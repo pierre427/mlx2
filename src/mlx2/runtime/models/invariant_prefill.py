@@ -197,7 +197,15 @@ def stack_dense(weight: mx.array) -> mx.array:
 
 
 class InvariantQuantizedLinear(nn.QuantizedLinear):
-    """``QuantizedLinear`` whose lane rows are row-count invariant."""
+    """``QuantizedLinear`` whose lane rows are row-count invariant.
+
+    Outside the lane its call is the plain class's, so the decode kernels that
+    transcribe a plain ``QuantizedLinear`` (HC decode, routed/shared decode,
+    MoE windows) keep admitting it through the base-class markers they read.
+    """
+
+    _row_exact_base = nn.QuantizedLinear
+    _mlx2_row_exact_base = nn.QuantizedLinear
 
     def __call__(self, x):
         if not _ACTIVE.get():
@@ -217,7 +225,10 @@ class InvariantQuantizedLinear(nn.QuantizedLinear):
 
 
 class InvariantLinear(nn.Linear):
-    """Dense ``Linear`` whose lane rows are row-count invariant."""
+    """Dense ``Linear`` whose lane rows are row-count invariant (see above)."""
+
+    _row_exact_base = nn.Linear
+    _mlx2_row_exact_base = nn.Linear
 
     def _lane_stack(self):
         weight = self["weight"]

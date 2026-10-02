@@ -333,3 +333,14 @@ def test_handle_status_reports_refusal_or_report():
     assert status["installed"] is False and status["reason"].startswith("quantized_mode")
     good = inv.install(Trunk()).status()
     assert good["installed"] is True and good["report"]["quantized_linears"] == 1
+
+
+def test_swapped_classes_keep_the_plain_decode_kernel_admission():
+    from mlx2.runtime.models import qwen4_hc_decode, qwen4_routed_decode
+
+    trunk = Trunk()
+    inv.install(trunk)
+    assert qwen4_hc_decode._plain_class(trunk.proj) is nn.QuantizedLinear
+    assert qwen4_hc_decode._plain_class(trunk.gate) is nn.Linear
+    reason = qwen4_routed_decode._linear_ok(trunk.proj, 4, 48, 128, 64)
+    assert reason != "not a plain QuantizedLinear"

@@ -138,7 +138,7 @@ def main():
     for arm in ("stock", "lane"):
         rows = [r for r in results["runs"] if r["arm"] == arm]
         summary[arm] = {k: statistics.median(r[k] for r in rows)
-                        for k in rows[0] if k.startswith(("prefill_", "decode_tok"))}
+                        for k in rows[0] if k.startswith("prefill_") or k == "decode_tok_s"}
     for key in summary["stock"]:
         summary.setdefault("lane_vs_stock_pct", {})[key] = round(
             100 * (summary["lane"][key] / summary["stock"][key] - 1), 2)

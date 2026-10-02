@@ -461,7 +461,7 @@ def weight_streaming_refusals(
     if "draft_model" in policy:
         reasons.append("external draft")
     for key in ("tensorfold_prefill", "tensorfold_qmv_rows", "row_exact_verify",
-                "mtp_draft_vocab", "moe_routed_candidate"):
+                "mtp_draft_vocab", "moe_routed_candidate", "invariant_prefill"):
         if policy.get(key):
             reasons.append(key)
     return reasons
@@ -3833,6 +3833,12 @@ class ServingEngine:
                 **(
                     {"row_exact_verify": row_exact_verify_handle(self).status()}
                     if row_exact_verify_handle(self) is not None
+                    else {}
+                ),
+                **(
+                    {"invariant_prefill": self.adapter.invariant_prefill.status()}
+                    if getattr(getattr(self, "adapter", None), "invariant_prefill", None)
+                    is not None
                     else {}
                 ),
                 "sp_qmm": sp_qmm_status(self),
