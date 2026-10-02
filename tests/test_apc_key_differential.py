@@ -205,6 +205,8 @@ NOT_BOUND = {
     # floor, and chunk geometry already moves it (tolerance class, like
     # prefill slicing).
     "env: MLX2_MOE_RHS_PAD_MIN_ROWS": {"env": {"MLX2_MOE_RHS_PAD_MIN_ROWS": "0"}},
+    # Adaptive per-table choice between the same two kernels (same class).
+    "env: MLX2_MOE_RHS_PAD_POLICY": {"env": {"MLX2_MOE_RHS_PAD_POLICY": "adaptive"}},
     # Fused routed weighted sum: replays MLX's col_reduce_small order, bit-exact
     # against the eager tail (qualification/runs/recon-20261001/l4-moe-wsum).
     "env: MLX_QWEN4_MOE_WEIGHTED_SUM": {"env": {"MLX_QWEN4_MOE_WEIGHTED_SUM": "1"}},

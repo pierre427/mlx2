@@ -5,6 +5,7 @@ import os
 
 import mlx.core as mx
 import mlx.nn as nn
+
 from .activations import swiglu
 from .import_env import snapshot as _import_env_snapshot
 
@@ -42,6 +43,86 @@ _RHS_PAD_MIN_ROWS_PER_EXPERT = _rhs_pad_floor()
 # Observed-use counters: padded gather_qmm calls, and pad rows added.
 rhs_pad_calls = 0
 rhs_pad_rows = 0
+
+# Adaptive kernel choice (default off: MLX2_MOE_RHS_PAD_POLICY=adaptive).
+# Instead of one rows-per-expert floor for every table, each sorted gather
+# picks per-row ``gather_qmv`` or the padded ``gather_qmm_rhs`` from a cost
+# model calibrated per expert-table class (format, bits, group, experts,
+# output x input dims) on this hardware:
+#     qmv_ms = q0 + q1 * assignments
+#     rhs_ms = r0 + r1 * E * (1 - exp(-assignments / E))   (expected experts touched)
+# The two projections of a SwiGLU expert differ (the 640-out gate/up tables
+# never gain from streaming below MLX's own floor; the 640-in down table
+# does from ~2 rows/expert).  A table with no calibration keeps the fixed
+# floor (reason ``uncalibrated``).  ``always`` (an A/B arm, MTPLX #549's
+# rule) pads every sorted gather to the streaming kernel so the expert
+# kernel never depends on row count.  ``MLX2_MOE_RHS_PAD_MIN_ROWS=0`` still
+# turns all padding off.  Not bit-exact against the floor: qmv and rhs
+# reduce in different orders (qualification/runs/moe-adaptive-pad-20261001).
+def _rhs_pad_policy(environ=os.environ) -> str:
+    value = (environ.get("MLX2_MOE_RHS_PAD_POLICY", "floor") or "floor").strip().lower()
+    if value not in {"floor", "adaptive", "always"}:
+        raise ValueError(
+            "MLX2_MOE_RHS_PAD_POLICY must be 'floor', 'adaptive' or 'always', "
+            f"got {value!r}"
+        )
+    return value
+
+
+_RHS_PAD_POLICY = _rhs_pad_policy()
+# (mode, bits, group_size, experts, output_dims, input_dims) -> (q0, q1, r0, r1),
+# ms per call.  Fitted in-model on M5 Max (mlx 39400a0d4) from real weights
+# and real routing, every sorted gather of one forward replayed both ways at
+# 16..204 rows (scripts/calibrate_moe_pad_inmodel.py, Flash-Next 4-bit
+# experts; qualification/runs/moe-adaptive-pad-20261001).  The touched term
+# assumes uniform routing; real routing touches fewer experts, which the
+# fitted r0/r1 absorb for this table.
+_PAD_COST_MODELS = {
+    # Flash-Next gate/up: 512 experts, 2560 -> 640.  rhs wins from ~120 rows.
+    ("affine", 4, 64, 512, 640, 2560): (-0.091401, 0.00096, 0.163268, 0.001819),
+    # Flash-Next down: 512 experts, 640 -> 2560.  rhs wins from ~30 rows.
+    ("affine", 4, 64, 512, 2560, 640): (-0.26367, 0.002081, -0.009772, 0.001673),
+}
+pad_choice_counts = {}
+
+
+def _record_pad_choice(reason: str) -> None:
+    pad_choice_counts[reason] = pad_choice_counts.get(reason, 0) + 1
+
+
+def moe_pad_status(*, reset: bool = False) -> dict:
+    """Which sorted-gather kernel was chosen, and why, since the last reset."""
+    out = {
+        "policy": _RHS_PAD_POLICY,
+        "floor_rows_per_expert": _RHS_PAD_MIN_ROWS_PER_EXPERT,
+        "padded_calls": rhs_pad_calls,
+        "pad_rows": rhs_pad_rows,
+        "choices": dict(pad_choice_counts),
+    }
+    if reset:
+        pad_choice_counts.clear()
+    return out
+
+
+def _adaptive_pad(n: int, layer) -> tuple:
+    """``(pad_rows, reason)`` for ``n`` sorted rows into ``layer``'s table."""
+    num_experts = layer.num_experts
+    stream_floor = max(_RHS_ROWS_PER_EXPERT * num_experts, _RHS_MIN_ROWS)
+    if n >= stream_floor:
+        return 0, "mlx_streams"
+    if _RHS_PAD_POLICY == "always":
+        return stream_floor - n, "always_rhs"
+    key = (layer.mode, layer.bits, layer.group_size, num_experts,
+           layer.output_dims, layer.input_dims)
+    model = _PAD_COST_MODELS.get(key)
+    if model is None:
+        pad = _rhs_stream_pad(n, num_experts)
+        return pad, "uncalibrated_rhs" if pad else "uncalibrated_qmv"
+    q0, q1, r0, r1 = model
+    touched = num_experts * (1.0 - math.exp(-n / num_experts))
+    if r0 + r1 * touched < q0 + q1 * n:
+        return stream_floor - n, "cost_rhs"
+    return 0, "cost_qmv"
 
 
 def _quantized_gather_tail_policy(mode: str, input_dims: int, sorted_indices: bool):
@@ -150,7 +231,11 @@ class QuantizedSwitchLinear(nn.Module):
             rows, pad = indices.size, 0
             if sorted_indices and tail_policy == "native" and _RHS_PAD_MIN_ROWS_PER_EXPERT:
                 if indices.ndim == 1 and x.ndim == 3 and x.shape[0] == rows:
-                    pad = _rhs_stream_pad(rows, self.num_experts)
+                    if _RHS_PAD_POLICY != "floor":
+                        pad, reason = _adaptive_pad(rows, self)
+                        _record_pad_choice(reason)
+                    else:
+                        pad = _rhs_stream_pad(rows, self.num_experts)
             rhs = indices
             if pad:
                 rhs_pad_calls += 1

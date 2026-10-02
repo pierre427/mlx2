@@ -152,3 +152,81 @@ def test_metal_padded_gather_bits(pad_floor):
             diff.max().item(), scale))
     finally:
         mx.set_default_device(previous)
+
+
+# -- adaptive kernel choice (MLX2_MOE_RHS_PAD_POLICY=adaptive) ----------------
+
+
+@pytest.fixture
+def adaptive(monkeypatch, pad_floor):
+    pad_floor(3)
+    monkeypatch.setattr(SL, "_RHS_PAD_POLICY", "adaptive")
+    monkeypatch.setattr(SL, "_PAD_COST_MODELS", {})
+    SL.moe_pad_status(reset=True)
+    yield SL._PAD_COST_MODELS
+    SL.moe_pad_status(reset=True)
+
+
+def test_pad_policy_is_default_off_and_strict():
+    assert SL._rhs_pad_policy({}) == "floor"
+    assert SL._rhs_pad_policy({"MLX2_MOE_RHS_PAD_POLICY": "adaptive"}) == "adaptive"
+    assert SL._rhs_pad_policy({"MLX2_MOE_RHS_PAD_POLICY": "always"}) == "always"
+    with pytest.raises(ValueError):
+        SL._rhs_pad_policy({"MLX2_MOE_RHS_PAD_POLICY": "sometimes"})
+    assert SL._RHS_PAD_POLICY == "floor"
+
+
+def test_adaptive_chooses_by_cost_per_table(adaptive):
+    E, D, N = 32, 64, 128
+    up = _quantized_projection(D, N, E)  # (out N, in D)
+    down = _quantized_projection(N, D, E)
+    # qmv = q0 + q1 n ; rhs = r0 + r1 * E (1 - exp(-n / E))
+    adaptive[("affine", 4, 64, E, N, D)] = (0.0, 0.001, 10.0, 0.0)  # rhs never pays
+    adaptive[("affine", 4, 64, E, D, N)] = (0.0, 0.010, 0.4, 0.0)  # rhs pays from n > 40
+    assert SL._adaptive_pad(64, up) == (0, "cost_qmv")
+    assert SL._adaptive_pad(32, down) == (0, "cost_qmv")
+    assert SL._adaptive_pad(64, down) == (4 * E - 64, "cost_rhs")
+    assert SL._adaptive_pad(4 * E, down) == (0, "mlx_streams")
+    # No calibration for this table: today's fixed floor (3 rows/expert).
+    other = _quantized_projection(D, N, E, bits=8)
+    assert SL._adaptive_pad(95, other) == (0, "uncalibrated_qmv")
+    assert SL._adaptive_pad(96, other) == (4 * E - 96, "uncalibrated_rhs")
+
+
+def test_adaptive_counts_choices_and_keeps_rows(adaptive):
+    E, D, N, n = 32, 64, 128, 64
+    mx.random.seed(5)
+    down = _quantized_projection(N, D, E)
+    adaptive[("affine", 4, 64, E, D, N)] = (0.0, 0.010, 0.4, 0.0)
+    x = mx.random.normal((n, 1, N))
+    idx = mx.sort(mx.random.randint(0, E, (n,)).astype(mx.uint32))
+    SL._RHS_PAD_POLICY = "floor"
+    base = down(x, idx, sorted_indices=True)  # 64 < 3 * 32: floor leaves it
+    SL._RHS_PAD_POLICY = "adaptive"
+    calls = SL.rhs_pad_calls
+    out = down(x, idx, sorted_indices=True)
+    assert SL.rhs_pad_calls == calls + 1
+    assert mx.array_equal(out, base).item()  # CPU gather has no kernel switch
+    status = SL.moe_pad_status()
+    assert status["policy"] == "adaptive" and status["choices"] == {"cost_rhs": 1}
+
+
+def test_adaptive_respects_pad_kill_switch(adaptive, pad_floor):
+    E, D, N, n = 32, 64, 128, 64
+    down = _quantized_projection(N, D, E)
+    adaptive[("affine", 4, 64, E, D, N)] = (0.0, 0.010, 0.4, 0.0)
+    pad_floor(0)
+    calls = SL.rhs_pad_calls
+    down(mx.random.normal((n, 1, N)), mx.sort(mx.random.randint(0, E, (n,)).astype(mx.uint32)),
+         sorted_indices=True)
+    assert SL.rhs_pad_calls == calls
+    assert SL.moe_pad_status()["choices"] == {}
+
+
+def test_always_pads_every_sorted_gather_below_the_stream_floor(adaptive, monkeypatch):
+    E, D, N = 32, 64, 128
+    monkeypatch.setattr(SL, "_RHS_PAD_POLICY", "always")
+    up = _quantized_projection(D, N, E)
+    adaptive[("affine", 4, 64, E, N, D)] = (0.0, 0.001, 10.0, 0.0)  # ignored
+    assert SL._adaptive_pad(20, up) == (4 * E - 20, "always_rhs")
+    assert SL._adaptive_pad(4 * E, up) == (0, "mlx_streams")
