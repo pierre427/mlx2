@@ -86,7 +86,6 @@ def test_qwen36_defaults_to_native_mtp_with_the_handoff():
     ("adapter_type", "descriptor", "constant"),
     [
         (Qwen3827BAdapter, QWEN38_27B, QWEN38_HANDOFF_WIDTH),
-        (Qwen3635BA3BAdapter, qwen36(has_mtp=True), QWEN36_HANDOFF_WIDTH),
         (XingAdapter, xing(has_mtp=True), XING_HANDOFF_WIDTH),
     ],
 )
@@ -110,6 +109,16 @@ def test_flash_next_declares_default_handoff_width_three():
     assert "default_mtp_ordinary_handoff_max_width" in FlashNextAdapter.__dict__
     assert _resolution(
         FlashNextAdapter, QWEN4_FLASH_NEXT
+    ).default_mtp_ordinary_handoff == {"enabled": True, "max_mtp_width": 3}
+
+
+def test_qwen36_declares_default_handoff_width_three():
+    # Width 3 measured 298.6 vs 260.2 tok/s over width 4 at 4 lanes, equal at
+    # 3 and 8 lanes (qualification/runs/port-park-memory-20261002).
+    assert QWEN36_HANDOFF_WIDTH == 3
+    assert "default_mtp_ordinary_handoff_max_width" in Qwen3635BA3BAdapter.__dict__
+    assert _resolution(
+        Qwen3635BA3BAdapter, qwen36(has_mtp=True)
     ).default_mtp_ordinary_handoff == {"enabled": True, "max_mtp_width": 3}
 
 
