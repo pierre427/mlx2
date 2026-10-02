@@ -73,8 +73,10 @@ def test_row_exact_candidate_is_explicit_and_reported_before_tensor_load():
 @pytest.mark.parametrize(
     "flag,value",
     [
-        ("--context-tokens", "129"),
+        ("--context-tokens", "4097"),
         ("--context-tokens", "15"),
+        ("--prefill-step", "15"),
+        ("--prefill-step", "513"),
         ("--max-tokens", "16"),
         ("--max-tokens", "49"),
         ("--repetitions", "0"),
@@ -415,3 +417,435 @@ def test_actual_cpu_pool_all_sampled_draws_match_original_prefix_s1_reference():
         if generator is not None:
             generator.close()
         mx.set_default_device(previous)
+
+
+@pytest.mark.parametrize("context", [128, 1024, 4096])
+@pytest.mark.parametrize("width", [1, 2, 4])
+def test_context_ladder_exact_geometry_preflight(context, width):
+    selected = args(
+        "--dry-run", "--context-tokens", str(context), "--batch-size", str(width)
+    )
+    plan = harness.preflight(selected)
+    assert plan["context_tokens"] == context
+    assert plan["batch_size"] == width
+    assert plan["prefill_step"] == 128
+    assert plan["max_sequences"] == 15
+    assert plan["memory_admission"]["model_constructed"] is False
+
+
+def test_default_geometry_preserves_128_chunk_and_two_request_batch():
+    selected = args("--dry-run")
+    assert (selected.context_tokens, selected.prefill_step, selected.batch_size) == (
+        128,
+        128,
+        2,
+    )
+    with pytest.raises(SystemExit):
+        args("--dry-run", "--batch-size", "3")
+
+
+def test_long_context_dry_run_reads_no_artifact_and_imports_no_tensor_module():
+    code = """
+import sys,runpy
+from pathlib import Path
+class Guard:
+ def find_spec(self,fullname,*a,**k):
+  if fullname.startswith(('mlx','numpy','transformers','psutil')):raise RuntimeError(fullname)
+sys.meta_path.insert(0,Guard())
+original=Path.open
+def guarded(path,*a,**k):
+ if str(path).startswith('/missing-'):raise RuntimeError('artifact read')
+ return original(path,*a,**k)
+Path.open=guarded
+sys.argv=[sys.argv[1],'--model','/missing-target','--draft','/missing-draft','--out','/missing-output','--dry-run','--context-tokens','4096','--batch-size','1']
+runpy.run_path(sys.argv[0],run_name='__main__')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["context_tokens"] == 4096
+
+
+@pytest.mark.parametrize("length", [128, 1024, 4096])
+def test_prompt_tokens_extend_to_exact_length_preserving_legacy_prefix(length):
+    class Tokenizer:
+        def __init__(self):
+            self.calls = []
+
+        def encode(self, text, add_special_tokens):
+            assert add_special_tokens is False
+            self.calls.append(len(text))
+            return [ord(character) for character in text]
+
+    tokenizer = Tokenizer()
+    text = "xy "
+    actual = harness.exact_prompt_tokens(tokenizer, text, length)
+    assert len(actual) == length
+    legacy = tokenizer.encode(text * 32, add_special_tokens=False)
+    assert actual[: min(len(legacy), length)] == legacy[:length]
+    assert tokenizer.calls[0] == len(text) * 32
+    if length == 128:
+        assert actual == [ord(character) for character in (text * 64)[:128]]
+
+
+def test_legacy_128_prompt_is_unchanged_when_initial_corpus_is_long_enough():
+    tokenizer = SimpleNamespace(encode=lambda text, **_: [ord(value) for value in text])
+    text = "abcdef "
+    assert (
+        harness.exact_prompt_tokens(tokenizer, text, 128)
+        == tokenizer.encode(text * 32)[:128]
+    )
+
+
+@pytest.mark.parametrize("tokens", [[], [True], [-1], [1.0]])
+def test_prompt_tokenizer_invalid_output_fails_closed(tokens):
+    tokenizer = SimpleNamespace(encode=lambda *_a, **_k: tokens)
+    with pytest.raises(ValueError, match="token"):
+        harness.exact_prompt_tokens(tokenizer, "hello", 4096)
+
+
+def memory_configs():
+    target = {
+        "num_hidden_layers": 36,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "hidden_size": 2560,
+        "vocab_size": 151936,
+    }
+    draft_config = {
+        **target,
+        "num_hidden_layers": 5,
+        "dflash_config": {"target_layer_ids": [1, 9, 17, 25, 33]},
+    }
+    return target, draft_config
+
+
+@pytest.mark.parametrize("width", [1, 2, 4])
+def test_memory_forecast_reserves_full_15_paths_per_request_and_rollback(width):
+    selected = args(
+        "--dry-run",
+        "--context-tokens",
+        "4096",
+        "--max-tokens",
+        "48",
+        "--batch-size",
+        str(width),
+    )
+    target, companion = memory_configs()
+    result = harness.context_memory_forecast(target, companion, 9_000_000_000, selected)
+    assert result["kv_capacity_tokens"] == 4352
+    assert result["target_row_bytes"] == 4352 * 144 * 1024
+    assert result["draft_row_bytes"] == 4352 * 20 * 1024
+    assert result["maximal_cohort_branch_reservation"] == 15 * width
+    assert result["phases"]["generation"]["target_rows"] == 4 + 16 * width
+    assert result["phases"]["cost_probe"]["target_rows"] == 16
+    assert result["phases"]["ordinary_law_audit"]["target_rows"] == 5
+    assert result["required_bytes"] == max(
+        item["required_bytes"] for item in result["phases"].values()
+    )
+    assert "not observed" in result["authority"]
+
+
+def test_memory_forecast_uses_each_plane_actual_element_width():
+    target, companion = memory_configs()
+    selected = args("--dry-run", "--context-tokens", "1024")
+    f16 = harness.context_memory_forecast(
+        target, companion, 10, selected, target_element_bytes=2, draft_element_bytes=2
+    )
+    mixed = harness.context_memory_forecast(
+        target, companion, 10, selected, target_element_bytes=4, draft_element_bytes=2
+    )
+    assert mixed["target_row_bytes"] == 2 * f16["target_row_bytes"]
+    assert mixed["draft_row_bytes"] == f16["draft_row_bytes"]
+    with pytest.raises(ValueError, match="element"):
+        harness.context_memory_forecast(
+            target, companion, 10, selected, target_element_bytes=1
+        )
+
+
+@pytest.mark.parametrize(
+    "available,recommended", [(0, 10**12), (10**12, 0), (1, 10**12), (10**12, 1)]
+)
+def test_unsafe_geometry_refused_before_constructor_or_policy_export(
+    monkeypatch, available, recommended
+):
+    target, companion = memory_configs()
+    monkeypatch.setattr(
+        harness,
+        "artifact_memory_metadata",
+        lambda _: (target, companion, 9_000_000_000, 2, 2),
+    )
+    selected = args("--dry-run", "--context-tokens", "4096", "--batch-size", "1")
+    report = harness.preflight(selected)
+    called = []
+    with pytest.raises(ValueError, match="15-path"):
+        harness.construct_admitted_adapter(
+            selected,
+            report,
+            {"max_recommended_working_set_size": recommended},
+            lambda *_a, **_k: called.append(True),
+            available,
+        )
+    assert not called
+    assert report["memory_admission"]["status"] == "refused"
+    assert report["skipped_geometries"] == [
+        {
+            "reason": "memory_admission",
+            "context_tokens": 4096,
+            "batch_size": 1,
+            "paths_per_request": 15,
+            "cost_policy_exported": False,
+            "executed": False,
+        }
+    ]
+    assert "continuation_costs" not in report
+
+
+def test_memory_exact_boundary_admits_and_keeps_full_policy(monkeypatch):
+    target, companion = memory_configs()
+    selected = args("--dry-run", "--context-tokens", "4096", "--batch-size", "1")
+    monkeypatch.setattr(
+        harness,
+        "artifact_memory_metadata",
+        lambda _: (target, companion, 9_000_000_000, 2, 2),
+    )
+    required = harness.context_memory_forecast(
+        target, companion, 9_000_000_000, selected
+    )["required_bytes"]
+    captured = []
+    sentinel = object()
+
+    def factory(*a, **k):
+        captured.append((a, k))
+        return sentinel
+
+    report = harness.preflight(selected)
+    assert (
+        harness.construct_admitted_adapter(
+            selected,
+            report,
+            {"max_recommended_working_set_size": required},
+            factory,
+            required,
+        )
+        is sentinel
+    )
+    assert report["memory_admission"]["status"] == "admitted"
+    assert captured[0][1]["execution_policy"]["continuation_pool"]["limit"] == 15
+
+
+def test_managed_batch_prefill_and_hook_cleanup_on_failure():
+    selected = args("--dry-run", "--context-tokens", "4096", "--batch-size", "1")
+    original = object()
+    batch = SimpleNamespace(_target_law=original, close=lambda: closed.append(True))
+    captured, closed = [], []
+
+    def factory(**kwargs):
+        captured.append(kwargs)
+        return batch
+
+    adapter = SimpleNamespace(create_external_batch=factory)
+    with (
+        pytest.raises(RuntimeError, match="late"),
+        harness.managed_batch(adapter, selected) as value,
+    ):
+        value._target_law = object()
+        raise RuntimeError("late audit failure")
+    assert batch._target_law is original
+    assert closed == [True]
+    assert captured[0]["prefill_step_size"] == 128
+    assert captured[0]["completion_batch_size"] == 1
+
+
+@pytest.mark.parametrize("length", [1024, 4096])
+def test_long_context_original_oracle_chunking_is_independent_of_context(length):
+    import numpy as np
+
+    calls = []
+
+    class Model:
+        def make_cache(self):
+            return [SimpleNamespace(offset=0)]
+
+        def __call__(self, inputs, cache):
+            calls.append(inputs.tolist())
+            cache[0].offset += inputs.shape[1]
+            return np.zeros((1, inputs.shape[1], 3), dtype=np.float32)
+
+    model = Model()
+    mx = SimpleNamespace(array=np.array, eval=lambda *_: None, float32=np.float32)
+    prompt = list(range(length))
+    rows = list(harness.ordinary_reached_rows(model, mx, prompt, [7, 8], 128))
+    assert sum(len(value[0]) for value in calls[:-2]) == length - 1
+    assert max(len(value[0]) for value in calls[:-2]) == 128
+    assert calls[-2:] == [[[length - 1]], [[7]]]
+    assert [offsets for _, _, offsets in rows] == [[length], [length + 1]]
+
+
+@pytest.mark.parametrize("dtype,bytes_per", [("BF16", 2), ("F16", 2), ("F32", 4)])
+@pytest.mark.parametrize("precision", ["artifact", "float32-diagnostic"])
+def test_artifact_memory_headers_preserve_valid_floating_precision(
+    tmp_path, monkeypatch, dtype, bytes_per, precision
+):
+    import struct
+
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    target, companion = memory_configs()
+    paths = []
+    for name, config in (("target", target), ("draft", companion)):
+        path = tmp_path / name
+        path.mkdir()
+        (path / "config.json").write_text(json.dumps(config))
+        header = json.dumps(
+            {
+                "weight": {
+                    "dtype": dtype,
+                    "shape": [2, 3],
+                    "data_offsets": [0, 6 * bytes_per],
+                }
+            }
+        ).encode()
+        (path / "model.safetensors").write_bytes(
+            struct.pack("<Q", len(header)) + header + b"\0" * (6 * bytes_per)
+        )
+        paths.append(path)
+    selected = args(
+        "--dry-run",
+        "--model",
+        str(paths[0]),
+        "--draft",
+        str(paths[1]),
+        "--compute-precision",
+        precision,
+    )
+    actual = harness.artifact_memory_metadata(selected)
+    expected = 4 if precision == "float32-diagnostic" else bytes_per
+    assert actual[:2] == (target, companion)
+    assert actual[2:] == (12 * expected, expected, expected)
+
+
+def test_real_tiny_cost_probe_failure_closes_batch_and_discards_snapshots(monkeypatch):
+    import mlx.core as mx
+    import numpy as np
+    from test_external_continuation_pool_cpu import batch
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    generator = None
+    try:
+        _model, _base, _draft, generator = batch()
+        original = generator._target_law
+        closed = []
+        native_close = generator.close
+
+        def close():
+            closed.append(True)
+            native_close()
+
+        generator.close = close
+        adapter = SimpleNamespace(
+            model=generator.model, create_external_batch=lambda **_: generator
+        )
+
+        def fail(*_a, **_k):
+            generator._target_law = object()
+            raise RuntimeError("later cost probe failure")
+
+        monkeypatch.setattr(harness, "measure_proposal_cost", fail)
+        with pytest.raises(RuntimeError, match="later cost"):
+            harness.measure_context_costs(
+                adapter, args("--dry-run"), [1, 2, 3], mx, np, {}
+            )
+        assert closed == [True]
+        assert generator._target_law == original
+        assert not generator.lanes and not generator.boundaries
+        assert not generator.draft.proposal_pool._pending
+    finally:
+        if generator is not None:
+            generator.close()
+        mx.set_default_device(previous)
+
+
+def test_adapter_and_target_hook_restored_on_later_generation_failure(monkeypatch):
+    import types
+
+    import mlx2.adapters.standard_decoder as standard_adapter
+
+    original = lambda *_a, **_k: None
+    model = SimpleNamespace(forward_with_taps=original)
+    closed = []
+    adapter = SimpleNamespace(
+        model=model,
+        draft_model=SimpleNamespace(receipt_settings={}),
+        identity={"fingerprint": A},
+        tokenizer=SimpleNamespace(encode=lambda *_a, **_k: [1] * 4096),
+        close=lambda: closed.append(True),
+    )
+    fake_mx = types.ModuleType("mlx.core")
+    fake_mx.gpu = "fake_gpu_spy_no_real_device_calls"
+    fake_mx.set_default_device = lambda _: None
+    fake_mx.device_info = lambda: {
+        "name": "Apple M3",
+        "max_recommended_working_set_size": 10**12,
+    }
+    fake_mx.metal = SimpleNamespace(is_available=lambda: True)
+    monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+    monkeypatch.setattr(sys.modules["mlx"], "core", fake_mx)
+    monkeypatch.setattr(
+        standard_adapter, "StandardDecoderAdapter", lambda *_a, **_k: adapter
+    )
+    monkeypatch.setattr(harness, "construct_admitted_adapter", lambda *_a: adapter)
+    monkeypatch.setattr(harness, "bind_compute_precision", lambda *_: A)
+    monkeypatch.setattr(harness, "sources", dict)
+    monkeypatch.setattr(
+        harness,
+        "measure_context_costs",
+        lambda *_a: (
+            {"1": [1.0] * 16, "5": [1.0] * 16, "15": [1.0] * 16},
+            {},
+            {"seconds": 1.0},
+            frozenset(),
+            [127],
+        ),
+    )
+
+    def fail(*_a, **_k):
+        assert model.forward_with_taps is not original
+        raise RuntimeError("later law audit failed")
+
+    monkeypatch.setattr(harness, "check_continuation_generation", fail)
+    selected = args("--dry-run")
+    with pytest.raises(RuntimeError, match="later law"):
+        harness.run(selected, harness.preflight(selected))
+    assert closed == [True]
+    assert model.forward_with_taps is original
+
+
+def test_diagnostic_capture_memory_limit_fails_before_copy_and_never_omits_rows():
+    import numpy as np
+
+    observations = {1: [], 2: []}
+    fake_mx = SimpleNamespace(float32=np.float32)
+    logits = np.array([0.0, 1.0], dtype=np.float32)
+    law = np.array([0.2, 0.8], dtype=np.float64)
+    harness.capture_law_observation(
+        observations, 1, logits, law, [1], True, fake_mx, np, 2
+    )
+    harness.capture_law_observation(
+        observations, 2, logits, law, [2], False, fake_mx, np, 2
+    )
+
+    class NoCopy:
+        def astype(self, *_):
+            raise AssertionError("must refuse before tensor copy")
+
+    with pytest.raises(ValueError, match="reserved memory"):
+        harness.capture_law_observation(
+            observations, 1, NoCopy(), law, [3], True, fake_mx, np, 2
+        )
+    assert len(observations[1]) == len(observations[2]) == 1
+    assert observations[2][0]["reachable"] is False

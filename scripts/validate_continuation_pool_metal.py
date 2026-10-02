@@ -10,6 +10,7 @@ import signal
 import statistics
 import time
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,8 @@ def parser():
         default="artifact",
     )
     result.add_argument("--context-tokens", type=int, default=128)
+    result.add_argument("--prefill-step", type=int, default=128)
+    result.add_argument("--batch-size", type=int, choices=(1, 2, 4), default=2)
     result.add_argument("--max-tokens", type=int, default=32)
     result.add_argument("--repetitions", type=int, default=2)
     result.add_argument("--deadline-seconds", type=int, default=900)
@@ -42,7 +45,8 @@ def parser():
 
 def preflight(args):
     for name, low, high in (
-        ("context_tokens", 16, 128),
+        ("context_tokens", 16, 4096),
+        ("prefill_step", 16, 512),
         ("max_tokens", 17, 48),
         ("repetitions", 1, 3),
         ("deadline_seconds", 1, 900),
@@ -51,6 +55,8 @@ def preflight(args):
             raise ValueError(f"{name} must be in [{low},{high}]")
     if not args.dry_run and not args.i_own_the_gpu:
         raise ValueError("Metal execution requires --i-own-the-gpu under both locks")
+    if args.batch_size not in (1, 2, 4):
+        raise ValueError("batch_size must be 1, 2 or 4")
     return {
         "schema": "mlx2.complete-continuation-metal.v1",
         "qualified": False,
@@ -65,10 +71,230 @@ def preflight(args):
         "cost_path_widths": [1, 5, 15],
         "cost_depths": list(range(16)),
         "context_tokens": args.context_tokens,
+        "prefill_step": args.prefill_step,
+        "batch_size": args.batch_size,
+        "ordinary_reference_convention": "B1 prompt[:-1] in matching prefill chunks, then original S1 anchor and emitted tokens",
+        "memory_admission": {"status": "not_measured", "model_constructed": False},
         "draft_cost_authority": "resident B1 fixed-context proposal probe; no published feedback",
         "checks": [],
+        "continuation_costs_complete": False,
+        "generation_completed": False,
+        "law_capture_limit_rows": 4 * args.max_tokens,
         "passed": False,
     }
+
+
+def exact_prompt_tokens(tokenizer, text, length):
+    """Keep the legacy 32-repeat prefix and extend the bounded corpus as needed."""
+    for repeats in (32, 64, 128, 256, 512, 1024, 2048, 4096):
+        tokens = list(tokenizer.encode(text * repeats, add_special_tokens=False))
+        if any(type(token) is not int or token < 0 for token in tokens):
+            raise ValueError("prompt tokenizer returned invalid token IDs")
+        if len(tokens) >= length:
+            return tokens[:length]
+        if not tokens:
+            raise ValueError("prompt tokenizer returned no token IDs")
+    raise ValueError("bounded prompt corpus is shorter than the requested context")
+
+
+def context_memory_forecast(
+    target,
+    draft,
+    parameter_bytes,
+    args,
+    *,
+    target_element_bytes=None,
+    draft_element_bytes=None,
+):
+    """Conservative phase reservations, not a measured MLX peak or donation claim.
+
+    The executor currently verifies each request separately. Reserve all 15
+    branches for every admitted cohort request anyway, plus authoritative and
+    rollback versions, so safety does not depend on lazy graph release timing.
+    """
+
+    def positive(config, key):
+        value = config.get(key)
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"memory forecast requires positive {key}")
+        return value
+
+    if type(parameter_bytes) is not int or parameter_bytes <= 0:
+        raise ValueError("memory forecast requires positive parameter bytes")
+    default_bytes = 4 if args.compute_precision == "float32-diagnostic" else 2
+    target_element_bytes = (
+        default_bytes if target_element_bytes is None else target_element_bytes
+    )
+    draft_element_bytes = (
+        default_bytes if draft_element_bytes is None else draft_element_bytes
+    )
+    if any(
+        type(value) is not int or value not in (2, 4)
+        for value in (target_element_bytes, draft_element_bytes)
+    ):
+        raise ValueError("memory forecast requires known floating element widths")
+    capacity = ((args.context_tokens + args.max_tokens + 16 + 255) // 256) * 256
+
+    def kv_bytes(config, element_bytes):
+        return (
+            2
+            * positive(config, "num_hidden_layers")
+            * positive(config, "num_key_value_heads")
+            * positive(config, "head_dim")
+            * element_bytes
+            * capacity
+        )
+
+    target_row = kv_bytes(target, target_element_bytes)
+    draft_row = kv_bytes(draft, draft_element_bytes)
+    vocab = positive(target, "vocab_size")
+    hidden = positive(target, "hidden_size")
+    taps = draft.get("dflash_config", {}).get("target_layer_ids")
+    if not isinstance(taps, list) or not taps:
+        raise ValueError("memory forecast requires target tap metadata")
+    # Each sampled law may retain an F32 raw row and F64 probability row;
+    # reserve that pair for all four requests, including response diagnostics.
+    captured_laws = 4 * args.max_tokens * (12 * vocab + 8 * capacity)
+    forward_outputs = (
+        2
+        * args.batch_size
+        * 15
+        * 16
+        * target_element_bytes
+        * (vocab + hidden * len(taps))
+    )
+    phases = {
+        "cost_probe": {
+            "target_rows": 16,
+            "draft_rows": 1,
+            "capture_bytes": 0,
+            "forward_output_bytes": forward_outputs,
+        },
+        "generation": {
+            "target_rows": 4 + 16 * args.batch_size,
+            "draft_rows": 4,
+            "capture_bytes": captured_laws,
+            "forward_output_bytes": forward_outputs,
+        },
+        "ordinary_law_audit": {
+            "target_rows": 5,
+            "draft_rows": 4,
+            "capture_bytes": captured_laws,
+            "forward_output_bytes": 0,
+        },
+    }
+    for phase in phases.values():
+        phase["required_bytes"] = (
+            parameter_bytes
+            + phase["target_rows"] * target_row
+            + phase["draft_rows"] * draft_row
+            + phase["capture_bytes"]
+            + phase["forward_output_bytes"]
+            + (4 << 30)
+        )
+    return {
+        "authority": "header/config-based conservative reservation; not observed peak memory",
+        "parameter_bytes": parameter_bytes,
+        "kv_capacity_tokens": capacity,
+        "target_element_bytes": target_element_bytes,
+        "draft_element_bytes": draft_element_bytes,
+        "target_row_bytes": target_row,
+        "draft_row_bytes": draft_row,
+        "maximum_admitted_requests": args.batch_size,
+        "resident_request_count": 4,
+        "full_paths_per_request": 15,
+        "maximal_cohort_branch_reservation": 15 * args.batch_size,
+        "transient_allowance_bytes": 4 << 30,
+        "phases": phases,
+        "required_bytes": max(phase["required_bytes"] for phase in phases.values()),
+        "status": "forecast_only",
+    }
+
+
+def artifact_memory_metadata(args):
+    """Read only configs and safetensors headers, before a model constructor."""
+    from validate_xpress_metal_matrix import float32_artifact_forecast
+
+    parameters, elements = 0, []
+    for path in (args.model, args.draft):
+        expanded, _largest, dtypes = float32_artifact_forecast([path])
+        widths = {"BF16": 2, "F16": 2, "F32": 4}
+        if not dtypes or not set(dtypes).issubset(widths):
+            raise ValueError("memory forecast requires floating source tensors")
+        if args.compute_precision == "float32-diagnostic":
+            parameters += expanded
+            elements.append(4)
+        else:
+            parameters += sum(widths[key] * count for key, count in dtypes.items())
+            elements.append(max(widths[key] for key in dtypes))
+    target = json.loads((args.model / "config.json").read_text())
+    draft = json.loads((args.draft / "config.json").read_text())
+    return target, draft, parameters, *elements
+
+
+def construct_admitted_adapter(args, report, device, factory, available_bytes):
+    target, draft, parameters, target_bytes, draft_bytes = artifact_memory_metadata(
+        args
+    )
+    forecast = context_memory_forecast(
+        target,
+        draft,
+        parameters,
+        args,
+        target_element_bytes=target_bytes,
+        draft_element_bytes=draft_bytes,
+    )
+    recommended = int(device.get("max_recommended_working_set_size", 0))
+    forecast.update(available_bytes=available_bytes, recommended_bytes=recommended)
+    report["memory_admission"] = forecast
+    if (
+        type(available_bytes) is not int
+        or available_bytes <= 0
+        or recommended <= 0
+        or forecast["required_bytes"] > min(available_bytes, recommended)
+    ):
+        forecast["status"] = "refused"
+        report["skipped_geometries"] = [
+            {
+                "reason": "memory_admission",
+                "context_tokens": args.context_tokens,
+                "batch_size": args.batch_size,
+                "paths_per_request": 15,
+                "cost_policy_exported": False,
+                "executed": False,
+            }
+        ]
+        raise ValueError(
+            "full 15-path context ladder exceeds the available/recommended memory reservation"
+        )
+    forecast["status"] = "admitted"
+    adapter = factory(
+        str(args.model),
+        execution_policy={
+            "draft_model": str(args.draft),
+            "num_draft": 15,
+            "target_verify_row_exact": args.target_verify_row_exact,
+            "continuation_pool": {"limit": 15, "ngram_min": 1, "ngram_max": 3},
+        },
+    )
+    forecast["model_constructed"] = True
+    return adapter
+
+
+@contextmanager
+def managed_batch(adapter, args, *, width=None, policy=None):
+    batch = adapter.create_external_batch(
+        completion_batch_size=args.batch_size if width is None else width,
+        prefill_step_size=args.prefill_step,
+        ready_drain="all",
+        adaptive_verification=policy,
+    )
+    original_law = batch._target_law
+    try:
+        yield batch
+    finally:
+        batch._target_law = original_law
+        batch.close()
 
 
 def sources():
@@ -195,6 +421,98 @@ def measure_proposal_cost(
         "critic_observations_published": False,
         "performance_qualified": False,
     }
+
+
+def measure_context_costs(adapter, args, prompt, mx, np, report):
+    """No probe lane, snapshot or transient tensor escapes this phase."""
+    with managed_batch(adapter, args, width=1) as probe:
+        uid = probe.insert([prompt], max_tokens=[args.max_tokens])[0]
+        lane = probe.lanes[uid]
+        while lane.remaining:
+            probe._prefill(lane)
+        frozen = snapshot_probe_cache(lane.cache)
+        offsets = [int(layer.offset) for layer in lane.cache]
+        if not offsets or any(offset != len(prompt) - 1 for offset in offsets):
+            raise AssertionError(
+                "cost probe does not match the reserved prompt-anchor boundary"
+            )
+        proposal = measure_proposal_cost(probe, lane, mx.synchronize, args.repetitions)
+        costs, observations = {}, {}
+        report["continuation_costs"] = costs
+        report["cost_samples_seconds"] = observations
+        for width in (1, 5, 15):
+            medians, details = [], []
+            for depth in range(16):
+                samples = []
+                for iteration in range(args.repetitions + 1):
+                    caches = [restore_probe_cache(frozen) for _ in range(width)]
+                    transaction = probe._target_owner(caches).begin(
+                        lengths=[depth + 1] * width
+                    )
+                    inputs = mx.array(
+                        [
+                            [lane.anchor]
+                            + [
+                                int((index + position) % 100)
+                                for position in range(depth)
+                            ]
+                            for index in range(width)
+                        ]
+                    )
+                    try:
+                        mx.synchronize()
+                        started = time.perf_counter()
+                        logits, hidden = adapter.model.forward_with_taps(
+                            inputs, transaction.caches, probe.layers
+                        )
+                        mx.eval(logits, hidden)
+                        mx.synchronize()
+                        elapsed = time.perf_counter() - started
+                        if iteration:
+                            samples.append(elapsed)
+                    finally:
+                        transaction.abort()
+                medians.append(float(np.median(samples)))
+                details.append(samples)
+            costs[str(width)] = medians
+            observations[str(width)] = details
+            print(
+                json.dumps({"event": "cost_width_measured", "width": width}), flush=True
+            )
+        report["continuation_costs_complete"] = True
+        return costs, observations, proposal, frozenset(probe.stops), offsets
+
+
+def snapshot_probe_cache(cache):
+    from mlx2.runtime.cow_cache import snapshot_recovery_descriptors
+
+    return snapshot_recovery_descriptors(cache)
+
+
+def restore_probe_cache(snapshot):
+    from mlx2.runtime.cow_cache import restore_recovery_descriptors
+
+    return restore_recovery_descriptors(*snapshot)[0]
+
+
+def capture_law_observation(
+    observations, uid, logits, law, history, reachable, mx, np, limit
+):
+    """Bound retained diagnostics; overflow fails the cell before another copy.
+
+    No callback row is silently discarded. This cap also covers unused future
+    callbacks if a final-budget chain round runs beside a longer request.
+    """
+    if sum(len(rows) for rows in observations.values()) >= limit:
+        raise ValueError("target-law diagnostic capture exceeds reserved memory rows")
+    observations[uid].append(
+        {
+            "raw_logits": np.asarray(logits.astype(mx.float32)).copy(),
+            "law": law.copy(),
+            "history_tokens": list(history),
+            "reachable": reachable,
+        }
+    )
 
 
 def ordinary_reached_rows(model, mx, prompt, emitted, prefill_step):
@@ -335,16 +653,149 @@ def audit_reached_laws(
     }
 
 
+def check_continuation_generation(
+    adapter,
+    args,
+    prompts,
+    policy,
+    adaptive,
+    mixed_sampling,
+    mx,
+    np,
+    frames,
+    ordinary,
+):
+    from mlx2.runtime.sample_utils import LaneRNG
+
+    with managed_batch(adapter, args, policy=policy) as batch:
+        temperatures = [0.0, 0.8, 0.0, 0.8] if mixed_sampling else [0.0] * 4
+        ids = batch.insert(
+            prompts,
+            max_tokens=[args.max_tokens] * 4,
+            lane_rngs=[LaneRNG(320 + index) for index in range(4)],
+            sampling_configs=[{"sampling_temp": temp} for temp in temperatures],
+        )
+        output, ends = {uid: [] for uid in ids}, {}
+        law_checks = {}
+        law_observations = {}
+        if mixed_sampling:
+            from mlx2.runtime.sample_utils import make_transformed_logprobs
+            from mlx2.runtime.speculative_sampling import probability
+
+            transform = make_transformed_logprobs(0.8)
+            for uid, prompt, temp in zip(ids, prompts, temperatures, strict=True):
+                if temp:
+                    law_observations[uid] = []
+            original_law = batch._target_law
+
+            def checked_law(
+                lane,
+                logits,
+                history,
+                *positional,
+                _law=original_law,
+                _observations=law_observations,
+                **keywords,
+            ):
+                law = _law(lane, logits, history, *positional, **keywords)
+                if lane.uid in _observations:
+                    capture_law_observation(
+                        _observations,
+                        lane.uid,
+                        logits,
+                        law,
+                        history,
+                        bool(
+                            keywords.get(
+                                "reachable", positional[0] if positional else True
+                            )
+                        ),
+                        mx,
+                        np,
+                        4 * args.max_tokens,
+                    )
+                return law
+
+            batch._target_law = checked_law
+        start = len(frames)
+        failures = []
+        for _ in range(512):
+            _, responses = batch.next()
+            failures.extend(str(value) for value in batch.take_lane_failures())
+            for response in responses:
+                output[response.uid].append(response.token)
+                if response.finish_reason:
+                    ends[response.uid] = response
+            if not batch.lanes:
+                break
+        actual_frames = frames[start:]
+        if mixed_sampling:
+
+            def transformed_reference(raw, _transform=transform):
+                return probability(np.asarray(mx.exp(_transform(raw[None])[0])))
+
+            for uid, prompt, temp in zip(ids, prompts, temperatures, strict=True):
+                if temp:
+                    law_checks[uid] = audit_reached_laws(
+                        law_observations[uid],
+                        prompt,
+                        output[uid],
+                        ordinary_reached_rows(
+                            adapter.model, mx, prompt, output[uid], args.prefill_step
+                        ),
+                        transformed_reference,
+                        temperature=temp,
+                    )
+        tokens_equal = [
+            output[uid] == ordinary(prompt) if temp == 0 else None
+            for uid, prompt, temp in zip(ids, prompts, temperatures, strict=True)
+        ]
+        if any(value is False for value in tokens_equal):
+            failures.append("greedy continuation-pool output differs from ordinary")
+        if not any(shape[0] == 15 for shape in actual_frames):
+            failures.append("no physical 15-path target forward observed")
+        if set(ends) != set(ids):
+            failures.append("generation did not terminate all four requests")
+        if mixed_sampling and (
+            len(law_checks) != 2
+            or any(
+                not value["every_reached_law_matches_ordinary"]
+                for value in law_checks.values()
+            )
+        ):
+            failures.append(
+                "a reached sampled canonical target branch law differs from ordinary prefix-plus-S1 reference or was not exercised"
+            )
+        check = {
+            "adaptive": adaptive,
+            "mixed_sampling": mixed_sampling,
+            "passed": not failures,
+            "failures": failures,
+            "tokens_equal": tokens_equal,
+            "tokens": output,
+            "sampling_law_checks": law_checks,
+            "frames": actual_frames,
+            "stats": dict(batch.scheduler_stats),
+            "receipts": {uid: end.speculative_receipt for uid, end in ends.items()},
+        }
+        print(
+            json.dumps(
+                {
+                    "event": "generation_checked",
+                    "adaptive": adaptive,
+                    "passed": check["passed"],
+                }
+            ),
+            flush=True,
+        )
+        return check
+
+
 def run(args, report):
     import mlx.core as mx
     import numpy as np
 
     from mlx2.adapters.standard_decoder import StandardDecoderAdapter
-    from mlx2.runtime.cow_cache import (
-        restore_recovery_descriptors,
-        snapshot_recovery_descriptors,
-    )
-    from mlx2.runtime.sample_utils import LaneRNG
 
     mx.set_default_device(mx.gpu)
     device = mx.device_info()
@@ -366,280 +817,134 @@ def run(args, report):
             int(psutil.virtual_memory().available),
             int(device.get("max_recommended_working_set_size", 0)),
         )
-    adapter = StandardDecoderAdapter(
-        str(args.model),
-        execution_policy={
-            "draft_model": str(args.draft),
-            "num_draft": 15,
-            "target_verify_row_exact": args.target_verify_row_exact,
-            "continuation_pool": {"limit": 15, "ngram_min": 1, "ngram_max": 3},
-        },
+    import psutil
+
+    adapter = construct_admitted_adapter(
+        args,
+        report,
+        device,
+        StandardDecoderAdapter,
+        int(psutil.virtual_memory().available),
     )
-    if args.compute_precision == "float32-diagnostic":
-        from validate_xpress_metal_matrix import cast_float32_diagnostic
-
-        cast_float32_diagnostic(adapter.model, adapter.draft_model)
-        if args.target_verify_row_exact:
-            adapter.model.configure_target_verify_row_exact(True)
-    model, draft = adapter.model, adapter.draft_model
-    report["critic_session_revision"] = bind_compute_precision(
-        draft, args.compute_precision
-    )
-    report["artifact_identity"] = adapter.identity
-    report["draft_settings"] = draft.receipt_settings
-    prompts = [
-        adapter.tokenizer.encode(text * 32, add_special_tokens=False)[
-            : args.context_tokens
-        ]
-        for text in PROMPTS
-    ]
-
-    def fresh(ids):
-        cache = model.make_cache()
-        for start in range(0, len(ids) - 1, args.context_tokens):
-            mx.eval(
-                model(
-                    mx.array(
-                        [ids[start : min(start + args.context_tokens, len(ids) - 1)]]
-                    ),
-                    cache=cache,
-                )
-            )
-        logits = model(mx.array([[ids[-1]]]), cache=cache)[0, -1]
-        mx.eval(logits)
-        return cache, logits
-
-    def ordinary(ids):
-        cache, logits = fresh(ids)
-        result = []
-        for index in range(args.max_tokens):
-            token = int(mx.argmax(logits).item())
-            result.append(token)
-            if token in probe.stops:
-                break
-            if index + 1 < args.max_tokens:
-                logits = model(mx.array([[token]]), cache=cache)[0, -1]
-        return result
-
-    def engine(width, policy=None):
-        return adapter.create_external_batch(
-            completion_batch_size=width,
-            prefill_step_size=args.context_tokens,
-            ready_drain="all",
-            adaptive_verification=policy,
-        )
-
-    probe = engine(1)
-    uid = probe.insert([prompts[0]], max_tokens=[args.max_tokens])[0]
-    lane = probe.lanes[uid]
-    while lane.remaining:
-        probe._prefill(lane)
-    frozen = snapshot_recovery_descriptors(lane.cache)
-    proposal_cost = measure_proposal_cost(probe, lane, mx.synchronize, args.repetitions)
-    report["proposal_cost"] = proposal_cost
-    costs, observations = {}, {}
-    for width in (1, 5, 15):
-        medians, details = [], []
-        for depth in range(16):
-            samples = []
-            for iteration in range(args.repetitions + 1):
-                caches = [
-                    restore_recovery_descriptors(*frozen)[0] for _ in range(width)
-                ]
-                transaction = probe._target_owner(caches).begin(
-                    lengths=[depth + 1] * width
-                )
-                inputs = mx.array(
-                    [
-                        [lane.anchor]
-                        + [int((index + position) % 100) for position in range(depth)]
-                        for index in range(width)
-                    ]
-                )
-                try:
-                    mx.synchronize()
-                    started = time.perf_counter()
-                    logits, hidden = model.forward_with_taps(
-                        inputs, transaction.caches, probe.layers
-                    )
-                    mx.eval(logits, hidden)
-                    mx.synchronize()
-                    elapsed = time.perf_counter() - started
-                    if iteration:
-                        samples.append(elapsed)
-                finally:
-                    transaction.abort()
-            medians.append(float(np.median(samples)))
-            details.append(samples)
-        costs[str(width)] = medians
-        observations[str(width)] = details
-        print(json.dumps({"event": "cost_width_measured", "width": width}), flush=True)
-    report["continuation_costs"] = costs
-    report["cost_samples_seconds"] = observations
-    report["cost_binding"] = {
-        "source_sha256": report["source_sha256"],
-        "artifact_identity": adapter.identity,
-        "compute_precision": args.compute_precision,
-        "context_tokens": args.context_tokens,
-        "requests_per_forward": 1,
-        "path_width_semantics": "physical independent continuation rows, including bonus",
-        "performance_qualified": False,
-        "critic_session_revision": report["critic_session_revision"],
-        "proposal_cost_seconds": proposal_cost["seconds"],
-        "scope": "fixed-context resident probes; timing informational only",
-    }
-
-    original = model.forward_with_taps
-    frames = []
-
-    def tracked(inputs, *positional, **keywords):
-        frames.append(list(inputs.shape))
-        return original(inputs, *positional, **keywords)
-
-    model.forward_with_taps = tracked
     try:
-        for adaptive, mixed_sampling in ((False, False), (True, False), (True, True)):
-            policy = (
-                {
-                    "continuation_costs": costs,
-                    "min_observations": 1,
-                    "full_depth_interval": 8,
-                    "draft_cost": proposal_cost["seconds"],
-                }
-                if adaptive
-                else None
-            )
-            batch = engine(2, policy)
-            temperatures = [0.0, 0.8, 0.0, 0.8] if mixed_sampling else [0.0] * 4
-            ids = batch.insert(
-                prompts,
-                max_tokens=[args.max_tokens] * 4,
-                lane_rngs=[LaneRNG(320 + index) for index in range(4)],
-                sampling_configs=[{"sampling_temp": temp} for temp in temperatures],
-            )
-            output, ends = {uid: [] for uid in ids}, {}
-            law_checks = {}
-            law_observations = {}
-            if mixed_sampling:
-                from mlx2.runtime.sample_utils import make_transformed_logprobs
-                from mlx2.runtime.speculative_sampling import probability
+        if args.compute_precision == "float32-diagnostic":
+            from validate_xpress_metal_matrix import cast_float32_diagnostic
 
-                transform = make_transformed_logprobs(0.8)
-                for uid, prompt, temp in zip(ids, prompts, temperatures, strict=True):
-                    if temp:
-                        law_observations[uid] = []
-                original_law = batch._target_law
+            cast_float32_diagnostic(adapter.model, adapter.draft_model)
+            if args.target_verify_row_exact:
+                adapter.model.configure_target_verify_row_exact(True)
+        model, draft = adapter.model, adapter.draft_model
+        report["critic_session_revision"] = bind_compute_precision(
+            draft, args.compute_precision
+        )
+        report["artifact_identity"] = adapter.identity
+        report["draft_settings"] = draft.receipt_settings
+        prompts = [
+            exact_prompt_tokens(adapter.tokenizer, text, args.context_tokens)
+            for text in PROMPTS
+        ]
+        report["prompt_lengths"] = [len(prompt) for prompt in prompts]
+        report["prompt_ids_sha256"] = [
+            hashlib.sha256(
+                json.dumps(prompt, separators=(",", ":")).encode()
+            ).hexdigest()
+            for prompt in prompts
+        ]
 
-                def checked_law(
-                    lane,
-                    logits,
-                    history,
-                    *positional,
-                    _law=original_law,
-                    _observations=law_observations,
-                    **keywords,
-                ):
-                    law = _law(lane, logits, history, *positional, **keywords)
-                    if lane.uid in _observations:
-                        _observations[lane.uid].append(
-                            {
-                                "raw_logits": np.asarray(
-                                    logits.astype(mx.float32)
-                                ).copy(),
-                                "law": law.copy(),
-                                "history_tokens": list(history),
-                                "reachable": bool(
-                                    keywords.get(
-                                        "reachable",
-                                        positional[0] if positional else True,
-                                    )
-                                ),
-                            }
-                        )
-                    return law
+        def fresh(ids):
+            cache = model.make_cache()
+            for start in range(0, len(ids) - 1, args.prefill_step):
+                mx.eval(
+                    model(
+                        mx.array(
+                            [ids[start : min(start + args.prefill_step, len(ids) - 1)]]
+                        ),
+                        cache=cache,
+                    )
+                )
+            logits = model(mx.array([[ids[-1]]]), cache=cache)[0, -1]
+            mx.eval(logits)
+            return cache, logits
 
-                batch._target_law = checked_law
-            start = len(frames)
-            failures = []
-            for _ in range(512):
-                _, responses = batch.next()
-                failures.extend(str(value) for value in batch.take_lane_failures())
-                for response in responses:
-                    output[response.uid].append(response.token)
-                    if response.finish_reason:
-                        ends[response.uid] = response
-                if not batch.lanes:
+        def ordinary(ids):
+            cache, logits = fresh(ids)
+            result = []
+            for index in range(args.max_tokens):
+                token = int(mx.argmax(logits).item())
+                result.append(token)
+                if token in stops:
                     break
-            actual_frames = frames[start:]
-            if mixed_sampling:
+                if index + 1 < args.max_tokens:
+                    logits = model(mx.array([[token]]), cache=cache)[0, -1]
+            return result
 
-                def transformed_reference(raw, _transform=transform):
-                    return probability(np.asarray(mx.exp(_transform(raw[None])[0])))
+        costs, _observations, proposal_cost, stops, probe_offsets = (
+            measure_context_costs(adapter, args, prompts[0], mx, np, report)
+        )
+        report["proposal_cost"] = proposal_cost
+        report["cost_binding"] = {
+            "source_sha256": report["source_sha256"],
+            "artifact_identity": adapter.identity,
+            "compute_precision": args.compute_precision,
+            "context_tokens": args.context_tokens,
+            "actual_context_tokens": len(prompts[0]),
+            "prefill_step": args.prefill_step,
+            "target_probe_offsets": probe_offsets,
+            "requests_per_forward": 1,
+            "path_width_semantics": "physical independent continuation rows, including bonus",
+            "performance_qualified": False,
+            "critic_session_revision": report["critic_session_revision"],
+            "proposal_cost_seconds": proposal_cost["seconds"],
+            "scope": "fixed-context resident probes; timing informational only",
+        }
 
-                for uid, prompt, temp in zip(ids, prompts, temperatures, strict=True):
-                    if temp:
-                        law_checks[uid] = audit_reached_laws(
-                            law_observations[uid],
-                            prompt,
-                            output[uid],
-                            ordinary_reached_rows(
-                                model, mx, prompt, output[uid], args.context_tokens
-                            ),
-                            transformed_reference,
-                            temperature=temp,
-                        )
-            tokens_equal = [
-                output[uid] == ordinary(prompt) if temp == 0 else None
-                for uid, prompt, temp in zip(ids, prompts, temperatures, strict=True)
-            ]
-            if any(value is False for value in tokens_equal):
-                failures.append("greedy continuation-pool output differs from ordinary")
-            if not any(shape[0] == 15 for shape in actual_frames):
-                failures.append("no physical 15-path target forward observed")
-            if set(ends) != set(ids):
-                failures.append("generation did not terminate all four requests")
-            if mixed_sampling and (
-                len(law_checks) != 2
-                or any(
-                    not value["every_reached_law_matches_ordinary"]
-                    for value in law_checks.values()
-                )
+        original = model.forward_with_taps
+        frames = []
+
+        def tracked(inputs, *positional, **keywords):
+            frames.append(list(inputs.shape))
+            return original(inputs, *positional, **keywords)
+
+        model.forward_with_taps = tracked
+        try:
+            for adaptive, mixed_sampling in (
+                (False, False),
+                (True, False),
+                (True, True),
             ):
-                failures.append(
-                    "a reached sampled canonical target branch law differs from ordinary prefix-plus-S1 reference or was not exercised"
-                )
-            check = {
-                "adaptive": adaptive,
-                "mixed_sampling": mixed_sampling,
-                "passed": not failures,
-                "failures": failures,
-                "tokens_equal": tokens_equal,
-                "tokens": output,
-                "sampling_law_checks": law_checks,
-                "frames": actual_frames,
-                "stats": dict(batch.scheduler_stats),
-                "receipts": {uid: end.speculative_receipt for uid, end in ends.items()},
-            }
-            report["checks"].append(check)
-            print(
-                json.dumps(
+                policy = (
                     {
-                        "event": "generation_checked",
-                        "adaptive": adaptive,
-                        "passed": check["passed"],
+                        "continuation_costs": costs,
+                        "min_observations": 1,
+                        "full_depth_interval": 8,
+                        "draft_cost": proposal_cost["seconds"],
                     }
-                ),
-                flush=True,
-            )
+                    if adaptive
+                    else None
+                )
+                check = check_continuation_generation(
+                    adapter,
+                    args,
+                    prompts,
+                    policy,
+                    adaptive,
+                    mixed_sampling,
+                    mx,
+                    np,
+                    frames,
+                    ordinary,
+                )
+                report["checks"].append(check)
+        finally:
+            model.forward_with_taps = original
+        report["source_unchanged"] = sources() == report["source_sha256"]
+        report["generation_completed"] = True
+        report["passed"] = (
+            all(check["passed"] for check in report["checks"])
+            and report["source_unchanged"]
+        )
     finally:
-        model.forward_with_taps = original
-        probe.close()
         adapter.close()
-    report["source_unchanged"] = sources() == report["source_sha256"]
-    report["passed"] = (
-        all(check["passed"] for check in report["checks"])
-        and report["source_unchanged"]
-    )
 
 
 def main(argv=None):
