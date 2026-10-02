@@ -19,7 +19,9 @@ DRAFT = "b" * 64
 SCOPE = "c" * 64
 
 
-def bind(*, windows=None, passes=3, depth=2, adaptive=None, pool=True):
+def bind(
+    *, windows=None, passes=3, depth=2, adaptive=None, pool=True, pool_settings=None
+):
     model, drafter = pair("xpress", windows)
     drafter.config.xpress_num_passes = passes
     adapter = ExternalDraftAdapterMixin()
@@ -27,7 +29,7 @@ def bind(*, windows=None, passes=3, depth=2, adaptive=None, pool=True):
     adapter.identity = {"fingerprint": TARGET}
     adapter.external_policy = {"draft_model": "synthetic", "num_draft": depth}
     if pool:
-        adapter.external_policy["continuation_pool"] = {}
+        adapter.external_policy["continuation_pool"] = pool_settings or {}
     if adaptive is not None:
         adapter.external_policy["adaptive_verification"] = adaptive
     record = {"fingerprint": DRAFT, "args": drafter.config}
@@ -142,3 +144,74 @@ def test_existing_final_route_fingerprint_formula_remains_unchanged(pool):
     assert adapter.identity["fingerprint"] == expected
     assert adapter.identity["target_fingerprint"] == TARGET
     assert adapter._external_draft_revision == DRAFT
+
+
+def test_dedup_algorithm_pins_enabled_pool_route_session_sources_and_receipt():
+    from dataclasses import replace
+
+    adapter = bind()
+    policy = ContinuationPoolPolicy.from_value({}).as_dict()
+    assert policy["verification_algorithm"] == "stable-truncated-prefix-dedup-v2"
+    assert (
+        adapter.draft_model.receipt_settings["continuation_pool"][
+            "verification_algorithm"
+        ]
+        == policy["verification_algorithm"]
+    )
+    old_policy = {
+        key: value for key, value in policy.items() if key != "verification_algorithm"
+    }
+    old_route = hashlib.sha256(
+        (
+            TARGET
+            + DRAFT
+            + adapter.EXTERNAL_ROUTE_TAG
+            + json.dumps(old_policy, sort_keys=True, separators=(",", ":"))
+        ).encode()
+    ).hexdigest()
+    assert adapter.identity["fingerprint"] != old_route
+    old_session = hashlib.sha256(
+        json.dumps(
+            {
+                "schema": "mlx2.continuation-session.v2",
+                "target_revision": TARGET,
+                "draft_revision": DRAFT,
+                "route": adapter.EXTERNAL_ROUTE_TAG,
+                "continuation_pool": old_policy,
+                "draft_settings": adapter.draft_model.backend.receipt_settings,
+                "num_draft": 2,
+                "adaptive_verification": None,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+    source = adapter.draft_model.source_records["external"]
+    assert source.session_revision == adapter.draft_model.session.session_revision
+    assert source.session_revision != old_session
+    assert source.revision == DRAFT
+    assert ProposalRankingRegistry.source_key(
+        source
+    ) != ProposalRankingRegistry.source_key(
+        replace(source, session_revision=old_session)
+    )
+
+
+def test_explicit_current_algorithm_normalizes_to_default_and_roundtrips():
+    default = bind()
+    explicit = bind(
+        pool_settings={"verification_algorithm": "stable-truncated-prefix-dedup-v2"}
+    )
+    assert default.identity == explicit.identity
+    assert default.draft_model.session == explicit.draft_model.session
+    normalized = ContinuationPoolPolicy.from_value({}).as_dict()
+    assert ContinuationPoolPolicy.from_value(normalized).as_dict() == normalized
+
+
+@pytest.mark.parametrize(
+    "algorithm", ["target-draw-then-prefix-match-v1", "", None, False, 2]
+)
+def test_unknown_or_legacy_pool_algorithm_fails_before_wrapper_binding(algorithm):
+    with pytest.raises(ValueError, match="verification_algorithm"):
+        ContinuationPoolPolicy.from_value({"verification_algorithm": algorithm})

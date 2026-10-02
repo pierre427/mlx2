@@ -117,6 +117,8 @@ class ExternalDraftAdapterMixin:
             from .proposal_path_sources import build_continuation_drafter
 
             value = self.external_policy["continuation_pool"]
+            # Normalized pool math includes its fixed verification algorithm,
+            # binding both APC route identity and critic source/session state.
             normalized = ContinuationPoolPolicy.from_value(value).as_dict()
             composition_identity = json.dumps(
                 normalized, sort_keys=True, separators=(",", ":")

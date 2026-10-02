@@ -355,6 +355,14 @@ class Model(nn.Module):
         return next(iter(dtypes))
 
     @property
+    def supports_contextual_prefix_equivalence(self):
+        """BF16 S1 candidate contract; qualification stays separate."""
+        return bool(
+            self._target_verify_row_exact
+            and self._row_exact_backbone_dtype == mx.bfloat16
+        )
+
+    @property
     def external_execution_receipt(self):
         if not self._target_verify_row_exact:
             return None

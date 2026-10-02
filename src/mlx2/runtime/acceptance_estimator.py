@@ -257,7 +257,13 @@ class AdaptiveVerificationPolicy:
         return dict(self.verification_costs_by_cohort).get(cohort_size)
 
     def choose_continuation_shape(
-        self, maximum_width, maximum_depth, coverage, rounds, path_lengths=None
+        self,
+        maximum_width,
+        maximum_depth,
+        coverage,
+        rounds,
+        path_lengths=None,
+        physical_widths=None,
     ):
         """Costs bind one request's physical (path width,depth+bonus) forward.
 
@@ -267,8 +273,33 @@ class AdaptiveVerificationPolicy:
         """
         full = (maximum_width, maximum_depth)
         tables = dict(self.continuation_costs)
+        # Coverage remains over ranked semantic top-W sets. Identical admitted
+        # prefixes may share one physical row; timing must bind that actual B.
+        if physical_widths is not None and (
+            not isinstance(physical_widths, dict)
+            or any(
+                not isinstance(key, tuple)
+                or len(key) != 2
+                or any(type(value) is not int for value in key)
+                or not 1 <= key[0] <= maximum_width
+                or not 1 <= key[1] <= maximum_depth
+                or type(value) is not int
+                or not 1 <= value <= key[0]
+                for key, value in physical_widths.items()
+            )
+        ):
+            raise ValueError("invalid continuation semantic-to-physical width mapping")
+
+        def physical(width, depth):
+            return (
+                width
+                if physical_widths is None
+                else physical_widths.get((width, depth))
+            )
+
+        full_physical = physical(*full)
         if (
-            maximum_width not in tables
+            full_physical not in tables
             or rounds % self.full_depth_interval == 0
             or maximum_depth < self.minimum_depth
         ):
@@ -287,13 +318,11 @@ class AdaptiveVerificationPolicy:
         base_yes, base_no = coverage.get((maximum_width, 0), (0, 0))
         if base_yes + base_no < self.min_observations:
             return full
-        baseline = (self.draft_cost + tables[maximum_width][maximum_depth]) / progress(
+        baseline = (self.draft_cost + tables[full_physical][maximum_depth]) / progress(
             *full
         )
         choices = [(baseline, -maximum_width, -maximum_depth, full)]
-        for width, costs in tables.items():
-            if width > maximum_width:
-                continue
+        for width in range(1, maximum_width + 1):
             yes, no = coverage.get((width, 0), (0, 0))
             if yes + no < self.min_observations:
                 continue
@@ -303,6 +332,10 @@ class AdaptiveVerificationPolicy:
                 else min(maximum_depth, max(path_lengths[:width]))
             )
             for depth in range(self.minimum_depth, bound + 1):
+                measured_width = physical(width, depth)
+                if measured_width not in tables:
+                    continue
+                costs = tables[measured_width]
                 cost = (self.draft_cost + costs[depth]) / progress(width, depth)
                 choices.append((cost, -width, -depth, (width, depth)))
         cost, _, _, chosen = min(choices)

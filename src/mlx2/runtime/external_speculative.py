@@ -296,6 +296,7 @@ class RoundDecision:
     verify_window: object = None
     commit_rows: object = None
     continuation_outcome: object = None
+    continuation_semantic_index: int | None = None
 
 
 def _block_row(block, vocab):
@@ -1777,8 +1778,11 @@ class ExternalDraftBatchGenerator:
                 lane.continuation_rounds = getattr(lane, "continuation_rounds", 0) + 1
                 lane.continuation_physical_width = outcome.physical_width
                 lane.continuation_physical_span = outcome.physical_span
-                lane.continuation_selected_path = outcome.selected_index
-                chosen = blocks[row].continuation_selection.paths[outcome.selected_index]
+                semantic_index = (outcome.selected_index if decision.continuation_semantic_index is None
+                                  else decision.continuation_semantic_index)
+                lane.continuation_selected_path = semantic_index
+                lane.continuation_selected_physical_path = outcome.selected_index
+                chosen = blocks[row].continuation_selection.paths[semantic_index]
                 lane.continuation_selected_sources = tuple((path.source_id, path.source_revision)
                     for path in chosen.contributors)
                 lane.continuation_target_rows = getattr(lane, "continuation_target_rows", 0) + outcome.physical_width * outcome.physical_span
@@ -1813,15 +1817,33 @@ class ExternalDraftBatchGenerator:
     def _continuation_receipt(self, lane):
         if self.continuation_policy is None:
             return {}
+        # A transient depth-zero terminal token has no feedback outbox entry.
+        # Retain evidence from prior committed pool rounds; this locked query
+        # changes neither labels nor tickets. Speculative rounds refresh their
+        # ready responses after the entire cohort commits, as before.
+        try:
+            ranking = {"ranking": copy.deepcopy(self.draft.proposal_pool.receipt(lane.session_scope_hash))}
+        except Exception as error:  # noqa: BLE001 - optional diagnostics cannot invalidate committed inference
+            ranking = {"ranking_error": str(error)}
         return {"verification": "processed_target_draw_then_matching_continuation_prefix",
                 "continuation_pool": {"implemented": True, "selected": True, "qualified": False,
+                    **ranking,
+                    "verification_algorithm": self.continuation_policy.verification_algorithm,
                     "observed_used": getattr(lane, "continuation_rounds", 0) > 0,
                     "unit": "complete_continuation_sequences", "limit": self.continuation_policy.limit,
                     "committed_rounds": getattr(lane, "continuation_rounds", 0),
                     "physical_width": getattr(lane, "continuation_physical_width", 0),
                     "physical_span": getattr(lane, "continuation_physical_span", 0),
+                    "ranked_complete_sequences": getattr(lane, "continuation_semantic_selected", 0),
+                    "admitted_complete_sequences": getattr(lane, "continuation_semantic_admitted", 0),
+                    "prefix_dedup_enabled": getattr(lane, "continuation_prefix_dedup_enabled", False),
+                    "prefix_dedup_observed_used": getattr(lane, "continuation_deduplicated_sequences", 0) > 0,
+                    "deduplicated_sequences": getattr(lane, "continuation_deduplicated_sequences", 0),
+                    "physical_to_semantic": list(getattr(lane, "continuation_physical_to_semantic", ())),
+                    "semantic_to_physical": list(getattr(lane, "continuation_semantic_to_physical", ())),
                     "target_rows": getattr(lane, "continuation_target_rows", 0),
                     "selected_path": getattr(lane, "continuation_selected_path", None),
+                    "selected_physical_path": getattr(lane, "continuation_selected_physical_path", None),
                     "selected_sources": list(getattr(lane, "continuation_selected_sources", ())),
                     "session_scope_hash": lane.session_scope_hash,
                     "adaptive_cost_binding": "one_request_physical_path_width_and_depth_plus_bonus",
@@ -2160,12 +2182,26 @@ class ExternalDraftBatchGenerator:
                 selection.require_verification_contract("target_draw_then_prefix_match")
                 maximum_width = len(selection.paths)
                 maximum_depth = max(len(path.tokens) for path in selection.paths)
+                dedup_enabled = (
+                    getattr(self.model, "supports_contextual_prefix_equivalence", False) is True
+                    and getattr(getattr(self.model, "model", None), "residual_taps", None) is None
+                )
+                physical_widths = {}
+                for semantic_width in range(1, maximum_width + 1):
+                    for candidate_depth in range(1, maximum_depth + 1):
+                        candidates = tuple(path.tokens[:candidate_depth]
+                            for path in selection.paths[:semantic_width])
+                        physical_widths[semantic_width, candidate_depth] = (
+                            len(set(candidates)) if dedup_enabled else semantic_width)
                 width, depth = maximum_width, maximum_depth
                 if self.adaptive_policy is not None:
                     width, depth = self.adaptive_policy.choose_continuation_shape(
                         maximum_width, maximum_depth, getattr(lane, "continuation_coverage", {}),
-                        getattr(lane, "continuation_rounds", 0), [len(path.tokens) for path in selection.paths])
-                paths = tuple(path.tokens[:depth] for path in selection.paths[:width])
+                        getattr(lane, "continuation_rounds", 0), [len(path.tokens) for path in selection.paths],
+                        physical_widths=physical_widths)
+                semantic_paths = tuple(path.tokens[:depth] for path in selection.paths[:width])
+                paths, representatives, semantic_to_physical = self._unique_continuation_paths(
+                    semantic_paths, enabled=dedup_enabled)
                 inputs = [[lane.anchor, *path] for path in paths]
                 counts = [len(path) for path in paths]
                 taps, steer, commits = self._verify_steer([lane] * len(paths), inputs, counts)
@@ -2193,13 +2229,22 @@ class ExternalDraftBatchGenerator:
 
                 outcome = sample_continuations(paths, logits, sample_row,
                     maximum=lane.maximum - lane.generated, stop_tokens=self.stops)
-                chosen = selection.paths[outcome.selected_index]
+                physical_index = outcome.selected_index
+                semantic_index = representatives[physical_index]
+                chosen = selection.paths[semantic_index]
                 source = chosen.representative.source_id
                 selected = HostDraftRow(list(paths[outcome.selected_index]), [], original_block.width,
                     proposal_source=source if source in {"prompt_lookup", "native_mtp"} else "external",
                     continuation_selection=selection, feedback_payload=original_block.feedback_payload)
                 decision = RoundDecision(outcome.accepted, list(outcome.emitted), laws,
-                    response_logprobs=response_rows, verify_window=window, continuation_outcome=outcome)
+                    response_logprobs=response_rows, verify_window=window, continuation_outcome=outcome,
+                    continuation_semantic_index=semantic_index)
+                lane.continuation_semantic_selected = maximum_width
+                lane.continuation_semantic_admitted = width
+                lane.continuation_physical_to_semantic = representatives
+                lane.continuation_semantic_to_physical = semantic_to_physical
+                lane.continuation_prefix_dedup_enabled = dedup_enabled
+                lane.continuation_deduplicated_sequences = getattr(lane, "continuation_deduplicated_sequences", 0) + width - len(paths)
                 if self.adaptive_policy is not None:
                     saved = maximum_width * (maximum_depth + 1) - outcome.physical_width * outcome.physical_span
                     lane.adaptive_round_policy = ("continuation_lagged_coverage_cost_model" if saved
@@ -2214,19 +2259,22 @@ class ExternalDraftBatchGenerator:
                     _bump(self.scheduler_stats, "external_adaptive_verification_groups")
                     self.scheduler_stats["external_adaptive_round_depth"] = outcome.physical_span - 1
                     self.scheduler_stats["external_adaptive_verify_width"] = outcome.physical_span
-                self._commit([lane], [decision], hidden[outcome.selected_index:outcome.selected_index + 1],
-                    blocks=[selected], transaction=SelectedContinuationTransaction(transaction, outcome.selected_index, len(paths)))
+                self._commit([lane], [decision], hidden[physical_index:physical_index + 1],
+                    blocks=[selected], transaction=SelectedContinuationTransaction(transaction, physical_index, len(paths)))
                 if commits:
-                    commits[outcome.selected_index](min(outcome.accepted + 1, len(outcome.emitted)))
+                    commits[physical_index](min(outcome.accepted + 1, len(outcome.emitted)))
                 _bump(self.scheduler_stats, "external_continuation_rounds")
                 _bump(self.scheduler_stats, "external_continuation_sequences", outcome.physical_width)
+                _bump(self.scheduler_stats, "external_continuation_ranked_complete_sequences", maximum_width)
+                _bump(self.scheduler_stats, "external_continuation_admitted_complete_sequences", width)
+                _bump(self.scheduler_stats, "external_continuation_deduplicated_sequences", width - len(paths))
                 _bump(self.scheduler_stats, "external_continuation_target_rows", outcome.physical_width * outcome.physical_span)
                 self.scheduler_stats["target_max_width"] = max(self.scheduler_stats["target_max_width"], outcome.physical_width)
         except BaseException:
             if transaction is not None and not transaction.closed:
                 try:
                     transaction.abort()
-                except BaseException:  # noqa: BLE001 - original boundary is authoritative
+                except BaseException:  # noqa: BLE001, S110 - original boundary is authoritative
                     pass
             self._restore_round(cohort, recovery)
             self.scheduler_stats = stats_snapshot
@@ -2234,6 +2282,21 @@ class ExternalDraftBatchGenerator:
             raise
         finally:
             self._open = False
+
+    @staticmethod
+    def _unique_continuation_paths(paths, *, enabled):
+        """Stable physical rows; each uses its first ranked semantic representative."""
+        unique, representatives, inverse, seen = [], [], [], {}
+        for semantic, path in enumerate(paths):
+            key = tuple(path)
+            physical = seen.get(key) if enabled else None
+            if physical is None:
+                physical = len(unique)
+                seen[key] = physical
+                unique.append(key)
+                representatives.append(semantic)
+            inverse.append(physical)
+        return tuple(unique), tuple(representatives), tuple(inverse)
 
     def _run_round(self, cohort):
         if cohort and all(lane.ordinary for lane in cohort):

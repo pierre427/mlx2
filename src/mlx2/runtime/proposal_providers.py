@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+CONTINUATION_VERIFICATION_ALGORITHM = "stable-truncated-prefix-dedup-v2"
+
 
 def continuation_context_revision(binding, history, anchor):
     return hashlib.sha256(
@@ -26,6 +28,14 @@ class ContinuationPoolPolicy:
     ngram_max: int = 6
     lookback: int = 4096
     mtp_max_history: int = 4096
+    verification_algorithm: str = CONTINUATION_VERIFICATION_ALGORITHM
+
+    def __post_init__(self):
+        if (
+            type(self.verification_algorithm) is not str
+            or self.verification_algorithm != CONTINUATION_VERIFICATION_ALGORITHM
+        ):
+            raise ValueError("unsupported continuation_pool verification_algorithm")
 
     @classmethod
     def from_value(cls, value):
