@@ -468,6 +468,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                     "gdn_prefill_chunk",
                     "gdn_prefill_segment_rows",
                     "gdn_core",
+                    "invariant_prefill",
                 )
                 if key in policy
             }
@@ -491,12 +492,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             "tensorfold_prefill_backend",
             "gdn_prefill_chunk",
             "gdn_prefill_segment_rows",
+            "invariant_prefill",
             *EAGER_DISPATCH_POLICY_KEYS,
         }:
             raise ValueError(
                 "Qwen3.8 27B execution policy supports only num_draft, gdn_core, "
                 "fp32_head_logits, tensorfold_prefill, tensorfold_prefill_backend, "
-                "gdn_prefill_chunk, gdn_prefill_segment_rows, "
+                "gdn_prefill_chunk, gdn_prefill_segment_rows, invariant_prefill, "
                 "eager_dispatch_stride and eager_dispatch_max_rows"
             )
         eager_dispatch = eager_dispatch_policy(policy, self.default_eager_dispatch_stride)
@@ -672,10 +674,20 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 prefill_policy.gdn_prefill_chunk,
                 prefill_policy.gdn_prefill_segment_rows,
             )
+        self.invariant_prefill = None
+        if prefill_policy.invariant_prefill:
+            from ..runtime.models.invariant_prefill import install as install_invariant
+
+            handle = install_invariant(self.model.language_model.model)
+            if not handle.installed:
+                raise ValueError(f"invariant_prefill refused: {handle.refusal}")
+            self.invariant_prefill = handle
         from ..runtime.prefill_plan import execution_identity
 
         self.prefill_execution_identity = execution_identity(
-            self.tensorfold_prefill, self.gdn_prefill_scan
+            self.tensorfold_prefill,
+            self.gdn_prefill_scan,
+            None if self.invariant_prefill is None else self.invariant_prefill.identity(),
         )
         self.fp32_head = None
         if fp32_head:
@@ -858,6 +870,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             ),
             **eager_dispatch_diagnostics(self),
             **gdn_state_diagnostics(self),
+            **(
+                {"invariant_prefill": self.invariant_prefill.status()}
+                if getattr(self, "invariant_prefill", None) is not None
+                else {}
+            ),
             **(
                 {"fused_gdn": self._fused_gdn_diagnostics()}
                 if getattr(self, "fused_gdn", False) else {}

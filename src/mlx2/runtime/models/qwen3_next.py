@@ -23,6 +23,7 @@ from .qwen4_moe_router import (
     qwen4_moe_router,
 )
 from . import switch_layers as _switch_layers
+from . import invariant_prefill as _invariant
 from . import qwen4_moe_weighted_sum as _moe_wsum
 from . import qwen4_routed_decode as _routed
 from . import qwen4_moe_window as _window
@@ -446,7 +447,7 @@ class FusedGateUpSwitchGLU(nn.Module):
         variant: str = "scalar",
     ) -> mx.array:
         x = mx.expand_dims(x, (-2, -3))
-        do_sort = indices.size >= switch_layers_sort_min()
+        do_sort = indices.size >= switch_layers_sort_min() or _invariant.active()
         idx = indices
         inv_order = None
         token_rows = None
@@ -499,7 +500,7 @@ class FusedDownSwitchGLU(SwitchGLU):
         variant: str = "scalar",
     ) -> mx.array:
         x = mx.expand_dims(x, (-2, -3))
-        do_sort = indices.size >= switch_layers_sort_min()
+        do_sort = indices.size >= switch_layers_sort_min() or _invariant.active()
         idx = indices
         inv_order = None
         token_rows = None
@@ -978,7 +979,7 @@ def _run_moe_window(block, x, rows, consumer):
 
 def _try_moe_window(block, x):
     """A multi-row window's block output, or None for the composed body."""
-    if not block.moe_window_consumers:
+    if not block.moe_window_consumers or _invariant.active():
         return None
     hidden = x.shape[-1]
     rows = x.size // hidden

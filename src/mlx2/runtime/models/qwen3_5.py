@@ -7,6 +7,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.nn.layers.distributed import sum_gradients
 from .base import BaseModelArgs
+from . import invariant_prefill as _invariant
 from .gated_delta import gated_delta_update, normalize_gdn_qk
 from .qwen3_next import Qwen3NextRMSNormGated as RMSNormGated
 
@@ -163,9 +164,15 @@ class GatedDeltaNet(nn.Module):
             return mx.split(fused(inputs), bounds[:-1], axis=-1)
         outputs = []
         lower = 0
+        matmul = mx.quantized_matmul
+        if _invariant.active():
+            def matmul(x, w, scales, biases, *, transpose, group_size, bits):
+                return _invariant.quantized_matmul(
+                    x, w, scales, biases, group_size=group_size, bits=bits
+                )
         for upper in bounds:
             outputs.append(
-                mx.quantized_matmul(
+                matmul(
                     inputs,
                     fused.weight[lower:upper],
                     fused.scales[lower:upper],

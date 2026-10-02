@@ -242,6 +242,16 @@ class FlashNextPolicy:
     # arm by reduction-order rounding (layer outputs within 1 bf16 ulp).
     qsa_batch_decode_sparse: str = "off"
     qsa_batch_decode_sparse_min_context: int = 32768
+    # Opt-in slice-invariant prefill lane (MTPLX #549 mechanism,
+    # runtime/models/invariant_prefill.py): inside a prefill forward every
+    # projection, expert gather, norm and attention call runs one kernel
+    # configuration at every row count, so the prefilled state and the first
+    # token do not depend on how the prompt was sliced (scheduler fairness
+    # slices, chunk size, APCv2 restore boundaries).  Decode and verify keep
+    # the stock kernels.  Changes prefill bits against the default route,
+    # so it is UNQUALIFIED and enters the APCv2 prefill-execution identity.
+    # Not an environment switch; entered in receipts only when enabled.
+    invariant_prefill: bool = False
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
@@ -294,6 +304,7 @@ class FlashNextPolicy:
             "attn_fused_rows",
             "row_exact_verify",
             "row_exact_window_kernels",
+            "invariant_prefill",
             "moe_window_row_exact",
             "moe_window_batch_decode",
             "moe_window_verify",
@@ -367,6 +378,24 @@ class FlashNextPolicy:
                 "row_exact_verify cannot be combined with tensorfold_qmv_rows "
                 "or fp32_head_logits"
             )
+        if self.invariant_prefill:
+            # Each of these owns prefill projections or a chunked recurrence
+            # whose bits depend on the slice; the lane would be half a lane.
+            clashing = [
+                name
+                for name, on in (
+                    ("tensorfold_prefill", self.tensorfold_prefill),
+                    ("tensorfold_qmv_rows", self.tensorfold_qmv_rows),
+                    ("gdn_prefill_chunk", bool(self.gdn_prefill_chunk)),
+                    ("gdn_core", self.gdn_core),
+                    ("row_exact_verify", self.row_exact_verify),
+                )
+                if on
+            ]
+            if clashing:
+                raise ValueError(
+                    "invariant_prefill cannot be combined with " + ", ".join(clashing)
+                )
         if self.hc_decode_multi_row not in ("auto", "on", "off"):
             raise ValueError("hc_decode_multi_row must be auto, on, or off")
         if self.hc_decode_multi_row == "on" and not self.hc_decode_kernels:
@@ -410,6 +439,8 @@ class FlashNextPolicy:
             del values["tensorfold_prefill"]
         if not self.row_exact_verify:
             del values["row_exact_verify"]
+        if not self.invariant_prefill:
+            del values["invariant_prefill"]
         # Inert without the route: absent then; recorded either way with it,
         # so a receipt read back reproduces an explicit "off".
         if not self.row_exact_verify:

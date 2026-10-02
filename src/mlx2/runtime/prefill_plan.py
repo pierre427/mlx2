@@ -4,11 +4,13 @@ import hashlib
 import json
 
 
-def execution_identity(projection=None, scan=None):
+def execution_identity(projection=None, scan=None, invariant=None):
     """Numerical law identity, excluding counters that change during a run."""
-    if not projection and not scan:
+    if not projection and not scan and not invariant:
         return None
     result = {"version": 1}
+    if invariant:
+        result["invariant"] = {key: invariant[key] for key in ("schema", "law")}
     if projection:
         result["projection"] = {
             key: projection[key]

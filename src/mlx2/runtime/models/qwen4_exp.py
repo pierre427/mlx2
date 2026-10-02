@@ -23,6 +23,7 @@ from .import_env import snapshot as _import_env_snapshot
 
 _import_env_snapshot(__name__)
 from .. import round_levers as _lv
+from . import invariant_prefill as _invariant
 from .base import (
     BaseModelArgs,
     create_attention_mask,
@@ -1089,7 +1090,9 @@ class GroupRMSNorm(nn.Module):
         ``shape[-2]`` is the group count, which is not a width at all.  A
         rank-1 input has no sequence axis and counts as width 1.
         """
-        if not _RMSNORM_FAST:
+        if not _RMSNORM_FAST or _invariant.active():
+            # The invariant prefill lane runs one norm arithmetic at every
+            # width: the eager one every wide forward uses.
             return False
         if _RMSNORM_FAST_WIDTH_OVERRIDE is not None:
             width = _RMSNORM_FAST_WIDTH_OVERRIDE
@@ -2052,7 +2055,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
 
     def _fused_input_projections(self, inputs: mx.array):
         """The four projection outputs from one matmul, or ``None``."""
-        if not self.gdn_fused_inproj or self.training:
+        if not self.gdn_fused_inproj or self.training or _invariant.active():
             return None
         if inputs.shape[0] * inputs.shape[1] > _GDN_FUSED_INPROJ_MAX_ROWS:
             return None
@@ -2438,6 +2441,10 @@ class GatedResidual(nn.Module):
                 )
             return mx.concatenate(tokens, axis=1)
         glue = compile_glue_enabled()
+        if _invariant.active():
+            # Invariant prefill: the composed ops at every width (the HC
+            # kernels serve 1..8 rows only).
+            return self._composed(hyper_input, glue, raw_inject)
         if _hc_decode.hc_decode_enabled() and raw_inject:
             # The HC kernels return the finished 2*sigmoid inject; the fused
             # gate-inject path wants the raw gate logit instead.
@@ -2467,7 +2474,7 @@ class GatedResidual(nn.Module):
         decline; only the calls they decline get the raw gate (``raw``
         True).  Options sweep 2026-10-01: taking every call from the kernels
         cost ordinary B1 decode 8.5% (qualification/runs/options-sweep-20261001)."""
-        if not _hc_decode.hc_decode_enabled():
+        if not _hc_decode.hc_decode_enabled() or _invariant.active():
             return (*self(hyper_input, raw_inject=True), True)
         if _GDN_SHAPE_STABLE_PROJECTIONS and hyper_input.shape[1] > 1:
             # Per token, as __call__ splits a shape-stable call, so each
@@ -6164,8 +6171,12 @@ class QSAIndexer(nn.Module):
                 all_raw, n_blocks, starts, cache, length, left_pad
             )
             k = min(self.block_topk, n_blocks)
-            stage1_reason = _qsa_stage1_admission_reason(
-                length, n_blocks * self.compress_ratio
+            stage1_reason = (
+                "invariant_prefill"
+                if _invariant.active()
+                else _qsa_stage1_admission_reason(
+                    length, n_blocks * self.compress_ratio
+                )
             )
             stage1_engaged = False
             stage1_score_producer = None
@@ -6202,7 +6213,7 @@ class QSAIndexer(nn.Module):
                     stage1_reason = "unsupported_geometry"
             if not stage1_engaged:
                 scores = None
-                if _qsa_scores.enabled():
+                if _qsa_scores.enabled() and not _invariant.active():
                     # TensorFold 0.6.1's keys-stationary block scores, in the
                     # stock chain's arithmetic (qwen4_qsa_scores).
                     refusal = _qsa_scores.supported(
@@ -6476,19 +6487,23 @@ class Attention(nn.Module):
             raise ValueError("existing QSA selection and fetched K/V must be paired")
         segmented_consumer = getattr(cache, "segmented_attention", None)
         if segmented_consumer is not None and _projected is None:
+            if _invariant.active():
+                _invariant.not_invariant("segmented_attention")
             return segmented_consumer(self, x, mask)
         (batch, length, _) = x.shape
         quantized_indexed = qsa_indexed_quantized_cache_config(cache)
         qg = k_flat = v_flat = fused_index_qk = None
+        lane = _invariant.active()
         fused_rows = (
             _attn_rows.enabled()
             and (not self.training)
+            and (not lane)
             and self._attn_rows_admit(x, cache, length)
         )
         grouped = fused_rows and batch * length <= _attn_rows.PROJECTION_MAX_ROWS
         if _projected is not None:
             (qg, k_flat, v_flat, fused_index_qk) = _projected
-        elif (_QSA_FUSED_PROJ or grouped) and (not self.training):
+        elif (_QSA_FUSED_PROJ or grouped) and (not self.training) and (not lane):
             table = self._fused_projection_table()
             if grouped:
                 _attn_rows.bump(
@@ -6538,7 +6553,9 @@ class Attention(nn.Module):
             and self._nax_layout_ok
             and nax_kernel_available()
         )
-        use_nax = nax_admission.engage or use_direct_nax
+        use_nax = (nax_admission.engage or use_direct_nax) and not lane
+        if lane and nax_admission.engage:
+            _invariant.note("qsa_nax_declined")
         if length == 1 and _QSA_NAX_DECODE:
             if use_direct_nax:
                 reason = "engaged"
@@ -6559,6 +6576,8 @@ class Attention(nn.Module):
             )
         if use_nax:
             (use_indexed, indexed_reason) = (False, "nax_engaged")
+        elif lane:
+            (use_indexed, indexed_reason) = (False, "invariant_prefill")
         else:
             (use_indexed, indexed_reason) = decide_qsa_indexed_admission(
                 selection,
@@ -6595,6 +6614,7 @@ class Attention(nn.Module):
         )
         use_gather = (
             _QSA_GATHER_KV
+            and (not lane)
             and (not use_nax)
             and (not use_indexed)
             and (
@@ -6752,9 +6772,17 @@ class Attention(nn.Module):
                 if _return_pre_o:
                     return (out, gate)
                 return self.o_proj(out)
-            out = scaled_dot_product_attention(
-                q, k, v, cache=cache, scale=self.scale, mask=sparse_mask
+            lane_refusal = (
+                _invariant.sdpa_refusal(q, k, v, sparse_mask) if lane else "off"
             )
+            if lane_refusal is None:
+                out = _invariant.sdpa(q, k, v, scale=self.scale, mask=sparse_mask)
+            else:
+                if lane:
+                    _invariant.not_invariant("sdpa_" + lane_refusal)
+                out = scaled_dot_product_attention(
+                    q, k, v, cache=cache, scale=self.scale, mask=sparse_mask
+                )
         out = out.transpose(0, 2, 1, 3).reshape(batch, length, -1)
         if _return_pre_o:
             return (out, gate)

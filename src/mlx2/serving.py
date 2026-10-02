@@ -5324,6 +5324,15 @@ class ServingEngine:
                     raise ValueError(
                         "row_exact_verify cannot share projections with lane_matmul"
                     )
+            invariant_prefill = getattr(adapter, "invariant_prefill", None)
+            if invariant_prefill is not None and (
+                self.sp_qmm_enabled
+                or self.int8_prefill_policy.enabled
+                or (getattr(self, "lane_matmul_receipt", None) or {}).get("covered")
+            ):
+                raise ValueError(
+                    "invariant_prefill cannot share projections with lane_matmul, sp_qmm or int8_prefill"
+                )
             # Wire the weights for the process lifetime, on every route and
             # before any cache exists (runtime/weight_residency.py).  The
             # prompt-lookup and external-draft generators never raised the
@@ -5367,6 +5376,12 @@ class ServingEngine:
             )
             self._resolve_commit_direction(adapter)
             self._install_expert_streaming(adapter)
+            if invariant_prefill is not None:
+                # Expert streaming or another late install may have replaced
+                # projections the lane swapped: refuse half a lane.
+                refusal = invariant_prefill.audit()
+                if refusal is not None:
+                    raise ValueError(f"invariant_prefill coverage lost: {refusal}")
             import mlx.core as mx
             from .memory import execution_headroom
             if self.host_memory_signals_policy["enabled"]:

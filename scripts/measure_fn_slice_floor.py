@@ -52,7 +52,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 ROUNDS = []  # (perf_counter, {uid: tokens delivered})
 TOKENS = {}  # uid -> [token ids]
 CHUNKS = {}  # uid -> [prefill widths, in order]
-ARM = {"slice_floor": 0, "stall_target_ms": 500.0, "pad_policy": None}
+ARM = {"slice_floor": 0, "stall_target_ms": 500.0, "pad_policy": None, "invariant": False}
 GENERATORS = set()
 
 
@@ -64,12 +64,14 @@ def pct(values, q):
 
 
 def parse_arm(name):
-    m = re.fullmatch(r"f(\d+)(?:s(\d+))?(?:@(floor|adaptive|always))?", name)
+    m = re.fullmatch(r"f(\d+)(?:s(\d+))?(?:@(floor|adaptive|always))?(\+inv)?", name)
     if not m:
-        raise SystemExit(f"bad arm {name!r}; expected f<rows>[s<ms>][@pad-policy]")
+        raise SystemExit(f"bad arm {name!r}; expected f<rows>[s<ms>][@pad-policy][+inv]")
     return {"slice_floor": int(m.group(1)),
             "stall_target_ms": float(m.group(2)) if m.group(2) else 500.0,
-            "pad_policy": m.group(3) or "floor"}
+            "pad_policy": m.group(3) or "floor",
+            # ``+inv``: the invariant prefill lane (needs --invariant-prefill).
+            "invariant": bool(m.group(4))}
 
 
 def main():
@@ -90,6 +92,8 @@ def main():
     ap.add_argument("--handoff-width", type=int, default=3)
     ap.add_argument("--corpus-offset", type=int, default=0)
     ap.add_argument("--max-swapout-pages", type=int, default=20000)
+    ap.add_argument("--invariant-prefill", action="store_true",
+                    help="load the opt-in invariant prefill lane; +inv arms enable it")
     ap.add_argument("--out", required=True)
     ap.add_argument("--i-own-the-gpu", action="store_true")
     a = ap.parse_args()
@@ -107,10 +111,15 @@ def main():
     policy_in = {"num_draft": 2, "adaptive_mtp_depth": False,
                  "mtp_ordinary_handoff": ({"enabled": True, "max_mtp_width": a.handoff_width}
                                           if a.handoff_width else False)}
+    if any(arm["invariant"] for arm in arms.values()) and not a.invariant_prefill:
+        raise SystemExit("+inv arms need --invariant-prefill")
+    if a.invariant_prefill:
+        policy_in["invariant_prefill"] = True
     parser = S.build_parser()
     args = parser.parse_args(["--model", a.model, "--max-lanes", str(a.max_lanes), "--native-mtp",
                               "--max-context", str(a.max_context),
-                              "--max-inflight", str(2 * a.max_lanes + 2)])
+                              "--max-inflight", str(2 * a.max_lanes + 2)]
+                             + (["--qualification-mode"] if a.invariant_prefill else []))
     resolution = inspect_model(args.model)
     selection = S.resolve_route_selection(args, policy_in, resolution)
     policy = S.resolve_execution_policy_defaults(policy_in, selection, resolution, approximate_kv=False,
@@ -302,13 +311,20 @@ def main():
             "lane_tokens_out": [x.tokens() for x in lanes],
             "scheduler_delta": {k: v - before.get(k, 0) for k, v in after.items()
                                 if isinstance(v, (int, float)) and v != before.get(k, 0)},
+            **({"invariant_prefill": lane.status(reset=True)} if lane is not None else {}),
         }
 
     from mlx2.runtime.models import switch_layers as SL
 
+    lane = getattr(engine.adapter, "invariant_prefill", None)
+    if a.invariant_prefill and lane is None:
+        raise SystemExit("the adapter did not install the invariant prefill lane")
+
     def set_arm(name):
         ARM.update(arms[name])
         SL._RHS_PAD_POLICY = ARM["pad_policy"]
+        if lane is not None:
+            lane.enabled = ARM["invariant"]
 
     # Warm-up (kernels, allocator, the running-max prefill rate), discarded.
     set_arm("f0")

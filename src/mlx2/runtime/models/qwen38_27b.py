@@ -21,6 +21,7 @@ from .qwen3_next import Qwen3NextMLP as MLP
 from .precise_ops import gate_sigmoid
 from .rope_utils import initialize_rope
 from .. import round_levers as _lv
+from . import invariant_prefill as _invariant
 
 
 class Qwen3NextAttention(nn.Module):
@@ -92,9 +93,19 @@ class Qwen3NextAttention(nn.Module):
         else:
             queries = self.rope(queries)
             keys = self.rope(keys)
-        output = scaled_dot_product_attention(
-            queries, keys, values, cache=cache, scale=self.scale, mask=mask
+        lane_refusal = (
+            _invariant.sdpa_refusal(queries, keys, values, mask)
+            if _invariant.active()
+            else "off"
         )
+        if lane_refusal is None:
+            output = _invariant.sdpa(queries, keys, values, scale=self.scale, mask=mask)
+        else:
+            if lane_refusal != "off":
+                _invariant.not_invariant("sdpa_" + lane_refusal)
+            output = scaled_dot_product_attention(
+                queries, keys, values, cache=cache, scale=self.scale, mask=mask
+            )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
         return output * gate_sigmoid(gate)
 

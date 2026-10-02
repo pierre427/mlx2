@@ -416,10 +416,22 @@ class FlashNextAdapter:
                     self.policy.gdn_prefill_chunk,
                     self.policy.gdn_prefill_segment_rows,
                 )
+            self.invariant_prefill = None
+            if self.policy.invariant_prefill:
+                from ..runtime.models.invariant_prefill import install as install_invariant
+
+                handle = install_invariant(self.model.language_model.model)
+                if not handle.installed:
+                    # Fail closed: the policy asked for a capability the
+                    # loaded model cannot provide.
+                    raise ValueError(f"invariant_prefill refused: {handle.refusal}")
+                self.invariant_prefill = handle
             from ..runtime.prefill_plan import execution_identity
 
             self.prefill_execution_identity = execution_identity(
-                self.tensorfold_prefill, self.gdn_prefill_scan
+                self.tensorfold_prefill,
+                self.gdn_prefill_scan,
+                None if self.invariant_prefill is None else self.invariant_prefill.identity(),
             )
             self.row_exact_verify = None
             if self.policy.row_exact_verify:
@@ -761,6 +773,11 @@ class FlashNextAdapter:
             **(
                 {"row_exact_verify": self.row_exact_verify.status()}
                 if getattr(self, "row_exact_verify", None) is not None
+                else {}
+            ),
+            **(
+                {"invariant_prefill": self.invariant_prefill.status()}
+                if getattr(self, "invariant_prefill", None) is not None
                 else {}
             ),
             **(

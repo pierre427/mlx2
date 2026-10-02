@@ -6,6 +6,7 @@ import os
 import mlx.core as mx
 import mlx.nn as nn
 
+from . import invariant_prefill as _invariant
 from . import moe_nax_gather as _nax
 from .activations import swiglu
 from .import_env import snapshot as _import_env_snapshot
@@ -240,6 +241,8 @@ class QuantizedSwitchLinear(nn.Module):
         tail_policy = _quantized_gather_tail_policy(
             self.mode, int(x.shape[-1]), sorted_indices
         )
+        if _invariant.active() and (tail_policy != "native" or not sorted_indices):
+            _invariant.not_invariant(f"gather_{tail_policy}_sorted{int(bool(sorted_indices))}")
         if tail_policy == "dense":
             quantized = [self["weight"], self["scales"]]
             if self.get("biases") is not None:
@@ -255,7 +258,19 @@ class QuantizedSwitchLinear(nn.Module):
             )
         else:
             rows, pad = indices.size, 0
-            if sorted_indices and tail_policy == "native" and _RHS_PAD_MIN_ROWS_PER_EXPERT:
+            lane = (
+                _invariant.active()
+                and sorted_indices
+                and tail_policy == "native"
+                and indices.ndim == 1
+                and x.ndim == 3
+                and x.shape[0] == rows
+            )
+            if lane:
+                # Invariant prefill lane: always the streaming kernel, whatever
+                # the floor policy (its kill switch governs the default route).
+                pad = _invariant.sorted_gather_pad(rows, self.num_experts)
+            elif sorted_indices and tail_policy == "native" and _RHS_PAD_MIN_ROWS_PER_EXPERT:
                 if indices.ndim == 1 and x.ndim == 3 and x.shape[0] == rows:
                     if _RHS_PAD_POLICY != "floor":
                         pad, reason = _adaptive_pad(rows, self)
@@ -270,6 +285,11 @@ class QuantizedSwitchLinear(nn.Module):
             nax = None
             if (
                 _nax.MODE != "off"
+                # The invariant prefill lane pins one kernel configuration at
+                # every width; the NAX gather is bit-identical to the stock
+                # sorted kernel but its admission depends on the row count, so
+                # it stands aside rather than enter the lane unproven.
+                and not lane
                 and sorted_indices
                 and tail_policy == "native"
                 and "bias" not in self
@@ -375,7 +395,7 @@ class SwitchGLU(nn.Module):
 
     def __call__(self, x, indices) -> mx.array:
         x = mx.expand_dims(x, (-2, -3))
-        do_sort = indices.size >= _GATHER_SORT_MIN_ASSIGNMENTS
+        do_sort = indices.size >= _GATHER_SORT_MIN_ASSIGNMENTS or _invariant.active()
         idx = indices
         inv_order = None
         if do_sort:
