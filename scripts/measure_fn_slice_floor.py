@@ -52,7 +52,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 ROUNDS = []  # (perf_counter, {uid: tokens delivered})
 TOKENS = {}  # uid -> [token ids]
 CHUNKS = {}  # uid -> [prefill widths, in order]
-ARM = {"slice_floor": 0, "stall_target_ms": 500.0}
+ARM = {"slice_floor": 0, "stall_target_ms": 500.0, "pad_policy": None}
 GENERATORS = set()
 
 
@@ -64,11 +64,12 @@ def pct(values, q):
 
 
 def parse_arm(name):
-    m = re.fullmatch(r"f(\d+)(?:s(\d+))?", name)
+    m = re.fullmatch(r"f(\d+)(?:s(\d+))?(?:@(floor|adaptive|always))?", name)
     if not m:
-        raise SystemExit(f"bad arm {name!r}; expected f<rows>[s<ms>]")
+        raise SystemExit(f"bad arm {name!r}; expected f<rows>[s<ms>][@pad-policy]")
     return {"slice_floor": int(m.group(1)),
-            "stall_target_ms": float(m.group(2)) if m.group(2) else 500.0}
+            "stall_target_ms": float(m.group(2)) if m.group(2) else 500.0,
+            "pad_policy": m.group(3) or "floor"}
 
 
 def main():
@@ -303,8 +304,11 @@ def main():
                                 if isinstance(v, (int, float)) and v != before.get(k, 0)},
         }
 
+    from mlx2.runtime.models import switch_layers as SL
+
     def set_arm(name):
         ARM.update(arms[name])
+        SL._RHS_PAD_POLICY = ARM["pad_policy"]
 
     # Warm-up (kernels, allocator, the running-max prefill rate), discarded.
     set_arm("f0")
