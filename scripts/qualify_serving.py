@@ -1716,6 +1716,88 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
         "fused_gdn_dynamic_accept": fused_gdn.get(
             "replay_dynamic_rollback_calls", 0
         ),
+        **default_on_observations(final, initial),
+    }
+
+
+def default_on_observations(final, initial=None):
+    """Engagement of the default-on Flash-Next / 27B kernels during this run.
+
+    Each value is a counter delta from the initial status (the final value
+    when there is none), so a mechanism that only ran at load cannot pass.
+    """
+    execution = final.get("execution") or {}
+    initial_execution = (initial or {}).get("execution") or {}
+    environment = (final.get("settings") or {}).get("environment") or {}
+
+    def delta(*path):
+        def read(root):
+            value = root
+            for key in path:
+                if not isinstance(value, dict):
+                    return 0
+                value = value.get(key, 0)
+            return value if type(value) is int and value >= 0 else 0
+        return max(0, read(execution) - read(initial_execution))
+
+    hc = execution.get("hc_decode") or {}
+    hc_decode = (
+        delta("hc_decode", "calls")
+        if hc.get("enabled") is True and not hc.get("broken") and not hc.get("errors")
+        else 0
+    )
+    rows = execution.get("attn_fused_rows") or {}
+    rows_counts = ("attn_fused_rows", "counts")
+    attn_rows = (
+        min(
+            delta(*rows_counts, "projection_grouped"),
+            delta(*rows_counts, "prep_rows"),
+            delta(*rows_counts, "sdpa_1pass_rows") + delta(*rows_counts, "sdpa_2pass_rows"),
+        )
+        if rows.get("enabled") is True and not rows.get("kernel_failures")
+        else 0
+    )
+    window = ("moe", "moe_window")
+    topk_mode = environment.get("MLX_QWEN4_MOE_TOPK_FOLD")
+    topk = (
+        delta(*window, "topk_calls", topk_mode)
+        if topk_mode in {"launch", "fold"}
+        else delta(*window, "topk_calls", "launch") + delta(*window, "topk_calls", "fold")
+    )
+    routed_mode = environment.get("MLX_QWEN4_MOE_ROUTED_DECODE") or ""
+    routed = ("moe", "routed_decode")
+    routed_parts = [delta(*routed, "calls")]
+    if routed_mode.startswith("gate_up_down"):
+        routed_parts.append(delta(*routed, "down_calls"))
+    if routed_mode.endswith("_shared"):
+        routed_parts.append(delta(*routed, "shared_fold_calls"))
+    scores = ((execution.get("tensorfold_longctx") or {}).get("qsa_fused_scores") or {})
+    qwen38 = execution.get("fused_gdn") or {}
+    return {
+        "hc_decode": hc_decode,
+        "fused_gdn_batch_decode": delta("fused_gdn", "batch_decode", "calls"),
+        "fused_gdn_batch_verify": delta("fused_gdn", "batch_verify", "calls"),
+        "attn_fused_rows": attn_rows,
+        "attn_fused_rows_qsa_mask": (
+            delta(*rows_counts, "mask_rows") if attn_rows else 0
+        ),
+        "attn_fused_rows_index_q": (
+            delta(*rows_counts, "index_q_rows") if attn_rows else 0
+        ),
+        "moe_topk_fold": topk,
+        "moe_routed_decode": min(routed_parts),
+        "qsa_fused_scores": (
+            delta("tensorfold_longctx", "qsa_fused_scores", "counts", "engaged")
+            if scores.get("enabled") is True
+            else 0
+        ),
+        # Qwen3.8-27B spells its fused GDN counters decode_calls /
+        # batch_decode_calls (runtime/models/qwen38_fused_gdn.py).
+        "qwen38_fused_gdn": (
+            delta("fused_gdn", "decode_calls") + delta("fused_gdn", "batch_decode_calls")
+            if qwen38.get("enabled") is True
+            else 0
+        ),
     }
 
 
@@ -2014,12 +2096,22 @@ def main():
         if not condition:
             raise AssertionError(name)
 
-    from mlx2.qualification import required_feature_checks
+    from mlx2.qualification import (
+        required_feature_checks,
+        selected_not_observed_features,
+    )
 
     required_features = {
         name.removeprefix("feature_")
         for name in required_feature_checks(initial["settings"])
     } | set(args.require_feature)
+    # Selected mechanisms this route cannot engage (or that are optional for
+    # now) are recorded as "selected, not observed", never as passed checks.
+    report["selected_not_observed"] = {
+        name: {"status": "selected, not observed", "reason": reason}
+        for name, reason in selected_not_observed_features(initial["settings"]).items()
+        if name.removeprefix("feature_") not in required_features
+    }
     try:
         unobservable = unobservable_features(required_features)
         check(

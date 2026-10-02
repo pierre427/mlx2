@@ -56,11 +56,13 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    # Re-pinned 2026-10-01 for the combined harness re-freeze: origin/main's
-    # import-guard and SRPT-forcing producer plus the dense_weight_streaming
-    # serving observation. Receipts from either previous harness
-    # (16c32750..., f3f001ec...) must be regenerated before they validate.
-    "sha256": "82ab29716f4b4f11bfb698223c4e6ae78afeb1c0dd00cc37838c26d451ce9e56",
+    # Re-pinned 2026-10-02 (sweep H1): the producer observes the default-on
+    # Flash-Next / Qwen3.8-27B kernels (HC decode, fused GDN batch decode and
+    # verify, attention fused rows, MoE top-k fold and routed decode, QSA
+    # fused scores, 27B fused_gdn) and records selected-but-unreachable ones
+    # as "selected, not observed".  Receipts from the previous harness
+    # (82ab2971..., 2026-10-01) must be regenerated before they validate.
+    "sha256": "8777ab766ff1901107bc84b4e1e84716c394caf232415d11a16d10f3cc691af9",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -188,9 +190,113 @@ def required_feature_checks(settings):
     return features
 
 
+# The qualifier's batch probe sends this many concurrent requests (the widest
+# deterministic cohort it drives; scripts/qualify_serving.py "batch" check).
+QUALIFIER_BATCH_WIDTH = 4
+
+
+def _default_on_mechanisms(settings):
+    """Default-on Flash-Next / Qwen3.8-27B kernels a selected route must engage.
+
+    Returns ``(required, not_observed)``: feature names (no ``feature_``
+    prefix) whose engagement the receipt must show, and ``{name: reason}`` for
+    selected mechanisms this route cannot engage, or that are optional for
+    now.  A mechanism in ``not_observed`` is *selected, not observed*: the
+    receipt records it as such instead of counting it as a pass.
+    """
+    env = settings.get("environment") or {}
+    required, not_observed = set(), {}
+    speculation = settings.get("speculation")
+    native_mtp = bool(settings.get("mtp")) and speculation not in {
+        "external_draft", "prompt_lookup"
+    }
+    width = min(int(settings.get("max_lanes") or 1), QUALIFIER_BATCH_WIDTH)
+    handoff = settings.get("mtp_ordinary_handoff") or {}
+    handoff_width = (
+        handoff.get("max_mtp_width") if handoff.get("enabled") is True else None
+    )
+    context = settings.get("max_context") or 0
+    long_context = context > int(env.get("MLX_QWEN4_QSA_INDEXED_MIN_CONTEXT", "16384")) + 100
+
+    if env.get("MLX_QWEN4_HC_DECODE") == "1":
+        required.add("hc_decode")
+    if _environment_mode_enabled(env.get("MLX_QWEN4_FUSED_GDN_BATCH_DECODE")):
+        if width < 2:
+            not_observed["fused_gdn_batch_decode"] = (
+                f"max_lanes {settings.get('max_lanes')}: no batched decode"
+            )
+        elif native_mtp and handoff_width is None:
+            not_observed["fused_gdn_batch_decode"] = (
+                "native MTP route without the MTP->ordinary handoff never runs "
+                "a batched one-token decode"
+            )
+        elif native_mtp and width <= handoff_width:
+            not_observed["fused_gdn_batch_decode"] = (
+                f"native MTP route stays MTP up to width {handoff_width}; the "
+                f"qualifier's {width}-lane batch never hands off to batched "
+                "one-token decode"
+            )
+        else:
+            required.add("fused_gdn_batch_decode")
+    if _environment_mode_enabled(env.get("MLX_QWEN4_FUSED_GDN_BATCH_VERIFY")):
+        if not native_mtp:
+            not_observed["fused_gdn_batch_verify"] = (
+                "route has no native MTP verify"
+            )
+        elif width < 2:
+            not_observed["fused_gdn_batch_verify"] = (
+                f"max_lanes {settings.get('max_lanes')}: no batched verify"
+            )
+        elif handoff_width is not None and handoff_width < 2:
+            not_observed["fused_gdn_batch_verify"] = (
+                "MTP->ordinary handoff at width 1 never batches MTP verify"
+            )
+        else:
+            required.add("fused_gdn_batch_verify")
+    if env.get("MLX_QWEN4_ATTN_FUSED_ROWS") == "1":
+        # Grouped projection, norm+RoPE prep and the vector SDPA rows engage
+        # on every one-request decode.  The QSA mask runs past the indexer
+        # budget only, so it is required on long-context routes.
+        required.add("attn_fused_rows")
+        if long_context:
+            required.add("attn_fused_rows_qsa_mask")
+        else:
+            not_observed["attn_fused_rows_qsa_mask"] = (
+                f"max_context {context} does not exceed the QSA long-context threshold"
+            )
+        # The fused indexer query never ran before the sweep A1 kernel fix;
+        # recorded, not required, until that fix lands.
+        not_observed["attn_fused_rows_index_q"] = (
+            "optional until the fused indexer query (sweep A1) engages"
+        )
+    if env.get("MLX_QWEN4_MOE_TOPK_FOLD") in {"launch", "fold"}:
+        required.add("moe_topk_fold")
+    if env.get("MLX_QWEN4_QSA_FUSED_SCORES") == "1":
+        if long_context:
+            required.add("qsa_fused_scores")
+        else:
+            not_observed["qsa_fused_scores"] = (
+                f"max_context {context} does not exceed the QSA long-context threshold"
+            )
+    if _environment_mode_enabled(env.get("MLX_QWEN4_MOE_ROUTED_DECODE")):
+        required.add("moe_routed_decode")
+    if env.get("MLX2_QWEN38_FUSED_GDN") == "1":
+        # Qwen3.8-27B: one-token decode on the shared fused kernels.
+        required.add("qwen38_fused_gdn")
+    return required, not_observed
+
+
+def selected_not_observed_features(settings):
+    """``{feature_name: reason}`` for selected mechanisms not required here."""
+    return {
+        "feature_" + name: reason
+        for name, reason in sorted(_default_on_mechanisms(settings)[1].items())
+    }
+
+
 def _route_feature_checks(settings):
     env = settings.get("environment", {})
-    features = set()
+    features = set(_default_on_mechanisms(settings)[0])
     if settings.get("speculation") == "external_draft":
         features.update({"external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction"})
         if (settings.get("fly_verification") or {}).get("enabled") is True:
