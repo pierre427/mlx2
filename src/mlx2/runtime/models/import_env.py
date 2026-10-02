@@ -53,14 +53,34 @@ class ImportOrderError(RuntimeError):
     """A tensor module was imported before its adapter pinned the profile."""
 
 
-def assert_profile_applied(owner: str, environ: Optional[Mapping[str, str]] = None) -> None:
-    """Refuse when an already imported module saw a different scoped environment."""
+def assert_profile_applied(
+    owner: str,
+    environ: Optional[Mapping[str, str]] = None,
+    *,
+    live: Iterable[str] = (),
+) -> None:
+    """Refuse when an already imported module saw a different scoped environment.
+
+    ``live`` names variables the caller re-applies to every module that reads
+    them through live setters after load; a stale import-time value of those
+    is overwritten, so it is not a reason to refuse.  Every other scoped
+    variable must match.  Checking the process environment (``environ`` is
+    None) also refuses an explicit TF32 value the profile overrode
+    (``process_env.require_process_numerics``).
+    """
+    if environ is None:
+        from ...process_env import require_process_numerics
+
+        require_process_numerics(owner)
+    live = frozenset(live)
     current = _scoped(os.environ if environ is None else environ, PREFIXES)
     for module_name, seen in _SNAPSHOTS.items():
         if module_name not in sys.modules:
             continue
         differs = sorted(
-            name for name in set(seen) | set(current) if seen.get(name) != current.get(name)
+            name
+            for name in set(seen) | set(current)
+            if name not in live and seen.get(name) != current.get(name)
         )
         if differs:
             shown = ", ".join(

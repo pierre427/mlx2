@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from ..process_env import PROCESS_NUMERICS
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 from .mtp_depth_cap import validate_self_mtp_num_draft
 from .qwen38_27b import (
     EAGER_DISPATCH_POLICY_KEYS,
@@ -227,6 +227,22 @@ ENUM_KERNELS = {
     "moe_topk_fold": ("off", "launch"),
 }
 EXPLICIT_ONLY_KERNELS = NEW_DECODE_KERNELS | {"moe_routed_candidate"}
+# Profile variables ``_select_decode_wins`` re-applies to every module that
+# reads them, through live setters, after each load; a value a module latched
+# under an earlier profile in this process is overwritten.  Exempt from the
+# import-order guard so a second Qwen3.6 load (A/B arms, harnesses) may change
+# them.  ``MLX_QWEN36_DECODE_WINS`` is receipt identity only (nothing reads
+# it).  Every other latch (MLX_GDN_*, MLX_QWEN4_MOE_*, QSDPA) must match.
+LIVE_APPLIED_ENV = frozenset(
+    {
+        "MLX_QWEN36_FUSED_GDN_DECODE",
+        "MLX_QWEN36_FUSED_GDN_BATCH_DECODE",
+        "MLX_QWEN36_FUSED_GDN_VERIFY",
+        "MLX_QWEN36_FUSED_GDN_BATCH_VERIFY",
+        "MLX_QWEN36_MOE_WINDOW",
+        "MLX_QWEN36_DECODE_WINS",
+    }
+)
 
 
 def validate_kernel_choice(key, value):
@@ -243,6 +259,7 @@ def choice_selected(key, value):
 
 
 def configure_environment(kernels=None) -> dict[str, str]:
+    require_process_numerics("the Qwen3.6 profile")
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
@@ -405,6 +422,11 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             else configure_environment(),
             eager_dispatch,
         )
+        from ..runtime.models.import_env import assert_profile_applied
+
+        # Import-time latches (GDN core/packed, MoE gate/up, QSDPA) must match
+        # this profile; the decode switches are re-applied live below.
+        assert_profile_applied("the Qwen3.6 35B adapter", live=LIVE_APPLIED_ENV)
         self.layout = CACHE_LAYOUT
         self._tables = []
         path = Path(self.identity["path"])
@@ -625,8 +647,16 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         from ..runtime.models.qwen36_35b import GatedDeltaNet
         from ..runtime.models.qwen36_moe_decode import Qwen36SparseMoeBlock
 
+        fused_decode = (
+            "fused"
+            if self.environment.get("MLX_QWEN36_FUSED_GDN_DECODE") == "1"
+            else "stock"
+        )
         for _, module in self.model.named_modules():
             if isinstance(module, GatedDeltaNet):
+                # The profile value, not ``_kernels``: an operator's explicit
+                # environment value is preserved when the policy omits it.
+                module.set_fused_gdn_decode_mode(fused_decode)
                 for choice in ("batch_decode", "verify", "batch_verify"):
                     key = "fused_gdn_" + choice
                     getattr(module, "set_" + key + "_mode")(

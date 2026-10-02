@@ -15,7 +15,7 @@ from ..contracts import Capability, ModelDescriptor, StatePlane
 from .external_draft_policy import ExternalDraftAdapterMixin
 from .flash_next import FlashNextAdapter, gdn_state_diagnostics
 from .mtp_depth_cap import validate_self_mtp_num_draft
-from ..process_env import PROCESS_NUMERICS
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
 CACHE_LAYOUT = "qwen38-27b-hybrid-layer-segments-v1"
 # Adapter-owned rather than inherited from Flash-Next: threshold four passed
@@ -275,6 +275,7 @@ def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
 
 def configure_environment() -> dict[str, str]:
     """Candidate dense profile; flags confer no qualification by themselves."""
+    require_process_numerics("the Qwen3.8 27B profile")
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
@@ -526,6 +527,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if self.fused_gdn:
             # Receipt identity only; no runtime module reads this variable.
             self.environment = {**self.environment, "MLX2_QWEN38_FUSED_GDN": "1"}
+        from ..runtime.models.import_env import assert_profile_applied
+
+        # Model modules read GDN/QSDPA selections at import: one imported
+        # under another profile would run a route this receipt does not name.
+        assert_profile_applied(f"the {type(self).__name__} adapter")
         self.layout = self.descriptor.cache_layout
         self._tables = []
         path = Path(self.identity["path"])

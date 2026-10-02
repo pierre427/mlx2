@@ -181,6 +181,11 @@ class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
         self.config = artifact["config"]
         self.descriptor = QWEN35_122B
         self.environment = configure_environment()
+        from ..runtime.models.import_env import assert_profile_applied
+
+        # Strict: this adapter builds Qwen3.6 GDN layers but re-applies none
+        # of their import-time switches, so every latch must match.
+        assert_profile_applied("the Qwen3.5 122B adapter")
         self.layout = CACHE_LAYOUT
         self._tables = []
         self._num_draft = 0

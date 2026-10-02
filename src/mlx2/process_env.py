@@ -7,31 +7,72 @@ profile (fifteen copies by 2026-09-30) is the wrong layer: a harness that ran
 one fp32 GEMM before constructing the adapter kept TF32 on while the receipt
 said otherwise.  The package applies the default at import, before any
 entrypoint can dispatch; adapters spread the same constant into their
-profiles so receipts keep recording it.  An explicit value already in the
-environment wins.
+profiles so receipts keep recording it.
+
+An explicit value already in the environment is left alone at package import,
+so tools that never construct an adapter may run with TF32.  Adapter profiles
+do not honour it: every qualified profile and the APCv2 numerics identity are
+pinned to "0", and once MLX has latched TF32 on there is no way to observe or
+undo it, so a profile that wrote "0" over it would publish a receipt the
+process does not run.  ``require_process_numerics`` therefore refuses a
+TF32-enabling value instead (sweep 2026-10-02 P3): before a profile is pinned
+(the Qwen adapters), and in ``import_env.assert_profile_applied`` for a value
+that was present at package import and has since been overwritten.
 """
 
 from __future__ import annotations
 
 import os
+from typing import Optional
 
 TF32_ENV = "MLX_ENABLE_TF32"
 PROCESS_NUMERICS = {TF32_ENV: "0"}
+
+# The TF32-enabling value present in ``os.environ`` when the package defaults
+# were first applied, if any; MLX may have latched it, whatever came later.
+_EXPLICIT_AT_IMPORT: Optional[str] = None
+
+
+class ProcessNumericsConflict(RuntimeError):
+    """An explicit process numerics value conflicts with the pinned profile."""
+
+
+def _enables_tf32(value) -> bool:
+    return value is not None and value.strip() not in ("0", "")
 
 
 def tf32_enabled(environ=None) -> bool:
     """Whether this process runs fp32 matmuls at TF32 (the owner of the
     variable reads it for kernels whose bits depend on it)."""
     target = os.environ if environ is None else environ
-    return target.get(TF32_ENV, PROCESS_NUMERICS[TF32_ENV]).strip() not in ("0", "")
+    return _enables_tf32(target.get(TF32_ENV, PROCESS_NUMERICS[TF32_ENV]))
 
 
 def apply_process_numerics(environ=None) -> dict:
     """Set every default that is not already present; return what was set."""
+    global _EXPLICIT_AT_IMPORT
     target = os.environ if environ is None else environ
+    if environ is None and _EXPLICIT_AT_IMPORT is None and _enables_tf32(target.get(TF32_ENV)):
+        _EXPLICIT_AT_IMPORT = target[TF32_ENV]
     applied = {}
     for name, value in PROCESS_NUMERICS.items():
         if name not in target:
             target[name] = value
             applied[name] = value
     return applied
+
+
+def require_process_numerics(owner: str, environ=None) -> None:
+    """Refuse an explicit TF32-enabling value a pinned profile would override."""
+    target = os.environ if environ is None else environ
+    value = target.get(TF32_ENV)
+    if not _enables_tf32(value) and environ is None:
+        value = _EXPLICIT_AT_IMPORT
+    if _enables_tf32(value):
+        raise ProcessNumericsConflict(
+            f"{TF32_ENV}={value!r} was set explicitly, but {owner} pins "
+            f"{TF32_ENV}={PROCESS_NUMERICS[TF32_ENV]!r} (its receipts and the APCv2 "
+            f"numerics identity record that value) and MLX latches TF32 at the first "
+            f"fp32 dispatch.  Unset {TF32_ENV} or set it to \"0\" before starting the "
+            f"process."
+        )

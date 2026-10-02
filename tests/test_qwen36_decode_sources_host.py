@@ -209,7 +209,11 @@ class Sources(unittest.TestCase):
 
     def test_adapter_explicit_only_choices(self):
         t = ast.parse((ROOT / "src/mlx2/adapters/qwen36_35b.py").read_text())
-        env = {"os": os, "PROCESS_NUMERICS": {}}
+        env = {
+            "os": os,
+            "PROCESS_NUMERICS": {},
+            "require_process_numerics": lambda _owner: None,
+        }
         names = {
             "KERNEL_POLICY_ENV",
             "NEW_DECODE_KERNELS",
