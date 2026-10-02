@@ -278,13 +278,16 @@ def mirror_guard(inner):
     Returns a sha256 of each mirrored source so a report states which code it
     decomposed.
     """
-    from mlx2.runtime.models import qwen3_5, qwen3_next, qwen36_35b, qwen38_27b
+    from mlx2.runtime.models import qwen3_5, qwen3_next, qwen36_35b, qwen36_moe_decode, qwen38_27b
 
     allowed = {
         "decoder": {qwen38_27b.DecoderLayer.__call__, qwen36_35b.DecoderLayer.__call__},
         "gdn": {qwen3_5.GatedDeltaNet.__call__},
         "attn": {qwen38_27b.Qwen3NextAttention.__call__},
-        "mlp": {qwen3_next.Qwen3NextMLP.__call__, qwen3_next.Qwen3NextSparseMoeBlock.__call__},
+        # Qwen36SparseMoeBlock only specializes 1-row decode and windowed
+        # verify; a prefill call (rows > 1, no window consumer) is the parent.
+        "mlp": {qwen3_next.Qwen3NextMLP.__call__, qwen3_next.Qwen3NextSparseMoeBlock.__call__,
+                qwen36_moe_decode.Qwen36SparseMoeBlock.__call__},
         "trunk": {qwen38_27b.Qwen3_5TextModel.__call__},
     }
     if type(inner).__call__ not in allowed["trunk"]:
