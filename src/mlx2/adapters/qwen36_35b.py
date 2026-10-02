@@ -232,9 +232,15 @@ EXPLICIT_ONLY_KERNELS = NEW_DECODE_KERNELS | {"moe_routed_candidate"}
 # under an earlier profile in this process is overwritten.  Exempt from the
 # import-order guard so a second Qwen3.6 load (A/B arms, harnesses) may change
 # them.  ``MLX_QWEN36_DECODE_WINS`` is receipt identity only (nothing reads
-# it).  Every other latch (MLX_GDN_*, MLX_QWEN4_MOE_*, QSDPA) must match.
+# it).  The routed-decode and top-k modes are latched by qwen3_next at import
+# but set on every Qwen36SparseMoeBlock (decoder and MTP layers alike) by
+# set_moe_routed_decode_mode / set_moe_topk_mode, and qwen3_next reads no other
+# state from them.  Every other latch (MLX_GDN_*, the other MLX_QWEN4_MOE_*,
+# QSDPA) must match.
 LIVE_APPLIED_ENV = frozenset(
     {
+        "MLX_QWEN4_MOE_ROUTED_DECODE",
+        "MLX_QWEN4_MOE_TOPK_FOLD",
         "MLX_QWEN36_FUSED_GDN_DECODE",
         "MLX_QWEN36_FUSED_GDN_BATCH_DECODE",
         "MLX_QWEN36_FUSED_GDN_VERIFY",

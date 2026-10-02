@@ -195,3 +195,61 @@ def test_guard_refuses_tf32_explicit_at_package_import(monkeypatch):
     monkeypatch.setenv("MLX_ENABLE_TF32", "0")
     with pytest.raises(process_env.ProcessNumericsConflict, match="MLX_ENABLE_TF32"):
         import_env.assert_profile_applied("the Flash-Next adapter")
+
+
+# --- review item 5: routed decode / top-k reload ----------------------------
+
+
+def test_qwen36_reload_turning_routed_decode_and_topk_off_is_allowed(monkeypatch, tmp_path):
+    """First load selected routed decode and the top-k launch; the second
+    turns both off.  ``_select_decode_wins`` re-applies both through the MoE
+    blocks' live setters, so the latched import values are not a refusal."""
+    from mlx2.adapters.qwen36_35b import configure_environment
+
+    first = configure_environment(
+        {"moe_routed_decode": "gate_up_down", "moe_topk_fold": "launch"}
+    )
+    assert first["MLX_QWEN4_MOE_ROUTED_DECODE"] == "gate_up_down"
+    _latched(monkeypatch, {k: v for k, v in first.items() if k.startswith(import_env.PREFIXES)})
+    with pytest.raises(_Loaded):
+        _qwen36(monkeypatch, tmp_path, {"moe_routed_decode": "off", "moe_topk_fold": "off"})
+
+
+@pytest.mark.parametrize("latched,kernels,expected", [
+    (("gate_up_down", "launch"), {}, ("off", "off")),
+    (("off", "off"), {"moe_routed_decode": "gate_up_down_shared", "moe_topk_fold": "launch"},
+     ("gate_up_down_shared", "launch")),
+])
+def test_qwen36_routed_decode_and_topk_applied_live(monkeypatch, latched, kernels, expected):
+    """Every Qwen3.6 MoE block (decoder and MTP layers build the same class)
+    takes the selection from the live setters, whatever it latched."""
+    import mlx.core as mx
+
+    from mlx2.adapters.qwen36_35b import Qwen3635BA3BAdapter
+    from mlx2.runtime.models import qwen3_next
+    from mlx2.runtime.models.qwen36_moe_decode import Qwen36SparseMoeBlock
+    from mlx2.runtime.models.qwen3_5 import TextModelArgs
+
+    mx.set_default_device(mx.cpu)
+    monkeypatch.setattr(qwen3_next, "_MOE_ROUTED_DECODE", latched[0])
+    monkeypatch.setattr(qwen3_next, "_MOE_TOPK_MODE", latched[1])
+    monkeypatch.setattr(qwen3_next, "_MOE_SHARED_IN_GATHER", False)
+    args = TextModelArgs(
+        hidden_size=64, num_experts=8, num_experts_per_tok=2, moe_intermediate_size=32,
+        shared_expert_intermediate_size=64, norm_topk_prob=True,
+    )
+    blocks = [Qwen36SparseMoeBlock(args), Qwen36SparseMoeBlock(args)]
+    assert blocks[0].switch_mlp.routed_decode_mode == latched[0]
+    assert blocks[0].moe_topk_mode == latched[1]
+
+    class Model:
+        def named_modules(self):
+            return [(f"b{i}", b) for i, b in enumerate(blocks)]
+
+    adapter = object.__new__(Qwen3635BA3BAdapter)
+    adapter.model = Model()
+    adapter._kernels = kernels
+    adapter.environment = {}
+    adapter._select_decode_wins()
+    for block in blocks:
+        assert (block.switch_mlp.routed_decode_mode, block.moe_topk_mode) == expected
