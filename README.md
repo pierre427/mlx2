@@ -106,22 +106,29 @@ Terminal responses include an `mlx2` route receipt.
 
 ### LLM test monitor
 
-`mlx2-top` is a read-only Apple-Silicon monitor for long model tests. It shows
-per-logical-CPU busy time, available AGX GPU counters, ANE active residency,
-mlx2 NAX engagement receipts, memory and swap activity, load averages, and
-thermal pressure. Unavailable hardware counters are labelled unavailable.
+`mlx2-top` is a read-only monitor for long model tests. It finds every
+listening `mlx2.server` on the host (add others with `--url`, repeatable) and
+shows, per server: model, route, qualification and serving state; lanes, queue
+and batch-width mix; generated, prompt and cached tokens per second;
+TTFT/ITL/queue/prefill/decode/TPOT/E2E percentiles over the lifetime and the
+last 30 seconds; speculative-decode acceptance; APCv2 hit rate, token reuse and
+residency; Metal memory and headroom; HTTP errors and fail-closed counts; the
+busiest mechanism counters; and live and recent requests. Below that it shows
+per-logical-CPU busy time, AGX GPU counters, memory and swap activity, load
+averages, and thermal pressure.
 
 ```bash
-.venv/bin/mlx2-top --once --no-powermetrics --no-mlx2
+.venv/bin/mlx2-top --once --no-powermetrics
 sudo -v
 .venv/bin/mlx2-top
 ```
 
-The monitor does not start model or GPU work. macOS does not expose a
-system-wide NAX utilization percentage through these collectors, so the
-display keeps hardware utilization separate from mlx2's observed call and
-row counts. Privileged `powermetrics` sampling uses cached sudo credentials
-and never prompts from the monitor.
+The monitor only issues GET requests to `/metrics`, `/v1/status/batching`, and
+(every `--status-interval` seconds, default 5) `/v1/status`; it never starts
+model or GPU work. Percentiles marked `~` are interpolated from histogram
+buckets; the others come from the server's raw samples. In the interactive
+view, `j`/`k` scroll, space/`b` page, and `q` quits. Privileged `powermetrics`
+sampling uses cached sudo credentials and never prompts from the monitor.
 
 ## Development and reproduction
 

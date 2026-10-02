@@ -1,24 +1,20 @@
 """Read-only macOS host telemetry for :mod:`mlx2.top`.
 
-The collectors deliberately distinguish public host counters, optional
-privileged ``powermetrics`` samples, and mlx2 mechanism receipts.  In
-particular, NAX engagement is not presented as a hardware-utilization
-percentage: macOS does not publish one through the interfaces used here.
+The collectors deliberately distinguish public host counters from optional
+privileged ``powermetrics`` samples.  Inference-server telemetry lives in
+:mod:`mlx2.inference_monitor`.
 """
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.util
-import json
 import os
 import platform
 import plistlib
 import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -130,34 +126,11 @@ class GPUReading:
 
 
 @dataclass(frozen=True)
-class ANEReading:
-    index: int
-    busy_percent: float | None
-    frequency_mhz: float | None = None
-    power_mw: float | None = None
-
-
-@dataclass(frozen=True)
 class PowermetricsReading:
     gpu_busy_percent: float | None = None
     gpu_frequency_mhz: float | None = None
     gpu_power_mw: float | None = None
-    ane: tuple[ANEReading, ...] = ()
     thermal_pressure: str | None = None
-
-
-@dataclass(frozen=True)
-class NAXReading:
-    service: str
-    reachable: bool
-    active: bool | None = None
-    int8_calls_total: int = 0
-    int8_rows_total: int = 0
-    qsa_engagements_total: int = 0
-    int8_calls_delta: int = 0
-    int8_rows_delta: int = 0
-    qsa_engagements_delta: int = 0
-    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,8 +142,6 @@ class HostReading:
     memory: MemoryReading | None
     swap: SwapReading | None
     gpus: tuple[GPUReading, ...]
-    ane: tuple[ANEReading, ...]
-    nax: NAXReading
     thermal_state: str
     thermal_pressure: str | None
     powermetrics_error: str | None = None
@@ -283,55 +254,16 @@ def parse_powermetrics_plist(document: Any) -> PowermetricsReading:
     gpu_power = _optional_float(processor.get("gpu_power"))
     if gpu_power is None:
         gpu_power = _optional_float(gpu.get("gpu_power"))
-    ane_power = _optional_float(processor.get("ane_power"))
-    ane_readings = []
-    raw_ane = document.get("ane") or []
-    if isinstance(raw_ane, dict):
-        raw_ane = [raw_ane]
-    for position, item in enumerate(raw_ane):
-        if not isinstance(item, dict):
-            continue
-        power = _optional_float(item.get("ane_power"))
-        if power is None and len(raw_ane) == 1:
-            power = ane_power
-        frequency = _optional_float(item.get("freq_hz"))
-        ane_readings.append(
-            ANEReading(
-                index=int(item.get("ane-id", position)),
-                busy_percent=_ratio_to_busy(item.get("idle_ratio")),
-                frequency_mhz=None if frequency is None else frequency / 1_000_000.0,
-                power_mw=power,
-            )
-        )
     frequency = _optional_float(gpu.get("freq_hz"))
     return PowermetricsReading(
         gpu_busy_percent=_ratio_to_busy(gpu.get("idle_ratio")),
         gpu_frequency_mhz=None if frequency is None else frequency / 1_000_000.0,
         gpu_power_mw=gpu_power,
-        ane=tuple(ane_readings),
         thermal_pressure=(
             str(document["thermal_pressure"])
             if document.get("thermal_pressure") is not None
             else None
         ),
-    )
-
-
-def parse_nax_status(status: Any, service: str) -> NAXReading:
-    """Extract host-only mlx2 NAX mechanism counters from ``/v1/status``."""
-    if not isinstance(status, dict):
-        return NAXReading(service=service, reachable=False, error="invalid status payload")
-    int8 = status.get("int8_prefill") or {}
-    counts = int8.get("counts") or {}
-    indexed = ((status.get("execution") or {}).get("indexed_qsa") or {})
-    indexed_counts = indexed.get("counts") or {}
-    return NAXReading(
-        service=service,
-        reachable=True,
-        active=bool(int8.get("active")),
-        int8_calls_total=int(counts.get("engaged_calls", 0) or 0),
-        int8_rows_total=int(counts.get("engaged_rows", 0) or 0),
-        qsa_engagements_total=int(indexed_counts.get("nax_engaged", 0) or 0),
     )
 
 
@@ -554,7 +486,7 @@ class PowermetricsSampler:
             "--sample-count",
             "-1",
             "--samplers",
-            "gpu_power,ane_power,thermal",
+            "gpu_power,thermal",
             "--format",
             "plist",
             "--buffer-size",
@@ -625,22 +557,6 @@ class PowermetricsSampler:
             self._thread.join(timeout=2)
 
 
-def fetch_nax_status(
-    url: str, api_key: str | None, timeout: float = 0.25
-) -> NAXReading:
-    endpoint = url.rstrip("/") + "/v1/status"
-    headers = {"Accept": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    try:
-        with urllib.request.urlopen(
-            urllib.request.Request(endpoint, headers=headers), timeout=timeout
-        ) as response:
-            return parse_nax_status(json.load(response), url)
-    except (OSError, ValueError, urllib.error.URLError) as error:
-        return NAXReading(service=url, reachable=False, error=str(error))
-
-
 class HostCollector:
     """Stateful sampler that turns cumulative host counters into rates."""
 
@@ -649,17 +565,12 @@ class HostCollector:
         *,
         interval_seconds: float = 1.0,
         powermetrics: bool = True,
-        mlx2_url: str | None = None,
-        api_key: str | None = None,
     ):
         self.interval_seconds = float(interval_seconds)
         self.mach = DarwinMach()
         self._last_time = time.monotonic()
         self._last_cpu = self.mach.cpu_ticks()
         self._last_vm = self.mach.vm()
-        self._last_nax: NAXReading | None = None
-        self.mlx2_url = mlx2_url
-        self.api_key = api_key
         self.powermetrics = (
             PowermetricsSampler(interval_seconds) if powermetrics else None
         )
@@ -742,34 +653,6 @@ class HostCollector:
             ),
         )
 
-    def _nax(self) -> NAXReading:
-        if self.mlx2_url is None:
-            return NAXReading(
-                service="disabled",
-                reachable=False,
-                error="mlx2 status probe disabled",
-            )
-        current = fetch_nax_status(self.mlx2_url, self.api_key)
-        before = self._last_nax
-        self._last_nax = current
-        if not current.reachable or before is None or not before.reachable:
-            return current
-        return NAXReading(
-            **{
-                **current.__dict__,
-                "int8_calls_delta": max(
-                    0, current.int8_calls_total - before.int8_calls_total
-                ),
-                "int8_rows_delta": max(
-                    0, current.int8_rows_total - before.int8_rows_total
-                ),
-                "qsa_engagements_delta": max(
-                    0,
-                    current.qsa_engagements_total - before.qsa_engagements_total,
-                ),
-            }
-        )
-
     def sample(self) -> HostReading:
         now = time.monotonic()
         seconds = max(1e-6, now - self._last_time)
@@ -809,8 +692,6 @@ class HostCollector:
             memory=memory,
             swap=swap,
             gpus=gpus,
-            ane=power.ane if power is not None else (),
-            nax=self._nax(),
             thermal_state=thermal_state(),
             thermal_pressure=power.thermal_pressure if power is not None else None,
             powermetrics_error=(
@@ -823,19 +704,15 @@ class HostCollector:
 
 
 __all__ = [
-    "ANEReading",
     "CPUTicks",
     "GPUReading",
     "HostCollector",
     "HostReading",
     "MemoryReading",
-    "NAXReading",
     "PowermetricsReading",
     "SwapReading",
     "cpu_busy_percent",
-    "fetch_nax_status",
     "parse_ioreg_gpus",
-    "parse_nax_status",
     "parse_powermetrics_plist",
     "thermal_state",
 ]
