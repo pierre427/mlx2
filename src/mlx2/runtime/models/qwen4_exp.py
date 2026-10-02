@@ -711,7 +711,8 @@ _QSA_GATHER_MAX_QUERY = max(
 #             (``_gather_qsa_attention``).
 #   "indexed" the same selection through mlx2's indexed QSA kernel.
 # Only B >= 2, L == 1 calls that no other sparse arm took are candidates; every
-# decline is counted by reason in ``qsa_batch_decode_sparse_status``.
+# decline is counted by reason in ``qsa_batch_decode_sparse_status``.  Floor
+# 32K: at 16K the masked arm is cheaper (8 lanes -3.6%).
 _QSA_BATCH_DECODE_SPARSE_MODES = ("off", "gather", "indexed")
 
 
@@ -729,7 +730,7 @@ def _env_batch_decode_sparse_mode() -> str:
 
 _QSA_BATCH_DECODE_SPARSE = _env_batch_decode_sparse_mode()
 _QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT = max(
-    0, int(os.environ.get("MLX_QWEN4_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT", "16384"))
+    0, int(os.environ.get("MLX_QWEN4_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT", "32768"))
 )
 _QSA_BATCH_DECODE_SPARSE_STATS_LOCK = threading.Lock()
 _QSA_BATCH_DECODE_SPARSE_STATS = Counter()

@@ -17,7 +17,9 @@ Per config, after a discarded short warm-up per arm:
 Before a config runs, the serving memory admission
 (``SelfMTPLaneAdmissionController`` with the adapter's cache estimator, live
 headroom) is asked to seat the cohort atomically; a config it would not seat
-is recorded as refused and skipped.  A run of a non-base arm whose mechanism
+is recorded as refused and skipped.  Run ONE config per process: after a
+config's runs the process footprint stays high, so live headroom (and with it
+admission) reads lower for every later config in the same process.  A run of a non-base arm whose mechanism
 counter stayed 0 is marked invalid.
 
   MLX_ENABLE_TF32=0 PYTHONPATH=src python scripts/bench_qsa_batch_decode_sparse.py \\
@@ -54,7 +56,8 @@ def main():
     ap.add_argument("--prompt-file", required=True)
     ap.add_argument("--configs", nargs="+", default=["ordinary:4:32768"])
     ap.add_argument("--arms", nargs="+", default=["gather"], choices=["gather", "indexed"])
-    ap.add_argument("--min-context", type=int, default=16384)
+    ap.add_argument("--min-context", type=int, default=16384,
+                    help="arm floor for this run (the policy default is 32768; 16384 measured the 16K cell)")
     ap.add_argument("--gen", type=int, default=256)
     ap.add_argument("--alt-gen", type=int, default=384)
     ap.add_argument("--window", type=int, default=16)

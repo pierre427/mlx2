@@ -236,8 +236,12 @@ class FlashNextPolicy:
     # indexed QSA kernel) instead of a dense SDPA over the padded width.
     # mlx2 already had #4070's other half (per-row pooled banks).  Opt-in
     # and unqualified; enters the environment and receipts only when not "off".
+    # Measured (qualification/runs/port-qsa-rowbanks-20261002): "indexed" is
+    # +2.5..+3.5% at 32K (4/8 lanes ordinary, 4 lanes MTP+handoff) and -3.6%
+    # at 16K (8 lanes), hence the 32K floor; tokens diverge from the masked
+    # arm by reduction-order rounding (layer outputs within 1 bf16 ulp).
     qsa_batch_decode_sparse: str = "off"
-    qsa_batch_decode_sparse_min_context: int = 16384
+    qsa_batch_decode_sparse_min_context: int = 32768
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
