@@ -23,7 +23,9 @@ DEFAULT_ON = {
     "feature_moe_topk_fold",
     "feature_moe_routed_decode",
 }
-LONG = {"feature_attn_fused_rows_qsa_mask", "feature_qsa_fused_scores"}
+# Reached once the indexer selects explicitly (past the indexer budget).
+LONG = {"feature_attn_fused_rows_qsa_mask", "feature_attn_fused_rows_index_q",
+        "feature_qsa_fused_scores"}
 
 
 @pytest.fixture(scope="module")
@@ -70,15 +72,14 @@ def test_mtp_route_that_cannot_batch_decode_says_so(handoff):
 
 
 def test_short_context_labels_the_long_context_kernels():
-    settings = _settings(max_context=8192)
+    # Probe floor 2304 - 256 = 2048 tokens: 512 blocks, exactly the indexer's
+    # top-k, so every fused-rows call selects all blocks implicitly.
+    settings = _settings(max_context=2304)
     required = required_feature_checks(settings)
     assert not LONG & required
     assert LONG <= set(selected_not_observed_features(settings))
-
-
-def test_index_q_is_recorded_but_optional():
-    assert "feature_attn_fused_rows_index_q" not in required_feature_checks(_settings())
-    assert "feature_attn_fused_rows_index_q" in selected_not_observed_features(_settings())
+    # One more block closes past the budget: the indexer selects explicitly.
+    assert LONG <= required_feature_checks(_settings(max_context=2308))
 
 
 def test_unselected_mechanisms_are_not_required():
@@ -163,3 +164,143 @@ def test_e8861bb5_mtp_receipt_shape_records_batch_decode_as_not_observed():
             "feature_moe_routed_decode", "feature_qsa_fused_scores",
             "feature_fused_gdn_batch_verify"} <= required
     assert "feature_fused_gdn_batch_decode" in selected_not_observed_features(settings)
+
+
+# --- sweep 1002 review items 2-4 --------------------------------------------
+
+
+def test_ordinary_8k_route_requires_the_indexer_kernels():
+    """Both served artifacts have indexer_budget 2048, so the 8K near-limit
+    probe (prompt > 7936 tokens) runs the explicit selection on every fused
+    call; the old 16,384 indexed-attention threshold exempted all three."""
+    for mtp in (False, True):
+        settings = _settings(max_context=8192, mtp=mtp,
+                             speculation="self_mtp" if mtp else "ordinary")
+        assert LONG <= required_feature_checks(settings), mtp
+
+
+def test_indexed_min_context_does_not_move_the_requirements():
+    for value in (1024, 16384, 1 << 20):
+        env = FlashNextPolicy(indexed_min_context=value).environment()
+        assert LONG <= required_feature_checks(_settings(environment=env, max_context=8192))
+        assert not LONG & required_feature_checks(
+            _settings(environment=env, max_context=2304))
+
+
+def test_requirements_follow_the_recorded_indexer_budget():
+    geometry = {"budget": 16384, "compress_ratio": 4, "head_dim": 128, "n_heads": 4}
+    settings = _settings(max_context=8192, qsa_indexer=geometry)
+    assert not LONG & required_feature_checks(settings)
+    assert LONG <= required_feature_checks(_settings(max_context=32768, qsa_indexer=geometry))
+
+
+def test_scorer_admission_limits_are_labelled():
+    narrow = {"budget": 2048, "compress_ratio": 4, "head_dim": 64, "n_heads": 4}
+    settings = _settings(qsa_indexer=narrow)
+    assert "feature_qsa_fused_scores" not in required_feature_checks(settings)
+    assert "head_dim 64" in selected_not_observed_features(settings)["feature_qsa_fused_scores"]
+
+
+def test_scorer_without_fused_rows_runs_from_the_first_wide_selection():
+    """Without the fused rows no dense short-circuit applies: the indexer
+    selects explicitly from the first block, and the scorer engages past
+    head_dim (128) blocks."""
+    env = FlashNextPolicy(attn_fused_rows=False).environment()
+    assert "feature_qsa_fused_scores" in required_feature_checks(
+        _settings(environment=env, max_context=1024))  # 768 tokens, 192 blocks
+    assert "feature_qsa_fused_scores" not in required_feature_checks(
+        _settings(environment=env, max_context=768))  # 512 tokens, 128 blocks
+
+
+def test_index_q_is_required_wherever_the_fused_indexer_runs():
+    required = required_feature_checks(_settings())
+    assert {"feature_attn_fused_rows", "feature_attn_fused_rows_index_q"} <= required
+    assert "feature_attn_fused_rows_index_q" not in selected_not_observed_features(_settings())
+
+
+def _fold(**policy):
+    return FlashNextPolicy(moe_topk_fold="fold", **policy).environment()
+
+
+def test_fold_with_no_reachable_consumer_is_labelled_not_required():
+    """Codex review item 4: fold, routed decode off and only the verify window
+    on an ordinary route -- no call can fold."""
+    env = _fold(moe_routed_decode="off", moe_window_verify=True)
+    settings = _settings(environment=env)
+    assert "feature_moe_topk_fold" not in required_feature_checks(settings)
+    assert "feature_moe_topk_fold" in selected_not_observed_features(settings)
+
+
+def test_fold_is_required_where_a_call_can_fold():
+    # One-token calls under routed gate_up_down.
+    env = _fold(moe_routed_decode="gate_up_down")
+    assert "feature_moe_topk_fold" in required_feature_checks(_settings(environment=env))
+    # MTP verify windows of num_draft + 1 = 3 rows.
+    env = _fold(moe_routed_decode="off", moe_window_verify=True)
+    mtp = _settings(environment=env, mtp=True, speculation="self_mtp",
+                    execution_policy={"num_draft": 2})
+    assert "feature_moe_topk_fold" in required_feature_checks(mtp)
+    # Four-row verify windows take the launch instead.
+    wide = dict(mtp, execution_policy={"num_draft": 3})
+    assert "feature_moe_topk_fold" not in required_feature_checks(wide)
+    # Batched one-token decode windows on an ordinary route.
+    env = _fold(moe_routed_decode="off", moe_window_batch_decode=True)
+    assert "feature_moe_topk_fold" in required_feature_checks(_settings(environment=env))
+    assert "feature_moe_topk_fold" not in required_feature_checks(
+        _settings(environment=env, max_lanes=1))
+
+
+def test_launch_mode_stays_required():
+    assert "feature_moe_topk_fold" in required_feature_checks(_settings())
+
+
+SERVED = [Path.home() / "mlx-models" / name for name in (
+    "Qwen3.8-Flash-Next-MLX-4bit-MTP", "Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP")]
+
+
+@pytest.mark.parametrize("artifact", SERVED, ids=lambda p: p.name)
+def test_served_artifacts_have_indexer_budget_2048(artifact):
+    import json
+
+    from mlx2.adapters.flash_next import qsa_indexer_geometry
+
+    if not (artifact / "config.json").exists():
+        pytest.skip("artifact not present")
+    config = json.loads((artifact / "config.json").read_text())
+    geometry = qsa_indexer_geometry(config.get("text_config", config))
+    assert geometry == {"budget": 2048, "compress_ratio": 4, "head_dim": 128, "n_heads": 4}
+
+
+def test_serving_settings_carry_the_indexer_geometry(monkeypatch):
+    from route_harness import make_engine, patch_host, tiny_qwen38_mtp
+
+    geometry = {"budget": 4096, "compress_ratio": 8, "head_dim": 128, "n_heads": 4}
+
+    class Mixin:
+        qsa_indexer = geometry
+
+    patch_host(monkeypatch)
+    model, vocab = tiny_qwen38_mtp()
+    engine = make_engine(model, vocab, mtp=True, adapter_mixin=Mixin)
+    try:
+        assert engine.status()["settings"]["qsa_indexer"] == geometry
+    finally:
+        engine.close()
+
+
+def test_mirrored_dispatch_constants_match_the_runtime(qualify):
+    from mlx2 import qualification as Q
+    from mlx2.runtime.models import qwen4_moe_window, qwen4_qsa_scores
+    from mlx2.runtime.models.qwen4_exp import TextModelArgs
+
+    assert Q.QUALIFIER_NEAR_LIMIT_HEADROOM == qualify.LONG_CONTEXT_HEADROOM
+    assert Q.QSA_FUSED_SCORES_HEAD_DIM == qwen4_qsa_scores._HEAD_DIM
+    assert Q.QSA_FUSED_SCORES_MAX_MATRIX_ROWS == qwen4_qsa_scores.MAX_MATRIX_ROWS
+    assert Q.MOE_TOPK_FOLD_MAX_ROWS == qwen4_moe_window.topk_fold_max_rows()
+    defaults = TextModelArgs.__dataclass_fields__
+    assert Q.QSA_INDEXER_DEFAULT == {
+        "budget": defaults["indexer_budget"].default,
+        "compress_ratio": defaults["indexer_compress_ratio"].default,
+        "head_dim": defaults["indexer_head_dim"].default,
+        "n_heads": defaults["indexer_n_heads"].default,
+    }

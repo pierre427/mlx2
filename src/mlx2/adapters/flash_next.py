@@ -119,6 +119,19 @@ def configure_environment(model_path: Path, policy=None) -> dict[str, str]:
     return profile
 
 
+def qsa_indexer_geometry(text_config) -> dict:
+    """The QSA indexer budget/ratio/heads a qwen4_exp model runs with."""
+    from ..runtime.models.qwen4_exp import TextModelArgs
+
+    args = TextModelArgs.from_dict(text_config)
+    return {
+        "budget": int(args.indexer_budget),
+        "compress_ratio": int(args.indexer_compress_ratio),
+        "head_dim": int(args.indexer_head_dim),
+        "n_heads": int(args.indexer_n_heads),
+    }
+
+
 def gdn_state_bytes(adapter) -> int:
     """Bytes per recurrent-state value the adapter's GDN layers store."""
     return 2 if getattr(adapter, "gdn_state", None) else 4
@@ -313,6 +326,10 @@ class FlashNextAdapter:
                 "This profile requires the unified-layout Flash-Next artifact with ple_rows.bin"
             )
         self.model = Model(ModelArgs.from_dict(config))
+        # The QSA indexer geometry decides which contexts reach the fused
+        # indexer query, block scorer and QSA mask; qualification derives
+        # their requirements from it (sweep 1002 review item 2).
+        self.qsa_indexer = qsa_indexer_geometry(self.model.args.text_config)
         index = json.loads((path / "model.safetensors.index.json").read_text())[
             "weight_map"
         ]

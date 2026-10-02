@@ -193,6 +193,65 @@ def required_feature_checks(settings):
 # The qualifier's batch probe sends this many concurrent requests (the widest
 # deterministic cohort it drives; scripts/qualify_serving.py "batch" check).
 QUALIFIER_BATCH_WIDTH = 4
+# The qualifier's one-request near-limit probe renders a prompt above
+# max_context - LONG_CONTEXT_HEADROOM (scripts/qualify_serving.py
+# near_limit_prompt_floor) and decodes from there, so every decode step of it
+# runs at a context of at least this floor.
+QUALIFIER_NEAR_LIMIT_HEADROOM = 256
+# Flash-Next (qwen4_exp) indexer geometry when a route does not record its
+# own (``settings["qsa_indexer"]``): the TextModelArgs defaults, which both
+# served artifacts use (indexer_budget 2048, compress ratio 4).
+QSA_INDEXER_DEFAULT = {"budget": 2048, "compress_ratio": 4, "head_dim": 128, "n_heads": 4}
+# qwen4_qsa_scores admission: head_dim 128 only, at most 32 query rows (rows
+# x indexer heads) per launch, and more pooled blocks than head_dim (the stock
+# GEMM routes N <= K elsewhere).
+QSA_FUSED_SCORES_HEAD_DIM = 128
+QSA_FUSED_SCORES_MAX_MATRIX_ROWS = 32
+# qwen4_moe_window: a row window above this many rows takes the top-k launch
+# instead of the in-kernel fold (counted as "launch").
+MOE_TOPK_FOLD_MAX_ROWS = 3
+MOE_TOPK_FOLD_ROUTED_MODES = {"gate_up_down", "gate_up_down_shared"}
+
+
+def _window_consumers(env):
+    """``MLX_QWEN4_MOE_WINDOW`` as qwen4_moe_window.consumers_from_env reads it."""
+    raw = str(env.get("MLX_QWEN4_MOE_WINDOW", "")).strip().lower()
+    if raw in ("", "0", "off", "false", "none"):
+        return frozenset()
+    if raw in ("1", "all", "on", "true"):
+        return frozenset({"row_exact", "batch_decode", "verify"})
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _qsa_indexer_probe(settings, env):
+    """Where the qualifier's B=1 near-limit probe meets the QSA indexer.
+
+    ``QSAIndexer.__call__`` (qwen4_exp) returns an implicit all-blocks
+    selection while ``n_blocks <= block_topk`` (``indexer_budget //
+    compress_ratio``) whenever the dense short-circuit applies: on every
+    fused-attention-rows call (unless the gather arm, which reads the
+    explicit selection, is on) and process-wide under
+    ``MLX_QWEN4_QSA_DENSE_SHORTCIRCUIT``.  Only an explicit selection runs the
+    fused indexer query, the block scorer and, downstream, the QSA mask.
+    """
+    geometry = {**QSA_INDEXER_DEFAULT, **(settings.get("qsa_indexer") or {})}
+    budget, ratio = int(geometry["budget"]), int(geometry["compress_ratio"])
+    context = int(settings.get("max_context") or 0)
+    probe = max(0, context - QUALIFIER_NEAR_LIMIT_HEADROOM)
+    global_shortcircuit = _environment_mode_enabled(env.get("MLX_QWEN4_QSA_DENSE_SHORTCIRCUIT"))
+    fused_shortcircuit = (
+        not _environment_mode_enabled(env.get("MLX_QWEN4_QSA_GATHER_KV"))
+        or global_shortcircuit
+    )
+    return {
+        "geometry": geometry,
+        "budget": budget,
+        "probe_context": probe,
+        "probe_blocks": probe // ratio if ratio > 0 else 0,
+        "topk_blocks": budget // ratio if ratio > 0 else 0,
+        "fused_shortcircuit": fused_shortcircuit,
+        "global_shortcircuit": global_shortcircuit,
+    }
 
 
 def _default_on_mechanisms(settings):
@@ -200,9 +259,9 @@ def _default_on_mechanisms(settings):
 
     Returns ``(required, not_observed)``: feature names (no ``feature_``
     prefix) whose engagement the receipt must show, and ``{name: reason}`` for
-    selected mechanisms this route cannot engage, or that are optional for
-    now.  A mechanism in ``not_observed`` is *selected, not observed*: the
-    receipt records it as such instead of counting it as a pass.
+    selected mechanisms this route cannot engage.  A mechanism in
+    ``not_observed`` is *selected, not observed*: the receipt records it as
+    such instead of counting it as a pass.
     """
     env = settings.get("environment") or {}
     required, not_observed = set(), {}
@@ -215,8 +274,8 @@ def _default_on_mechanisms(settings):
     handoff_width = (
         handoff.get("max_mtp_width") if handoff.get("enabled") is True else None
     )
-    context = settings.get("max_context") or 0
-    long_context = context > int(env.get("MLX_QWEN4_QSA_INDEXED_MIN_CONTEXT", "16384")) + 100
+    attn_rows = env.get("MLX_QWEN4_ATTN_FUSED_ROWS") == "1"
+    indexer = _qsa_indexer_probe(settings, env)
 
     if env.get("MLX_QWEN4_HC_DECODE") == "1":
         required.add("hc_decode")
@@ -253,30 +312,63 @@ def _default_on_mechanisms(settings):
             )
         else:
             required.add("fused_gdn_batch_verify")
-    if env.get("MLX_QWEN4_ATTN_FUSED_ROWS") == "1":
+    if attn_rows:
         # Grouped projection, norm+RoPE prep and the vector SDPA rows engage
-        # on every one-request decode.  The QSA mask runs past the indexer
-        # budget only, so it is required on long-context routes.
+        # on every one-request decode.  The fused indexer query (index_q) and
+        # the QSA mask run on a fused-rows call only once the indexer selects
+        # explicitly: past the model's indexer budget (sweep 1002 review
+        # items 2 and 3; A1 made index_q engage on every such call).
         required.add("attn_fused_rows")
-        if long_context:
-            required.add("attn_fused_rows_qsa_mask")
-        else:
-            not_observed["attn_fused_rows_qsa_mask"] = (
-                f"max_context {context} does not exceed the QSA long-context threshold"
-            )
-        # The fused indexer query never ran before the sweep A1 kernel fix;
-        # recorded, not required, until that fix lands.
-        not_observed["attn_fused_rows_index_q"] = (
-            "optional until the fused indexer query (sweep A1) engages"
-        )
-    if env.get("MLX_QWEN4_MOE_TOPK_FOLD") in {"launch", "fold"}:
+        explicit_after = indexer["topk_blocks"] if indexer["fused_shortcircuit"] else 0
+        for name in ("attn_fused_rows_index_q", "attn_fused_rows_qsa_mask"):
+            if indexer["probe_blocks"] > explicit_after:
+                required.add(name)
+            else:
+                not_observed[name] = (
+                    f"near-limit probe context {indexer['probe_context']} stays within "
+                    f"the indexer budget {indexer['budget']}: every fused-rows call "
+                    "selects all blocks implicitly"
+                )
+    if env.get("MLX_QWEN4_MOE_TOPK_FOLD") == "launch":
+        # One-token MoE calls (ordinary decode, MTP drafting) take the launch.
         required.add("moe_topk_fold")
+    elif env.get("MLX_QWEN4_MOE_TOPK_FOLD") == "fold":
+        fold_paths = _topk_fold_paths(settings, env, native_mtp, width, handoff_width)
+        if fold_paths:
+            required.add("moe_topk_fold")
+        else:
+            not_observed["moe_topk_fold"] = (
+                "top-k fold needs moe_routed_decode gate_up_down[_shared] for "
+                "one-token calls, or a selected MoE row window of at most "
+                f"{MOE_TOPK_FOLD_MAX_ROWS} rows this route runs; it has neither"
+            )
     if env.get("MLX_QWEN4_QSA_FUSED_SCORES") == "1":
-        if long_context:
+        # qwen4_qsa_scores: decode/verify rows of an explicit selection, more
+        # pooled blocks than head_dim.  The B=1 probe's selection is explicit
+        # past the budget under fused rows, else from the first block.
+        geometry = indexer["geometry"]
+        shortcircuit = (
+            indexer["fused_shortcircuit"] if attn_rows else indexer["global_shortcircuit"]
+        )
+        explicit_after = indexer["topk_blocks"] if shortcircuit else 0
+        floor_blocks = max(explicit_after, QSA_FUSED_SCORES_HEAD_DIM)
+        if int(geometry["head_dim"]) != QSA_FUSED_SCORES_HEAD_DIM:
+            not_observed["qsa_fused_scores"] = (
+                f"indexer head_dim {geometry['head_dim']}: the scorer admits "
+                f"{QSA_FUSED_SCORES_HEAD_DIM} only"
+            )
+        elif int(geometry["n_heads"]) > QSA_FUSED_SCORES_MAX_MATRIX_ROWS:
+            not_observed["qsa_fused_scores"] = (
+                f"{geometry['n_heads']} indexer heads exceed the scorer's "
+                f"{QSA_FUSED_SCORES_MAX_MATRIX_ROWS} rows per launch"
+            )
+        elif indexer["probe_blocks"] > floor_blocks:
             required.add("qsa_fused_scores")
         else:
             not_observed["qsa_fused_scores"] = (
-                f"max_context {context} does not exceed the QSA long-context threshold"
+                f"near-limit probe context {indexer['probe_context']} gives "
+                f"{indexer['probe_blocks']} pooled blocks; the scorer needs an "
+                f"explicit selection of more than {floor_blocks}"
             )
     if _environment_mode_enabled(env.get("MLX_QWEN4_MOE_ROUTED_DECODE")):
         required.add("moe_routed_decode")
@@ -284,6 +376,37 @@ def _default_on_mechanisms(settings):
         # Qwen3.8-27B: one-token decode on the shared fused kernels.
         required.add("qwen38_fused_gdn")
     return required, not_observed
+
+
+def _topk_fold_paths(settings, env, native_mtp, width, handoff_width):
+    """Which calls of this route can run the in-kernel top-k fold.
+
+    qwen3_next: a one-token MoE call folds only under routed decode
+    gate_up_down[_shared]; a row window folds when it has at most
+    MOE_TOPK_FOLD_MAX_ROWS rows (wider windows take the launch).
+    """
+    paths = []
+    routed = str(env.get("MLX_QWEN4_MOE_ROUTED_DECODE") or "off").strip().lower()
+    if routed in MOE_TOPK_FOLD_ROUTED_MODES:
+        # Every route runs one-token MoE calls: ordinary decode, MTP drafting.
+        paths.append("one_token")
+    consumers = _window_consumers(env)
+    num_draft = (settings.get("execution_policy") or {}).get("num_draft")
+    verify_rows = int(num_draft) + 1 if type(num_draft) is int else None
+    if native_mtp and verify_rows is not None and 2 <= verify_rows <= MOE_TOPK_FOLD_MAX_ROWS:
+        if "verify" in consumers:
+            paths.append("verify")
+        if "row_exact" in consumers:
+            paths.append("row_exact")
+    if "batch_decode" in consumers and width >= 2:
+        # Batched one-token decode of 2..width lanes; a native MTP route hands
+        # off to it only above its handoff width.
+        smallest = 2 if not native_mtp else (
+            None if handoff_width is None else int(handoff_width) + 1
+        )
+        if smallest is not None and smallest <= min(width, MOE_TOPK_FOLD_MAX_ROWS):
+            paths.append("batch_decode")
+    return paths
 
 
 def selected_not_observed_features(settings):

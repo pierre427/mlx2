@@ -5474,6 +5474,14 @@ class ServingEngine:
                 # adaptive or always-pad policy, or another floor, runs other
                 # kernels than the default floor, so a floor receipt must not
                 # qualify it.  Absent at the default so receipts are unchanged.
+                # Flash-Next QSA indexer geometry: qualification derives the
+                # contexts that reach the fused indexer query, scorer and QSA
+                # mask from it.  Only adapters that record one carry it.
+                **(
+                    {"qsa_indexer": dict(adapter.qsa_indexer)}
+                    if isinstance(getattr(adapter, "qsa_indexer", None), dict)
+                    else {}
+                ),
                 **(
                     {"moe_rhs_pad": moe_rhs_pad}
                     if (moe_rhs_pad := _moe_rhs_pad_identity()) is not None
