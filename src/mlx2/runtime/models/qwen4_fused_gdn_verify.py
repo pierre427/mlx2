@@ -1597,6 +1597,11 @@ def probe_qwen4_fused_gdn_batch_verify(
                 mx.eval(*outputs, *extra)
                 result = threadgroup_y
             except (ValueError, RuntimeError) as exc:
+                from .served_exp import is_device_fault
+
+                if is_device_fault(exc):
+                    # Not a kernel refusal: let serving recover, probe again.
+                    raise
                 logger.info(
                     "Qwen4 batched fused GDN verify width %d unavailable: %s", steps, exc
                 )

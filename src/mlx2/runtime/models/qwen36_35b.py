@@ -28,6 +28,7 @@ from .qwen4_fused_gdn import (
     qwen4_fused_gdn_decode,
     served_silu_refusal,
 )
+from .served_exp import is_device_fault
 from .qwen36_moe_decode import Qwen36SparseMoeBlock as Qwen3NextSparseMoeBlock
 from .qwen38_27b import (
     ModelArgs,
@@ -86,7 +87,11 @@ def probe_qwen36_gdn(dtype, state_dtype, *, verify=False, rows=1, steps=1):
         try:
             mx.eval(*fn(*args, threadgroup_y=ty, **extra))
             return ty
-        except (RuntimeError, ValueError):
+        except (RuntimeError, ValueError) as exc:
+            if is_device_fault(exc):
+                # Not a kernel refusal: lru_cache does not cache a raise, so
+                # serving recovers and the next call probes again.
+                raise
             continue
     return None
 
@@ -239,6 +244,8 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                 conv_kernel=self.conv_kernel_size,
             )
         except Exception as exc:
+            if is_device_fault(exc):
+                raise
             return fallback(f"Metal kernel dispatch failed: {type(exc).__name__}")
         cache[0] = conv_state
         cache[1] = recurrent_state
@@ -335,6 +342,8 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                 *args, threadgroup_y=ty, architecture="qwen35", num_value_heads=32
             )
         except Exception as exc:
+            if is_device_fault(exc):
+                raise
             return fallback(f"Metal kernel dispatch failed: {type(exc).__name__}")
 
         def restore_rows(lengths):
