@@ -20,7 +20,7 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .mtp_depth_cap import validate_self_mtp_num_draft
 from ..sampling_defaults import XING4_SAMPLING
-from ..process_env import PROCESS_NUMERICS
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
 CACHE_LAYOUT = "xing4-0-mla-latent-layer-segments-v1"
 CONVERSION_LAYOUT = "xing4_0-sanitized-v1"
@@ -233,6 +233,9 @@ def inspect_artifact(model_path: str | Path) -> dict:
 
 
 def configure_environment() -> dict[str, str]:
+    # Refuse an explicit TF32 value before the profile overwrites it
+    # (sweep 1002 review item 6).
+    require_process_numerics("the Xing profile")
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",

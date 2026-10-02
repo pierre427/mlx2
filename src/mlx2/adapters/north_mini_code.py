@@ -13,7 +13,7 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import SamplingDefaults, VendorSampling
 from .external_draft_policy import ExternalDraftAdapterMixin
-from ..process_env import PROCESS_NUMERICS
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
 CACHE_LAYOUT = "north-mini-code-layer-segments-v1"
 _SAFETENSORS_HEADER_LIMIT = 64 << 20
@@ -334,6 +334,9 @@ def inspect_artifact(model_path: str | Path) -> dict:
 
 
 def configure_environment() -> dict[str, str]:
+    # Refuse an explicit TF32 value before the profile overwrites it
+    # (sweep 1002 review item 6).
+    require_process_numerics("the North-Mini-Code profile")
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",

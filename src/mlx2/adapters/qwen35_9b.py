@@ -16,7 +16,7 @@ from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .qwen38_27b import Qwen3827BAdapter
-from ..process_env import PROCESS_NUMERICS
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
 
 CACHE_LAYOUT = "qwen35-9b-hybrid-layer-segments-v1"
@@ -70,6 +70,9 @@ QWEN35_9B = descriptor_for()
 
 def configure_environment() -> dict[str, str]:
     """Ordinary-only profile; disable inherited speculative toggles."""
+    # Refuse an explicit TF32 value before the profile overwrites it
+    # (sweep 1002 review item 6).
+    require_process_numerics("the Qwen3.5 9B profile")
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",

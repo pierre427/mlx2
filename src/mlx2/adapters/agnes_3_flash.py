@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from ..process_env import PROCESS_NUMERICS
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 from .ordinary_artifact import inspect_indexed_artifact
 from .ordinary_text import OrdinaryTextAdapter
 
@@ -65,6 +65,9 @@ def inspect_artifact(model_path: str | Path) -> dict:
 
 
 def configure_environment() -> dict[str, str]:
+    # Refuse an explicit TF32 value before the profile overwrites it
+    # (sweep 1002 review item 6).
+    require_process_numerics("the Agnes-3-Flash profile")
     profile = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
                **PROCESS_NUMERICS, "MLX_GDN_PACKED": "1",
                "MLX_GDN_CORE": "0", "MLX_LM_COMPILED_DECODE": "0"}

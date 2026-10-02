@@ -16,7 +16,7 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .muse_glimmer_config import ModelArgs
 from ..sampling_defaults import SamplingDefaults, VendorSampling
-from ..process_env import PROCESS_NUMERICS
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
 
 MUSE_GLIMMER = ModelDescriptor(
@@ -110,6 +110,9 @@ def inspect_artifact(model_path: str | Path) -> dict:
 
 
 def configure_environment() -> dict[str, str]:
+    # Refuse an explicit TF32 value before the profile overwrites it
+    # (sweep 1002 review item 6).
+    require_process_numerics("the Muse-Glimmer profile")
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",

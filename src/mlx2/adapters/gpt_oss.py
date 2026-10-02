@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
-from ..process_env import PROCESS_NUMERICS
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
 
 _COMMON = frozenset({
@@ -165,6 +165,9 @@ def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> 
 
 
 def configure_environment() -> dict[str, str]:
+    # Refuse an explicit TF32 value before the profile overwrites it
+    # (sweep 1002 review item 6).
+    require_process_numerics("the gpt-oss profile")
     profile = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", **PROCESS_NUMERICS}
     os.environ.update(profile)
     return profile

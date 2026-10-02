@@ -12,7 +12,7 @@ from .artifact_paths import shard_within_artifact
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from .ordinary_text import OrdinaryTextAdapter
-from ..process_env import PROCESS_NUMERICS
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
 
 DESCRIPTOR = ModelDescriptor(
@@ -142,6 +142,8 @@ class GraniteSWAAdapter(OrdinaryTextAdapter):
         self.identity = artifact["identity"]
         self.config = artifact["config"]
         self.layout = DESCRIPTOR.cache_layout
+        # Refuse an explicit TF32 value before the profile overwrites it.
+        require_process_numerics("the Granite SWA profile")
         self.environment = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", **PROCESS_NUMERICS}
         os.environ.update(self.environment)
         path = Path(self.identity["path"])

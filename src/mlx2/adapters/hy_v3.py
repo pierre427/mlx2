@@ -8,7 +8,7 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .ordinary_artifact import inspect_indexed_artifact
 from .ordinary_text import OrdinaryTextAdapter
-from ..process_env import PROCESS_NUMERICS
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
 CACHE_LAYOUT = "hy-v3-full-kv-v1"
 
@@ -75,6 +75,9 @@ def inspect_artifact(model_path: str | Path) -> dict:
 
 
 def configure_environment() -> dict[str, str]:
+    # Refuse an explicit TF32 value before the profile overwrites it
+    # (sweep 1002 review item 6).
+    require_process_numerics("the Hy-V3 profile")
     profile = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
                **PROCESS_NUMERICS, "MLX_LM_COMPILED_DECODE": "0"}
     for name in tuple(os.environ):

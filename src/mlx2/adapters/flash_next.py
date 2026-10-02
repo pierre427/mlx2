@@ -7,7 +7,7 @@ import copy
 import json
 import os
 from pathlib import Path
-from ..process_env import PROCESS_NUMERICS
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
 
 # Default on at width 3 (width 4 until 2026-10-02; Qwen3.8 and Qwen3.6 stay at 4).
@@ -68,6 +68,9 @@ def artifact_identity(path: Path) -> dict:
 
 
 def configure_environment(model_path: Path, policy=None) -> dict[str, str]:
+    # Refuse an explicit TF32 value before the profile overwrites it
+    # (sweep 1002 review item 6).
+    require_process_numerics("the Flash-Next profile")
     from .flash_next_policy import FlashNextPolicy
     policy = policy or FlashNextPolicy()
     """Pin the proven eager profile before importing tensor modules."""

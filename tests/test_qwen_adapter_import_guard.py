@@ -253,3 +253,66 @@ def test_qwen36_routed_decode_and_topk_applied_live(monkeypatch, latched, kernel
     adapter._select_decode_wins()
     for block in blocks:
         assert (block.switch_mlp.routed_decode_mode, block.moe_topk_mode) == expected
+
+
+# --- review item 6: TF32 enabled after package import ----------------------
+
+PROFILE_MODULES = [
+    "agnes_3_flash", "flash_next", "gpt_oss", "hy_v3", "laguna_xs21",
+    "muse_glimmer", "nemotron3_super", "north_mini_code", "qwen35_9b",
+    "qwen36_35b", "qwen38_27b", "xing",
+]
+
+
+def _configure(module, tmp_path):
+    import importlib
+
+    configure = importlib.import_module(f"mlx2.adapters.{module}").configure_environment
+    return configure(tmp_path) if module == "flash_next" else configure()
+
+
+@pytest.mark.parametrize("module", PROFILE_MODULES)
+def test_tf32_set_after_package_import_is_refused_by_every_profile(monkeypatch, tmp_path, module):
+    """Codex review item 6: ``mlx2`` imported first (no explicit value, so
+    nothing recorded at import), then MLX_ENABLE_TF32=1 and possibly an fp32
+    dispatch.  The profile must refuse before it writes "0" over the value,
+    or the later guard sees only its own "0"."""
+    monkeypatch.setattr(process_env, "_EXPLICIT_AT_IMPORT", None)
+    monkeypatch.setenv("MLX_ENABLE_TF32", "1")
+    with pytest.raises(process_env.ProcessNumericsConflict, match="MLX_ENABLE_TF32"):
+        _configure(module, tmp_path)
+    assert os.environ["MLX_ENABLE_TF32"] == "1"
+
+
+@pytest.mark.parametrize("module,cls", [
+    ("olmo_hils", "OlmoHiLSAdapter"), ("granite_swa", "GraniteSWAAdapter"),
+])
+def test_tf32_set_after_package_import_is_refused_by_inline_profiles(
+    monkeypatch, tmp_path, module, cls
+):
+    import importlib
+
+    mod = importlib.import_module(f"mlx2.adapters.{module}")
+    monkeypatch.setattr(mod, "inspect_artifact", lambda _p: {
+        "identity": {"path": str(tmp_path), "fingerprint": "f", "files": []}, "config": {},
+    })
+    monkeypatch.setattr(process_env, "_EXPLICIT_AT_IMPORT", None)
+    monkeypatch.setenv("MLX_ENABLE_TF32", "1")
+    with pytest.raises(process_env.ProcessNumericsConflict, match="MLX_ENABLE_TF32"):
+        getattr(mod, cls)(str(tmp_path))
+    assert os.environ["MLX_ENABLE_TF32"] == "1"
+
+
+def test_every_profile_that_spreads_process_numerics_is_covered():
+    """A new adapter that spreads PROCESS_NUMERICS must refuse explicit TF32."""
+    from pathlib import Path
+
+    adapters = Path(__file__).resolve().parents[1] / "src" / "mlx2" / "adapters"
+    spreading = {
+        p.stem for p in adapters.glob("*.py") if "**PROCESS_NUMERICS" in p.read_text()
+    }
+    refusing = {
+        p.stem for p in adapters.glob("*.py") if "require_process_numerics(" in p.read_text()
+    }
+    assert spreading <= refusing, sorted(spreading - refusing)
+    assert spreading == set(PROFILE_MODULES) | {"olmo_hils", "granite_swa"}

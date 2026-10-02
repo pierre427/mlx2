@@ -10,7 +10,7 @@ from pathlib import Path
 from .artifact_paths import shard_within_artifact
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .ordinary_text import OrdinaryTextAdapter
-from ..process_env import PROCESS_NUMERICS
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
 
 DESCRIPTOR = ModelDescriptor(
@@ -98,6 +98,8 @@ class OlmoHiLSAdapter(OrdinaryTextAdapter):
         self.identity = artifact["identity"]
         self.config = artifact["config"]
         self.layout = "hils-landmark-custom-cache-v1"
+        # Refuse an explicit TF32 value before the profile overwrites it.
+        require_process_numerics("the OLMo HiLS profile")
         self.environment = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", **PROCESS_NUMERICS}
         os.environ.update(self.environment)
         path = Path(self.identity["path"])

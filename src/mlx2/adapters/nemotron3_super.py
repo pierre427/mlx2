@@ -15,7 +15,7 @@ from .artifact_paths import shard_within_artifact
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from .flash_next import FlashNextAdapter
-from ..process_env import PROCESS_NUMERICS
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
 CACHE_LAYOUT = "nemotron3-super-hybrid-mamba-kv-v1"
 SAMPLING = VendorSampling.single(
@@ -146,6 +146,9 @@ def configure_environment() -> dict[str, str]:
     must not silently change this model's serving path.  The profile itself
     (and so the qualification identity) is unchanged.
     """
+    # Refuse an explicit TF32 value before the profile overwrites it
+    # (sweep 1002 review item 6).
+    require_process_numerics("the Nemotron-3 Super profile")
     profile = {
         "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
         **PROCESS_NUMERICS}
