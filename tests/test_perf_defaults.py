@@ -762,3 +762,34 @@ def test_flash_next_policy_kernel_switches_are_opt_in_and_receipt_neutral():
     assert selected.as_dict()["qsa_nax_decode"] is True
     with pytest.raises(ValueError):
         FlashNextPolicy.from_mapping({"gdn_core": "yes"})
+
+
+def test_flash_next_diagnostics_expose_qsa_nax_decode_counters():
+    # The options sweep had to read qwen4_exp._QSA_NAX_DECODE_STATS directly:
+    # diagnostics() (and so /v1/status) never showed whether NAX decode ran.
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
+    from mlx2.runtime.models import qwen4_exp as QE
+
+    import mlx.nn as nn
+
+    adapter = object.__new__(FlashNextAdapter)
+    adapter.model = nn.Module()
+    adapter._tables = []
+    adapter._diagnostic_modules = ()
+    adapter.policy = FlashNextPolicy()
+    QE.qsa_nax_decode_status(reset=True)
+    try:
+        assert "qsa_nax_decode" not in adapter.diagnostics()  # default receipts unchanged
+        adapter.policy = FlashNextPolicy(qsa_nax_decode=True)
+        QE._record_qsa_nax_decode(engaged=True, reason="engaged", context=32768)
+        QE._record_qsa_nax_decode(engaged=False, reason="dense_by_construction", context=20000)
+        status = adapter.diagnostics()["qsa_nax_decode"]
+        assert status["attempts"] == 2
+        assert status["engagements"] == 1
+        assert status["fallbacks"] == 1
+        assert status["counts"] == {"engaged": 1, "dense_by_construction": 1}
+        assert status["last_receipt"] == {
+            "engaged": False, "reason": "dense_by_construction", "context": 20000,
+        }
+    finally:
+        QE.qsa_nax_decode_status(reset=True)

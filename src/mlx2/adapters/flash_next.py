@@ -533,6 +533,7 @@ class FlashNextAdapter:
             qwen4_fused_gdn_stats,
             qwen4_ple_compile_status,
             qsa_mtp_amendment_status,
+            qsa_nax_decode_status,
             qsa_rollback_status,
             qsa_stage1_status,
         )
@@ -673,6 +674,15 @@ class FlashNextAdapter:
             "ple_compile": qwen4_ple_compile_status(),
             "indexed_qsa": qsa_indexed_status(),
             "qsa_stage1": qsa_stage1_status(),
+            # Opt-in NAX decode rows (measured slower on Flash-Next, -15.6% at
+            # 32K ordinary); absent while off and unused so default receipts
+            # are unchanged.
+            **(
+                {"qsa_nax_decode": nax_decode}
+                if (nax_decode := qsa_nax_decode_status())["attempts"]
+                or getattr(self.policy, "qsa_nax_decode", False)
+                else {}
+            ),
             "qsa_mtp_amendment": qsa_mtp_amendment_status(),
             "qsa_rollback": qsa_rollback_status(),
             "segmented_mtp": segmented_self_mtp_stats(),

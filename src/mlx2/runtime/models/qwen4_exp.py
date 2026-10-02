@@ -706,6 +706,30 @@ def _record_qsa_nax_decode(*, engaged: bool, reason: str, context: int) -> None:
         _QSA_NAX_DECODE_LAST_DECISION = receipt
 
 
+def qsa_nax_decode_status(*, reset: bool = False) -> dict:
+    """Bounded receipts of the opt-in NAX QSA decode rows
+    (MLX_QWEN4_QSA_NAX_DECODE): one count per one-token decision, by reason.
+    Measured slower on Flash-Next (32K B1 ordinary -15.6%,
+    qualification/runs/options-sweep-20261001); kept off by default."""
+    global _QSA_NAX_DECODE_LAST_DECISION
+    with _QSA_NAX_DECODE_STATS_LOCK:
+        counts = dict(_QSA_NAX_DECODE_STATS)
+        attempts = sum(counts.values())
+        engagements = counts.get("engaged", 0)
+        report = {
+            "enabled": bool(_QSA_NAX_DECODE),
+            "attempts": attempts,
+            "engagements": engagements,
+            "fallbacks": attempts - engagements,
+            "counts": counts,
+            "last_receipt": _QSA_NAX_DECODE_LAST_DECISION,
+        }
+        if reset:
+            _QSA_NAX_DECODE_STATS.clear()
+            _QSA_NAX_DECODE_LAST_DECISION = None
+    return report
+
+
 def _record_qsa_stage1(
     *,
     engaged: bool,
