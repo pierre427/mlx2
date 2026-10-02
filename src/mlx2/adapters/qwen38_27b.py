@@ -858,6 +858,31 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             ),
         }
 
+    def execution_numerics_contract(self):
+        """Selected target math for APCv2 and external learning identities."""
+        from ..runtime.models.qwen38_fused_gdn import GatedDeltaNet
+
+        layers = [
+            module
+            for _, module in self.model.named_modules()
+            if isinstance(module, GatedDeltaNet)
+        ]
+        enabled = bool(getattr(self, "fused_gdn", False))
+        if (enabled and not layers) or any(
+            module.fused_gdn_enabled is not enabled for module in layers
+        ):
+            raise ValueError("selected fused_gdn policy disagrees with live target layers")
+        if not enabled:
+            return None
+        return {
+            "schema": "mlx2.qwen38-fused-gdn-numerics.v1",
+            "fused_gdn": {
+                "algorithm": "qwen35-served-silu-decode-v1",
+                "scope": "initialized-nonspeculating-single-token",
+                "verify_prefill": "reference",
+            },
+        }
+
     def _fused_gdn_diagnostics(self):
         from ..runtime.models.qwen38_fused_gdn import stats
 

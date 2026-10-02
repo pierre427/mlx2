@@ -86,8 +86,33 @@ class ExternalDraftAdapterMixin:
             if "continuation_pool" in self.external_policy
             else None
         )
-        self._external_target_revision = self.identity["fingerprint"]
+        target_artifact_revision = self.identity["fingerprint"]
+        self._external_target_revision = target_artifact_revision
         self._external_draft_revision = record["fingerprint"]
+        # Direct adapter users construct shared source critics without a serving
+        # engine. Pin adapter-owned target math before creating those sources.
+        describe = getattr(self, "execution_numerics_contract", None)
+        if describe is not None and not callable(describe):
+            raise ValueError("adapter execution_numerics_contract must be callable")
+        adapter_numerics = None if describe is None else describe()
+        numerical_identity = ""
+        if adapter_numerics is not None:
+            if not isinstance(adapter_numerics, dict) or not adapter_numerics:
+                raise ValueError(
+                    "adapter numerical contract must be a nonempty object or None"
+                )
+            numerical_identity = json.dumps(
+                {
+                    "schema": "mlx2.adapter-execution-numerics.v1",
+                    "contract": adapter_numerics,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            self._external_target_revision = hashlib.sha256(
+                (target_artifact_revision + numerical_identity).encode()
+            ).hexdigest()
         if "lilicorr_feedback" in self.external_policy and not hasattr(
             self.draft_model, "lilicorr"
         ):
@@ -154,7 +179,7 @@ class ExternalDraftAdapterMixin:
                 value,
                 target_revision=self._external_target_revision,
                 draft_revision=self._external_draft_revision,
-                tokenizer_revision=self._external_target_revision,
+                tokenizer_revision=target_artifact_revision,
                 session_revision=session_revision,
             )
         if "lilicorr_feedback" in self.external_policy:
@@ -176,6 +201,7 @@ class ExternalDraftAdapterMixin:
                 + record["fingerprint"]
                 + self.EXTERNAL_ROUTE_TAG
                 + composition_identity
+                + numerical_identity
             ).encode()
         ).hexdigest()
         self.identity = {
@@ -183,6 +209,10 @@ class ExternalDraftAdapterMixin:
             "target_fingerprint": self.identity["fingerprint"],
             "draft_fingerprint": record["fingerprint"],
             "fingerprint": digest,
+            **(
+                {"target_execution_fingerprint": self._external_target_revision}
+                if numerical_identity else {}
+            ),
         }
         self.layout += f":{self.EXTERNAL_ROUTE_TAG}:" + digest
         self.descriptor = replace(
@@ -306,7 +336,10 @@ class ExternalDraftAdapterMixin:
         self.draft_model = replacement
         self._external_target_revision = target_revision
         self._external_serving_namespace = payload
-        self.identity = {**self.identity, "fingerprint": fingerprint}
+        self.identity = {
+            **self.identity, "fingerprint": fingerprint,
+            "target_execution_fingerprint": target_revision,
+        }
         self.layout += ":external-numerical-laws:" + fingerprint
         self.descriptor = replace(self.descriptor, cache_layout=self.layout)
         return True

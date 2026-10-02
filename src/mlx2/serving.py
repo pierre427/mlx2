@@ -788,10 +788,30 @@ def apc_request_semantic(tenant_scope, request_scope=None):
     return semantic
 
 
+def adapter_numerical_contract(adapter):
+    """Snapshot an adapter's selected target math without scheduler knowledge."""
+    describe = getattr(adapter, "execution_numerics_contract", None)
+    if describe is None:
+        return None
+    if not callable(describe):
+        raise ValueError("adapter execution_numerics_contract must be callable")
+    contract = describe()
+    if contract is None:
+        return None
+    if not isinstance(contract, dict) or not contract:
+        raise ValueError(
+            "adapter execution_numerics_contract must be a nonempty object or None"
+        )
+    # Reject nonfinite or unserializable laws before any route/cache is published;
+    # the detached snapshot also prevents later mutation from changing APC keys.
+    return json.loads(json.dumps(contract, sort_keys=True, allow_nan=False))
+
+
 def apc_semantic_namespace(
     semantic,
     *,
     execution_numerics=None,
+    adapter_execution_numerics=None,
     prefill_execution=None,
     lane_matmul_receipt=None,
     int8_prefill_policy=None,
@@ -810,6 +830,19 @@ def apc_semantic_namespace(
     from .runtime.prefill_plan import apc_prefill_fingerprint
     from .runtime.recurrent_state_codec import apc_state_codec_fingerprint
     from .runtime.weight_stream import apc_weight_stream_fingerprint
+
+    if adapter_execution_numerics is not None:
+        payload = json.dumps(
+            {
+                "schema": "mlx2.adapter-execution-numerics.v1",
+                "semantic": semantic,
+                "contract": adapter_execution_numerics,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        semantic = hashlib.sha256(payload.encode()).hexdigest()
 
     # The recurrent-state storage codec is the outermost law.
     return apc_state_codec_fingerprint(
@@ -5727,6 +5760,7 @@ class ServingEngine:
             # The exact same laws bind learning and both APCv2 namespaces.
             # Default wrappers are identities; main GDN/QSA defaults stay put.
             numerics_laws = dict(
+                adapter_execution_numerics=adapter_numerical_contract(adapter),
                 execution_numerics=execution_numerics_identity(
                     sp_qmm=self.sp_qmm_enabled,
                     verify_bitexact=self.verify_bitexact_policy.enabled,
