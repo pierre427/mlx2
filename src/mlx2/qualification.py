@@ -56,13 +56,12 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    # Re-pinned 2026-10-02 (sweep H1): the producer observes the default-on
-    # Flash-Next / Qwen3.8-27B kernels (HC decode, fused GDN batch decode and
-    # verify, attention fused rows, MoE top-k fold and routed decode, QSA
-    # fused scores, 27B fused_gdn) and records selected-but-unreachable ones
-    # as "selected, not observed".  Receipts from the previous harness
-    # (82ab2971..., 2026-10-01) must be regenerated before they validate.
-    "sha256": "8777ab766ff1901107bc84b4e1e84716c394caf232415d11a16d10f3cc691af9",
+    # Re-pinned 2026-10-02 (NAX gather default): the producer observes the
+    # Flash-Next NAX segmented MoE gather (moe_nax_gather) and records it
+    # "selected, not observed" (host_gated) when the host is not M5 or the
+    # bitwise canary refused the kernel.  Receipts from the previous harness
+    # (8777ab76..., sweep H1) must be regenerated before they validate.
+    "sha256": "8a2ced1d8982733bdd2321989aa0e533fcf64f4e4da6187d9fe58be63c2e39ac",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -375,7 +374,111 @@ def _default_on_mechanisms(settings):
     if env.get("MLX2_QWEN38_FUSED_GDN") == "1":
         # Qwen3.8-27B: one-token decode on the shared fused kernels.
         required.add("qwen38_fused_gdn")
+    if str(env.get("MLX2_MOE_NAX_GATHER") or "off").strip().lower() in {"gather", "fused"}:
+        # Prefill expert gathers of >= 16 rows and >= 4 rows per expert; every
+        # qualifier route prefills prompts well past that.  Host-gated: see
+        # HOST_GATED_FEATURES / host_gated_not_observed.
+        required.add("moe_nax_gather")
     return required, not_observed
+
+
+# Required mechanisms whose engagement depends on the host, not the route:
+# MLX2_MOE_NAX_GATHER runs only on an M5 (NAX) Metal device, and only kernels
+# whose bitwise canary against the stock op passed.  A run on another host,
+# or one whose canary refused the kernel, records the mechanism as "selected,
+# not observed" with the reason: not a pass, and not a failure either (the
+# route keeps the stock path, bit-identical by construction).
+HOST_GATED_FEATURES = frozenset({"moe_nax_gather"})
+
+# Fallback reasons of moe_nax_gather that mean the kernel itself was refused
+# (canary failed or the instantiation could not be built).
+MOE_NAX_GATHER_CANARY_REFUSALS = (
+    "kernel_unverified",
+    "swiglu_declined",
+    "row_map_declined",
+)
+
+
+def moe_nax_gather_engagement(execution, initial_execution=None):
+    """Engaged NAX gather launches this run (a counter delta).
+
+    "fused" needs both halves: the gate/up SwiGLU launches and the gather
+    (down projection); "gather" needs the gather launches.
+    """
+    status = (execution or {}).get("moe_nax_gather")
+    if not isinstance(status, dict):
+        return 0
+    before = ((initial_execution or {}).get("moe_nax_gather") or {}).get("calls") or {}
+    after = status.get("calls") or {}
+
+    def delta(name):
+        value, base = after.get(name, 0), before.get(name, 0)
+        if type(value) is not int or type(base) is not int:
+            return 0
+        return max(0, value - base)
+
+    gather = delta("gather")
+    if status.get("mode") == "fused":
+        swiglu = sum(
+            delta(name)
+            for name in ("swiglu", "swiglu_map", "swiglu_split", "swiglu_split_map")
+        )
+        return min(gather, swiglu)
+    return gather
+
+
+def host_gated_not_observed(execution, initial_execution=None):
+    """``{feature: reason}`` for host-gated mechanisms this host could not run.
+
+    Empty when the mechanism engaged, or when it did not engage for a reason
+    other than the host gate or the canary (that remains a failed check).
+    """
+    out = {}
+    status = (execution or {}).get("moe_nax_gather")
+    if isinstance(status, dict) and not moe_nax_gather_engagement(
+        execution, initial_execution
+    ):
+        before = ((initial_execution or {}).get("moe_nax_gather") or {}).get(
+            "fallbacks"
+        ) or {}
+        fallbacks = status.get("fallbacks") or {}
+        refused = sorted(
+            reason
+            for reason in MOE_NAX_GATHER_CANARY_REFUSALS
+            if type(fallbacks.get(reason, 0)) is int
+            and fallbacks.get(reason, 0) > (before.get(reason, 0) or 0)
+        )
+        failed_kernels = sorted(
+            name for name, ok in (status.get("verified") or {}).items() if ok is False
+        )
+        if status.get("nax_host") is False:
+            out["moe_nax_gather"] = (
+                "host is not an M5 (NAX) Metal device: the sorted MoE gather "
+                "keeps the stock kernel"
+            )
+        elif refused or failed_kernels:
+            out["moe_nax_gather"] = (
+                "bitwise canary refused the NAX kernel ("
+                + ", ".join(refused + failed_kernels)
+                + "): the sorted MoE gather keeps the stock kernel"
+            )
+    return out
+
+
+def _host_gated_exemption(record, name):
+    """A required host-gated feature the producer recorded as not observed."""
+    if name.removeprefix("feature_") not in HOST_GATED_FEATURES:
+        return False
+    if name in (record.get("checks") or {}):
+        return False
+    entry = (record.get("selected_not_observed") or {}).get(name)
+    return (
+        isinstance(entry, dict)
+        and entry.get("status") == "selected, not observed"
+        and entry.get("host_gated") is True
+        and isinstance(entry.get("reason"), str)
+        and bool(entry["reason"])
+    )
 
 
 def _topk_fold_paths(settings, env, native_mtp, width, handoff_width):
@@ -662,6 +765,9 @@ def load_qualified_route(
         name
         for name in required_feature_checks(settings)
         if checks.get(name, {}).get("passed") is not True
+        # Host-gated mechanisms a run could not engage on its host (not M5,
+        # or the canary refused the kernel): selected, not observed.
+        and not _host_gated_exemption(record, name)
     )
     if missing_features:
         raise ValueError(

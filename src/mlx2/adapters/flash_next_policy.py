@@ -252,6 +252,23 @@ class FlashNextPolicy:
     # so it is UNQUALIFIED and enters the APCv2 prefill-execution identity.
     # Not an environment switch; entered in receipts only when enabled.
     invariant_prefill: bool = False
+    # oMLX #3995/#4022/#4029 NAX segmented sorted MoE gather
+    # (MLX2_MOE_NAX_GATHER, runtime/models/moe_nax_gather.py): prefill expert
+    # gathers MLX would send to its row-block NAX kernel (>= 16 rows, >= 4
+    # rows per expert; M5 hosts only, each kernel canaried bitwise against
+    # the stock op) run a segmented kernel; "fused" also runs gate and up of
+    # the split tables in one launch with silu(gate) * up in its epilogue,
+    # reading the token rows through the sorted row map.  Decode and MTP
+    # verify are below the floor and untouched.  Default "fused" on
+    # Flash-Next since 2026-10-02: prefill MoE bit-identical on the served and
+    # all-4-bit artifacts (trunk hidden and logits), prefill +20% at 512-row
+    # chunks and +6% at 8192 (qualification/runs/port-nax-gather-20261002).
+    # The module default stays "off", so other models are unaffected.  The
+    # profile always pins the variable (an inherited value cannot change the
+    # route); the kill switch is the policy value "off" (an --execution-policy
+    # JSON file with {"moe_nax_gather": "off"}), which round-trips through
+    # receipts.  Recorded in receipts only when not "fused".
+    moe_nax_gather: str = "fused"
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
@@ -284,6 +301,8 @@ class FlashNextPolicy:
             raise ValueError(
                 "qsa_batch_decode_sparse_min_context must be a nonnegative integer"
             )
+        if self.moe_nax_gather not in {"off", "gather", "fused"}:
+            raise ValueError("moe_nax_gather must be off, gather or fused")
         if self.fused_gdn_batch_decode not in {"off", "row_exact"}:
             raise ValueError("fused_gdn_batch_decode must be off or row_exact")
         if self.fused_gdn_batch_verify not in {"off", "row_exact"}:
@@ -476,6 +495,8 @@ class FlashNextPolicy:
                 del values[name]
         if self.moe_topk_fold == _DEFAULTS["moe_topk_fold"]:
             del values["moe_topk_fold"]
+        if self.moe_nax_gather == _DEFAULTS["moe_nax_gather"]:
+            del values["moe_nax_gather"]
         if self.prefill_depth_budget is None:
             del values["prefill_depth_budget"]
         if self.gdn_state_dtype == "float32":
@@ -546,6 +567,10 @@ class FlashNextPolicy:
             environment["MLX_QWEN4_MOE_WINDOW"] = ",".join(consumers)
         if self.moe_topk_fold != "off":
             environment["MLX_QWEN4_MOE_TOPK_FOLD"] = self.moe_topk_fold
+        # Pinned at every value, "off" included: MLX2_* variables are not
+        # stripped from the inherited environment, so leaving it out would
+        # let an operator's shell select the route behind the receipt.
+        environment["MLX2_MOE_NAX_GATHER"] = self.moe_nax_gather
         if self.qsa_batch_decode_sparse != "off":
             environment["MLX_QWEN4_QSA_BATCH_DECODE_SPARSE"] = (
                 self.qsa_batch_decode_sparse

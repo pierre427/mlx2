@@ -764,6 +764,22 @@ def test_flash_next_policy_kernel_switches_are_opt_in_and_receipt_neutral():
         FlashNextPolicy.from_mapping({"gdn_core": "yes"})
 
 
+def test_flash_next_defaults_to_fused_nax_gather_and_other_models_stay_off():
+    # Flash-Next only (qualification/runs/port-nax-gather-20261002): prefill
+    # MoE bit-identical, +20% at 512-row chunks, +6% at 8192.  The module
+    # default, which Qwen3.6 / Nemotron reach through QuantizedSwitchLinear,
+    # stays off.
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
+    from mlx2.runtime.models import moe_nax_gather
+
+    assert FlashNextPolicy().environment()["MLX2_MOE_NAX_GATHER"] == "fused"
+    assert moe_nax_gather.mode_from_env({}) == "off"
+    for name in ("off", "gather"):
+        policy = FlashNextPolicy.from_mapping({"moe_nax_gather": name})
+        assert policy.environment()["MLX2_MOE_NAX_GATHER"] == name
+        assert FlashNextPolicy.from_mapping(policy.as_dict()) == policy
+
+
 def test_flash_next_diagnostics_expose_qsa_nax_decode_counters():
     # The options sweep had to read qwen4_exp._QSA_NAX_DECODE_STATS directly:
     # diagnostics() (and so /v1/status) never showed whether NAX decode ran.

@@ -1726,6 +1726,8 @@ def default_on_observations(final, initial=None):
     Each value is a counter delta from the initial status (the final value
     when there is none), so a mechanism that only ran at load cannot pass.
     """
+    from mlx2.qualification import moe_nax_gather_engagement
+
     execution = final.get("execution") or {}
     initial_execution = (initial or {}).get("execution") or {}
     environment = (final.get("settings") or {}).get("environment") or {}
@@ -1798,6 +1800,8 @@ def default_on_observations(final, initial=None):
             if qwen38.get("enabled") is True
             else 0
         ),
+        # NAX segmented MoE gather (prefill); "fused" needs gate/up and down.
+        "moe_nax_gather": moe_nax_gather_engagement(execution, initial_execution),
     }
 
 
@@ -2097,6 +2101,7 @@ def main():
             raise AssertionError(name)
 
     from mlx2.qualification import (
+        host_gated_not_observed,
         required_feature_checks,
         selected_not_observed_features,
     )
@@ -2791,7 +2796,21 @@ def main():
                 forced,
                 report["prefill_scheduling_forcing"],
             )
-        for feature in sorted(required_features):
+        # Host-gated mechanisms (MLX2_MOE_NAX_GATHER: M5 only, canaried) that
+        # this host could not run are "selected, not observed", neither a
+        # pass nor a failure.
+        host_gated = host_gated_not_observed(
+            final.get("execution") or {}, initial.get("execution") or {}
+        )
+        for feature in sorted(required_features & set(host_gated)):
+            report["selected_not_observed"]["feature_" + feature] = {
+                "status": "selected, not observed",
+                "reason": host_gated[feature],
+                "host_gated": True,
+            }
+            print(f"feature_{feature}: SELECTED, NOT OBSERVED "
+                  f"({host_gated[feature]})", flush=True)
+        for feature in sorted(required_features - set(host_gated)):
             if feature in {"adaptive_mtp_depth", "mtp_ordinary_handoff"}:
                 evidence = report.get("adaptive_benchmark")
             elif feature == "sp_qmm":

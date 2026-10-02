@@ -45,10 +45,31 @@ def test_flash_adapter_explicitly_selects_observable_parity_paths(tmp_path, monk
     assert "MLX_GDN_UNBOUND_EXPERIMENT" not in __import__("os").environ
 
 
+def test_flash_next_profile_pins_the_nax_gather_at_every_value(tmp_path, monkeypatch):
+    # Default "fused" (port-nax-gather-20261002); an inherited MLX2_* value is
+    # not stripped, so the profile pins the variable even at "off".
+    import os
+
+    from mlx2.adapters.flash_next import configure_environment
+
+    monkeypatch.setenv("MLX2_MOE_NAX_GATHER", "gather")
+    assert FlashNextPolicy().moe_nax_gather == "fused"
+    assert "moe_nax_gather" not in FlashNextPolicy().as_dict()
+    environment = configure_environment(tmp_path, FlashNextPolicy())
+    assert environment["MLX2_MOE_NAX_GATHER"] == "fused"
+    assert os.environ["MLX2_MOE_NAX_GATHER"] == "fused"
+    off = FlashNextPolicy.from_mapping({"moe_nax_gather": "off"})
+    assert off.as_dict()["moe_nax_gather"] == "off"
+    environment = configure_environment(tmp_path, off)
+    assert environment["MLX2_MOE_NAX_GATHER"] == "off"
+    assert os.environ["MLX2_MOE_NAX_GATHER"] == "off"
+
+
 @pytest.mark.parametrize("settings", [{"num_draft": 0}, {"num_draft": True},
     {"shared_qsa_suffix": "yes"}, {"async_qsa_promotion": 1},
     {"private_delta_min_context": -1}, {"eager_dispatch": 1},
     {"eager_dispatch_max_rows": 0}, {"eager_dispatch_stride": 0},
+    {"moe_nax_gather": "on"}, {"moe_nax_gather": True},
     {"bogus": True}])
 def test_invalid_policy_rejected(settings):
     with pytest.raises(ValueError):
@@ -148,6 +169,7 @@ def test_flash_next_receipt_round_trips_every_non_default_choice():
         "row_exact_verify": True,
         "qsa_fused_scores": False,
         "fused_gdn_batch_verify": "off",
+        "moe_nax_gather": "off",
     }
     assert FlashNextPolicy.from_mapping(FlashNextPolicy().as_dict()) == FlashNextPolicy()
     names = {f.name for f in fields(FlashNextPolicy)}

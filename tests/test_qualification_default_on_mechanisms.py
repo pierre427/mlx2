@@ -22,6 +22,7 @@ DEFAULT_ON = {
     "feature_attn_fused_rows",
     "feature_moe_topk_fold",
     "feature_moe_routed_decode",
+    "feature_moe_nax_gather",
 }
 # Reached once the indexer selects explicitly (past the indexer budget).
 LONG = {"feature_attn_fused_rows_qsa_mask", "feature_attn_fused_rows_index_q",
@@ -86,7 +87,7 @@ def test_unselected_mechanisms_are_not_required():
     policy = FlashNextPolicy(hc_decode_kernels=False, fused_gdn_batch_decode="off",
                              fused_gdn_batch_verify="off", attn_fused_rows=False,
                              moe_topk_fold="off", qsa_fused_scores=False,
-                             moe_routed_decode="off")
+                             moe_routed_decode="off", moe_nax_gather="off")
     settings = _settings(environment=policy.environment())
     assert not (DEFAULT_ON | LONG) & required_feature_checks(settings)
     assert selected_not_observed_features(settings) == {}
@@ -304,3 +305,114 @@ def test_mirrored_dispatch_constants_match_the_runtime(qualify):
         "head_dim": defaults["indexer_head_dim"].default,
         "n_heads": defaults["indexer_n_heads"].default,
     }
+
+
+# NAX segmented MoE gather (Flash-Next default "fused" since 2026-10-02):
+# required where selected; host-gated, so a non-M5 host or a refused canary
+# is "selected, not observed" -- neither a pass nor a failure.
+
+def _nax(calls=None, fallbacks=None, nax_host=True, mode="fused", verified=None):
+    return {"moe_nax_gather": {
+        "mode": mode, "nax_host": nax_host,
+        "calls": {"gather": 0, "swiglu": 0, "swiglu_map": 0, "swiglu_split": 0,
+                  "swiglu_split_map": 0, **(calls or {})},
+        "fallbacks": dict(fallbacks or {}), "not_candidates": 0,
+        "last_fallback": None, "verified": dict(verified or {}),
+    }}
+
+
+def test_nax_gather_is_required_where_selected_only():
+    assert "feature_moe_nax_gather" in required_feature_checks(_settings())
+    for mode in ("gather", "fused"):
+        env = FlashNextPolicy(moe_nax_gather=mode).environment()
+        assert "feature_moe_nax_gather" in required_feature_checks(
+            _settings(environment=env))
+    off = FlashNextPolicy(moe_nax_gather="off").environment()
+    assert "feature_moe_nax_gather" not in required_feature_checks(
+        _settings(environment=off))
+    # Other models never select it (module default off, no profile pin).
+    assert "feature_moe_nax_gather" not in required_feature_checks(
+        {"environment": {}, "mtp": False, "max_lanes": 4, "max_context": 8192})
+
+
+def test_nax_gather_observation_counts_both_fused_halves(qualify):
+    from mlx2.qualification import moe_nax_gather_engagement
+
+    idle = _nax()
+    ran = _nax(calls={"gather": 48, "swiglu_split_map": 48})
+    assert qualify.feature_observations({"execution": ran},
+                                        initial={"execution": idle})["moe_nax_gather"] == 48
+    assert qualify.feature_observations({"execution": idle},
+                                        initial={"execution": idle})["moe_nax_gather"] == 0
+    # Only at load (before the initial status): no engagement this run.
+    assert moe_nax_gather_engagement(ran, ran) == 0
+    # Fused mode with the down gather but no gate/up launch is not engaged.
+    assert moe_nax_gather_engagement(_nax(calls={"gather": 48}), idle) == 0
+    assert moe_nax_gather_engagement(
+        _nax(mode="gather", calls={"gather": 12}), _nax(mode="gather")) == 12
+    assert moe_nax_gather_engagement({}, {}) == 0
+
+
+def test_nax_gather_host_gate_and_canary_are_selected_not_observed():
+    from mlx2.qualification import host_gated_not_observed
+
+    idle = _nax()
+    assert host_gated_not_observed(_nax(calls={"gather": 4, "swiglu_split_map": 4}),
+                                   idle) == {}
+    m3 = host_gated_not_observed(_nax(nax_host=False, fallbacks={"not_nax_host": 9}),
+                                 _nax(nax_host=False))
+    assert "not an M5" in m3["moe_nax_gather"]
+    canary = host_gated_not_observed(
+        _nax(fallbacks={"kernel_unverified": 3, "swiglu_declined": 3}), idle)
+    assert "canary" in canary["moe_nax_gather"]
+    assert "kernel_unverified" in canary["moe_nax_gather"]
+    failed = host_gated_not_observed(_nax(verified={"gather 4-bit": False}), idle)
+    assert "canary" in failed["moe_nax_gather"]
+    # On an M5 with a passing canary, no engagement stays a failed check.
+    assert host_gated_not_observed(idle, idle) == {}
+    assert host_gated_not_observed({}, {}) == {}
+
+
+def _nax_record(tmp_path, checks, selected_not_observed=None):
+    import json
+
+    from mlx2.adapters.qwen import QWEN4_FLASH_NEXT
+    from mlx2.qualification import (
+        APPROVED_QUALIFICATION_HARNESS,
+        REQUIRED_CHECKS,
+        load_qualified_route,
+    )
+
+    settings = {"mtp": False, "max_context": 32768,
+                "environment": {"MLX2_MOE_NAX_GATHER": "fused"}}
+    record = {
+        "passed": True, "runtime": {"source": "abc"}, "artifact": "weights",
+        "settings": settings,
+        "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "checks": {**{c: {"passed": True}
+                      for c in REQUIRED_CHECKS | {"structured_output"}}, **checks},
+    }
+    if selected_not_observed is not None:
+        record["selected_not_observed"] = selected_not_observed
+    path = tmp_path / "qualification.json"
+    path.write_text(json.dumps(record))
+    return lambda: load_qualified_route(
+        path, runtime=record["runtime"], artifact="weights", settings=settings,
+        descriptor=QWEN4_FLASH_NEXT, name="nax")
+
+
+def test_loader_accepts_host_gated_not_observed_but_not_a_bare_omission(tmp_path):
+    entry = {"status": "selected, not observed", "host_gated": True,
+             "reason": "host is not an M5 (NAX) Metal device"}
+    assert _nax_record(tmp_path, {"feature_moe_nax_gather": {"passed": True}})().profile
+    assert _nax_record(tmp_path, {}, {"feature_moe_nax_gather": entry})().profile
+    with pytest.raises(ValueError, match="moe_nax_gather"):
+        _nax_record(tmp_path, {})()
+    for bad in ({**entry, "host_gated": False}, {**entry, "reason": ""},
+                {**entry, "status": "passed"}):
+        with pytest.raises(ValueError, match="moe_nax_gather"):
+            _nax_record(tmp_path, {}, {"feature_moe_nax_gather": bad})()
+    # A recorded failure is never excused by a not-observed entry.
+    with pytest.raises(ValueError):
+        _nax_record(tmp_path, {"feature_moe_nax_gather": {"passed": False}},
+                    {"feature_moe_nax_gather": entry})()

@@ -322,7 +322,14 @@ class FlashNextAdapter:
 
         # qwen4_exp reads its selections at import: if it was imported before
         # the profile above was pinned, this model would run another route.
-        assert_profile_applied("the Flash-Next adapter")
+        # MLX2_MOE_NAX_GATHER is applied live (moe_nax_gather.set_mode below),
+        # so an earlier import under another value is not a reason to refuse.
+        assert_profile_applied(
+            "the Flash-Next adapter", live=("MLX2_MOE_NAX_GATHER",)
+        )
+        from ..runtime.models import moe_nax_gather as _moe_nax
+
+        _moe_nax.set_mode(self.policy.moe_nax_gather)
         config = json.loads((path / "config.json").read_text())
         if config.get("model_type") != "qwen4_exp" or config.get("ngram_table"):
             raise ValueError(
