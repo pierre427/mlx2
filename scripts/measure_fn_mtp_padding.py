@@ -50,6 +50,26 @@ sys.path.insert(0, str(ROOT / "scripts"))
 _DOC = ROOT / "docs" / "QUALIFICATION.md"
 
 
+# Polls without any response before a run is declared stuck (prefill polls
+# return nothing).  A lane the generator drops (a non-finite sampled row) never
+# emits a finish_reason, so a loop waiting for every lane would spin forever;
+# same rule as scripts/paired_direct_ab.py.
+IDLE_POLL_LIMIT = 4096
+
+
+def _drain_poll(gen, idle):
+    """One ``gen.next()``: raise on a dropped lane or a stuck generator."""
+    _p, responses = gen.next()
+    take = getattr(gen, "take_lane_failures", None)
+    lost = take() if take is not None else []
+    if lost:
+        raise RuntimeError("generator dropped lane(s): " + "; ".join(str(f) for f in lost))
+    idle = 0 if responses else idle + 1
+    if idle > IDLE_POLL_LIMIT:
+        raise RuntimeError(f"no response in {IDLE_POLL_LIMIT} polls")
+    return responses, idle
+
+
 def pad_census(records):
     """Rows and pad rows per forward kind, grouped by lanes in the forward."""
     out = collections.defaultdict(lambda: {"forwards": 0, "rows": 0, "valid": 0, "pad": 0,
@@ -201,11 +221,12 @@ def main():
         state["records"], state["timed"] = records, timed
         steps = []
         done = set()
+        idle = 0
         try:
             while len(done) < batch:
                 n0 = len(records)
                 t0 = time.perf_counter()
-                _p, responses = gen.next()
+                responses, idle = _drain_poll(gen, idle)
                 ms = 1e3 * (time.perf_counter() - t0)
                 if len(records) > n0:
                     steps.append({"ms": ms, "first": n0, "end": len(records),

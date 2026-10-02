@@ -34,6 +34,26 @@ ARMS = {
 }
 
 
+# Polls without any response before a run is declared stuck (prefill polls
+# return nothing).  A lane the generator drops (a non-finite sampled row) never
+# emits a finish_reason, so a loop waiting for every lane would spin forever;
+# same rule as scripts/paired_direct_ab.py.
+IDLE_POLL_LIMIT = 4096
+
+
+def _drain_poll(gen, idle):
+    """One ``gen.next()``: raise on a dropped lane or a stuck generator."""
+    _p, responses = gen.next()
+    take = getattr(gen, "take_lane_failures", None)
+    lost = take() if take is not None else []
+    if lost:
+        raise RuntimeError("generator dropped lane(s): " + "; ".join(str(f) for f in lost))
+    idle = 0 if responses else idle + 1
+    if idle > IDLE_POLL_LIMIT:
+        raise RuntimeError(f"no response in {IDLE_POLL_LIMIT} polls")
+    return responses, idle
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -99,8 +119,9 @@ def main():
         c_first = None
         emitted = steps = 0
         try:
+            idle = 0
             while len(done) < lanes:
-                _p, responses = g.next()
+                responses, idle = _drain_poll(g, idle)
                 now = time.perf_counter()
                 if t_first is not None and responses:
                     steps += 1
