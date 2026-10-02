@@ -99,6 +99,7 @@ def test_runtime_constructor_validates_without_model_load(probe):
 def test_live_switch_restores_after_exception(probe, monkeypatch):
     from mlx2 import memory
     import sys
+    import mlx2.runtime.models as models_pkg
     # Host doubles exercise scope/restoration without constructing Metal kernels.
     def toggle(getter, setter, field="_ENABLED"):
         module = SimpleNamespace(**{field: True})
@@ -113,6 +114,9 @@ def test_live_switch_restores_after_exception(probe, monkeypatch):
                          ("qwen4_qsa_scores", qsa), ("qwen4_routed_decode", routed),
                          ("qwen4_exp", SimpleNamespace())):
         monkeypatch.setitem(sys.modules, "mlx2.runtime.models." + name, module)
+        # `from mlx2.runtime.models import X` returns the package attribute once
+        # an earlier test imported the real module; patch it too.
+        monkeypatch.setattr(models_pkg, name, module, raising=False)
     model = SimpleNamespace(named_modules=lambda: [])
     original = memory.host_term_reserve_credit_bytes
     with ExitStack() as stack:

@@ -193,7 +193,7 @@ def main():
         t_first = b.stamps()[0]
         for x in lanes:
             x.wait()
-        gaps_in, gaps_before, tokens_in, tokens_before, span_before = [], [], 0, 0, 0.0
+        gaps_in, gaps_before, tokens_in = [], [], 0
         for x in lanes:
             st = x.stamps()
             gaps_in += [(q - p) * 1e3 for p, q in zip(st, st[1:]) if t_sub <= q <= t_first + 0.05]

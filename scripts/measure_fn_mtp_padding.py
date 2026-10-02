@@ -196,7 +196,7 @@ def main():
         insert = {"max_tokens": [a.gen] * batch,
                   "lane_rngs": [LaneRNG(1 + i) for i in range(batch)],
                   "self_mtp_configs": [{"sampling_temp": 0.0}] * batch}
-        uids = gen.insert(prompts, **insert)
+        gen.insert(prompts, **insert)
         records = []
         state["records"], state["timed"] = records, timed
         steps = []
