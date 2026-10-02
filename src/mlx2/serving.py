@@ -2168,6 +2168,15 @@ class ServingEngine:
         self.prefill_scheduling_policy = (
             prefill_order.as_dict() if prefill_order.enabled else None
         )
+        from .runtime.adaptive_policy import DecodeFirstPublish
+
+        # Decode-first publication (mlx-vlm #1630 port); absent = off.
+        decode_first = DecodeFirstPublish.from_value(
+            (execution_policy or {}).get("decode_first")
+        )
+        self.decode_first_policy = (
+            decode_first.as_dict() if decode_first.enabled else None
+        )
         # Server-owned decode-fairness overrides; {} keeps today's interleave.
         self.decode_fairness_overrides = decode_fairness_overrides(
             (execution_policy or {}).get("decode_fairness")
@@ -5228,6 +5237,7 @@ class ServingEngine:
                         "moe_expert_streaming",
                         "dense_weight_streaming",
                         "prefill_scheduling",
+                        "decode_first",
                         "decode_fairness",
                         "constrained_tool_grammar",
                         "tolerant_tool_markers",
@@ -5767,6 +5777,13 @@ class ServingEngine:
                         "self-MTP route"
                     )
                 settings["prefill_scheduling"] = dict(self.prefill_scheduling_policy)
+            if self.decode_first_policy is not None:
+                if external_draft or prompt_lookup:
+                    raise ValueError(
+                        "decode_first requires the ordinary or native "
+                        "self-MTP route"
+                    )
+                settings["decode_first"] = dict(self.decode_first_policy)
             prompt_lookup_policy = {}
             if "prompt_lookup" in (self.execution_policy or {}):
                 # This block is carved out of the adapter's unknown-key check
@@ -6506,6 +6523,7 @@ class ServingEngine:
                             else {}
                         ),
                         prefill_scheduling=self.prefill_scheduling_policy,
+                        decode_first=self.decode_first_policy,
                         self_mtp=config if self.mtp else None,
                         mtp_admission=_make_self_mtp_admission_callback(
                             controller,

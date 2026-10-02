@@ -314,6 +314,100 @@ class PrefillOrder:
         _bump(self.counters, "one_slice_clamps")
 
 
+DECODE_FIRST_ENV = "MLX2_DECODE_FIRST"
+_DECODE_FIRST_ENV_MODES = {"0": "off", "order": "order", "1": "all", "all": "all"}
+
+
+@dataclass
+class DecodeFirstPublish:
+    """Publish a round's decode tokens before that round's prefill work.
+
+    Ported from mlx-vlm #1630 (MIT), see provenance.  Off (the default) a
+    ``BatchGenerator.next`` call runs one round, decode then prefill, and
+    returns both phases' responses together, so a decode token reaches the
+    serving loop (and the client) only after the prefill slice that follows
+    it.  On, ``next`` returns as soon as the decode phase has produced
+    tokens; the same round's prefill phase runs at the start of the next
+    call.  The device work and its order are unchanged; only the host return
+    point moves.  A mixed round (one fused forward carrying the prompt slice
+    and every decode row) cannot be split: its decode rows emerge from the
+    shared trunk together with the slice.
+
+    ``shared_prefill_budget`` additionally shares one prefill token budget
+    across the rows that prefill in the same round (rows x padded width, as
+    #1630 counts it) instead of giving each row its own full slice.
+    ``prefill_token_budget`` caps that budget; ``None`` uses the round's
+    slice (the decode-fairness or adaptive slice when one applies, else the
+    prefill step).
+
+    ``MLX2_DECODE_FIRST`` is read per round: ``0`` is the kill switch (off
+    whatever the policy says), ``order`` forces the ordering alone, ``1`` or
+    ``all`` forces ordering and the shared budget.
+    """
+
+    enabled: bool = False
+    shared_prefill_budget: bool = True
+    prefill_token_budget: int | None = None
+    counters: dict[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("decode_first enabled must be boolean")
+        if not isinstance(self.shared_prefill_budget, bool):
+            raise ValueError("decode_first shared_prefill_budget must be boolean")
+        if self.prefill_token_budget is not None:
+            self.prefill_token_budget = _positive_integer(
+                self.prefill_token_budget, name="decode_first prefill_token_budget"
+            )
+
+    @classmethod
+    def from_value(
+        cls, value: Mapping[str, Any] | bool | DecodeFirstPublish | None
+    ) -> DecodeFirstPublish:
+        """Parse the server-owned ``decode_first`` object; absent = off."""
+        if value is None or value is False:
+            return cls()
+        if isinstance(value, cls):
+            return value
+        if value is True:
+            return cls(enabled=True)
+        if not isinstance(value, Mapping):
+            raise ValueError("decode_first must be a boolean or an object")
+        allowed = {"enabled", "shared_prefill_budget", "prefill_token_budget"}
+        unknown = set(value) - allowed
+        if unknown:
+            raise ValueError(f"unknown decode_first settings: {sorted(unknown)}")
+        return cls(
+            enabled=value.get("enabled", True),
+            shared_prefill_budget=value.get("shared_prefill_budget", True),
+            prefill_token_budget=value.get("prefill_token_budget"),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "shared_prefill_budget": self.shared_prefill_budget,
+            "prefill_token_budget": self.prefill_token_budget,
+        }
+
+    def mode(self, environ: Mapping[str, str] | None = None) -> str:
+        """``off``, ``order`` or ``all`` for this round."""
+        import os
+
+        raw = (environ if environ is not None else os.environ).get(DECODE_FIRST_ENV)
+        if raw is not None and raw.strip().lower() in _DECODE_FIRST_ENV_MODES:
+            forced = _DECODE_FIRST_ENV_MODES[raw.strip().lower()]
+            if forced == "off" and self.enabled:
+                _bump(self.counters, "kill_switch_rounds")
+            return forced
+        if not self.enabled:
+            return "off"
+        return "all" if self.shared_prefill_budget else "order"
+
+    def bump(self, key: str, amount: int = 1) -> None:
+        _bump(self.counters, key, amount)
+
+
 @dataclass
 class CohortAdaptiveMTPDepth:
     """One cost-aware draft-depth decision for an entire physical cohort.

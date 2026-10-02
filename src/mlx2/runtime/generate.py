@@ -276,6 +276,15 @@ def maybe_quantize_kv_cache(
                 ) from exc
 
 
+def _drive_round(round_):
+    """Run a scheduler round generator to completion; return its result."""
+    try:
+        while True:
+            next(round_)
+    except StopIteration as stop:
+        return stop.value
+
+
 def _right_pad_prompts(prompts, max_length=None):
     if max_length is None:
         max_length = max((len(p) for p in prompts))
@@ -3004,6 +3013,7 @@ class BatchGenerator:
         copy_draft=None,
         mtp_acceptance_log: Optional[Any] = None,
         prefill_depth_budget: Optional[int] = None,
+        decode_first: Optional[Union[bool, Mapping[str, Any]]] = None,
     ):
         if decode_priority_cadence < 1:
             raise ValueError("decode_priority_cadence must be positive")
@@ -3139,6 +3149,11 @@ class BatchGenerator:
         self.prefill_order = PrefillOrder.from_value(prefill_scheduling)
         if self.prefill_order.enabled:
             self._sync_prefill_order_stats()
+        from .adaptive_policy import DecodeFirstPublish
+
+        # Default off: ``next`` keeps returning one whole round per call.
+        self.decode_first = DecodeFirstPublish.from_value(decode_first)
+        self._decode_first_pending = None
         for key in (
             "prefill_rounds",
             "prefill_only_rounds",
@@ -3350,6 +3365,12 @@ class BatchGenerator:
         )
 
     def close(self):
+        pending = getattr(self, "_decode_first_pending", None)
+        if pending is not None:
+            # A round whose decode phase was published but whose prefill
+            # phase never ran: nothing of it is device-side yet.
+            self._decode_first_pending = None
+            pending[0].close()
         if getattr(self, "_old_wired_limit", None) is not None:
             mx.synchronize(self._stream)
             mx.set_wired_limit(self._old_wired_limit)
@@ -5485,6 +5506,17 @@ class BatchGenerator:
         return self._promote_ready_prompts(self._plain_fallback_batch)
 
     def _next_mtp(self):
+        return _drive_round(self._round_mtp())
+
+    def _round_mtp(self):
+        """One self-MTP round as a generator.
+
+        It yields once, with the decode phase's responses, at the boundary
+        between the decode phase and the admission/prefill phase, and returns
+        ``(prompt_responses, generation_responses)``.  ``_next_mtp`` runs it
+        to completion (one whole round); decode-first publication returns at
+        the yield and resumes the prefill phase on the next ``next`` call.
+        """
         generation_responses = []
         prompt_responses = []
         had_decode_work = self._has_active_decode()
@@ -5556,6 +5588,8 @@ class BatchGenerator:
                 ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL,
             ):
                 mx.clear_cache()
+        # Decode/prefill phase boundary (decode-first publication point).
+        yield generation_responses
         prompt_responses.extend(self._admit_target_only_plain_fallbacks())
         occupied = len(self._generation_batch.mtp_cycle_state()) + len(
             self._plain_fallback_batch
@@ -5720,6 +5754,8 @@ class BatchGenerator:
                 if batch is not None:
                     self._generation_batch.extend(batch)
             else:
+                if not has_cohort:
+                    n = self._shared_budget_rows(candidates[:n])
                 (batch, progress) = self._make_mtp_batch(n)
                 if batch is not None:
                     self._generation_batch.extend(batch)
@@ -6102,11 +6138,19 @@ class BatchGenerator:
         return ([response], generation_responses)
 
     def _next(self):
+        return _drive_round(self._round())
+
+    def _round(self):
+        """One scheduler round as a generator; see :meth:`_round_mtp`."""
         if self.self_mtp is not None:
-            return self._next_mtp()
+            return (yield from self._round_mtp())
         if self._mixed_round_ready():
             mixed = self._next_mixed()
             if mixed is not None:
+                # One fused forward: the decode rows emerge from the shared
+                # trunk together with the prompt slice, so there is no
+                # decode-only point to publish from.
+                self._round_fused = True
                 return mixed
         generation_responses = []
         prompt_responses = []
@@ -6139,6 +6183,8 @@ class BatchGenerator:
                 reclaim_interval,
             ):
                 mx.clear_cache()
+        # Decode/prefill phase boundary (decode-first publication point).
+        yield generation_responses
         if len(self._generation_batch) >= self.completion_batch_size:
             return (prompt_responses, generation_responses)
         # A persistent concept lane is deliberately a request-private B=1
@@ -6216,18 +6262,26 @@ class BatchGenerator:
             )
             return (prompt_responses, generation_responses)
         prompts = []
+        round_slice = (
+            adaptive_chunk
+            if self._bounded_prefill_chunks()
+            else self.prefill_step_size
+        )
+        round_slice = self._shared_prefill_width(
+            round_slice,
+            sum(
+                1
+                for seq in self._currently_processing
+                if not (len(seq) > 6 and seq[6] is not None)
+            ),
+        )
         for i, seq in enumerate(self._currently_processing):
             response = PromptProcessingBatch.Response(
                 self._prompt_batch.uids[i], 0, False, False
             )
             segments = seq[0]
             covered = int(seq[4] or 0) + int(seq[1])
-            step_size = self._depth_bounded_step(
-                adaptive_chunk
-                if self._bounded_prefill_chunks()
-                else self.prefill_step_size,
-                covered,
-            )
+            step_size = self._depth_bounded_step(round_slice, covered)
             if len(seq) > 6 and seq[6] is not None:
                 step_size = len(segments[0])
             n = min(len(segments[0]), step_size)
@@ -6293,15 +6347,138 @@ class BatchGenerator:
             self._sync_decode_fairness_stats()
         return (prompt_responses, generation_responses)
 
+    def _decode_first_mode(self) -> str:
+        return getattr(self, "_decode_first_round_mode", "off")
+
+    def _shared_prefill_width(self, base: int, rows: int) -> int:
+        """Per-row slice when rows share one prefill token budget.
+
+        mlx-vlm #1630 counts the budget as rows x padded width; prompt rows
+        here are right-padded to the widest slice, so ``budget // rows`` per
+        row keeps the padded tile within the budget.  Off unless
+        decode-first publication runs in ``all`` mode.
+        """
+        base = max(1, int(base))
+        if self._decode_first_mode() != "all":
+            return base
+        policy = self.decode_first
+        budget = base
+        if policy.prefill_token_budget is not None:
+            budget = min(budget, policy.prefill_token_budget)
+        width = max(1, budget // max(1, int(rows)))
+        if width < base:
+            policy.bump("budget_split_rounds")
+            self._sync_decode_first_stats()
+        return width
+
+    def _shared_budget_rows(self, candidates) -> int:
+        """How many one-call self-MTP prompts fit one shared budget.
+
+        ``_make_mtp_batch`` prepares every admitted prompt to its end in one
+        call; without a shared budget a burst of short arrivals runs all of
+        their prefills back to back inside a single round.  The oldest
+        candidate is always admitted, so progress never stops.
+        """
+        n = len(candidates)
+        if self._decode_first_mode() != "all" or n <= 1:
+            return n
+        policy = self.decode_first
+        budget = self.prefill_step_size
+        if policy.prefill_token_budget is not None:
+            budget = min(budget, policy.prefill_token_budget)
+        total = keep = 0
+        for candidate in candidates:
+            residual = sum(len(segment) for segment in candidate[1])
+            if keep and total + residual > budget:
+                break
+            total += residual
+            keep += 1
+        if keep < n:
+            policy.bump("budget_deferred_rows", n - keep)
+            policy.bump("budget_split_rounds")
+            self._sync_decode_first_stats()
+        return keep
+
+    def _sync_decode_first_stats(self):
+        for key, value in self.decode_first.counters.items():
+            self.scheduler_stats[f"decode_first_{key}"] = int(value)
+
+    def _next_decode_first(self, mode: str):
+        """Return a round's decode responses before its prefill phase runs.
+
+        A call first finishes the previous round's pending prefill phase,
+        then runs the next round's decode phase and returns.  The device work
+        and its order are those of ``_next`` (decode k, prefill k, decode
+        k+1, ...); only the host return point moves so the serving loop can
+        deliver decode k's tokens while prefill k runs.  A round with no
+        decode output, a fused mixed round, or a round that ends before its
+        phase boundary (a deferred prefill or no admission) runs whole.
+        """
+        policy = self.decode_first
+        prompts, generations = [], []
+        resumed = self._decode_first_pending is not None
+        if resumed:
+            (pending, published) = self._decode_first_pending
+            self._decode_first_pending = None
+            (rest_prompts, rest_generations) = _drive_round(pending)
+            prompts.extend(rest_prompts)
+            generations.extend(rest_generations[published:])
+            policy.bump("prefill_phases_resumed")
+        if mode == "off":
+            # Kill switch flipped with a phase pending: finish whole rounds.
+            (more_prompts, more_generations) = self._next()
+            prompts.extend(more_prompts)
+            generations.extend(more_generations)
+            self._sync_decode_first_stats()
+            return (prompts, generations)
+        self._round_fused = False
+        round_ = self._round()
+        try:
+            decoded = next(round_)
+        except StopIteration as stop:
+            (more_prompts, more_generations) = stop.value
+            prompts.extend(more_prompts)
+            generations.extend(more_generations)
+            policy.bump(
+                "fused_rounds" if self._round_fused else "unsplit_rounds"
+            )
+            self._sync_decode_first_stats()
+            return (prompts, generations)
+        if decoded:
+            generations.extend(decoded)
+            self._decode_first_pending = (round_, len(decoded))
+            policy.bump("published_rounds")
+            policy.bump("published_tokens", len(decoded))
+        elif prompts or generations:
+            # Nothing decoded, but the resumed phase produced output: keep
+            # one prefill phase per call, as ``_next`` does.
+            self._decode_first_pending = (round_, 0)
+            policy.bump("no_decode_rounds")
+        else:
+            (more_prompts, more_generations) = _drive_round(round_)
+            prompts.extend(more_prompts)
+            generations.extend(more_generations)
+            policy.bump("no_decode_rounds")
+        self._sync_decode_first_stats()
+        return (prompts, generations)
+
     def next(self):
         """
         Get the next batch of responses.
 
         Returns:
             Tuple of prompt processing responses and generation responses.
+            With decode-first publication the generation responses are the
+            current round's decode output and the prompt responses come from
+            the previous round's prefill phase, which this call ran first.
         """
+        mode = self.decode_first.mode()
+        self._decode_first_round_mode = mode
         with mx.stream(self._stream):
-            result = self._next()
+            if mode == "off" and self._decode_first_pending is None:
+                result = self._next()
+            else:
+                result = self._next_decode_first(mode)
         self._observe_adaptive_mtp_responses(result[1])
         for response in result[1]:
             if response.finish_reason:

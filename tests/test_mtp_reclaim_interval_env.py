@@ -18,7 +18,7 @@ def _mtp_clears(monkeypatch):
     real = mx.clear_cache
 
     def counting():
-        if traceback.extract_stack()[-2].name == "_next_mtp":
+        if traceback.extract_stack()[-2].name in {"_next_mtp", "_round_mtp"}:
             hits.append(1)
         real()
 
