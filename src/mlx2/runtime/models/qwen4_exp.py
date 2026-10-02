@@ -2355,10 +2355,36 @@ class GatedResidual(nn.Module):
         decline; only the calls they decline get the raw gate (``raw``
         True).  Options sweep 2026-10-01: taking every call from the kernels
         cost ordinary B1 decode 8.5% (qualification/runs/options-sweep-20261001)."""
-        if not _hc_decode.hc_decode_enabled() or (
-            _GDN_SHAPE_STABLE_PROJECTIONS and hyper_input.shape[1] > 1
-        ):
+        if not _hc_decode.hc_decode_enabled():
             return (*self(hyper_input, raw_inject=True), True)
+        if _GDN_SHAPE_STABLE_PROJECTIONS and hyper_input.shape[1] > 1:
+            # Per token, as __call__ splits a shape-stable call, so each
+            # one-row call can still yield to the HC kernels (sweep
+            # 2026-10-02 A3).  A token they declined carries the raw gate;
+            # if the tokens disagree, finish those injects with the composed
+            # path's own 2*sigmoid(raw / hc) so all concatenate as finished.
+            with _declared_width(hyper_input.shape[1]):
+                tokens = [
+                    self.split_for_gate_inject(hyper_input[:, index : index + 1])
+                    for index in range(hyper_input.shape[1])
+                ]
+            raws = {token[3] for token in tokens}
+            if len(raws) > 1:
+                tokens = [
+                    (
+                        (m, r, 2 * mx.sigmoid(i / self.hc_count), False)
+                        if raw
+                        else (m, r, i, raw)
+                    )
+                    for (m, r, i, raw) in tokens
+                ]
+            return (
+                *(
+                    mx.concatenate([token[field] for token in tokens], axis=1)
+                    for field in range(3)
+                ),
+                tokens[0][3],
+            )
         glue = compile_glue_enabled()
         fused = self._try_hc_decode(hyper_input, glue)
         if fused is not None:

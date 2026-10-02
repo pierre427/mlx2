@@ -660,3 +660,64 @@ def test_gate_inject_yields_to_the_hc_decode_kernels(reference_kernels):
     finally:
         GI.set_fused_gate_inject_enabled(previous)
         GI.reset_qwen4_gate_inject_stats()
+
+
+def test_gate_inject_yields_per_token_under_shape_stable_projections(
+    reference_kernels, monkeypatch
+):
+    # Sweep 2026-10-02 A3: with MLX_QWEN4_GDN_SHAPE_STABLE_PROJECTIONS on, a
+    # multi-token call went raw as a whole; __call__ then split it per token
+    # and every one-row call declined the HC kernels ("raw gate inject
+    # requested").  Each token now yields to the kernels as at one token.
+    from mlx2.runtime.models import qwen4_gate_inject as GI
+
+    monkeypatch.setattr(Q, "_GDN_SHAPE_STABLE_PROJECTIONS", True)
+    layer = _stub_decoder_layer()
+    x = _x(13, rows=2, hidden=DH)
+    HCD.set_hc_decode_enabled(True)
+    previous = GI.fused_gate_inject_enabled()
+    results = {}
+    try:
+        for gate_inject in (False, True):
+            GI.set_fused_gate_inject_enabled(gate_inject)
+            GI.reset_qwen4_gate_inject_stats()
+            HCD.reset_for_tests()
+            reference_kernels["launch"] = 0
+            out = layer(x, None)
+            results[gate_inject] = (
+                reference_kernels["launch"], HCD.hc_decode_status()["declines"], out
+            )
+        counts = GI.qwen4_gate_inject_stats()["counts"]
+    finally:
+        GI.set_fused_gate_inject_enabled(previous)
+        GI.reset_qwen4_gate_inject_stats()
+    assert results[False][0] == 4  # two hyper connections x two tokens
+    assert results[True][0] == results[False][0]
+    assert "raw gate inject requested" not in results[True][1]
+    assert counts["decline:hc decode kernels served the call"] == 4
+    assert _same(results[True][2], results[False][2])
+
+
+def test_shape_stable_gate_inject_mixed_tokens_finish_the_inject(monkeypatch):
+    # A token the kernels decline carries the raw gate; mixed with a served
+    # token, its inject is finished with the composed 2*sigmoid(raw / hc).
+    monkeypatch.setattr(Q, "_GDN_SHAPE_STABLE_PROJECTIONS", True)
+    m = _module(seed=5, hidden=DH, dense_inject=True)
+    x = _x(31, rows=2, hidden=DH)
+    want = m(x)
+    HCD.set_hc_decode_enabled(True)
+    served = iter([None, "fused"])
+
+    def try_once(hyper_input, glue):
+        if next(served) is None:
+            return None
+        was = HCD.set_hc_decode_enabled(False)
+        try:
+            return m(hyper_input)
+        finally:
+            HCD.set_hc_decode_enabled(was)
+
+    monkeypatch.setattr(m, "_try_hc_decode", try_once)
+    mixed, residual, inject, raw = m.split_for_gate_inject(x)
+    assert raw is False
+    assert _same(mixed, want[0]) and _same(inject, want[2])
