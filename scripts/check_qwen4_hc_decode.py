@@ -42,6 +42,39 @@ NO_LAUNCH = {"Reshape", "Broadcast", "Squeeze", "ExpandDims", "Transpose", "AsSt
              "StopGradient", "Depends"}
 
 
+def gate_failures(report):
+    """Why this gate failed; empty when it passed.
+
+    A fused arm that declined runs the composed ops, so "fused == composed"
+    holds vacuously.  Every comparison therefore also needs the kernel to
+    have served the call (``fused_declined`` counts the ones it did not).
+    """
+    failures = []
+    exact = report.get("exact") or {}
+    if not exact.get("cases"):
+        failures.append("exact: no cases compared")
+    if exact.get("fused_declined"):
+        failures.append(f"exact: {exact['fused_declined']} fused calls declined (vacuous comparison)")
+    if exact.get("all_bit_identical") is not True:
+        failures.append(f"exact: {exact.get('mismatched_cases')} mismatched cases")
+    table = report.get("elementwise_table_mismatches") or {}
+    bad = {k: v for k, v in table.items() if k != "finite_inputs" and v}
+    if bad:
+        failures.append(f"elementwise table mismatches: {bad}")
+    window = report.get("row_exact_window")
+    if window is not None:
+        if window.get("fused_declined"):
+            failures.append(f"row-exact: {window['fused_declined']} fused calls declined")
+        if window.get("all_rows_equal") is not True or not window.get("rows"):
+            failures.append("row-exact: rows differ or none compared")
+    chain = report.get("chain") or {}
+    if chain.get("fused_declined"):
+        failures.append(f"chain: {chain['fused_declined']} fused calls declined")
+    if report.get("chain_bit_identical") is not True:
+        failures.append("chain: not bit-identical")
+    return failures
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", type=Path, default=DEFAULT_MODEL)
@@ -144,10 +177,15 @@ def main():
         HCD.set_hc_decode_enabled(False)
         return module(x)
 
+    declined = {"count": 0}
+
     def fused(module, x):
+        before = HCD.hc_decode_status()["calls"]
         HCD.set_hc_decode_enabled(True)
         out = module(x)
         HCD.set_hc_decode_enabled(False)
+        if HCD.hc_decode_status()["calls"] <= before:
+            declined["count"] += 1  # composed ops ran: not a comparison
         return out
 
     def bits_equal(p, q):
@@ -193,6 +231,7 @@ def main():
               "formats": formats, "elementwise_table_mismatches": elementwise}
     scales = [0.02, 0.3, 1.0, 4.0, 30.0]
     total_mismatch = 0
+    declined["count"] = 0
     for name, module in modules.items():
         stats = {"cases": 0, "mixed_equal": 0, "inject_equal": 0, "normed_equal": 0,
                  "act_equal": 0, "max_abs_mixed": 0.0, "max_abs_inject": 0.0, "by_rows": {}}
@@ -240,7 +279,9 @@ def main():
         print(name, json.dumps(stats), flush=True)
     status = HCD.hc_decode_status()
     report["exact"] = {"all_bit_identical": total_mismatch == 0,
-                       "mismatched_cases": total_mismatch, "status": status}
+                       "mismatched_cases": total_mismatch, "status": status,
+                       "cases": sum(m["cases"] for m in report["modules"].values()),
+                       "fused_declined": declined["count"]}
     print("EXACT", total_mismatch == 0, "mismatched", total_mismatch, "status", status, flush=True)
 
     # ---- row-exact windows -----------------------------------------------
@@ -249,6 +290,7 @@ def main():
 
         HCD.set_hc_row_exact_enabled(True)
         re_stats = {"cases": 0, "rows_equal": 0, "rows": 0, "stages": {}}
+        declined["count"] = 0
         for name, module in modules.items():
             for case in range(a.row_exact_cases):
                 rows = (2, 3, 5, 8, 17)[case % 5]
@@ -276,6 +318,7 @@ def main():
                         re_stats["stages"][key] = re_stats["stages"].get(key, 0) + n
         HCD.set_hc_row_exact_enabled(False)
         re_stats["all_rows_equal"] = re_stats["rows_equal"] == re_stats["rows"]
+        re_stats["fused_declined"] = declined["count"]
         report["row_exact_window"] = re_stats
         print("ROWEXACT", json.dumps(re_stats), flush=True)
 
@@ -310,19 +353,24 @@ def main():
     chain_modules = [m for n, m in modules.items() if "layers." in n and "mtp" not in n]
 
     def chain(on, x):
+        before = HCD.hc_decode_status()["calls"]
         HCD.set_hc_decode_enabled(on)
         for i in range(a.chain):
             m = chain_modules[i % len(chain_modules)]
             mixed, residual, inject = m(x)
             x = Q._apply_inject(residual, mixed, inject)
         HCD.set_hc_decode_enabled(False)
+        if on:
+            declined["count"] += a.chain - (HCD.hc_decode_status()["calls"] - before)
         return x
 
     x0 = (mx.random.normal((1, 1, width)) * 0.5).astype(mx.bfloat16)
     mx.eval(x0)
     ref_final = chain(False, x0)
+    declined["count"] = 0
     got_final = chain(True, x0)
     mx.eval(ref_final, got_final)
+    report["chain"] = {"fused_declined": declined["count"]}
     report["chain_bit_identical"] = bits_equal(ref_final, got_final)
     print("CHAIN identical", report["chain_bit_identical"], flush=True)
     times = {"composed": [], "fused": []}
@@ -342,7 +390,12 @@ def main():
     report["micro_speedup"] = (report["micro_us_per_call"]["composed"]["median"]
                                / report["micro_us_per_call"]["fused"]["median"])
     print("MICRO", json.dumps(report["micro_us_per_call"]), "speedup", report["micro_speedup"], flush=True)
+    report["failures"] = gate_failures(report)
+    report["passed"] = not report["failures"]
     Path(a.out).write_text(json.dumps(report, indent=1))
+    if report["failures"]:
+        print("GATE FAILED", report["failures"], flush=True)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
