@@ -338,6 +338,12 @@ def main():
             cell = {"rep": rep, "decode_lanes": d}
             set_arm("f0")
             cell["alone"] = alone(d)
+            if lane is not None:
+                # The prompt alone (one 8K chunk) with the lane on: the
+                # reference a +inv arm's sliced prefill must reproduce.
+                lane.enabled = True
+                cell["alone_inv"] = alone(d)
+                lane.enabled = False
             for name in order:
                 set_arm(name)
                 c = contended(d)
@@ -366,6 +372,9 @@ def main():
             identity[key] = {
                 "prompt_vs_f0": c["prompt_tokens_out"] == ref["prompt_tokens_out"],
                 "prompt_vs_alone": c["prompt_tokens_out"] == cell["alone"]["tokens"],
+                **({"prompt_vs_alone_same_lane": c["prompt_tokens_out"] == cell[
+                    "alone_inv" if arms[name]["invariant"] else "alone"]["tokens"]}
+                   if "alone_inv" in cell else {}),
                 "neighbours_vs_f0": [x == y for x, y in zip(c["lane_tokens_out"], ref["lane_tokens_out"])],
             }
     for d in a.decode_lanes:

@@ -72,8 +72,12 @@ def main():
         elif arm == "lane" and not handle.installed:
             state["handle"] = inv.install(trunk)
             assert state["handle"].installed, state["handle"].refusal
-        expect = inv.InvariantQuantizedLinear if arm == "lane" else __import__("mlx.nn").nn.QuantizedLinear
-        assert type(trunk.layers[0].mlp.gate) is expect
+        import mlx.nn as nn
+
+        expect = inv.InvariantQuantizedLinear if arm == "lane" else nn.QuantizedLinear
+        probe = next(m for _, m in trunk.named_modules()
+                     if isinstance(m, nn.QuantizedLinear))
+        assert type(probe) is expect
 
     def prefill(step):
         cache = model.make_cache()
