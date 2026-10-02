@@ -5459,6 +5459,16 @@ class ServingEngine:
                 "mtp": self.mtp,
                 "tenant_scoped_cache": self.tenant_scoped_cache,
                 "environment": adapter.environment,
+                # The adapter's whole execution policy is route identity.
+                # Options that are neither environment switches nor batch
+                # config (Flash-Next row_exact_verify, mtp_draft_vocab,
+                # tensorfold_qmv_rows, ...) otherwise left the settings equal
+                # to the default route's, so a default receipt qualified them.
+                **(
+                    {"adapter_policy": adapter.policy.as_dict()}
+                    if callable(getattr(getattr(adapter, "policy", None), "as_dict", None))
+                    else {}
+                ),
                 "adaptive_mtp_depth": self.adaptive_mtp_policy.as_dict(),
                 "mtp_acceptance_log": (
                     None if self.mtp_acceptance_log is None else {"enabled": True}
