@@ -46,6 +46,11 @@ class DecodeTimeFairness:
     fallback_cap: int = 512
     floor: int = 64
     grid: int = 64
+    # Contended-slice row floor (0 = off, today's behaviour).  When set, a
+    # prefill slice taken beside decode lanes is lifted to at least this many
+    # rows (never above the prefill step), so a slow stall-target estimate
+    # cannot push it into the small-M regime where a row costs 2-3x more.
+    slice_floor: int = 0
     debt_seconds: float = 0.0
     best_prefill_tokens_per_second: float = 0.0
     counters: dict[str, int] = field(default_factory=dict)
@@ -57,6 +62,19 @@ class DecodeTimeFairness:
             raise ValueError("decode stall_target_ms must be finite and positive")
         if min(self.fallback_cap, self.floor, self.grid) < 1:
             raise ValueError("decode fairness token limits must be positive")
+        if (
+            isinstance(self.slice_floor, bool)
+            or not isinstance(self.slice_floor, int)
+            or self.slice_floor < 0
+        ):
+            raise ValueError("decode slice_floor must be a nonnegative integer")
+        if self.slice_floor % self.grid:
+            raise ValueError(
+                f"decode slice_floor must be a multiple of the {self.grid}-row grid"
+            )
+        if self.slice_floor:
+            # Present only when configured, so default counters are unchanged.
+            self.counters.setdefault("slice_floor_lifts", 0)
         for name in (
             "prefill_chunks",
             "debt_deferrals",
@@ -90,6 +108,20 @@ class DecodeTimeFairness:
         else:
             value = self.fallback_cap
         return max(self.floor, min(configured, value))
+
+    def floor_slice(self, chunk: int, limit: int, *, contended: bool) -> int:
+        """Lift a contended prefill slice to ``slice_floor`` rows.
+
+        ``limit`` is the configured prefill step; the floor never exceeds it.
+        Off (``slice_floor`` 0), disabled, or uncontended returns ``chunk``.
+        """
+        chunk = int(chunk)
+        if not self.enabled or not contended or self.slice_floor <= 0:
+            return chunk
+        lifted = min(max(1, int(limit)), max(chunk, self.slice_floor))
+        if lifted > chunk:
+            _bump(self.counters, "slice_floor_lifts")
+        return lifted
 
     def may_prefill(self, *, contended: bool) -> bool:
         if not self.enabled or not contended:

@@ -419,3 +419,61 @@ def test_batch_scheduler_turns_defer_prefill_until_decode_repays_debt(monkeypatc
     assert scheduler.decode_time_fairness.debt_seconds == pytest.approx(0.1)
     assert scheduler.scheduler_stats["decode_fairness_debt_deferrals"] == 1
     assert scheduler.scheduler_stats["decode_fairness_debt_repayments"] == 2
+
+
+def test_decode_slice_floor_lifts_contended_slices_only():
+    off = DecodeTimeFairness(enabled=True)
+    assert off.slice_floor == 0
+    assert off.floor_slice(448, 8192, contended=True) == 448
+    assert "slice_floor_lifts" not in off.counters
+
+    policy = DecodeTimeFairness(enabled=True, slice_floor=1024)
+    assert policy.floor_slice(448, 8192, contended=True) == 1024
+    assert policy.floor_slice(448, 8192, contended=False) == 448
+    assert policy.floor_slice(2048, 8192, contended=True) == 2048
+    # Never above the configured prefill step.
+    assert policy.floor_slice(448, 512, contended=True) == 512
+    assert policy.counters["slice_floor_lifts"] == 2
+    disabled = DecodeTimeFairness(enabled=False, slice_floor=1024)
+    assert disabled.floor_slice(448, 8192, contended=True) == 448
+
+
+@pytest.mark.parametrize("bad", [-64, 100, True, 256.0])
+def test_decode_slice_floor_is_grid_aligned_and_integral(bad):
+    with pytest.raises(ValueError):
+        DecodeTimeFairness(enabled=True, slice_floor=bad)
+
+
+@pytest.mark.parametrize(("slice_floor", "expected"), [(0, 448), (256, 448), (1024, 1024)])
+def test_adaptive_prefill_decision_applies_contended_slice_floor(slice_floor, expected):
+    from mlx2.runtime import generate
+    from mlx2.runtime.adaptive_policy import PrefillOrder
+
+    class Scheduler(generate.BatchGenerator):
+        def __del__(self):
+            pass
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.adaptive_prefill = True
+    scheduler.adaptive_prefill_target_itl_ms = 1500.0
+    scheduler.adaptive_prefill_max_defer_ms = 2000.0
+    scheduler.adaptive_prefill_slices = (64, 128, 256, 512)
+    scheduler._last_decode_interval_ms = None
+    scheduler._last_decode_duration_ms = 0.0
+    scheduler._prefill_ms_per_token_ewma = 1.1
+    scheduler.prefill_step_size = 8192
+    scheduler.prefill_order = PrefillOrder()
+    scheduler.scheduler_stats = defaultdict(int)
+    scheduler.decode_time_fairness = DecodeTimeFairness(
+        enabled=True, slice_floor=slice_floor
+    )
+    # Measured best rate 900 tok/s at the 500 ms stall target -> 448 rows.
+    scheduler.decode_time_fairness.best_prefill_tokens_per_second = 900.0
+    scheduler._has_active_decode = lambda: True
+    scheduler._has_prefill_work = lambda: True
+    scheduler._oldest_prefill_age_ms = lambda now: 0.0
+
+    defer, chunk, forced = scheduler._adaptive_prefill_decision(0.0)
+    assert (defer, chunk, forced) == (False, expected, False)
+    lifts = scheduler.scheduler_stats.get("decode_fairness_slice_floor_lifts")
+    assert lifts == (1 if expected > 448 else (0 if slice_floor else None))

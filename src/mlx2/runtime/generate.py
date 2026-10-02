@@ -5614,6 +5614,10 @@ class BatchGenerator:
                 adaptive_chunk = self._fairness().cap(
                     adaptive_chunk, contended=True
                 )
+                adaptive_chunk = self._fairness().floor_slice(
+                    adaptive_chunk, self.prefill_step_size,
+                    contended=self._has_active_decode(),
+                )
                 self._sync_decode_fairness_stats()
             if adaptive_residual and adaptive_defer:
                 return (prompt_responses, generation_responses)
@@ -5790,6 +5794,9 @@ class BatchGenerator:
                 self.prefill_step_size, contended=contended
             )
             chunk = self._one_slice_bound(chunk)
+            chunk = self._fairness().floor_slice(
+                chunk, self.prefill_step_size, contended=contended
+            )
             self._sync_decode_fairness_stats()
             return (False, chunk, False)
         forced = self._oldest_prefill_age_ms(now) >= self.adaptive_prefill_max_defer_ms
@@ -5806,6 +5813,9 @@ class BatchGenerator:
             chunk = self.adaptive_prefill_slices[0]
         chunk = self._fairness().cap(chunk, contended=contended)
         chunk = self._one_slice_bound(chunk)
+        chunk = self._fairness().floor_slice(
+            chunk, self.prefill_step_size, contended=contended
+        )
         self._sync_decode_fairness_stats()
         return (False, chunk, forced)
 

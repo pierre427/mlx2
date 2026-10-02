@@ -325,3 +325,74 @@ def test_qualification_engine_propagates_adaptive_mtp_identity_and_policy(
         assert captured["decode_time_fairness"]["enabled"]
     finally:
         engine.close()
+
+
+def test_decode_fairness_overrides_are_absent_by_default_and_strict():
+    from mlx2.serving import decode_fairness_overrides
+
+    assert decode_fairness_overrides(None) == {}
+    assert decode_time_fairness_policy(
+        external_draft=False, prompt_lookup=False, overrides={}
+    ) == {"enabled": True, "fair_share": 0.5, "stall_target_ms": 500.0}
+    assert decode_fairness_overrides({"slice_floor": 0}) == {}
+    overrides = decode_fairness_overrides(
+        {"slice_floor": 1024, "stall_target_ms": 850}
+    )
+    assert overrides == {"slice_floor": 1024, "stall_target_ms": 850.0}
+    assert decode_time_fairness_policy(
+        external_draft=False, prompt_lookup=False, overrides=overrides
+    ) == {"enabled": True, "fair_share": 0.5, "stall_target_ms": 850.0,
+          "slice_floor": 1024}
+    for bad in (
+        [],
+        {"fair_share": 0.25},
+        {"slice_floor": 100},
+        {"slice_floor": -64},
+        {"stall_target_ms": 0},
+        {"stall_target_ms": True},
+    ):
+        with pytest.raises(ValueError):
+            decode_fairness_overrides(bad)
+
+
+def test_serving_parses_decode_fairness_at_construction():
+    with pytest.raises(ValueError, match="slice_floor"):
+        ServingEngine(
+            "fixture",
+            adapter_factory=lambda *_a, **_k: None,
+            execution_policy={"decode_fairness": {"slice_floor": 100}},
+        )
+
+
+@pytest.mark.parametrize(
+    ("prompt_lookup", "backend"), [(True, None), (False, "external_draft")]
+)
+def test_serving_rejects_decode_fairness_off_batch_generator_routes(
+    monkeypatch, prompt_lookup, backend
+):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_apc_interior_route_selection import _UnsupportedInteriorAdapter
+
+    monkeypatch.setattr(serving, "runtime_identity", lambda: {"source_sha256": "fake"})
+
+    class Adapter(_UnsupportedInteriorAdapter):
+        pass
+
+    Adapter.backend = backend
+    engine = ServingEngine(
+        "fixture",
+        adapter_factory=Adapter,
+        qualification_mode=True,
+        mtp=False,
+        prompt_lookup=prompt_lookup,
+        execution_policy={"decode_fairness": {"slice_floor": 1024}},
+    )
+    try:
+        engine.thread.join(5)
+        assert not engine.ready.is_set()
+        assert "decode_fairness requires" in (engine.error or "")
+    finally:
+        engine.close()

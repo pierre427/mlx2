@@ -530,13 +530,59 @@ def budget_interior_checkpoint_positions(
     return tuple(reversed(selected)), charged
 
 
-def decode_time_fairness_policy(*, external_draft: bool, prompt_lookup: bool) -> dict:
-    """Return only the policy actually constructed by the selected route."""
-    return {
+_DECODE_FAIRNESS_KEYS = frozenset({"stall_target_ms", "slice_floor"})
+
+
+def decode_fairness_overrides(value) -> dict:
+    """Validate the server-owned ``decode_fairness`` execution-policy object.
+
+    Absent (None) keeps today's interleave.  ``stall_target_ms`` (positive)
+    replaces the 500 ms stall target; ``slice_floor`` (a multiple of 64 rows,
+    0 = off) lifts every prefill slice taken beside decode lanes to at least
+    that many rows.  Both change scheduling only.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("decode_fairness must be an object")
+    unknown = set(value) - _DECODE_FAIRNESS_KEYS
+    if unknown:
+        raise ValueError(f"unknown decode_fairness settings: {sorted(unknown)}")
+    out = {}
+    if "stall_target_ms" in value:
+        target = value["stall_target_ms"]
+        if (
+            isinstance(target, bool)
+            or not isinstance(target, (int, float))
+            or not math.isfinite(target)
+            or target <= 0
+        ):
+            raise ValueError("decode_fairness stall_target_ms must be positive")
+        out["stall_target_ms"] = float(target)
+    if "slice_floor" in value:
+        from .runtime.adaptive_policy import DecodeTimeFairness
+
+        DecodeTimeFairness(slice_floor=value["slice_floor"])  # validates
+        if value["slice_floor"]:
+            out["slice_floor"] = int(value["slice_floor"])
+    return out
+
+
+def decode_time_fairness_policy(
+    *, external_draft: bool, prompt_lookup: bool, overrides=None
+) -> dict:
+    """Return only the policy actually constructed by the selected route.
+
+    ``overrides`` (validated by :func:`decode_fairness_overrides`) appear only
+    when configured, so a default policy's identity is unchanged.
+    """
+    policy = {
         "enabled": not (external_draft or prompt_lookup),
         "fair_share": 0.5,
         "stall_target_ms": 500.0,
     }
+    policy.update(overrides or {})
+    return policy
 
 
 class HostPromptCache:
@@ -2120,6 +2166,10 @@ class ServingEngine:
         )
         self.prefill_scheduling_policy = (
             prefill_order.as_dict() if prefill_order.enabled else None
+        )
+        # Server-owned decode-fairness overrides; {} keeps today's interleave.
+        self.decode_fairness_overrides = decode_fairness_overrides(
+            (execution_policy or {}).get("decode_fairness")
         )
         self.spomin_policy = ServingSpominPolicy.from_value(spomin_live_surgery)
         self.spomin_manager = None
@@ -5177,6 +5227,7 @@ class ServingEngine:
                         "moe_expert_streaming",
                         "dense_weight_streaming",
                         "prefill_scheduling",
+                        "decode_fairness",
                         "constrained_tool_grammar",
                         "tolerant_tool_markers",
                         "constrained_tool_grammar_auto",
@@ -5706,9 +5757,14 @@ class ServingEngine:
                     self.execution_policy["prompt_lookup"]
                 )
             settings["prompt_lookup"] = dict(prompt_lookup_policy)
+            if self.decode_fairness_overrides and (external_draft or prompt_lookup):
+                raise ValueError(
+                    "decode_fairness requires the ordinary or native self-MTP route"
+                )
             settings["decode_time_fairness"] = decode_time_fairness_policy(
                 external_draft=external_draft,
                 prompt_lookup=prompt_lookup,
+                overrides=self.decode_fairness_overrides,
             )
             settings["speculation"] = (
                 "external_draft"
