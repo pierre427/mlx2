@@ -572,6 +572,37 @@ class TestQSAIndexedReference(unittest.TestCase):
         self.assertTrue(status['last_decision']['device_attested'])
         self.assertEqual(status['last_decision']['device_counter_observed'], 2)
 
+    def test_foreign_thread_status_does_not_evaluate_pending_device_counter(self):
+        # The engine worker builds counters on its thread-local generation
+        # stream; a probe or request thread reading diagnostics must not
+        # evaluate them (MLX: "There is no Stream(...) in current thread").
+        import threading
+        indexed.qsa_indexed_status(reset=True)
+        stream = mx.new_thread_local_stream(mx.cpu)
+        attached, read, done = threading.Event(), threading.Event(), threading.Event()
+        owner = {}
+
+        def worker():
+            with mx.stream(stream):
+                counter = mx.array([1], dtype=mx.uint32) + mx.array([0], dtype=mx.uint32)
+                indexed._device_attest_output(mx.array([7], dtype=mx.int32), counter, length=3, context=16384, splits=32, hpt=12, candidate=(384, 32, 12), geometry_key='B1-L3-thread', candidate_timings_ms={})
+                attached.set()
+                read.wait(10)
+                owner['status'] = indexed.qsa_indexed_status()
+            done.set()
+        thread = threading.Thread(target=worker)
+        thread.start()
+        try:
+            self.assertTrue(attached.wait(10))
+            foreign = indexed.qsa_indexed_status()
+        finally:
+            read.set()
+            thread.join(10)
+        self.assertTrue(done.is_set())
+        self.assertEqual(foreign['device_attestation'], {'expected': 0, 'observed': 0, 'mismatches': 0, 'pending': 1})
+        self.assertEqual(owner['status']['device_attestation'], {'expected': 1, 'observed': 1, 'mismatches': 0, 'pending': 0})
+        self.assertEqual(owner['status']['counts']['engaged'], 1)
+
     def test_quantized_dispatch_failure_uses_dequantized_gather(self):
         mx.random.seed(35)
         compact = _compact(1, 3)

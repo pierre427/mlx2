@@ -424,6 +424,9 @@ _STATUS_DEVICE_PENDING = None
 _STATUS_DEVICE_PENDING_EXPECTED = 0
 _STATUS_DEVICE_PENDING_WIDTHS = Counter()
 _STATUS_DEVICE_PENDING_LAST = None
+# Thread that built the pending counter.  Its graph may sit on that thread's
+# thread-local generation stream, which no other thread can evaluate.
+_STATUS_DEVICE_PENDING_THREAD = None
 _STATUS_DEVICE_EXPECTED = 0
 _STATUS_DEVICE_OBSERVED = 0
 _STATUS_DEVICE_MISMATCHES = 0
@@ -520,6 +523,7 @@ def _device_attest_output(
     """Attach one device counter and defer host credit until status readback."""
     global _STATUS_CANDIDATE, _STATUS_DEVICE_PENDING
     global _STATUS_DEVICE_PENDING_EXPECTED, _STATUS_DEVICE_PENDING_LAST
+    global _STATUS_DEVICE_PENDING_THREAD
     timings = {
         _timing_key(entry): float(elapsed)
         for (entry, elapsed) in candidate_timings_ms.items()
@@ -547,6 +551,7 @@ def _device_attest_output(
         _STATUS_DEVICE_PENDING_EXPECTED += 1
         _STATUS_DEVICE_PENDING_WIDTHS[_width_bucket(int(length))] += 1
         _STATUS_DEVICE_PENDING_LAST = receipt
+        _STATUS_DEVICE_PENDING_THREAD = threading.get_ident()
         _STATUS_CANDIDATE = tuple(candidate)
         _STATUS_GEOMETRIES[geometry_key] = {
             "candidate": list(candidate),
@@ -561,6 +566,10 @@ def _reconcile_device_receipts_locked() -> None:
     global _STATUS_DEVICE_PENDING_LAST, _STATUS_DEVICE_EXPECTED
     global _STATUS_DEVICE_OBSERVED, _STATUS_DEVICE_MISMATCHES, _STATUS_LAST
     if _STATUS_DEVICE_PENDING is None:
+        return
+    if _STATUS_DEVICE_PENDING_THREAD != threading.get_ident():
+        # Foreign reader (probe, request thread): leave the credit pending for
+        # the owning thread's next status read instead of evaluating its graph.
         return
     observed = int(_STATUS_DEVICE_PENDING.item())
     expected = int(_STATUS_DEVICE_PENDING_EXPECTED)
