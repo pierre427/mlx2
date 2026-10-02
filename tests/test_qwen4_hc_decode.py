@@ -19,6 +19,9 @@ from mlx2.runtime.models import qwen4_exp as Q
 from mlx2.runtime.models import qwen4_hc_decode as HCD
 
 H, R = 512, 320  # small stand-in with the admitted structure (FN: 2560, 320)
+# A dense bf16 inject needs 8 norm_down simdgroups (hidden >= 1024): MLX's
+# gemv spreads K over 8 simdgroups (sweep 2026-10-02 A2).
+DH = 1024
 
 
 def _args(hidden=H, lowrank=R, hc=4):
@@ -154,17 +157,43 @@ def test_admission_accepts_8bit_and_mixed_formats(kwargs, inject):
 
 
 def test_dense_inject_width_must_be_whole_gemv_blocks():
-    m = _module(bits=8, dense_inject=True, hidden=H)  # width 2048: whole blocks
+    m = _module(bits=8, dense_inject=True, hidden=DH)  # width 4096: whole blocks
     assert HCD.static_admission(m) is None
-    m = _module(bits=8, dense_inject=True, hidden=640)  # width 2560
+    # width 4608: 4.5 gemv blocks (9 simdgroups; lowrank 576 tiles them)
+    m = _module(bits=8, dense_inject=True, hidden=1152, lowrank=576)
     assert "gemv tiling" in HCD.static_admission(m)
 
 
+@pytest.mark.parametrize(
+    "kwargs,needle",
+    [
+        # quantized inject at law 0 writes row sg for sg < 4: hidden/128 >= 4
+        ({"hidden": 256, "lowrank": 64 * 5}, "inject rows"),
+        # dense inject: MLX gemv spreads K over 8 simdgroups
+        ({"bits": 8, "dense_inject": True, "hidden": 512}, "dense inject"),
+        ({"bits": 8, "dense_inject": True, "hidden": 768, "lowrank": 384}, "dense inject"),
+        # xs[4 * hidden] in bf16 alone fills the 32 KiB threadgroup memory
+        ({"bits": 8, "hidden": 4096, "lowrank": 384}, "threadgroup memory"),
+    ],
+)
+def test_admission_refuses_hidden_sizes_the_inject_cannot_compute(kwargs, needle):
+    # Sweep 2026-10-02 A2: these layouts were admitted; the kernel left
+    # inject rows unwritten, skipped K columns, or overflowed threadgroup
+    # memory.
+    reason = HCD.static_admission(_module(**kwargs))
+    assert reason is not None and needle in reason, reason
+
+
+def test_admission_threadgroup_memory_boundary():
+    # 3968 is the widest multiple of 128 whose norm_down fits 32 KiB.
+    assert HCD.static_admission(_module(bits=8, hidden=3968, lowrank=1984)) is None
+
+
 def test_dense_inject_with_bias_or_other_dtype_is_refused():
-    m = _module(bits=8, dense_inject=True)
+    m = _module(bits=8, dense_inject=True, hidden=DH)
     m.block_inject_weight.bias = mx.zeros((4,), mx.bfloat16)
     assert "dense with bias" in HCD.static_admission(m)
-    m = _module(bits=8, dense_inject=True)
+    m = _module(bits=8, dense_inject=True, hidden=DH)
     m.block_inject_weight.weight = m.block_inject_weight.weight.astype(mx.float32)
     assert "dense weight dtype" in HCD.static_admission(m)
 
@@ -214,8 +243,9 @@ def pair_reference(monkeypatch, served_exp_forms_match):
 @pytest.mark.parametrize("kwargs", [{"dense_inject": True}, {"inject_bits": 4}, {}])
 def test_8bit_module_is_served_with_its_inject(pair_reference, rows, kwargs):
     HCD.set_hc_multi_row_mode("on")
-    m = _module(seed=9, bits=8, **kwargs)
-    x = _x(21, rows=rows)
+    hidden = DH if kwargs.get("dense_inject") else H
+    m = _module(seed=9, bits=8, hidden=hidden, **kwargs)
+    x = _x(21, rows=rows, hidden=hidden)
     want = m(x)
     HCD.set_hc_decode_enabled(True)
     got = m(x)
@@ -303,8 +333,9 @@ def test_multi_row_env_parsing(monkeypatch):
 )
 def test_multi_row_auto_serves_all_4bit_layouts_only(pair_reference, kwargs, served):
     HCD.set_hc_multi_row_mode("auto")
-    m = _module(seed=12, **kwargs)
-    x = _x(23, rows=3)
+    hidden = DH if kwargs.get("dense_inject") else H
+    m = _module(seed=12, hidden=hidden, **kwargs)
+    x = _x(23, rows=3, hidden=hidden)
     want = m(x)
     HCD.set_hc_decode_enabled(True)
     got = m(x)
@@ -315,7 +346,7 @@ def test_multi_row_auto_serves_all_4bit_layouts_only(pair_reference, kwargs, ser
     assert status["calls"] == int(served)
     if not served:
         assert status["declines"] == {HCD.MULTI_ROW_FORMAT_DECLINE: 1}
-    m(_x(24, rows=1))  # one row is served whatever the layout
+    m(_x(24, rows=1, hidden=hidden))  # one row is served whatever the layout
     assert HCD.hc_decode_status()["calls"] == int(served) + 1
 
 
@@ -584,8 +615,8 @@ def _stub_decoder_layer(seed=11):
     nn.Module.__init__(layer)
     layer.is_linear = True
     layer.ple = None
-    layer.attn_hyper_connection = _module(seed=seed, dense_inject=True)
-    layer.mlp_hyper_connection = _module(seed=seed + 1, dense_inject=True)
+    layer.attn_hyper_connection = _module(seed=seed, hidden=DH, dense_inject=True)
+    layer.mlp_hyper_connection = _module(seed=seed + 1, hidden=DH, dense_inject=True)
     layer.linear_attn = lambda mixed, ssm_mask, cache: (mixed * 0.5).astype(mx.bfloat16)
     layer.mlp = lambda mixed: (mixed * 0.25).astype(mx.bfloat16)
     return layer
@@ -599,7 +630,7 @@ def test_gate_inject_yields_to_the_hc_decode_kernels(reference_kernels):
     from mlx2.runtime.models import qwen4_gate_inject as GI
 
     layer = _stub_decoder_layer()
-    x = _x(12)
+    x = _x(12, hidden=DH)
     want = layer(x, None)
     previous = GI.fused_gate_inject_enabled()
     GI.set_fused_gate_inject_enabled(True)
@@ -615,7 +646,7 @@ def test_gate_inject_yields_to_the_hc_decode_kernels(reference_kernels):
         assert counts.get("calls", 0) == 0
         # A call the HC kernels decline (2 rows with multi-row off) still
         # reaches the gate-inject candidate with the raw gate.
-        wide = _x(13, rows=2)
+        wide = _x(13, rows=2, hidden=DH)
         HCD.set_hc_decode_enabled(False)
         want_wide = layer(wide, None)
         HCD.set_hc_decode_enabled(True)

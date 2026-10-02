@@ -96,6 +96,8 @@ from .served_exp import ServedExpGate, metal_helper
 
 HC_DECODE_ENV = "MLX_QWEN4_HC_DECODE"
 HC_COUNT = 4
+# Apple GPU threadgroup memory per threadgroup (bytes).
+_NORM_DOWN_TGMEM_LIMIT = 32768
 # Weight formats the launches transcribe (affine, group 64), per projection:
 # MLX's 4-bit and 8-bit qmv_fast/qmv/qmv_wide arithmetic.
 BITS = 4
@@ -362,6 +364,20 @@ def static_admission(module) -> str | None:
         return "lowrank row tiling"
     if hidden % UP_SIMDGROUPS:
         return "hidden column tiling"
+    inject_mode = _inject_mode(module)
+    # norm_down's threadgroup memory: xs[K] in bf16, local_sums, local_inv
+    # and dense_part (float32).  Past the 32 KiB limit the launch fails.
+    tgmem = 2 * width + 4 * hc * 32 + 4 * hc + 4 * (8 * hc if inject_mode == "dense" else 1)
+    if tgmem > _NORM_DOWN_TGMEM_LIMIT:
+        return "hidden size (norm_down threadgroup memory)"
+    # The inject rows are computed by the norm_down threadgroup's simdgroups
+    # (hidden / 128 of them): a quantized inject at law 0 writes row sg for
+    # sg < hc; a dense inject at law 0 (gemv) needs 8 simdgroups over K, at
+    # law 1 (gemv_wide) one per row.  Fewer simdgroups leave rows unwritten.
+    if inject_mode == "quantized" and simdgroups < hc:
+        return "hidden size (too few simdgroups for the inject rows)"
+    if inject_mode == "dense" and simdgroups < 8:
+        return "hidden size (too few simdgroups for the dense inject)"
     if "block_inject_weight" in module:
         inject = module["block_inject_weight"]
         if _plain_class(inject) is nn.QuantizedLinear:
