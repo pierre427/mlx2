@@ -1653,7 +1653,10 @@ def _describe(key: tuple) -> str:
     if len(key) > 7:
         limit = key[8]
         epi = " + silu(gate) * up" if limit is None else f" + clamped SwiGLU {limit:g}"
-        if len(key) > 9:
+        extras = key[9:]
+        if "split" in extras:
+            epi += ", split gate/up tables"
+        if "map" in extras:
             epi += ", row map"
     return (
         f"{str(dtype).rsplit('.', 1)[-1]} {mode} {bits}-bit gs{group_size} "
