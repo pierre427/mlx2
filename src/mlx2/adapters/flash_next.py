@@ -10,7 +10,15 @@ from pathlib import Path
 from ..process_env import PROCESS_NUMERICS
 
 
-# Default on at width 4, as for Qwen3.8 and Qwen3.6.
+# Default on at width 3 (width 4 until 2026-10-02; Qwen3.8 and Qwen3.6 stay at 4).
+#
+# Width 3: on the served uncensored artifact, 4 lanes of ordinary decode beat
+# 4-lane batched MTP by 7.9-9.3%, and width 3 measured +9.9% over width 4 at
+# 4 lanes (8/8 paired reps; qualification/runs/options-sweep-20261001,
+# commit 8ae6079b).  At 3 lanes handing off is +1.3%, within noise, so the
+# boundary stays MTP up to 3 lanes.
+#
+# History of the default:
 #
 # This was off from 2026-09-20 because threshold-4 qualification found
 # reproducible divergences at prompt 0 tokens 38 and 142 with width-one margins
@@ -25,7 +33,7 @@ from ..process_env import PROCESS_NUMERICS
 #
 # Measured B16 on the same tree: ordinary 167.2, fixed MTP 102.7, handoff
 # 180.4 tok/s.  Leaving it off served fixed MTP at 57% of the handoff's rate.
-DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = 4
+DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = 3
 
 
 def artifact_identity(path: Path) -> dict:
