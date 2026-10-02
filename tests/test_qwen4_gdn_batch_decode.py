@@ -201,6 +201,7 @@ def test_row_exact_launch_updates_cache_and_counters(production_gdn_qwen4, monke
         return (mx.zeros(z.shape, z.dtype), conv_state + 1, args[3] + 1)
 
     monkeypatch.setattr(qwen4_exp, "fused_gdn_runtime_supported", lambda: True)
+    monkeypatch.setattr(qwen4_exp, "served_silu_refusal", lambda: None)
     monkeypatch.setattr(qwen4_exp, "probe_qwen4_fused_gdn_decode", lambda dtype: 32)
     monkeypatch.setattr(qwen4_exp, "qwen4_fused_gdn_batch_decode", fake)
     layer.set_fused_gdn_batch_decode_mode("row_exact")

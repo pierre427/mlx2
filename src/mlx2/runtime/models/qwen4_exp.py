@@ -1176,6 +1176,9 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             return self._fused_gdn_batch_fallback(admission.reason)
         if not fused_gdn_runtime_supported():
             return self._fused_gdn_batch_fallback("Metal runtime unavailable")
+        refusal = served_silu_refusal()
+        if refusal is not None:
+            return self._fused_gdn_batch_fallback(refusal)
         try:
             threadgroup_y = probe_qwen4_fused_gdn_decode(
                 qkv.dtype, **_state_probe(cache[1])
