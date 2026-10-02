@@ -174,8 +174,10 @@ class FootprintSettler:
     ``clear_cache``, so a 4 x 32K Flash-Next cohort's chunk re-check read 5-9
     GiB of such pages and refused (HTTP 429) a cohort it had admitted cold.
 
-    ``settle`` runs only on the refusal path, after the synchronized reclaim.
-    It never credits bytes: it waits, bounded, and the caller re-measures.  It
+    Admission calls ``settle`` only when a reading taken after its
+    synchronized reclaim still falls short, so a request that fits never
+    waits.  It never credits bytes: it waits, bounded, and the caller
+    re-measures.  It
     stops when the footprint's excess over MLX's ``active + cached`` (the
     *overhang*) is back within ``tolerance`` of the quiet-state overhang
     (``baseline``: Python heap, mapped tables and other non-MLX pages), when the

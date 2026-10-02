@@ -84,6 +84,7 @@ def test_cohort_chunk_recheck_admits_once_freed_pages_leave_the_footprint(metal)
     admit = _make_self_mtp_admission_callback(
         controller, free_memory=free_gib,
         reclaim_memory=lambda: engine._clear_allocator_cache_before_reject(synchronize=True),
+        settle_memory=engine._settle_footprint_before_reject,
         evict_unused_cache=lambda: False, max_draft=2,
     )
     rows = tuple((uid, context, 2, True, 0.0) for uid in range(4))
@@ -114,11 +115,46 @@ def test_settled_cohort_is_still_refused_when_memory_is_really_held(metal):
             cached=mx.get_cache_memory(), footprint=os_memory.physical_footprint_bytes(),
         ) / G,
         reclaim_memory=lambda: engine._clear_allocator_cache_before_reject(synchronize=True),
+        settle_memory=engine._settle_footprint_before_reject,
         evict_unused_cache=lambda: False, max_draft=2,
     )
     decision = admit.atomic(tuple((uid, 32768, 2, True, 0.0) for uid in range(4)))
     assert decision != {uid: 2 for uid in range(4)}
     assert engine.counts["memory_footprint_settle_quiet"] >= 1
+
+
+def test_reading_that_fits_after_the_clear_never_waits():
+    calls = []
+    admit = _make_self_mtp_admission_callback(
+        SelfMTPLaneAdmissionController(host_memory_gib=128, advisory_gib=112),
+        free_memory=iter([0.0, 80.0, 80.0]).__next__,
+        reclaim_memory=lambda: calls.append("reclaim"),
+        settle_memory=lambda: calls.append("settle"),
+        evict_unused_cache=lambda: False, max_draft=2,
+    )
+    assert admit.atomic(((0, 4096, 2, True, 0.0),)) == {0: 2}
+    assert calls == ["reclaim"]
+
+
+def test_request_admission_settles_before_evicting_a_checkpoint():
+    from mlx2.serving import ensure_admission_headroom
+
+    state = {"free": 5, "lagging": 6, "evictions": 0, "settles": 0}
+
+    def settle():
+        state["settles"] += 1
+        state["free"] += state["lagging"]
+        state["lagging"] = 0
+
+    def evict():
+        state["evictions"] += 1
+        return True
+
+    assert ensure_admission_headroom(
+        10, headroom=lambda: state["free"], reclaim=lambda: None,
+        evict=evict, settle=settle,
+    )
+    assert state == {"free": 11, "lagging": 0, "evictions": 0, "settles": 1}
 
 
 class Clock:

@@ -722,6 +722,7 @@ def _make_self_mtp_admission_callback(
     observer: Optional[Callable[[SelfMTPLaneAdmission], None]] = None,
     reclaim_memory: Optional[Callable[[], None]] = None,
     evict_unused_cache: Optional[Callable[[], bool]] = None,
+    settle_memory: Optional[Callable[[], object]] = None,
 ) -> Callable[
     [Sequence[Tuple[int, int, int, bool, float]]], Mapping[int, Union[int, str]]
 ]:
@@ -822,14 +823,32 @@ def _make_self_mtp_admission_callback(
             )
 
         decision = plan(free)
+
+        def remeasure():
+            current_free = free_memory()
+            return math.nan if current_free is None else current_free
+
+        def settled(decision, free, done):
+            # Metal returns freed buffer pages to the OS asynchronously, so a
+            # reading right after a clear (every prefill chunk ends with one)
+            # can charge GiB MLX no longer holds.  Only a plan that still falls
+            # short waits for them (bounded); nothing is credited.
+            if settle_memory is None or done(decision):
+                return (decision, free)
+            settle_memory()
+            free = remeasure()
+            return (plan(free), free)
+
         # Cached allocator scratch is reclaimable. Recheck measured headroom
         # before an irreversible migration to ordinary decoding or queueing.
         # This does not credit hypothetical bytes or spend the hard reserve.
         if decision.stage != "full" and reclaim_memory is not None:
             reclaim_memory()
-            current_free = free_memory()
-            free = math.nan if current_free is None else current_free
+            free = remeasure()
             decision = plan(free)
+            (decision, free) = settled(
+                decision, free, lambda d: d.stage == "full"
+            )
         # Idle APC checkpoints compete with the next active cohort. Reclaim
         # only unleased checkpoints before splitting/demoting that cohort;
         # preserve the immutable owners currently borrowed by its warm rows.
@@ -856,9 +875,14 @@ def _make_self_mtp_admission_callback(
                     break
                 if reclaim_memory is not None:
                     reclaim_memory()
-                current_free = free_memory()
-                free = math.nan if current_free is None else current_free
+                free = remeasure()
                 decision = plan(free)
+                # Wait for the evicted pages before evicting the next entry.
+                (decision, free) = settled(
+                    decision, free,
+                    lambda d: (d.modes, d.draft_depths)
+                    == (ceiling.modes, ceiling.draft_depths),
+                )
         uids = [int(row[0]) for row in rows]
         cycle_boundary = all(resident)
         rejoining = [

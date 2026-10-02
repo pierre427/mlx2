@@ -1513,6 +1513,7 @@ def admit_lane_headroom(
     reclaim,
     evict,
     evictable=None,
+    settle=None,
 ):
     """Admit one arriving request, falling back to the depth floor.
 
@@ -1549,6 +1550,7 @@ def admit_lane_headroom(
             reclaim=reclaim,
             evict=evict,
             evictable=evictable,
+            settle=settle,
         )
         return (fits, required)
 
@@ -1612,7 +1614,7 @@ def admit_prompt_lookup_lane(
 
 
 def ensure_admission_headroom(
-    required_bytes, *, headroom, reclaim, evict, evictable=None
+    required_bytes, *, headroom, reclaim, evict, evictable=None, settle=None
 ):
     """Observe completed reclamation before evicting or rejecting a request.
 
@@ -1626,8 +1628,18 @@ def ensure_admission_headroom(
     """
     if headroom() >= required_bytes:
         return True
-    reclaim()
-    free = headroom()
+
+    def reclaimed_fits():
+        # ``settle`` waits out pages Metal has not yet returned after the
+        # clear; only a reading that still falls short pays for it.
+        reclaim()
+        free = headroom()
+        if free < required_bytes and settle is not None:
+            settle()
+            free = headroom()
+        return free
+
+    free = reclaimed_fits()
     if free >= required_bytes:
         return True
     if (
@@ -1636,8 +1648,7 @@ def ensure_admission_headroom(
     ):
         return False
     while evict():
-        reclaim()
-        if headroom() >= required_bytes:
+        if reclaimed_fits() >= required_bytes:
             return True
     return False
 
@@ -3311,8 +3322,13 @@ class ServingEngine:
             return None, grammar, "engaged", None
         return None, None, "disabled", None
 
-    def _clear_allocator_cache_before_reject(self, *, synchronize=False):
-        """Rate-limited allocator reclaim shared by every admission seam."""
+    def _clear_allocator_cache_before_reject(self, *, synchronize=False, settle=False):
+        """Rate-limited allocator reclaim shared by every admission seam.
+
+        ``settle`` also waits out the footprint pages Metal has not yet
+        returned (``_settle_footprint_before_reject``); the final reclaim before
+        a deadline refusal asks for it.
+        """
         now = time.monotonic()
         lock = getattr(self, "_memory_reclaim_lock", None)
         if lock is None:
@@ -3336,27 +3352,35 @@ class ServingEngine:
         counts = getattr(self, "counts", None)
         if counts is not None:
             counts["memory_cache_reclaims_before_reject"] += 1
-        if synchronize:
-            # The last step before a refusal: Metal returns freed buffer pages
-            # to the OS asynchronously, so the footprint the caller is about
-            # to re-measure can still hold GiB that MLX no longer owns (see
-            # ``FootprintSettler``).  Wait for them, bounded; credit nothing.
-            settler = getattr(self, "_footprint_settler", None)
-            if settler is None:
-                from .memory import FootprintSettler
-
-                settler = self._footprint_settler = FootprintSettler()
-            report = settler.settle()
-            if counts is not None:
-                counts["memory_footprint_settles"] += 1
-                counts["memory_footprint_settle_" + report["exit"]] += 1
-                counts["memory_footprint_settle_wait_ms"] += int(
-                    report["waited"] * 1000
-                )
-                counts["memory_footprint_settle_released_bytes"] += int(
-                    report["released_bytes"]
-                )
+        if settle:
+            self._settle_footprint_before_reject()
         return True
+
+    def _settle_footprint_before_reject(self):
+        """Wait (bounded) for freed Metal pages to leave the footprint.
+
+        Metal returns the pages of buffers MLX has released to the OS
+        asynchronously, so a footprint measured right after a clear -- every
+        prefill chunk ends with one -- can still hold GiB that MLX no longer
+        owns (``FootprintSettler``).  Admission calls this only once a
+        synchronized reclaim has left a request short, so the common path
+        never waits.  It credits nothing: the caller re-measures.
+        """
+        settler = getattr(self, "_footprint_settler", None)
+        if settler is None:
+            from .memory import FootprintSettler
+
+            settler = self._footprint_settler = FootprintSettler()
+        report = settler.settle()
+        counts = getattr(self, "counts", None)
+        if counts is not None:
+            counts["memory_footprint_settles"] += 1
+            counts["memory_footprint_settle_" + report["exit"]] += 1
+            counts["memory_footprint_settle_wait_ms"] += int(report["waited"] * 1000)
+            counts["memory_footprint_settle_released_bytes"] += int(
+                report["released_bytes"]
+            )
+        return report
 
     def _permit_allocator_reclaim_after_eviction(self):
         with self._memory_reclaim_lock:
@@ -6380,6 +6404,8 @@ class ServingEngine:
                 # clearing allocator pages and measuring admission headroom.
                 return self._clear_allocator_cache_before_reject(synchronize=True)
 
+            settle_footprint = self._settle_footprint_before_reject
+
             def observe_admission(decision):
                 admission.update(asdict(decision))
 
@@ -6574,6 +6600,7 @@ class ServingEngine:
                             free_memory=lambda: execution_headroom() / (1 << 30),
                             observer=observe_admission,
                             reclaim_memory=reclaim_allocator,
+                            settle_memory=settle_footprint,
                             evict_unused_cache=evict_unused_checkpoint,
                             max_draft=config["num_draft"],
                         )
@@ -6799,7 +6826,7 @@ class ServingEngine:
                     elif time.monotonic() >= waiting.admission_deadline:
                         if not waiting.admission_final_reclaim_done:
                             self._clear_allocator_cache_before_reject(
-                                synchronize=True
+                                synchronize=True, settle=True
                             )
                             waiting.admission_final_reclaim_done = True
                             waiting.admission_retry_at = time.monotonic()
@@ -6963,7 +6990,7 @@ class ServingEngine:
                         if time.monotonic() >= job.admission_deadline:
                             if not job.admission_final_reclaim_done:
                                 self._clear_allocator_cache_before_reject(
-                                    synchronize=True
+                                    synchronize=True, settle=True
                                 )
                                 job.admission_final_reclaim_done = True
                                 job.admission_deadline = (
@@ -7138,6 +7165,7 @@ class ServingEngine:
                                 prefill_gib=prefill_gib,
                                 headroom=admission_headroom,
                                 reclaim=reclaim_allocator,
+                                settle=settle_footprint,
                                 evict=evict_unused_checkpoint,
                                 evictable=getattr(apc, "unleased_resident_nbytes", None),
                             )
@@ -7154,6 +7182,7 @@ class ServingEngine:
                                 prefill_gib=prefill_gib,
                                 headroom=admission_headroom,
                                 reclaim=reclaim_allocator,
+                                settle=settle_footprint,
                                 evict=evict_unused_checkpoint,
                                 evictable=getattr(apc, "unleased_resident_nbytes", None),
                             )
