@@ -168,6 +168,16 @@ class _RowExactSwitch:
         return out.reshape(*lead, *out.shape[2:])
 
 
+def _has_segmented_layer(cache) -> bool:
+    try:
+        layers = list(cache) if cache is not None else []
+    except TypeError:
+        layers = [cache]
+    return any(
+        getattr(layer, "segmented_attention", None) is not None for layer in layers
+    )
+
+
 def _ordinary_b1_mask(cache):
     """The mask the ordinary B=1 route gives a one-token attention forward.
 
@@ -228,7 +238,30 @@ class _RowExactAttention:
         window = REV.current()
         length = int(x.shape[1])
         stock = super().__call__
-        if window is None or length <= 1:
+        if window is None or length < 1:
+            return stock(
+                x, mask, cache, _projected=_projected, _return_pre_o=_return_pre_o,
+                _selection=_selection, _fetched_kv=_fetched_kv,
+            )
+        if length == 1 and not (
+            getattr(cache, "segmented_attention", None) is not None
+            and _projected is None
+        ):
+            # A one-row lineage inside a window (a ragged lane on its last
+            # token, or K=0): its B1 row cache gives no mask, but the ordinary
+            # B=1 route's SDPA reads an explicit all-valid one and the two
+            # differ in bits (sweep 2026-10-02 S1).
+            if _selection is not None or _fetched_kv is not None:
+                window.fail("attention_preselected")
+            elif int(x.shape[0]) != 1:
+                window.fail("attention_batch_rows")
+            else:
+                row_mask = _ordinary_b1_mask(cache)
+                if row_mask is None:
+                    window.fail("attention_offset_not_host")
+                else:
+                    mask = row_mask
+                    window.note("attention", "per_row", 1)
             return stock(
                 x, mask, cache, _projected=_projected, _return_pre_o=_return_pre_o,
                 _selection=_selection, _fetched_kv=_fetched_kv,
@@ -480,6 +513,14 @@ class RowExactVerify:
                 record.note("target_backbone", "batched_one_token_passthrough")
                 record.note("target_logits", "outside_window")
                 record.fail("batched_one_token_target_not_row_exact")
+                self._close(record)
+            elif self.enabled and _has_segmented_layer(cache):
+                # A single lane at K=0 through a segmented cache: each B1 row
+                # cache gives its attention no mask, not the ordinary B=1
+                # route's explicit one (sweep 2026-10-02 S1).  Not row-exact.
+                record = REV.Window(rows)
+                record.note("target_backbone", "segmented_one_token_passthrough")
+                record.fail("segmented_one_token_target_not_row_exact")
                 self._close(record)
             return model.mtp_backbone(tokens, cache=cache)
         from . import qwen4_exp as Q
