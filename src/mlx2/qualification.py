@@ -56,12 +56,17 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    # Re-pinned 2026-10-02 (Codex port review item 2): a host-gated
+    # Re-pinned 2026-10-02 (qualify-f4cdb698): the batch check sends four
+    # distinct prompts.  Four copies of one prompt were served one after
+    # another by APCv2's same-prefix wait and reached only width 3, so a
+    # width-3 handoff could never be observed.  Receipts from 2ce013d9...
+    # must be regenerated.
+    # Earlier re-pin 2026-10-02 (Codex port review item 2): a host-gated
     # "selected, not observed" entry now carries the host gate it was
     # recorded under ({"nax_host", "device_name"}), which the loader
     # re-evaluates on the serving host.  Receipts from the previous harness
     # (8a2ced1d..., NAX gather default) must be regenerated.
-    "sha256": "2ce013d983b3d848aed5391b0ac54f9f970b16862c99f14881c8d50c500f3934",
+    "sha256": "54bb6a2fb28caaf019b5eca3d4187154e5c41fef1f993c36eda5f75dea224146",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A

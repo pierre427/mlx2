@@ -68,6 +68,10 @@ LONG_CONTEXT_CHECKS = (
 )
 
 
+# Distinct batch-check subjects; one per lane of the qualifier's width-4 load.
+BATCH_SUBJECTS = ("a compiler", "a refrigerator", "a jet engine", "photosynthesis")
+
+
 def validate_context_matrix_delegation(path, context_cap):
     """Bind deferred long-context coverage to a runnable thermal matrix.
 
@@ -2447,13 +2451,20 @@ def main():
             # Four concurrent requests cover row lifetimes and observed compute width.
             # Fixed 160-token lanes measure batching, not reasoning: thinking is
             # turned off so a thinking-default model fills the same budget.
-            batch_request = prompt(
-                "Explain how a compiler works in detail.", max_tokens=160,
-                reasoning_effort="none", think=False,
-            )
+            # Four distinct subjects: APCv2 serves identical prompts one after
+            # another (same-prefix wait), so four copies of one prompt reached
+            # only width 3 and could never exceed a width-3 MTP handoff
+            # (qualify-f4cdb698-uncensored, 2026-10-02).
+            batch_requests = [
+                prompt(
+                    f"Explain how {subject} works in detail.", max_tokens=160,
+                    reasoning_effort="none", think=False,
+                )
+                for subject in BATCH_SUBJECTS
+            ]
             start = time.monotonic()
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                batch = list(pool.map(post, [batch_request] * 4))
+            with ThreadPoolExecutor(max_workers=len(batch_requests)) as pool:
+                batch = list(pool.map(post, batch_requests))
             elapsed = time.monotonic() - start
             report["responses"]["batch"] = batch
             widths = sorted(
