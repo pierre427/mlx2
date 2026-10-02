@@ -6032,11 +6032,17 @@ class QSAIndexer(nn.Module):
             q_pos = mx.arange(offset, offset + length)[None, :]
             token_logical = mx.arange(total)[None, :]
         if shared_topk is None:
-            q = self.q_layernorm(q.reshape(batch, length, self.n_heads, self.head_dim))
-            q = _apply_rope_positions(
-                q, q_pos[..., None], self.rotary_dim, self.rope_theta,
-                self.rope_scaling,
-            )
+            fused_q = self._fused_query(qk, q_pos) if fused_query else None
+            if fused_q is not None:
+                q = fused_q
+            else:
+                q = self.q_layernorm(
+                    q.reshape(batch, length, self.n_heads, self.head_dim)
+                )
+                q = _apply_rope_positions(
+                    q, q_pos[..., None], self.rotary_dim, self.rope_theta,
+                    self.rope_scaling,
+                )
         starts = mx.arange(n_blocks) * self.compress_ratio
         valid_blocks = (starts + self.compress_ratio - 1)[None, None, :] <= q_pos[
             ..., None
