@@ -52,9 +52,17 @@ class FlashNextPolicy:
     # Like fused_gdn_dynamic_accept they enter the environment and receipts
     # only when enabled, so default receipts are unchanged.
     #   moe_router_kernel: exact-shape B1 512/top-10 router kernel
-    #     (MLX_QWEN4_MOE_ROUTER_KERNEL); no mlx2 A/B found.
-    #   qsa_nax_decode: NAX QSA on decode rows (MLX_QWEN4_QSA_NAX_DECODE);
-    #     "NAX decode off", no decode A/B (docs/FLASHNEXT-PARITY.md).
+    #     (MLX_QWEN4_MOE_ROUTER_KERNEL).  It replaces the same routing step
+    #     as the router top-k launch/fold, so the two exclude each other:
+    #     with both selected every one-token call declined the launch and
+    #     ordinary B1 decode lost 9.6% [-10.7, -6.8], 0/6 reps faster
+    #     (qualification/runs/options-sweep-20261001).  Validation refuses
+    #     it unless moe_topk_fold is "off".
+    #   qsa_nax_decode: NAX QSA on decode rows (MLX_QWEN4_QSA_NAX_DECODE).
+    #     MEASURED SLOWER on Flash-Next: 32K B1 ordinary decode -15.6%
+    #     [-18.3, -15.0], 0/6 reps faster, tokens differ in 2/6; it does not
+    #     engage at 20K (options-sweep-20261001).  Keep it off.  Its counters
+    #     are in diagnostics()["qsa_nax_decode"].
     #   gdn_core: MLX gated_delta_update for 17-256 row prefill chunks
     #     (MLX_GDN_CORE); parity on this geometry unestablished.
     moe_router_kernel: bool = False
@@ -238,6 +246,14 @@ class FlashNextPolicy:
             )
         if self.moe_topk_fold not in {"off", "launch", "fold"}:
             raise ValueError("moe_topk_fold must be off, launch, or fold")
+        if self.moe_router_kernel and self.moe_topk_fold != "off":
+            # Both replace the stock routing; the blocks give the router
+            # kernel the call and count every launch/fold as declined.
+            raise ValueError(
+                "moe_router_kernel excludes the router top-k "
+                f"(moe_topk_fold={self.moe_topk_fold!r}); set moe_topk_fold "
+                "to \"off\" to select the router kernel"
+            )
         if self.fused_gdn_batch_decode not in {"off", "row_exact"}:
             raise ValueError("fused_gdn_batch_decode must be off or row_exact")
         if self.fused_gdn_batch_verify not in {"off", "row_exact"}:

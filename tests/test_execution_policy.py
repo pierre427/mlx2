@@ -156,3 +156,23 @@ def test_flash_next_receipt_round_trips_every_non_default_choice():
         policy = FlashNextPolicy.from_mapping({name: value})
         assert FlashNextPolicy.from_mapping(policy.as_dict()) == policy, name
         assert policy.as_dict()[name] == value, name
+
+
+def test_flash_next_router_kernel_refuses_the_router_topk_launch_and_fold():
+    # The fused router kernel and the top-k launch/fold replace the same
+    # routing step; with both selected every one-token call declined the
+    # launch ("fused router kernel selected") and ordinary B1 lost 9.6%
+    # (qualification/runs/options-sweep-20261001).  The policy refuses it.
+    import pytest
+
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
+
+    for topk in ("launch", "fold"):
+        with pytest.raises(ValueError, match="moe_router_kernel.*moe_topk_fold"):
+            FlashNextPolicy.from_mapping({"moe_router_kernel": True, "moe_topk_fold": topk})
+    with pytest.raises(ValueError, match="moe_topk_fold"):
+        FlashNextPolicy.from_mapping({"moe_router_kernel": True})
+    policy = FlashNextPolicy.from_mapping({"moe_router_kernel": True, "moe_topk_fold": "off"})
+    assert policy.environment()["MLX_QWEN4_MOE_ROUTER_KERNEL"] == "1"
+    assert "MLX_QWEN4_MOE_TOPK_FOLD" not in policy.environment()
+    assert FlashNextPolicy.from_mapping(policy.as_dict()) == policy

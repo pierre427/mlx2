@@ -748,7 +748,12 @@ def test_flash_next_policy_kernel_switches_are_opt_in_and_receipt_neutral():
     assert "MLX_QWEN4_QSA_NAX_DECODE" not in env
     assert "MLX_GDN_CORE" not in env
     selected = FlashNextPolicy.from_mapping(
-        {"moe_router_kernel": True, "qsa_nax_decode": True, "gdn_core": True}
+        {
+            "moe_router_kernel": True,
+            "moe_topk_fold": "off",  # the router kernel excludes the top-k launch
+            "qsa_nax_decode": True,
+            "gdn_core": True,
+        }
     )
     env = selected.environment()
     assert env["MLX_QWEN4_MOE_ROUTER_KERNEL"] == "1"
