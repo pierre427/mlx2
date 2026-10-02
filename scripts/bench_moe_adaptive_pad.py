@@ -53,7 +53,7 @@ def main():
             mx.eval(wq, s, b)
             del w
 
-            def call(x, idx, pad):
+            def call(x, idx, pad, wq=wq, s=s, b=b, bits=bits):
                 if pad:
                     x, idx = SL._pad_sorted_tail(x, idx, pad)
                 y = mx.gather_qmm(x, wq, s, b, rhs_indices=idx, transpose=True,
