@@ -6013,7 +6013,13 @@ class BatchGenerator:
         uid = self._prompt_batch.uids[0]
         segments = seq[0]
         budget = self._fairness().stall_bound(self.prefill_step_size)
-        n = aligned_prompt_rows(min(budget, self.prefill_step_size), len(gen))
+        # A mixed slice always runs beside decode lanes: the contended slice
+        # floor applies as in the ordinary round (sweep 2026-10-02 P4).
+        budget = self._fairness().floor_slice(
+            min(budget, self.prefill_step_size), self.prefill_step_size,
+            contended=True,
+        )
+        n = aligned_prompt_rows(budget, len(gen))
         covered = int(seq[4] or 0) + int(seq[1])
         n = min(
             n,
