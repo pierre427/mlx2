@@ -76,6 +76,7 @@ def main():
         execution_policy={"eager_dispatch_stride": 0, "num_draft": a.num_draft},
     )
     from mlx2.runtime import generate as G
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
     from mlx2.runtime.models import qwen4_routed_decode as RD
     from mlx2.runtime.models import qwen36_35b as Q
     from mlx2.runtime.models import qwen36_moe_decode as M
@@ -164,21 +165,25 @@ def main():
         out["old_candidate"] = routed_candidate_stats(adapter.model, reset=True)
         return out
 
+    handoff = MTPOrdinaryHandoffPolicy.from_value(
+        {
+            "enabled": True,
+            "max_mtp_width": type(adapter).default_mtp_ordinary_handoff_max_width,
+        }
+    )
+    record["mtp_ordinary_handoff"] = handoff.as_dict()
+
     def run(route, rows, rep, arm, warm=False):
         select(arm)
         counters()
-        kwargs = (
-            {}
-            if route == "ordinary"
-            else {
-                "self_mtp": {
-                    "num_draft": a.num_draft,
-                    "persistent": True,
-                    "rate_gate": False,
-                    "prefill_step_size": 1024,
-                }
-            }
-        )
+        kwargs = {}
+        if route == "mtp":
+            # As serving builds it: the cohort spans every lane, and the
+            # adapter's default handoff moves a wide cohort to ordinary.
+            kwargs["self_mtp"] = adapter.execution_config(
+                max_lanes=rows, prefill_step=1024
+            )
+            kwargs["mtp_ordinary_handoff"] = handoff
         gen = G.BatchGenerator(
             adapter.model,
             completion_batch_size=rows,
@@ -195,31 +200,46 @@ def main():
             insert["self_mtp_configs"] = [{"sampling_temp": 0.0}] * rows
         uids = gen.insert(pp, **insert)
         done = set()
-        started = set()
         tokens = {uid: [] for uid in uids}
         emitted = 0
         steps = 0
         t0 = None
         t1 = None
         full_start = time.perf_counter()
+        failures = []
         try:
             while len(done) < rows:
                 _, responses = gen.next()
+                # A lane dropped as corrupt (e.g. a non-finite sample) never
+                # gets a finish response; it ends here instead of hanging.
+                for failure in gen.take_lane_failures():
+                    failures.append(failure)
+                    done.add(failure["uid"])
                 now = time.perf_counter()
                 if t0 is not None:
                     steps += 1
                     emitted += len(responses)
                     t1 = now
                 for response in responses:
-                    started.add(response.uid)
                     tokens[response.uid].append(int(response.token))
                     if response.finish_reason:
                         done.add(response.uid)
-                if t0 is None and started == set(uids):
+                if t0 is None and responses:
+                    # Aggregate rate from the first emitted token, so a lane
+                    # still prefilling counts against the batch.
                     t0 = now
                     t1 = now
         finally:
+            handoff_stats = {
+                k: v
+                for k, v in gen.scheduler_stats.items()
+                if k.startswith("mtp_ordinary_handoff")
+            }
             gen.close()
+        if failures:
+            raise ValueError(
+                f"{route}:{rows}/{arm}: {len(failures)} lane failure(s): {failures}"
+            )
         duration = (t1 - t0) if t0 is not None else 0
         if duration <= 0 or emitted < 1:
             raise ValueError("no steady decode interval (EOS or short generation)")
@@ -239,6 +259,7 @@ def main():
                 json.dumps([tokens[u] for u in uids]).encode()
             ).hexdigest(),
             "prompt_tokens": [len(p) for p in pp],
+            "handoff": handoff_stats,
         }
         result["observed_used"] = bool(
             stats["moe"]["calls"]

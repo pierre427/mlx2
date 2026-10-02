@@ -382,3 +382,52 @@ def test_qwen36_topk_launch_runs_only_admitted_router_logits(monkeypatch):
     assert block.moe_topk_fallbacks == 1
     assert "bfloat16" in block.moe_topk_last_fallback
     assert block.qwen36_decode_calls == 2
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("rps", [2, 4])
+@pytest.mark.parametrize("rows", [1, 3])
+def test_qwen36_down_launch_covers_every_output_row(monkeypatch, shared, rps, rows):
+    """The down kernel runs one simdgroup per slot (threadgroup y = slots) and
+    RPS output rows per threadgroup; MLX grids count threads, so grid y must
+    be slots * hidden / RPS or 7/8 of each output row is never written."""
+    from types import SimpleNamespace as NS
+
+    from mlx2.runtime.models import qwen36_moe_decode as M
+
+    calls = []
+
+    def recorder(*_args):
+        def run(**kw):
+            calls.append(kw)
+            return [mx.zeros(s, d) for s, d in zip(kw["output_shapes"], kw["output_dtypes"])]
+
+        return run
+
+    monkeypatch.setattr(RD, "_kernels", lambda: [None, None, recorder()])
+    monkeypatch.setattr(M, "shared_gate_up_kernel", recorder)
+    monkeypatch.setattr(M, "down_kernel", recorder)
+    monkeypatch.setattr(RD, "expert_operands", lambda layer: ())
+    monkeypatch.setattr(RD, "_dense_operands", lambda layer: ())
+    monkeypatch.setattr(RD, "served_down_rows", lambda: rps)
+    table = NS(weight=mx.zeros((256, 512, 1)))
+    fmt = NS(bits=4, group_size=64)
+    shared_mlp = NS(gate_proj=fmt, up_proj=fmt, down_proj=fmt) if shared else None
+    hidden = 2048
+    out = M.routed_rows(
+        mx.zeros((rows, 1, hidden), mx.bfloat16),
+        mx.zeros((rows, 8), mx.uint32),
+        mx.zeros((rows, 8), mx.bfloat16),
+        table,
+        table,
+        table,
+        shared=shared_mlp,
+        shared_gate=mx.zeros((rows, 1), mx.bfloat16) if shared else None,
+    )
+    assert out.shape == (rows, hidden)
+    down = calls[-1]
+    grid, group = down["grid"], down["threadgroup"]
+    assert group[1] == 8 + int(shared)
+    assert grid[1] % group[1] == 0
+    assert (grid[1] // group[1]) * rps == hidden
+    assert grid[2] == rows

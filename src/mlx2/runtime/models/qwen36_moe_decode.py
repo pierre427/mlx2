@@ -205,6 +205,8 @@ def routed_rows(x, indices, scores, gate, up, down, *, shared=None, shared_gate=
         extra = [*RD._dense_operands(shared.down_proj), shared_gate.reshape(rows)]
         shared_format = (shared.down_proj.bits, shared.down_proj.group_size)
     rps = RD.served_down_rows()
+    # One simdgroup per slot; the grid counts threads, so it spans every slot.
+    slots = top_k + int(shared is not None)
     return down_kernel(shared_format)(
         inputs=[
             h,
@@ -220,8 +222,8 @@ def routed_rows(x, indices, scores, gate, up, down, *, shared=None, shared_gate=
             ("RPS", rps),
             ("TOPK", top_k),
         ],
-        grid=(32, hidden // rps, rows),
-        threadgroup=(32, top_k + int(shared is not None), 1),
+        grid=(32, slots * hidden // rps, rows),
+        threadgroup=(32, slots, 1),
         output_shapes=[(rows, hidden)],
         output_dtypes=[x.dtype],
     )[0]
