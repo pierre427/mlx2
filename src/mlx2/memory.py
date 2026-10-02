@@ -215,15 +215,20 @@ class FootprintSettler:
     quiet-state overhang (``baseline``), when the footprint has not fallen
     for ``quiet`` seconds, or at the timeout.
 
-    ``baseline`` is the lowest overhang among the readings of the last
-    ``window`` seconds (``refresh`` / ``observe`` from the serving loop, plus
-    every reading taken while settling).  A real reading can only be the
-    non-MLX residency plus pending frees, so the minimum never certifies
-    pages that are still pending; a drop in non-MLX residency lowers it at the
-    next quiet reading, and growth is picked up once the older, lower
-    readings leave the window.  With no reading in the window there is no
-    baseline and only the quiet and timeout exits apply.  One lock serializes
-    callers on the scheduler and HTTP threads.
+    ``baseline`` comes from *verified* quiet readings of the last ``window``
+    seconds: the reading at load, an idle serving-loop reading that matches
+    the previous idle one (nothing was still being returned), and the final
+    reading of a settle that had to wait.  Any other real reading in the
+    window may still lower it -- a reading is only non-MLX residency plus
+    pending frees, so a lower one is never optimistic -- but cannot stand in
+    for a verified one: during a long prefill every loop reading lands right
+    after a chunk's clear, and a baseline built from those alone would
+    certify the very pages it should wait for.  With no verified reading in
+    the window there is no baseline and only the quiet and timeout exits
+    apply, so a stale high value cannot certify a reading taken right after
+    a clear.  A drop in non-MLX residency lowers it at the next reading; a
+    rise is picked up once the older, lower verified readings leave the
+    window.  One lock serializes callers on the scheduler and HTTP threads.
     """
 
     def __init__(
@@ -237,7 +242,7 @@ class FootprintSettler:
         quiet=0.3,
         timeout=SETTLE_BUDGET_SECONDS,
         interval=0.01,
-        window=5.0,
+        window=10.0,
     ):
         from collections import deque
         import threading
@@ -252,7 +257,8 @@ class FootprintSettler:
         self.timeout = float(timeout)
         self.interval = float(interval)
         self.window = float(window)
-        self._samples = deque(maxlen=4096)
+        self._samples = deque(maxlen=4096)  # (time, overhang, verified)
+        self._last_idle = None
         self._lock = threading.Lock()
 
     @staticmethod
@@ -260,32 +266,51 @@ class FootprintSettler:
         active, cached, footprint = reading
         return footprint - (active + cached)
 
-    def _note(self, reading, now):
-        self._samples.append((now, max(0, self._overhang(reading))))
+    def _note(self, reading, now, verified):
+        self._samples.append((now, max(0, self._overhang(reading)), bool(verified)))
 
     def _baseline(self, now):
         while self._samples and now - self._samples[0][0] > self.window:
             self._samples.popleft()
-        return min((o for (_t, o) in self._samples), default=None)
+        if not any(verified for (_t, _o, verified) in self._samples):
+            return None
+        return min(o for (_t, o, _v) in self._samples)
 
     @property
     def baseline(self):
         return self._baseline(self._clock())
 
     def observe(self):
-        """Record one reading (the serving loop calls this outside rejection)."""
+        """Record a known-quiet reading (the server calls this after load)."""
         reading = self._read()
         now = self._clock()
         if reading is not None:
-            self._note(reading, now)
+            self._note(reading, now, verified=True)
         return self._baseline(now)
 
-    def refresh(self):
-        """``observe`` unless a settle holds the lock (never blocks)."""
+    def refresh(self, idle=False):
+        """Record a serving-loop reading taken outside rejection.
+
+        Never blocks: a settle in progress skips it.  An idle reading whose
+        overhang matches the previous idle reading's is verified quiet.
+        """
         if not self._lock.acquire(blocking=False):
             return None
         try:
-            return self.observe()
+            reading = self._read()
+            now = self._clock()
+            if reading is None:
+                self._last_idle = None
+                return self._baseline(now)
+            overhang = self._overhang(reading)
+            verified = (
+                idle
+                and self._last_idle is not None
+                and abs(overhang - self._last_idle) <= self.drop_bytes
+            )
+            self._last_idle = overhang if idle else None
+            self._note(reading, now, verified)
+            return self._baseline(now)
         finally:
             self._lock.release()
 
@@ -312,6 +337,7 @@ class FootprintSettler:
         baseline = self._baseline(now)
         first = lowest = reading[2]
         last_drop = now
+        slept = False
         exit_reason = "settled"
         while baseline is None or self._overhang(reading) > baseline + self.tolerance_bytes:
             if now - start >= budget:
@@ -321,6 +347,7 @@ class FootprintSettler:
                 exit_reason = "quiet"
                 break
             self._sleep(self.interval)
+            slept = True
             fresh = self._read()
             now = self._clock()
             if fresh is None:
@@ -330,7 +357,13 @@ class FootprintSettler:
             if reading[2] < lowest - self.drop_bytes:
                 lowest = reading[2]
                 last_drop = now
-        self._note(reading, now)
+        # A settle that waited ended on a stable or baseline-level reading;
+        # one certified at once proves nothing new.
+        self._note(
+            reading, now,
+            verified=exit_reason == "quiet"
+            or (exit_reason == "settled" and slept),
+        )
         return {
             "waited": now - start,
             "released_bytes": max(0, first - reading[2]),

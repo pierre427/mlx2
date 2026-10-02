@@ -191,7 +191,7 @@ def test_settler_waits_through_a_flat_lag_until_pages_return():
     # Flat for 150 ms, then 8 GiB leave (the measured Metal shape).
     s = FootprintSettler(read=reader(clock, [(0, 19 * G), (0.15, 11 * G)]),
                          clock=clock, sleep=clock.sleep)
-    s._note((10 * G, 0, 11 * G), 0.0)
+    s._note((10 * G, 0, 11 * G), 0.0, verified=True)
     report = s.settle()
     assert report["exit"] == "settled"
     assert 0.15 <= report["waited"] < 0.2
@@ -210,7 +210,7 @@ def test_settler_learns_baseline_from_quiet_and_is_bounded():
     steps = [(i * 0.05, (40 - i) * G) for i in range(40)]
     s2 = FootprintSettler(read=reader(clock2, steps), clock=clock2, sleep=clock2.sleep,
                           timeout=1.0)
-    s2._note((10 * G, 0, 10 * G), 0.0)
+    s2._note((10 * G, 0, 10 * G), 0.0, verified=True)
     report = s2.settle()
     assert report["exit"] == "timeout" and report["waited"] <= 1.02
 
@@ -312,26 +312,47 @@ def test_stale_high_baseline_does_not_certify_a_deferred_release():
 def test_baseline_tracks_growth_and_shrink_and_still_waits_for_a_release():
     clock = Clock()
     host = Host(clock)
-    s = FootprintSettler(read=host.read, clock=clock, sleep=clock.sleep, window=5.0)
-    assert s.refresh() == G
+    s = FootprintSettler(read=host.read, clock=clock, sleep=clock.sleep, window=10.0)
+    assert s.refresh(idle=True) is None  # one idle reading verifies nothing
+    clock.t += 1.0
+    assert s.refresh(idle=True) == G
     # Growth: non-MLX residency rises to 9 GiB and stays.  Once the old low
     # readings age out, nothing pending means no wait at all.
     host.non_mlx = 9 * G
-    for _ in range(7):
+    for _ in range(12):
         clock.t += 1.0
-        s.refresh()
+        s.refresh(idle=True)
     assert s.baseline == 9 * G
     sleeps = clock.sleeps
     assert s.settle()["exit"] == "settled" and clock.sleeps == sleeps
-    # Shrink: the next quiet reading outside rejection lowers it at once.
+    # Shrink: the next reading outside rejection lowers it at once.
     host.non_mlx = G
     clock.t += 1.0
-    assert s.refresh() == G
+    assert s.refresh(idle=True) == G
     # A deferred release now is waited for, not certified by the old 9 GiB.
     host.defer(8 * G, 0.15)
     report = s.settle()
     assert report["exit"] == "settled"
     assert 0.15 <= report["waited"] < 0.2
+
+
+def test_busy_loop_readings_alone_never_form_a_baseline():
+    """GPU 2026-10-02: during a long prefill every loop reading lands right
+    after a chunk's clear.  Those inflated readings must not certify the next
+    chunk's lagging pages once the verified idle readings have aged out."""
+    clock = Clock()
+    host = Host(clock)
+    s = FootprintSettler(read=host.read, clock=clock, sleep=clock.sleep, window=10.0)
+    s.observe()  # 1 GiB at load
+    for _ in range(15):  # busy: each reading 6 GiB of lag above residency
+        clock.t += 1.0
+        host.defer(6 * G, 0.15)
+        s.refresh(idle=False)
+    assert s.baseline is None
+    host.defer(6 * G, 0.15)
+    report = s.settle()
+    assert report["waited"] >= 0.15 and report["released_bytes"] == 6 * G
+    assert s.baseline == G  # the settle that waited verified it again
 
 
 def test_refresh_never_blocks_while_another_thread_settles():

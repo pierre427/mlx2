@@ -9247,7 +9247,7 @@ class ServingEngine:
                     # current (a drop in non-MLX residency lowers it).
                     settler = getattr(self, "_footprint_settler", None)
                     if settler is not None:
-                        settler.refresh()
+                        settler.refresh(idle=not active)
                     with self.lock:
                         self.snapshot.update(
                             {
