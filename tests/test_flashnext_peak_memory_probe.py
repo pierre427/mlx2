@@ -79,6 +79,34 @@ def test_unknown_arms_and_widths_fail_closed(probe):
             probe.parse_args(args)
 
 
+def test_default_served_config_reads_committed_run_without_git(probe, monkeypatch):
+    # Snapshot clones (QUALIFICATION.md Step 1) carry only origin/qualify/*;
+    # the run directory committed on main must be enough on its own.
+    def no_git(args, **_):
+        pytest.fail(f"consulted repository refs: {args}")
+    monkeypatch.setattr(probe.subprocess, "check_output", no_git)
+    initial, policy = probe.served_config()
+    assert initial["settings"]["prefill_step"] == 8192
+    assert policy["qsa_fused_scores"] is False
+
+
+def test_default_served_config_falls_back_to_remote_ref(probe, monkeypatch, tmp_path):
+    shown = []
+    def git_show(args, **_):
+        shown.append(args[-1])
+        if not args[-1].startswith("origin/"):
+            raise probe.subprocess.CalledProcessError(128, args)
+        name = args[-1].rsplit("/", 1)[-1]
+        return json.dumps({"initial": {"execution": {"policy": {}}, "settings": {}}}
+                          if name == "ladder-short.json" else {"num_draft": 2})
+    monkeypatch.setattr(probe, "ROOT", tmp_path)
+    monkeypatch.setattr(probe.subprocess, "check_output", git_show)
+    _, policy = probe.served_config()
+    assert policy["num_draft"] == 2
+    assert shown[:2] == [f"{probe.REF}:{probe.RUN}/results/ladder-flash-next-uncensored-mtp2/ladder-short.json",
+                         f"origin/{probe.REF}:{probe.RUN}/results/ladder-flash-next-uncensored-mtp2/ladder-short.json"]
+
+
 def test_resolved_policy_fields_validate_without_model_load(probe):
     from mlx2.adapters.flash_next_policy import FlashNextPolicy
     initial, policy = probe.served_config()

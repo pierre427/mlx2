@@ -35,15 +35,30 @@ ARMS = (
 )
 
 
-def git_text(spec):
-    return subprocess.check_output(["git", "show", spec], cwd=ROOT, text=True)
+def run_text(relative):
+    """Read a file of the committed run directory.
+
+    The run is committed on main, so the working tree has it. Snapshot clones
+    (docs/QUALIFICATION.md Step 1) carry the qualify branch only as
+    origin/<ref>, so the ref fallback tries both spellings.
+    """
+    path = ROOT / RUN / relative
+    if path.is_file():
+        return path.read_text()
+    for ref in (REF, f"origin/{REF}"):
+        try:
+            return subprocess.check_output(["git", "show", f"{ref}:{RUN}/{relative}"],
+                                           cwd=ROOT, text=True, stderr=subprocess.DEVNULL)
+        except (subprocess.CalledProcessError, OSError):
+            continue
+    raise FileNotFoundError(f"{RUN}/{relative}: not in the working tree, {REF} or origin/{REF}")
 
 
 def served_config(ladder_file=None, policy_file=None):
-    ladder = json.loads(Path(ladder_file).read_text() if ladder_file else git_text(
-        f"{REF}:{RUN}/results/ladder-flash-next-uncensored-mtp2/ladder-short.json"))
-    policy = json.loads(Path(policy_file).read_text() if policy_file else git_text(
-        f"{REF}:{RUN}/policies/flash-next-uncensored-policy.json"))
+    ladder = json.loads(Path(ladder_file).read_text() if ladder_file else run_text(
+        "results/ladder-flash-next-uncensored-mtp2/ladder-short.json"))
+    policy = json.loads(Path(policy_file).read_text() if policy_file else run_text(
+        "policies/flash-next-uncensored-policy.json"))
     initial = ladder["initial"]
     # Freeze resolved choices that the three-key service policy leaves implicit.
     policy = {**initial["execution"]["policy"], **policy}
