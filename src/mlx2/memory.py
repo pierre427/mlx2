@@ -146,3 +146,121 @@ def execution_headroom(host_signals=False):
             info.get("memory_size", 0), recommended
         ),
     )
+
+
+def mlx_footprint_reading():
+    """``(active, cached, footprint)`` bytes, or ``None`` when unmeasurable."""
+    try:
+        import mlx.core as mx
+        from .runtime.os_memory import physical_footprint_bytes
+
+        footprint = physical_footprint_bytes()
+        if footprint is None:
+            return None
+        return (int(mx.get_active_memory()), int(mx.get_cache_memory()), int(footprint))
+    except Exception:  # noqa: BLE001 - admission must survive probe failure
+        return None
+
+
+class FootprintSettler:
+    """Wait out Metal's deferred release of buffers MLX has just freed.
+
+    ``mx.clear_cache()`` returns in microseconds, but macOS takes the freed
+    ``MTLBuffer`` pages out of the process's physical footprint later: 8 GiB
+    released in 256 MiB-1 GiB buffers stayed in the footprint, flat, for
+    100-200 ms and was gone after 70-250 ms (M5 Max, 2026-10-02).  Admission
+    charges ``max(active + cached, footprint)``, so a measurement taken in that
+    window charges memory MLX no longer holds.  Every prefill chunk ends with a
+    ``clear_cache``, so a 4 x 32K Flash-Next cohort's chunk re-check read 5-9
+    GiB of such pages and refused (HTTP 429) a cohort it had admitted cold.
+
+    ``settle`` runs only on the refusal path, after the synchronized reclaim.
+    It never credits bytes: it waits, bounded, and the caller re-measures.  It
+    stops when the footprint's excess over MLX's ``active + cached`` (the
+    *overhang*) is back within ``tolerance`` of the quiet-state overhang
+    (``baseline``: Python heap, mapped tables and other non-MLX pages), when the
+    footprint has not fallen for ``quiet`` seconds, or at ``timeout``.  The
+    baseline is learned from settled readings; before one exists only the
+    quiet and timeout exits apply.
+    """
+
+    def __init__(
+        self,
+        *,
+        read=mlx_footprint_reading,
+        clock=None,
+        sleep=None,
+        tolerance_bytes=512 << 20,
+        drop_bytes=16 << 20,
+        quiet=0.3,
+        timeout=1.0,
+        interval=0.01,
+    ):
+        import time
+
+        self._read = read
+        self._clock = clock or time.monotonic
+        self._sleep = sleep or time.sleep
+        self.tolerance_bytes = int(tolerance_bytes)
+        self.drop_bytes = int(drop_bytes)
+        self.quiet = float(quiet)
+        self.timeout = float(timeout)
+        self.interval = float(interval)
+        self.baseline = None
+
+    @staticmethod
+    def _overhang(reading):
+        active, cached, footprint = reading
+        return footprint - (active + cached)
+
+    def observe(self):
+        """Record a quiet-state overhang (for example once the model is loaded)."""
+        reading = self._read()
+        if reading is not None:
+            self.baseline = max(0, self._overhang(reading))
+        return self.baseline
+
+    def _settled(self, reading):
+        return (
+            self.baseline is not None
+            and self._overhang(reading) <= self.baseline + self.tolerance_bytes
+        )
+
+    def settle(self):
+        """Wait (bounded) until recently freed pages leave the footprint."""
+        reading = self._read()
+        if reading is None:
+            return {"waited": 0.0, "released_bytes": 0, "exit": "unmeasurable"}
+        start = now = self._clock()
+        first = lowest = reading[2]
+        last_drop = start
+        exit_reason = "settled"
+        while not self._settled(reading):
+            if now - start >= self.timeout:
+                exit_reason = "timeout"
+                break
+            if now - last_drop >= self.quiet:
+                exit_reason = "quiet"
+                break
+            self._sleep(self.interval)
+            now = self._clock()
+            fresh = self._read()
+            if fresh is None:
+                exit_reason = "unmeasurable"
+                break
+            reading = fresh
+            if reading[2] < lowest - self.drop_bytes:
+                lowest = reading[2]
+                last_drop = now
+        overhang = max(0, self._overhang(reading))
+        if exit_reason == "quiet":
+            # Nothing more is being returned: this is the quiet-state overhang,
+            # even if non-MLX pages have grown since the last one.
+            self.baseline = overhang
+        elif exit_reason == "settled":
+            self.baseline = min(self.baseline, overhang)
+        return {
+            "waited": now - start,
+            "released_bytes": max(0, first - reading[2]),
+            "exit": exit_reason,
+        }

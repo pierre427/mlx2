@@ -2552,6 +2552,9 @@ class ServingEngine:
         )
         self._memory_reclaim_lock = threading.Lock()
         self._memory_reclaim_last = 0.0
+        from .memory import FootprintSettler
+
+        self._footprint_settler = FootprintSettler()
         self.apc_interior_route_supported = not self.prompt_lookup
         self.apc_interior_turn_markers = ()
         # (tenant_id, receipt) pairs: receipts carry request and session ids
@@ -3333,6 +3336,26 @@ class ServingEngine:
         counts = getattr(self, "counts", None)
         if counts is not None:
             counts["memory_cache_reclaims_before_reject"] += 1
+        if synchronize:
+            # The last step before a refusal: Metal returns freed buffer pages
+            # to the OS asynchronously, so the footprint the caller is about
+            # to re-measure can still hold GiB that MLX no longer owns (see
+            # ``FootprintSettler``).  Wait for them, bounded; credit nothing.
+            settler = getattr(self, "_footprint_settler", None)
+            if settler is None:
+                from .memory import FootprintSettler
+
+                settler = self._footprint_settler = FootprintSettler()
+            report = settler.settle()
+            if counts is not None:
+                counts["memory_footprint_settles"] += 1
+                counts["memory_footprint_settle_" + report["exit"]] += 1
+                counts["memory_footprint_settle_wait_ms"] += int(
+                    report["waited"] * 1000
+                )
+                counts["memory_footprint_settle_released_bytes"] += int(
+                    report["released_bytes"]
+                )
         return True
 
     def _permit_allocator_reclaim_after_eviction(self):
@@ -6661,6 +6684,9 @@ class ServingEngine:
                     "headroom_bytes": execution_headroom(),
                     **self._host_memory_status(),
                 }
+            # Quiet-state footprint overhang (non-MLX pages) after load.
+            if getattr(self, "_footprint_settler", None) is not None:
+                self._footprint_settler.observe()
             self.ready.set()
             last_snapshot = 0
             last_reclaim = 0
