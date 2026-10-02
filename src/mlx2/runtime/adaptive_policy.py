@@ -1065,10 +1065,21 @@ class MTPOrdinaryHandoffPolicy:
 
     enabled: bool = False
     max_mtp_width: int | None = None
+    # Default off.  When set, a measured park (``runtime/mtp_park_memory``)
+    # decides instead of the fixed width; ``max_mtp_width`` remains its
+    # cold-start threshold.  Mined from oMLX #4112.
+    adaptive_park: Any = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("MTP ordinary handoff enabled must be boolean")
+        from .mtp_park_memory import AdaptiveParkSettings
+
+        object.__setattr__(
+            self, "adaptive_park", AdaptiveParkSettings.from_value(self.adaptive_park)
+        )
+        if self.adaptive_park is not None and not self.enabled:
+            raise ValueError("adaptive_park requires an enabled MTP ordinary handoff")
         if self.max_mtp_width is not None:
             _positive_integer(
                 self.max_mtp_width, name="MTP ordinary handoff max_mtp_width"
@@ -1093,7 +1104,7 @@ class MTPOrdinaryHandoffPolicy:
             return value
         if not isinstance(value, Mapping):
             raise ValueError("mtp_ordinary_handoff must be an object")
-        allowed = {"enabled", "max_mtp_width"}
+        allowed = {"enabled", "max_mtp_width", "adaptive_park"}
         unknown = set(value) - allowed
         if unknown:
             raise ValueError(
@@ -1106,10 +1117,14 @@ class MTPOrdinaryHandoffPolicy:
         return cls(**dict(value))
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        values = {
             "enabled": self.enabled,
             "max_mtp_width": self.max_mtp_width,
         }
+        # Present only when selected: default receipts keep their settings.
+        if self.adaptive_park is not None:
+            values["adaptive_park"] = self.adaptive_park.as_dict()
+        return values
 
     def decision(
         self,

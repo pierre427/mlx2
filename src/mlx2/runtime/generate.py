@@ -2,6 +2,8 @@
 # Adapted from mlx-lm-unified; see docs/PROVENANCE.md and provenance/flashnext.json.
 import contextlib
 import copy
+import hashlib
+import json
 import logging
 import math
 import os
@@ -1487,6 +1489,7 @@ class MTPGenerationBatch:
         async_qsa_prequeue: Optional[Any] = None,
         adaptive_depth_policy: Optional[Any] = None,
         ordinary_handoff_policy: Optional[Any] = None,
+        park_memory: Optional[Any] = None,
         scheduler_stats: Optional[Dict[str, Any]] = None,
         acceptance_logger: Optional[Any] = None,
         mtp_admission: Optional[
@@ -1547,6 +1550,9 @@ class MTPGenerationBatch:
         self._base_mtp_admission = mtp_admission
         self.adaptive_depth_policy = adaptive_depth_policy
         self.ordinary_handoff_policy = ordinary_handoff_policy
+        # Measured park (oMLX #4112 port); None keeps the static threshold.
+        self.park_memory = park_memory
+        self._last_round_proposal = False
         self.acceptance_logger = acceptance_logger
         self.scheduler_stats = scheduler_stats if scheduler_stats is not None else {}
         self._ordinary_handoff_latched = False
@@ -1914,10 +1920,15 @@ class MTPGenerationBatch:
                 projected_width = (
                     len(self.state.lanes) + len(self._paused) + len(packages)
                 )
-                decision = self.ordinary_handoff_policy.decision(
-                    width=projected_width,
-                    width_locked=True,
-                    adaptive=self.adaptive_depth_policy,
+                memory = getattr(self, "park_memory", None)
+                decision = (
+                    memory.peek(projected_width)
+                    if memory is not None
+                    else self.ordinary_handoff_policy.decision(
+                        width=projected_width,
+                        width_locked=True,
+                        adaptive=self.adaptive_depth_policy,
+                    )
                 )
                 if decision is not None:
                     self._handoff_all_to_plain(
@@ -2058,11 +2069,15 @@ class MTPGenerationBatch:
         ):
             return False
         width = len(self.state.lanes) + len(self._paused)
-        decision = self.ordinary_handoff_policy.decision(
-            width=width,
-            width_locked=False,
-            adaptive=self.adaptive_depth_policy,
-        )
+        memory = getattr(self, "park_memory", None)
+        if memory is not None:
+            decision = memory.decide(width)
+        else:
+            decision = self.ordinary_handoff_policy.decision(
+                width=width,
+                width_locked=False,
+                adaptive=self.adaptive_depth_policy,
+            )
         if decision is None:
             return False
         self._handoff_all_to_plain(decision=decision, projected_width=width)
@@ -2686,6 +2701,7 @@ class MTPGenerationBatch:
                 )
 
     def next(self) -> List[Response]:
+        self._last_round_proposal = False
         if any((output is not None for output in self._initial_outputs)):
             return self._emit_initial()
         if not self._apply_admission():
@@ -2916,6 +2932,8 @@ class MTPGenerationBatch:
         terminal_indices = [i for (i, value) in enumerate(terminal) if value]
         if terminal_indices:
             self._complete_responses(terminal_indices, last)
+        # Only a completed proposal round is a timing sample for park memory.
+        self._last_round_proposal = True
         return responses
 
     @classmethod
@@ -2928,6 +2946,7 @@ class MTPGenerationBatch:
         async_qsa_promotion: bool = False,
         adaptive_depth_policy: Optional[Any] = None,
         ordinary_handoff_policy: Optional[Any] = None,
+        park_memory: Optional[Any] = None,
         scheduler_stats: Optional[Dict[str, Any]] = None,
     ):
         return cls(
@@ -2940,6 +2959,7 @@ class MTPGenerationBatch:
             async_qsa_promotion=async_qsa_promotion,
             adaptive_depth_policy=adaptive_depth_policy,
             ordinary_handoff_policy=ordinary_handoff_policy,
+            park_memory=park_memory,
             scheduler_stats=scheduler_stats,
         )
 
@@ -3118,6 +3138,8 @@ class BatchGenerator:
         self._last_decode_duration_ms = None
         self._prefill_ms_per_token_ewma = None
         self.scheduler_stats = scheduler_stats if scheduler_stats is not None else {}
+        self.mtp_park_memory = self._build_mtp_park_memory()
+        self._park_sample_prev = None
         if self.copy_draft.enabled:
             # Mechanism counters are present (as zero) from the first scrape so
             # a harness can refuse an enabled arm that never copied.
@@ -3289,6 +3311,7 @@ class BatchGenerator:
                 ordinary_handoff_policy=getattr(
                     self, "mtp_ordinary_handoff", None
                 ),
+                park_memory=getattr(self, "mtp_park_memory", None),
                 scheduler_stats=self.scheduler_stats,
             )
         self._plain_fallback_batch = GenerationBatch.empty(self.model, self.sampler)
@@ -4325,6 +4348,7 @@ class BatchGenerator:
                 ordinary_handoff_policy=getattr(
                     self, "mtp_ordinary_handoff", None
                 ),
+                park_memory=getattr(self, "mtp_park_memory", None),
                 scheduler_stats=self.scheduler_stats,
                 acceptance_logger=getattr(self, "mtp_acceptance_logger", None),
             ),
@@ -5505,6 +5529,83 @@ class BatchGenerator:
         )
         return self._promote_ready_prompts(self._plain_fallback_batch)
 
+    def _build_mtp_park_memory(self):
+        """Measured MTP park (oMLX #4112 port); None keeps the static width."""
+        policy = getattr(self, "mtp_ordinary_handoff", None)
+        settings = getattr(policy, "adaptive_park", None)
+        if settings is None or not getattr(policy, "enabled", False):
+            return None
+        from .mtp_park_memory import (
+            adaptive_park_kill_switch_engaged,
+            park_memory_for,
+        )
+
+        if adaptive_park_kill_switch_engaged():
+            # Counted fallback: the static threshold decides.
+            self.scheduler_stats["mtp_adaptive_park_kill_switch"] = 1
+            return None
+        route_key = hashlib.sha256(
+            json.dumps(
+                self.self_mtp or {},
+                sort_keys=True,
+                default=lambda value: type(value).__name__,
+            ).encode()
+        ).hexdigest()[:16]
+        memory = park_memory_for(
+            self.model,
+            settings,
+            static_max_width=int(policy.max_mtp_width),
+            route_key=route_key,
+            stats=self.scheduler_stats,
+        )
+        self.scheduler_stats.setdefault("mtp_adaptive_park_engaged", 1)
+        for key in (
+            "mtp_adaptive_park_mtp_samples",
+            "mtp_adaptive_park_ordinary_samples",
+            "mtp_adaptive_park_decisions",
+        ):
+            self.scheduler_stats.setdefault(key, 0)
+        return memory
+
+    def mtp_park_memory_snapshot(self):
+        memory = getattr(self, "mtp_park_memory", None)
+        return None if memory is None else memory.snapshot()
+
+    def _observe_park_round(
+        self, *, mtp_width, plain_width, mtp_tokens, plain_tokens, quiet
+    ):
+        """Feed one decode round to park memory as a same-domain interval.
+
+        A sample is the wall interval between two consecutive *pure* rounds of
+        the same kind and width with no prompt work queued: MTP-only rounds
+        that completed a proposal, or ordinary-only rounds.  Mixed rounds and
+        rounds next to prompt work are skipped and counted.
+        """
+        memory = self.mtp_park_memory
+        now = time.perf_counter()
+        if plain_width > 0:
+            memory.tick_ordinary(1)
+        kind = None
+        if (
+            mtp_width > 0
+            and plain_width == 0
+            and getattr(self._generation_batch, "_last_round_proposal", False)
+        ):
+            kind, width, tokens = "mtp", mtp_width, mtp_tokens
+        elif mtp_width == 0 and plain_width > 0 and plain_tokens > 0:
+            kind, width, tokens = "ordinary", plain_width, plain_tokens
+        prev = self._park_sample_prev
+        self._park_sample_prev = (
+            None if kind is None or not quiet else (kind, width, now)
+        )
+        if kind is None or not quiet:
+            if mtp_width or plain_width:
+                memory.note_skipped()
+            return
+        if prev is None or prev[0] != kind or prev[1] != width:
+            return
+        memory.observe(kind, width, tokens, now - prev[2])
+
     def _next_mtp(self):
         return _drive_round(self._round_mtp())
 
@@ -5526,11 +5627,21 @@ class BatchGenerator:
             and had_decode_work
             else None
         )
+        park_memory = self.mtp_park_memory
+        if park_memory is not None:
+            park_mtp_width = len(self._generation_batch.mtp_cycle_state())
+            park_quiet = (
+                not self._unprocessed_sequences
+                and len(self._prompt_batch) == 0
+                and not self._generation_batch.has_deferred_lanes
+            )
+            self._generation_batch._last_round_proposal = False
         if (
             self._generation_batch.mtp_cycle_state()
             or self._generation_batch.has_deferred_lanes
         ):
             generation_responses.extend(self._generation_batch.next())
+        park_mtp_tokens = len(generation_responses)
         lifecycle_failure = getattr(
             self._generation_batch, "take_atomic_cohort_failure", lambda: None
         )()
@@ -5546,13 +5657,29 @@ class BatchGenerator:
         else:
             self._demote_starved_mtp_lane()
         generation_responses.extend(self._migrate_plain_fallbacks())
+        park_plain_width = len(self._plain_fallback_batch)
+        park_plain_start = len(generation_responses)
         if len(self._plain_fallback_batch) > 0:
             generation_responses.extend(self._plain_fallback_batch.next())
+        if park_memory is not None:
+            self._observe_park_round(
+                mtp_width=park_mtp_width,
+                plain_width=park_plain_width,
+                mtp_tokens=park_mtp_tokens,
+                plain_tokens=len(generation_responses) - park_plain_start,
+                quiet=park_quiet,
+            )
         handoff_policy = getattr(self, "mtp_ordinary_handoff", None)
         if (
             getattr(self._generation_batch, "_ordinary_handoff_latched", False)
             and handoff_policy is not None
-            and len(self._plain_fallback_batch) < handoff_policy.max_mtp_width
+            and (
+                # Adaptive: release once one more arrival would not be parked
+                # (the static rule's ``plain < max_mtp_width``, measured).
+                not park_memory.would_park(len(self._plain_fallback_batch) + 1)
+                if park_memory is not None
+                else len(self._plain_fallback_batch) < handoff_policy.max_mtp_width
+            )
         ):
             # Expire the cohort latch on width, not total service idleness.
             # A steady prefill queue must not make ordinary mode permanent.

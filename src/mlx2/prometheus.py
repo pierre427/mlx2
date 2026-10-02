@@ -583,6 +583,20 @@ _SCHEDULER_EVENTS = frozenset(
         "mtp_ordinary_handoff_lanes",
         "mtp_ordinary_handoff_static_width_threshold",
         "mtp_ordinary_handoff_segmented_width_lock",
+        "mtp_ordinary_handoff_measured_loss",
+        "mtp_ordinary_handoff_park_memory",
+        "mtp_adaptive_park_engaged",
+        "mtp_adaptive_park_kill_switch",
+        "mtp_adaptive_park_mtp_samples",
+        "mtp_adaptive_park_ordinary_samples",
+        "mtp_adaptive_park_samples_skipped",
+        "mtp_adaptive_park_decisions",
+        "mtp_adaptive_park_measured_loss",
+        "mtp_adaptive_park_park_memory",
+        "mtp_adaptive_park_static_width_threshold",
+        "mtp_adaptive_park_verdicts_set",
+        "mtp_adaptive_park_verdicts_cleared",
+        "mtp_adaptive_park_verdicts_expired",
         "mtp_confidence_feature_cycles",
         "mtp_acceptance_log_records",
         "self_mtp_zero_fast_rounds",
@@ -1095,6 +1109,8 @@ def _scheduler_mechanism(key: str) -> str:
         return "prompt_lookup"
     if key.startswith("mtp_ordinary_handoff_"):
         return "mtp_ordinary_handoff"
+    if key.startswith("mtp_adaptive_park_"):
+        return "mtp_adaptive_park"
     if key.startswith("adaptive_mtp_"):
         return "adaptive_mtp"
     if key.startswith("self_mtp_copy_"):
