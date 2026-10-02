@@ -90,6 +90,43 @@ def moe_rhs_pad_identity(environ=None):
     return None if effective == MOE_RHS_PAD_DEFAULT else effective
 
 
+# oMLX #4070 batched one-token sparse QSA (qwen4_exp): "gather"/"indexed"
+# attend each row's selected K/V where the default runs a dense SDPA over the
+# padded width, so the decode K/V and logits differ from the default law.
+# Bound with its context floor only when the mode is not off, so default
+# namespaces are unchanged (Codex port review 2026-10-02, item 1).
+QSA_BATCH_DECODE_SPARSE_ENV = "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE"
+QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT_ENV = "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT"
+QSA_BATCH_DECODE_SPARSE_DEFAULT_MIN_CONTEXT = 32768
+_QWEN4_EXP = "mlx2.runtime.models.qwen4_exp"
+
+
+def qsa_batch_decode_sparse_effective(environ=None) -> dict:
+    """``{"mode", "min_context"}`` the batched sparse QSA arm runs under.
+
+    With ``environ`` None this is the value ``qwen4_exp`` holds when it is
+    loaded (what actually runs), else the process environment.
+    """
+    module = sys.modules.get(_QWEN4_EXP) if environ is None else None
+    if module is not None and hasattr(module, "_QSA_BATCH_DECODE_SPARSE"):
+        return {
+            "mode": module._QSA_BATCH_DECODE_SPARSE,
+            "min_context": module._QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT,
+        }
+    env = os.environ if environ is None else environ
+    mode = (env.get(QSA_BATCH_DECODE_SPARSE_ENV, "off") or "off").strip().lower()
+    if mode in _FALSE:
+        mode = "off"
+    raw = env.get(QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT_ENV)
+    try:
+        floor = max(0, int(raw)) if raw not in (None, "") else (
+            QSA_BATCH_DECODE_SPARSE_DEFAULT_MIN_CONTEXT
+        )
+    except ValueError:
+        floor = raw.strip()
+    return {"mode": mode, "min_context": floor}
+
+
 def _bound_value(kind: str, raw: str):
     value = raw.strip()
     if kind == "flag":
@@ -119,6 +156,9 @@ def execution_numerics_identity(environ=None, *, sp_qmm=False, verify_bitexact=F
     policy = moe_rhs_pad_effective(environ)["policy"]
     if policy not in {"floor", "off"}:
         bound[MOE_RHS_PAD_POLICY_ENV] = policy
+    sparse = qsa_batch_decode_sparse_effective(environ)
+    if sparse["mode"] != "off":
+        bound["qsa_batch_decode_sparse"] = sparse
     if sp_qmm:
         bound["sp_qmm"] = True
     if verify_bitexact:

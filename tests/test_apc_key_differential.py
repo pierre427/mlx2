@@ -178,6 +178,22 @@ BOUND = {
     "env: MLX2_MOE_RHS_PAD_POLICY=always": (
         {"env": {"MLX2_MOE_RHS_PAD_POLICY": "always"}}, "sorted-MoE expert kernel choice",
     ),
+    # oMLX #4070 batched one-token sparse QSA (Codex port review item 1):
+    # gather/indexed attend each row's selected K/V where the default runs a
+    # dense SDPA over the padded width, so served decode bits differ.
+    "env: MLX_QWEN4_QSA_BATCH_DECODE_SPARSE=gather": (
+        {"env": {"MLX_QWEN4_QSA_BATCH_DECODE_SPARSE": "gather"}}, "decode attention law",
+    ),
+    "env: MLX_QWEN4_QSA_BATCH_DECODE_SPARSE=indexed": (
+        {"env": {"MLX_QWEN4_QSA_BATCH_DECODE_SPARSE": "indexed"}}, "decode attention law",
+    ),
+    "env: MLX_QWEN4_QSA_BATCH_DECODE_SPARSE threshold": (
+        {"env": {
+            "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE": "gather",
+            "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT": "16384",
+        }},
+        "which contexts take the sparse arm",
+    ),
     "sp_qmm": ({"sp_qmm": True}, "M=2..16 matmuls (prefill tails), not bitwise identical"),
     "verify_bitexact": ({"verify_bitexact": True}, "every M<=max_m matmul (prefill tails)"),
 }
@@ -244,6 +260,47 @@ def test_default_environment_keeps_existing_namespaces():
     assert execution_numerics_identity(defaults) is None
     assert execution_numerics_identity({"MLX_GDN_CORE": "off", "MLX_ENABLE_TF32": ""}) is None
     assert apc_semantic_namespace("text-token-v1") == "text-token-v1"
+
+
+def test_qsa_batch_decode_sparse_modes_get_distinct_namespaces(tmp_path):
+    """off/gather/indexed and two thresholds: five laws, five namespaces;
+    an explicit off (with or without a threshold) is the default namespace."""
+    variants = [
+        {},
+        {"MLX_QWEN4_QSA_BATCH_DECODE_SPARSE": "gather"},
+        {"MLX_QWEN4_QSA_BATCH_DECODE_SPARSE": "indexed"},
+        {"MLX_QWEN4_QSA_BATCH_DECODE_SPARSE": "gather",
+         "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT": "65536"},
+        {"MLX_QWEN4_QSA_BATCH_DECODE_SPARSE": "indexed",
+         "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT": "65536"},
+    ]
+    keys = [build_key(tmp_path / str(i), env=env) for i, env in enumerate(variants)]
+    assert len(set(keys)) == len(keys)
+    assert execution_numerics_identity({"MLX_QWEN4_QSA_BATCH_DECODE_SPARSE": "off"}) is None
+    assert execution_numerics_identity({
+        "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE": "off",
+        "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT": "1024",
+    }) is None
+    # The policy's default threshold written explicitly is the same law.
+    assert execution_numerics_identity({"MLX_QWEN4_QSA_BATCH_DECODE_SPARSE": "gather"}) == (
+        execution_numerics_identity({
+            "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE": "gather",
+            "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT": "32768",
+        })
+    )
+
+
+def test_flash_next_policy_sparse_mode_reaches_the_identity():
+    """The serving environment the policy pins is what the identity reads."""
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
+
+    assert execution_numerics_identity(FlashNextPolicy().environment()) is None
+    gather = FlashNextPolicy(qsa_batch_decode_sparse="gather").environment()
+    indexed = FlashNextPolicy(
+        qsa_batch_decode_sparse="indexed", qsa_batch_decode_sparse_min_context=65536
+    ).environment()
+    assert execution_numerics_identity(gather) is not None
+    assert execution_numerics_identity(gather) != execution_numerics_identity(indexed)
 
 
 def test_execution_numerics_identity_is_order_and_value_canonical():
