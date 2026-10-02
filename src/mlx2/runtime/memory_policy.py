@@ -16,6 +16,8 @@ from typing import (
     Union,
 )
 
+from ..memory import bounded_settle
+
 
 @dataclass(frozen=True)
 class SelfMTPLaneAdmission:
@@ -828,14 +830,19 @@ def _make_self_mtp_admission_callback(
             current_free = free_memory()
             return math.nan if current_free is None else current_free
 
+        # One settle deadline per admission attempt, shared by the reclaim
+        # and every eviction; once spent, eviction proceeds without waiting.
+        settle_once = bounded_settle(settle_memory)
+
         def settled(decision, free, done):
             # Metal returns freed buffer pages to the OS asynchronously, so a
             # reading right after a clear (every prefill chunk ends with one)
             # can charge GiB MLX no longer holds.  Only a plan that still falls
             # short waits for them (bounded); nothing is credited.
-            if settle_memory is None or done(decision):
+            if settle_once is None or done(decision):
                 return (decision, free)
-            settle_memory()
+            if settle_once() is None:
+                return (decision, free)
             free = remeasure()
             return (plan(free), free)
 

@@ -162,6 +162,39 @@ def mlx_footprint_reading():
         return None
 
 
+SETTLE_BUDGET_SECONDS = 1.0
+
+
+def bounded_settle(settle, seconds=SETTLE_BUDGET_SECONDS, clock=None):
+    """Share one settle deadline across every wait of one admission attempt.
+
+    ``settle(timeout)`` is called with what is left of ``seconds``, counted
+    from the first call; once it is spent the wrapper returns ``None``
+    without waiting, so a reclaim / eviction / depth-fallback sequence blocks
+    its thread for at most ``seconds`` in total and leaves the rest of the
+    work to later scheduler rounds.  Wrapping is idempotent: an already
+    bounded callable keeps its own (outer) deadline.
+    """
+    if settle is None or getattr(settle, "settle_budget", None) is not None:
+        return settle
+    import time
+
+    clock = clock or time.monotonic
+    deadline = []
+
+    def bounded():
+        now = clock()
+        if not deadline:
+            deadline.append(now + seconds)
+        remaining = deadline[0] - now
+        if remaining <= 0:
+            return None
+        return settle(timeout=remaining)
+
+    bounded.settle_budget = seconds
+    return bounded
+
+
 class FootprintSettler:
     """Wait out Metal's deferred release of buffers MLX has just freed.
 
@@ -177,13 +210,20 @@ class FootprintSettler:
     Admission calls ``settle`` only when a reading taken after its
     synchronized reclaim still falls short, so a request that fits never
     waits.  It never credits bytes: it waits, bounded, and the caller
-    re-measures.  It
-    stops when the footprint's excess over MLX's ``active + cached`` (the
-    *overhang*) is back within ``tolerance`` of the quiet-state overhang
-    (``baseline``: Python heap, mapped tables and other non-MLX pages), when the
-    footprint has not fallen for ``quiet`` seconds, or at ``timeout``.  The
-    baseline is learned from settled readings; before one exists only the
-    quiet and timeout exits apply.
+    re-measures.  It stops when the footprint's excess over MLX's
+    ``active + cached`` (the *overhang*) is back within ``tolerance`` of the
+    quiet-state overhang (``baseline``), when the footprint has not fallen
+    for ``quiet`` seconds, or at the timeout.
+
+    ``baseline`` is the lowest overhang among the readings of the last
+    ``window`` seconds (``refresh`` / ``observe`` from the serving loop, plus
+    every reading taken while settling).  A real reading can only be the
+    non-MLX residency plus pending frees, so the minimum never certifies
+    pages that are still pending; a drop in non-MLX residency lowers it at the
+    next quiet reading, and growth is picked up once the older, lower
+    readings leave the window.  With no reading in the window there is no
+    baseline and only the quiet and timeout exits apply.  One lock serializes
+    callers on the scheduler and HTTP threads.
     """
 
     def __init__(
@@ -195,9 +235,12 @@ class FootprintSettler:
         tolerance_bytes=512 << 20,
         drop_bytes=16 << 20,
         quiet=0.3,
-        timeout=1.0,
+        timeout=SETTLE_BUDGET_SECONDS,
         interval=0.01,
+        window=5.0,
     ):
+        from collections import deque
+        import threading
         import time
 
         self._read = read
@@ -208,45 +251,78 @@ class FootprintSettler:
         self.quiet = float(quiet)
         self.timeout = float(timeout)
         self.interval = float(interval)
-        self.baseline = None
+        self.window = float(window)
+        self._samples = deque(maxlen=4096)
+        self._lock = threading.Lock()
 
     @staticmethod
     def _overhang(reading):
         active, cached, footprint = reading
         return footprint - (active + cached)
 
+    def _note(self, reading, now):
+        self._samples.append((now, max(0, self._overhang(reading))))
+
+    def _baseline(self, now):
+        while self._samples and now - self._samples[0][0] > self.window:
+            self._samples.popleft()
+        return min((o for (_t, o) in self._samples), default=None)
+
+    @property
+    def baseline(self):
+        return self._baseline(self._clock())
+
     def observe(self):
-        """Record a quiet-state overhang (for example once the model is loaded)."""
+        """Record one reading (the serving loop calls this outside rejection)."""
         reading = self._read()
+        now = self._clock()
         if reading is not None:
-            self.baseline = max(0, self._overhang(reading))
-        return self.baseline
+            self._note(reading, now)
+        return self._baseline(now)
 
-    def _settled(self, reading):
-        return (
-            self.baseline is not None
-            and self._overhang(reading) <= self.baseline + self.tolerance_bytes
-        )
+    def refresh(self):
+        """``observe`` unless a settle holds the lock (never blocks)."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return self.observe()
+        finally:
+            self._lock.release()
 
-    def settle(self):
+    def settle(self, timeout=None):
         """Wait (bounded) until recently freed pages leave the footprint."""
+        budget = self.timeout if timeout is None else min(self.timeout, float(timeout))
+        if budget <= 0:
+            return {"waited": 0.0, "released_bytes": 0, "exit": "budget"}
+        start = self._clock()
+        if not self._lock.acquire(timeout=budget):
+            return {"waited": self._clock() - start, "released_bytes": 0, "exit": "busy"}
+        try:
+            return self._settle(start, budget)
+        finally:
+            self._lock.release()
+
+    def _settle(self, start, budget):
         reading = self._read()
         if reading is None:
             return {"waited": 0.0, "released_bytes": 0, "exit": "unmeasurable"}
-        start = now = self._clock()
+        now = self._clock()
+        # Certify only against readings taken before this one: the first
+        # reading after a clear may itself be inflated.
+        baseline = self._baseline(now)
         first = lowest = reading[2]
-        last_drop = start
+        last_drop = now
         exit_reason = "settled"
-        while not self._settled(reading):
-            if now - start >= self.timeout:
+        while baseline is None or self._overhang(reading) > baseline + self.tolerance_bytes:
+            if now - start >= budget:
                 exit_reason = "timeout"
                 break
             if now - last_drop >= self.quiet:
                 exit_reason = "quiet"
                 break
             self._sleep(self.interval)
-            now = self._clock()
             fresh = self._read()
+            now = self._clock()
             if fresh is None:
                 exit_reason = "unmeasurable"
                 break
@@ -254,13 +330,7 @@ class FootprintSettler:
             if reading[2] < lowest - self.drop_bytes:
                 lowest = reading[2]
                 last_drop = now
-        overhang = max(0, self._overhang(reading))
-        if exit_reason == "quiet":
-            # Nothing more is being returned: this is the quiet-state overhang,
-            # even if non-MLX pages have grown since the last one.
-            self.baseline = overhang
-        elif exit_reason == "settled":
-            self.baseline = min(self.baseline, overhang)
+        self._note(reading, now)
         return {
             "waited": now - start,
             "released_bytes": max(0, first - reading[2]),

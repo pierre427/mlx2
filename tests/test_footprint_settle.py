@@ -129,7 +129,7 @@ def test_reading_that_fits_after_the_clear_never_waits():
         SelfMTPLaneAdmissionController(host_memory_gib=128, advisory_gib=112),
         free_memory=iter([0.0, 80.0, 80.0]).__next__,
         reclaim_memory=lambda: calls.append("reclaim"),
-        settle_memory=lambda: calls.append("settle"),
+        settle_memory=lambda timeout=None: calls.append("settle"),
         evict_unused_cache=lambda: False, max_draft=2,
     )
     assert admit.atomic(((0, 4096, 2, True, 0.0),)) == {0: 2}
@@ -141,10 +141,11 @@ def test_request_admission_settles_before_evicting_a_checkpoint():
 
     state = {"free": 5, "lagging": 6, "evictions": 0, "settles": 0}
 
-    def settle():
+    def settle(timeout=None):
         state["settles"] += 1
         state["free"] += state["lagging"]
         state["lagging"] = 0
+        return {"exit": "settled"}
 
     def evict():
         state["evictions"] += 1
@@ -190,7 +191,7 @@ def test_settler_waits_through_a_flat_lag_until_pages_return():
     # Flat for 150 ms, then 8 GiB leave (the measured Metal shape).
     s = FootprintSettler(read=reader(clock, [(0, 19 * G), (0.15, 11 * G)]),
                          clock=clock, sleep=clock.sleep)
-    s.baseline = G
+    s._note((10 * G, 0, 11 * G), 0.0)
     report = s.settle()
     assert report["exit"] == "settled"
     assert 0.15 <= report["waited"] < 0.2
@@ -209,6 +210,160 @@ def test_settler_learns_baseline_from_quiet_and_is_bounded():
     steps = [(i * 0.05, (40 - i) * G) for i in range(40)]
     s2 = FootprintSettler(read=reader(clock2, steps), clock=clock2, sleep=clock2.sleep,
                           timeout=1.0)
-    s2.baseline = 0
+    s2._note((10 * G, 0, 10 * G), 0.0)
     report = s2.settle()
     assert report["exit"] == "timeout" and report["waited"] <= 1.02
+
+
+# --- review round (codex, 2026-10-02) -------------------------------------
+
+
+def slow_settle(per_call, waits):
+    """A settle whose pages each take ``per_call`` seconds to come back."""
+    def settle(timeout=None):
+        wait = per_call if timeout is None else min(per_call, timeout)
+        waits.append(wait)
+        time.sleep(wait)
+        return {"exit": "settled", "waited": wait}
+    return settle
+
+
+def test_settle_budget_is_shared_across_evictions_in_mtp_admission():
+    """32 checkpoints x 150 ms of lagging pages must not block ~5 s."""
+    entries = {"left": 32}
+
+    def evict():
+        if not entries["left"]:
+            return False
+        entries["left"] -= 1
+        return True
+
+    waits = []
+    admit = _make_self_mtp_admission_callback(
+        SelfMTPLaneAdmissionController(host_memory_gib=128, advisory_gib=112),
+        free_memory=lambda: 0.0,
+        reclaim_memory=lambda: None,
+        settle_memory=slow_settle(0.15, waits),
+        evict_unused_cache=evict, max_draft=2,
+    )
+    started = time.monotonic()
+    admit.atomic(((0, 32768, 2, False, 0.0),))
+    elapsed = time.monotonic() - started
+    assert elapsed < 1.4, elapsed
+    assert sum(waits) <= 1.05
+
+
+def test_settle_budget_is_shared_across_evictions_and_depth_fallback():
+    from mlx2.serving import admit_lane_headroom
+
+    entries = {"left": 32}
+
+    def evict():
+        if not entries["left"]:
+            return False
+        entries["left"] -= 1
+        return True
+
+    waits = []
+    started = time.monotonic()
+    (admitted, _floor, _req) = admit_lane_headroom(
+        SelfMTPLaneAdmissionController(host_memory_gib=128, advisory_gib=112),
+        context_tokens=32768, draft_depth=2, cache_gib=0.0,
+        headroom=lambda: 0, reclaim=lambda: None, evict=evict,
+        settle=slow_settle(0.15, waits),
+    )
+    elapsed = time.monotonic() - started
+    assert not admitted
+    assert elapsed < 1.4, elapsed
+    assert sum(waits) <= 1.05
+
+
+class Host:
+    """Fake readings: MLX holds 10 GiB; non-MLX residency and lagging pages vary."""
+
+    def __init__(self, clock):
+        self.clock, self.non_mlx, self.pending, self.release_at = clock, G, 0, 0.0
+
+    def read(self):
+        lagging = self.pending if self.clock.t < self.release_at else 0
+        return (10 * G, 0, 10 * G + self.non_mlx + lagging)
+
+    def defer(self, nbytes, seconds):
+        self.pending, self.release_at = nbytes, self.clock.t + seconds
+
+
+def test_stale_high_baseline_does_not_certify_a_deferred_release():
+    """Learned 9 GiB quiet overhang, residency later drops to 1 GiB, then a
+    clear leaves 8 GiB lagging: 1 + 8 matches the stale 9 and must not pass
+    as settled without waiting."""
+    clock = Clock()
+    host = Host(clock)
+    s = FootprintSettler(read=host.read, clock=clock, sleep=clock.sleep)
+    host.non_mlx = 9 * G
+    s.observe()
+    clock.t = 30.0  # long after; no reading in between
+    host.non_mlx = G
+    host.defer(8 * G, 0.15)
+    report = s.settle()
+    assert report["waited"] >= 0.15, report
+    assert report["released_bytes"] == 8 * G
+
+
+def test_baseline_tracks_growth_and_shrink_and_still_waits_for_a_release():
+    clock = Clock()
+    host = Host(clock)
+    s = FootprintSettler(read=host.read, clock=clock, sleep=clock.sleep, window=5.0)
+    assert s.refresh() == G
+    # Growth: non-MLX residency rises to 9 GiB and stays.  Once the old low
+    # readings age out, nothing pending means no wait at all.
+    host.non_mlx = 9 * G
+    for _ in range(7):
+        clock.t += 1.0
+        s.refresh()
+    assert s.baseline == 9 * G
+    sleeps = clock.sleeps
+    assert s.settle()["exit"] == "settled" and clock.sleeps == sleeps
+    # Shrink: the next quiet reading outside rejection lowers it at once.
+    host.non_mlx = G
+    clock.t += 1.0
+    assert s.refresh() == G
+    # A deferred release now is waited for, not certified by the old 9 GiB.
+    host.defer(8 * G, 0.15)
+    report = s.settle()
+    assert report["exit"] == "settled"
+    assert 0.15 <= report["waited"] < 0.2
+
+
+def test_refresh_never_blocks_while_another_thread_settles():
+    clock = Clock()
+    host = Host(clock)
+    s = FootprintSettler(read=host.read, clock=clock, sleep=clock.sleep)
+    s._lock.acquire()
+    try:
+        assert s.refresh() is None
+        assert s.settle(timeout=0.01)["exit"] == "busy"
+    finally:
+        s._lock.release()
+
+
+def test_parallel_sample_final_check_settles_before_refusing(metal, monkeypatch):
+    from mlx2 import memory, serving
+
+    recommended = 112 * G
+    required = (20 + 2 * 2) * G  # reserve + 2 samples x 2 GiB default
+    # Settled there is 1 GiB to spare; 4 GiB of freed pages still lag.
+    fake = metal(active=int(recommended - G - required - G), base=G,
+                 pending=4 * G, release_after=0.15)
+    monkeypatch.setattr(memory, "execution_headroom", lambda: available_execution_bytes(
+        available=200 * G, recommended=recommended, active=fake.active,
+        cached=fake.cache, footprint=fake.footprint()))
+    monkeypatch.setattr(serving.ServingEngine, "PARALLEL_SAMPLE_WAIT_SECONDS", 0.0)
+    engine = serving.ServingEngine.__new__(serving.ServingEngine)
+    engine.max_lanes = 4
+    engine.queued_jobs = 0
+    engine.counts = Counter()
+    engine._hard_reserve_gib = 20.0
+    engine.batch_metrics = type("M", (), {"rejected": lambda self, *a: None})()
+    receipt = engine.admit_parallel_samples(2)
+    assert receipt["required_headroom_bytes"] == required
+    assert engine.counts["memory_footprint_settles"] == 1

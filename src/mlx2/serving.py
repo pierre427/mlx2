@@ -1535,6 +1535,11 @@ def admit_lane_headroom(
     The fallback runs only on the branch that previously returned "refuse",
     so every host that admitted at full depth is untouched.
     """
+    from .memory import bounded_settle
+
+    # The depth fallback shares the first attempt's settle deadline.
+    settle = bounded_settle(settle)
+
     def attempt(depth):
         required = lane_admission_required_gib(
             controller,
@@ -1580,6 +1585,11 @@ def admit_prompt_lookup_lane(
     target decode), exactly as the MTP route falls back to its depth floor;
     the lane's receipt reports the cap.
     """
+    if kwargs.get("settle") is not None:
+        from .memory import bounded_settle
+
+        # Both span attempts share one settle deadline.
+        kwargs["settle"] = bounded_settle(kwargs["settle"])
     (admitted, _floor, required) = admit_lane_headroom(
         controller,
         context_tokens=context_tokens,
@@ -1628,6 +1638,10 @@ def ensure_admission_headroom(
     """
     if headroom() >= required_bytes:
         return True
+    from .memory import bounded_settle
+
+    # One settle deadline for the whole attempt: eviction never restarts it.
+    settle = bounded_settle(settle)
 
     def reclaimed_fits():
         # ``settle`` waits out pages Metal has not yet returned after the
@@ -1635,8 +1649,8 @@ def ensure_admission_headroom(
         reclaim()
         free = headroom()
         if free < required_bytes and settle is not None:
-            settle()
-            free = headroom()
+            if settle() is not None:
+                free = headroom()
         return free
 
     free = reclaimed_fits()
@@ -3356,7 +3370,7 @@ class ServingEngine:
             self._settle_footprint_before_reject()
         return True
 
-    def _settle_footprint_before_reject(self):
+    def _settle_footprint_before_reject(self, timeout=None):
         """Wait (bounded) for freed Metal pages to leave the footprint.
 
         Metal returns the pages of buffers MLX has released to the OS
@@ -3364,14 +3378,17 @@ class ServingEngine:
         prefill chunk ends with one -- can still hold GiB that MLX no longer
         owns (``FootprintSettler``).  Admission calls this only once a
         synchronized reclaim has left a request short, so the common path
-        never waits.  It credits nothing: the caller re-measures.
+        never waits.  It credits nothing: the caller re-measures.  ``timeout``
+        is what is left of the caller's per-attempt budget
+        (``bounded_settle``); the settler's lock serializes the scheduler and
+        HTTP threads.
         """
         settler = getattr(self, "_footprint_settler", None)
         if settler is None:
             from .memory import FootprintSettler
 
             settler = self._footprint_settler = FootprintSettler()
-        report = settler.settle()
+        report = settler.settle(timeout)
         counts = getattr(self, "counts", None)
         if counts is not None:
             counts["memory_footprint_settles"] += 1
@@ -4423,7 +4440,14 @@ class ServingEngine:
         deadline = time.monotonic() + self.PARALLEL_SAMPLE_WAIT_SECONDS
         while available() < required:
             if time.monotonic() >= deadline:
+                # Final measurement: reclaim, then wait (bounded) for pages
+                # Metal has not yet returned.  This is the HTTP thread: MLX
+                # streams are thread-local, so a synchronize here could not
+                # drain the worker's stream; the settle waits on the
+                # footprint itself and takes the settler's lock.
                 self._clear_allocator_cache_before_reject()
+                if available() < required:
+                    self._settle_footprint_before_reject()
                 if available() >= required:
                     break
                 self.batch_metrics.rejected("parallel_sample_footprint", self.queued_jobs)
@@ -9219,6 +9243,11 @@ class ServingEngine:
                     apc.spill_idle_entries()
                 now = time.monotonic()
                 if now - last_snapshot > 1:
+                    # A reading outside rejection keeps the settle baseline
+                    # current (a drop in non-MLX residency lowers it).
+                    settler = getattr(self, "_footprint_settler", None)
+                    if settler is not None:
+                        settler.refresh()
                     with self.lock:
                         self.snapshot.update(
                             {
