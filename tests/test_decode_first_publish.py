@@ -72,15 +72,36 @@ def test_policy_off_by_default_and_parsing():
         DecodeFirstPublish.from_value(3)
 
 
-def test_env_kill_switch_and_forcing():
+def test_env_is_a_kill_switch_only():
+    """Codex port review 2026-10-02 item 4: the environment may only disable
+    a selected policy.  Serving records the configured policy as the route
+    identity, so an inherited value that enabled or widened the policy would
+    run a route the receipt does not describe."""
     on = DecodeFirstPublish.from_value(True)
     assert on.mode({DECODE_FIRST_ENV: "0"}) == "off"
     assert on.counters["kill_switch_rounds"] == 1
+    assert on.mode({DECODE_FIRST_ENV: "off"}) == "off"
     off = DecodeFirstPublish()
-    assert off.mode({DECODE_FIRST_ENV: "order"}) == "order"
-    assert off.mode({DECODE_FIRST_ENV: "1"}) == "all"
-    assert off.mode({DECODE_FIRST_ENV: "garbage"}) == "off"
+    for value in ("order", "1", "all", "garbage", ""):
+        assert off.mode({DECODE_FIRST_ENV: value}) == "off", value
     assert "kill_switch_rounds" not in off.counters
+    # Nor can it widen an "order" selection to the shared budget.
+    order = DecodeFirstPublish.from_value({"shared_prefill_budget": False})
+    assert order.mode({DECODE_FIRST_ENV: "1"}) == "order"
+    assert order.mode({DECODE_FIRST_ENV: "all"}) == "order"
+    # Or narrow "all" to "order" (that is another route as well).
+    assert on.mode({DECODE_FIRST_ENV: "order"}) == "all"
+
+
+def test_inherited_env_does_not_enable_a_default_generator(model, monkeypatch):
+    monkeypatch.setenv(DECODE_FIRST_ENV, "order")
+    gen = ordinary(model)
+    try:
+        drive(gen, Trace(monkeypatch), arrivals=ordinary_arrivals())
+        stats = dict(gen.scheduler_stats)
+    finally:
+        gen.close()
+    assert not any(k.startswith("decode_first_") for k in stats), stats
 
 
 @pytest.mark.parametrize(
@@ -264,7 +285,7 @@ def test_default_returns_decode_tokens_after_the_prefill_slice(model, monkeypatc
     assert not any(k.startswith("decode_first_") for k in gen.scheduler_stats)
 
 
-@pytest.mark.parametrize("value", [{"shared_prefill_budget": False}, "env-order"])
+@pytest.mark.parametrize("value", [{"shared_prefill_budget": False}])
 def test_decode_first_returns_tokens_before_prefill_same_work_and_tokens(
     model, monkeypatch, value
 ):

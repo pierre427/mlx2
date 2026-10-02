@@ -1,7 +1,8 @@
 """Decode-first publication A/B on served Flash-Next (mlx-vlm #1630 port).
 
-Arms (``MLX2_DECODE_FIRST``, read per scheduler round, so arms alternate in
-one process and one engine):
+Arms (the live generator's ``decode_first`` policy, read per scheduler round,
+so arms alternate in one process and one engine; ``MLX2_DECODE_FIRST`` is a
+kill switch only and cannot select an arm):
 
   off    today: a round's decode tokens are returned after its prefill phase;
   order  decode tokens are returned before the round's prefill phase;
@@ -94,7 +95,7 @@ def main():
         ap.error("refusing Metal execution without --i-own-the-gpu")
     if a.arms[0] != "off":
         raise SystemExit("the off arm is the identity reference; list it first")
-    env_value = {"off": "0", "order": "order", "all": "1"}
+    ARM = {"name": "off"}
 
     from mlx2 import server as S
     from mlx2 import serving
@@ -143,6 +144,10 @@ def main():
 
     def batch_next(self, *args_, **kwargs):
         LIVE["stats"] = self.scheduler_stats
+        # The arm is the live policy (counters kept); "off" still finishes a
+        # pending prefill phase first, as the kill switch does.
+        self.decode_first.enabled = ARM["name"] != "off"
+        self.decode_first.shared_prefill_budget = ARM["name"] == "all"
         out = real_next(self, *args_, **kwargs)
         for r in out[1]:
             TOKENS.setdefault(r.uid, []).append(int(r.token))
@@ -382,7 +387,7 @@ def main():
                                     if v != before.get(k, 0)}}
 
     def set_arm(name):
-        os.environ["MLX2_DECODE_FIRST"] = env_value[name]
+        ARM["name"] = name
 
     def check_swap():
         grew = swapouts() - swap0

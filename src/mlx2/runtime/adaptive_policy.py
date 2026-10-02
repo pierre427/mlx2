@@ -315,7 +315,12 @@ class PrefillOrder:
 
 
 DECODE_FIRST_ENV = "MLX2_DECODE_FIRST"
-_DECODE_FIRST_ENV_MODES = {"0": "off", "order": "order", "1": "all", "all": "all"}
+# Kill switch only (Codex port review 2026-10-02 item 4): serving records the
+# configured policy as route and qualification identity, so the environment
+# may disable a selected policy but never enable, widen or narrow one; the
+# same rule as MLX2_MOE_NAX_GATHER on Flash-Next.  Paired A/B arms set the
+# live generator's policy instead (scripts/measure_decode_first.py).
+_DECODE_FIRST_KILL_VALUES = frozenset({"0", "off", "false", "no"})
 
 
 @dataclass
@@ -340,9 +345,11 @@ class DecodeFirstPublish:
     slice (the decode-fairness or adaptive slice when one applies, else the
     prefill step).
 
-    ``MLX2_DECODE_FIRST`` is read per round: ``0`` is the kill switch (off
-    whatever the policy says), ``order`` forces the ordering alone, ``1`` or
-    ``all`` forces ordering and the shared budget.
+    ``MLX2_DECODE_FIRST`` is read per round and is a kill switch only:
+    ``0``/``off`` turns a selected policy off (a pending prefill phase still
+    completes first).  Any other value is ignored: it cannot enable the
+    policy or change its mode, because the route receipt records the
+    configured policy, not the environment.
     """
 
     enabled: bool = False
@@ -394,13 +401,11 @@ class DecodeFirstPublish:
         """``off``, ``order`` or ``all`` for this round."""
         import os
 
-        raw = (environ if environ is not None else os.environ).get(DECODE_FIRST_ENV)
-        if raw is not None and raw.strip().lower() in _DECODE_FIRST_ENV_MODES:
-            forced = _DECODE_FIRST_ENV_MODES[raw.strip().lower()]
-            if forced == "off" and self.enabled:
-                _bump(self.counters, "kill_switch_rounds")
-            return forced
         if not self.enabled:
+            return "off"
+        raw = (environ if environ is not None else os.environ).get(DECODE_FIRST_ENV)
+        if raw is not None and raw.strip().lower() in _DECODE_FIRST_KILL_VALUES:
+            _bump(self.counters, "kill_switch_rounds")
             return "off"
         return "all" if self.shared_prefill_budget else "order"
 
