@@ -5581,7 +5581,9 @@ class BatchGenerator:
         that completed a proposal, or ordinary-only rounds.  Mixed rounds and
         rounds next to prompt work are skipped and counted.
         """
-        memory = self.mtp_park_memory
+        memory = getattr(self, "mtp_park_memory", None)
+        if memory is None:
+            return
         now = time.perf_counter()
         kind = None
         if (
@@ -5625,7 +5627,7 @@ class BatchGenerator:
             and had_decode_work
             else None
         )
-        park_memory = self.mtp_park_memory
+        park_memory = getattr(self, "mtp_park_memory", None)
         if park_memory is not None:
             park_mtp_width = len(self._generation_batch.mtp_cycle_state())
             park_quiet = (
