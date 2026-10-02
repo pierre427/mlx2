@@ -220,6 +220,7 @@ class ExternalDraftAdapterMixin:
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
 
         self._initialize_external_feedback()
+        self._external_execution_started = True
         if hasattr(self.draft_model, "last_continuation_selections"):
             kwargs.setdefault("continuation_pool", self.draft_model.policy)
 
@@ -233,6 +234,82 @@ class ExternalDraftAdapterMixin:
             num_draft=self._external_num_draft(),
             **kwargs,
         )
+
+    def bind_external_serving_namespace(self, namespace):
+        """Bind effective target numerical laws before any cache or learning.
+
+        Serving passes the same composed namespace used by APCv2. Its default
+        is an identity, preserving existing ordinary/chain/pool route hashes.
+        """
+        if (
+            getattr(self, "draft_model", None) is None
+            or namespace == "external-learning-v1"
+        ):
+            return False
+        payload = json.dumps(
+            namespace, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        previous = getattr(self, "_external_serving_namespace", None)
+        if previous == payload:
+            return False
+        if (
+            previous is not None
+            or getattr(self, "_external_execution_started", False)
+            or getattr(self, "_external_feedback_manager", None) is not None
+        ):
+            raise ValueError(
+                "external serving numerical laws must bind before execution or feedback"
+            )
+        old = self.draft_model
+        if hasattr(old, "proposal_pool") and (
+            old.proposal_pool._pending or old.proposal_pool.feedback_revision
+        ):
+            raise ValueError(
+                "external serving numerical laws require an unconsumed continuation pool"
+            )
+        target_revision = hashlib.sha256(
+            (self._external_target_revision + payload).encode()
+        ).hexdigest()
+        replacement = old
+        if hasattr(old, "proposal_pool"):
+            from ..runtime.proposal_providers import ContinuationDraftModel
+
+            session_revision = hashlib.sha256(
+                (old.session.session_revision + payload).encode()
+            ).hexdigest()
+            session = replace(
+                old.session,
+                session_revision=session_revision,
+                target_revision=target_revision,
+            )
+            records = {
+                name: replace(
+                    record,
+                    session_revision=session_revision,
+                    target_revision=target_revision,
+                )
+                for name, record in old.source_records.items()
+            }
+            replacement = ContinuationDraftModel(
+                old.backend,
+                old.policy.as_dict(),
+                session=session,
+                source_records=records,
+                providers=old.providers,
+            )
+            replacement.proposal_pool.ranking_registry = (
+                old.proposal_pool.ranking_registry
+            )
+        fingerprint = hashlib.sha256(
+            (self.identity["fingerprint"] + payload).encode()
+        ).hexdigest()
+        self.draft_model = replacement
+        self._external_target_revision = target_revision
+        self._external_serving_namespace = payload
+        self.identity = {**self.identity, "fingerprint": fingerprint}
+        self.layout += ":external-numerical-laws:" + fingerprint
+        self.descriptor = replace(self.descriptor, cache_layout=self.layout)
+        return True
 
     def _initialize_external_feedback(self):
         if (

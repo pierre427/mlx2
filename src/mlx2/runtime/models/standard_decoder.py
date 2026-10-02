@@ -394,6 +394,9 @@ class Model(nn.Module):
             raise ValueError(
                 "row-exact backbone dtype changed after configuration; reconfigure before allocating caches"
             )
+        # Serving installs some projection policies after adapter loading.
+        # Dtype alone cannot admit replacement modules into this math contract.
+        self.configure_target_verify_row_exact(True)
         if inputs.ndim != 2 or min(inputs.shape) <= 0 or cache is None:
             raise ValueError(
                 "row-exact verification requires nonempty batched tokens and plain KV caches"
