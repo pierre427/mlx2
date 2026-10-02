@@ -10,7 +10,7 @@ import json
 import math
 import os
 import threading
-from collections import Counter
+from collections import Counter, OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
@@ -226,15 +226,36 @@ def _trace_flags() -> tuple:
 
 
 _PLE_COMPILE = _env_flag("MLX_QWEN4_PLE_COMPILE", default=True)
+# Cache policy (sweep1002): a signature is traced only on its
+# ``_PLE_COMPILE_MIN_SEEN``-th sighting, and the traced entries are an LRU of
+# ``_PLE_COMPILE_CACHE_MAX``.  Serving produces a small hot set (decode and
+# MTP verify widths per batch size) plus one prefill tail per distinct prompt
+# length, which almost never recurs.  The old never-evicting cache filled with
+# those tails and then ran every NEW shape eager forever -- including decode
+# shapes of a batch size it had not met yet.  One-off tails now run eager
+# (``cold_eager``; the trace would cost about what it saves on that one call),
+# and a full cache drops its least recently used entry (``evictions``), so no
+# shape is ever locked out.  Pending sightings live in a separate LRU bounded
+# by ``_ple_compile_seen_max()``.
 _PLE_COMPILE_CACHE_MAX = max(
     1, int(os.environ.get("MLX_QWEN4_PLE_COMPILE_CACHE", "32"))
 )
+_PLE_COMPILE_MIN_SEEN = max(
+    1, int(os.environ.get("MLX_QWEN4_PLE_COMPILE_MIN_SEEN", "2"))
+)
+
+
+def _ple_compile_seen_max() -> int:
+    return max(64, 4 * _PLE_COMPILE_CACHE_MAX)
+
+
 _PLE_COMPILE_STATS_LOCK = threading.Lock()
 _PLE_COMPILE_STATS = {
     "builds": 0,
     "hits": 0,
     "fallbacks": 0,
-    "overflow": 0,
+    "cold_eager": 0,
+    "evictions": 0,
     "skips": 0,
     "retraces": 0,
     "invalidations": 0,
@@ -255,6 +276,8 @@ def qwen4_ple_compile_status(*, reset: bool = False) -> dict:
 
     ``fallbacks`` MUST be 0 on a healthy run: every one is a signature that
     raised while tracing or replaying and was demoted to the eager chain.
+    ``cold_eager`` (a signature not yet seen ``min_seen`` times, run eager)
+    and ``evictions`` (LRU drops from a full cache) are normal serving events.
     ``enabled`` is False by default -- the lever is opt-in, see the module
     comment on ``_PLE_COMPILE``.
     """
@@ -263,6 +286,7 @@ def qwen4_ple_compile_status(*, reset: bool = False) -> dict:
         report = {
             "enabled": bool(_PLE_COMPILE),
             "cache_max": _PLE_COMPILE_CACHE_MAX,
+            "min_seen": _PLE_COMPILE_MIN_SEEN,
             "counts": dict(_PLE_COMPILE_STATS),
             "last_receipt": _PLE_COMPILE_LAST_RECEIPT,
         }
@@ -3106,17 +3130,20 @@ class PLELayer(nn.Module):
         """Return the traced chain for ``signature``, or ``None`` for eager.
 
         ``None`` is the fail-closed answer and is cached as such, so a
-        signature that raised once is never retried -- the eager chain is
-        always a correct substitute, and a compile failure must cost one
-        receipt, not one exception per round.
+        signature that raised once is not retried while its entry lives --
+        the eager chain is always a correct substitute, and a compile failure
+        must cost one receipt, not one exception per round.  A signature seen
+        fewer than ``_PLE_COMPILE_MIN_SEEN`` times also answers ``None``
+        (``cold_eager``); a full cache evicts its least recently used entry.
         """
         cache = getattr(self, "_ple_compile_cache", None)
         flags = _trace_flags()
         if cache is None or getattr(self, "_ple_compile_flags", None) != flags:
             if cache:
                 _record_ple_compile("invalidations", flags=repr(flags))
-            cache = {}
+            cache = OrderedDict()
             self._ple_compile_cache = cache
+            self._ple_compile_seen = OrderedDict()
             self._ple_compile_flags = flags
         params = self._chain_params()
         entry = cache.get(signature)
@@ -3125,13 +3152,23 @@ class PLELayer(nn.Module):
             if len(cached_params) == len(params) and all(
                 (a is b for (a, b) in zip(cached_params, params))
             ):
+                cache.move_to_end(signature)
                 _record_ple_compile("hits")
                 return compiled
             _record_ple_compile("retraces", signature=repr(signature))
             del cache[signature]
-        if len(cache) >= _PLE_COMPILE_CACHE_MAX:
-            _record_ple_compile("overflow", signature=repr(signature))
-            return None
+        else:
+            seen = self._ple_compile_seen
+            count = seen.pop(signature, 0) + 1
+            if count < _PLE_COMPILE_MIN_SEEN:
+                seen[signature] = count
+                while len(seen) > _ple_compile_seen_max():
+                    seen.popitem(last=False)
+                _record_ple_compile("cold_eager", signature=repr(signature))
+                return None
+        while len(cache) >= _PLE_COMPILE_CACHE_MAX:
+            (evicted, _entry) = cache.popitem(last=False)
+            _record_ple_compile("evictions", signature=repr(evicted))
         out_shape = tuple(signature[0])
         try:
 

@@ -1406,8 +1406,8 @@ def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> 
         counts = compile_status.get("counts")
         if isinstance(counts, Mapping):
             for event in (
-                "builds", "hits", "fallbacks", "overflow", "skips",
-                "retraces", "invalidations",
+                "builds", "hits", "fallbacks", "cold_eager", "evictions",
+                "skips", "retraces", "invalidations",
             ):
                 builder.counter(
                     "mlx2_ple_compile_events_total",

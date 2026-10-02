@@ -164,7 +164,7 @@ def clear_derived(model, hc):
     counts = {}
     for _, module in model.named_modules():
         for name in ("_qsa_fused_cache", "_hc_decode_plan", "_mlx2_expert_views",
-                     "_ple_compile_cache"):
+                     "_ple_compile_cache", "_ple_compile_seen"):
             if name in module.__dict__:
                 counts[name] = counts.get(name, 0) + 1
                 if name == "_qsa_fused_cache":
