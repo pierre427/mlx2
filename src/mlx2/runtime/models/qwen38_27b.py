@@ -15,7 +15,8 @@ from .base import (
 )
 from .cache import ArraysCache, KVCache
 from .pipeline import PipelineMixin
-from .qwen3_5 import TextModelArgs, GatedDeltaNet
+from .qwen3_5 import TextModelArgs
+from .qwen38_fused_gdn import GatedDeltaNet
 from .qwen3_next import Qwen3NextMLP as MLP
 from .precise_ops import gate_sigmoid
 from .rope_utils import initialize_rope

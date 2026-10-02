@@ -295,6 +295,14 @@ def configure_environment() -> dict[str, str]:
     return profile
 
 
+def fused_gdn_policy(policy: dict) -> bool:
+    """27B decode switch in the existing execution policy; false kills it."""
+    enabled = policy.get("fused_gdn", False)
+    if type(enabled) is not bool:
+        raise ValueError("fused_gdn must be boolean")
+    return enabled
+
+
 EAGER_DISPATCH_POLICY_KEYS = ("eager_dispatch_stride", "eager_dispatch_max_rows")
 # Route identity of a selected stride: recorded in the adapter environment
 # (and so in qualification settings) only when the lever is on, so receipts
@@ -429,6 +437,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
+        self.fused_gdn = fused_gdn_policy(policy)
+        policy.pop("fused_gdn", None)
         if stream_request is not None:
             if "draft_model" in policy:
                 raise ValueError(
@@ -513,6 +523,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             }
             os.environ["MLX_GDN_CORE"] = self.environment["MLX_GDN_CORE"]
         self.environment = eager_dispatch_environment(self.environment, eager_dispatch)
+        if self.fused_gdn:
+            # Receipt identity only; no runtime module reads this variable.
+            self.environment = {**self.environment, "MLX2_QWEN38_FUSED_GDN": "1"}
         self.layout = self.descriptor.cache_layout
         self._tables = []
         path = Path(self.identity["path"])
@@ -630,6 +643,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         import mlx.core as mx
 
         self.model.eval()
+        from ..runtime.models.qwen38_fused_gdn import configure as configure_fused_gdn
+
+        configure_fused_gdn(self.model, self.fused_gdn)
         mx.eval(self.model.parameters())
         if eager_dispatch[0]:
             self.model.model.set_eager_dispatch(*eager_dispatch)
@@ -836,4 +852,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             ),
             **eager_dispatch_diagnostics(self),
             **gdn_state_diagnostics(self),
+            **(
+                {"fused_gdn": self._fused_gdn_diagnostics()}
+                if getattr(self, "fused_gdn", False) else {}
+            ),
         }
+
+    def _fused_gdn_diagnostics(self):
+        from ..runtime.models.qwen38_fused_gdn import stats
+
+        return stats(self.model)

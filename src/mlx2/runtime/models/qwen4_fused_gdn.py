@@ -166,6 +166,7 @@ def _admit_decode_operands(
         "qwen4": "sigmoid",
         "agnes": "swish",
         "qwen35": "swish",
+        "qwen38": "swish",
     }.get(architecture)
     if expected_gate is None:
         return FusedGdnAdmission(False, f"unsupported architecture {architecture!r}")
@@ -523,7 +524,7 @@ def qwen4_fused_gdn_decode(
         raise ValueError(
             f"unsupported threadgroup_y {threadgroup_y}; expected one of {_THREADGROUP_Y_CANDIDATES}"
         )
-    if architecture not in ("qwen4", "agnes", "qwen35"):
+    if architecture not in ("qwen4", "agnes", "qwen35", "qwen38"):
         raise ValueError(f"unsupported fused GDN architecture {architecture!r}")
     key_dim = num_key_heads * key_head_dim
     value_dim = num_value_heads * value_head_dim
@@ -554,7 +555,7 @@ def qwen4_fused_gdn_decode(
             ("K", conv_kernel),
             ("TY", threadgroup_y),
             ("RATIO", num_value_heads // num_key_heads),
-            ("AGNES_NUMERICS", int(architecture in ("agnes", "qwen35"))),
+            ("AGNES_NUMERICS", int(architecture in ("agnes", "qwen35", "qwen38"))),
         ],
         grid=(32, threadgroup_y, num_value_heads),
         threadgroup=(32, threadgroup_y, 1),
@@ -597,7 +598,7 @@ def qwen4_fused_gdn_batch_decode(
         raise ValueError(
             f"unsupported threadgroup_y {threadgroup_y}; expected one of {_THREADGROUP_Y_CANDIDATES}"
         )
-    if architecture not in ("qwen4", "agnes", "qwen35"):
+    if architecture not in ("qwen4", "agnes", "qwen35", "qwen38"):
         raise ValueError(f"unsupported fused GDN architecture {architecture!r}")
     rows = int(qkv.shape[0])
     key_dim = num_key_heads * key_head_dim
@@ -629,7 +630,7 @@ def qwen4_fused_gdn_batch_decode(
             ("K", conv_kernel),
             ("TY", threadgroup_y),
             ("RATIO", num_value_heads // num_key_heads),
-            ("AGNES_NUMERICS", int(architecture in ("agnes", "qwen35"))),
+            ("AGNES_NUMERICS", int(architecture in ("agnes", "qwen35", "qwen38"))),
         ],
         grid=(32, threadgroup_y, num_value_heads * rows),
         threadgroup=(32, threadgroup_y, 1),
