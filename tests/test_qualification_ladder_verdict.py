@@ -61,10 +61,13 @@ def _run(i, warm_cached=31999, decode=60.0, prefill=1500.0):
             "requests": {"warm": {"rows": [_row(warm_cached)]}}}
 
 
+RUNTIME = {"source_sha256": "5" * 64, "mlx_native_sha256": "7" * 64, "mlx": "0.32.2"}
+
+
 def _ladder(runs, model="flash-next", route="mtp2", artifact="A", runs_per_cell=3):
     return {"finished_at": 1, "runs_per_cell": runs_per_cell, "model": model, "route": route,
             "max_context": 65536,
-            "initial": {"artifact": artifact, "runtime": {"source_sha256": "S"}},
+            "initial": {"artifact": artifact, "runtime": RUNTIME},
             "cells": [{"requested_tokens": 32768, "width": 1, "runs": runs}]}
 
 
@@ -100,3 +103,46 @@ def test_verdict_binds_identity_and_refuses_zero_runs(run_modules):
     anonymous = _ladder([_run(i) for i in range(3)])
     del anonymous["model"], anonymous["initial"]
     assert verdict.verdict(anonymous)["qualified"] is False
+
+
+# --- review item 7: runtime identity ----------------------------------------
+
+
+@pytest.mark.parametrize("runtime", [
+    None, {}, {"source_sha256": "S", "mlx_native_sha256": "7" * 64},
+    {"source_sha256": "5" * 64}, {"source_sha256": "5" * 64, "mlx_native_sha256": None},
+    "e151ee5e",
+])
+def test_verdict_requires_a_runtime_identity(run_modules, runtime):
+    """Codex review item 7: removing initial.runtime from an otherwise passing
+    ladder still qualified, with runtime_source_sha256 null."""
+    _, verdict = run_modules
+    ladder = _ladder([_run(i) for i in range(3)])
+    if runtime is None:
+        del ladder["initial"]["runtime"]
+    else:
+        ladder["initial"]["runtime"] = runtime
+    result = verdict.verdict(ladder)
+    assert result["qualified"] is False
+    assert any("runtime identity" in f for f in result["failures"])
+
+
+def test_verdict_preserves_the_runtime_identity(run_modules):
+    _, verdict = run_modules
+    result = verdict.verdict(_ladder([_run(i) for i in range(3)]))
+    assert result["qualified"] is True
+    assert result["identity"]["runtime_source_sha256"] == "5" * 64
+    assert result["identity"]["runtime_mlx_native_sha256"] == "7" * 64
+    assert result["identity"]["runtime_mlx"] == "0.32.2"
+
+
+@pytest.mark.parametrize("name", ["ladder-short.json", "ladder-long.json"])
+def test_real_e8861bb5_ladders_still_qualify(run_modules, name):
+    import json
+
+    _, verdict = run_modules
+    path = RUN / "results" / "ladder-flash-next-uncensored-mtp2" / name
+    result = verdict.verdict(json.loads(path.read_text()))
+    assert result["qualified"] is True, result["failures"]
+    assert result["identity"]["runtime_source_sha256"] == (
+        "e151ee5e976869deef1e76f8463c6bf5b230e0f22f44ead931130a111fe0a159")
