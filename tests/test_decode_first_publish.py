@@ -489,3 +489,44 @@ def test_self_mtp_shared_budget_defers_burst_prefills(model, monkeypatch):
     assert stats["decode_first_budget_deferred_rows"] >= 2
     # The burst rows keep their greedy tokens (per-lane MTP state).
     assert sorted(map(tuple, got.values())) == sorted(map(tuple, ref.values()))
+
+
+# ------------------------------------------- idle retention (review item 5)
+
+
+@pytest.mark.parametrize("route", ["ordinary", "mtp"])
+def test_published_final_response_is_not_pinned_by_the_pending_round(model, route):
+    """Codex port review 2026-10-02 item 5: the suspended round generator
+    held the published responses (and a finished lane's cache) in its frame;
+    once the last request finished, serving stopped calling ``next`` and the
+    cache stayed pinned until another request or shutdown."""
+    import gc
+    import weakref
+
+    if route == "mtp":
+        gen = mtp(model, decode_first=True)
+        gen.insert(**mtp_item(list(range(2, 12)), 4, 1))
+    else:
+        gen = ordinary(model, decode_first=True)
+        gen.insert(prompts=[list(range(2, 12))], max_tokens=[4])
+    try:
+        final = None
+        for _ in range(50):
+            _prompts, responses = gen.next()
+            final = next((r for r in responses if r.finish_reason), None)
+            if final is not None:
+                break
+        assert final is not None and final.prompt_cache
+        # The round that published it is still suspended at its phase boundary.
+        assert gen._decode_first_pending is not None
+        response_ref = weakref.ref(final)
+        cache_refs = [weakref.ref(c) for c in final.prompt_cache]
+        del final, responses, _prompts
+        gc.collect()
+        assert response_ref() is None, "pending round pins the published response"
+        assert all(ref() is None for ref in cache_refs), "finished cache pinned"
+        # The pending phase still completes normally afterwards.
+        assert gen.next() == ([], [])
+        assert gen._decode_first_pending is None
+    finally:
+        gen.close()

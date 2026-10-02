@@ -6573,6 +6573,14 @@ class BatchGenerator:
             return (prompts, generations)
         if decoded:
             generations.extend(decoded)
+            # ``decoded`` is the round's own response list: the suspended
+            # frame would keep every published response, and a finished
+            # lane's cache with it, alive until the next call -- which never
+            # comes once the last request is done (Codex port review
+            # 2026-10-02 item 5).  Drop the references in place; the length
+            # and truthiness the prefill phase reads are kept, and the
+            # resumed phase's output is taken from index ``published`` on.
+            decoded[:] = [None] * len(decoded)
             self._decode_first_pending = (round_, len(decoded))
             policy.bump("published_rounds")
             policy.bump("published_tokens", len(decoded))
