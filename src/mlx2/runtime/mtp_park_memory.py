@@ -318,6 +318,35 @@ class ParkMemory:
                 }
         return None
 
+    def _consume_locked(self, decision: Optional[dict[str, Any]]) -> bool:
+        """Count one parked cohort against a remembered verdict; True when
+        that expired it.  Decisions of any other reason carry no cooldown."""
+        if not decision or decision.get("reason") != "park_memory":
+            return False
+        verdict = self._verdicts.get(decision["verdict_width"])
+        if verdict is None or verdict["remaining"] <= 0:
+            return False
+        verdict["remaining"] -= 1
+        if verdict["remaining"] == 0:
+            self._expire_locked(decision["verdict_width"])
+            return True
+        return False
+
+    def commit(self, decision: Optional[dict[str, Any]]) -> None:
+        """A handoff taken on a ``peek`` decision was committed.
+
+        The width-locked joining path decides with ``peek`` (no streak
+        advance) and must still count the parked cohort, exactly once per
+        committed handoff, or a verdict it keeps hitting never expires
+        (Codex port review 2026-10-02 item 6).  ``decide`` consumes its own.
+        """
+        with self._lock:
+            expired = self._consume_locked(decision)
+        if decision is not None and decision.get("reason") == "park_memory":
+            _bump(self.stats, "mtp_adaptive_park_park_memory")
+        if expired:
+            _bump(self.stats, "mtp_adaptive_park_verdicts_expired")
+
     def would_park(self, width: int) -> bool:
         return self.peek(width) is not None
 
@@ -336,13 +365,8 @@ class ParkMemory:
             expired = False
             if early is not None:
                 result = early
-                if early["reason"] == "park_memory":
-                    # This cohort is parked; count it against the cooldown.
-                    verdict = self._verdicts[early["verdict_width"]]
-                    verdict["remaining"] -= 1
-                    if verdict["remaining"] == 0:
-                        self._expire_locked(early["verdict_width"])
-                        expired = True
+                # This cohort is parked; count it against the cooldown.
+                expired = self._consume_locked(early)
             else:
                 ordinary = self._ordinary_rate(width)
                 mtp = self._rate("mtp", width)

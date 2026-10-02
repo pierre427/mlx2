@@ -1936,6 +1936,10 @@ class MTPGenerationBatch:
                         decision=decision,
                         projected_width=projected_width,
                     )
+                    if memory is not None:
+                        # Peeked, so count the parked cohort now that the
+                        # handoff committed (once per handoff).
+                        memory.commit(decision)
                     return
             from .segmented_self_mtp import note_segmented_self_mtp
 

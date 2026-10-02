@@ -211,7 +211,8 @@ def test_verdict_expires_after_parked_cohorts_and_repeat_loss_doubles():
     memory = _memory(stats, cooldown_cohorts=2, max_cooldown_cohorts=6)
     _park_at(memory, 4)
     assert memory.snapshot()["verdicts"]["4"] == {"cooldown": 2, "remaining": 2}
-    # Peeks (latch release, width-locked joins) never consume the cooldown.
+    # Bare peeks (latch release) never consume the cooldown; a width-locked
+    # join consumes it through commit() once its handoff commits.
     for _ in range(5):
         assert memory.would_park(4)
     assert memory.decide(4)["remaining_cohorts"] == 2
@@ -399,3 +400,86 @@ def test_kill_switch_forces_the_static_threshold(cpu_model, monkeypatch):
         assert gen.scheduler_stats["mtp_ordinary_handoff_static_width_threshold"] == 1
     finally:
         gen.close()
+
+
+# -- joining-cohort handoff consumes the cooldown (Codex review item 6) -------
+
+
+def test_commit_consumes_a_remembered_verdict_once():
+    stats = {}
+    memory = _memory(stats, cooldown_cohorts=2)
+    _park_at(memory, 4)
+    decision = memory.peek(4)
+    assert decision["reason"] == "park_memory"
+    memory.commit(decision)
+    assert memory.snapshot()["verdicts"]["4"]["remaining"] == 1
+    memory.commit(memory.peek(6))
+    assert memory.snapshot()["verdicts"] == {} or (
+        memory.snapshot()["verdicts"]["4"]["remaining"] == 0
+    )
+    assert not memory.would_park(4)
+    assert stats["mtp_adaptive_park_verdicts_expired"] == 1
+    # Static and measured decisions carry no cooldown to consume.
+    memory.commit({"reason": "static_width_threshold", "max_mtp_width": 3})
+    memory.commit(None)
+
+
+def _joining_batch(memory, *, lanes=2):
+    """The width-locked joining path of MTPGenerationBatch._attach_packages,
+    on a stand-in batch whose handoff records the call."""
+    from types import SimpleNamespace
+
+    from mlx2.runtime import generate as G
+
+    handoffs = []
+    batch = SimpleNamespace(
+        _ordinary_handoff_latched=False,
+        state=SimpleNamespace(lanes=[SimpleNamespace(num_draft=2)] * lanes),
+        segmented_live_tip=True,
+        _segmented_compute_width_locked=True,
+        ordinary_handoff_policy=MTPOrdinaryHandoffPolicy(enabled=True, max_mtp_width=3),
+        park_memory=memory,
+        _paused={},
+        _width_lock_deferrals={},
+        adaptive_depth_policy=None,
+        _plain_ready=[],
+    )
+
+    def handoff(packages, *, decision, projected_width):
+        handoffs.append((decision, projected_width))
+        batch._ordinary_handoff_latched = True
+
+    batch._handoff_all_to_plain = handoff
+
+    def join(n=2):
+        batch._ordinary_handoff_latched = False
+        batch._paused.clear()
+        packages = [
+            SimpleNamespace(handoff_receipt=None,
+                            detached=SimpleNamespace(lane=SimpleNamespace(num_draft=2, uid=i)))
+            for i in range(n)
+        ]
+        G.MTPGenerationBatch._attach_packages(batch, packages)
+
+    return join, handoffs
+
+
+def test_joining_cohort_handoffs_consume_the_cooldown():
+    """Width-two cohorts joined by two lanes (projected width four) under a
+    width-four verdict: each committed handoff counts one parked cohort, so
+    the verdict expires after its cooldown instead of parking forever."""
+    stats = {}
+    memory = _memory(stats, cooldown_cohorts=2)
+    _park_at(memory, 4)
+    join, handoffs = _joining_batch(memory)
+    join()
+    assert handoffs[-1][0]["reason"] == "park_memory" and handoffs[-1][1] == 4
+    assert memory.snapshot()["verdicts"]["4"]["remaining"] == 1
+    join()
+    assert len(handoffs) == 2
+    assert not memory.would_park(4)
+    assert stats["mtp_adaptive_park_verdicts_expired"] == 1
+    for _ in range(3):
+        join()
+    # Expired: MTP is re-measured at width 4, no further remembered handoffs.
+    assert all(d["reason"] != "park_memory" for d, _w in handoffs[2:])
