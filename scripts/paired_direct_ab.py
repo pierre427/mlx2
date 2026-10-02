@@ -712,7 +712,7 @@ def snapshot_refusal(snapshot):
         return f"not a digest record ({type(snapshot).__name__})"
     status = snapshot.get("status")
     if type(status) is not str or status != "complete":
-        return f"status {status!r} is not complete"[:200]
+        return "status " + repr(status)[:200 - len("status  is not complete")] + " is not complete"
     extra = sorted(str(k) for k in set(snapshot) - _COMPLETE_FIELDS)
     if extra:  # e.g. state_only_sha256: never a complete digest's field
         return "complete with unexpected fields " + ", ".join(extra)[:200]

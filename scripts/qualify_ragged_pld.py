@@ -266,14 +266,19 @@ def source_identity(names):
     }
 
 
+def _bounded_detail(prefix, detail, suffix=""):
+    """Keep fixed refusal text intact; spend the 200-character budget only on details."""
+    return prefix + detail[:max(0, 200 - len(prefix) - len(suffix))] + suffix
+
+
 def source_identity_refusals(identity, required):
     """Why a raw source identity cannot bind a native run (empty when it can)."""
     if not isinstance(identity, dict):
         return ["source identity missing"]
     out = []
     if not _is_commit(identity.get("commit")):
-        out.append(f"source commit {identity.get('commit')!r} is not a 40-hex revision "
-                   "(git failed or HEAD unknown)"[:200])
+        out.append(_bounded_detail("source commit ", repr(identity.get("commit")),
+                                   " is not a 40-hex revision (git failed or HEAD unknown)"))
     if identity.get("status_known") is not True or type(identity.get("dirty")) is not bool:
         out.append("worktree status of the required files is unknown (git status failed)")
     elif identity["dirty"]:
@@ -331,7 +336,7 @@ def artifact_family(config):
         if why is None:
             return "north", None
         return None, f"cohere2_moe: {why}; the North bounded-header digests recipe binds only that artifact"
-    return None, f"model_type {model_type!r} topology {topology!r} has no identity recipe here"[:200]
+    return None, _bounded_detail("model_type ", f"{model_type!r} topology {topology!r}", " has no identity recipe here")
 
 
 def north_config_refusal(config):
@@ -376,9 +381,9 @@ def _strict_json(raw, label, *, text=True):
         return json.loads(raw.decode("utf-8") if text else raw,
                           object_pairs_hook=lambda pairs: _unique_object(pairs, label))
     except RecursionError:
-        raise ValueError(f"{label} nests too deeply to parse"[:200]) from None
+        raise ValueError(_bounded_detail("", label, " nests too deeply to parse")) from None
     except ValueError as error:
-        raise ValueError(f"{label} is not valid JSON: {error}"[:200]) from None
+        raise ValueError(_bounded_detail("is not valid JSON: ", f"{error}; {label}")) from None
 
 
 def _quantized_shapes(name, shape, quant):
@@ -498,11 +503,11 @@ def north_shard_header(item, label):
     """
     before = os.stat(item)
     if not S_ISREG(before.st_mode):
-        raise ValueError(f"weight shard {label!r} is not a regular file"[:200])
+        raise ValueError(_bounded_detail("weight shard ", repr(label), " is not a regular file"))
     fd = _open_fd(item, _NOFOLLOW)
     try:
         if _stat_key(_fstat_fd(fd)) != _stat_key(before):
-            raise ValueError(f"weight shard {label!r} changed between stat and open"[:200])
+            raise ValueError(_bounded_detail("weight shard ", repr(label), " changed between stat and open"))
         short = f"Truncated safetensors file: {label}"
         length = struct.unpack("<Q", _read_exact(fd, 8, short))[0]
         if not 0 < length <= min(NORTH_HEADER_LIMIT, before.st_size - 8):
@@ -512,9 +517,9 @@ def north_shard_header(item, label):
     finally:
         os.close(fd)
     if _stat_key(after) != _stat_key(before):
-        raise ValueError(f"weight shard {label!r} changed while its header was read"[:200])
+        raise ValueError(_bounded_detail("weight shard ", repr(label), " changed while its header was read"))
     if _stat_key(os.stat(item)) != _stat_key(before):
-        raise ValueError(f"weight shard {label!r} was replaced at its path while its header was read"[:200])
+        raise ValueError(_bounded_detail("weight shard ", repr(label), " was replaced at its path while its header was read"))
     return before, raw
 
 
@@ -589,12 +594,12 @@ def _north_collect(path):
         item = (path / name).resolve()
         if (not name or Path(name).is_absolute() or ".." in Path(name).parts
                 or not item.is_relative_to(path) or item.suffix != ".safetensors"):
-            raise ValueError(f"weight shard {name!r} is not a local .safetensors file in the artifact"[:200])
+            raise ValueError(_bounded_detail("weight shard ", repr(name), " is not a local .safetensors file in the artifact"))
         if not item.is_file():
             raise ValueError(f"missing weight shard {name!r}"[:200])
         info = item.stat()
         if item in resolved.values() or (info.st_dev, info.st_ino) in inodes:
-            raise ValueError(f"weight shard {name!r} is another index name for the same file"[:200])
+            raise ValueError(_bounded_detail("weight shard ", repr(name), " is another index name for the same file"))
         resolved[name] = item
         inodes.add((info.st_dev, info.st_ino))
     expected = north_expected_headers(config)
@@ -691,7 +696,7 @@ def artifact_manifest(model_path):
         item = (path / name).resolve()
         if (not name or Path(name).is_absolute() or ".." in Path(name).parts
                 or not item.is_relative_to(path) or item.suffix != ".safetensors"):
-            raise ValueError(f"weight shard {name!r} is not a local .safetensors file in the artifact"[:200])
+            raise ValueError(_bounded_detail("weight shard ", repr(name), " is not a local .safetensors file in the artifact"))
         if not item.is_file():
             raise ValueError(f"missing weight shard {name!r}"[:200])
         stat = item.stat()
@@ -758,11 +763,11 @@ def build_identity_refusals(build):
            if type(build.get(key)) is not str or not build[key].strip()]
     path = build.get("path")
     if type(path) is not str or not os.path.isabs(path) or not os.path.isdir(path):
-        out.append(f"MLX core path {path!r} is not an existing absolute directory"[:200])
+        out.append(_bounded_detail("MLX core path ", repr(path), " is not an existing absolute directory"))
     if not _is_sha256(build.get("metallib_sha256")):
         out.append("MLX build identity has no metallib sha256")
     if type(build.get("device")) is str and "gpu" not in build["device"].lower():
-        out.append(f"MLX default device {build['device']!r} is not the GPU"[:200])
+        out.append(_bounded_detail("MLX default device ", repr(build["device"]), " is not the GPU"))
     return out
 
 
@@ -794,7 +799,7 @@ def _worktree_file(name, file):
 def module_path_refusals(files):
     """Every loaded mlx2 module (and the oracle) must be a source file of this worktree."""
     out = [] if any(name == "mlx2" or name.startswith("mlx2.") for name in files) else ["no mlx2 module is loaded"]
-    out.extend(f"{name} imported from {file!r}, not this worktree"[:200]
+    out.extend(_bounded_detail(f"not this worktree: {name} imported from ", repr(file))
                for name, file in sorted(files.items()) if _worktree_file(name, file) is None)
     return out
 
@@ -828,10 +833,10 @@ def adapter_source_refusals(adapter_name, adapter_file, manifest, source):
     family = FAMILIES[manifest["family"]]
     out = []
     if adapter_name != family["adapter"]:
-        out.append(f"dispatch selected {adapter_name}, the preflight recipe binds {family['adapter']}"[:200])
+        out.append(_bounded_detail("dispatch selected ", str(adapter_name), f", the preflight recipe binds {family['adapter']}"))
     path = _worktree_file(family["adapter"].rsplit(".", 1)[0], adapter_file)
     if path is None or str(path.relative_to(ROOT)) != family["files"][0]:
-        out.append(f"adapter module file {adapter_file!r} is not this worktree's {family['files'][0]}"[:200])
+        out.append(_bounded_detail(f"not this worktree's {family['files'][0]}: adapter module file ", repr(adapter_file)))
         return out
     try:
         now = _sha(path.read_bytes())
@@ -1328,10 +1333,10 @@ def row_evidence_refusal(record, requested):
     expected = min(requested, len(tokens))
     declared = record.get("logprob_rows_requested")
     if not _is_count(declared) or declared != requested:
-        return f"requested {declared!r} is not the protocol bound {requested}"[:200]
+        return _bounded_detail("requested ", repr(declared), f" is not the protocol bound {requested}")
     declared = record.get("logprob_rows_expected")
     if not _is_count(declared) or declared != expected:
-        return f"declares {declared!r} rows; protocol bound and delivered tokens give {expected}"[:200]
+        return _bounded_detail("declares ", repr(declared), f" rows; protocol bound and delivered tokens give {expected}")
     digests = record.get("logprob_row_digests")
     if not isinstance(digests, list):
         return "no row digest records"

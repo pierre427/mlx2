@@ -474,6 +474,66 @@ def test_adapter_source_must_be_the_family_class_file_and_hash(git, tmp_path):
         "adapter source sha256 differs from the preflight hash"]
 
 
+@pytest.mark.parametrize("gate,phrase", [
+    ("adapter", "not this worktree's"),
+    ("module", "not this worktree"),
+    ("build_path", "not an existing absolute directory"),
+    ("build_device", "not the GPU"),
+    ("family", "no identity recipe"),
+    ("source_commit", "is not a 40-hex revision"),
+    ("dispatch", "the preflight recipe binds"),
+    ("requested_rows", "is not the protocol bound"),
+    ("expected_rows", "protocol bound and delivered tokens give"),
+])
+def test_refusal_reason_survives_long_identity_details(tmp_path, gate, phrase):
+    # No filesystem path needs to exist: the refusal must survive any checkout length.
+    long_path = "/foreign/" + "/".join(["x" * 100] * 4) + "/adapter.py"
+    assert len(long_path) >= 300
+    family = Q.FAMILIES["muse"]
+    if gate == "adapter":
+        message = Q.adapter_source_refusals(family["adapter"], long_path, {"family": "muse"}, {})[0]
+    elif gate == "module":
+        message = Q.module_path_refusals({"mlx2.foreign": long_path})[0]
+    elif gate.startswith("build_"):
+        key = "path" if gate == "build_path" else "device"
+        message = Q.build_identity_refusals(build(tmp_path, **{key: long_path}))[0]
+    elif gate == "source_commit":
+        message = Q.source_identity_refusals({"commit": long_path}, Q.IDENTITY_FILES)[0]
+    elif gate == "family":
+        _, message = Q.artifact_family({"model_type": long_path})
+    elif gate == "dispatch":
+        good = str(ROOT / family["files"][0])
+        message = Q.adapter_source_refusals(long_path, good, {"family": "muse"}, {})[0]
+    else:
+        record = {"evidence": Q.EVIDENCE, "tokens": [1], "logprob_rows_requested": 1,
+                  "logprob_rows_expected": 1}
+        key = "logprob_rows_requested" if gate == "requested_rows" else "logprob_rows_expected"
+        record[key] = long_path
+        message = Q.row_evidence_refusal(record, 1)
+    assert phrase in message
+    if gate in ("adapter", "module"):
+        assert message.startswith(phrase)
+    assert len(message) <= 200
+
+
+@pytest.mark.parametrize("family", ["muse", "north"])
+def test_long_unsafe_shard_name_keeps_refusal_reason(tmp_path, family):
+    long_name = "../" + "/".join(["x" * 100] * 4) + ".safetensors"
+    if family == "muse":
+        path = make_artifact(tmp_path / family)
+        index = {"weight_map": {"w": long_name}}
+    else:
+        path = make_artifact(tmp_path / family, config={**Q.NORTH_CONFIG,
+            "model_type": "cohere2_moe", "layer_types": Q.NORTH_LAYER_TYPES,
+            "architectures": Q.NORTH_ARCHITECTURES})
+        index = {"weight_map": {"model.embed_tokens.weight": long_name}}
+    (path / "model.safetensors.index.json").write_text(json.dumps(index))
+    with pytest.raises(ValueError) as caught:
+        Q.artifact_manifest(path)
+    assert "not a local .safetensors file" in str(caught.value)
+    assert len(str(caught.value)) <= 200
+
+
 def test_adapter_identity_muse_top_level_and_qwen_nested(tmp_path):
     path = make_artifact(tmp_path / "m")
     manifest = Q.artifact_manifest(path)

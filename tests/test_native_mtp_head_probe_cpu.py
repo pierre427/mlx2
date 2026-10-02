@@ -1224,3 +1224,10 @@ def test_receipt_json_is_strict(tmp_path):
     loaded = json.loads(out.read_text())
     assert loaded["runs"][1]["logprobs"]["chosen"][2] == "nan"
     assert loaded["decision"]["verdict"] == "refused"
+
+
+def test_long_lane_list_keeps_refusal_reason():
+    (_, problems), _ = native_eval(max_tokens=16, knobs={"uids": tuple(range(100))})
+    message = next(p for p in problems if "lane width" in p)
+    assert "is not exactly 1" in message
+    assert len(message) <= 200

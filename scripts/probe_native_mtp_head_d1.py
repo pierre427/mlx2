@@ -593,7 +593,8 @@ def validate_native_trace(trace, *, max_tokens, tokens, from_draft, stats, finis
             refusals.append(f"{where}: cycle after the terminal cycle {terminal_at}")
         lanes = cycle.get("lane_uids")
         if not isinstance(lanes, list) or len(lanes) != LANES:
-            refusals.append(f"{where}: lane width {lanes!r} is not exactly 1"[:200])
+            prefix, suffix = f"{where}: lane width ", " is not exactly 1"
+            refusals.append(prefix + repr(lanes)[:200 - len(prefix) - len(suffix)] + suffix)
             continue
         depth = _one(cycle.get("draft_depths"), "draft_depths", where, refusals)
         accepted = _one(cycle.get("accepted_lengths"), "accepted_lengths", where, refusals)

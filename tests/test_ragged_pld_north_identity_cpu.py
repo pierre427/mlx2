@@ -838,7 +838,8 @@ def test_change_between_the_two_collections_refuses(north, monkeypatch):
         Q.artifact_manifest(north.path)
 
 
-def test_header_rewritten_while_read_refuses(north, monkeypatch):
+@pytest.mark.parametrize("long_label", [False, True])
+def test_header_rewritten_while_read_refuses(north, monkeypatch, long_label):
     real_read = Q._read_fd
     target = min(north.raw)
     state = {"done": False}
@@ -854,10 +855,14 @@ def test_header_rewritten_while_read_refuses(north, monkeypatch):
 
     monkeypatch.setattr(Q, "_read_fd", read)
     with pytest.raises(ValueError, match="changed while its header was read"):
-        Q.artifact_manifest(north.path)
+        if long_label:
+            Q.north_shard_header(north.path / min(north.raw), "x" * 400)
+        else:
+            Q.artifact_manifest(north.path)
 
 
-def test_shard_replaced_at_its_path_while_read_refuses(north, monkeypatch):
+@pytest.mark.parametrize("long_label", [False, True])
+def test_shard_replaced_at_its_path_while_read_refuses(north, monkeypatch, long_label):
     """Same bytes, size and mtime under a new inode: only the post-read path check sees it."""
     real_read = Q._read_fd
     target = north.path / min(north.raw)
@@ -876,7 +881,10 @@ def test_shard_replaced_at_its_path_while_read_refuses(north, monkeypatch):
 
     monkeypatch.setattr(Q, "_read_fd", read)
     with pytest.raises(ValueError, match="was replaced at its path while its header was read"):
-        Q.artifact_manifest(north.path)
+        if long_label:
+            Q.north_shard_header(north.path / min(north.raw), "x" * 400)
+        else:
+            Q.artifact_manifest(north.path)
 
 
 def test_identical_replacement_between_collections_is_seen_through_the_inode(north, monkeypatch):
@@ -1128,7 +1136,10 @@ def _definitions(tree):
 CHANGED = {"artifact_family", "artifact_manifest", "adapter_identity_snapshot", "adapter_identity_refusals",
            "post_run_identity",
            # 451f5d30 (survivor continuation after lane removal) changed run_all on purpose
-           "run_all"}
+           "run_all",
+           # Path-length-independent diagnostics reserve space for fixed refusal reasons.
+           "module_path_refusals", "adapter_source_refusals", "build_identity_refusals",
+           "row_evidence_refusal", "source_identity_refusals"}
 
 
 def test_every_other_baseline_definition_is_unchanged():
@@ -1137,7 +1148,7 @@ def test_every_other_baseline_definition_is_unchanged():
     moved = sorted(name for name in before if before[name] != now[name])
     assert moved == sorted(CHANGED)
     for name in ("Driver.__init__", "Driver.run", "Driver.continuation", "compare", "coverage",
-                 "row_evidence_refusal", "continuation_refusal", "lane_row_evidence", "preflight",
+                 "continuation_refusal", "lane_row_evidence", "preflight",
                  "source_identity", "checked_post_run_identity", "build_parser", "resolve_args"):
         assert before[name] == now[name], name
 
@@ -1179,3 +1190,49 @@ def test_artifact_manifest_routes_north_before_the_stat_only_recipe():
                                if isinstance(n, ast.FunctionDef) and n.name == "_north_collect"))
     assert collect.index("north_config_refusal") < collect.index("north_shard_header")
     assert collect.index("json.dumps(record)") < collect.index("json.dumps(headers)")
+
+
+@pytest.mark.parametrize("raw,phrase", [("{bad", "not valid JSON"),
+                                        ("[" * 2000, "nests too deeply to parse")], ids=["invalid", "deep"])
+def test_long_json_label_keeps_refusal_reason(raw, phrase, monkeypatch):
+    if phrase == "nests too deeply to parse":
+        def too_deep(*args, **kwargs):
+            raise RecursionError("synthetic deep JSON")
+        monkeypatch.setattr(Q.json, "loads", too_deep)
+    with pytest.raises(ValueError) as caught:
+        Q._strict_json(raw.encode(), "x" * 400)
+    assert phrase in str(caught.value)
+    assert len(str(caught.value)) <= 200
+
+
+def test_long_shard_label_keeps_directory_refusal(tmp_path):
+    with pytest.raises(ValueError) as caught:
+        Q.north_shard_header(tmp_path, "x" * 400)
+    assert "not a regular file" in str(caught.value)
+    assert len(str(caught.value)) <= 200
+
+
+def test_long_alias_shard_name_keeps_same_file_refusal(north):
+    alias = north.path.joinpath(*(["z" * 100] * 4), "alias.safetensors")
+    alias.parent.mkdir(parents=True)
+    original = north.path / min(north.raw)
+    os.link(original, alias)
+    index_path = north.path / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    index["weight_map"]["extra.weight"] = str(alias.relative_to(north.path))
+    index_path.write_text(json.dumps(index))
+    with pytest.raises(ValueError) as caught:
+        Q.artifact_manifest(north.path)
+    assert "same file" in str(caught.value)
+    assert len(str(caught.value)) <= 200
+
+
+def test_long_shard_label_keeps_stat_open_drift_refusal(tmp_path, monkeypatch):
+    item, other = tmp_path / "shard", tmp_path / "other"
+    item.write_bytes(b"shard")
+    other.write_bytes(b"other")
+    monkeypatch.setattr(Q, "_fstat_fd", lambda fd: other.stat())
+    with pytest.raises(ValueError) as caught:
+        Q.north_shard_header(item, "x" * 400)
+    assert "changed between stat and open" in str(caught.value)
+    assert len(str(caught.value)) <= 200

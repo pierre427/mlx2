@@ -568,3 +568,9 @@ def test_cli_flag_defaults_off_and_sets_on():
                                               "--model", "/nonexistent", "--policy", "/nonexistent",
                                               "--out", "/dev/null", "--require-complete-state"])
     assert real.require_complete_state is True
+
+
+def test_long_snapshot_status_keeps_refusal_reason():
+    message = H.snapshot_refusal({"status": "x" * 400})
+    assert "is not complete" in message
+    assert len(message) <= 200
