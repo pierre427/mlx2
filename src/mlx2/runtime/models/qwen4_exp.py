@@ -698,6 +698,117 @@ _QSA_GATHER_MAX_QUERY = max(
     1, int(os.environ.get("MLX_QWEN4_QSA_GATHER_MAX_QUERY", "8"))
 )
 
+# oMLX #4070 (jundot/omlx, Apache-2.0; provenance/omlx-4070-batched-qsa.json):
+# a batched ONE-TOKEN decode step attends each row's QSA selection instead of
+# a dense SDPA over the whole left-padded width behind the sparse mask.  mlx2
+# already pools each row's blocks once (pooled-key cache + ragged tail; #4070's
+# "row banks") and admits the indexed kernel for verify windows >= 16K and for
+# one-token steps >= 64K; between 16K and 64K a B >= 2 one-token step still ran
+# the masked arm, reading every row's whole K/V in each of the 12 QSA layers.
+#   "off"     (default): unchanged.
+#   "gather"  #4070's arithmetic: one gather of each row's selected K/V
+#             (<= budget + ratio - 1 keys) and one bool-masked MLX SDPA
+#             (``_gather_qsa_attention``).
+#   "indexed" the same selection through mlx2's indexed QSA kernel.
+# Only B >= 2, L == 1 calls that no other sparse arm took are candidates; every
+# decline is counted by reason in ``qsa_batch_decode_sparse_status``.
+_QSA_BATCH_DECODE_SPARSE_MODES = ("off", "gather", "indexed")
+
+
+def _env_batch_decode_sparse_mode() -> str:
+    raw = os.environ.get("MLX_QWEN4_QSA_BATCH_DECODE_SPARSE", "off").strip().lower()
+    if raw in {"", "0", "false", "no", "off"}:
+        return "off"
+    if raw not in _QSA_BATCH_DECODE_SPARSE_MODES:
+        raise ValueError(
+            "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE must be off, gather or indexed; "
+            f"got {raw!r}"
+        )
+    return raw
+
+
+_QSA_BATCH_DECODE_SPARSE = _env_batch_decode_sparse_mode()
+_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT = max(
+    0, int(os.environ.get("MLX_QWEN4_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT", "16384"))
+)
+_QSA_BATCH_DECODE_SPARSE_STATS_LOCK = threading.Lock()
+_QSA_BATCH_DECODE_SPARSE_STATS = Counter()
+
+
+def set_qsa_batch_decode_sparse(mode: str, *, min_context: Optional[int] = None):
+    """In-process switch for paired A/B runs (the policy owns serving)."""
+    global _QSA_BATCH_DECODE_SPARSE, _QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT
+    mode = str(mode).strip().lower()
+    if mode not in _QSA_BATCH_DECODE_SPARSE_MODES:
+        raise ValueError("batched decode sparse QSA mode must be off, gather or indexed")
+    if min_context is not None:
+        if type(min_context) is not int or min_context < 0:
+            raise ValueError("min_context must be a nonnegative integer")
+        _QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT = min_context
+    _QSA_BATCH_DECODE_SPARSE = mode
+
+
+def _decide_qsa_batch_decode_sparse(
+    selection, *, batch: int, length: int, training: bool, layout_ok: bool,
+    cache, quantized_indexed,
+):
+    """``(arm or None, reason)`` for one call; ``(None, None)`` when not a
+    candidate (mode off, or not a batched one-token step) -- uncounted."""
+    mode = _QSA_BATCH_DECODE_SPARSE
+    if mode == "off" or int(batch) < 2 or int(length) != 1:
+        return (None, None)
+    if training:
+        return (None, "training")
+    if selection.kind != "explicit":
+        return (None, "selection_not_explicit")
+    if int(selection.n_blocks) <= int(selection.raw_block_ids.shape[-1]):
+        return (None, "dense_by_construction")
+    if int(selection.physical_width) < _QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT:
+        return (None, "context_below_min")
+    if mode == "indexed":
+        (admitted, reason) = decide_qsa_indexed_admission(
+            selection,
+            length=length,
+            training=training,
+            layout_ok=layout_ok,
+            cache=cache,
+            min_context_override=_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT,
+        )
+        return ("indexed", "engaged") if admitted else (None, "indexed_" + reason)
+    if quantized_indexed is not None and (
+        quantized_indexed["rotate"] or quantized_indexed["normalize"]
+    ):
+        return (None, "quantized_transform_unsupported")
+    return ("gather", "engaged")
+
+
+def _record_qsa_batch_decode_sparse(arm, reason: str, rows: int) -> None:
+    with _QSA_BATCH_DECODE_SPARSE_STATS_LOCK:
+        _QSA_BATCH_DECODE_SPARSE_STATS["attempts"] += 1
+        if arm is None:
+            _QSA_BATCH_DECODE_SPARSE_STATS["fallback_" + reason] += 1
+        else:
+            _QSA_BATCH_DECODE_SPARSE_STATS["engaged_" + arm] += 1
+            _QSA_BATCH_DECODE_SPARSE_STATS["engaged_rows"] += int(rows)
+
+
+def qsa_batch_decode_sparse_status(*, reset: bool = False) -> dict:
+    """Bounded counters of the batched one-token sparse QSA arm (#4070)."""
+    with _QSA_BATCH_DECODE_SPARSE_STATS_LOCK:
+        counts = dict(_QSA_BATCH_DECODE_SPARSE_STATS)
+        engaged = sum(v for k, v in counts.items() if k in ("engaged_gather", "engaged_indexed"))
+        report = {
+            "mode": _QSA_BATCH_DECODE_SPARSE,
+            "min_context": _QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT,
+            "attempts": counts.get("attempts", 0),
+            "engagements": engaged,
+            "fallbacks": counts.get("attempts", 0) - engaged,
+            "counts": counts,
+        }
+        if reset:
+            _QSA_BATCH_DECODE_SPARSE_STATS.clear()
+    return report
+
 
 def _record_qsa_nax_decode(*, engaged: bool, reason: str, context: int) -> None:
     global _QSA_NAX_DECODE_LAST_DECISION
@@ -6455,6 +6566,21 @@ class Attention(nn.Module):
                 layout_ok=self._nax_layout_ok,
                 cache=cache,
             )
+        (batch_arm, batch_reason) = (None, None)
+        if not (use_nax or use_indexed):
+            (batch_arm, batch_reason) = _decide_qsa_batch_decode_sparse(
+                selection,
+                batch=batch,
+                length=length,
+                training=self.training,
+                layout_ok=self._nax_layout_ok,
+                cache=cache,
+                quantized_indexed=quantized_indexed,
+            )
+            if batch_reason is not None:
+                _record_qsa_batch_decode_sparse(batch_arm, batch_reason, batch)
+            if batch_arm == "indexed":
+                (use_indexed, indexed_reason) = (True, "engaged")
         if qsa_indexed_enabled() and (not use_indexed):
             record_qsa_indexed_receipt(
                 engaged=False,
@@ -6481,7 +6607,7 @@ class Attention(nn.Module):
             and (length >= _QSA_GATHER_MIN_QUERY)
             and (length <= _QSA_GATHER_MAX_QUERY)
             and gather_context_ok
-        )
+        ) or (batch_arm == "gather")
         if use_nax or use_indexed or use_gather:
             sparse_mask = None
         elif fused_rows and selection.kind == "explicit":

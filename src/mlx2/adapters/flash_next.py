@@ -562,6 +562,7 @@ class FlashNextAdapter:
             qwen4_fused_gdn_stats,
             qwen4_ple_compile_status,
             qsa_mtp_amendment_status,
+            qsa_batch_decode_sparse_status,
             qsa_nax_decode_status,
             qsa_rollback_status,
             qsa_stage1_status,
@@ -726,6 +727,14 @@ class FlashNextAdapter:
                 {"qsa_nax_decode": nax_decode}
                 if (nax_decode := qsa_nax_decode_status())["attempts"]
                 or getattr(self.policy, "qsa_nax_decode", False)
+                else {}
+            ),
+            # oMLX #4070 batched one-token sparse arm: absent while off and
+            # unused so default receipts are unchanged.
+            **(
+                {"qsa_batch_decode_sparse": batch_sparse}
+                if (batch_sparse := qsa_batch_decode_sparse_status())["attempts"]
+                or getattr(self.policy, "qsa_batch_decode_sparse", "off") != "off"
                 else {}
             ),
             "qsa_mtp_amendment": qsa_mtp_amendment_status(),

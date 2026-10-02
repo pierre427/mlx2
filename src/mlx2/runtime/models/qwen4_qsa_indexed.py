@@ -367,9 +367,21 @@ def qsa_indexed_quantized_cache_config(cache):
 
 
 def decide_qsa_indexed_admission(
-    selection, *, length: int, training: bool, layout_ok: bool, cache=None
+    selection,
+    *,
+    length: int,
+    training: bool,
+    layout_ok: bool,
+    cache=None,
+    min_context_override: int | None = None,
 ) -> tuple[bool, str]:
-    """Resolve the indexed route without evaluating arrays or changing state."""
+    """Resolve the indexed route without evaluating arrays or changing state.
+
+    ``min_context_override`` is the batched one-token sparse arm's floor
+    (``qwen4_exp`` ``MLX_QWEN4_QSA_BATCH_DECODE_SPARSE=indexed``): it replaces
+    the mode's context threshold and admits widths 1..max.  The mode's "off"
+    still refuses, so ``MLX_QWEN4_QSA_INDEXED=0`` stays a kill switch.
+    """
     mode = _qsa_indexed_mode()
     if mode == "off":
         return (False, "disabled")
@@ -382,7 +394,14 @@ def decide_qsa_indexed_admission(
         return (False, "dense_by_construction")
     length = int(length)
     context = int(selection.physical_width)
-    if mode == "auto":
+    if min_context_override is not None:
+        if length < 1 or length > _MAX_QUERY:
+            return (False, "width_out_of_range")
+        if context < int(min_context_override) or (
+            _MAX_CONTEXT and context > _MAX_CONTEXT
+        ):
+            return (False, "context_out_of_range")
+    elif mode == "auto":
         if length < 1 or length > _MAX_QUERY:
             return (False, "width_out_of_range")
         threshold = _AUTO_MIN_CONTEXT_M1 if length == 1 else _AUTO_MIN_CONTEXT_M3

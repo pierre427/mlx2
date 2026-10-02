@@ -229,6 +229,15 @@ class FlashNextPolicy:
     # Not an environment switch: bound to the layers at load, entered in the
     # APCv2 cache layout fingerprint and in receipts only when "float16".
     gdn_state_dtype: str = "float32"
+    # oMLX #4070 batched one-token sparse QSA (MLX_QWEN4_QSA_BATCH_DECODE_SPARSE,
+    # provenance/omlx-4070-batched-qsa.json): a B >= 2 one-token decode step
+    # at >= qsa_batch_decode_sparse_min_context attends each row's QSA
+    # selection ("gather": #4070's gather + masked SDPA; "indexed": mlx2's
+    # indexed QSA kernel) instead of a dense SDPA over the padded width.
+    # mlx2 already had #4070's other half (per-row pooled banks).  Opt-in
+    # and unqualified; enters the environment and receipts only when not "off".
+    qsa_batch_decode_sparse: str = "off"
+    qsa_batch_decode_sparse_min_context: int = 16384
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
@@ -253,6 +262,13 @@ class FlashNextPolicy:
                 "moe_router_kernel excludes the router top-k "
                 f"(moe_topk_fold={self.moe_topk_fold!r}); set moe_topk_fold "
                 "to \"off\" to select the router kernel"
+            )
+        if self.qsa_batch_decode_sparse not in {"off", "gather", "indexed"}:
+            raise ValueError("qsa_batch_decode_sparse must be off, gather or indexed")
+        value = self.qsa_batch_decode_sparse_min_context
+        if type(value) is not int or value < 0:
+            raise ValueError(
+                "qsa_batch_decode_sparse_min_context must be a nonnegative integer"
             )
         if self.fused_gdn_batch_decode not in {"off", "row_exact"}:
             raise ValueError("fused_gdn_batch_decode must be off or row_exact")
@@ -429,6 +445,9 @@ class FlashNextPolicy:
             del values["prefill_depth_budget"]
         if self.gdn_state_dtype == "float32":
             del values["gdn_state_dtype"]
+        if self.qsa_batch_decode_sparse == "off":
+            del values["qsa_batch_decode_sparse"]
+            del values["qsa_batch_decode_sparse_min_context"]
         return values
 
     def moe_window_consumers(self):
@@ -492,6 +511,13 @@ class FlashNextPolicy:
             environment["MLX_QWEN4_MOE_WINDOW"] = ",".join(consumers)
         if self.moe_topk_fold != "off":
             environment["MLX_QWEN4_MOE_TOPK_FOLD"] = self.moe_topk_fold
+        if self.qsa_batch_decode_sparse != "off":
+            environment["MLX_QWEN4_QSA_BATCH_DECODE_SPARSE"] = (
+                self.qsa_batch_decode_sparse
+            )
+            environment["MLX_QWEN4_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT"] = str(
+                self.qsa_batch_decode_sparse_min_context
+            )
         return environment
 
     def batch_config(self, *, max_lanes, prefill_step):
