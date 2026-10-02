@@ -388,6 +388,7 @@ def _nax_swiglu_candidate(switch_mlp) -> bool:
     proj = switch_mlp.get("gate_up_proj") if hasattr(switch_mlp, "get") else None
     return (
         _nax.MODE == "fused"
+        and not _invariant.active()
         and not switch_mlp.training
         and type(proj) is QuantizedSwitchLinear
         and "bias" not in proj
@@ -401,6 +402,7 @@ def _nax_split_swiglu_candidate(switch_mlp) -> bool:
     up = switch_mlp.get("up_proj") if hasattr(switch_mlp, "get") else None
     return (
         _nax.MODE == "fused"
+        and not _invariant.active()
         and not switch_mlp.training
         and type(gate) is QuantizedSwitchLinear
         and type(up) is QuantizedSwitchLinear
