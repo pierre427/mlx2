@@ -353,6 +353,30 @@ def test_a_member_fed_another_tensor_is_counted_partial_and_stays_correct():
         assert _close(got, want)
 
 
+@pytest.mark.parametrize("installed", [False, True])
+@pytest.mark.parametrize("declaration,groups,error", [
+    ((object(),), installer.DEFAULT_GROUPS, TypeError),
+    ((GATED, GATED), installer.DEFAULT_GROUPS, ValueError),
+    ((GATED,), (), ValueError),
+])
+def test_invalid_declarations_preserve_existing_projection_topology(installed, declaration, groups, error):
+    model = _Gated()
+    if installed:
+        lane.install(model, min_rows=1, declared=(GATED,))
+    before = [(type(module), installer._group(module), installer._prepared(module))
+              for module in (model.q_proj, model.k_proj, model.v_proj, model.gate_proj)]
+    with pytest.raises(error):
+        lane.install(model, min_rows=4, declared=declaration, groups=groups)
+    for module, (kind, group, prepared) in zip(
+        (model.q_proj, model.k_proj, model.v_proj, model.gate_proj), before, strict=True
+    ):
+        assert type(module) is kind
+        assert installer._group(module) is group
+        assert installer._prepared(module) is prepared
+        if installed:
+            assert module._lane_min_rows == 1
+
+
 def test_the_declared_spec_is_part_of_the_law_and_reinstall_dissolves_it():
     renamed = ProjectionGroup("test-qkv-gate", _Gated, ("gate_proj", "q_proj", "k_proj", "v_proj"))
     model = _Gated()

@@ -835,14 +835,17 @@ def apc_semantic_namespace(
         payload = json.dumps(
             {
                 "schema": "mlx2.adapter-execution-numerics.v1",
-                "semantic": semantic,
                 "contract": adapter_execution_numerics,
             },
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
         )
-        semantic = hashlib.sha256(payload.encode()).hexdigest()
+        semantic = (
+            semantic,
+            "adapter-execution-numerics-v1",
+            hashlib.sha256(payload.encode()).hexdigest(),
+        )
 
     # The recurrent-state storage codec is the outermost law.
     return apc_state_codec_fingerprint(
@@ -1647,9 +1650,13 @@ def mlx_cache_limit_bytes():
         gib = float(raw)
     except ValueError:
         return None
-    if gib < 0:
+    if not math.isfinite(gib) or gib < 0:
         return None
-    return int(gib * float(1 << 30))
+    limit = gib * float(1 << 30)
+    if not math.isfinite(limit):
+        return None
+    limit = int(limit)
+    return limit if limit <= (1 << 64) - 1 else None
 
 
 def greedy_batch_sampler_enabled() -> bool:
@@ -1800,6 +1807,8 @@ class Job:
     approximate_kv_applied: bool = False
     verify_bitexact_start: dict | None = None
     row_exact_verify_start: object | None = None
+    recurrent_codec_restored_leaves: int = 0
+    recurrent_codec_restored_tokens: int = 0
     admission_final_reclaim_done: bool = False
     # Lane bytes admission granted this job that its cache has not allocated
     # yet; cleared by its first generated token (see ``unmaterialized_lane_bytes``).
@@ -7307,6 +7316,10 @@ class ServingEngine:
                                 ), tokens
                             )
                             job.cache_branch = hit.cache
+                        decoded_leaves = int(getattr(hit, "codec_restored_leaves", 0))
+                        job.recurrent_codec_restored_leaves += decoded_leaves
+                        if decoded_leaves:
+                            job.recurrent_codec_restored_tokens += int(hit.cached_tokens)
                         if job.preempted:
                             # Receipts keep the first admission's cache view.
                             job.preemption_events[-1]["replay_cached_tokens"] = int(
@@ -8902,7 +8915,8 @@ class ServingEngine:
                                     **(
                                         {
                                             "recurrent_state_codec": self.recurrent_state_codec_policy.receipt(
-                                                restored_tokens=int(job.cached_tokens or 0)
+                                                restored_tokens=job.recurrent_codec_restored_tokens,
+                                                restored_leaves=job.recurrent_codec_restored_leaves,
                                             )
                                         }
                                         if self.recurrent_state_codec_policy.enabled

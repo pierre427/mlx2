@@ -17,7 +17,7 @@ from mlx2.runtime.models.qwen38_fused_gdn import GatedDeltaNet
 from mlx2.serving import adapter_numerical_contract, apc_semantic_namespace
 
 
-def selected_contract(enabled):
+def selected_contract(enabled, *, state_dtype=None, fp32_head=False):
     layer = GatedDeltaNet(
         TextModelArgs(
             hidden_size=16,
@@ -32,6 +32,22 @@ def selected_contract(enabled):
         fused_gdn=enabled,
         model=SimpleNamespace(named_modules=lambda: [("layer", layer)]),
     )
+    if state_dtype is not None:
+        from mlx2.runtime.models.gdn_state import install_state_dtype
+
+        adapter.gdn_state = install_state_dtype(adapter.model, state_dtype)
+    if fp32_head:
+        import mlx.core as mx
+        from mlx import nn
+
+        from mlx2.runtime.fp32_head import enable_fp32_head_logits
+
+        language_model = nn.Module()
+        language_model.lm_head = nn.QuantizedLinear(64, 64, bias=False)
+        language_model.lm_head.scales = language_model.lm_head.scales.astype(mx.bfloat16)
+        language_model.lm_head.biases = language_model.lm_head.biases.astype(mx.bfloat16)
+        adapter.model.language_model = language_model
+        adapter.fp32_head = enable_fp32_head_logits(language_model)
     adapter.execution_numerics_contract = lambda: (
         Qwen3827BAdapter.execution_numerics_contract(adapter)
     )
@@ -122,13 +138,13 @@ def test_selected_law_sidecar_and_source_ranking_follow_execution_pin():
         batch.close()
 
 
-def direct_adapter(enabled):
+def direct_adapter(enabled, **precision):
     model, drafter = pair("xpress")
     adapter = ExternalDraftAdapterMixin()
     adapter.model, adapter.layout = model, "target-layout"
     adapter.identity = {"fingerprint": "a" * 64}
     adapter.external_policy = {"num_draft": 2, "continuation_pool": {}}
-    adapter.execution_numerics_contract = lambda: selected_contract(enabled)
+    adapter.execution_numerics_contract = lambda: selected_contract(enabled, **precision)
     adapter._bind_external_drafter(
         {"fingerprint": "b" * 64, "args": drafter.config},
         lambda _record, _target: drafter,
@@ -200,6 +216,70 @@ def test_contract_is_frozen_and_mapping_order_has_canonical_namespace():
             "algorithm": "candidate-v1",
         },
     )
+
+
+@pytest.mark.parametrize("precision", [
+    {"state_dtype": "float16"}, {"fp32_head": True},
+    {"state_dtype": "float16", "fp32_head": True},
+])
+def test_direct_adapter_precision_laws_split_target_sources_and_sessions(precision):
+    default, selected = direct_adapter(False), direct_adapter(False, **precision)
+    first, second = default.draft_model, selected.draft_model
+    assert first.session.target_revision != second.session.target_revision
+    assert first.session.session_revision != second.session.session_revision
+    assert first.session.tokenizer_revision == second.session.tokenizer_revision
+    assert first.source_records["external"].revision == second.source_records["external"].revision
+    assert first.source_records["external"].target_revision != second.source_records["external"].target_revision
+    assert first.proposal_pool.ranking_registry.model_key(first.session) != second.proposal_pool.ranking_registry.model_key(second.session)
+    contract = selected_contract(False, **precision)
+    assert apc_semantic_namespace("s", adapter_execution_numerics=contract) != "s"
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_gdn_precision_contract_checks_actual_live_storage_selection(selected):
+    import mlx.core as mx
+
+    from mlx2.runtime.models.gdn_state import install_state_dtype
+
+    layer = GatedDeltaNet(TextModelArgs(hidden_size=16, linear_num_key_heads=1,
+        linear_num_value_heads=2, linear_key_head_dim=8, linear_value_head_dim=8))
+    adapter = SimpleNamespace(fused_gdn=False,
+        model=SimpleNamespace(named_modules=lambda: [("layer", layer)]))
+    if selected:
+        adapter.gdn_state = install_state_dtype(adapter.model, "float16")
+        object.__setattr__(layer, "_gdn_state_dtype", mx.float32)
+    else:
+        object.__setattr__(layer, "_gdn_state_dtype", mx.float16)
+    with pytest.raises(ValueError, match="live target layers"):
+        Qwen3827BAdapter.execution_numerics_contract(adapter)
+
+
+@pytest.mark.parametrize("explicit_default", [None, "float32"])
+def test_explicit_default_gdn_dtype_keeps_contract_absent(explicit_default):
+    import mlx.core as mx
+
+    layer = GatedDeltaNet(TextModelArgs(hidden_size=16, linear_num_key_heads=1,
+        linear_num_value_heads=2, linear_key_head_dim=8, linear_value_head_dim=8))
+    object.__setattr__(layer, "_gdn_state_dtype", None if explicit_default is None else mx.float32)
+    adapter = SimpleNamespace(fused_gdn=False,
+        model=SimpleNamespace(named_modules=lambda: [("layer", layer)]))
+    assert Qwen3827BAdapter.execution_numerics_contract(adapter) is None
+
+
+def test_fp32_head_contract_refuses_stale_receipt():
+    import mlx.core as mx
+    from mlx import nn
+
+    from mlx2.runtime.fp32_head import enable_fp32_head_logits
+
+    language_model = nn.Module()
+    language_model.lm_head = nn.QuantizedLinear(64, 64, bias=False)
+    adapter = SimpleNamespace(fused_gdn=False,
+        model=SimpleNamespace(language_model=language_model, named_modules=list))
+    adapter.fp32_head = enable_fp32_head_logits(language_model)
+    language_model.lm_head.scales = language_model.lm_head.scales.astype(mx.bfloat16)
+    with pytest.raises(ValueError, match="live target head"):
+        Qwen3827BAdapter.execution_numerics_contract(adapter)
 
 
 def test_direct_teacher_feedback_receives_effective_target_and_raw_draft_pins(

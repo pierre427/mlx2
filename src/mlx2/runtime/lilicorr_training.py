@@ -125,7 +125,10 @@ class TeacherBuffer:
                     raise ValueError("Invalid teacher candidate IDs")
             elif not np.isfinite(source).all():
                 raise ValueError(f"Teacher {name} must be finite")
-            stored = np.array(source, dtype=dtype, copy=True)
+            with np.errstate(over="ignore", invalid="ignore"):
+                stored = np.array(source, dtype=dtype, copy=True)
+            if not np.isfinite(stored).all():
+                raise ValueError(f"Teacher {name} must remain finite in stored dtype")
             stored.setflags(write=False)
             arrays[name] = stored
         if (arrays["candidate_log_probs"] > 1e-6).any() or (

@@ -17,12 +17,25 @@ def sha256(path):
     return h.hexdigest()
 
 
-def fetch_file(repo, revision, item, root, *, open_url=urllib.request.urlopen):
-    path = PurePosixPath(item["path"])
+def _source_directory(root, repo, revision):
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or not re.fullmatch(
         r"[0-9a-f]{40}", revision
     ):
         raise ValueError("a dataset ID and exact 40-character revision are required")
+    return _contained_path(root, repo.replace("/", "--"), revision)
+
+
+def _contained_path(root, *parts):
+    root = Path(root).expanduser().resolve()
+    target = root.joinpath(*parts).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError("unsafe dataset path escapes output root")
+    return target
+
+
+def fetch_file(repo, revision, item, root, *, open_url=urllib.request.urlopen):
+    path = PurePosixPath(item["path"])
+    directory = _source_directory(root, repo, revision)
     if path.is_absolute() or ".." in path.parts or not path.parts:
         raise ValueError("unsafe dataset path")
     if (
@@ -31,7 +44,7 @@ def fetch_file(repo, revision, item, root, *, open_url=urllib.request.urlopen):
         or item["size"] < 1
     ):
         raise ValueError("expected SHA256 and positive size required")
-    target = Path(root) / repo.replace("/", "--") / revision / path
+    target = _contained_path(root, directory, path)
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         if target.stat().st_size != item["size"] or sha256(target) != item["sha256"]:
@@ -72,6 +85,9 @@ def main(argv=None):
     args = p.parse_args(argv)
     data = json.loads(args.manifest.read_text())
     for source in data["sources"]:
+        directory = _source_directory(args.output, source["id"], source["revision"])
+        # Validate the receipt destination before downloads or any writes.
+        path = _contained_path(args.output, directory, "receipt.json")
         results = []
         for item in source["files"]:
             result = fetch_file(source["id"], source["revision"], item, args.output)
@@ -82,12 +98,7 @@ def main(argv=None):
             "schema": "mlx2.verified-public-dataset.v1",
             "verified_files": results,
         }
-        path = (
-            args.output
-            / source["id"].replace("/", "--")
-            / source["revision"]
-            / "receipt.json"
-        )
+        path = _contained_path(args.output, directory, "receipt.json")
         path.write_text(json.dumps(receipt, indent=2) + "\n")
 
 

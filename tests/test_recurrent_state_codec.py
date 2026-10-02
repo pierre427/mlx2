@@ -151,7 +151,7 @@ def test_policy_parsing_and_disabled_namespace_is_identity():
     status = POLICY.as_dict()
     assert status["fidelity"] == "approximate" and status["qualified"] is False
     assert status["state"] == "candidate"
-    receipt = POLICY.receipt(restored_tokens=12)
+    receipt = POLICY.receipt(restored_tokens=12, restored_leaves=1)
     assert receipt["qualified"] is False and receipt["reason"] == "candidate_validation"
     assert receipt["restored_from_codec_state"] is True
 

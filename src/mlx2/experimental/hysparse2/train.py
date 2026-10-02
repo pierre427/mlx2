@@ -651,11 +651,17 @@ def main(argv=None):
     if (
         not all(
             math.isfinite(v)
-            for v in (args.learning_rate, args.mtp_weight, args.router_weight)
+            for v in (
+                args.learning_rate,
+                args.mtp_weight,
+                args.router_weight,
+                args.diffusion_weight,
+            )
         )
         or args.learning_rate <= 0
         or args.mtp_weight < 0
         or args.router_weight < 0
+        or args.diffusion_weight < 0
     ):
         p.error("invalid optimizer/loss settings")
     from .resources import gpu_guard

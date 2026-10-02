@@ -62,6 +62,26 @@ def test_teacher_buffer_copies_freezes_and_enforces_fifo_budget():
         buffer(max_bytes=1).add(**example())
 
 
+@pytest.mark.parametrize(
+    "field", ["token_embeddings", "candidate_log_probs", "pass_hidden", "anchor_hidden"]
+)
+def test_teacher_cast_overflow_refuses_before_fifo_or_buffer_mutation(field):
+    data = buffer(max_examples=1, max_bytes=4096)
+    assert data.add(**example())
+    original = data.examples[0]
+    before = data.nbytes, data.dropped
+    record = example()
+    record[field] = np.full(
+        record[field].shape,
+        -1e300 if field == "candidate_log_probs" else 1e300,
+        dtype=np.float64,
+    )
+    with pytest.raises(ValueError, match="remain finite"):
+        data.add(**record)
+    assert data.examples == [original]
+    assert (data.nbytes, data.dropped) == before
+
+
 def test_shadow_loss_decreases_without_touching_source_and_exports_unselected(tmp_path):
     head = initialized_head()
     original = {k: np.asarray(v).copy() for k, v in tree_flatten(head.parameters())}

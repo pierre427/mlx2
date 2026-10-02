@@ -371,10 +371,12 @@ class ExternalDraftAdapterMixin:
             manager.close()
 
     def close(self):
-        self._close_external_feedback()
-        parent_close = getattr(super(), "close", None)
-        if callable(parent_close):
-            parent_close()
+        try:
+            self._close_external_feedback()
+        finally:
+            parent_close = getattr(super(), "close", None)
+            if callable(parent_close):
+                parent_close()
 
 
 __all__ = ["ExternalDraftAdapterMixin"]

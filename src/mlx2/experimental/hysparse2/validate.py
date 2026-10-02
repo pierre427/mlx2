@@ -1,16 +1,17 @@
 """Bounded GPU checkpoint/context validation; does not qualify learned retrieval."""
 
-import os
 import argparse
 import json
 import math
+import os
 import time
 from dataclasses import asdict
 from pathlib import Path
 
+from mlx2.process_env import PROCESS_NUMERICS
+
 from .config import Config
 from .resources import gpu_guard
-from mlx2.process_env import PROCESS_NUMERICS
 
 
 def run(args):
@@ -22,6 +23,7 @@ def run(args):
     import numpy as np
 
     from .model import Model
+    from .train import initialize_from_checkpoint
 
     state = json.loads((args.checkpoint / "state.json").read_text())
     c = Config(**state["config"])
@@ -39,12 +41,7 @@ def run(args):
     mx.set_memory_limit(int(args.memory_limit_gib * 2**30))
     mx.set_cache_limit(1 << 30)
     model = Model(c)
-    model.load_weights(str(args.checkpoint / "model.safetensors"), strict=True)
-    sidecar = state.get("permanent_sidecar")
-    if c.semantic_ple_rows:
-        if not isinstance(sidecar, dict) or not isinstance(sidecar.get("sha256"), str):
-            raise ValueError("checkpoint semantic PLE identity is missing")
-        model.ple_sidecar_digest = sidecar["sha256"]
+    checkpoint_identity = initialize_from_checkpoint(args.checkpoint, model)
     model.eval()
     values = np.load(args.tokens, mmap_mode="r", allow_pickle=False)
     if (
@@ -63,6 +60,7 @@ def run(args):
     receipt = {
         "schema": "mlx2.hysparse2-gpu-context.v1",
         "checkpoint_step": state["step"],
+        "checkpoint_identity": checkpoint_identity,
         "config": asdict(c),
         "fp32_prefill_max_abs_error": prefill_error,
         "fp32_decode_max_abs_error": decode_error,

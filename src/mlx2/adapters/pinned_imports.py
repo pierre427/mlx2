@@ -19,7 +19,9 @@ class PinnedSourceLoader(importlib.machinery.SourceFileLoader):
         data = self.get_data(self.path)
         if hashlib.sha256(data).hexdigest() != self.expected_hash:
             raise ImportError(f"pinned source bytes changed: {fullname}")
-        return self.source_to_code(data, self.path)
+        code = self.source_to_code(data, self.path)
+        self._compiled_sha256 = self.expected_hash
+        return code
 
 
 class PinnedSourceFinder(importlib.abc.MetaPathFinder):
@@ -55,6 +57,16 @@ class PinnedSourceFinder(importlib.abc.MetaPathFinder):
         for name, module in list(sys.modules.items()):
             if self.covers(name):
                 self.validate(name, getattr(module, "__spec__", None))
+                loader = module.__spec__.loader
+                expected = self.sources[Path(module.__spec__.origin).resolve()]
+                if (
+                    not isinstance(loader, PinnedSourceLoader)
+                    or loader.expected_hash != expected
+                    or getattr(loader, "_compiled_sha256", None) != expected
+                ):
+                    raise ImportError(
+                        f"loaded module lacks matching pinned execution: {name}"
+                    )
 
     def __enter__(self):
         sys.meta_path.insert(0, self)

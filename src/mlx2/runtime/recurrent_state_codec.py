@@ -141,7 +141,7 @@ class RecurrentStateCodecPolicy:
             "live state and rollback records stay exact",
         }
 
-    def receipt(self, *, restored_tokens: int) -> dict:
+    def receipt(self, *, restored_tokens: int, restored_leaves: int = 0) -> dict:
         """Per-request route receipt; only emitted when the policy is on."""
         return {
             "schema": RECEIPT_SCHEMA,
@@ -151,8 +151,10 @@ class RecurrentStateCodecPolicy:
             "fidelity": Fidelity.APPROXIMATE.value,
             "qualified": bool(self.qualified),
             "reason": "qualified" if self.qualified else "candidate_validation",
-            "restored_from_codec_state": restored_tokens > 0,
-            "restored_tokens": int(restored_tokens),
+            "observed_used": restored_leaves > 0,
+            "restored_from_codec_state": restored_leaves > 0,
+            "restored_leaves": int(restored_leaves),
+            "restored_tokens": int(restored_tokens) if restored_leaves > 0 else 0,
         }
 
 
@@ -242,7 +244,9 @@ def decode(record) -> mx.array:
 
     A row whose stored scale is not finite (a nonfinite source row) decodes
     to NaN rather than to finite garbage."""
-    _check_structure(record)
+    codec = record_codec(record)
+    if codec not in CODECS:
+        raise ValueError(f"unknown recurrent state codec {codec!r}")
     scale = record["scale"]
     value = record["q"].astype(mx.float32) * scale
     return mx.where(mx.isfinite(scale), value, mx.array(float("nan"), dtype=mx.float32))
@@ -338,6 +342,7 @@ def decode_prompt_cache(prompt_cache) -> int:
     """
     decoded = 0
     for cache in _arrays_caches(prompt_cache):
+        before = decoded
         for index, value in enumerate(list(cache.cache)):
             if is_encoded(value):
                 cache.cache[index] = decode(value)
@@ -358,8 +363,19 @@ def decode_prompt_cache(prompt_cache) -> int:
                     new_lane.append((position, leaves))
                 new_lanes.append(new_lane)
             cache._checkpoints = new_lanes
+        # Request-private attribution, reset on every restore. A dense KV-only
+        # warm hit must not inherit the process's other codec restores.
+        cache._recurrent_codec_restored_leaves = decoded - before
     STATS["decoded_leaves"] += decoded
     return decoded
+
+
+def restored_leaf_count(prompt_cache) -> int:
+    """Local leaves decoded by this restore, independent of global counters."""
+    return sum(
+        int(getattr(cache, "_recurrent_codec_restored_leaves", 0))
+        for cache in _arrays_caches(prompt_cache or [])
+    )
 
 
 def _leaves(cache):

@@ -457,6 +457,15 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
     """
     if not 1 <= min_rows <= max_rows <= MAX_ROWS:
         raise ValueError(f"need 1 <= min_rows <= max_rows <= {MAX_ROWS}")
+    # Reject malformed adapter declarations before changing any projection,
+    # including a model already installed under another backend.
+    declared = tuple(declared or ())
+    if any(not isinstance(spec, ProjectionGroup) for spec in declared):
+        raise TypeError("declared projection groups must be ProjectionGroup instances")
+    if len({spec.name for spec in declared}) != len(declared):
+        raise ValueError("declared projection group names must be unique")
+    if declared and not groups:
+        raise ValueError("declared projection groups require grouping")
     from .policy import format_class
 
     def threshold(module):
@@ -506,13 +515,6 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
         object.__setattr__(module, "_lane_min_rows", int(rows))
         object.__setattr__(module, "_lane_max_rows", int(max_rows))
         covered[lw.format] += 1
-    declared = tuple(declared or ())
-    if any(not isinstance(spec, ProjectionGroup) for spec in declared):
-        raise TypeError("declared projection groups must be ProjectionGroup instances")
-    if len({spec.name for spec in declared}) != len(declared):
-        raise ValueError("declared projection group names must be unique")
-    if declared and not groups:
-        raise ValueError("declared projection groups require grouping")
     declared_formed, declared_refused = {}, {}
     if declared or any(getattr(_group(m), "declared", None) is not None
                        for _n, m in model.named_modules()):

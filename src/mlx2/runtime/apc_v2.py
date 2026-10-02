@@ -54,6 +54,7 @@ from .recurrent_state_codec import (
     RecurrentStateCodecPolicy,
     encode_prompt_cache,
     key_codec_layer,
+    restored_leaf_count,
     validate_prompt_cache,
 )
 from .persistent_blocks import (
@@ -139,6 +140,7 @@ class APCLookup:
     # ``cached_tokens``.
     branch_tokens: int = 0
     target_only_plain_fallback: bool = False
+    codec_restored_leaves: int = 0
 
 
 @dataclass
@@ -281,6 +283,7 @@ _NUMERICS_WRAPPER_TAGS = frozenset(
         "prefill-execution-v1",
         "weight-stream",
         "execution-numerics-v1",
+        "adapter-execution-numerics-v1",
         RECURRENT_STATE_CODEC_TAG,
     }
 )
@@ -639,6 +642,7 @@ class APCv2(PrefixIndex):
             "encoded_bytes": 0,
             "key_mismatch_refusals": 0,
             "disk_restore_validated": 0,
+            "payload_refusals": 0,
         }
         self._cow_branching = True
         self._cow_telemetry = COWCacheTelemetry()
@@ -3150,6 +3154,7 @@ class APCv2(PrefixIndex):
                         entry, "_apc_retention_role", self._RETENTION_DEFAULT
                     ),
                     branch_tokens=branch_beyond(covered),
+                    codec_restored_leaves=restored_leaf_count(restored_cache),
                 )
         hidden = []
         # Hit accounting must credit the entry fetch actually served.
@@ -3303,6 +3308,7 @@ class APCv2(PrefixIndex):
                 else None
             ),
             branch_tokens=branch_beyond(cached_tokens),
+            codec_restored_leaves=restored_leaf_count(cache) if hit else 0,
         )
 
     def _branch_lacks_restore_points_locked(self, key, trie_result) -> bool:
@@ -3387,10 +3393,18 @@ class APCv2(PrefixIndex):
             (prompt_cache, codec_counts) = encode_prompt_cache(
                 prompt_cache, self._state_codec
             )
-            if codec_counts["encoded_leaves"]:
-                self._state_codec_stats["stores_encoded"] += 1
-                for name in ("encoded_leaves", "source_bytes", "encoded_bytes"):
-                    self._state_codec_stats[name] += codec_counts[name]
+        # Resident restores use the same codec contract as disk restores.
+        # A caller-provided encoded record must never bypass policy checks,
+        # nor may malformed state be published into a valid namespace.
+        try:
+            validate_prompt_cache(prompt_cache, self._state_codec)
+        except ValueError:
+            self._state_codec_stats["payload_refusals"] += 1
+            return replace(capabilities, stored=False)
+        if self._state_codec.enabled and codec_counts["encoded_leaves"]:
+            self._state_codec_stats["stores_encoded"] += 1
+            for name in ("encoded_leaves", "source_bytes", "encoded_bytes"):
+                self._state_codec_stats[name] += codec_counts[name]
         if self._cow_branching:
             try:
                 (prompt_cache, sidecar) = freeze_prompt_cache(

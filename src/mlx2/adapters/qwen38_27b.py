@@ -860,11 +860,16 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
 
     def execution_numerics_contract(self):
         """Selected target math for APCv2 and external learning identities."""
+        import mlx.core as mx
+        from mlx import nn
+
+        from ..runtime.models.gdn_state import is_gdn_layer
         from ..runtime.models.qwen38_fused_gdn import GatedDeltaNet
 
+        modules = list(self.model.named_modules())
         layers = [
             module
-            for _, module in self.model.named_modules()
+            for _, module in modules
             if isinstance(module, GatedDeltaNet)
         ]
         enabled = bool(getattr(self, "fused_gdn", False))
@@ -872,16 +877,56 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             module.fused_gdn_enabled is not enabled for module in layers
         ):
             raise ValueError("selected fused_gdn policy disagrees with live target layers")
-        if not enabled:
-            return None
-        return {
-            "schema": "mlx2.qwen38-fused-gdn-numerics.v1",
-            "fused_gdn": {
+        contract = {}
+        if enabled:
+            contract["fused_gdn"] = {
                 "algorithm": "qwen35-served-silu-decode-v1",
                 "scope": "initialized-nonspeculating-single-token",
                 "verify_prefill": "reference",
-            },
-        }
+            }
+        state_receipt = getattr(self, "gdn_state", None)
+        state_layers = [module for _, module in modules if is_gdn_layer(module)]
+        state_selected = state_receipt is not None
+        expected = mx.float16 if state_selected else mx.float32
+        if (state_selected and (
+                not isinstance(state_receipt, dict)
+                or state_receipt.get("state_dtype") != "float16"
+                or not state_layers
+                or state_receipt.get("layers") != len(state_layers))) or any(
+            (getattr(layer, "_gdn_state_dtype", None) or mx.float32) != expected
+            for layer in state_layers
+        ):
+            raise ValueError("selected GDN state dtype disagrees with live target layers")
+        if state_selected:
+            contract["gdn_state"] = {
+                "algorithm": "gdn-state-fp16-v1",
+                "storage_dtype": "float16",
+                "compute_dtype": "float32",
+                "rounding": "per-token-round-to-nearest-even",
+            }
+        head_receipt = getattr(self, "fp32_head", None)
+        if head_receipt is not None:
+            head = getattr(getattr(self.model, "language_model", None), "lm_head", None)
+            if (not isinstance(head_receipt, dict)
+                    or head_receipt.get("enabled") is not True
+                    or not isinstance(head, nn.QuantizedLinear)
+                    or "bias" in head
+                    or head.mode != "affine"
+                    or head.scales.dtype != mx.float32
+                    or (head.get("biases") is not None and head.biases.dtype != mx.float32)
+                    or any(head_receipt.get(key) != getattr(head, key)
+                           for key in ("bits", "group_size", "mode"))):
+                raise ValueError("selected fp32 head policy disagrees with live target head")
+            contract["fp32_head_logits"] = {
+                "algorithm": "affine-head-fp32-scales-v1",
+                "bits": int(head.bits),
+                "group_size": int(head.group_size),
+            }
+        if not contract:
+            return None
+        # Retain the existing fused-only schema spelling and identity; selected
+        # storage/head precision extends it without changing the default.
+        return {"schema": "mlx2.qwen38-fused-gdn-numerics.v1", **contract}
 
     def _fused_gdn_diagnostics(self):
         from ..runtime.models.qwen38_fused_gdn import stats
