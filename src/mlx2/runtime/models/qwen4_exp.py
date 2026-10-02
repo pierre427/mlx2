@@ -77,6 +77,7 @@ from . import qwen4_hc_decode as _hc_decode
 from .qwen4_gate_inject import (
     eager_qwen4_gate_inject,
     fused_gate_inject_enabled,
+    record_gate_inject_yield,
     try_qwen4_gate_inject,
 )
 from .qwen4_gdn_outproj import admit_qwen4_gdn_outproj
@@ -2327,18 +2328,42 @@ class GatedResidual(nn.Module):
             # gate-inject path wants the raw gate logit instead.
             _hc_decode.decline("raw gate inject requested")
         elif _hc_decode.hc_decode_enabled():
-            # omlx #4038 two-launch HC decode; counted declines.
-            fused = _hc_decode.try_hc_decode(
-                self,
-                hyper_input,
-                eager_norm=(
-                    not fused_group_norm_enabled()
-                    and self.hc_norm._use_fast(hyper_input)
-                ),
-                compile_glue=glue,
-            )
+            fused = self._try_hc_decode(hyper_input, glue)
             if fused is not None:
                 return fused
+        return self._composed(hyper_input, glue, raw_inject)
+
+    def _try_hc_decode(self, hyper_input, glue):
+        # omlx #4038 two-launch HC decode; counted declines.
+        return _hc_decode.try_hc_decode(
+            self,
+            hyper_input,
+            eager_norm=(
+                not fused_group_norm_enabled() and self.hc_norm._use_fast(hyper_input)
+            ),
+            compile_glue=glue,
+        )
+
+    def split_for_gate_inject(self, hyper_input: mx.array):
+        """``(mixed, residual, inject, raw)`` for a layer that selected the
+        fused gate-inject candidate.  The candidate yields to the HC decode
+        kernels, which already fuse the inject: a call they serve returns
+        their finished inject (``raw`` False) and counts as a candidate
+        decline; only the calls they decline get the raw gate (``raw``
+        True).  Options sweep 2026-10-01: taking every call from the kernels
+        cost ordinary B1 decode 8.5% (qualification/runs/options-sweep-20261001)."""
+        if not _hc_decode.hc_decode_enabled() or (
+            _GDN_SHAPE_STABLE_PROJECTIONS and hyper_input.shape[1] > 1
+        ):
+            return (*self(hyper_input, raw_inject=True), True)
+        glue = compile_glue_enabled()
+        fused = self._try_hc_decode(hyper_input, glue)
+        if fused is not None:
+            record_gate_inject_yield("hc decode kernels served the call")
+            return (*fused, False)
+        return (*self._composed(hyper_input, glue, True), True)
+
+    def _composed(self, hyper_input, glue, raw_inject):
         normed = self.hc_norm(hyper_input)
         gate_input = self.input_mix_weight_down(normed)
         weights = None
@@ -6603,6 +6628,14 @@ def _apply_raw_gate_inject(residual, branch, raw_gate, *, training: bool):
     return eager_qwen4_gate_inject(residual, branch, raw_gate)
 
 
+def _split_hyper(connection, x, gate_inject: bool):
+    """``(mixed, residual, inject, raw)``: ``raw`` says ``inject`` is the raw
+    gate logit for the fused gate-inject candidate."""
+    if gate_inject:
+        return connection.split_for_gate_inject(x)
+    return (*connection(x), False)
+
+
 class DecoderLayer(nn.Module):
     def __init__(self, args: TextModelArgs, layer_idx: int, summary_layer_id=None):
         super().__init__()
@@ -6626,9 +6659,9 @@ class DecoderLayer(nn.Module):
     def __call__(self, x, input_ids, mask=None, cache=None, ssm_mask=None):
         if self.ple is not None:
             x = x + self.ple(x, input_ids, cache, ssm_mask)
-        raw_inject = fused_gate_inject_enabled()
-        (mixed, residual, inject) = self.attn_hyper_connection(
-            x, raw_inject=raw_inject
+        gate_inject = fused_gate_inject_enabled()
+        (mixed, residual, inject, raw) = _split_hyper(
+            self.attn_hyper_connection, x, gate_inject
         )
         if self.is_linear:
             branch = self.linear_attn(mixed, ssm_mask, cache)
@@ -6638,14 +6671,14 @@ class DecoderLayer(nn.Module):
             _apply_raw_gate_inject(
                 residual, branch, inject, training=self.training
             )
-            if raw_inject
+            if raw
             else _apply_inject(residual, branch, inject)
         )
-        (mixed, residual, inject) = self.mlp_hyper_connection(
-            x, raw_inject=raw_inject
+        (mixed, residual, inject, raw) = _split_hyper(
+            self.mlp_hyper_connection, x, gate_inject
         )
         branch = self.mlp(mixed)
-        if raw_inject:
+        if raw:
             return _apply_raw_gate_inject(
                 residual, branch, inject, training=self.training
             )

@@ -34,6 +34,14 @@ PHYSICAL_ENGAGEMENT_RECEIPT = (
 from .import_env import snapshot as _import_env_snapshot
 
 _import_env_snapshot(__name__)
+# Default off.  Options sweep on the served Flash-Next artifact
+# (qualification/runs/options-sweep-20261001): bit-identical everywhere, but
+# while it took every dense-inject call from the HC decode kernels (which
+# already fuse the inject) ordinary B1 decode lost 8.5% [-12.5, -6.5] and 32K
+# ordinary 8.5%; MTP B1 -0.2%, 4 lanes +1.3% (noise).  It now yields to those
+# kernels (qwen4_exp.GatedResidual.split_for_gate_inject) and serves only
+# the calls they decline: verify windows wider than 8 rows, batches past 8
+# lanes, multi-row "off", non-eager norms.  The narrowed route is unmeasured.
 _ENABLE = os.environ.get("MLX_QWEN4_FUSED_GATE_INJECT", "0") == "1"
 _KERNEL = None
 _KERNEL_LOCK = threading.Lock()
@@ -176,6 +184,11 @@ def _record_decision(admission: GateInjectAdmission, *, error: str | None = None
             "mode": admission.mode,
             "error": error,
         }
+
+
+def record_gate_inject_yield(reason: str) -> None:
+    """Count a call the candidate left to a faster fused path (a decline)."""
+    _record_decision(GateInjectAdmission(False, reason))
 
 
 def try_qwen4_gate_inject(

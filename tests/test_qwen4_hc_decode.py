@@ -576,3 +576,56 @@ def test_raw_gate_inject_mode_declines_the_hc_kernels(reference_kernels):
     assert reference_kernels["launch"] == 0
     assert _same(got[0], want[0]) and _same(got[2], want[2])
     assert HCD.hc_decode_status()["declines"] == {"raw gate inject requested": 1}
+
+
+def _stub_decoder_layer(seed=11):
+    """A DecoderLayer with its two hyper connections and stand-in branches."""
+    layer = Q.DecoderLayer.__new__(Q.DecoderLayer)
+    nn.Module.__init__(layer)
+    layer.is_linear = True
+    layer.ple = None
+    layer.attn_hyper_connection = _module(seed=seed, dense_inject=True)
+    layer.mlp_hyper_connection = _module(seed=seed + 1, dense_inject=True)
+    layer.linear_attn = lambda mixed, ssm_mask, cache: (mixed * 0.5).astype(mx.bfloat16)
+    layer.mlp = lambda mixed: (mixed * 0.25).astype(mx.bfloat16)
+    return layer
+
+
+def test_gate_inject_yields_to_the_hc_decode_kernels(reference_kernels):
+    # Options sweep 2026-10-01: with MLX_QWEN4_FUSED_GATE_INJECT on, every
+    # dense-inject HC call declined the two-launch kernels ("raw gate inject
+    # requested", 37,632 at B1) and ordinary decode lost 8.5%.  The candidate
+    # now serves only the calls the HC kernels decline (counted).
+    from mlx2.runtime.models import qwen4_gate_inject as GI
+
+    layer = _stub_decoder_layer()
+    x = _x(12)
+    want = layer(x, None)
+    previous = GI.fused_gate_inject_enabled()
+    GI.set_fused_gate_inject_enabled(True)
+    GI.reset_qwen4_gate_inject_stats()
+    try:
+        HCD.set_hc_decode_enabled(True)
+        got = layer(x, None)
+        assert _same(got, want)
+        assert reference_kernels["launch"] == 2
+        assert "raw gate inject requested" not in HCD.hc_decode_status()["declines"]
+        counts = GI.qwen4_gate_inject_stats()["counts"]
+        assert counts["decline:hc decode kernels served the call"] == 2
+        assert counts.get("calls", 0) == 0
+        # A call the HC kernels decline (2 rows with multi-row off) still
+        # reaches the gate-inject candidate with the raw gate.
+        wide = _x(13, rows=2)
+        HCD.set_hc_decode_enabled(False)
+        want_wide = layer(wide, None)
+        HCD.set_hc_decode_enabled(True)
+        GI.reset_qwen4_gate_inject_stats()
+        assert _same(layer(wide, None), want_wide)
+        assert reference_kernels["launch"] == 2
+        counts = GI.qwen4_gate_inject_stats()["counts"]
+        assert "decline:hc decode kernels served the call" not in counts
+        assert counts["attempts"] == 2  # both reached admission (declined on CPU)
+        assert HCD.hc_decode_status()["declines"] == {HCD.MULTI_ROW_DECLINE: 2}
+    finally:
+        GI.set_fused_gate_inject_enabled(previous)
+        GI.reset_qwen4_gate_inject_stats()
