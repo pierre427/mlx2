@@ -281,6 +281,38 @@ class FlashNextPolicy:
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
+        fold_windows = (
+            self.moe_window_batch_decode
+            or self.moe_window_verify
+            or (self.row_exact_verify and self.moe_window_row_exact)
+        )
+        if (
+            self.moe_topk_fold == "fold"
+            and self.moe_routed_decode not in {"gate_up_down", "gate_up_down_shared"}
+            and not fold_windows
+        ):
+            # The fold runs inside the routed gate+up launch: one-token decode
+            # declines it under any other routed mode, and no row window is
+            # selected to take it (sweep 2026-10-02 M1).
+            raise ValueError(
+                "moe_topk_fold \"fold\" needs moe_routed_decode gate_up_down or "
+                f"gate_up_down_shared (got {self.moe_routed_decode!r}) or a "
+                "moe_window consumer"
+            )
+        if (self.moe_window_batch_decode or self.moe_window_verify) and (
+            self.moe_router_kernel or self.moe_routed_decode == "two_launch"
+        ):
+            # The window reproduces the one-token reference; under the router
+            # kernel or two_launch that reference is not the window's
+            # arithmetic, so every window declines (sweep 2026-10-02 M1).
+            reason = (
+                "moe_router_kernel" if self.moe_router_kernel
+                else "moe_routed_decode \"two_launch\""
+            )
+            raise ValueError(
+                f"{reason} excludes moe_window_batch_decode and moe_window_verify "
+                "(every window would decline)"
+            )
         for name in (
             "shared_qsa_min_context",
             "shared_qsa_max_remaining",
