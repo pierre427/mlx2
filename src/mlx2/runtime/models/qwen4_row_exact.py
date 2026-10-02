@@ -577,22 +577,26 @@ class RowExactVerify:
         }
 
     def status(self) -> dict:
-        counts = self.counts
-        return {
-            "schema": SCHEMA,
-            "enabled": self.enabled,
-            "max_evidenced_lanes": MAX_EVIDENCED_LANES,
-            "installed_modules": len(self._swapped),
-            "static_refusals": dict(self.static_refusals),
-            "gdn_layers": len(self._gdn),
-            "windows": counts["windows"],
-            "windows_row_exact": counts["windows_row_exact"],
-            "windows_not_exact": counts["windows_not_exact"],
-            "rows": counts["rows"],
-            "one_row_passthrough": counts["one_row_passthrough"],
-            "stages": {k: dict(v) for k, v in counts["stages"].items()},
-            "failures": dict(counts["failures"]),
-        }
+        # HTTP threads call this while the generation worker's _close()
+        # inserts stage/route keys under the lock: copy under it too, or a
+        # resize mid-iteration 500s /v1/status (sweep 2026-10-02 V3).
+        with self._lock:
+            counts = self.counts
+            return {
+                "schema": SCHEMA,
+                "enabled": self.enabled,
+                "max_evidenced_lanes": MAX_EVIDENCED_LANES,
+                "installed_modules": len(self._swapped),
+                "static_refusals": dict(self.static_refusals),
+                "gdn_layers": len(self._gdn),
+                "windows": counts["windows"],
+                "windows_row_exact": counts["windows_row_exact"],
+                "windows_not_exact": counts["windows_not_exact"],
+                "rows": counts["rows"],
+                "one_row_passthrough": counts["one_row_passthrough"],
+                "stages": {k: dict(v) for k, v in counts["stages"].items()},
+                "failures": dict(counts["failures"]),
+            }
 
 
 def install(model) -> RowExactVerify:
