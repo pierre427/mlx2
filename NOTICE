@@ -81,3 +81,464 @@ nongated SiLU MLP in nemotron_h.py. Copyright contributors to the vLLM
 project. The upstream head is adapted from sgl-project/sglang PR #37462.
 Licensed under Apache License, Version 2.0; see LICENSE.
 Provenance and modifications: provenance/lilicorr.json.
+
+------------------------------------------------------------------------------
+Scoped third-party notices
+
+The notices below are reproduced from the project's per-mechanism provenance
+records. Those records (the provenance/ files they mention) are kept with the
+project's private evidence and are not part of this repository; the
+attributions and license texts that the adapted code requires are complete
+here.
+
+------------------------------------------------------------------------------
+Scoped notices for code adapted from jundot/omlx PR #3903 (merged as
+3e2bdb1fea5571c7e85f160a9c3df9ad76516be9). See
+provenance/omlx-3903-qwen4-prefill.json for paths and modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx, revision 3e2bdb1f.
+   The Python admission/dispatch glue in
+   src/mlx2/runtime/models/qwen4_fused_gdn_prefill.py and the weighted-sum
+   routing idea in src/mlx2/runtime/models/qwen4_moe_weighted_sum.py are
+   adapted from omlx/patches/qwen35_gdn_prework.py and
+   omlx/patches/qwen35_moe_weighted_sum.py. The full Apache-2.0 text is
+   this repository's LICENSE.
+
+2. mlx-serve — MIT License (scoped to the GDN prework and norm-gate Metal
+   kernel sources in src/mlx2/runtime/models/qwen4_fused_gdn_prefill.py)
+
+Copyright (c) 2026 David Dalcu
+
+Source: ddalcu/mlx-serve src/transformer.zig, tag v26.8.11-pre-release.1
+(commit 09970f9b), as carried by omlx 3e2bdb1f.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+3. mlx-serve — MIT License (scoped to the reduction order of the MoE
+   weighted-sum kernel in src/mlx2/runtime/models/qwen4_moe_weighted_sum.py
+   and the shapes/falsifier of tests/test_qwen4_moe_weighted_sum_metal.py)
+
+Copyright (c) 2026 David Dalcu
+
+Source: ddalcu/mlx-serve PR #653, merge commit a453794f
+(src/transformer.zig, VERIFY_EXPERT_REDUCE_SOURCE and its bit-identity test).
+See provenance/mlx-serve-653-moe-prefill-reduce.json. The MIT permission
+notice and warranty disclaimer are as in section 2 above.
+
+------------------------------------------------------------------------------
+Scoped notices for code adapted from jundot/omlx pull requests #3912 and
+#3935 (open, read 2026-09-25). See provenance/omlx-fn-2026-09-25.json for
+paths, revisions and modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx
+   - PR #3912 head e3d4a213743041ce884861f93c87dbdabe4c3a6e:
+     omlx/patches/qwen35_moe_routed_decode.py (the gate+up/SwiGLU and
+     down/weighted-sum Metal kernels and admission idea) and the _HEADER of
+     omlx/patches/moe_verify_gather.py, carried in
+     src/mlx2/runtime/models/qwen4_routed_decode.py.
+   - PR #3935 head 5c5517558d3e3621fdc9911a0ae9a4190b8cf4ff:
+     the "keep an embedded MTP head resident under expert offload" idea and
+     the `"mtp" in path.split(".")` predicate from
+     omlx/patches/moe_expert_offload.py, re-expressed in
+     src/mlx2/runtime/weight_stream.py (is_mtp_path, mtp_resident).
+   The full Apache-2.0 text is this repository's LICENSE.
+
+2. MLX — MIT License (scoped to the quantized dot-product helpers
+   load_vector, load_vector_safe and qdot_n in the QMV_HEADER of
+   src/mlx2/runtime/models/qwen4_routed_decode.py)
+
+   Copyright © 2023-2026 Apple Inc.
+
+   omlx transcribed these from MLX 0.32.2
+   mlx/backend/metal/kernels/quantized.h; mlx2 adapts the input sums to the
+   float accumulation of the lab MLX fork in the mlx2 venv (commit
+   2d6705923, in 39400a0d4). The MIT
+   text is provenance/LICENSE.unified-MIT (same terms). No Apple copyright
+   header is added to mlx2 source files.
+
+------------------------------------------------------------------------------
+Scoped notice for the NAX sorted MoE gather (segmented tile scheduling, the
+SwiGLU epilogue and the sorted row map) adapted from jundot/omlx PRs #3995
+(8bb1fb9c), #4022 (b18cc5a1), #4029 (0c9de320) and the follow-up 195a69e5,
+read at origin/main d6b2b92b11ebcbf4a4c1f002b0d590a3117212a8 on 2026-10-02.
+See provenance/omlx-3995-4022-4029-nax-gather.json for paths and
+modifications.
+
+omlx — Apache License 2.0
+Source: https://github.com/jundot/omlx, omlx/patches/m5_gather_qmm_nax.py
+(the Metal sources, plan table, canaries and Python launch code, adopted
+nearly verbatim into src/mlx2/runtime/models/moe_nax_gather.py) and
+omlx/patches/moe_routes.py (sort_routes, re-expressed as
+switch_layers._sort_routes). The admission, policy, counters and wiring are
+mlx2's own. The full Apache-2.0 text is this repository's LICENSE.
+
+The Metal sources are compiled against MLX's own steel/gemm/nax.h,
+unary_ops.h and binary_ops.h, read at run time from the installed MLX
+package (MIT, Apple); no MLX text is copied into this repository.
+
+ddalcu/mlx-serve#638 (MIT, Copyright (c) 2026 David Dalcu), a Zig port of
+the same three oMLX PRs, motivated the port and its acceptance numbers;
+nothing was copied from it.
+
+------------------------------------------------------------------------------
+Scoped notices for the two-launch Flash-Next hyper-connection decode
+(src/mlx2/runtime/models/qwen4_hc_decode.py). See
+provenance/omlx-4038-qwen4-hc-decode.json for revisions, hashes and
+modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx, PR #4038 head
+   2608f6785a78bca01967f22f72cf67c52e6d3973:
+   omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/hc_fused.py.
+   The two-launch partition of the hyper-connection decode, the
+   identity-keyed layout cache and the first-use validation are adapted from
+   that file. No Metal source is copied. The full Apache-2.0 text is this
+   repository's LICENSE.
+
+2. MLX — MIT License (scoped to the 4-bit and 8-bit load_vector /
+   load_vector_safe / qdot / dequantize expressions, the qmv_wide reduction
+   ladder and the Sigmoid expression in the HEADER of
+   src/mlx2/runtime/models/qwen4_hc_decode.py, and to the dense gemv /
+   gemv_wide accumulation and reduction order in its NORM_DOWN_SOURCE)
+
+   Copyright © 2023-2026 Apple Inc.
+
+   Transcribed from mlx/backend/metal/kernels/quantized.h, gemv.h and unary_ops.h of
+   the lab MLX fork installed in the mlx2 venv (39400a0d4). The MIT text is
+   provenance/LICENSE.unified-MIT (same terms). No Apple copyright header is
+   added to mlx2 source files.
+
+------------------------------------------------------------------------------
+Scoped notices for code adapted into src/mlx2/runtime/models/qwen4_attn_window.py
+(row-exact attention window for Flash-Next self-MTP verify) and the HC row-exact
+mode in src/mlx2/runtime/models/qwen4_hc_decode.py. See
+provenance/omlx-4041-4105-qwen4-attn-window.json for paths, hashes and
+modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx PR #4041 (head
+   7ef4d997b5713aaef53aaadca9a656736a12fa74) and PR #4105 (head
+   93e708a816a70a8183b5cefca4e81c1c3d48bef8),
+   omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/attn_fused.py
+   (dense_sdpa_gate, row_plan) and .../language.py (_row_exact_masked_verify,
+   _row_exact_gathered_verify). The window layout -- every row of a verify
+   window runs the vector-SDPA plan of its own one-token step over its own key
+   count, rows indexed from the grid, windows up to 16 rows -- is adapted from
+   them. No omlx source text is copied. The full Apache-2.0 text is this
+   repository's LICENSE.
+
+2. MLX — MIT License. The Metal arithmetic inside qwen4_attn_window.py is
+   generated from the sources of src/mlx2/runtime/models/qwen4_attn_rows.py
+   (sdpa_vector / sdpa_vector_2pass_1 / sdpa_vector_2pass_2 from sdpa_vector.h
+   and select_sdpa_blocks from scaled_dot_product_attention.cpp at
+   ml-explore/mlx revision 39400a0d4cf1641bc6e543cb5e3585757f491854); the MIT
+   notice for that transcription is provenance/omlx-4052-qwen4-attn-rows.NOTICE
+   and applies here unchanged.
+
+------------------------------------------------------------------------------
+Scoped notices for code adapted into src/mlx2/runtime/models/qwen4_attn_rows.py
+(fused Qwen4 attention rows). See provenance/omlx-4052-qwen4-attn-rows.json for
+paths, hashes and modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx PR #4052, head
+   d05afc7a7a59a871531b89ee769460581a26aabb,
+   omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/attn_fused.py.
+   The fused-row structure (q/k norm + RoPE in one launch per head and row;
+   one-pass SDPA chains split over simdgroups and closed by a separate
+   combine launch that also applies the output gate) is adapted from it.
+   The full Apache-2.0 text is this repository's LICENSE.
+
+2. MLX — MIT License (scoped to the arithmetic transcribed inside the Metal
+   sources of qwen4_attn_rows.py: rms_single_row from rms_norm.metal,
+   rope/rope_single from rope.metal, sdpa_vector / sdpa_vector_2pass_1 /
+   sdpa_vector_2pass_2 from sdpa_vector.h, and select_sdpa_blocks from
+   scaled_dot_product_attention.cpp, at ml-explore/mlx revision
+   39400a0d4cf1641bc6e543cb5e3585757f491854)
+
+MIT License
+
+Copyright © 2023 Apple Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------------
+Scoped notice for the batched one-token GDN decode adapted from jundot/omlx
+PR #4106 (head 0b4babcf54e6b6bbb4eaddeec0e73e9dc6063a35, open, unmerged when
+read on 2026-09-30). See provenance/omlx-4106-gdn-batch-decode.json for paths
+and modifications.
+
+omlx — Apache License 2.0
+Source: https://github.com/jundot/omlx, omlx/patches/qwen35_gdn_prework.py
+(_QWEN4_BATCH_DECODE_STEP_SOURCE, qwen4_batch_decode_step_fused).
+The batch-row prefix in src/mlx2/runtime/models/qwen4_fused_gdn.py
+(_BATCH_ROW_PREFIX, _SOURCE_BATCH) follows that design: grid z is
+(row, value head), each threadgroup rebinds the per-row buffers in a nested
+scope and runs the one-row kernel source with threadgroup_position_in_grid.z
+replaced by the in-row head index.  The one-row kernel body itself is mlx2's
+existing qwen4_fused_gdn _SOURCE (provenance/flashnext.json), not omlx's.
+The full Apache-2.0 text is this repository's LICENSE.
+
+------------------------------------------------------------------------------
+Scoped notice for the routed MoE row window and router top-k launch/fold
+adapted from jundot/omlx PRs #4106 (head 0b4babcf54e6b6bbb4eaddeec0e73e9dc6063a35),
+#4052 (head d05afc7a7a59a871531b89ee769460581a26aabb), #4041 (merged,
+7ef4d997b5713aaef53aaadca9a656736a12fa74) and #4105 (head
+93e708a816a70a8183b5cefca4e81c1c3d48bef8), read on 2026-09-30. See
+provenance/omlx-4106-moe-window.json for paths and modifications.
+
+omlx — Apache License 2.0
+Source: https://github.com/jundot/omlx, omlx/patches/qwen35_moe_router.py
+(omlx_router_softmax_row; the integer key packing of omlx_router_topk) and
+omlx/patches/qwen35_moe_routed_decode.py (the window and top-k fold designs).
+mlx2_router_keys in src/mlx2/runtime/models/qwen4_moe_window.py follows
+omlx_router_softmax_row closely; the selection, slot order, normalization and
+all window kernels are mlx2's own (the window kernels are mlx2's one-token
+routed-decode sources, provenance/omlx-routed-split-flash-next.json).
+The full Apache-2.0 text is this repository's LICENSE.
+
+------------------------------------------------------------------------------
+Scoped notice for the measured MTP park with memory adapted from jundot/omlx
+PR #4112 (head 276097ab3402928a741678bfb29f2d97ffd15d1f, "perf(mtp): stop
+shared MTP from slowing down busy batches"), read on 2026-10-02. See
+provenance/omlx-4112-park-memory.json for paths and modifications.
+
+omlx — Apache License 2.0
+Source: https://github.com/jundot/omlx, omlx/patches/mlx_lm_mtp/batch_policy.py
+(ParkMemory, the _CLEAR_LOSS rule, the 16-decision losing streak, held_up,
+start_parked cooldown doubling) and omlx/patches/mlx_lm_mtp/batch_generator.py
+(_batch_park_memory: one memory per live model object behind a weak reference).
+src/mlx2/runtime/mtp_park_memory.py re-expresses those decisions over mlx2's
+one-way MTP->ordinary handoff; no omlx code is copied verbatim. The rate
+measurement, ordinary lower bound and scheduler wiring are mlx2's own.
+The full Apache-2.0 text is this repository's LICENSE.
+
+------------------------------------------------------------------------------
+Scoped notice for code adapted from jundot/omlx pull request #4113 (open,
+head 1335263e8503b3f632819b0d3985a5b7b45fe92c, read 2026-09-30). See
+provenance/omlx-4113-routed-candidate.json for paths and modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx
+   omlx/patches/qwen35_moe_routed_decode.py: the two-table qmv_rows gate+up,
+   the qmv_fast/qmv down traversal and the top-k-generic combine fold,
+   re-expressed in the candidate section of
+   src/mlx2/runtime/models/qwen4_routed_decode.py.
+   The full Apache-2.0 text is this repository's LICENSE.
+
+2. MLX — MIT License: the quantized dot-product helpers are the existing
+   QMV_HEADER already covered by provenance/omlx-fn-2026-09-25.NOTICE.
+   No Apple copyright header is added to mlx2 source files.
+
+------------------------------------------------------------------------------
+Scoped notices for code adapted from jundot/omlx pull requests #4113, #4039
+and #4055 (read 2026-09-30). See provenance/omlx-routed-split-flash-next.json
+for paths, revisions and modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx
+   - PR #4113 head 1335263e8503b3f632819b0d3985a5b7b45fe92c:
+     the two-table gate+up (qmv_rows) structure of
+     omlx/patches/qwen35_moe_routed_decode.py, carried (via mlx2's top-8
+     candidate) as SPLIT_GATE_UP_SOURCE in
+     src/mlx2/runtime/models/qwen4_routed_decode.py.
+   - PR #4039 head 3d433694214f5082aabd754d27cb3ee57f9889f1 (merged):
+     the one-expert view technique (_expert_view/_address) of
+     omlx/patches/qwen35_moe_routed_decode.py, re-expressed as
+     expert_operands/_expert_view in the same file.
+   - PR #4055 head e6108149a4b4feb707d54c0ab33f8e02a6a8652a:
+     the two-rows-per-launch-unit idea for one-token down, applied to
+     mlx2's own tile4 arithmetic (SERVED_DOWN_SOURCE).
+   The full Apache-2.0 text is this repository's LICENSE.
+
+2. MLX — MIT License: the quantized dot-product helpers used by the gate+up
+   kernel are the QMV_HEADER already recorded in
+   provenance/omlx-fn-2026-09-25.NOTICE (Copyright © 2023-2026 Apple Inc.;
+   text in provenance/LICENSE.unified-MIT). No Apple copyright header is
+   added to mlx2 source files.
+
+3. mlx-lm-unified — MIT License: SERVED_DOWN_SOURCE copies the per-row
+   arithmetic of qwen4_fused_moe's tile4 kernel, itself adapted from
+   mlx-lm-unified (provenance/flashnext.json; provenance/LICENSE.unified-MIT).
+
+------------------------------------------------------------------------------
+Scoped notices for code adapted from jundot/omlx pull requests #4023 and
+#4050 (merged; read 2026-09-30). See provenance/omlx-row-exact-verify.json
+for paths, revisions, hashes and modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx
+   - PR #4050 head 65a07cab0cea09c9797ccc2c7744db85274f9252 (which carries
+     PR #4023's row_exact_qmv.py with #4050's K-alignment fix):
+     omlx/patches/row_exact_qmv.py — the Metal tile ``_TILE``, the decoded
+     dot product ``_DECODED_DOT``, the launch source ``_SOURCE``, the launch
+     geometry (``_launch_geometry``, ``_RPS``, ``_SHARED_ROWS_MIN_TILES``,
+     ``_ROW_VALUES_BUDGET``) and the per-module plan cache, carried in
+     src/mlx2/runtime/models/row_exact_qmv.py.
+   - PRs #4023, #4041, #4052, #4105 and issues #4014, #4102 were read for the
+     component inventory (projections, norms, attention rows, GDN, MoE
+     window) and the fail-closed design; no other code is copied.
+   The full Apache-2.0 text is this repository's LICENSE.
+
+2. MLX — MIT License (scoped to the quantized dot-product helpers
+   load_vector, load_vector_safe and qdot_n that the tile calls; they are the
+   QMV_HEADER already carried in src/mlx2/runtime/models/qwen4_routed_decode.py,
+   see provenance/omlx-fn-2026-09-25.NOTICE)
+
+   Copyright © 2023-2026 Apple Inc.
+
+   omlx transcribed these from MLX 0.32.2
+   mlx/backend/metal/kernels/quantized.h; mlx2 uses its float-sum
+   adaptation for the lab MLX fork in the mlx2 venv. The MIT text is
+   provenance/LICENSE.unified-MIT (same terms). No Apple copyright header is
+   added to mlx2 source files.
+
+------------------------------------------------------------------------------
+Adapted source notice: approximate tensor-API dense attention research kernel
+
+src/mlx2/adapters/tensor_fa_research.py contains a Metal kernel body
+(TENSOR_FA_SOURCE) adapted from ggml's tensor-API flash attention kernel:
+
+  repository: https://github.com/ggml-org/llama.cpp
+  pull request: 29570 (open, unmerged when read on 2026-10-01)
+  revision: 7f0d4d5e0ae391e4ff75512402cb5dd141507244
+  file: ggml/src/ggml-metal/kernels/fa_f16.metal (blob 2dfd3799d137fc32bd370e8e637163d8894125e7)
+  function: kernel_flash_attn_ext_tensor
+
+Adapted parts: the Q/C/NSG tiling, the tensor_ops matmul2d QK^T and P*V
+descriptors, half-rounded scaled queries, half probabilities with the fp32
+row sum taken over the same rounded values, the lazy running-max rescale
+(only on growth > 8) with a per-row scale and a threadgroup "last rescale"
+flag, and the clipped cooperative-tensor store. mlx2 modifications: MLX
+mx.fast.metal_kernel wrapping, B1 [1, H, L, D] contiguous layout, in-kernel
+causal masking from an explicit absolute query start (finite -FLT_MAX), a
+causal KV loop bound, fp32 output, and a race-free atomic threadgroup
+engagement counter. Masks, sinks, ALiBi and softcap paths were removed.
+Independent review additionally replaced the upstream shared last-rescale
+flag with one single-writer flag per SIMD group, reduced after a barrier.
+
+The original copyright and permission notice follow.
+
+MIT License
+
+Copyright (c) 2023-2026 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------------
+RADIO image encoder: mlx-vlm (https://github.com/Blaizzy/mlx-vlm, revision
+06ff63d6e9c8e14649ed3e5cb380810d27c790b8, mlx_vlm/models/nemotron_h_nano_omni/vision.py),
+adapted in src/mlx2/adapters/radio.py
+
+MIT License
+
+Copyright © 2025 Prince Canuma
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------------
+RADIO image encoder: nemotron-omni-mlx (https://github.com/nicedreamzapp/nemotron-omni-mlx,
+revision 9702e3de0f2bdd02c6130f83e657a060b605b16b, src/vision.py), adapted in
+src/mlx2/adapters/radio.py
+
+MIT License
+
+Copyright (c) 2026 Matt Macosko
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------------
+DPara algorithm attribution
+
+Fuliang Liu, Xue Li, Kun Qian, Zhibin Wang, Wanchun Dou, Wenyuan Yu,
+and Chen Tian. When Parallel Drafter Meets Parallel Speculative Decoding.
+arXiv:2609.27396v1, 23 September 2026.
+https://arxiv.org/html/2609.27396v1
+Paper license: Creative Commons Attribution 4.0 International (CC BY 4.0).
+
+The DPara candidate is original mlx2 code implementing the described algorithm.
+No upstream DPara source code or paper figures were copied. The implementation
+reuses local DFlash projection and MLP classes covered by
+provenance/muse-dflash2.json and provenance/muse-dflash2.NOTICE.
