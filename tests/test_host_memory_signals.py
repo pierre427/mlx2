@@ -298,6 +298,47 @@ def test_host_available_bytes_default_is_psutil_and_opt_in_uses_estimate(monkeyp
     assert memory.host_available_bytes(True) == 7 * GIB
 
 
+def test_host_floor_prices_short_warm_turns_against_actual_host_availability(monkeypatch):
+    """A warm prefix still needs room for its answer and must keep host reserve."""
+    import mlx.core as mx
+
+    from mlx2 import memory
+
+    available = [12 * GIB]
+    monkeypatch.setattr(memory, "host_available_bytes", lambda _signals=False: available[0])
+    monkeypatch.setattr(mx, "device_info", lambda: {
+        "memory_size": 36 * GIB,
+        "max_recommended_working_set_size": 28 * GIB,
+    })
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 15 * GIB)
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+    monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 15 * GIB)
+    baseline = memory.execution_headroom(host_signals=True)
+    guarded = memory.execution_headroom(
+        host_signals=True, minimum_host_available_bytes=4 * GIB
+    )
+    assert baseline == 12 * GIB
+    assert guarded == 8 * GIB
+    available[0] = 3 * GIB  # another process grew before the next request
+    assert memory.execution_headroom(
+        host_signals=True, minimum_host_available_bytes=4 * GIB
+    ) == 0
+    # A large host's existing service-reserve credit must not refill the floor.
+    monkeypatch.setattr(mx, "device_info", lambda: {
+        "memory_size": 128 * GIB,
+        "max_recommended_working_set_size": 112 * GIB,
+    })
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 70 * GIB)
+    monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 70 * GIB)
+    available[0] = 6 * GIB
+    assert memory.execution_headroom(
+        host_signals=True, minimum_host_available_bytes=4 * GIB
+    ) == 2 * GIB
+    for invalid in (-1, True, 1.5):
+        with pytest.raises(ValueError, match="minimum_host_available_bytes"):
+            memory.execution_headroom(minimum_host_available_bytes=invalid)
+
+
 # -- serving policy ---------------------------------------------------------------
 
 
@@ -310,6 +351,10 @@ def test_host_available_bytes_default_is_psutil_and_opt_in_uses_estimate(monkeyp
         ({"fall_after_seconds": -1}, "fall_after_seconds"),
         ({"fall_after_seconds": True}, "fall_after_seconds"),
         ({"fall_after_seconds": float("nan")}, "fall_after_seconds"),
+        ({"minimum_host_available_gib": 4}, "requires enabled"),
+        ({"enabled": True, "minimum_host_available_gib": -1}, "minimum_host_available_gib"),
+        ({"enabled": True, "minimum_host_available_gib": True}, "minimum_host_available_gib"),
+        ({"enabled": True, "minimum_host_available_gib": float("nan")}, "minimum_host_available_gib"),
     ],
 )
 def test_policy_rejects_invalid_values(value, error):
@@ -328,6 +373,12 @@ def test_policy_defaults_off_and_engine_level_is_normal():
     }
     with pytest.raises(ValueError, match="unknown host memory"):
         ServingEngine("unused", execution_policy={"host_memory_signals": {"x": 1}})
+    assert host_memory_signals_policy({
+        "enabled": True, "minimum_host_available_gib": 4,
+    }) == {
+        "enabled": True, "fall_after_seconds": 5.0,
+        "minimum_host_available_gib": 4.0,
+    }
 
 
 def test_required_feature_check_only_when_enabled():
@@ -430,6 +481,29 @@ def test_disabled_engine_is_unchanged(monkeypatch):
         assert calls and all(call == {} for call in calls)
         assert adapter_policies == [None]
         assert engine.memory_pressure_level() is PressureLevel.NORMAL
+    finally:
+        engine.close()
+
+
+def test_enabled_host_floor_is_wired_to_every_serving_headroom_read(monkeypatch):
+    from mlx2 import memory
+
+    monkeypatch.setattr(os_memory, "host_memory_snapshot", lambda: None)
+    engine, calls, _ = _run_engine(monkeypatch, {
+        "host_memory_signals": {
+            "enabled": True,
+            "minimum_host_available_gib": 4,
+        },
+    })
+    try:
+        assert engine.ready.wait(5)
+        assert engine.error is None
+        assert calls
+        assert all(call == {
+            "host_signals": True,
+            "minimum_host_available_bytes": 4 * GIB,
+        } for call in calls)
+        assert engine.snapshot["settings"]["host_memory_signals"]["minimum_host_available_gib"] == 4.0
     finally:
         engine.close()
 

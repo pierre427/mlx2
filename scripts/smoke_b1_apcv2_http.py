@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -126,16 +127,35 @@ def run(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--python", default=sys.executable)
+    parser.add_argument("--backend-source", help="clean pinned local dependency checkout for a source-bound spot")
     parser.add_argument("--port", type=int, default=8393)
     parser.add_argument("--max-tokens", type=int, default=16)
+    parser.add_argument("--prompt-file", type=Path,
+                        help="UTF-8 user prompt; defaults to the standard B1 spot prompt")
+    parser.add_argument("--wall-seconds", type=int, default=0,
+                        help="optional hard wall bound; preserves server cleanup on expiry")
     parser.add_argument("--cpg-lease", required=True)
     parser.add_argument("--i-own-gpu", action="store_true")
     args = parser.parse_args(argv)
+    if args.wall_seconds < 0:
+        parser.error("--wall-seconds must be non-negative")
     if not args.i_own_gpu:
         parser.error("GPU smoke requires --i-own-gpu under the CPG lease and host lock")
-    if not 2 <= args.max_tokens <= 32:
-        parser.error("--max-tokens must be 2..32")
+    if not 2 <= args.max_tokens <= 128:
+        parser.error("--max-tokens must be 2..128")
+    prompt = args.prompt_file.read_text(encoding="utf-8") if args.prompt_file else PROMPT
+    if not prompt.strip() or len(prompt) > 16_384:
+        parser.error("prompt must contain text and be at most 16384 characters")
     model = Path(args.model).expanduser().resolve(strict=True)
+    backend_source = None
+    if args.backend_source:
+        backend_source = Path(args.backend_source).expanduser().resolve(strict=True)
+        backend_head = subprocess.check_output(
+            ["git", "-C", str(backend_source), "rev-parse", "HEAD"], text=True).strip()
+        backend_dirty = subprocess.check_output(
+            ["git", "-C", str(backend_source), "status", "--porcelain"], text=True).strip()
+        if backend_dirty:
+            parser.error("--backend-source checkout must be clean")
     out_path = Path(args.out).expanduser().resolve()
     if out_path.exists():
         parser.error(f"refusing to overwrite existing receipt: {out_path}")
@@ -152,14 +172,22 @@ def run(argv: list[str] | None = None) -> int:
                    "tracked_dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
                    "harness_sha256": sha256(Path(__file__))},
         "model_path": str(model), "cpg_lease": args.cpg_lease,
-        "request": {"prompt_sha256": hashlib.sha256(PROMPT.encode()).hexdigest(),
-                    "prompt_chars": len(PROMPT), "max_tokens": args.max_tokens,
+        "backend_source": ({"path": str(backend_source), "git_revision": backend_head,
+                            "clean": True} if backend_source else None),
+        "request": {"prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                    "prompt_chars": len(prompt), "max_tokens": args.max_tokens,
                     "temperature": 0, "logprobs": True},
         "measurement": "client-observed HTTP SSE token-logprob arrival times; no host-sync instrumentation",
     }
     base = f"http://127.0.0.1:{args.port}"
     log_path = out_path.with_suffix(".server.log")
     server = None
+    previous_alarm = None
+    if args.wall_seconds:
+        def _wall_expired(_signum, _frame):
+            raise TimeoutError(f"bounded smoke exceeded {args.wall_seconds} seconds")
+        previous_alarm = signal.signal(signal.SIGALRM, _wall_expired)
+        signal.alarm(args.wall_seconds)
     try:
         with tempfile.TemporaryDirectory(prefix="b1-apcv2-cache-", dir=out_path.parent) as cache_dir:
             command = [args.python, "-m", "mlx2.server", "--model", str(model),
@@ -167,7 +195,10 @@ def run(argv: list[str] | None = None) -> int:
                        "--ordinary", "--qualification-mode", "--max-lanes", "1",
                        "--max-inflight", "1", "--cache-dir", cache_dir]
             receipt["server_command"] = command
-            env = {**os.environ, "PYTHONPATH": str(ROOT / "src"),
+            pythonpath = str(ROOT / "src")
+            if backend_source:
+                pythonpath += os.pathsep + str(backend_source)
+            env = {**os.environ, "PYTHONPATH": pythonpath,
                    "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "MLX_ENABLE_TF32": "0"}
             with log_path.open("w") as log:
                 server = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -193,7 +224,7 @@ def run(argv: list[str] | None = None) -> int:
                         or (identity["settings"] or {}).get("route") != "ordinary"
                         or (identity["settings"] or {}).get("max_lanes") != 1):
                     raise ValueError("server model/source/settings identity differs from requested ordinary B=1 run")
-                body = {"messages": [{"role": "user", "content": PROMPT}],
+                body = {"messages": [{"role": "user", "content": prompt}],
                         "max_tokens": args.max_tokens, "temperature": 0,
                         "stream": True, "logprobs": True}
                 receipt["cold"] = stream_one(base, body, timeout=90)
@@ -211,10 +242,13 @@ def run(argv: list[str] | None = None) -> int:
     except Exception as error:
         receipt["error"] = f"{type(error).__name__}: {error}"
     finally:
+        if args.wall_seconds:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous_alarm)
         if server is not None and server.poll() is None:
             server.terminate()
             try:
-                server.wait(15)
+                server.wait(3 if args.wall_seconds else 15)
             except subprocess.TimeoutExpired:
                 server.kill()
                 server.wait()

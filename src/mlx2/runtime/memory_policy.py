@@ -20,6 +20,62 @@ from ..memory import bounded_settle
 
 
 @dataclass(frozen=True)
+class PagedMemoryEstimate:
+    """Peak incremental bytes for one private dense paged use.
+
+    The fixed two-plane arena is charged only while it is being created.
+    COW and append/export staging are temporary copies, not a second charge
+    for pages already resident in that arena. This is a host estimate, not a
+    measurement of allocator or Metal overhead.
+    """
+
+    arena_bytes: int
+    table_bytes: int
+    scratch_bytes: int
+    cow_staging_bytes: int
+    payload_staging_bytes: int
+
+    @property
+    def total_bytes(self) -> int:
+        return (self.arena_bytes + self.table_bytes + self.scratch_bytes
+                + self.cow_staging_bytes + self.payload_staging_bytes)
+
+
+def estimate_paged_memory(plan, *, arena_allocated: bool,
+                          cow_pages: int = 0, staging_tokens: int = 0) -> PagedMemoryEstimate:
+    """Price a validated dense-vector plan before any page or writer mutation.
+
+    A page-table entry is priced at a uint32 GPU page ID plus a uint32 host
+    generation. The read metadata has one uint32 row-to-span index, six uint32
+    arrays per span and one uint32 GPU page ID per table entry. Scratch uses
+    the same 512-key split count as the validated read plan.
+    """
+    from .paged_attention_plan import KV_CHUNK, PAGE_SIZE, PagedAttentionPlan, _uint
+
+    if type(plan) is not PagedAttentionPlan:
+        raise TypeError("a validated PagedAttentionPlan is required")
+    if type(arena_allocated) is not bool:
+        raise TypeError("arena_allocated must be bool")
+    _uint("cow_pages", cow_pages)
+    _uint("staging_tokens", staging_tokens)
+    page_plane_bytes = PAGE_SIZE * plan.kv_heads * plan.head_dim * 2
+    scratch = sum(
+        4 * plan.query_heads * ((upper - lower + KV_CHUNK - 1) // KV_CHUNK)
+        * (plan.head_dim + 2)
+        for span in plan.spans
+        for local_row in range(span.row_count)
+        for lower, upper in (span.visible_bounds(local_row),)
+    )
+    return PagedMemoryEstimate(
+        arena_bytes=0 if arena_allocated else 2 * plan.pool_capacity * page_plane_bytes,
+        table_bytes=4 * (plan.total_rows + 6 * len(plan.spans) + 3 * len(plan.page_table)),
+        scratch_bytes=scratch,
+        cow_staging_bytes=2 * cow_pages * page_plane_bytes,
+        payload_staging_bytes=2 * staging_tokens * plan.kv_heads * plan.head_dim * 2,
+    )
+
+
+@dataclass(frozen=True)
 class SelfMTPLaneAdmission:
     """One cycle-boundary memory decision for batched self-MTP.
 

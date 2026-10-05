@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import hmac
+import hashlib
 import ipaddress
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -28,6 +29,7 @@ import struct
 import uuid
 
 from .serving import (
+    APCReuseDisabled,
     AdmissionClosed,
     Overloaded,
     PromptTemplateFailure,
@@ -498,6 +500,13 @@ def validate_request(
         "batch_cohort",
         "mlx_fault",
         "skip_writing_prefix_cache",
+        "paged_native_qwen3",
+        "paged_native_qwen3_b2",
+        "paged_native_hybrid_b2",
+        "paged_native_hybrid_packed_prefill",
+        "paged_native_packed_n20_research",
+        "native_research_input_id",
+        "native_research_inputs_sha256",
         "session_id",
         "return_progress",
         "verify_bitexact",
@@ -827,7 +836,11 @@ def validate_request(
                 or not -100 <= value <= 100 or not math.isfinite(value)):
                 raise ValueError("invalid logit_bias token or value")
     for key in (
-        "stream", "enable_thinking", "skip_writing_prefix_cache", "return_progress"
+        "stream", "enable_thinking", "skip_writing_prefix_cache", "return_progress",
+        "paged_native_qwen3",
+        "paged_native_qwen3_b2",
+        "paged_native_hybrid_b2",
+        "paged_native_hybrid_packed_prefill",
     ):
         if key in body and not isinstance(body[key], bool):
             raise ValueError(f"{key} must be boolean")
@@ -835,6 +848,29 @@ def validate_request(
         # Progress is a pre-output stream event; a non-streaming response has
         # nowhere to put it.  Reject rather than silently ignore.
         raise ValueError("return_progress requires stream")
+    if body.get("paged_native_qwen3") and body.get("skip_writing_prefix_cache") is not True:
+        raise ValueError("native paged Qwen3 requires skip_writing_prefix_cache=true")
+    if body.get("paged_native_qwen3_b2"):
+        if body.get("paged_native_hybrid_b2") is True:
+            raise ValueError("native B2 capabilities are mutually exclusive")
+        if (body.get("paged_native_qwen3") is True or
+                body.get("skip_writing_prefix_cache") is not True or
+                not isinstance(body.get("batch_cohort"), dict) or
+                body["batch_cohort"].get("size") != 2 or
+                body.get("max_tokens") not in (2, 32) or body.get("temperature") != 0):
+            raise ValueError("native B2 requires a separate cold two-member cohort, a pinned greedy token count and no APCv2 write")
+    from .runtime.paged_packed_prefill_serving_profile import validate_request as validate_packed_request
+    validate_packed_request(body)
+    from .runtime.paged_n20_request import validate_request as validate_n20_request
+    validate_n20_request(body)
+    if body.get("paged_native_hybrid_b2"):
+        maximum = body.get("max_tokens")
+        if (body.get("paged_native_qwen3") is True or body.get("paged_native_qwen3_b2") is True or
+                body.get("skip_writing_prefix_cache") is not True or
+                not isinstance(body.get("batch_cohort"), dict) or
+                body["batch_cohort"].get("size") != 2 or
+                type(maximum) is not int or not 1 <= maximum <= 256 or body.get("temperature") != 0):
+            raise ValueError("hybrid native B2 requires a separate cold two-member greedy cohort and no APCv2 write")
     if "session_id" in body:
         validate_session_id(body["session_id"])
     if body.get("thinking_budget_mode", "state_aware") not in (
@@ -1239,6 +1275,82 @@ def prompt_render_payload(engine, body, path):
     return {"prompt": prompt}
 
 
+def tensorfold_owned_client_disconnected(connection):
+    """Observe an HTTP peer FIN without consuming a pipelined request byte."""
+
+    try:
+        if not select.select([connection], [], [], 0)[0]:
+            return False
+        return connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
+    except BlockingIOError:
+        return False
+    except (OSError, ValueError):
+        return True
+
+
+def tensorfold_owned_completion_payload(engine, router, body, path, *, route="auto",
+                                        disconnect_probe=None):
+    """Explicit greedy text bridge into a cache-isolated native worker."""
+
+    if path not in {"/v1/completions", "/v1/chat/completions"}:
+        raise ValueError("TensorFold-owned header requires a completion endpoint")
+    if route not in {"auto", "serial"}:
+        raise ValueError("TensorFold-owned completion route must be auto or serial")
+    if not isinstance(body, dict):
+        raise ValueError("request must be a JSON object")
+    chat = path == "/v1/chat/completions"
+    allowed = {"model", "messages" if chat else "prompt", "temperature",
+               "top_p", "top_k",
+               "max_tokens", "max_completion_tokens", "n", "stream"}
+    if chat:
+        allowed.add("enable_thinking")
+    unknown = set(body) - allowed
+    if unknown:
+        raise ValueError("TensorFold-owned greedy route does not support: "
+                         + ", ".join(sorted(unknown)))
+    if body.get("temperature", 0) != 0 or body.get("n", 1) != 1 or body.get("stream", False):
+        raise ValueError("TensorFold-owned completion requires temperature=0, n=1, stream=false")
+    if body.get("top_p", 1) != 1 or body.get("top_k", 0) != 0:
+        raise ValueError("TensorFold-owned greedy route only accepts top_p=1 and top_k=0")
+    if chat and body.get("enable_thinking", False) is not False:
+        raise ValueError("TensorFold-owned chat requires enable_thinking=false")
+    status = engine.status()
+    model = _generation_model(status, body)
+    if model != status.get("model"):
+        raise ValueError("TensorFold-owned completion requires the base model")
+    request = validate_request({**body, "enable_thinking": False} if chat else body, chat)
+    budget = request.get("max_tokens", 64)
+    if not 1 <= budget <= 192:
+        raise ValueError("TensorFold-owned completion supports max_tokens 1..192")
+    prompt_ids = engine.render_prompt(request)
+    with engine.prompt_lock:
+        tokenizer = engine.adapter.tokenizer
+        eos_ids = sorted(int(token) for token in tokenizer.eos_token_ids)
+    generated = router.generate(prompt_ids, budget, route=route, eos_ids=eos_ids,
+                                timeout=840, allow_long=True,
+                                disconnect_probe=disconnect_probe)
+    token_ids = generated["token_ids"]
+    with engine.prompt_lock:
+        text = tokenizer.decode(token_ids, skip_special_tokens=True)
+    receipt = {**generated["route_receipt"], "selected_by": "explicit_standard_header",
+               "output_token_ids_sha256": hashlib.sha256(json.dumps(
+                   token_ids, separators=(",", ":")).encode()).hexdigest()}
+    choice = {"index": 0, "finish_reason": generated["finish_reason"]}
+    if chat:
+        choice["message"] = {"role": "assistant", "content": text}
+    else:
+        choice["text"] = text
+    return {
+        "id": ("chatcmpl_" if chat else "cmpl_") + uuid.uuid4().hex,
+        "object": "chat.completion" if chat else "text_completion",
+        "created": int(time.time()), "model": model, "choices": [choice],
+        "usage": {"prompt_tokens": len(prompt_ids),
+                  "completion_tokens": len(token_ids),
+                  "total_tokens": len(prompt_ids) + len(token_ids)},
+        "mlx2": receipt,
+    }
+
+
 def lora_control_payload(engine, body, *, load):
     """Execute vLLM-compatible dynamic LoRA control through an engine hook."""
     if not isinstance(body, dict):
@@ -1530,6 +1642,7 @@ def handler_for(
     tenant_authenticator=None,
     agent_compat=None,
     semantic_middleware=None,
+    tensorfold_owned_router=None,
     sse_keepalive_seconds: float | None = DEFAULT_SSE_KEEPALIVE_SECONDS,
 ):
     if (
@@ -2093,6 +2206,9 @@ def handler_for(
             return _request_json(self.read_body(size))
 
         def _session_failure(self, error):
+            if isinstance(error, APCReuseDisabled):
+                self.error(409, str(error))
+                return
             from .runtime.apc_v2 import (
                 APCSessionCapacityError,
                 APCSessionNotFound,
@@ -2471,6 +2587,8 @@ def handler_for(
                     },
                 )
             elif self.path == "/v1/status":
+                if tensorfold_owned_router is not None:
+                    status = {**status, "tensorfold_owned": tensorfold_owned_router.status()}
                 if tenant_authenticator is not None and "recent_receipts" in status:
                     # Receipts carry request and session ids, seeds and
                     # logit_bias: show a tenant only its own.  An engine that
@@ -2592,12 +2710,63 @@ def handler_for(
                         sessions = validate_resume_body(body)
                         value = engine.resume(prefetch_sessions=sessions)
                     self.send_json(202, value)
-                except SuspendUnavailable as error:
+                except (APCReuseDisabled, SuspendUnavailable) as error:
                     self.api_error(409, str(error))
                 except (ValueError, json.JSONDecodeError) as error:
                     self.api_error(400, str(error))
                 return
             if not self._authenticate_tenant(path):
+                return
+            owned_header = self.headers.get("X-MLX2-TensorFold-Owned")
+            if (self.headers.get("X-MLX2-TensorFold-Route") is not None
+                    and owned_header is None):
+                self.api_error(400, "TensorFold route control requires the owned profile")
+                return
+            if owned_header is not None:
+                if tensorfold_owned_router is None or owned_header != "1":
+                    self.api_error(400, "TensorFold-owned completion route is unavailable")
+                    return
+                try:
+                    body = self._read_json_body(max_bytes=1 << 20)
+                    route = self.headers.get("X-MLX2-TensorFold-Route", "auto")
+                    result = tensorfold_owned_completion_payload(
+                        engine, tensorfold_owned_router, body, path, route=route,
+                        disconnect_probe=lambda: tensorfold_owned_client_disconnected(
+                            self.connection))
+                    self.send_json(200, result)
+                except ConnectionAbortedError:
+                    return
+                except (ValueError, json.JSONDecodeError) as error:
+                    self.api_error(400, str(error))
+                except TimeoutError:
+                    self.api_error(504, "TensorFold-owned worker timed out")
+                except RuntimeError as error:
+                    self.api_error(503, str(error))
+                return
+            if path == "/v1/experimental/tensorfold-owned/generate":
+                if tensorfold_owned_router is None:
+                    self.error(404, "unknown endpoint")
+                    return
+                try:
+                    body = self._read_json_body(max_bytes=1 << 20)
+                    if (not isinstance(body, dict)
+                            or not {"token_ids", "max_new_tokens"} <= set(body)
+                            or set(body) - {"token_ids", "max_new_tokens", "route"}):
+                        raise ValueError("TensorFold-owned request requires token_ids and max_new_tokens; route is optional")
+                    result = tensorfold_owned_router.generate(
+                        body["token_ids"], body["max_new_tokens"],
+                        route=body.get("route", "auto"),
+                        disconnect_probe=lambda: tensorfold_owned_client_disconnected(
+                            self.connection))
+                    self.send_json(200, result)
+                except ConnectionAbortedError:
+                    return
+                except (ValueError, json.JSONDecodeError) as error:
+                    self.api_error(400, str(error))
+                except TimeoutError:
+                    self.api_error(504, "TensorFold-owned worker timed out")
+                except RuntimeError as error:
+                    self.api_error(503, str(error))
                 return
             try:
                 session_route = self._session_route()
@@ -4706,6 +4875,12 @@ def build_parser():
         action="store_true",
         help="target-verified indexed prompt-lookup route",
     )
+    owned = parser.add_argument_group("experimental TensorFold-owned token-ID route")
+    owned.add_argument("--tensorfold-owned-live", action="store_true",
+                       help="enable unqualified, default-off native worker endpoint")
+    owned.add_argument("--tensorfold-owned-source")
+    owned.add_argument("--tensorfold-owned-mlx-lm-source")
+    owned.add_argument("--tensorfold-owned-drafter")
     parser.add_argument(
         "--tenant-scoped-cache",
         action="store_true",
@@ -4852,6 +5027,9 @@ def build_parser():
             "verify_bitexact=true (default: off)"
         ),
     )
+    parser.add_argument("--native-packed-prefill-profile", help="explicit default-off source-bound short research serving profile")
+    parser.add_argument("--native-packed-prefill-manifest", help="pinned artifact manifest for packed-prefill research")
+    parser.add_argument("--native-packed-prefill-mlx-wheel", help="pinned MLX wheel for packed-prefill research")
     parser.add_argument("--qualification-mode", action="store_true")
     parser.add_argument("--qualification")
     parser.add_argument(
@@ -5160,6 +5338,22 @@ class SignalShutdownController:
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    packed_paths=(args.native_packed_prefill_profile,args.native_packed_prefill_manifest,args.native_packed_prefill_mlx_wheel)
+    if any(packed_paths):
+        if not all(packed_paths):parser.error("packed-prefill requires profile, artifact manifest and MLX wheel")
+        if any(not Path(path).is_file() for path in packed_paths):parser.error("packed-prefill pinned input path missing")
+        from .runtime.paged_packed_prefill_serving_profile import startup_environment
+        try:os.environ.update(startup_environment(packed_paths[0]))
+        except ValueError as error:parser.error(str(error))
+        os.environ.update(MLX2_NATIVE_PACKED_PREFILL_B2_PROFILE=packed_paths[0],
+            MLX2_NATIVE_PAGED_MANIFEST=packed_paths[1],MLX2_NATIVE_PAGED_MLX_WHEEL=packed_paths[2])
+
+    owned_paths = (args.tensorfold_owned_source, args.tensorfold_owned_mlx_lm_source,
+                   args.tensorfold_owned_drafter)
+    if (args.tensorfold_owned_live and not all(owned_paths)) or (
+        not args.tensorfold_owned_live and any(owned_paths)
+    ):
+        parser.error("TensorFold-owned live route requires its explicit flag and all three pinned paths")
     try:
         max_request_bytes = request_body_limit(
             args.max_context, args.max_request_bytes
@@ -5368,6 +5562,24 @@ def main():
                     request_tracer.close()
                 server.server_close()
                 parser.error(str(error))
+    tensorfold_owned_router = None
+    if args.tensorfold_owned_live:
+        from .adapters.qwen38_tensorfold_owned import TensorfoldOwnedB1Profile
+        from .runtime.tensorfold_owned_router import TensorfoldOwnedLiveRouter
+
+        try:
+            tensorfold_owned_router = TensorfoldOwnedLiveRouter(
+                TensorfoldOwnedB1Profile(
+                    args.tensorfold_owned_source, args.model, args.tensorfold_owned_drafter,
+                    mlx_lm_source=args.tensorfold_owned_mlx_lm_source, enabled=True,
+                ), max_streams=min(args.max_lanes, 8), max_context=args.max_context,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            engine.close()
+            if request_tracer is not None:
+                request_tracer.close()
+            server.server_close()
+            parser.error(str(error))
     server.RequestHandlerClass = handler_for(
         engine,
         max_request_bytes=max_request_bytes,
@@ -5385,6 +5597,7 @@ def main():
             else None,
         ),
         semantic_middleware=semantic_middleware,
+        tensorfold_owned_router=tensorfold_owned_router,
         sse_keepalive_seconds=args.sse_keepalive_seconds or None,
     )
 
@@ -5410,7 +5623,11 @@ def main():
         exit_trace.set_reason("server shutdown")
     finally:
         try:
-            engine.close()
+            try:
+                if tensorfold_owned_router is not None:
+                    tensorfold_owned_router.close()
+            finally:
+                engine.close()
         finally:
             try:
                 request_tracer.close()

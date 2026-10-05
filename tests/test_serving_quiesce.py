@@ -6,7 +6,13 @@ import time
 
 import pytest
 
-from mlx2.serving import AdmissionClosed, Job, ServingEngine, SuspendUnavailable
+from mlx2.serving import (
+    APCReuseDisabled,
+    AdmissionClosed,
+    Job,
+    ServingEngine,
+    SuspendUnavailable,
+)
 from test_structured_deferral import _collect, scripted_engine  # noqa: F401 - shared fixture
 
 
@@ -38,6 +44,7 @@ def _engine(*, disk=True):
     engine.api_resources = {}
     engine.jobs = {}
     engine.apc = None
+    engine.apc_reuse_disabled_reason = None
     return engine
 
 
@@ -208,6 +215,53 @@ def test_admin_prefetch_queue_is_sequenced_on_worker():
         ("tenant", "one", None),
         ("tenant", "two", None),
     ]
+
+
+def test_route_disabled_apc_reuse_refuses_and_cancels_prefetches():
+    class APC:
+        def __init__(self):
+            self.pending = True
+            self.cancelled = 0
+            self.resumed = []
+            self.serviced = 0
+
+        def resume_session(self, tenant, session_id, *, ttl_seconds=None):
+            self.resumed.append((tenant, session_id, ttl_seconds))
+
+        def cancel_pending_prefetch(self):
+            if not self.pending:
+                return False
+            self.pending = False
+            self.cancelled += 1
+            return True
+
+        def service_pending_prefetch(self):
+            self.serviced += 1
+            return True
+
+    engine = _engine()
+    engine.apc = APC()
+    engine.apc_reuse_disabled_reason = "external_varlen_prefill_not_batch_invariant"
+
+    with pytest.raises(APCReuseDisabled, match="session prefetch is disabled"):
+        engine.resume(prefetch_sessions=(("tenant", "admin"),))
+    with pytest.raises(APCReuseDisabled, match="session prefetch is disabled"):
+        engine.apc_session_resume("tenant", "direct")
+    assert not engine._admin_prefetch_queue
+    assert not engine.apc.resumed
+
+    # Defensively cancel work queued before route initialization completed.
+    engine._admin_prefetch_queue.append(("tenant", "stale"))
+    assert engine._service_admin_prefetch(engine.apc)
+    assert not engine._admin_prefetch_queue
+    assert engine.apc.cancelled == 1
+    assert engine.counts["prefetches_cancelled"] == 2
+    assert not engine.apc.resumed
+
+    engine.apc.pending = True
+    assert engine._service_pending_prefetch(engine.apc)
+    assert engine.apc.cancelled == 2
+    assert engine.apc.serviced == 0
 
 
 def test_queued_and_memory_deferred_jobs_finish_before_drain_completes():

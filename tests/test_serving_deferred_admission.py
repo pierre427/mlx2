@@ -10,8 +10,13 @@ def deferred_engine(monkeypatch):
     from mlx2 import serving, memory
     from mlx2.runtime import apc_v2, generate, os_memory
     import mlx.core as mx
-    state = dict(free=21 * 2**30, lookups=[], tokenizations=[], branches=[], cycles=0,
-                 recover=False, pending=threading.Event(), allocator_reclaims=0)
+    state = dict(free=21 * 2**30, lookups=[], stores=[], tokenizations=[],
+                 branches=[], cycles=0,
+                 recover=False, pending=threading.Event(), allocator_reclaims=0,
+                 cold=False, native_uids=set(), native_jobs={},
+                 native_allocations=[], native_retired=[], native_fail=False,
+                 native_hold=False, native_waiting=threading.Event(),
+                 native_release=threading.Event())
     class Branch(list):
         def __init__(self, large):
             super().__init__([NS(nbytes=2 * 2**30 if large else 0)])
@@ -24,9 +29,13 @@ def deferred_engine(monkeypatch):
         def lookup(self, key, tokens, **kw):
             state['lookups'].append(len(tokens))
             if len(tokens) > 10: state['pending'].set()
+            if state['cold']:
+                return NS(cache=None, cached_tokens=0,
+                          remaining_tokens=list(tokens), sidecar=None,
+                          miss_reason='cold')
             return NS(cache=Branch(len(tokens) > 10), cached_tokens=len(tokens)-1,
                       remaining_tokens=[2], sidecar=None, miss_reason=None)
-        def store(self, *a, **kw): pass
+        def store(self, *a, **kw): state['stores'].append((a, kw))
         def spill_idle_entries(self): pass
         def evict_oldest_unleased(self): return False
         def clear(self): pass
@@ -43,13 +52,42 @@ def deferred_engine(monkeypatch):
                 state['free'] = 100 * 2**30
             if state['recover'] and state['free'] < 30 * 2**30:
                 return [], []
-            result = [NS(uid=uid, execution_width=len(self.pending), finish_reason='length',
-                token=3, mtp_state=None, all_tokens=[1,2,3], prompt_cache=[], mtp_receipt=None)
-                for uid in self.pending]
+            result = []
+            self.failures = []
+            for uid in tuple(self.pending):
+                native = uid in state['native_uids']
+                if native and state['native_hold']:
+                    state['native_waiting'].set()
+                    state['native_release'].wait(2)
+                    if state['native_jobs'][uid].cancelled.is_set():
+                        continue
+                if native and state['native_fail']:
+                    self.failures.append({'uid': uid, 'reason': 'injected native terminal failure'})
+                    state['native_retired'].append(uid)
+                    state['native_uids'].discard(uid)
+                    continue
+                result.append(NS(uid=uid, execution_width=len(self.pending),
+                    finish_reason='length', token=3, mtp_state=None,
+                    all_tokens=[1,2,3], prompt_cache=None if native else [],
+                    mtp_receipt=({'route': 'native_qwen3_paged',
+                        'implemented': True, 'qualified': False,
+                        'selected': True, 'observed_used': True,
+                        'apcv2': 'native_checkpoint_unavailable'} if native else None)))
+                if native:
+                    state['native_retired'].append(uid)
+                    state['native_uids'].discard(uid)
             self.pending.clear()
             return [], result
         def remove(self, uids):
-            for uid in uids: self.pending.pop(uid, None)
+            for uid in uids:
+                self.pending.pop(uid, None)
+                if uid in state['native_uids']:
+                    state['native_uids'].remove(uid)
+                    state['native_retired'].append(uid)
+        def take_lane_failures(self):
+            failures = getattr(self, 'failures', [])
+            self.failures = []
+            return failures
         def close(self): pass
     class Detokenizer:
         last_segment = 'ok'
@@ -140,3 +178,150 @@ def test_pending_lease_released_on_every_terminal_path(deferred_engine, monkeypa
     assert state['branches'][0].closed == 1
     assert state['lookups'] == [1000]
     assert state['cycles'] == 0
+
+
+def test_native_http_worker_cold_policy_receipt_and_failure_retirement(
+        deferred_engine, monkeypatch):
+    """Exercise real HTTP and the serving worker with a host-only native stand-in."""
+    import json
+    from http.server import ThreadingHTTPServer
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+    from mlx2 import serving
+    from mlx2.server import handler_for
+
+    engine, state = deferred_engine
+    state['cold'] = True
+    original = serving.install_explicit_native_qwen3_request
+
+    def install(batch, adapter, job, *, prompt_tokens, maximum,
+                lifecycle_lock, **paths):
+        if job.cached_tokens or job.request.get('skip_writing_prefix_cache') is not True:
+            # Run the production refusal before the stand-in can create state.
+            return original(batch, adapter, job, prompt_tokens=prompt_tokens,
+                            maximum=maximum, lifecycle_lock=lifecycle_lock,
+                            **paths)
+        state['native_uids'].add(job.uid)
+        state['native_jobs'][job.uid] = job
+        state['native_allocations'].append(job.uid)
+        return {'route': 'native_qwen3_paged', 'implemented': True,
+                'qualified': False, 'selected': True, 'observed_used': False}
+
+    monkeypatch.setattr(serving, 'install_explicit_native_qwen3_request', install)
+    server = ThreadingHTTPServer(('127.0.0.1', 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f'http://127.0.0.1:{server.server_port}'
+
+    def post(**options):
+        body = {'model': 'fake', 'messages': [{'role': 'user', 'content': 'hi'}],
+                'max_tokens': 1, **options}
+        return urlopen(Request(base + '/v1/chat/completions',
+                               data=json.dumps(body).encode(),
+                               headers={'Content-Type': 'application/json'}),
+                       timeout=5)
+
+    try:
+        with post() as response:
+            ordinary = json.load(response)
+        assert ordinary['mlx2']['route'] != 'native_qwen3_paged'
+        assert not state['native_retired']
+
+        with pytest.raises(HTTPError) as write_refusal:
+            post(paged_native_qwen3=True, temperature=0)
+        assert write_refusal.value.code == 400
+        assert 'skip_writing_prefix_cache' in json.load(write_refusal.value)['error']['message']
+
+        stores_before_native = len(state['stores'])
+        with post(paged_native_qwen3=True, skip_writing_prefix_cache=True,
+                  temperature=0) as response:
+            cold = json.load(response)
+        route = cold['mlx2']['route_receipt']
+        assert cold['mlx2']['cached_tokens'] == 0
+        assert cold['mlx2']['route'] == 'native_qwen3_paged'
+        assert route['implemented'] and route['selected'] and route['observed_used']
+        assert route['qualified'] is False
+        assert route['apcv2'] == 'native_checkpoint_unavailable'
+        assert cold['mlx2']['request_controls']['sampling'] == {'temperature': 0}
+        assert len(state['stores']) == stores_before_native
+        assert len(state['native_retired']) == 1 and not state['native_uids']
+        assert len(state['native_allocations']) == 1
+
+        state['cold'] = False
+        with pytest.raises(HTTPError) as warm_refusal:
+            post(paged_native_qwen3=True, skip_writing_prefix_cache=True,
+                 temperature=0)
+        assert warm_refusal.value.code == 400
+        assert 'pinned price/source paths' in json.load(warm_refusal.value)['error']['message']
+        assert len(state['native_retired']) == 1 and not state['native_uids']
+        assert len(state['native_allocations']) == 1
+
+        state['cold'] = True
+        state['native_fail'] = True
+        with pytest.raises(HTTPError) as failed:
+            post(paged_native_qwen3=True, skip_writing_prefix_cache=True,
+                 temperature=0)
+        assert failed.value.code == 500
+        assert 'injected native terminal failure' in json.load(failed.value)['error']['message']
+        assert len(state['native_retired']) == 2 and not state['native_uids']
+        with post() as response:
+            assert json.load(response)['choices'][0]['finish_reason'] == 'length'
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_native_live_worker_cancellation_retires_private_lane(
+        deferred_engine, monkeypatch):
+    from mlx2 import serving
+
+    engine, state = deferred_engine
+    state['cold'] = True
+    state['native_hold'] = True
+
+    def install(batch, adapter, job, **kwargs):
+        state['native_uids'].add(job.uid)
+        state['native_jobs'][job.uid] = job
+        state['native_allocations'].append(job.uid)
+        return {'route': 'native_qwen3_paged', 'implemented': True,
+                'qualified': False, 'selected': True, 'observed_used': False}
+
+    monkeypatch.setattr(serving, 'install_explicit_native_qwen3_request', install)
+    job = engine.submit({'max_tokens': 1, 'paged_native_qwen3': True,
+                         'skip_writing_prefix_cache': True, 'temperature': 0})
+    assert state['native_waiting'].wait(3)
+    job.cancelled.set()
+    state['native_release'].set()
+    result = job.events.get(timeout=5)
+    assert result['error'] == 'cancelled'
+    assert state['native_retired'] == [job.uid]
+    assert state['native_retired'].count(job.uid) == 1
+    assert not state['native_uids']
+    state['native_hold'] = False
+    ordinary = engine.submit({'max_tokens': 1})
+    assert ordinary.events.get(timeout=5)['finish_reason'] == 'length'
+
+
+def test_idle_worker_reaps_terminal_native_admission_owner(deferred_engine):
+    from mlx2 import serving
+
+    _engine, _state = deferred_engine
+    calls = []
+    owner = NS(
+        fully_retired=True,
+        reap_retired=lambda: calls.append("retired"),
+        reap_quarantine=lambda: calls.append("quarantine"),
+    )
+    writer = NS(poisoned=False)
+    record = (owner, writer)
+    serving._NATIVE_ADMISSION_ORPHANS.append(record)
+    try:
+        deadline = time.monotonic() + 2
+        while record in serving._NATIVE_ADMISSION_ORPHANS and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert record not in serving._NATIVE_ADMISSION_ORPHANS
+        assert calls == ["retired", "quarantine"]
+    finally:
+        if record in serving._NATIVE_ADMISSION_ORPHANS:
+            serving._NATIVE_ADMISSION_ORPHANS.remove(record)

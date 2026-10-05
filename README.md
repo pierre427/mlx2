@@ -158,4 +158,9 @@ See [architecture](docs/ARCHITECTURE.md), [results](docs/RESULTS.md),
 Qwen-Image-2.1, LTX-2.5 and MiniMax-Music3 have revision-bound LoRA artifacts,
 reversible backend integration and bounded training on pre-encoded flow examples.
 Actual tiny transformer contracts are CPU-validated; full media LoRA generation
-remains unqualified. See [media LoRA contracts and limitations](docs/MEDIA-LORA.md).
+remains unqualified. These are direct Python APIs, not HTTP routes: convert a
+PEFT adapter with `mlx2.runtime.media_lora.convert_media_lora` (or
+`python -m mlx2.runtime.media_lora --help`, which does not import MLX), then call
+`load_lora`, `lora_receipt` and `unload_lora` on `QwenImage21Adapter`,
+`LTX25Adapter` or `mlx2.adapters.music3.Music3Adapter`. Only one adapter may be
+active at a time, and unsupported tensor layouts fail closed.

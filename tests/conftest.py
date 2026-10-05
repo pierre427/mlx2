@@ -33,3 +33,31 @@ def served_exp_forms_match(monkeypatch):
     from mlx2.runtime.models.served_exp import ServedExpGate
 
     monkeypatch.setattr(ServedExpGate, "refusal", lambda self, dtype=None: None)
+
+
+# Test modules that read private material at import time and whose own bytes
+# are frozen by a reviewed hash (scripts/qualify_segmented_moe_prefill_research.py
+# FROZEN), so they cannot guard themselves.  The public mirror does not carry
+# provenance/; there the module is reported as skipped instead of erroring.
+_MODULE_PRIVATE_MATERIAL = {
+    "test_segmented_moe_prefill_research.py": "provenance/segmented-moe-prefill-research.json",
+}
+_ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
+
+
+class _PrivateMaterialAbsentModule(pytest.Module):
+    skip_reason = ""
+
+    def collect(self):
+        pytest.skip(self.skip_reason, allow_module_level=True)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_pycollect_makemodule(module_path, parent):
+    needed = _MODULE_PRIVATE_MATERIAL.get(module_path.name)
+    if needed is None or (_ROOT / needed).is_file():
+        return None
+    module = _PrivateMaterialAbsentModule.from_parent(parent, path=module_path)
+    module.skip_reason = (f"private material absent: {needed} "
+                          "(not exported to the public mirror)")
+    return module

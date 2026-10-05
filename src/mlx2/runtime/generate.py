@@ -8,7 +8,9 @@ import logging
 import math
 import os
 import sys
+import threading
 import time
+import weakref
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
@@ -55,6 +57,28 @@ ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL = 256
 _COUNTER_MAX = (1 << 63) - 1
 _PERSISTENT_DECODE_INPUTS = "_mlx2_persistent_decode_inputs"
 generation_stream = mx.new_thread_local_stream(mx.default_device())
+
+# A generator may close while an ambiguous native command is still pending.
+# Keep that arena reachable for process lifetime until terminal/teardown proof.
+_NATIVE_ORPHANED_RETIREMENTS = []
+_NATIVE_ORPHANED_LOCK = threading.RLock()
+
+
+def reap_orphaned_native_retirements() -> int:
+    """Drop only closed native arenas whose owner proves full retirement."""
+    with _NATIVE_ORPHANED_LOCK:
+        remaining = []
+        for continuation in _NATIVE_ORPHANED_RETIREMENTS:
+            try:
+                continuation.reap()
+            except Exception:
+                # Keep the arena reachable on an ambiguous cleanup failure.
+                remaining.append(continuation)
+                continue
+            if not continuation.can_release:
+                remaining.append(continuation)
+        _NATIVE_ORPHANED_RETIREMENTS[:] = remaining
+        return len(remaining)
 
 
 def _invalid_output_reason(token: int, logprobs: mx.array) -> Optional[str]:
@@ -689,7 +713,22 @@ class PromptProcessingBatch:
                 lora_rows = bind_lora_rows(self.model, self.uids)
                 try:
                     forward = getattr(self.model, "prefill_forward", self.model)
-                    forward(tokens[:, :n_to_process], cache=self.prompt_cache, **kwargs)
+                    row_context = getattr(self.model, "prefill_row_context", None)
+                    chunk_lengths = [
+                        max(0, min(n_to_process, length - processed))
+                        for length in lengths
+                    ]
+                    context = (
+                        row_context(chunk_lengths, width=n_to_process)
+                        if callable(row_context)
+                        else contextlib.nullcontext()
+                    )
+                    with context:
+                        forward(
+                            tokens[:, :n_to_process],
+                            cache=self.prompt_cache,
+                            **kwargs,
+                        )
                 finally:
                     clear_lora_rows(lora_rows)
             if kwargs:
@@ -1470,6 +1509,19 @@ def _note_copy_draft_round(stats: Dict[str, Any], proposal: Any) -> None:
             _bump_bounded_counter(stats, "self_mtp_copy_lookup_misses")
 
 
+def _cohort_plain_width(batch) -> int:
+    """Rows decoding ordinary in the same round as an MTP cohort.
+
+    Width-locked late lanes go plain after a bounded wait and keep decoding
+    beside the cohort.  A handoff test that saw only MTP, paused and joining
+    lanes never fired once they had left (27B, 8 cold streams: one MTP lane
+    at width 1 beside seven plain lanes, two forwards per round).
+    """
+    probe = getattr(batch, "plain_width_probe", None)
+    external = 0 if probe is None else int(probe())
+    return len(getattr(batch, "_plain_ready", ())) + external
+
+
 class MTPGenerationBatch:
     """Scheduler wrapper for Agent A's batched self-MTP transaction."""
 
@@ -1546,6 +1598,11 @@ class MTPGenerationBatch:
         # WIDTH_LOCK_DEFERRALS_BEFORE_PLAIN before the lane goes plain.
         self._width_lock_deferrals: Dict[int, int] = {}
         self._plain_ready: List[_PausedMTPGenerationLane] = []
+        # Rows the owning scheduler already decodes as ordinary beside this
+        # cohort (its plain fallback batch).  They share the round with the
+        # MTP lanes, so every handoff width decision counts them: one
+        # physical width, not the MTP subset of it.
+        self.plain_width_probe: Optional[Callable[[], int]] = None
         self.mtp_admission = mtp_admission
         self._base_mtp_admission = mtp_admission
         self.adaptive_depth_policy = adaptive_depth_policy
@@ -1918,7 +1975,10 @@ class MTPGenerationBatch:
         ):
             if self.ordinary_handoff_policy is not None:
                 projected_width = (
-                    len(self.state.lanes) + len(self._paused) + len(packages)
+                    len(self.state.lanes)
+                    + len(self._paused)
+                    + len(packages)
+                    + _cohort_plain_width(self)
                 )
                 memory = getattr(self, "park_memory", None)
                 decision = (
@@ -2072,7 +2132,7 @@ class MTPGenerationBatch:
             or not self.state.lanes
         ):
             return False
-        width = len(self.state.lanes) + len(self._paused)
+        width = len(self.state.lanes) + len(self._paused) + _cohort_plain_width(self)
         memory = getattr(self, "park_memory", None)
         if memory is not None:
             decision = memory.decide(width)
@@ -2512,7 +2572,14 @@ class MTPGenerationBatch:
             stats = dict(vars(lane.stats))
             # ``vars`` hands out the live dicts; a delivered receipt must not
             # keep mutating behind the caller.
-            for _hist in ("verify_span_hist", "verify_accept_hist"):
+            for _hist in (
+                "verify_span_hist",
+                "verify_accept_hist",
+                "ragged_verify_backend_modes",
+                "ragged_verify_stage_ns",
+                "ragged_verify_stage_calls",
+                "ragged_verify_stage_rows",
+            ):
                 if isinstance(stats.get(_hist), dict):
                     stats[_hist] = dict(stats[_hist])
             stats["total_emitted"] = int(lane.stats.total_emitted)
@@ -3038,6 +3105,7 @@ class BatchGenerator:
         mtp_acceptance_log: Optional[Any] = None,
         prefill_depth_budget: Optional[int] = None,
         decode_first: Optional[Union[bool, Mapping[str, Any]]] = None,
+        batch_geometry: Optional[Union[bool, Mapping[str, Any]]] = None,
     ):
         if decode_priority_cadence < 1:
             raise ValueError("decode_priority_cadence must be positive")
@@ -3125,9 +3193,19 @@ class BatchGenerator:
         depth_bounded_prefill_rows(prefill_step_size, 0, prefill_depth_budget)
         self.prefill_depth_budget = prefill_depth_budget
         self.prefill_batch_size = prefill_batch_size
+        from .batch_geometry import GeometrySchedulerPolicy
+
+        self.batch_geometry = GeometrySchedulerPolicy.from_value(batch_geometry)
         self.prefill_batch_window = (
             1 if prefill_batch_window is None else prefill_batch_window
         )
+        if self.batch_geometry.enabled:
+            # Head-preserving companion selection already bounds starvation in
+            # _select_prefill_indices; a 2x window gives it actual length
+            # choices without turning admission into a global reorder.
+            self.prefill_batch_window = max(
+                self.prefill_batch_window, 2 * self.prefill_batch_size
+            )
         if self.prefill_batch_window < 1:
             raise ValueError("prefill_batch_window must be positive")
         self.decode_priority_cadence = decode_priority_cadence
@@ -3199,6 +3277,16 @@ class BatchGenerator:
         ):
             self.scheduler_stats.setdefault(key, 0)
         self.scheduler_stats.setdefault("adaptive_prefill_chunk_histogram", {})
+        if self.batch_geometry.enabled:
+            for key in (
+                "batch_geometry_rounds",
+                "batch_geometry_bucketed_rounds",
+                "batch_geometry_budget_deferred_rows",
+                "batch_geometry_real_rows",
+                "batch_geometry_charged_rows",
+                "batch_geometry_padding_rows",
+            ):
+                self.scheduler_stats.setdefault(key, 0)
         self.completion_batch_size = max(completion_batch_size, prefill_batch_size)
         if self.prefill_order.enabled and self.self_mtp is not None:
             # The self-MTP prefill admission window is a FIFO prefix of the
@@ -3319,8 +3407,22 @@ class BatchGenerator:
                 scheduler_stats=self.scheduler_stats,
             )
         self._plain_fallback_batch = GenerationBatch.empty(self.model, self.sampler)
+        if isinstance(self._generation_batch, MTPGenerationBatch):
+            # Weak: a strong closure would make every generator a reference
+            # cycle that only the cyclic collector frees (with its model).
+            owner = weakref.ref(self)
+            self._generation_batch.plain_width_probe = lambda: (
+                0 if owner() is None else len(owner()._plain_fallback_batch)
+            )
         self._starved_mtp_boundaries = 0
         self._unprocessed_sequences = deque()
+        # Explicitly installed native lanes are separate from the ordinary
+        # prompt/decode batches. No native lane is created by default.
+        self._native_continuations = {}
+        self._native_retiring = []
+        self._native_prompt_responses = []
+        self._native_lane_failures = []
+        self._native_lane_rngs = {}
         self._currently_processing = []
         self._mtp_states = {}
         self._mtp_lane_rngs = {}
@@ -3392,6 +3494,19 @@ class BatchGenerator:
         )
 
     def close(self):
+        try:
+            for continuation in getattr(self, "_native_continuations", {}).values():
+                self._retire_native_continuation(continuation)
+        finally:
+            getattr(self, "_native_continuations", {}).clear()
+            if hasattr(self, "_native_retiring"):
+                # Keep poisoned or still-submitted native arenas alive even
+                # when close itself raises before their terminal is known.
+                with _NATIVE_ORPHANED_LOCK:
+                    _NATIVE_ORPHANED_RETIREMENTS.extend(self._native_retiring)
+                self._native_retiring.clear()
+        getattr(self, "_native_prompt_responses", []).clear()
+        getattr(self, "_native_lane_rngs", {}).clear()
         pending = getattr(self, "_decode_first_pending", None)
         if pending is not None:
             # A round whose decode phase was published but whose prefill
@@ -3751,6 +3866,8 @@ class BatchGenerator:
             self._unprocessed_sequences.append(
                 (self._uid_count, seq, m, c, at, s, lp, sm, time.monotonic(), prefill_input)
             )
+            if lane_rng is not None and self.self_mtp is None:
+                self._native_lane_rngs[self._uid_count] = lane_rng
             if self.self_mtp is not None:
                 self._mtp_states[self._uid_count] = mtp_state
                 self._mtp_lane_rngs[self._uid_count] = lane_rng
@@ -3758,6 +3875,259 @@ class BatchGenerator:
             uids.append(self._uid_count)
             self._uid_count += 1
         return uids
+
+    def install_native_queued(self, preparation, owner, candidate, lifecycle_lock,
+                              *, permit_native=False, research_only=False,
+                              cancelled=lambda: False,
+                              price_provenance=None, price_evidence_sha256=None):
+        """Replace one pristine queued row with a private Qwen3 continuation.
+
+        The caller holds the same lifecycle lock around insert/next/remove.
+        All potentially failing validation and continuation construction happen
+        before the queue is changed. The route is opt-in and remains unqualified.
+        """
+        from .paged_native_batch_lifecycle import NativeQueuedHandoffPreparation
+        from .paged_native_continuation import NativeQwen3Continuation
+        from .paged_native_atomic_owner import NativeAtomicRequestOwner
+        from ..adapters.qwen3_paged_candidate import Qwen3PackedCandidate
+
+        def receipt(reason, *, selected=False):
+            return {"route": "native_qwen3_paged", "implemented": True,
+                    "qualified": False, "selected": selected,
+                    "observed_used": False, "reason": reason,
+                    "research_only": research_only is True,
+                    "uid": getattr(preparation, "uid", None)}
+
+        if not permit_native:
+            return receipt("native_serving_disabled")
+        if (type(preparation) is not NativeQueuedHandoffPreparation or
+                type(owner) is not NativeAtomicRequestOwner or
+                type(candidate) is not Qwen3PackedCandidate or
+                not hasattr(lifecycle_lock, "__enter__") or
+                not hasattr(lifecycle_lock, "__exit__")):
+            raise TypeError("complete native handoff inputs are required")
+        with lifecycle_lock:
+            if cancelled():
+                return receipt("cancelled")
+            if self.self_mtp is not None:
+                return receipt("unsupported_generator_route")
+            if (preparation.reason != "native_continuation_not_installed" or
+                    preparation.first_token_logits is None or
+                    preparation.generation is None or
+                    candidate.model is not self.model or
+                    preparation.uid in self._native_continuations):
+                return receipt("native_preparation_incomplete")
+            backend = candidate.backend
+            submissions = getattr(backend, "read_submissions", 0)
+            terminals = getattr(backend, "terminal_successes", 0)
+            depth = len(getattr(candidate.model, "layers", ()))
+            if (type(submissions) is not int or type(terminals) is not int or
+                    submissions < max(depth, 1) or terminals != submissions):
+                return receipt("native_terminal_evidence_missing")
+            found = self._find_uids((preparation.uid,)).get(preparation.uid)
+            if found is None or found[0] != 0:
+                return receipt("queued_uid_drifted")
+            index = found[1]
+            sequence = self._unprocessed_sequences[index]
+            suffix = tuple(token for part in sequence[1] for token in part)
+            tokens = tuple(sequence[4]) + suffix
+            if (tokens != preparation.prompt_tokens or not suffix or
+                    sequence[9] is not None or sequence[3] is None):
+                return receipt("queued_prompt_drifted")
+            with owner.snapshot() as public:
+                if (public.revision != preparation.revision or
+                        public.generation != preparation.generation or
+                        public.offset != len(tokens)):
+                    return receipt("native_state_drifted")
+            continuation = NativeQwen3Continuation(
+                uid=preparation.uid, revision=preparation.revision,
+                prompt_tokens=tokens, first_logits=preparation.first_token_logits,
+                owner=owner, candidate=candidate, maximum=sequence[2],
+                sampler=sequence[5] or self.sampler,
+                processors=list(sequence[6] or ()), matcher=sequence[7],
+                lane_rng=self._native_lane_rngs.get(preparation.uid),
+                research_only=research_only,
+                apcv2_restored_tokens=len(sequence[4]),
+                price_provenance=price_provenance,
+                price_evidence_sha256=price_evidence_sha256,
+            )
+            if cancelled():
+                return receipt("cancelled")
+            # The single-threaded serving lifecycle holds lifecycle_lock here.
+            # Deque replacement and dict insertion are host-only and cannot
+            # submit device work; no sampler or response is invoked mid-swap.
+            queued = list(self._unprocessed_sequences)
+            queued.pop(index)
+            self._unprocessed_sequences = deque(queued)
+            self._native_continuations[preparation.uid] = continuation
+            self._native_lane_rngs.pop(preparation.uid, None)
+            self._native_prompt_responses.append(
+                PromptProcessingBatch.Response(
+                    preparation.uid, (len(tokens), len(tokens)), True, True))
+            return receipt("native_installed", selected=research_only is not True)
+
+    def install_native_hybrid_cohort(self, owners, candidate, bootstrap, lifecycle_lock,
+                                    *, permit_native=False, cancelled=lambda: False):
+        """Replace both queued lanes atomically after terminal-proved bootstrap.
+
+        Generation zero is an imported or explicit packed cold boundary.
+        Candidate-bound evidence attributes actual prefill dispatches.
+        Samplers/RNG remain private and are first invoked only by next().
+        """
+        from .paged_native_contract import supports_native_checkpoint_candidate
+        from .paged_native_continuation import NativeQwen3Continuation
+        from .paged_native_atomic_owner import NativeAtomicRequestOwner
+        if not permit_native:
+            raise ValueError("hybrid native serving disabled")
+        if (not supports_native_checkpoint_candidate(candidate) or candidate.model is not self.model or
+                type(owners) is not tuple or len(owners) != 2 or owners[0] is owners[1] or
+                type(bootstrap) is not tuple or len(bootstrap) != 2 or
+                not hasattr(lifecycle_lock, "__enter__") or self.self_mtp is not None):
+            raise ValueError("complete ordinary hybrid cohort required")
+        with lifecycle_lock:
+            if cancelled(): raise ValueError("hybrid cohort cancelled before attachment")
+            writer = candidate.backend.writer
+            if writer.poisoned or writer.pending_epochs or writer.ledger.pending_count:
+                raise ValueError("hybrid bootstrap native writes are not terminal")
+            from .packed_prefill_receipt import bootstrap_prefill_attribution
+            prefill_attribution=bootstrap_prefill_attribution(candidate)
+            replacements = {}; indices = []; prompt_responses = []; receipts = []
+            for owner, boot in zip(owners, bootstrap):
+                if type(owner) is not NativeAtomicRequestOwner or owner.supported_planes != ("kv", "gdn"):
+                    raise ValueError("hybrid atomic state owner required")
+                uid = owner._lane_id
+                found = self._find_uids((uid,)).get(uid)
+                if found is None or found[0] != 0 or uid in self._native_continuations:
+                    raise ValueError("hybrid queued UID drifted")
+                index = found[1]; sequence = self._unprocessed_sequences[index]
+                tokens = tuple(token for part in sequence[1] for token in part)
+                if (not tokens or tokens != candidate._serving_prompt_ids_by_uid.get(uid) or
+                        sequence[4] or sequence[9] is not None or sequence[6] or
+                        sequence[3] is None or boot.offset != len(tokens) or
+                        getattr(boot.logits, "shape", None) is None or boot.logits.shape[0] != 1):
+                    raise ValueError("hybrid pristine full queued prompt required")
+                with owner.snapshot() as public:
+                    boundary = dict(public.companions)["gdn"][0]
+                    if (public.generation != 0 or public.offset != len(tokens) or
+                            boundary.lane_id != uid or boundary.revision != public.revision or
+                            boundary.offset != public.offset or boundary.generation != 0 or
+                            len(public.layer_owners) != candidate.native_layer_count):
+                        raise ValueError("hybrid imported ordinary boundary drifted")
+                    revision = public.revision
+                replacements[uid] = NativeQwen3Continuation(
+                    uid=uid, revision=revision, prompt_tokens=tokens, first_logits=boot.logits[0],
+                    owner=owner, candidate=candidate, maximum=sequence[2],
+                    sampler=sequence[5] or self.sampler, processors=[], matcher=sequence[7],
+                    lane_rng=self._native_lane_rngs.get(uid), research_only=False)
+                indices.append(index)
+                prompt_responses.append(PromptProcessingBatch.Response(uid, (len(tokens), len(tokens)), True, True))
+                receipts.append({"route":"native_hybrid_paged_b2", "implemented":True,
+                    "qualified":False, "selected":True, "observed_used":False,
+                    "reason":"native_installed", "uid":uid, "bootstrap_generation":0,
+                    "prefill_mode":"ordinary_completed_import", "prefill_native_attention_calls":prefill_attribution.get("native_prefill_attention_calls",0),
+                    "state_planes":["kv","gdn"], "native_layer_count":candidate.native_layer_count,
+                    "logical_layer_count":candidate.logical_layer_count,
+                    "singleton_mode":"same_math_short_tile_long_scalar", "price_usable":False,
+                    "memory_charge_bytes":candidate._serving_resources.charge,
+                    **prefill_attribution})
+            if len(set(indices)) != 2 or cancelled():
+                raise ValueError("hybrid cohort cancelled or queued identity duplicated")
+            queued = deque(item for index,item in enumerate(self._unprocessed_sequences) if index not in indices)
+            continuations = dict(self._native_continuations); continuations.update(replacements)
+            rngs = dict(self._native_lane_rngs)
+            for uid in replacements: rngs.pop(uid,None)
+            responses = list(self._native_prompt_responses) + prompt_responses
+            # Commit only host objects, after both continuation constructors pass.
+            self._unprocessed_sequences = queued
+            self._native_continuations = continuations
+            self._native_lane_rngs = rngs
+            self._native_prompt_responses = responses
+            return tuple(receipts)
+
+    def install_native_hybrid_n_cohort(self, owners, candidate, bootstrap, lifecycle_lock,
+                                    *, permit_native=False, cancelled=lambda: False):
+        """Replace both queued lanes atomically after terminal-proved bootstrap.
+
+        Generation zero is an imported or explicit packed cold boundary.
+        Candidate-bound evidence attributes actual prefill dispatches.
+        Samplers/RNG remain private and are first invoked only by next().
+        """
+        from .paged_native_contract import supports_native_checkpoint_candidate
+        from .paged_native_continuation import NativeQwen3Continuation
+        from .paged_native_atomic_owner import NativeAtomicRequestOwner
+        if not permit_native:
+            raise ValueError("hybrid native serving disabled")
+        if (not supports_native_checkpoint_candidate(candidate) or candidate.model is not self.model or
+                type(owners) is not tuple or not 1 <= len(owners) <= 20 or len({id(owner) for owner in owners}) != len(owners) or
+                type(bootstrap) is not tuple or len(bootstrap) != len(owners) or
+                not hasattr(lifecycle_lock, "__enter__") or self.self_mtp is not None):
+            raise ValueError("complete ordinary hybrid cohort required")
+        with lifecycle_lock:
+            if cancelled(): raise ValueError("hybrid cohort cancelled before attachment")
+            writer = candidate.backend.writer
+            if writer.poisoned or writer.pending_epochs or writer.ledger.pending_count:
+                raise ValueError("hybrid bootstrap native writes are not terminal")
+            from .packed_prefill_receipt import bootstrap_prefill_attribution
+            prefill_attribution=bootstrap_prefill_attribution(candidate)
+            replacements = {}; indices = []; prompt_responses = []; receipts = []
+            for owner, boot in zip(owners, bootstrap):
+                if type(owner) is not NativeAtomicRequestOwner or owner.supported_planes != ("kv", "gdn"):
+                    raise ValueError("hybrid atomic state owner required")
+                uid = owner._lane_id
+                found = self._find_uids((uid,)).get(uid)
+                if found is None or found[0] != 0 or uid in self._native_continuations:
+                    raise ValueError("hybrid queued UID drifted")
+                index = found[1]; sequence = self._unprocessed_sequences[index]
+                tokens = tuple(token for part in sequence[1] for token in part)
+                if (not tokens or tokens != candidate._serving_prompt_ids_by_uid.get(uid) or
+                        sequence[4] or sequence[9] is not None or
+                        sequence[3] is None or boot.offset != len(tokens) or
+                        getattr(boot.logits, "shape", None) is None or boot.logits.shape[0] != 1):
+                    raise ValueError("hybrid pristine full queued prompt required")
+                with owner.snapshot() as public:
+                    boundary = dict(public.companions)["gdn"][0]
+                    if (public.generation != 0 or public.offset != len(tokens) or
+                            boundary.lane_id != uid or boundary.revision != public.revision or
+                            boundary.offset != public.offset or boundary.generation != 0 or
+                            len(public.layer_owners) != candidate.native_layer_count):
+                        raise ValueError("hybrid imported ordinary boundary drifted")
+                    revision = public.revision
+                from .paged_n20_request import validate_ordinary_processors
+                sampling=getattr(candidate,'_serving_sampling_by_uid',{}).get(uid)
+                if sampling is None:
+                    if sequence[6]:raise ValueError('nativeN20 queued-processor refusal: sampling_binding_missing')
+                    processors=()
+                else:processors=validate_ordinary_processors(sequence[6],sampling,len(tokens))
+                replacements[uid] = NativeQwen3Continuation(
+                    uid=uid, revision=revision, prompt_tokens=tokens, first_logits=boot.logits[0],
+                    owner=owner, candidate=candidate, maximum=sequence[2],
+                    sampler=sequence[5] or self.sampler, processors=list(processors), matcher=sequence[7],
+                    lane_rng=self._native_lane_rngs.get(uid), research_only=False)
+                indices.append(index)
+                prompt_responses.append(PromptProcessingBatch.Response(uid, (len(tokens), len(tokens)), True, True))
+                receipts.append({"route":"native_hybrid_packed_n20_research", "implemented":True,
+                    "qualified":False, "selected":True, "observed_used":False,
+                    "reason":"native_installed", "uid":uid, "bootstrap_generation":0,
+                    "prefill_mode":"ordinary_completed_import", "prefill_native_attention_calls":prefill_attribution.get("native_prefill_attention_calls",0),
+                    "state_planes":["kv","gdn"], "native_layer_count":candidate.native_layer_count,
+                    "logical_layer_count":candidate.logical_layer_count,
+                    "singleton_mode":"same_math_nativeN1", "price_usable":False,
+                    "sampling_policy":"existing_ordinary_processors", "ordinary_processor_count":len(processors),
+                    "memory_charge_bytes":candidate._serving_resources.charge,
+                    **prefill_attribution})
+            if len(set(indices)) != len(owners) or cancelled():
+                raise ValueError("hybrid cohort cancelled or queued identity duplicated")
+            queued = deque(item for index,item in enumerate(self._unprocessed_sequences) if index not in indices)
+            continuations = dict(self._native_continuations); continuations.update(replacements)
+            rngs = dict(self._native_lane_rngs)
+            for uid in replacements: rngs.pop(uid,None)
+            responses = list(self._native_prompt_responses) + prompt_responses
+            # Commit only host objects, after both continuation constructors pass.
+            self._unprocessed_sequences = queued
+            self._native_continuations = continuations
+            self._native_lane_rngs = rngs
+            self._native_prompt_responses = responses
+            return tuple(receipts)
 
     def _make_new_cache(self):
         if self.max_kv_size is None:
@@ -4359,6 +4729,41 @@ class BatchGenerator:
             progress,
         )
 
+    def _prepare_mtp_rows(self, n: int):
+        """Capture the queue head's planned boundaries, then prepare it.
+
+        The first ``n`` queued prompts each fit one prefill chunk.  Any exact
+        state boundary they still plan (interior lattice, turn, generation
+        prompt) is captured here, one bounded advance per boundary, so all
+        ``n`` rows reach ``_make_mtp_batch`` together and the cohort forms at
+        full width.  The prefill work equals preparing the prompts unsplit.
+        """
+        progress = []
+        for index in range(min(n, len(self._unprocessed_sequences))):
+            while True:
+                sequence = self._unprocessed_sequences[index]
+                (uid, segments, history) = (sequence[0], sequence[1], sequence[4])
+                covered = len(history)
+                residual = sum(len(segment) for segment in segments)
+                boundary = self._next_interior_checkpoint(uid, covered)
+                # Boundaries sit strictly below the final prompt token, so a
+                # bounded advance never reaches lane preparation here.
+                if boundary is None or not 0 < boundary - covered < residual - 1:
+                    break
+                (released, chunk) = self._advance_mtp_prefill(
+                    index, boundary - covered
+                )
+                if released is not None:
+                    raise RuntimeError(
+                        "boundary capture prepared a lane before its cohort"
+                    )
+                progress.extend(chunk)
+                _bump_bounded_counter(
+                    self.scheduler_stats, "mtp_one_chunk_boundary_advances"
+                )
+        (batch, prepared) = self._make_mtp_batch(n)
+        return (batch, progress + list(prepared))
+
     def _next_interior_checkpoint(self, uid: int, covered: int):
         positions = getattr(self, "_interior_checkpoint_positions", {}).get(
             int(uid)
@@ -4759,6 +5164,9 @@ class BatchGenerator:
         for i, seq in enumerate(self._unprocessed_sequences):
             if seq[0] in uids:
                 results[seq[0]] = (0, i)
+        for uid in self._native_continuations:
+            if uid in uids:
+                results[uid] = (4, -1)
         return results
 
     def extract_cache(self, uids):
@@ -4779,11 +5187,13 @@ class BatchGenerator:
                         self._generation_batch.extract_cache(idx),
                         self._generation_batch.tokens[idx],
                     )
-            else:
+            elif stage == 3:
                 results[uid] = (
                     self._plain_fallback_batch.extract_cache(idx),
                     self._plain_fallback_batch.tokens[idx],
                 )
+            else:
+                raise RuntimeError("native paged state cannot be extracted as ordinary cache")
         return results
 
     def pop_prompt_boundary(self, uid: int):
@@ -4869,6 +5279,15 @@ class BatchGenerator:
             set(range(len(self._plain_fallback_batch))),
         )
         found = self._find_uids(uids)
+        for uid in uids:
+            continuation = self._native_continuations.pop(uid, None)
+            if continuation is not None:
+                self._retire_native_continuation(continuation)
+            self._native_lane_rngs.pop(uid, None)
+        self._native_prompt_responses = [
+            response for response in self._native_prompt_responses
+            if response.uid not in set(uids)
+        ]
         orphaned_cohorts = self._queued_cohorts_losing_members(uids)
         memory_queued = getattr(self, "_memory_queued_prefill", None)
         if getattr(self, "_state_checkpoints", None):
@@ -4980,6 +5399,9 @@ class BatchGenerator:
         stop_matchers = []
         for sequence in sequences:
             uids.append(sequence[0])
+            # Native installation is possible only while queued. Once the
+            # ordinary prefill takes this row, its RNG belongs to that path.
+            self._native_lane_rngs.pop(sequence[0], None)
             caches.append(sequence[3])
             tokens.append(sequence[4])
             samplers.append(sequence[5])
@@ -5167,7 +5589,18 @@ class BatchGenerator:
                 return []
             return [media[0]]
         if window == n:
-            return list(range(n))
+            selected = list(range(n))
+            candidate_lengths = [
+                self._prefill_chunk_length(sequence[1]) for sequence in candidates
+            ]
+            active_lengths = [
+                self._prefill_chunk_length(sequence[0])
+                for sequence in self._currently_processing
+                if not (len(sequence[0]) == 1 and len(sequence[0][0]) == 1)
+            ]
+            return self._apply_batch_geometry_budget(
+                selected, candidate_lengths, active_lengths
+            )
         candidate_lengths = [
             self._prefill_chunk_length(sequence[1]) for sequence in candidates
         ]
@@ -5176,6 +5609,19 @@ class BatchGenerator:
             for sequence in self._currently_processing
             if not (len(sequence[0]) == 1 and len(sequence[0][0]) == 1)
         ]
+        if self.batch_geometry.enabled:
+            fifo = [
+                *active_lengths,
+                *(length for length in candidate_lengths[:n] if length > 0),
+            ]
+            fifo_padded = max(fifo) * len(fifo) if fifo else 0
+            fifo_fraction = (
+                0.0 if not fifo_padded else (fifo_padded - sum(fifo)) / fifo_padded
+            )
+            if fifo_fraction < self.batch_geometry.selection.bucket_padding_fraction:
+                return self._apply_batch_geometry_budget(
+                    list(range(n)), candidate_lengths, active_lengths
+                )
         selected = [0]
         selected_lengths = list(active_lengths)
         if candidate_lengths[0] > 0:
@@ -5191,6 +5637,20 @@ class BatchGenerator:
                     return 0
                 return max(lengths) * len(lengths) - sum(lengths)
 
+            eligible = remaining
+            if self.batch_geometry.enabled and selected_lengths:
+                compatible = {
+                    index
+                    for index in remaining
+                    if candidate_lengths[index] <= 0
+                    or (
+                        max((*selected_lengths, candidate_lengths[index]))
+                        / min((*selected_lengths, candidate_lengths[index]))
+                        <= self.batch_geometry.selection.max_bucket_ratio
+                    )
+                }
+                if compatible:
+                    eligible = compatible
             if getattr(self, "adaptive_prefill", False):
 
                 def adaptive_cost(i):
@@ -5198,18 +5658,60 @@ class BatchGenerator:
                     cached = len(candidates[i][4]) if candidates[i][4] else 0
                     return (residual, -cached, padding_after_adding(i), i)
 
-                best = min(remaining, key=adaptive_cost)
-                if best != min(remaining) and candidates[best][4]:
+                best = min(eligible, key=adaptive_cost)
+                if best != min(eligible) and candidates[best][4]:
                     self.scheduler_stats[
                         "adaptive_prefill_apc_priority_admissions"
                     ] += 1
             else:
-                best = min(remaining, key=lambda i: (padding_after_adding(i), i))
+                best = min(eligible, key=lambda i: (padding_after_adding(i), i))
             selected.append(best)
             if candidate_lengths[best] > 0:
                 selected_lengths.append(candidate_lengths[best])
             remaining.remove(best)
-        return sorted(selected)
+        return self._apply_batch_geometry_budget(
+            sorted(selected), candidate_lengths, active_lengths
+        )
+
+    def _apply_batch_geometry_budget(
+        self, selected, candidate_lengths, active_lengths
+    ):
+        """Apply the default-off rectangular token budget and emit evidence."""
+        policy = getattr(self, "batch_geometry", None)
+        if policy is None or not policy.enabled:
+            return selected
+        from .batch_geometry import trim_rectangular_cohort
+
+        budget = policy.token_budget
+        if budget is None:
+            all_lengths = [
+                *active_lengths,
+                *(candidate_lengths[index] for index in selected),
+            ]
+            budget = max(all_lengths, default=1) * max(1, len(all_lengths))
+        chosen, receipt = trim_rectangular_cohort(
+            candidate_lengths,
+            selected,
+            active_lengths=active_lengths,
+            token_budget=budget,
+        )
+        stats = self.scheduler_stats
+        _bump_bounded_counter(stats, "batch_geometry_rounds")
+        if tuple(chosen) != tuple(range(len(chosen))):
+            _bump_bounded_counter(stats, "batch_geometry_bucketed_rounds")
+        _bump_bounded_counter(
+            stats, "batch_geometry_budget_deferred_rows", receipt["deferred_rows"]
+        )
+        _bump_bounded_counter(
+            stats, "batch_geometry_real_rows", receipt["real_rows"]
+        )
+        _bump_bounded_counter(
+            stats, "batch_geometry_charged_rows", receipt["charged_rows"]
+        )
+        _bump_bounded_counter(
+            stats, "batch_geometry_padding_rows", receipt["padding_rows"]
+        )
+        return list(chosen)
 
     def _queued_prefill_candidate(self, sequence):
         return self._prefill_order().candidate(
@@ -5751,16 +6253,19 @@ class BatchGenerator:
                     int(config.get("prefill_step_size", self.prefill_step_size)),
                     len(candidate[4]),
                 )
+                # A prompt that fits one chunk is prepared in this round
+                # whatever boundaries it plans: ``_prepare_mtp_rows`` captures
+                # them first.  Counting a planned boundary as a multi-slice
+                # prefill admitted cold short prompts one per round, so the
+                # first one decoded alone and locked the cohort at width 1.
+                one_chunk = sum(len(segment) for segment in candidate[1]) <= step + 1
                 next_checkpoint = self._next_interior_checkpoint(
                     candidate[0], len(candidate[4])
                 )
                 if next_checkpoint is not None:
                     step = min(step, next_checkpoint - len(candidate[4]))
                 candidate_steps.append(step)
-                if (
-                    next_checkpoint is not None
-                    or sum(len(segment) for segment in candidate[1]) > step + 1
-                ):
+                if not one_chunk:
                     incremental_indices.append(index)
             incremental_prefill = bool(incremental_indices)
             order = self._prefill_order()
@@ -5824,7 +6329,7 @@ class BatchGenerator:
                     self.scheduler_stats["mtp_short_prefill_interleaved"] = (
                         self.scheduler_stats.get("mtp_short_prefill_interleaved", 0) + 1
                     )
-                    (batch, progress) = self._make_mtp_batch(1)
+                    (batch, progress) = self._prepare_mtp_rows(1)
                     if batch is not None:
                         self._generation_batch.extend(batch)
                     prompt_responses.extend(progress)
@@ -5850,7 +6355,7 @@ class BatchGenerator:
                     self.scheduler_stats["mtp_short_prefill_interleaved"] = (
                         self.scheduler_stats.get("mtp_short_prefill_interleaved", 0) + 1
                     )
-                    (batch, progress) = self._make_mtp_batch(1)
+                    (batch, progress) = self._prepare_mtp_rows(1)
                     if batch is not None:
                         self._generation_batch.extend(batch)
                     prompt_responses.extend(progress)
@@ -5887,7 +6392,7 @@ class BatchGenerator:
             else:
                 if not has_cohort:
                     n = self._shared_budget_rows(candidates[:n])
-                (batch, progress) = self._make_mtp_batch(n)
+                (batch, progress) = self._prepare_mtp_rows(n)
                 if batch is not None:
                     self._generation_batch.extend(batch)
             prompt_responses.extend(progress)
@@ -6611,6 +7116,8 @@ class BatchGenerator:
             current round's decode output and the prompt responses come from
             the previous round's prefill phase, which this call ran first.
         """
+        self._reap_native_retiring()
+        reap_orphaned_native_retirements()
         mode = self.decode_first.mode()
         self._decode_first_round_mode = mode
         with mx.stream(self._stream):
@@ -6618,11 +7125,131 @@ class BatchGenerator:
                 result = self._next()
             else:
                 result = self._next_decode_first(mode)
+            if self._native_prompt_responses:
+                result[0].extend(self._native_prompt_responses)
+                self._native_prompt_responses = []
+            native_items = tuple(self._native_continuations.items())
+            processed_native = set()
+            # Snapshot the first-token pair before either lane advances. Once
+            # the first continuation samples, its state is ready while its
+            # partner still carries prefill logits. Only an already installed
+            # complete pair may prime the two first HTTP responses.
+            serving_b2_priming = set()
+            if any(getattr(getattr(lane, "candidate", None), "_serving_b2", False)
+                   for _, lane in native_items):
+                from .paged_native_graph_group import can_prime_serving_graph_b2
+                for prime_uid, prime_lane in native_items:
+                    peers = tuple(other for other_uid, other in native_items
+                                  if other_uid != prime_uid and
+                                  getattr(other, "candidate", None) is prime_lane.candidate)
+                    if (len(peers) == 1 and
+                            can_prime_serving_graph_b2((prime_lane, peers[0]))):
+                        serving_b2_priming.add(prime_uid)
+            for uid, continuation in native_items:
+                if uid in processed_native:
+                    continue
+                candidate = getattr(continuation, "candidate", None)
+                if getattr(candidate, "_serving_n20", False) is True:
+                    from .paged_native_graph_n import run_native_graph_n
+                    group = tuple(other for other_uid, other in native_items
+                                  if other_uid not in processed_native and
+                                  getattr(other, "candidate", None) is candidate)
+                    processed_native.update(lane.uid for lane in group)
+                    try:
+                        responses = run_native_graph_n(group)
+                    except Exception as exc:
+                        for failed in group:
+                            self._native_continuations.pop(failed.uid, None)
+                            self._retire_native_continuation(failed)
+                            self._native_lane_failures.append({"uid": failed.uid, "reason": str(exc)})
+                        continue
+                    result[1].extend(responses)
+                    by_uid = {lane.uid: lane for lane in group}
+                    for response in responses:
+                        if response.finish_reason is not None:
+                            self._native_continuations.pop(response.uid, None)
+                            self._retire_native_continuation(by_uid[response.uid])
+                    continue
+                # Research-only shared-arena B2. Both responses pass through
+                # the live generator step; no measured-price admission or
+                # ordinary serving lane can select this default-off path.
+                if getattr(getattr(continuation, "candidate", None),
+                           "_research_staged_graph", False):
+                    from .paged_native_graph_group import (
+                        can_run_research_graph_b2, run_research_graph_b2)
+                    partner = next((
+                        (other_uid, other) for other_uid, other in native_items
+                        if other_uid != uid and other_uid not in processed_native and
+                        can_run_research_graph_b2((continuation, other))
+                    ), None)
+                    if partner is not None:
+                        other_uid, other = partner
+                        processed_native.update((uid, other_uid))
+                        try:
+                            responses = run_research_graph_b2((continuation, other))
+                        except Exception as exc:
+                            for failed_uid, failed in ((uid, continuation), (other_uid, other)):
+                                self._native_continuations.pop(failed_uid, None)
+                                self._retire_native_continuation(failed)
+                                self._native_lane_failures.append(
+                                    {"uid": failed_uid, "reason": str(exc)})
+                            continue
+                        result[1].extend(responses)
+                        for response in responses:
+                            if response.finish_reason is not None:
+                                self._native_continuations.pop(response.uid, None)
+                                self._retire_native_continuation(
+                                    continuation if response.uid == uid else other)
+                        continue
+                    if (getattr(continuation.candidate, "_serving_b2", False) is True
+                            and uid not in serving_b2_priming
+                            and not getattr(continuation.candidate, "supports_singleton", False)):
+                        processed_native.add(uid)
+                        self._native_continuations.pop(uid, None)
+                        self._retire_native_continuation(continuation)
+                        self._native_lane_failures.append({
+                            "uid": uid, "reason": "serving_b2_partner_missing"})
+                        continue
+                try:
+                    response = continuation.next()
+                except Exception as exc:
+                    self._native_continuations.pop(uid, None)
+                    self._retire_native_continuation(continuation)
+                    self._native_lane_failures.append({"uid": uid, "reason": str(exc)})
+                    continue
+                result[1].append(response)
+                if response.finish_reason is not None:
+                    self._native_continuations.pop(uid, None)
+                    self._retire_native_continuation(continuation)
         self._observe_adaptive_mtp_responses(result[1])
         for response in result[1]:
             if response.finish_reason:
                 self._release_cache_capsule_uid(response.uid)
         return result
+
+    def _retire_native_continuation(self, continuation):
+        # Retain before invoking any close operation that could fail after a
+        # native command was submitted. A failed close never drops the arena.
+        self._native_retiring.append(continuation)
+        try:
+            continuation.close()
+        except Exception:
+            # The lane has already failed or been removed. A cleanup failure
+            # must not abort unrelated lanes; retain and retry the owner.
+            pass
+        self._reap_native_retiring()
+
+    def _reap_native_retiring(self):
+        remaining = []
+        for continuation in self._native_retiring:
+            try:
+                continuation.reap()
+            except Exception:
+                remaining.append(continuation)
+                continue
+            if not getattr(continuation, "can_release", False):
+                remaining.append(continuation)
+        self._native_retiring = remaining
 
     def take_lane_failures(self):
         """Transfer ordinary decode failures to the serving executor."""
@@ -6631,6 +7258,8 @@ class BatchGenerator:
             take = getattr(batch, "take_lane_failures", None)
             if take is not None:
                 failures.extend(take())
+        failures.extend(self._native_lane_failures)
+        self._native_lane_failures = []
         return failures
 
     def _observe_adaptive_mtp_responses(self, responses):
@@ -6652,4 +7281,3 @@ class BatchGenerator:
                 # keep this status tree finite. Prometheus applies its own
                 # reviewed label bounds when exporting it.
                 self.scheduler_stats["adaptive_mtp_cost_model"] = dict(cost_model)
-

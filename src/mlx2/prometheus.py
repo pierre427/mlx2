@@ -570,6 +570,12 @@ _SCHEDULER_EVENTS = frozenset(
         "decode_first_budget_split_rounds",
         "decode_first_budget_deferred_rows",
         "decode_first_kill_switch_rounds",
+        "batch_geometry_rounds",
+        "batch_geometry_bucketed_rounds",
+        "batch_geometry_budget_deferred_rows",
+        "batch_geometry_real_rows",
+        "batch_geometry_charged_rows",
+        "batch_geometry_padding_rows",
         "adaptive_mtp_boundaries",
         "adaptive_mtp_depth_changes",
         "adaptive_mtp_parks",
@@ -1130,6 +1136,8 @@ def _scheduler_mechanism(key: str) -> str:
         return "prefill_scheduling"
     if key.startswith("decode_first_"):
         return "decode_first"
+    if key.startswith("batch_geometry_"):
+        return "batch_geometry"
     if key.startswith("cache_capsule_"):
         return "cache_capsule"
     if key.startswith("adaptive_prefill_"):

@@ -17,6 +17,7 @@ from mlx2.runtime.multi_lora import (
     multi_lora_manager,
     write_adapter,
 )
+from mlx2.serving import multi_lora_policy, optional_policy_enabled
 
 KEYS_A = (
     "model.layers.0.linear_attn.in_proj_qkv",
@@ -81,6 +82,53 @@ PROMPTS = [
     [100, 12, 6, 6, 70, 1],
     [1, 2, 3, 4, 5, 6],
 ]
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (False, False),
+        (None, False),
+        ({"enabled": False}, False),
+        (True, True),
+        ({}, True),
+        ({"enabled": True}, True),
+    ],
+)
+def test_optional_execution_policy_selection(value, expected):
+    assert optional_policy_enabled(value) is expected
+
+
+@pytest.mark.parametrize("varlen", [True, {}, {"enabled": True}])
+def test_concurrent_multi_lora_refuses_varlen_compaction(varlen, tmp_path):
+    with pytest.raises(ValueError, match="varlen MLP compaction"):
+        multi_lora_policy(
+            2,
+            8,
+            lora_root=tmp_path,
+            mtp=False,
+            prompt_lookup=False,
+            spomin=False,
+            int8_prefill=False,
+            approximate_kv=False,
+            cache_capsules=False,
+            varlen_mlp=optional_policy_enabled(varlen),
+        )
+
+
+def test_concurrent_multi_lora_allows_explicitly_disabled_varlen(tmp_path):
+    assert multi_lora_policy(
+        2,
+        8,
+        lora_root=tmp_path,
+        mtp=False,
+        prompt_lookup=False,
+        spomin=False,
+        int8_prefill=False,
+        approximate_kv=False,
+        cache_capsules=False,
+        varlen_mlp=optional_policy_enabled({"enabled": False}),
+    ) == {"max_loras": 2, "max_lora_rank": 8}
 
 
 def test_mixed_batch_matches_per_request_single_adapter(adapters):
@@ -614,8 +662,25 @@ def test_multi_lora_is_ordinary_route_only_and_needs_lora_dir(tmp_path):
         ({"mtp": True}, "MTP"),
         ({"mtp": False, "prompt_lookup": True}, "prompt lookup"),
         ({"mtp": False, "int8_prefill": {"enabled": True, "scope": "all"}}, "int8"),
+        (
+            {
+                "mtp": False,
+                "execution_policy": {"varlen_dense_mlp": True},
+            },
+            "varlen MLP compaction",
+        ),
+        (
+            {
+                "mtp": False,
+                "execution_policy": {"varlen_sparse_moe": {"enabled": True}},
+            },
+            "varlen MLP compaction",
+        ),
     ):
-        with pytest.raises(ValueError, match="ordinary route|int8|prompt lookup|MTP"):
+        with pytest.raises(
+            ValueError,
+            match="ordinary route|int8|prompt lookup|MTP|varlen MLP compaction",
+        ):
             ServingEngine.validate_arguments(
                 "tiny", max_loras=2, lora_root=str(tmp_path), **extra, **base
             )
@@ -625,7 +690,12 @@ def test_multi_lora_is_ordinary_route_only_and_needs_lora_dir(tmp_path):
                 "tiny", max_loras=bad, lora_root=str(tmp_path), mtp=False, **base
             )
     ServingEngine.validate_arguments(
-        "tiny", max_loras=2, lora_root=str(tmp_path), mtp=False, **base
+        "tiny",
+        max_loras=2,
+        lora_root=str(tmp_path),
+        mtp=False,
+        execution_policy={"varlen_dense_mlp": {"enabled": False}},
+        **base,
     )
 
 

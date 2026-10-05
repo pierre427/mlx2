@@ -39,6 +39,69 @@ from .runtime.apc_numerics import moe_rhs_pad_identity as _moe_rhs_pad_identity
 
 log = logging.getLogger(__name__)
 
+_MOE_NAX_GATHER_MODULE = "mlx2.runtime.models.moe_nax_gather"
+_SWITCH_LAYERS_MODULE = "mlx2.runtime.models.switch_layers"
+_GATED_DELTA_MODULE = "mlx2.runtime.models.gated_delta"
+
+
+def _moe_nax_gather_mode() -> str:
+    """The NAX MoE gather mode in force (the module's, else the environment)."""
+    import sys
+
+    module = sys.modules.get(_MOE_NAX_GATHER_MODULE)
+    if module is not None:
+        return str(module.MODE)
+    return (os.environ.get("MLX2_MOE_NAX_GATHER", "off") or "off").strip().lower()
+
+
+def _moe_nax_gather_setting(environment) -> dict:
+    """Route identity of a NAX gather selection the adapter profile omits.
+
+    Flash-Next pins ``MLX2_MOE_NAX_GATHER`` in its profile.  Other adapters
+    (Qwen3.6) inherit the process value, which then ran behind a receipt that
+    did not name it (options-sweep-qwen36-20261002 bug 3).  Absent while off,
+    so default receipts are unchanged.
+    """
+    if "MLX2_MOE_NAX_GATHER" in (environment or {}):
+        return {}
+    mode = _moe_nax_gather_mode()
+    return {} if mode == "off" else {"moe_nax_gather": mode}
+
+
+def _execution_diagnostics(adapter) -> dict:
+    """``adapter.diagnostics()`` plus process-wide engagement counters the
+    adapter does not report itself, so the qualifier can observe a selected
+    mechanism on every model (NAX MoE gather, sorted-MoE pad choice, MLX's
+    GDN core).  Each is added only while selected or used, so default status
+    snapshots are unchanged."""
+    import sys
+
+    execution = adapter.diagnostics()
+    if not isinstance(execution, dict):
+        return execution
+    nax = sys.modules.get(_MOE_NAX_GATHER_MODULE)
+    if (
+        "moe_nax_gather" not in execution
+        and nax is not None
+        and (nax.MODE != "off" or any(nax.calls.values()))
+    ):
+        execution["moe_nax_gather"] = nax.status()
+    switch = sys.modules.get(_SWITCH_LAYERS_MODULE)
+    if "moe_pad" not in execution and switch is not None:
+        pad = switch.moe_pad_status()
+        if pad["policy"] != "floor":
+            execution["moe_pad"] = pad
+    gdn = sys.modules.get(_GATED_DELTA_MODULE)
+    if (
+        "gdn_core" not in execution
+        and gdn is not None
+        and hasattr(gdn, "gdn_core_status")
+    ):
+        core = gdn.gdn_core_status()
+        if core["enabled"] or core["calls"]:
+            execution["gdn_core"] = core
+    return execution
+
 
 def validated_adapter_prefill_inputs(adapter, request, remaining_tokens, prefill_input):
     """Let an adapter attest CPU token/media alignment before array conversion.
@@ -132,10 +195,27 @@ class IdleAdmissionCoalescer:
 
     initial_seconds: float
     deadline: float | None = None
+    mechanism: str = "ordinary"
+    target_lanes: int = 1
+    attached: list = field(default_factory=list)
+    started_at: float | None = None
 
-    def note_attachment(self, *, now: float) -> None:
+    def select(
+        self, *, seconds: float, mechanism: str, target_lanes: int
+    ) -> None:
+        """Select a wider idle-only window before the first lane attaches."""
+        if self.deadline is not None or self.attached:
+            raise RuntimeError("admission cohort policy selected after attachment")
+        self.initial_seconds = seconds
+        self.mechanism = mechanism
+        self.target_lanes = target_lanes
+
+    def note_attachment(self, *, now: float, job=None) -> None:
         if self.deadline is None:
+            self.started_at = now
             self.deadline = now + self.initial_seconds
+        if job is not None:
+            self.attached.append(job)
 
     def timeout(self, *, now: float, idle: bool, deferred: bool) -> float:
         if self.deadline is not None:
@@ -143,6 +223,160 @@ class IdleAdmissionCoalescer:
         if idle:
             return 0.01 if deferred else 0.05
         return 0.0
+
+
+def defer_expired_ingress_follower(
+    coalescer,
+    job,
+    pending,
+    *,
+    now: float,
+    admission_timeout: float,
+) -> bool:
+    """Retain a prepared follower when its ingress window has expired.
+
+    Dequeue, prompt rendering, APC lookup, and admission can each outlive the
+    remaining wait.  The dequeued request is still valid work: move it to the
+    ordinary pending path instead of attaching it late or dropping it.
+    """
+    expired = (
+        coalescer.mechanism != "ordinary"
+        and bool(coalescer.attached)
+        and coalescer.deadline is not None
+        and now >= coalescer.deadline
+    )
+    if not expired:
+        return False
+    if not job.admission_deadline:
+        # The first guard runs before ordinary admission initializes this
+        # field.  Preserve the full memory-admission window on the deferred
+        # path instead of making its next sweep look already expired.
+        job.admission_deadline = now + admission_timeout
+    job.admission_retry_at = now
+    job.admission_defer_reason = "ingress_cohort_deadline"
+    pending.appendleft(job)
+    return True
+
+
+def ingress_cohort_execution(prompts, cohort_uids, *, target_lanes: int) -> dict:
+    """Summarize physical packed-prefill evidence for one admission cohort."""
+    cohort_uids = set(cohort_uids)
+    physical_widths = {
+        response.uid: response.external_prefill_width
+        for response in prompts
+        if response.uid in cohort_uids
+        and type(getattr(response, "external_prefill_width", None)) is int
+        and response.external_prefill_width > 1
+    }
+    observed_uids = frozenset(physical_widths)
+    execution_width = max(physical_widths.values(), default=0)
+    observed = execution_width > 1
+    target_reached = (
+        observed
+        and execution_width >= target_lanes
+        and len(observed_uids) >= target_lanes
+    )
+    return {
+        "observed_used": observed,
+        "observed_uids": observed_uids,
+        "observed_lanes": len(observed_uids),
+        "execution_width": execution_width,
+        "target_reached": target_reached,
+    }
+
+
+def bind_ingress_cohort_observation(jobs, receipt) -> dict:
+    """Give one formed ingress cohort durable, non-public observation state."""
+    jobs = tuple(jobs)
+    state = {
+        "member_uids": frozenset(job.uid for job in jobs),
+        "observed_uids": set(),
+        "observed_used": False,
+        "target_reached": False,
+        "target_lanes": int(receipt["target_lanes"]),
+        "jobs": jobs,
+    }
+    for job in jobs:
+        job.ingress_cohort_observation = state
+        job.ingress_cohort_receipt = dict(
+            receipt, member_observed_used=False
+        )
+    return state
+
+
+def reconcile_ingress_cohort_prompts(prompts, active, counts) -> None:
+    """Reconcile every physical packed slab, including later fitted subsets.
+
+    A formed B4 can execute as B2 then B2 when the external executor's memory
+    fit admits only two rows at a time.  Cohort state therefore lives on its
+    jobs rather than on one worker poll.  Counters count unique cohort members
+    and transition once per formed cohort; request receipts describe the
+    physical slab their own member actually entered.
+    """
+    grouped = {}
+    for response in prompts:
+        job = active.get(response.uid)
+        state = getattr(job, "ingress_cohort_observation", None)
+        if state is None:
+            continue
+        grouped.setdefault(id(state), (state, []))[1].append(response)
+
+    for state, cohort_prompts in grouped.values():
+        execution = ingress_cohort_execution(
+            cohort_prompts,
+            state["member_uids"],
+            target_lanes=state["target_lanes"],
+        )
+        if not execution["observed_used"]:
+            continue
+        newly_observed = execution["observed_uids"] - state["observed_uids"]
+        if not state["observed_used"]:
+            counts["ingress_cohort_observed_used"] += 1
+            state["observed_used"] = True
+        counts["ingress_cohort_executed_lanes"] += len(newly_observed)
+        state["observed_uids"].update(newly_observed)
+        if execution["target_reached"] and not state["target_reached"]:
+            counts["ingress_cohort_target_reached"] += 1
+            state["target_reached"] = True
+        counts["ingress_cohort_max_execution_width"] = max(
+            counts["ingress_cohort_max_execution_width"],
+            execution["execution_width"],
+        )
+
+        widths = {
+            response.uid: response.external_prefill_width
+            for response in cohort_prompts
+            if response.uid in execution["observed_uids"]
+        }
+        width_counts = Counter(widths.values())
+        jobs_by_uid = {job.uid: job for job in state["jobs"]}
+        for uid, width in widths.items():
+            job = jobs_by_uid.get(uid)
+            if job is None or job.ingress_cohort_receipt is None:
+                continue
+            # If two B2 slabs are reported in one poll, four progress rows can
+            # carry width=2.  Clamp to the physical width instead of turning
+            # that into a fictitious four-lane execution.
+            observed_lanes = min(width, width_counts[width])
+            previous = job.ingress_cohort_receipt
+            job.ingress_cohort_receipt = dict(
+                previous,
+                observed_used=True,
+                observed_lanes=max(
+                    int(previous.get("observed_lanes", 0)), observed_lanes
+                ),
+                execution_width=max(
+                    int(previous.get("execution_width", 0)), width
+                ),
+                target_reached=(
+                    bool(previous.get("target_reached", False))
+                    or (
+                        width >= state["target_lanes"]
+                        and observed_lanes >= state["target_lanes"]
+                    )
+                ),
+                member_observed_used=True,
+            )
 
 
 def coalescing_window(initial_ms=5.0):
@@ -156,6 +390,53 @@ def coalescing_window(initial_ms=5.0):
     if not math.isfinite(initial_ms) or initial_ms < 0:
         raise ValueError("coalescing window must be finite and nonnegative")
     return initial_ms / 1000.0
+
+
+def ingress_cohort_policy(value, *, max_lanes: int) -> dict:
+    """Validate an adapter-declared, idle-only ingress cohort policy."""
+    defaults = {
+        "enabled": False,
+        "mechanism": None,
+        "maximum_wait_ms": 0,
+        "minimum_prompt_tokens": 1,
+        "target_lanes": max_lanes,
+    }
+    if value is None or value is False:
+        return defaults
+    if not isinstance(value, dict):
+        raise TypeError("ingress_cohort must be an object or false")
+    unknown = set(value) - {
+        "enabled", "mechanism", "maximum_wait_ms",
+        "minimum_prompt_tokens", "target_lanes",
+    }
+    if unknown:
+        raise ValueError(f"ingress_cohort has unknown keys: {sorted(unknown)}")
+    enabled = value.get("enabled", True)
+    if type(enabled) is not bool:
+        raise ValueError("ingress_cohort.enabled must be boolean")
+    wait_ms = value.get("maximum_wait_ms", 0)
+    minimum = value.get("minimum_prompt_tokens", 1)
+    target = value.get("target_lanes", max_lanes)
+    mechanism = value.get("mechanism")
+    if type(wait_ms) is not int or not 0 <= wait_ms <= 1000:
+        raise ValueError(
+            "ingress_cohort.maximum_wait_ms must be an integer from 0 to 1000"
+        )
+    if type(minimum) is not int or minimum < 1:
+        raise ValueError("ingress_cohort.minimum_prompt_tokens must be a positive integer")
+    if type(target) is not int or not 2 <= target <= max_lanes:
+        raise ValueError("ingress_cohort.target_lanes must be between 2 and max_lanes")
+    if enabled and (not wait_ms or not isinstance(mechanism, str) or not mechanism):
+        raise ValueError(
+            "enabled ingress_cohort requires a positive wait and named mechanism"
+        )
+    return {
+        "enabled": enabled,
+        "mechanism": mechanism,
+        "maximum_wait_ms": wait_ms,
+        "minimum_prompt_tokens": minimum,
+        "target_lanes": target,
+    }
 
 
 def cache_capsule_policy(value) -> dict:
@@ -303,12 +584,22 @@ def host_memory_signals_policy(value) -> dict:
         return defaults
     if not isinstance(value, dict):
         raise ValueError("host_memory_signals must be an object")
-    unknown = set(value) - set(defaults)
+    unknown = set(value) - set(defaults) - {"minimum_host_available_gib"}
     if unknown:
         raise ValueError(f"unknown host memory signal settings: {sorted(unknown)}")
     policy = {**defaults, **value}
     if type(policy["enabled"]) is not bool:
         raise ValueError("host_memory_signals.enabled must be boolean")
+    floor = policy.get("minimum_host_available_gib", 0.0)
+    if (isinstance(floor, bool) or not isinstance(floor, (int, float))
+            or not math.isfinite(floor) or floor < 0):
+        raise ValueError(
+            "host_memory_signals.minimum_host_available_gib must be nonnegative"
+        )
+    if floor and not policy["enabled"]:
+        raise ValueError(
+            "host_memory_signals.minimum_host_available_gib requires enabled=true"
+        )
     fall = policy["fall_after_seconds"]
     if (
         isinstance(fall, bool)
@@ -319,7 +610,10 @@ def host_memory_signals_policy(value) -> dict:
         raise ValueError(
             "host_memory_signals.fall_after_seconds must be a number from 0 to 600"
         )
-    return {"enabled": policy["enabled"], "fall_after_seconds": float(fall)}
+    result = {"enabled": policy["enabled"], "fall_after_seconds": float(fall)}
+    if floor:
+        result["minimum_host_available_gib"] = float(floor)
+    return result
 
 
 def moe_expert_streaming_policy(value) -> dict:
@@ -626,6 +920,13 @@ class HostPromptCache:
             "batch_cohort",
             "mlx_fault",
             "skip_writing_prefix_cache",
+            "paged_native_qwen3",
+            "paged_native_qwen3_b2",
+            "paged_native_hybrid_b2",
+            "paged_native_hybrid_packed_prefill",
+            "paged_native_packed_n20_research",
+            "native_research_input_id",
+            "native_research_inputs_sha256",
             "verify_bitexact",
             "session_id",
             "return_progress",
@@ -978,6 +1279,7 @@ def multi_lora_policy(
     int8_prefill,
     approximate_kv,
     cache_capsules,
+    varlen_mlp,
 ):
     """Validate concurrent multi-LoRA settings; None when the lever is off.
 
@@ -1002,6 +1304,7 @@ def multi_lora_policy(
         (int8_prefill, "int8 prefill"),
         (approximate_kv, "approximate KV"),
         (cache_capsules, "cache capsules"),
+        (varlen_mlp, "varlen MLP compaction"),
     ):
         if enabled:
             raise ValueError(
@@ -1009,6 +1312,22 @@ def multi_lora_policy(
                 f"incompatible with {name}"
             )
     return {"max_loras": max_loras, "max_lora_rank": max_lora_rank}
+
+
+def optional_policy_enabled(value) -> bool:
+    """Return whether a boolean-or-object execution policy selects a route.
+
+    Policy objects conventionally default to enabled when present.  Treat an
+    explicit ``enabled: false`` as off so compatibility checks do not reject a
+    configured-but-disabled candidate.
+    """
+    if value is None or value is False:
+        return False
+    if isinstance(value, dict):
+        return value.get("enabled", True) is True
+    return value is True
+
+
 def verify_bitexact_status(engine):
     """Host-only bit-exact verify status (mode, route counter, request counts)."""
     from .runtime.verify_bitexact import engine_status
@@ -1752,6 +2071,542 @@ _greedy_batch_sampler.batch_groupable = True
 _GREEDY_BATCH_SAMPLER = _greedy_batch_sampler
 
 
+# Admission failures may occur after a native command was submitted. Keep
+# those owners process-reachable until terminal retirement is proved.
+_NATIVE_ADMISSION_ORPHANS = []
+
+
+def _reap_native_admission_orphans():
+    from .runtime.paged_native_retirement import reap_native_request_owner
+    from .runtime.qwen35_paged_graph_factory import reap_hybrid_admission_orphans
+
+    reap_hybrid_admission_orphans()
+    for owner, writer, backend in tuple(_NATIVE_ADMISSION_ORPHANS):
+        try:
+            reap_native_request_owner(owner, writer, backend)
+            if getattr(owner, "fully_retired", False):
+                _NATIVE_ADMISSION_ORPHANS.remove((owner, writer, backend))
+        except Exception:
+            # A failed retirement is still an owner, not disposable state.
+            pass
+
+
+def preverify_explicit_native_qwen3_price_identity(adapter):
+    """Move the expensive, explicit native byte attestation before HTTP readiness."""
+    configured = tuple(os.environ.get(key) for key in (
+        "MLX2_NATIVE_PAGED_PRICE", "MLX2_NATIVE_PAGED_MANIFEST",
+        "MLX2_NATIVE_PAGED_MLX_WHEEL"))
+    if (not all(configured) or not callable(getattr(
+            adapter, "create_native_paged_qwen3_request", None))):
+        return None
+    from pathlib import Path
+    import _paged_kv_native
+    from .runtime.paged_price_identity import cached_live_price_identity
+
+    return cached_live_price_identity(
+        configured[1], configured[2], Path(_paged_kv_native.__file__).resolve(),
+        adapter_artifact_root=Path(adapter.identity["path"]).resolve())
+
+
+def install_explicit_native_qwen3_request(
+    batch, adapter, job, *, prompt_tokens, maximum, lifecycle_lock,
+    price_path, manifest_path, mlx_wheel_path, cached_tokens=0, apc_cache=None,
+):
+    """Admit one explicit native lane with exact live price identity.
+
+    A warm hit is copied from APCv2 into a fresh native owner before the
+    private suffix probe. Native-to-APCv2 publication remains unavailable.
+    """
+    if (job.preempted or
+            job.request.get("skip_writing_prefix_cache") is not True or
+            job.request.get("paged_native_qwen3") is not True):
+        raise ValueError("native paged Qwen3 requires an explicit no-write request")
+    if not all((price_path, manifest_path, mlx_wheel_path)):
+        raise ValueError("native paged Qwen3 requires pinned price/source paths")
+    _reap_native_admission_orphans()
+    if (type(prompt_tokens) is not list or not prompt_tokens or type(maximum) is not int or
+            type(cached_tokens) is not int or cached_tokens < 0 or
+            cached_tokens >= len(prompt_tokens) or
+            bool(cached_tokens) != (apc_cache is not None) or
+            int(job.cached_tokens) != cached_tokens):
+        raise ValueError("native paged Qwen3 requires a nonempty token prompt")
+    suffix_rows = len(prompt_tokens) - cached_tokens
+    from pathlib import Path
+    try:
+        import _paged_kv_native
+    except ImportError as exc:
+        raise ValueError("native paged Qwen3 kernel is unavailable") from exc
+
+    from .runtime.paged_native_batch_lifecycle import (
+        prepare_queued_native_first_response, probe_queued_native_qwen3,
+    )
+    from .runtime.paged_pack_price import (
+        ResearchCalibratedPrice, ResearchWarmCalibratedPrice, load_price,
+        load_research_calibration, load_research_warm_calibration,
+    )
+    from .runtime.paged_pack_scheduler import PrefillOffer, PrefillOption
+    from .runtime.paged_price_identity import cached_live_price_identity
+    from .runtime.paged_request_route import RouteCapability
+    from .runtime.paged_request_transaction import CandidateRequest
+    create = getattr(adapter, "create_native_paged_qwen3_request", None)
+    if not callable(create):
+        raise ValueError("adapter has no native paged Qwen3 capability")
+    identity = cached_live_price_identity(
+        Path(manifest_path), Path(mlx_wheel_path),
+        Path(_paged_kv_native.__file__).resolve(),
+        adapter_artifact_root=Path(adapter.identity["path"]).resolve(),
+    )
+    import json
+    price_scope = json.loads(Path(price_path).read_text()).get("measurement_scope")
+    if price_scope in ("research_live_request_calibration",
+                       "research_live_warm_request_calibration"):
+        # The bootstrap price is only a conservative bound for the one
+        # measured cold 63-token prompt and its single q=1 continuation.
+        # It has its own validation token and never becomes MeasuredPackPrice.
+        if price_scope == "research_live_request_calibration":
+            if cached_tokens or len(prompt_tokens) != 63 or maximum != 2:
+                raise ValueError("research calibration admits only cold context63 B1 with two tokens")
+        elif (cached_tokens != 63 or len(prompt_tokens) != 64 or suffix_rows != 1 or
+              apc_cache is None or maximum != 2):
+            raise ValueError("warm research calibration requires exact APCv2-63 plus suffix-1")
+        if (job.request.get("temperature") != 0 or
+                job.request.get("top_p", 1) != 1 or
+                job.request.get("top_k", 0) != 0 or
+                job.request.get("min_p", 0) != 0 or
+                any(job.request.get(key) not in (None, False, 0, (), []) for key in
+                    ("grammar", "response_format", "logit_bias", "stop",
+                     "repetition_penalty", "presence_penalty", "frequency_penalty"))):
+            raise ValueError("research calibration requires exact greedy sampling without processors")
+        if price_scope == "research_live_request_calibration":
+            price = load_research_calibration(
+                price_path, live_identity=identity, context_tokens=(63,))
+        else:
+            price = load_research_warm_calibration(
+                price_path, live_identity=identity, context_tokens=(64,))
+    else:
+        price = load_price(price_path, live_identity=identity,
+                           context_tokens=(len(prompt_tokens),))
+    revision = adapter.identity["fingerprint"]
+    owner, candidate = create(
+        revision=revision, prompt_tokens=len(prompt_tokens),
+        max_tokens=maximum, apc_cache=apc_cache,
+        cached_tokens=cached_tokens, permit_candidate=True)
+    installed = False
+    try:
+        uid = job.uid
+        offer = PrefillOffer(uid, (PrefillOption(suffix_rows, 0),))
+        probe = probe_queued_native_qwen3(
+            batch, lifecycle_lock,
+            CandidateRequest(uid, revision, suffix_rows, ("kv",)),
+            owner, candidate,
+            RouteCapability(True, False, ("kv",), price.profile_id),
+            (), (offer,), price=price, live_identity=identity,
+            context_tokens=(len(prompt_tokens),), row_capacity=suffix_rows,
+            free_pages=candidate.backend.writer.pool.free_count,
+            permit_native_probe=True, cancelled=job.cancelled.is_set,
+            permit_research_calibration=type(price) in (
+                ResearchCalibratedPrice, ResearchWarmCalibratedPrice),
+        )
+        if not probe.native_probe or not probe.native_probe.published:
+            raise ValueError(f"native paged Qwen3 refused: {probe.reason}")
+        prepared = prepare_queued_native_first_response(
+            batch, lifecycle_lock, owner, probe, cancelled=job.cancelled.is_set)
+        result = batch.install_native_queued(
+            prepared, owner, candidate, lifecycle_lock,
+            permit_native=True, cancelled=job.cancelled.is_set,
+            price_provenance=("research_calibrated" if type(price) in (
+                ResearchCalibratedPrice, ResearchWarmCalibratedPrice)
+                              else "measured_complete_request"),
+            price_evidence_sha256=(price.evidence_sha256 if type(price) in (
+                ResearchCalibratedPrice, ResearchWarmCalibratedPrice)
+                                   else price.complete_request_evidence_sha256))
+        if not result["selected"]:
+            raise ValueError(f"native paged Qwen3 handoff refused: {result['reason']}")
+        installed = True
+        result["price_provenance"] = (
+            "research_calibrated" if type(price) in (
+                ResearchCalibratedPrice, ResearchWarmCalibratedPrice)
+            else "measured_complete_request")
+        result["price_evidence_sha256"] = (
+            price.evidence_sha256 if type(price) in (
+                ResearchCalibratedPrice, ResearchWarmCalibratedPrice)
+            else price.complete_request_evidence_sha256)
+        return result
+    finally:
+        if not installed:
+            # The native submission may still be in flight if admission
+            # failed. Retain the owner before close, even if close raises.
+            writer = candidate.backend.writer
+            backend = candidate.backend
+            _NATIVE_ADMISSION_ORPHANS.append((owner, writer, backend))
+            owner.close()
+            from .runtime.paged_native_retirement import reap_native_request_owner
+
+            reap_native_request_owner(owner, writer, backend)
+            if getattr(owner, "fully_retired", False):
+                _NATIVE_ADMISSION_ORPHANS.remove((owner, writer, backend))
+
+
+def _native_b2_requested(job):
+    n_selected=job.request.get("paged_native_packed_n20_research",False)
+    if type(n_selected) is not bool:raise ValueError("nativeN20 selector must be boolean")
+    return (n_selected or job.request.get("paged_native_qwen3_b2") is True or
+            job.request.get("paged_native_hybrid_b2") is True)
+
+
+
+def adapter_shared_cohort_admission(adapter,jobs,*,profile_path,manifest_path,mlx_wheel_path):
+    """Return a complete source-bound adapter cost before any tensor allocation."""
+    hook=getattr(adapter,'native_cohort_memory_admission',None)
+    if type(jobs) is not tuple or not 1<=len(jobs)<=20 or not callable(hook) or not all((profile_path,manifest_path,mlx_wheel_path)):
+        raise ValueError('complete adapter shared-cohort admission capability required')
+    if len({(job.tenant_id,job.request.get('batch_cohort',{}).get('id')) for job in jobs})!=1 or any(job.cancelled.is_set() or job.preempted or job.request.get('batch_cohort',{}).get('size')!=len(jobs) or job.request.get('skip_writing_prefix_cache') is not True or job.native_b2_cached_tokens!=0 or getattr(job,'lora_name',None) is not None or getattr(job,'lora_slot',None) is not None or any(job.request.get(k) is not None for k in ('_mlx2_prefill_inputs','_mlx2_neural_concepts','_mlx2_lora_fingerprint')) for job in jobs):
+        raise ValueError('shared adapter admission requires one complete cold closed cohort')
+    requests=tuple((job.request.get('native_research_input_id'),tuple(job.admission_tokens if job.admission_tokens is not None else job.native_b2_prompt),job.effective_max_tokens) for job in jobs)
+    from .runtime.paged_cohort_memory import validate_shared_cohort_bound
+    existing=getattr(jobs[0],'native_cohort_memory_receipt',None)
+    if existing is not None:
+        if any(getattr(job,'native_cohort_memory_receipt',None) is not existing for job in jobs):raise ValueError('shared cohort memory receipt ownership drifted')
+        return validate_shared_cohort_bound(existing,requests)
+    bound=hook(requests,profile_path=profile_path,manifest_path=manifest_path,mlx_wheel_path=mlx_wheel_path,permit_candidate=True)
+    validate_shared_cohort_bound(bound,requests)
+    for job in jobs:job.native_cohort_memory_receipt=bound
+    return bound
+
+def _hybrid_output_caps_match(jobs, profile):
+    return all(type(job.effective_max_tokens) is int and
+               1 <= job.effective_max_tokens <= profile["max_tokens"] for job in jobs)
+
+
+def install_explicit_native_hybrid_b2_cohort(
+    batch, adapter, jobs, *, lifecycle_lock, profile_path, manifest_path, mlx_wheel_path,
+):
+    """Select an adapter-owned hybrid graph only through a pinned explicit permit."""
+    from .runtime.paged_packed_prefill_serving_profile import validate_request
+    packed_flags=tuple(validate_request(job.request) for job in jobs)
+    if len(set(packed_flags))!=1:raise ValueError("hybrid cohort prefill selection differs")
+    packed=bool(packed_flags and packed_flags[0])
+    factory_name="create_native_packed_prefill_b2" if packed else "create_native_paged_hybrid_b2"
+    if (type(jobs) is not tuple or len(jobs) != 2 or
+            not callable(getattr(adapter, factory_name, None)) or
+            not all(job.request.get("paged_native_hybrid_b2") is True and
+                job.request.get("paged_native_qwen3_b2") is not True and
+                job.request.get("paged_native_qwen3") is not True and
+                job.request.get("skip_writing_prefix_cache") is True and
+                isinstance(job.request.get("batch_cohort"), dict) and
+                job.request["batch_cohort"].get("size") == 2 and
+                not job.preempted and not job.cancelled.is_set() and
+                job.uid is not None and job.native_b2_cached_tokens == 0 for job in jobs)):
+        raise ValueError("hybrid native B2 requires one explicit live cold cohort and adapter capability")
+    if (jobs[0].tenant_id != jobs[1].tenant_id or
+            jobs[0].request["batch_cohort"]["id"] != jobs[1].request["batch_cohort"]["id"]):
+        raise ValueError("hybrid native B2 cohort identity differs")
+    for job in jobs:
+        request = job.request; sampling = job.effective_sampling or {}
+        if (request.get("temperature") != 0 or sampling.get("temperature") != 0 or
+                sampling.get("repetition_penalty") != 1 or sampling.get("presence_penalty") != 0 or
+                sampling.get("frequency_penalty") != 0 or request.get("sampling_profile") is not None or
+                request.get("min_tokens",0) != 0 or request.get("tools") or request.get("tool_choice") or
+                request.get("thinking_budget") or request.get("thinking_steer_alpha") or
+                job.thinking_guard is not None or job.structured is not None or
+                request.get("repetition_penalty",1) != 1 or
+                any(request.get(key) not in (None,False,0,(),[]) for key in
+                    ("grammar","response_format","logit_bias","stop","presence_penalty","frequency_penalty"))):
+            raise ValueError("hybrid native B2 requires exact greedy sampling without processors")
+        found = batch._find_uids((job.uid,)).get(job.uid)
+        if found is None or found[0] != 0 or batch._unprocessed_sequences[found[1]][6]:
+            raise ValueError("hybrid native B2 requires a pristine queued lane")
+    if not all((profile_path,manifest_path,mlx_wheel_path)):
+        raise ValueError("hybrid native B2 requires pinned profile/source/wheel paths")
+    from pathlib import Path
+    import _paged_kv_native
+    from .runtime.paged_price_identity import cached_live_price_identity
+    from .runtime.paged_hybrid_research_profile import load_hybrid_research_profile
+    identity = cached_live_price_identity(Path(manifest_path),Path(mlx_wheel_path),
+        Path(_paged_kv_native.__file__).resolve(),
+        adapter_artifact_root=Path(adapter.identity["path"]).resolve())
+    counts=tuple(len(job.native_b2_prompt) for job in jobs)
+    if packed:
+        from .runtime.paged_packed_prefill_serving_profile import load_profile, factory_profile
+        profile=load_profile(profile_path,live_identity=identity,context_lengths=counts,environment=os.environ)
+        cold_profile=factory_profile(profile,counts)
+    else:
+        profile = load_hybrid_research_profile(profile_path,live_identity=identity,
+            context_lengths=counts,environment=os.environ)
+        cold_profile=profile
+    if packed and any(job.request.get('paged_native_long_cap20_research',False) is not profile.get('research_output_cap20',False) for job in jobs):
+        raise ValueError('request/profile long cap20 research selection differs')
+    if not _hybrid_output_caps_match(jobs, profile):
+        raise ValueError("hybrid native output length exceeds profile bound")
+    cancelled = lambda:any(job.cancelled.is_set() for job in jobs)
+    # Bootstrap remains private. The generator takes lifecycle_lock once when
+    # it atomically replaces both queued lanes; engine.lock is nonreentrant.
+    owners,candidate,bootstrap = getattr(adapter,factory_name)(
+        tuple((job.uid,adapter.identity["fingerprint"],job.native_b2_prompt,
+               job.effective_max_tokens) for job in jobs),profile=cold_profile,
+        **({"live_identity":identity} if packed else {}),
+        permit_candidate=True,cancelled=cancelled)
+    installed = False
+    try:
+        candidate._b2_profile_id = profile["profile_id"]
+        if packed:
+            candidate._packed_prefill_receipt['serving_numerical_reference']=profile['numerical_reference']
+        receipts = batch.install_native_hybrid_cohort(owners,candidate,bootstrap,lifecycle_lock,
+            permit_native=True,cancelled=cancelled)
+        installed = True
+        for job,result in zip(jobs,receipts):
+            job.native_paged_receipt = {**result,"admission_profile":profile["profile_id"],
+                "storage_dtype":profile["storage_dtype"],"numerical_policy":"same-"+profile["storage_dtype"],
+                "stock_reduction":profile.get("stock_reduction",False),
+                "survivor_q1_stripes":profile["q1_simd_stripes"],
+                **({"packed_prefill_selected":True,"prefill_numerical_reference":profile["numerical_reference"]} if packed else {})}
+        if cancelled(): raise ValueError("hybrid cohort cancelled during attachment")
+        return tuple(job.native_paged_receipt for job in jobs)
+    except BaseException:
+        # Cleanup failures must retain the complete private bootstrap and its
+        # charge, and must not replace the original attachment failure.
+        resources = candidate._serving_resources
+        try:
+            if installed: batch.remove(tuple(job.uid for job in jobs))
+        except BaseException as cleanup_error:
+            resources.retirement_failures.append({"stage":"batch_remove",
+                "error":f"{type(cleanup_error).__name__}: {cleanup_error}"})
+        try:
+            resources.abort()
+        except BaseException:
+            # abort registers before any fallible close; idle reaping retries.
+            pass
+        raise
+
+
+
+def record_native_bootstrap_progress(jobs,lifecycle_lock,*,clock=time.monotonic):
+    """Advance only after complete successful atomic native attachment."""
+    with lifecycle_lock:
+        if any(job.cancelled.is_set() for job in jobs):raise ValueError('native cohort cancelled before bootstrap progress publication')
+        tick=clock()
+        for job in jobs:job.last_progress=tick
+    return tick
+
+
+def install_explicit_native_hybrid_n_cohort(batch,adapter,jobs,*,lifecycle_lock,profile_path,manifest_path,mlx_wheel_path):
+    """Explicit genericN closed cohort through adapter capability and bound inputs."""
+    if type(jobs) is not tuple or not 1<=len(jobs)<=20 or not callable(getattr(adapter,"create_native_packed_prefill_n",None)) or not all((profile_path,manifest_path,mlx_wheel_path)):
+        raise ValueError("complete nativeN20 adapter/profile cohort required")
+    from .runtime.paged_n20_request import validate_ready_job,validate_ordinary_processors
+    for job in jobs:
+        sampling=validate_ready_job(job,len(jobs))
+        found=batch._find_uids((job.uid,)).get(job.uid)
+        if found is None or found[0]!=0:raise ValueError('nativeN20 queued-lane refusal: queued_uid')
+        sequence=batch._unprocessed_sequences[found[1]]
+        validate_ordinary_processors(sequence[6],sampling,len(job.native_b2_prompt))
+    if len({(job.tenant_id,job.request["batch_cohort"]["id"]) for job in jobs})!=1:raise ValueError("nativeN20 cohort identity differs")
+    from pathlib import Path
+    import _paged_kv_native
+    from .runtime.paged_price_identity import cached_live_price_identity
+    from .runtime.hybrid_packed_prefill_n import load_profile
+    identity=cached_live_price_identity(Path(manifest_path),Path(mlx_wheel_path),Path(_paged_kv_native.__file__).resolve(),adapter_artifact_root=Path(adapter.identity["path"]).resolve())
+    ids=tuple(job.request.get("native_research_input_id") for job in jobs);tokens=tuple(job.native_b2_prompt for job in jobs);counts=tuple(map(len,tokens))
+    profile=load_profile(profile_path,live_identity=identity,source_input_ids=ids,counts=counts,tokens=tokens,environment_values=os.environ)
+    if any(job.request.get("native_research_inputs_sha256")!=profile["inputs_sha256"] for job in jobs):raise ValueError("nativeN20 actualsuite input identity differs")
+    cancelled=lambda:any(job.cancelled.is_set() for job in jobs)
+    owners,candidate,bootstrap=adapter.create_native_packed_prefill_n(tuple((job.uid,adapter.identity["fingerprint"],job.native_b2_prompt,job.effective_max_tokens) for job in jobs),
+        profile=profile,live_identity=identity,source_input_ids=ids,permit_candidate=True,cancelled=cancelled,phase_boundary=getattr(adapter,"_native_n20_phase_boundary",None))
+    installed=False
+    try:
+        candidate._serving_sampling_by_uid={job.uid:dict(job.effective_sampling) for job in jobs}
+        candidate._b2_profile_id=profile["profile_id"]
+        candidate._packed_prefill_receipt["serving_numerical_reference"]="same_geometry_ordinary_mixed"
+        receipts=batch.install_native_hybrid_n_cohort(owners,candidate,bootstrap,lifecycle_lock,permit_native=True,cancelled=cancelled)
+        installed=True
+        for job,receipt in zip(jobs,receipts):job.native_paged_receipt={**receipt,"admission_profile":profile["profile_id"],"storage_dtype":"bfloat16","numerical_policy":"same-bfloat16","native_input_id":job.request["native_research_input_id"]}
+        if cancelled():raise ValueError("nativeN20 cancelled during attachment")
+        # The fully evaluated private bootstrap and atomic attachment are real
+        # progress. Their elapsed compute/operator pauses must not age the
+        # pre-bootstrap admission timestamp into a memory-stall failure.
+        record_native_bootstrap_progress(jobs,lifecycle_lock)
+        return tuple(job.native_paged_receipt for job in jobs)
+    except BaseException:
+        resources=candidate._serving_resources
+        try:
+            if installed:batch.remove(tuple(job.uid for job in jobs))
+        except BaseException as error:resources.retirement_failures.append({"stage":"batch_remove","error":repr(error)})
+        try:resources.abort()
+        except BaseException:pass
+        raise
+
+
+def install_explicit_native_qwen3_b2_cohort(
+    batch, adapter, jobs, *, lifecycle_lock, profile_path, manifest_path,
+    mlx_wheel_path,
+):
+    """Install one narrowly admitted, shared-arena native cohort before decode.
+
+    The source-bound research profile permits this exact serving experiment;
+    it is not a measured price or qualification. Every rejected preflight runs
+    before the first native submission. The caller removes installed UIDs on
+    attachment failure while uninstalled owners remain here for retirement.
+    """
+    if type(jobs) is not tuple or len(jobs) != 2 or not all(
+        job.request.get("paged_native_qwen3_b2") is True and
+        job.request.get("skip_writing_prefix_cache") is True and
+        isinstance(job.request.get("batch_cohort"), dict) and
+        job.request["batch_cohort"].get("size") == 2 and
+        not job.preempted and not job.cancelled.is_set() and
+        job.uid is not None and job.native_b2_cached_tokens == 0
+        for job in jobs
+    ):
+        raise ValueError("native B2 requires a live cold declared two-request cohort")
+    if (jobs[0].tenant_id != jobs[1].tenant_id or
+            jobs[0].request["batch_cohort"]["id"] !=
+            jobs[1].request["batch_cohort"]["id"]):
+        raise ValueError("native B2 requires one cold two-request cohort")
+    context_lengths = tuple(len(job.native_b2_prompt) for job in jobs)
+    if (any(not 32 <= length <= 127 for length in context_lengths) or
+            context_lengths[0] == context_lengths[1]):
+        raise ValueError("native B2 requires distinct cold 32-127 token prompts")
+    for job in jobs:
+        request = job.request
+        sampling = job.effective_sampling or {}
+        if (request.get("temperature") != 0 or sampling.get("temperature") != 0 or
+                sampling.get("repetition_penalty") != 1 or
+                sampling.get("presence_penalty") != 0 or
+                sampling.get("frequency_penalty") != 0 or
+                request.get("sampling_profile") is not None or
+                request.get("min_tokens", 0) != 0 or
+                request.get("tools") or request.get("tool_choice") or
+                request.get("thinking_budget") or
+                request.get("thinking_steer_alpha") or
+                job.thinking_guard is not None or job.structured is not None or
+                request.get("repetition_penalty", 1) != 1 or
+                any(request.get(key) not in (None, False, 0, (), []) for key in
+                    ("grammar", "response_format", "logit_bias", "stop",
+                     "presence_penalty", "frequency_penalty"))):
+            raise ValueError("native B2 requires exact greedy sampling without processors")
+        found = batch._find_uids((job.uid,)).get(job.uid)
+        if found is None or found[0] != 0 or batch._unprocessed_sequences[found[1]][6]:
+            raise ValueError("native B2 requires a pristine queued lane without processors")
+    if not all((profile_path, manifest_path, mlx_wheel_path)):
+        raise ValueError("native B2 requires pinned profile/source/wheel paths")
+    if any(os.environ.get(key) != "1" for key in (
+        "MLX2_PAGED_Q1_SIMD_TILE", "MLX2_PAGED_GROUPED_Q1_WRITE",
+        "MLX2_PAGED_PRIVATE_TAIL_REUSE")):
+        raise ValueError("native B2 physical kernel flags are disabled")
+    from pathlib import Path
+    import _paged_kv_native
+    from .runtime.paged_b2_research_profile import (
+        DIRECT_FENCE_FLAG, PACKED_FLAG,
+        SCHEMA, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7,
+        SUSTAINED_FLAG, VECTOR_ROPE_FLAG,
+        load_b2_research_profile, validate_combined_environment)
+    from .runtime.paged_native_batch_lifecycle import (
+        prepare_queued_native_first_response, run_research_native_queued_qwen3,
+        run_research_native_queued_qwen3_b2_packed)
+    from .runtime.paged_price_identity import cached_live_price_identity
+    from .runtime.paged_request_transaction import CandidateRequest
+    from .runtime.qwen3_paged_graph_factory import create_shared_qwen3_graph_pack
+
+    identity = cached_live_price_identity(
+        Path(manifest_path), Path(mlx_wheel_path),
+        Path(_paged_kv_native.__file__).resolve(),
+        adapter_artifact_root=Path(adapter.identity["path"]).resolve())
+    profile = load_b2_research_profile(
+        profile_path, live_identity=identity, context_lengths=context_lengths)
+    combined = validate_combined_environment(profile, os.environ)
+    if profile["schema"] == SCHEMA and any(
+        (job.effective_sampling or {}).get(key) != value or
+        job.request.get(key, value) != value
+        for job in jobs for key, value in
+        (("top_p", 1), ("top_k", 0), ("min_p", 0))
+    ):
+        raise ValueError("native B2 v1 requires neutral sampling filters")
+    if any(job.effective_max_tokens != profile["max_tokens"] for job in jobs):
+        raise ValueError("native B2 output length differs from the pinned profile")
+    packed_prefill = profile["schema"] in (SCHEMA_V3, SCHEMA_V4, SCHEMA_V5,
+                                           SCHEMA_V6, SCHEMA_V7)
+    if packed_prefill and os.environ.get(PACKED_FLAG) != "1":
+        raise ValueError("native B2 packed prefill flag is disabled")
+    if profile["schema"] in (SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7) and os.environ.get(SUSTAINED_FLAG) != "1":
+        raise ValueError("native B2 sustained decode flag is disabled")
+    vector_q1_rope = profile["schema"] == SCHEMA_V5
+    if vector_q1_rope and os.environ.get(VECTOR_ROPE_FLAG) != "1":
+        raise ValueError("native B2 vector Q1 RoPE flag is disabled")
+    direct_grouped_fence = profile["schema"] in (SCHEMA_V6, SCHEMA_V7)
+    if direct_grouped_fence and os.environ.get(DIRECT_FENCE_FLAG) != "1":
+        raise ValueError("native B2 direct grouped fence flag is disabled")
+    revision = adapter.identity["fingerprint"]
+    _reap_native_admission_orphans()
+    owners, candidate = create_shared_qwen3_graph_pack(
+        adapter, tuple((revision, len(job.native_b2_prompt), profile["max_tokens"])
+                       for job in jobs),
+        permit_candidate=True, profile_host=True)
+    candidate._serving_b2 = True
+    candidate._b2_profile_id = profile["profile_id"]
+    candidate._b2_packed_prefill = packed_prefill
+    candidate._vector_q1_rope = vector_q1_rope
+    options = profile["combined_optimizations"] if combined else {}
+    candidate._defer_staged_q1_eval = options.get("deferred_eval", False)
+    candidate._defer_staged_q1_writes = options.get("deferred_write_eval", False)
+    candidate._b2_inline_metadata = options.get("inline_metadata", False)
+    candidate._b2_grouped_sampler = options.get("grouped_sampler", False)
+    candidate._b2_q1_stripes = profile["q1_simd_stripes"] if combined else 4
+    candidate._b2_stock_sdpa = options.get("stock_sdpa", False)
+    candidate.backend.direct_grouped_fence = direct_grouped_fence
+    installed = set()
+    try:
+        probes = (run_research_native_queued_qwen3_b2_packed(
+            batch, lifecycle_lock,
+            tuple(CandidateRequest(job.uid, revision, len(job.native_b2_prompt), ("kv",))
+                  for job in jobs), owners, candidate, research_permit=True,
+            cancelled=tuple(job.cancelled.is_set for job in jobs))
+            if packed_prefill else None)
+        for index, (job, owner) in enumerate(zip(jobs, owners)):
+            probe = (probes[index] if probes is not None else
+                     run_research_native_queued_qwen3(
+                         batch, lifecycle_lock,
+                         CandidateRequest(job.uid, revision, len(job.native_b2_prompt), ("kv",)),
+                         owner, candidate, research_permit=True,
+                         cancelled=job.cancelled.is_set))
+            if probe.reason != "research_executed" or not probe.research_executed:
+                raise ValueError(f"native B2 prompt refused: {probe.reason}")
+            prepared = prepare_queued_native_first_response(
+                batch, lifecycle_lock, owner, probe, cancelled=job.cancelled.is_set)
+            result = batch.install_native_queued(
+                prepared, owner, candidate, lifecycle_lock,
+                permit_native=True, cancelled=job.cancelled.is_set)
+            if result.get("reason") != "native_installed" or not result.get("selected"):
+                raise ValueError(f"native B2 handoff refused: {result.get('reason')}")
+            installed.add(job.uid)
+            job.native_paged_receipt = {
+                **result, "route": "native_qwen3_paged_b2",
+                "admission_profile": profile["profile_id"],
+                "prefill_mode": ("packed_staged" if packed_prefill else "serial_native"),
+                "price_usable": False, "qualified": False,
+            }
+        if any(job.cancelled.is_set() for job in jobs):
+            raise ValueError("native B2 cohort cancelled during attachment")
+        return tuple(job.native_paged_receipt for job in jobs)
+    except BaseException:
+        # No BatchGenerator.next has run while the declared cohort owns the
+        # attachment boundary. Retire every installed continuation together;
+        # the outer cohort failure then removes any queued UID and finishes
+        # both HTTP jobs. BatchGenerator.remove is intentionally idempotent.
+        if installed:
+            batch.remove(tuple(installed))
+        raise
+    finally:
+        for job, owner in zip(jobs, owners):
+            if job.uid in installed:
+                continue
+            writer, backend = candidate.backend.writer, candidate.backend
+            _NATIVE_ADMISSION_ORPHANS.append((owner, writer, backend))
+            owner.close()
+            from .runtime.paged_native_retirement import reap_native_request_owner
+            reap_native_request_owner(owner, writer, backend)
+            if getattr(owner, "fully_retired", False):
+                _NATIVE_ADMISSION_ORPHANS.remove((owner, writer, backend))
+
+
 def render_prompt_tokens(adapter, request):
     """Render one request to prompt tokens, shaping template failures.
 
@@ -1819,6 +2674,10 @@ class SuspendUnavailable(RuntimeError):
     """Cache suspension was requested without an APCv2 disk tier."""
 
 
+class APCReuseDisabled(RuntimeError):
+    """The selected execution route cannot safely load reusable APCv2 state."""
+
+
 @dataclass
 class Job:
     request: dict
@@ -1842,6 +2701,9 @@ class Job:
     output_parser: object = None
     pending_text: str = ""
     uid: int | None = None
+    native_b2_prompt: tuple[int, ...] = ()
+    native_b2_cached_tokens: int = 0
+    native_cohort_memory_receipt: dict | None = None
     last_progress: float = 0
     observed_width: int = 1
     admission_hit: object = None
@@ -1851,11 +2713,14 @@ class Job:
     apc_sequence_waited: bool = False
     admission_retry_at: float = 0
     admission_deadline: float = 0
+    admission_defer_reason: str | None = None
     fault_fired: bool = False
     fanout_group: str | None = None
     fanout_role: str | None = None
     spomin_receipt: dict | None = None
     prefill_chunk_receipt: dict | None = None
+    ingress_cohort_receipt: dict | None = None
+    ingress_cohort_observation: dict | None = None
     cache_capsule: object = None
     cache_capsule_rows: int = 0
     cache_capsule_receipt: dict | None = None
@@ -2069,6 +2934,12 @@ class ServingEngine:
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         self.execution_policy = execution_policy
+        # Some exactness candidates can change target cache state according to
+        # physical batch geometry.  The worker resolves this after the adapter
+        # has declared its effective execution config.  Until a candidate is
+        # proven batch-invariant, requests on that route must neither consume
+        # nor publish APCv2 state.
+        self.apc_reuse_disabled_reason = None
         for policy_name in (
             "constrained_tool_grammar",
             "tolerant_tool_markers",
@@ -2201,6 +3072,14 @@ class ServingEngine:
         )
         self.decode_first_policy = (
             decode_first.as_dict() if decode_first.enabled else None
+        )
+        from .runtime.batch_geometry import GeometrySchedulerPolicy
+
+        geometry = GeometrySchedulerPolicy.from_value(
+            (execution_policy or {}).get("batch_geometry")
+        )
+        self.batch_geometry_policy = (
+            geometry.as_dict() if geometry.enabled else None
         )
         # Server-owned decode-fairness overrides; {} keeps today's interleave.
         self.decode_fairness_overrides = decode_fairness_overrides(
@@ -2407,6 +3286,10 @@ class ServingEngine:
             int8_prefill=self.int8_prefill_policy.enabled,
             approximate_kv=self.approximate_kv_policy.enabled,
             cache_capsules=self.cache_capsule_policy["enabled"],
+            varlen_mlp=any(
+                optional_policy_enabled((execution_policy or {}).get(name))
+                for name in ("varlen_dense_mlp", "varlen_sparse_moe")
+            ),
         )
         self.multi_lora = None
         if self.weight_streaming_enabled():
@@ -2763,6 +3646,8 @@ class ServingEngine:
             raise ValueError(
                 f"prefetch_sessions accepts at most {self._admin_prefetch_limit} entries"
             )
+        if prefetch_sessions:
+            self._ensure_apc_prefetch_available()
         # Holding submission_lock and lock makes drain cancellation atomic with
         # the worker's claim of the idle boundary. If the worker has already
         # claimed it (state is quiesced/suspended but completion is not set),
@@ -3088,7 +3973,10 @@ class ServingEngine:
         fault = BatchFaultSpec.parse(
             request.get("mlx_fault"), enabled=self.qualification_mode
         )
-        if request.get("skip_writing_prefix_cache", False):
+        if self.apc_reuse_disabled_reason is not None:
+            public_request["skip_writing_prefix_cache"] = True
+            self.counts["apcv2_route_disabled_requests"] += 1
+        if public_request.get("skip_writing_prefix_cache", False):
             self.counts["apcv2_write_suppressed_requests"] += 1
         interior_policy = getattr(
             self,
@@ -3871,6 +4759,12 @@ class ServingEngine:
                 "error": self.error,
                 "inflight": len(self.jobs),
                 "accepted_lifecycles": len(self._admission_leases),
+                "tokenizers_v1": getattr(
+                    getattr(self.adapter, "tokenizer", None), "tokenizer_v1_status",
+                    lambda: {"implemented": True, "qualified": False,
+                             "selected": False, "observed_used": False,
+                             "serving_qualified": False},
+                )(),
                 "queue_depth": self.queued_jobs,
                 "counts": {**dict(self.counts), **self.expert_stream_counters()},
                 "quiesce": quiesce,
@@ -4281,6 +5175,15 @@ class ServingEngine:
             raise LookupError("APCv2 session controls require a configured disk tier")
         return apc
 
+    def _ensure_apc_prefetch_available(self):
+        """Refuse persisted-state loads when this route cannot reuse APCv2 safely."""
+        reason = getattr(self, "apc_reuse_disabled_reason", None)
+        if reason is None:
+            return
+        raise APCReuseDisabled(
+            f"APCv2 session prefetch is disabled on this route: {reason}"
+        )
+
     def apc_session_state(self, tenant_id, session_id):
         return self._session_apc().session_state(
             self._session_scope(tenant_id), session_id
@@ -4301,6 +5204,7 @@ class ServingEngine:
     ):
         # Publish the worker-owned prefetch before quiesce can close admission,
         # so an accepted resume is visible to the drain's idle predicate.
+        self._ensure_apc_prefetch_available()
         with self._admission_section():
             self._ensure_admission("session_prefetch", admitted=admitted)
             return self._session_apc().resume_session(
@@ -5095,6 +5999,9 @@ class ServingEngine:
         """
         from .runtime.approximate_kv import prompt_cache_is_approximate
 
+        if self.apc_reuse_disabled_reason is not None:
+            self.counts["apcv2_store_skipped_route"] += 1
+            return False
         if approximate or prompt_cache_is_approximate(prompt_cache):
             self.counts["apcv2_store_skipped_approximate"] += 1
             return False
@@ -5255,6 +6162,8 @@ class ServingEngine:
             self._finish(job, {"error": "drain timeout", "status": 503})
 
     def _service_admin_prefetch(self, apc):
+        if self.apc_reuse_disabled_reason is not None:
+            return bool(self._cancel_pending_prefetches(apc))
         with self.submission_lock:
             with self.lock:
                 if (
@@ -5279,6 +6188,8 @@ class ServingEngine:
 
     def _service_pending_prefetch(self, apc):
         """Restore only while admission is stably open; otherwise cancel it."""
+        if self.apc_reuse_disabled_reason is not None:
+            return bool(self._cancel_pending_prefetches(apc))
         with self.submission_lock:
             with self.lock:
                 may_restore = self._service_state in {"serving", "draining"} and not self._quiesce_worker_owned
@@ -5315,6 +6226,7 @@ class ServingEngine:
                         "dense_weight_streaming",
                         "prefill_scheduling",
                         "decode_first",
+                        "batch_geometry",
                         "decode_fairness",
                         "constrained_tool_grammar",
                         "tolerant_tool_markers",
@@ -5462,7 +6374,15 @@ class ServingEngine:
             import mlx.core as mx
             from .memory import execution_headroom
             if self.host_memory_signals_policy["enabled"]:
-                execution_headroom = partial(execution_headroom, host_signals=True)
+                floor_gib = self.host_memory_signals_policy.get(
+                    "minimum_host_available_gib", 0.0
+                )
+                execution_headroom = partial(
+                    execution_headroom,
+                    host_signals=True,
+                    **({"minimum_host_available_bytes": int(floor_gib * (1 << 30))}
+                       if floor_gib else {}),
+                )
             from .runtime.apc_v2 import (
                 APCLookup,
                 APCv2,
@@ -5589,6 +6509,7 @@ class ServingEngine:
                     if (moe_rhs_pad := _moe_rhs_pad_identity()) is not None
                     else {}
                 ),
+                **_moe_nax_gather_setting(adapter.environment),
                 "adaptive_mtp_depth": self.adaptive_mtp_policy.as_dict(),
                 "mtp_acceptance_log": (
                     None if self.mtp_acceptance_log is None else {"enabled": True}
@@ -5703,8 +6624,32 @@ class ServingEngine:
             config = adapter.execution_config(
                 max_lanes=self.max_lanes, prefill_step=self.prefill_step
             )
+            ingress_cohort = ingress_cohort_policy(
+                config.get("ingress_cohort"), max_lanes=self.max_lanes
+            )
             settings["execution_policy"] = dict(config)
             external_draft = config.get("backend") == "external_draft"
+            if config.get("external_varlen_prefill"):
+                # The current source-bound evidence compares serial B1 with
+                # packed B4 and is not full parity (8/12 greedy cases).  A
+                # packed B2/B4 cache therefore cannot be published under one
+                # reusable namespace, and admission cannot know the eventual
+                # physical width when it performs a lookup.  Keep the
+                # candidate runnable, but fail closed on request reuse reads,
+                # checkpoint writes and persisted-state prefetch restores until
+                # batch invariance is established. Metadata/delete controls
+                # remain available.
+                self.apc_reuse_disabled_reason = (
+                    "external_varlen_prefill_not_batch_invariant"
+                )
+                settings["apcv2_reuse"] = {
+                    "enabled": False,
+                    "reason": self.apc_reuse_disabled_reason,
+                }
+            if ingress_cohort["enabled"] and not external_draft:
+                raise ValueError(
+                    "ingress_cohort currently requires the external-draft route"
+                )
             calibrated_depths = SelfMTPLaneAdmissionController.TRANSIENT_SCALE
             if self.mtp and config.get("num_draft") not in calibrated_depths:
                 # Lane admission costs every self-MTP lane with the verify
@@ -5738,6 +6683,18 @@ class ServingEngine:
                     raise ValueError(
                         "concurrent multi-LoRA requires the ordinary route; it is "
                         "incompatible with external draft"
+                    )
+                if any(
+                    getattr(adapter.model, name, None) is not None
+                    for name in ("_varlen_dense_mlp", "_varlen_sparse_moe")
+                ):
+                    # Varlen compaction flattens live token rows to a leading
+                    # dimension of one. Multi-LoRA currently binds one slot id
+                    # per original batch row, so the wrapped projection would
+                    # fail its row-identity check and stop the serving worker.
+                    raise ValueError(
+                        "concurrent multi-LoRA is incompatible with varlen MLP "
+                        "compaction until compacted LoRA row identities are bound"
                     )
                 from .runtime.multi_lora import MultiLoRAManager
 
@@ -5876,6 +6833,12 @@ class ServingEngine:
                         "self-MTP route"
                     )
                 settings["decode_first"] = dict(self.decode_first_policy)
+            if self.batch_geometry_policy is not None:
+                if external_draft or prompt_lookup or self.mtp:
+                    raise ValueError(
+                        "batch_geometry currently requires the ordinary route"
+                    )
+                settings["batch_geometry"] = dict(self.batch_geometry_policy)
             prompt_lookup_policy = {}
             if "prompt_lookup" in (self.execution_policy or {}):
                 # This block is carved out of the adapter's unknown-key check
@@ -6192,6 +7155,20 @@ class ServingEngine:
             self.apc = apc
             cache_keys = {}
 
+            def lookup_apc(key, tokens, **kwargs):
+                """APCv2 lookup, or an explicit cold miss for unsafe routes."""
+                if self.apc_reuse_disabled_reason is not None:
+                    self.counts["apcv2_lookup_bypassed_route"] += 1
+                    return APCLookup(
+                        None,
+                        list(tokens),
+                        0,
+                        False,
+                        None,
+                        self.apc_reuse_disabled_reason,
+                    )
+                return apc.lookup(key, tokens, **kwargs)
+
             def cache_key_for(tenant_id, media_fingerprint=None):
                 """APCv2 namespace for a request: shared, or per tenant."""
                 scope = tenant_id if self.tenant_scoped_cache else None
@@ -6485,6 +7462,17 @@ class ServingEngine:
                 cannot take it while the job waits.
                 """
                 job = active.pop(uid)
+                if getattr(job, "native_paged_receipt", None) is not None:
+                    # A native KV branch cannot be replayed through the
+                    # ordinary APCv2 cache contract. End this explicit lane
+                    # rather than silently changing its requested route.
+                    batch.remove([uid])
+                    self._finish(job, {
+                        "error": "native paged Qwen3 lane cannot be preempted and replayed",
+                        "status": 503,
+                    })
+                    self.counts["native_paged_preemptions_refused"] += 1
+                    return
                 batch.remove([uid])
                 phase = "decode" if job.completion_tokens else "prefill"
                 replay_tokens = list(job.preemption_prompt)
@@ -6493,7 +7481,7 @@ class ServingEngine:
                 hit = None
                 try:
                     hit = route_usable_hit(
-                        apc.lookup(
+                        lookup_apc(
                             cache_key_for(
                                 job.tenant_id,
                                 request_apc_scope(job.request),
@@ -6618,6 +7606,7 @@ class ServingEngine:
                         ),
                         prefill_scheduling=self.prefill_scheduling_policy,
                         decode_first=self.decode_first_policy,
+                        batch_geometry=self.batch_geometry_policy,
                         self_mtp=config if self.mtp else None,
                         mtp_admission=_make_self_mtp_admission_callback(
                             controller,
@@ -6729,7 +7718,7 @@ class ServingEngine:
                     "metal_active_bytes": mx.get_active_memory(),
                     "metal_peak_bytes": mx.get_peak_memory(),
                     "process_physical_footprint_bytes": physical_footprint_bytes(),
-                    "execution": adapter.diagnostics(),
+                    "execution": _execution_diagnostics(adapter),
                     "admission": dict(admission),
                     "memory_waiting": 0,
                     "headroom_bytes": execution_headroom(),
@@ -6738,6 +7727,10 @@ class ServingEngine:
             # Quiet-state footprint overhang (non-MLX pages) after load.
             if getattr(self, "_footprint_settler", None) is not None:
                 self._footprint_settler.observe()
+            # Explicit native deployment verifies large model/source/wheel bytes
+            # once during load. Admission still checks all mutable file
+            # signatures and Git cleanliness before reusing the attestation.
+            preverify_explicit_native_qwen3_price_identity(adapter)
             self.ready.set()
             last_snapshot = 0
             last_reclaim = 0
@@ -6880,6 +7873,17 @@ class ServingEngine:
                 )
                 retry_budget = len(deferred)
                 while len(active) < self.max_lanes:
+                    if (
+                        coalescer.mechanism != "ordinary"
+                        and (
+                            len(coalescer.attached) >= coalescer.target_lanes
+                            or (
+                                coalescer.deadline is not None
+                                and time.monotonic() >= coalescer.deadline
+                            )
+                        )
+                    ):
+                        break
                     try:
                         queued_job = False
                         prefix_retry = False
@@ -6950,7 +7954,18 @@ class ServingEngine:
                         ):
                             job = deferred.popleft()
                             retry_budget -= 1
-                            self.counts["memory_admission_retries"] += 1
+                            ingress_retry = (
+                                job.admission_defer_reason
+                                == "ingress_cohort_deadline"
+                            )
+                            if ingress_retry:
+                                # The cutoff made this immediately runnable;
+                                # a later real memory/LoRA deferral must get a
+                                # fresh first-deferral count and retry delay.
+                                job.admission_retry_at = 0
+                            else:
+                                self.counts["memory_admission_retries"] += 1
+                            job.admission_defer_reason = None
                         else:
                             item = self.incoming.get(timeout=timeout)
                             if isinstance(item, PublishedCohort) and not item.atomic:
@@ -6996,6 +8011,15 @@ class ServingEngine:
                             )
                             self._finish(job, {"error": "cancelled"})
                         continue
+                    if defer_expired_ingress_follower(
+                        coalescer,
+                        job,
+                        deferred,
+                        now=time.monotonic(),
+                        admission_timeout=self.MEMORY_ADMISSION_TIMEOUT,
+                    ):
+                        self.counts["ingress_cohort_deadline_deferrals"] += 1
+                        break
                     try:
                         if not job.started:
                             job.started = time.monotonic()
@@ -7032,6 +8056,15 @@ class ServingEngine:
                                     tokens = render_prompt_tokens(adapter, job.request)
                                 self.host_prompt_cache.put(job.request, tokens)
                             job.admission_tokens = tokens
+                        if defer_expired_ingress_follower(
+                            coalescer,
+                            job,
+                            deferred,
+                            now=time.monotonic(),
+                            admission_timeout=self.MEMORY_ADMISSION_TIMEOUT,
+                        ):
+                            self.counts["ingress_cohort_deadline_deferrals"] += 1
+                            break
                         # A decode-phase replay prefills prompt + delivered
                         # tokens but is still the same request: processors,
                         # receipts and the output cap keep the original prompt.
@@ -7116,7 +8149,7 @@ class ServingEngine:
                                 request_apc_scope(job.request),
                             )
                             hit = route_usable_hit(
-                                apc.lookup(
+                                lookup_apc(
                                     key,
                                     tokens,
                                     allow_disk_restore=False,
@@ -7179,8 +8212,29 @@ class ServingEngine:
                             if granted
                             else execution_headroom
                         )
+                        if job.request.get('paged_native_packed_n20_research') is True and hit.cached_tokens:
+                            raise ValueError('shared native cohort requires actual zero APC reuse')
+                        shared_bound=None
+                        if attaching_cohort is not None and any(member.request.get('paged_native_packed_n20_research') is True for member in attaching_cohort.jobs):
+                            if not all(member.request.get('paged_native_packed_n20_research') is True for member in attaching_cohort.jobs) or prompt_lookup or self.mtp:
+                                raise ValueError('shared native cohort cannot mix ordinary/speculative admission')
+                            for member in attaching_cohort.jobs:
+                                if member.admission_tokens is None and not member.native_b2_prompt:
+                                    member.admission_tokens=self._prerender_prompt(member.request)
+                                concrete=member.admission_tokens if member.admission_tokens is not None else member.native_b2_prompt
+                                if not concrete:raise ValueError('shared cohort requires every concrete prompt before admission')
+                                if member.effective_max_tokens is None:
+                                    cap,defaulted=resolve_output_limit(member.request,prompt_tokens=len(concrete),effective_context=context_limit,default_max_tokens=self.default_max_tokens)
+                                    member.effective_max_tokens=cap;member.max_tokens_defaulted=defaulted;member.request['max_tokens']=cap
+                            fresh=getattr(attaching_cohort.jobs[0],'native_cohort_memory_receipt',None) is None
+                            shared_bound=adapter_shared_cohort_admission(adapter,tuple(attaching_cohort.jobs),profile_path=os.environ.get('MLX2_NATIVE_PACKED_PREFILL_N20_PROFILE'),manifest_path=os.environ.get('MLX2_NATIVE_PAGED_MANIFEST'),mlx_wheel_path=os.environ.get('MLX2_NATIVE_PAGED_MLX_WHEEL'))
+                            if fresh and not ensure_admission_headroom(shared_bound['runtime_bytes']+int(controller.hard_reserve_gib*(1<<30)),headroom=admission_headroom,reclaim=reclaim_allocator,evict=evict_unused_checkpoint,evictable=getattr(apc,'unleased_resident_nbytes',None),settle=settle_footprint):
+                                for member in attaching_cohort.jobs:member.native_cohort_memory_receipt=None
+                                raise Overloaded('complete adapter shared cohort does not fit live execution headroom')
                         job.prompt_lookup_span = None
-                        if prompt_lookup:
+                        if shared_bound is not None:
+                            admitted=True;depth_floor=False;required=shared_bound['runtime_bytes']/len(attaching_cohort.jobs)/(1<<30)
+                        elif prompt_lookup:
                             (admitted, span, required) = admit_prompt_lookup_lane(
                                 controller,
                                 context_tokens=len(tokens) + maximum,
@@ -7508,7 +8562,7 @@ class ServingEngine:
                         )
                         if hit.miss_reason == "disk_restore_requires_admission":
                             hit = route_usable_hit(
-                                apc.lookup(
+                                lookup_apc(
                                     cache_key_for(
                                         job.tenant_id,
                                         request_apc_scope(job.request),
@@ -8011,9 +9065,18 @@ class ServingEngine:
                             }
                             job.neural_concept_receipt = prepared["receipt"]
                             self.counts["neural_concept_bridge_engagements"] += 1
-                        job.admission_reserved_gib = max(
+                        if defer_expired_ingress_follower(
+                            coalescer,
+                            job,
+                            deferred,
+                            now=time.monotonic(),
+                            admission_timeout=self.MEMORY_ADMISSION_TIMEOUT,
+                        ):
+                            self.counts["ingress_cohort_deadline_deferrals"] += 1
+                            break
+                        job.admission_reserved_gib = (float(required) if shared_bound is not None else max(
                             0.0, float(required) - float(controller.hard_reserve_gib)
-                        )
+                        ))
                         job.uid = batch.insert(
                             [hit.remaining_tokens], max_tokens=[maximum],
                             caches=[lane_cache], all_tokens=[tokens[:hit.cached_tokens]],
@@ -8031,6 +9094,30 @@ class ServingEngine:
                             **state_options,
                             prefill_inputs=[prefill_input],
                         )[0]
+                        if _native_b2_requested(job):
+                            if (attaching_cohort is None or
+                                    len(attaching_cohort.jobs) != (job.request.get("batch_cohort",{}).get("size") if job.request.get("paged_native_packed_n20_research") is True else 2) or
+                                    any(not _native_b2_requested(member)
+                                        for member in attaching_cohort.jobs)):
+                                raise ValueError("native B2 requires one declared two-member cohort")
+                            job.native_b2_prompt = tuple(tokens)
+                            job.native_b2_cached_tokens = int(hit.cached_tokens)
+                            job.receipt_token_ids = []
+                        if job.request.get("paged_native_qwen3") is True:
+                            try:
+                                job.native_paged_receipt = install_explicit_native_qwen3_request(
+                                    batch, adapter, job,
+                                    prompt_tokens=list(tokens), cached_tokens=int(hit.cached_tokens),
+                                    apc_cache=hit.cache,
+                                    maximum=maximum, lifecycle_lock=self.lock,
+                                    price_path=os.environ.get("MLX2_NATIVE_PAGED_PRICE"),
+                                    manifest_path=os.environ.get("MLX2_NATIVE_PAGED_MANIFEST"),
+                                    mlx_wheel_path=os.environ.get("MLX2_NATIVE_PAGED_MLX_WHEEL"),
+                                )
+                            except BaseException:
+                                batch.remove([job.uid])
+                                job.uid = None
+                                raise
                         if job.lora_slot is not None:
                             self.multi_lora.bind_uid(job.uid, job.lora_slot)
                         if job.cache_capsule is not None:
@@ -8043,7 +9130,26 @@ class ServingEngine:
                         # race later HTTP handlers and could split a requested
                         # B4 into fixed-width B2 segmented-MTP cohorts.
                         if len(active) == 1 and coalescer.deadline is None:
-                            coalescer.note_attachment(now=time.monotonic())
+                            if (
+                                external_draft
+                                and ingress_cohort["enabled"]
+                                and not hit.cached_tokens
+                                and len(hit.remaining_tokens)
+                                >= ingress_cohort["minimum_prompt_tokens"]
+                                and attaching_cohort is None
+                            ):
+                                coalescer.select(
+                                    seconds=ingress_cohort["maximum_wait_ms"] / 1000.0,
+                                    mechanism=ingress_cohort["mechanism"],
+                                    target_lanes=ingress_cohort["target_lanes"],
+                                )
+                            coalescer.note_attachment(
+                                now=time.monotonic(), job=job
+                            )
+                        elif coalescer.deadline is not None:
+                            coalescer.note_attachment(
+                                now=time.monotonic(), job=job
+                            )
                         job.last_progress = time.monotonic()
                         job.admission_hit = job.admission_tokens = None
                         if job.preempted:
@@ -8071,6 +9177,31 @@ class ServingEngine:
                                 raise Overloaded(
                                     "declared batch cohort member cancelled before atomic attachment"
                                 )
+                            if all(_native_b2_requested(member) for member in attaching_cohort.jobs):
+                                hybrid = any(member.request.get("paged_native_hybrid_b2") is True
+                                             for member in attaching_cohort.jobs)
+                                n20 = all(member.request.get("paged_native_packed_n20_research") is True for member in attaching_cohort.jobs)
+                                if n20:
+                                    final_bound=adapter_shared_cohort_admission(adapter,tuple(attaching_cohort.jobs),profile_path=os.environ.get('MLX2_NATIVE_PACKED_PREFILL_N20_PROFILE'),manifest_path=os.environ.get('MLX2_NATIVE_PAGED_MANIFEST'),mlx_wheel_path=os.environ.get('MLX2_NATIVE_PAGED_MLX_WHEEL'))
+                                    # Grants are host reservations. The full runtime
+                                    # is still unallocated here; test raw live
+                                    # headroom again without subtracting this
+                                    # cohort's already booked shared grants.
+                                    if not ensure_admission_headroom(final_bound['runtime_bytes']+int(controller.hard_reserve_gib*(1<<30)),headroom=execution_headroom,reclaim=reclaim_allocator,evict=evict_unused_checkpoint,evictable=getattr(apc,'unleased_resident_nbytes',None),settle=settle_footprint):
+                                        for member in attaching_cohort.jobs:member.native_cohort_memory_receipt=None
+                                        raise Overloaded('shared cohort live headroom changed before native allocation')
+                                installer = (install_explicit_native_hybrid_n_cohort if n20 else
+                                             install_explicit_native_hybrid_b2_cohort if hybrid else
+                                             install_explicit_native_qwen3_b2_cohort)
+                                installer(
+                                    batch, adapter, tuple(attaching_cohort.jobs),
+                                    lifecycle_lock=self.lock,
+                                    profile_path=os.environ.get("MLX2_NATIVE_PACKED_PREFILL_N20_PROFILE" if n20 else "MLX2_NATIVE_PACKED_PREFILL_B2_PROFILE"
+                                        if n20 or (hybrid and any(member.request.get("paged_native_hybrid_packed_prefill") is True
+                                            for member in attaching_cohort.jobs)) else
+                                        "MLX2_NATIVE_HYBRID_B2_PROFILE" if hybrid else "MLX2_NATIVE_PAGED_B2_PROFILE"),
+                                    manifest_path=os.environ.get("MLX2_NATIVE_PAGED_MANIFEST"),
+                                    mlx_wheel_path=os.environ.get("MLX2_NATIVE_PAGED_MLX_WHEEL"))
                             attaching_cohort = None
                     except Exception as exc:
                         if is_weight_source_change(exc):
@@ -8078,6 +9209,10 @@ class ServingEngine:
                             # prefill: stop the worker before anything this
                             # request computed can be published.
                             raise
+                        if (_native_b2_requested(job) and
+                                job.uid is not None and job.uid not in active):
+                            batch.remove([job.uid])
+                            job.uid = None
                         if job.cache_capsule is not None:
                             if job.uid is not None and job.uid not in active:
                                 batch.remove([job.uid])
@@ -8220,8 +9355,76 @@ class ServingEngine:
                                 "status": 429,
                             },
                         )
+                cohort_receipt = None
+                cohort_jobs = ()
+                if coalescer.mechanism != "ordinary" and coalescer.attached:
+                    # Cancellation handling above may have removed a lane
+                    # after it joined the bounded window. Only live, active
+                    # members belong to the admission attempt. Physical
+                    # executor engagement is reconciled after batch.next().
+                    cohort_jobs = tuple(
+                        attached_job
+                        for attached_job in coalescer.attached
+                        if attached_job.uid is not None
+                        and active.get(attached_job.uid) is attached_job
+                        and not attached_job.cancelled.is_set()
+                    )
+                if cohort_jobs:
+                    width = len(cohort_jobs)
+                    now = time.monotonic()
+                    waited_ms = max(
+                        0.0,
+                        (
+                            now
+                            - (
+                                coalescer.started_at
+                                if coalescer.started_at is not None
+                                else now
+                            )
+                        )
+                        * 1000.0,
+                    )
+                    cohort_receipt = {
+                        "schema": "mlx2.ingress-cohort.v1",
+                        "implemented": True,
+                        "selected": True,
+                        "qualified": False,
+                        # Executor evidence is reconciled immediately after
+                        # batch.next(); attachment alone is not observation.
+                        "observed_used": False,
+                        "mechanism": coalescer.mechanism,
+                        "admission_width": width,
+                        "width": width,
+                        "observed_lanes": 0,
+                        "execution_width": 0,
+                        "target_lanes": coalescer.target_lanes,
+                        "formation_target_reached": (
+                            width >= coalescer.target_lanes
+                        ),
+                        "target_reached": False,
+                        "expired": width < coalescer.target_lanes,
+                        "maximum_wait_ms": ingress_cohort["maximum_wait_ms"],
+                        "waited_ms": waited_ms,
+                    }
+                    bind_ingress_cohort_observation(
+                        cohort_jobs, cohort_receipt
+                    )
+                    self.counts["ingress_cohort_attempts"] += 1
+                    self.counts["ingress_cohort_lanes"] += width
+                    self.counts["ingress_cohort_expirations"] += int(
+                        width < coalescer.target_lanes
+                    )
+                    self.counts["ingress_cohort_max_width"] = max(
+                        self.counts["ingress_cohort_max_width"], width
+                    )
+                    self.counts["ingress_cohort_wait_us"] += int(waited_ms * 1000)
                 if active:
                     self.counts["cycles"] += 1
+                    if self.counts["cycles"] % 64 == 0:
+                        _reap_native_admission_orphans()
+                        from .runtime.paged_apcv2_native_restore import reap_failed_native_restores
+
+                        reap_failed_native_restores()
                     self.counts["multi_request_cycles"] += int(len(active) > 1)
                     self.batch_metrics.batch_cycle(len(active), len(deferred))
                     try:
@@ -8239,6 +9442,11 @@ class ServingEngine:
                             exc, build_batch, apc, fault=fault
                         )
                         continue
+                    # Reconcile on every poll, not only the formation poll: a
+                    # memory-fitted B4 may physically execute as B2 then B2.
+                    reconcile_ingress_cohort_prompts(
+                        prompts, active, self.counts
+                    )
                     if (
                         self.apc_rolling_route == "hybrid"
                         or self.apc_junction_checkpoints
@@ -8520,7 +9728,7 @@ class ServingEngine:
                                                         sibling.request, sibling_tokens
                                                     )
                                                 sibling_hit = route_usable_hit(
-                                                    apc.lookup(
+                                                    lookup_apc(
                                                         key,
                                                         sibling_tokens,
                                                         allow_disk_restore=False,
@@ -8623,7 +9831,7 @@ class ServingEngine:
                                             # siblings then decoded their
                                             # one remaining token on a state
                                             # missing 1-7 prompt tokens.
-                                            capsule_hit = apc.lookup(
+                                            capsule_hit = lookup_apc(
                                                 key,
                                                 siblings[0].admission_tokens,
                                                 allow_disk_restore=False,
@@ -8914,6 +10122,12 @@ class ServingEngine:
                             )
                             if response.finish_reason and approximate_state:
                                 self.counts["apcv2_store_skipped_approximate"] += 1
+                            elif (
+                                response.finish_reason and
+                                (getattr(response, "mtp_receipt", None) or {}).get("route")
+                                in ("native_qwen3_paged", "native_qwen3_paged_b2", "native_hybrid_paged_b2", "native_hybrid_packed_n20_research")
+                            ):
+                                self.counts["apcv2_store_skipped_native"] += 1
                             elif response.finish_reason and not job.request.get(
                                 "skip_writing_prefix_cache", False
                             ):
@@ -8947,11 +10161,33 @@ class ServingEngine:
                                 if getattr(job.structured, "deferred", False):
                                     self.counts["structured_deferred"] += 1
                             budget_fired = bool(job.thinking_budget_fired)
+                            native_route = (
+                                getattr(response, "mtp_receipt", None)
+                                if (getattr(response, "mtp_receipt", None) or {}).get("route")
+                                in ("native_qwen3_paged", "native_qwen3_paged_b2", "native_hybrid_paged_b2", "native_hybrid_packed_n20_research")
+                                else None
+                            )
+                            if (native_route is not None and
+                                    native_route.get("route") in ("native_qwen3_paged_b2", "native_hybrid_paged_b2", "native_hybrid_packed_n20_research")):
+                                native_route = dict(native_route,
+                                                    output_token_ids=list(job.receipt_token_ids or ()))
                             try:
                                 receipt = {
                                     "request_id": job.id,
                                     "cache": "apcv2",
                                     "cached_tokens": job.cached_tokens,
+                                    **(
+                                        {
+                                            "apcv2_reuse": {
+                                                "enabled": False,
+                                                "reason": (
+                                                    self.apc_reuse_disabled_reason
+                                                ),
+                                            }
+                                        }
+                                        if self.apc_reuse_disabled_reason is not None
+                                        else {}
+                                    ),
                                     "apcv2_same_prefix_waited": job.apc_sequence_waited,
                                     "cache_checkpoint_role": job.cache_retention_role,
                                     "stop_sequence": getattr(
@@ -8971,14 +10207,18 @@ class ServingEngine:
                                     ),
                                     "profile": self.snapshot["profile"],
                                     "qualification": self.snapshot["qualification"],
-                                    "route_receipt": route_receipt,
+                                    "route_receipt": native_route or route_receipt,
                                     **(
                                         {"lora": self._multi_lora_receipt(job)}
                                         if self.multi_lora is not None
                                         else {}
                                     ),
-                                    "route": self.snapshot["settings"]["route"],
-                                    "route_selection_source": self.route_selection_source,
+                                    "route": (native_route["route"] if native_route else
+                                              self.snapshot["settings"]["route"]),
+                                    "route_selection_source": (
+                                        "explicit_request" if native_route else
+                                        self.route_selection_source),
+                                    "ingress_cohort": job.ingress_cohort_receipt,
                                     "request_controls": {
                                         "max_tokens": job.effective_max_tokens,
                                         "max_tokens_defaulted": job.max_tokens_defaulted,
@@ -9238,6 +10478,13 @@ class ServingEngine:
                     prompts = responses = ()
                     job = None
                 else:
+                    # Idle servers still drain terminal-completed native
+                    # admission failures; no later request is needed to
+                    # release their proven-safe arena owners.
+                    _reap_native_admission_orphans()
+                    from .runtime.paged_apcv2_native_restore import reap_failed_native_restores
+
+                    reap_failed_native_restores()
                     self._service_admin_prefetch(apc)
                     self._service_pending_prefetch(apc)
                     apc.spill_idle_entries()
@@ -9262,9 +10509,13 @@ class ServingEngine:
                                 "metal_active_bytes": mx.get_active_memory(),
                                 "metal_peak_bytes": mx.get_peak_memory(),
                                 "process_physical_footprint_bytes": physical_footprint_bytes(),
-                                "execution": adapter.diagnostics(),
+                                "execution": _execution_diagnostics(adapter),
                                 "admission": dict(admission),
-                                "memory_waiting": len(deferred),
+                                "memory_waiting": sum(
+                                    waiting.admission_defer_reason
+                                    != "ingress_cohort_deadline"
+                                    for waiting in deferred
+                                ),
                                 "headroom_bytes": execution_headroom(),
                                 **self._host_memory_status(),
                                 "spomin_live_surgery": (
@@ -9328,6 +10579,11 @@ class ServingEngine:
             if adapter is not None:
                 with self.prompt_lock:
                     self.adapter = None
+                    close_tokenizer = getattr(
+                        getattr(adapter, "tokenizer", None), "tokenizer_v1_close", None
+                    )
+                    if callable(close_tokenizer):
+                        close_tokenizer()
                     adapter.close()
 
     def close(self):
@@ -9359,6 +10615,6 @@ class ServingEngine:
             if not callable(configure):
                 raise ValueError("loaded adapter has no neural concept bridge")
             configure(artifact)
-            diagnostics = adapter.diagnostics()
+            diagnostics = _execution_diagnostics(adapter)
         with self.lock:
             self.snapshot = {**self.snapshot, "execution": diagnostics}

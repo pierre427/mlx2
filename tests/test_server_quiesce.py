@@ -17,7 +17,7 @@ from mlx2.server import (
     validate_quiesce_body,
     validate_resume_body,
 )
-from mlx2.serving import AdmissionClosed, Job, SuspendUnavailable
+from mlx2.serving import APCReuseDisabled, AdmissionClosed, Job, SuspendUnavailable
 
 
 class AdminEngine:
@@ -178,6 +178,38 @@ def test_suspend_without_disk_tier_is_http_409():
             _post(base, "/v1/admin/quiesce", b"{}")
         assert caught.value.code == 409
         assert "disk tier" in json.load(caught.value)["error"]["message"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_route_disabled_apcv2_admin_prefetch_is_http_409():
+    class DisabledReuseEngine(AdminEngine):
+        def resume(self, *, prefetch_sessions=()):
+            assert prefetch_sessions == (("tenant", "session"),)
+            raise APCReuseDisabled(
+                "APCv2 session prefetch is disabled on this route"
+            )
+
+    engine = DisabledReuseEngine()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        body = json.dumps(
+            {
+                "prefetch_sessions": [
+                    {"tenant": "tenant", "session_id": "session"}
+                ]
+            }
+        ).encode()
+        with pytest.raises(HTTPError) as caught:
+            _post(base, "/v1/admin/resume", body)
+        assert caught.value.code == 409
+        message = json.load(caught.value)["error"]["message"]
+        assert "disabled on this route" in message
     finally:
         server.shutdown()
         server.server_close()

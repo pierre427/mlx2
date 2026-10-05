@@ -17,6 +17,18 @@ def probe():
     return module
 
 
+_RUN_FILES = ("results/ladder-flash-next-uncensored-mtp2/ladder-short.json",
+              "policies/flash-next-uncensored-policy.json")
+
+
+def _require_committed_run(probe):
+    """Skip when the private e8861bb5 run copies are absent (public mirror)."""
+    missing = [name for name in _RUN_FILES if not (probe.ROOT / probe.RUN / name).is_file()]
+    if missing:
+        pytest.skip(f"private qualification run absent: {probe.RUN}/{missing[0]} "
+                    "(not exported to the public mirror)")
+
+
 def test_guard_precedes_loading(probe, monkeypatch):
     monkeypatch.setattr(probe, "served_config", lambda *_: pytest.fail("read/load before guard"))
     with pytest.raises(SystemExit) as error:
@@ -80,6 +92,7 @@ def test_unknown_arms_and_widths_fail_closed(probe):
 
 
 def test_default_served_config_reads_committed_run_without_git(probe, monkeypatch):
+    _require_committed_run(probe)
     # Snapshot clones (QUALIFICATION.md Step 1) carry only origin/qualify/*;
     # the run directory committed on main must be enough on its own.
     def no_git(args, **_):
@@ -108,6 +121,7 @@ def test_default_served_config_falls_back_to_remote_ref(probe, monkeypatch, tmp_
 
 
 def test_resolved_policy_fields_validate_without_model_load(probe):
+    _require_committed_run(probe)
     from mlx2.adapters.flash_next_policy import FlashNextPolicy
     initial, policy = probe.served_config()
     adapter_keys = set(FlashNextPolicy.__dataclass_fields__)
@@ -116,6 +130,7 @@ def test_resolved_policy_fields_validate_without_model_load(probe):
 
 
 def test_runtime_constructor_validates_without_model_load(probe):
+    _require_committed_run(probe)
     from mlx2.serving import ServingEngine
     _, policy = probe.served_config()
     ServingEngine.validate_arguments(

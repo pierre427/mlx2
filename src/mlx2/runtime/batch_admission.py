@@ -175,3 +175,68 @@ class StateBudget:
             committed += need
             admitted += 1
         return admitted
+
+
+@dataclass(frozen=True)
+class PagedAdmissionDecision:
+    """A CPU preflight result; acceptance does not select a serving route."""
+
+    accepted: bool
+    reason: str | None
+    estimated_bytes: int
+    arena_bytes: int
+    temporary_bytes: int
+
+
+def decide_private_paged_use(
+    plan,
+    *,
+    permit_candidate: bool = False,
+    available_bytes: int,
+    arena_allocated: bool,
+    free_pages: int,
+    new_pages: int = 0,
+    cow_pages: int = 0,
+    staging_tokens: int = 0,
+    requested_features: Iterable[str] = (),
+) -> PagedAdmissionDecision:
+    """Fail closed before constructing a private paged cache or submitting work.
+
+    ``available_bytes`` is incremental headroom after existing allocations;
+    ``arena_allocated`` must reflect whether this exact arena is already in
+    those allocations. The caller supplies required new/COW pages because a
+    read plan alone cannot predict append or branch ownership.
+    """
+    from .memory_policy import estimate_paged_memory
+    from .paged_attention_plan import _uint
+
+    _uint("available_bytes", available_bytes, (1 << 64) - 1)
+    _uint("free_pages", free_pages)
+    _uint("new_pages", new_pages)
+    _uint("cow_pages", cow_pages)
+    if type(permit_candidate) is not bool:
+        raise TypeError("permit_candidate must be bool")
+    if type(requested_features) is str:
+        raise TypeError("requested_features must be an iterable of feature names")
+    features = tuple(requested_features)
+    if any(type(feature) is not str for feature in features):
+        raise TypeError("requested_features must contain strings")
+    estimate = estimate_paged_memory(
+        plan, arena_allocated=arena_allocated,
+        cow_pages=cow_pages, staging_tokens=staging_tokens,
+    )
+    reason = None
+    if not permit_candidate:
+        reason = "paged_candidate_disabled"
+    elif features:
+        reason = "unsupported_paged_features:" + ",".join(sorted(set(features)))
+    elif new_pages + cow_pages > free_pages:
+        reason = "insufficient_retired_pages"
+    elif estimate.total_bytes > available_bytes:
+        reason = "insufficient_memory_headroom"
+    return PagedAdmissionDecision(
+        accepted=reason is None, reason=reason,
+        estimated_bytes=estimate.total_bytes,
+        arena_bytes=estimate.arena_bytes,
+        temporary_bytes=estimate.total_bytes - estimate.arena_bytes,
+    )

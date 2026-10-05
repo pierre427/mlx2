@@ -130,14 +130,25 @@ def host_memory_gib():
     return total / float(1 << 30)
 
 
-def execution_headroom(host_signals=False):
+def execution_headroom(host_signals=False, minimum_host_available_bytes=0):
+    """Measured lane headroom after an optional host-wide free-memory floor.
+
+    The floor caps the final headroom after the service-reserve credit, so that
+    credit cannot make unavailable host pages appear free. It applies to warm
+    requests as well as cold prefills. The default preserves existing policy.
+    """
     import mlx.core as mx
     from .runtime.os_memory import physical_footprint_bytes
 
+    if (isinstance(minimum_host_available_bytes, bool)
+            or not isinstance(minimum_host_available_bytes, int)
+            or minimum_host_available_bytes < 0):
+        raise ValueError("minimum_host_available_bytes must be a nonnegative integer")
     info = mx.device_info()
     recommended = info.get("max_recommended_working_set_size", 0)
-    return available_execution_bytes(
-        available=host_available_bytes(host_signals),
+    available = host_available_bytes(host_signals)
+    headroom = available_execution_bytes(
+        available=available,
         recommended=recommended,
         active=mx.get_active_memory(),
         cached=mx.get_cache_memory(),
@@ -146,6 +157,9 @@ def execution_headroom(host_signals=False):
             info.get("memory_size", 0), recommended
         ),
     )
+    if minimum_host_available_bytes:
+        headroom = min(headroom, max(0, available - minimum_host_available_bytes))
+    return headroom
 
 
 def mlx_footprint_reading():

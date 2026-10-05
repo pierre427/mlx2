@@ -387,7 +387,11 @@ def test_minicpmo_refuses_video_parts_instead_of_misaligning_media():
 
         def __call__(self, **kwargs):
             processed.append(kwargs)
-            return {"input_ids": np.array([[1, 2, 3]])}
+            return {
+                "input_ids": np.array([[1, 2, 3]]),
+                "image_bound": [np.array([[1, 2]])],
+                "audio_bounds": [np.zeros((0, 2), dtype=np.int32)],
+            }
 
     adapter = object.__new__(MiniCPMOAdapter)
     adapter.processor = Processor()

@@ -452,6 +452,27 @@ def test_skip_writing_prefix_cache_requires_boolean_and_is_preserved():
         })
 
 
+def test_native_paged_http_control_is_explicit_and_cold_no_write():
+    base = {"messages": [{"role": "user", "content": "hello"}]}
+    assert "paged_native_qwen3" not in validate_request(base)
+    assert validate_request({**base, "paged_native_qwen3": False})[
+        "paged_native_qwen3"] is False
+    with pytest.raises(ValueError, match="paged_native_qwen3 must be boolean"):
+        validate_request({**base, "paged_native_qwen3": 1})
+    with pytest.raises(ValueError, match="skip_writing_prefix_cache=true"):
+        validate_request({**base, "paged_native_qwen3": True})
+    assert validate_request({**base, "paged_native_qwen3": True,
+                             "skip_writing_prefix_cache": True})[
+        "paged_native_qwen3"] is True
+
+    from mlx2.serving import HostPromptCache
+    # Route selection changes execution, not the rendered prompt identity.
+    assert HostPromptCache.key(base) == HostPromptCache.key({
+        **base, "paged_native_qwen3": True,
+        "skip_writing_prefix_cache": True,
+    })
+
+
 class FakeEngine:
     model_path = "fixture"
     max_context = 16384
@@ -638,6 +659,38 @@ def test_nonstreaming_receipt_and_usage(http_engine):
     assert data["choices"][0]["finish_reason"] == "stop"
     assert data["mlx2"] == {"cache": "apcv2", "stop_sequence": "STOP"}
     assert data["usage"]["total_tokens"] == 7
+
+
+def test_native_paged_http_control_and_route_receipt_transport(http_engine):
+    engine, base = http_engine
+    with pytest.raises(HTTPError) as refused:
+        post(base, paged_native_qwen3=True)
+    assert refused.value.code == 400
+    assert engine.job is None
+
+    def submit(request, *, tenant_id="default"):
+        job = Job(request)
+        job.events.put({"text": "hello"})
+        job.events.put({"finish_reason": "length", "receipt": {
+            "cache": "apcv2", "cached_tokens": 0,
+            "route": "native_qwen3_paged", "route_receipt": {
+                "route": "native_qwen3_paged", "implemented": True,
+                "qualified": False, "selected": True,
+                "observed_used": True, "apcv2": "native_checkpoint_unavailable",
+            },
+        }})
+        engine.job = job
+        return job
+
+    engine.submit = submit
+    with post(base, paged_native_qwen3=True,
+              skip_writing_prefix_cache=True, temperature=0,
+              max_tokens=2) as response:
+        data = json.load(response)
+    assert engine.job.request["paged_native_qwen3"] is True
+    assert data["choices"][0]["message"]["content"] == "hello"
+    assert data["mlx2"]["route_receipt"]["observed_used"] is True
+    assert data["mlx2"]["route_receipt"]["qualified"] is False
 
 
 def test_nonstreaming_failure_preserves_qualification_receipt():
