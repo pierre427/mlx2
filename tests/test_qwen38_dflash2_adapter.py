@@ -18,6 +18,22 @@ TARGET = Path.home() / "mlx-models/Qwen3.8-27B-oQ4e-mtp"
 POLICY = Path(__file__).parents[1] / "qualification/policies/qwen38-27b-dflash2.json"
 
 
+def test_varlen_tree_declares_row_stable_lane_geometry():
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
+
+    adapter = object.__new__(Qwen3827BAdapter)
+    adapter.external_policy = {
+        "external_varlen_prefill": True,
+        "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
+    }
+    assert adapter.lane_policy_defaults() == {
+        "max_rows": 128,
+        "chunk_above_max": True,
+    }
+    adapter.external_policy = {}
+    assert adapter.lane_policy_defaults() is None
+
+
 def _draft_config(**dflash):
     config = {
         "architectures": ["DFlash2DraftModel"], "model_type": "qwen3", "dtype": "bfloat16",
@@ -79,6 +95,20 @@ def test_pinned_policy_inspects_without_payload(tmp_path):
     record = inspect_external_policy({**_pins(target, draft), "num_draft": 5}, target)
     assert record["args"].target_layer_ids == [1, 6]
     assert record["runtime_quantization"] is None
+
+
+def test_qwen_external_policy_enforces_two_and_prefers_three_proposals(tmp_path):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+
+    target, draft = _write_artifacts(tmp_path)
+    pins = _pins(target, draft)
+    with pytest.raises(ValueError, match=r"min\(2, num_draft\)"):
+        inspect_external_policy(
+            {**pins, "num_draft": 7, "minimum_draft_proposals": 1}, target
+        )
+    assert inspect_external_policy(
+        {**pins, "num_draft": 7, "minimum_draft_proposals": 2}, target
+    )["args"].block_size == 8
 
 
 def test_external_policy_accepts_target_varlen_selection(tmp_path):
@@ -201,6 +231,65 @@ def test_bounded_route_refuses_incompatible_policy(tmp_path, monkeypatch, extra,
     policy = {**_pins(target, draft), "batch_size_route": "tree15_b1_b4_chain_b5plus_v1", **extra}
     with pytest.raises(ValueError, match=error):
         inspect_external_policy(policy, target)
+
+
+@pytest.mark.parametrize(
+    "budgets,error",
+    [
+        ({"1": 15, "2": 7, "4": 3}, "every enabled tree width"),
+        ({"1": 15, "2": 7, "3": 4, "4": 2}, "integers from 3 to 15"),
+        ({"1": 15, "2": 7, "3": 8, "4": 3}, "must not increase"),
+    ],
+)
+def test_bounded_route_validates_lane_pressure_budgets(
+    tmp_path, monkeypatch, budgets, error
+):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+    from mlx2.runtime import qwen38_tensorfold
+
+    target, draft = _write_artifacts(tmp_path)
+    source = tmp_path / "tensorfold"
+    source.mkdir()
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(source))
+    monkeypatch.setattr(qwen38_tensorfold, "_validate", lambda _path: None)
+    policy = {
+        **_pins(target, draft),
+        "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
+        "tree_node_budget_by_lanes": budgets,
+    }
+    with pytest.raises(ValueError, match=error):
+        inspect_external_policy(policy, target)
+
+
+@pytest.mark.parametrize("limit", [0, 5, True, "2"])
+def test_bounded_route_validates_tensorfold_cohort_limit(
+    tmp_path, monkeypatch, limit
+):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+    from mlx2.runtime import qwen38_tensorfold
+
+    target, draft = _write_artifacts(tmp_path)
+    source = tmp_path / "tensorfold"
+    source.mkdir()
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(source))
+    monkeypatch.setattr(qwen38_tensorfold, "_validate", lambda _path: None)
+    policy = {
+        **_pins(target, draft),
+        "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
+        "tensorfold_cohort_limit": limit,
+    }
+    with pytest.raises(ValueError, match="tensorfold_cohort_limit"):
+        inspect_external_policy(policy, target)
+
+
+def test_tensorfold_cohort_limit_requires_bounded_route(tmp_path):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+
+    target, draft = _write_artifacts(tmp_path)
+    with pytest.raises(ValueError, match="requires a batch_size_route"):
+        inspect_external_policy(
+            {**_pins(target, draft), "tensorfold_cohort_limit": 1}, target
+        )
 
 
 @pytest.mark.parametrize("name", [
@@ -391,6 +480,8 @@ def test_explicit_b1_route_receipt_names_policy_and_remains_unqualified():
                                              "external_tensorfold_cohort_rounds": 0})
     receipt = ExternalDraftBatchGenerator._target_execution_receipt(route)["batch_size_route"]
     assert receipt == {"policy": "tree15_b1_chain_b2plus_v1", "max_tree_width": 1,
+                       "tree_node_budget_by_lanes": {"1": 15},
+                       "current_tree_node_budget": 15,
                        "active_lanes": 1, "cohort_width": 1,
                        "current": "tree15_tensorfold", "qualified": False}
 

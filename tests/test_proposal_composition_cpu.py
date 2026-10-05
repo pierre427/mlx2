@@ -286,10 +286,77 @@ def test_unsupported_sources_fail_closed_without_proposal():
         native_mtp_source(model)
     with pytest.raises(ValueError, match="adapter-owned"):
         ComposedDraftModel(draft, {"native_mtp": True})
-    with pytest.raises(ValueError, match="point-mass"):
+    with pytest.raises(ValueError, match="exact proposal-law"):
         ComposedDraftModel(
             SimpleNamespace(proposal_distribution="stochastic"), {"prompt_lookup": True}
         )
+
+
+def test_dflash_exact_laws_compose_with_pld_without_draft_cache_desync():
+    from test_external_dflash2_cpu import tiny as tiny_dflash
+    from mlx2.runtime.speculative_sampling import RequestRNG
+
+    model, draft = tiny_dflash()
+    wrapped = ComposedDraftModel(draft, {"ngram_min": 1, "ngram_max": 1})
+    histories, anchors = [[1, 2, 3, 1], [4, 5]], [2, 6]
+    hidden = model.prefill_body(
+        mx.array([[1, 2], [4, 5]]), model.make_cache(), [0, 3]
+    )
+    caches = [wrapped.make_cache(), wrapped.make_cache()]
+    tokens, laws = wrapped.draft_distributions(
+        anchors,
+        hidden,
+        wrapped.batch_caches(caches),
+        2,
+        [RequestRNG(7), RequestRNG(11)],
+        [0.8, 0.8],
+        processor_histories=histories,
+    )
+
+    assert wrapped.proposal_distribution == "stochastic_exact_law"
+    assert wrapped.last_proposal_sources == ("prompt_lookup", "external")
+    assert tokens[0] == [3, 1]
+    for token, law in zip(tokens[0], laws[0]):
+        assert law[token] == 1 and np.count_nonzero(law) == 1
+    for token, law in zip(tokens[1], laws[1]):
+        assert law[token] > 0 and np.count_nonzero(law) > 1
+        assert law.sum() == pytest.approx(1)
+    # DFlash commits only the supplied target-feature context.  PLD token
+    # substitution cannot leave its cache at a different token boundary.
+    assert all(cache[0].offset == 2 for cache in caches)
+
+
+def test_real_dflash_pld_serving_matches_greedy_reference():
+    from test_external_dflash2_cpu import (
+        drain as drain_dflash,
+        generator as generator_dflash,
+        tiny as tiny_dflash,
+    )
+
+    model, draft = tiny_dflash()
+    wrapped = ComposedDraftModel(draft, {"ngram_min": 1, "ngram_max": 1})
+    prompts = [[1, 2, 3, 1, 2, 3, 1, 2], [4, 5, 4, 5, 4]]
+    batch = generator_dflash(model, wrapped)
+    ids = batch.insert(
+        prompts,
+        max_tokens=[8, 8],
+        sampling_configs=[{"sampling_temp": 0.0}] * 2,
+    )
+    outputs, finishes = drain_dflash(batch)
+    for uid, prompt in zip(ids, prompts):
+        cache = model.make_cache()
+        expected, context = [], list(prompt)
+        for step in range(8):
+            logits = model(
+                mx.array([context if step == 0 else [context[-1]]]), cache=cache
+            )
+            token = int(mx.argmax(logits[0, -1]).item())
+            expected.append(token)
+            context.append(token)
+        assert outputs[uid] == expected
+        finishes[uid].cache_sidecar.validate("test", len(finishes[uid].all_tokens))
+    assert wrapped.composition_stats["prompt_lookup"] > 0
+    assert batch.scheduler_stats["target_max_width"] > 1
 
 
 def test_shared_adapter_binding_selects_reachable_wrapper_and_revision_policy():

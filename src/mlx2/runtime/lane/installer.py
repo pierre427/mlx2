@@ -160,6 +160,7 @@ def law_id(min_rows: int, backend_name: str | None = None) -> str:
 class _LaneMixin:
     _lane_min_rows = 1
     _lane_max_rows = MAX_ROWS
+    _lane_chunk_above_max = False
 
     def __call__(self, x):
         lw = _prepared(self)
@@ -174,6 +175,22 @@ class _LaneMixin:
                 STATS["stock_stacked_calls"] += 1
                 return _stock_stacked(self, group, x)
         elif rows > self._lane_max_rows:
+            if self._lane_chunk_above_max:
+                lead = x.shape[:-1]
+                flat = x.reshape(rows, x.shape[-1])
+                chunks = [
+                    lane_matmul(flat[start : start + self._lane_max_rows], lw)
+                    for start in range(0, rows, self._lane_max_rows)
+                ]
+                y = mx.concatenate(chunks, axis=0).reshape(*lead, -1)
+                STATS["lane_chunked_calls"] += 1
+                STATS["lane_chunked_launches"] += len(chunks)
+                STATS["lane_chunked_rows"] += rows
+                STATS["lane_calls"] += 1
+                STATS["lane_launches"] += len(chunks)
+                STATS["lane_rows"] += rows
+                STATS[f"rows_{_bucket(rows)}"] += 1
+                return y
             STATS["stock_above_max_rows"] += 1
         else:
             group = _group(self) if GROUPING[0] else None
@@ -442,7 +459,8 @@ def apc_lane_fingerprint(base, receipt):
     return (base, "lane-matmul", receipt["law_id"])
 
 
-def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unquantized: bool = True,
+def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS,
+            chunk_above_max: bool = False, unquantized: bool = True,
             groups=DEFAULT_GROUPS, skip=lambda name, module: False,
             min_rows_by_format: dict | None = None, declared=()) -> dict:
     """Swap every supported projection to its lane class; returns a receipt.
@@ -455,6 +473,8 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
     (for example a huge vocabulary head it measures separately).  Idempotent
     for the class swap; a repeat call updates the row window.
     """
+    if type(chunk_above_max) is not bool:
+        raise TypeError("chunk_above_max must be a boolean")
     if not 1 <= min_rows <= max_rows <= MAX_ROWS:
         raise ValueError(f"need 1 <= min_rows <= max_rows <= {MAX_ROWS}")
     # Reject malformed adapter declarations before changing any projection,
@@ -494,6 +514,7 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
                 continue
             object.__setattr__(module, "_lane_min_rows", rows)
             object.__setattr__(module, "_lane_max_rows", int(max_rows))
+            object.__setattr__(module, "_lane_chunk_above_max", chunk_above_max)
             covered["already"] += 1
             continue
         if kind not in _SWAP or (kind is nn.Linear and not unquantized):
@@ -514,6 +535,7 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
         module.__class__ = _SWAP[kind]
         object.__setattr__(module, "_lane_min_rows", int(rows))
         object.__setattr__(module, "_lane_max_rows", int(max_rows))
+        object.__setattr__(module, "_lane_chunk_above_max", chunk_above_max)
         covered[lw.format] += 1
     declared_formed, declared_refused = {}, {}
     if declared or any(getattr(_group(m), "declared", None) is not None
@@ -542,6 +564,8 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
         # Calls up to max_rows take the lane arithmetic: a wider window is a
         # different law (33-64-row verify or prefill tails change).
         law += f"+rows-le-{max_rows}"
+    if chunk_above_max:
+        law += f"+chunk-above-{max_rows}"
     live = {group.declared for _name, module in model.named_modules()
             if (group := _group(module)) is not None and group.declared is not None}
     grouped = any(_group(module) is not None for _name, module in model.named_modules())
@@ -553,7 +577,8 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
         law += f"+simd-affine[{hashlib.sha256(shapes.encode()).hexdigest()[:12]}]"
     receipt = {"law_id": law + ("+grouped" if grouped else ""),
                "min_rows": min_rows if min_rows_by_format is None else dict(min_rows_by_format),
-               "max_rows": max_rows, "covered": dict(covered),
+               "max_rows": max_rows, "chunk_above_max": chunk_above_max,
+               "covered": dict(covered),
                "groups": dict(formed), "refused": dict(refused), "available": available(),
                "backend": backend()}
     if twins:
@@ -605,7 +630,7 @@ def _check_simd_twins(model) -> dict:
 def _restore(module) -> None:
     module.__class__ = _RESTORE[type(module)]
     for name in ("_lane_prepared", "_lane_group", "_lane_columns", "_lane_min_rows",
-                 "_lane_max_rows"):
+                 "_lane_max_rows", "_lane_chunk_above_max"):
         module.__dict__.pop(name, None)
 
 
@@ -649,7 +674,7 @@ def apply_policy(model, policy: dict, declared=()) -> dict | None:
             "refused": {"device_unsupported": sum(policy["detected"]["formats"].values())},
             "available": False,
             "policy": {k: policy[k] for k in (
-                "mode", "min_rows", "max_rows", "grouping", "declared_groups", "skip",
+                "mode", "min_rows", "max_rows", "chunk_above_max", "grouping", "declared_groups", "skip",
                 "detected", "family", "sources")},
         }
     by_format = ({fmt: 1 for fmt in policy["min_rows"]} if policy["mode"] == "exact"
@@ -660,6 +685,7 @@ def apply_policy(model, policy: dict, declared=()) -> dict | None:
         raise ValueError("lane policy selects declared_groups but the adapter declares none")
     receipt = install(
         model, min_rows=1, max_rows=int(policy["max_rows"]),
+        chunk_above_max=bool(policy["chunk_above_max"]),
         groups=DEFAULT_GROUPS if policy["grouping"] else (),
         skip=lambda name, module: skipped(policy, name),
         min_rows_by_format=by_format,
@@ -679,5 +705,5 @@ def apply_policy(model, policy: dict, declared=()) -> dict | None:
                         "formed": {}, "refused": {"not selected": 1}}
             for spec in declared}
     return {**receipt, "policy": {k: policy[k] for k in (
-        "mode", "min_rows", "max_rows", "grouping", "declared_groups", "skip", "detected",
+        "mode", "min_rows", "max_rows", "chunk_above_max", "grouping", "declared_groups", "skip", "detected",
         "family", "sources")}}

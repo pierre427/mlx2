@@ -465,6 +465,7 @@ _SCHEDULER_GAUGES = frozenset(
         "reservation_bytes",
         "external_tensorfold_cohort_max_width",
         "external_tensorfold_cohort_limit",
+        "external_minimum_draft_proposals",
     }
 )
 
@@ -515,6 +516,9 @@ _SCHEDULER_EVENTS = frozenset(
         "external_tensorfold_target_rounds",
         "external_tensorfold_cohort_rounds",
         "external_tensorfold_cohort_lanes",
+        "external_tensorfold_packed_target_rounds",
+        "external_tensorfold_packed_target_lanes",
+        "external_tensorfold_physical_target_forwards",
         "external_tensorfold_executor_validations",
         "external_tensorfold_executor_cache_hits",
         "external_tree_codebook_cache_hits",
@@ -525,6 +529,7 @@ _SCHEDULER_EVENTS = frozenset(
         "external_tree_single_fence_rounds",
         "external_tree_pipelined_drafts",
         "external_tree_pipeline_discards",
+        "external_proposal_floor_raises",
         "external_allocator_reclaims",
         "memory_deferred",
         "memory_pressure_evictions",
@@ -1165,6 +1170,9 @@ def _scheduler_mechanism(key: str) -> str:
         "external_tensorfold_cohort_lanes",
         "external_tensorfold_cohort_max_width",
         "external_tensorfold_cohort_limit",
+        "external_tensorfold_packed_target_rounds",
+        "external_tensorfold_packed_target_lanes",
+        "external_tensorfold_physical_target_forwards",
         "external_tensorfold_executor_validations",
         "external_tensorfold_executor_cache_hits",
         "external_tree_codebook_cache_hits",
@@ -1175,6 +1183,8 @@ def _scheduler_mechanism(key: str) -> str:
         "external_tree_single_fence_rounds",
         "external_tree_pipelined_drafts",
         "external_tree_pipeline_discards",
+        "external_minimum_draft_proposals",
+        "external_proposal_floor_raises",
         "external_allocator_reclaims",
     }:
         return "external_speculative"
@@ -1596,6 +1606,21 @@ def _add_lane_matmul(builder: PrometheusBuilder, engine: Any) -> None:
         "mlx2_lane_matmul_launches_total",
         "Lane kernel launches (a grouped launch serves several projections).",
         int(counts.get("lane_launches", 0)),
+    )
+    builder.counter(
+        "mlx2_lane_matmul_chunked_calls_total",
+        "Wide projection calls tiled into row-stable lane chunks.",
+        int(counts.get("lane_chunked_calls", 0)),
+    )
+    builder.counter(
+        "mlx2_lane_matmul_chunked_launches_total",
+        "Lane-kernel launches used by wide chunked projection calls.",
+        int(counts.get("lane_chunked_launches", 0)),
+    )
+    builder.counter(
+        "mlx2_lane_matmul_chunked_rows_total",
+        "Activation rows computed through wide row-stable projection chunks.",
+        int(counts.get("lane_chunked_rows", 0)),
     )
     builder.counter(
         "mlx2_lane_matmul_group_launches_total",

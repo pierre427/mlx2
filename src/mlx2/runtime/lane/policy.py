@@ -36,6 +36,7 @@ BUILTIN = {
     "min_rows": {"q2": 8, "q3": 8, "q4": 8, "q5": 8, "q6": 8, "q8": 8,
                  "bf16": 16, "fp16": 16},
     "max_rows": 32,
+    "chunk_above_max": False,
     "grouping": True,
     # Adapter-declared projection groups (installer.ProjectionGroup): offered
     # by the adapter, stacked only when selected.  Off until GPU-qualified;
@@ -60,7 +61,10 @@ FAMILY_DEFAULT_FORMATS: dict[str, frozenset[str]] = {
     "muse-glimmer": frozenset({"q4"}),
 }
 
-_KEYS = {"mode", "min_rows", "max_rows", "grouping", "declared_groups", "skip", "moe"}
+_KEYS = {
+    "mode", "min_rows", "max_rows", "chunk_above_max", "grouping",
+    "declared_groups", "skip", "moe",
+}
 
 
 def format_class(module) -> str | None:
@@ -146,7 +150,7 @@ def _validate(partial: dict, where: str) -> None:
     if "max_rows" in partial and (type(partial["max_rows"]) is not int
                                   or not 1 <= partial["max_rows"] <= 128):
         raise ValueError(f"{where}: max_rows must be 1-128")
-    for key in ("grouping", "declared_groups"):
+    for key in ("chunk_above_max", "grouping", "declared_groups"):
         if key in partial and type(partial[key]) is not bool:
             raise ValueError(f"{where}: {key} must be boolean")
     if "skip" in partial and (not isinstance(partial["skip"], list)
@@ -174,15 +178,17 @@ def _merge(base: dict, partial: dict, source: str, sources: dict) -> dict:
     return out
 
 
-def resolve(detected: dict, *, family: str | None = None, overrides=None,
+def resolve(detected: dict, *, family: str | None = None, adapter=None, overrides=None,
             mode: str | None = None) -> dict:
     """Resolve the effective policy; ``mode`` (the CLI switch) wins last.
 
     Returns the policy plus ``sources`` naming where every tuned value came
     from (builtin, builtin.moe, family:<name>, override, override.moe, cli).
     """
-    sources = {key: "builtin"
-               for key in ("mode", "max_rows", "grouping", "declared_groups", "skip")}
+    sources = {key: "builtin" for key in (
+        "mode", "max_rows", "chunk_above_max", "grouping",
+        "declared_groups", "skip",
+    )}
     sources.update({f"min_rows.{fmt}": "builtin" for fmt in FORMAT_CLASSES})
     policy = copy.deepcopy(BUILTIN)
     user = load_overrides(overrides)
@@ -195,6 +201,9 @@ def resolve(detected: dict, *, family: str | None = None, overrides=None,
         fam = {}
     _validate(fam, f"family {family}")
     policy = _merge(policy, fam, f"family:{family}", sources)
+    adapter = load_overrides(adapter)
+    _validate(adapter, f"adapter {family}")
+    policy = _merge(policy, adapter, f"adapter:{family}", sources)
     policy = _merge(policy, user, "override", sources)
     if detected.get("moe"):
         # MoE adjustments apply after defaults, but explicit top-level

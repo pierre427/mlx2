@@ -51,7 +51,11 @@ QUANT_BITS = (2, 3, 4, 5, 6, 8)
 UNQUANTIZED_BITS = 16
 GROUP_SIZES = (32, 64, 128)
 NT = 32               # output columns per simdgroup tile (one column per lane when unpacking)
-ROW_BLOCK = 32        # rows per threadgroup; 16-row fragments (TMR = 1 or 2)
+# One 16-row MPP fragment per threadgroup.  Interleaved M5 measurements on the
+# packed DFlash shapes found that TMR=1 is faster than a 32-row/TMR=2 block at
+# the stable 32/64/128-row cells while preserving the established one-row lane
+# law; the small 16-row cell is shape/noise dependent and B1 is neutral.
+ROW_BLOCK = 16
 MAX_ROWS = 128        # rows accepted by one call
 _NATIVE = {4: "uint4b_format", 8: "uint8_t"}
 _TYPES = {mx.bfloat16: "bfloat", mx.float16: "half"}

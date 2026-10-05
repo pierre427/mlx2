@@ -1,8 +1,10 @@
-"""Exact host arbitration of deterministic external, copy and MTP proposals.
+"""Exact host arbitration of external, copy and MTP proposals.
 
 The external backbone still advances its committed feature cache for every
-row. Arbitration changes only proposed tokens and their actual point-mass q;
-the existing external verifier remains the sole owner of accepted state.
+row. Arbitration changes only selected rows: copy/MTP tokens carry their
+actual point-mass q, while untouched stochastic rows retain the backend's
+exact proposal laws.  The external verifier remains the sole owner of
+accepted state.
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ class ProposalCompositionPolicy:
 
 
 class ComposedDraftModel:
-    """PLD → bounded private native-MTP → external deterministic arbitration.
+    """PLD → bounded private native-MTP → exact-law external arbitration.
 
     Histories are supplied by the request executor at each committed boundary.
     No copy index, private head cache or rejected token survives a call. Backend
@@ -61,18 +63,23 @@ class ComposedDraftModel:
 
     requires_processor_histories = True
     supports_logits_processors = True
-    proposal_distribution = "deterministic_point_mass"
+    _supported_proposal_distributions = frozenset(
+        {"deterministic_point_mass", "stochastic_exact_law"}
+    )
 
     def __init__(self, backend, policy, *, native_mtp_source=None):
         self.backend = backend
         self.policy = ProposalCompositionPolicy.from_value(policy)
-        if (
-            getattr(backend, "proposal_distribution", None)
-            != self.proposal_distribution
-        ):
+        proposal_distribution = getattr(backend, "proposal_distribution", None)
+        if proposal_distribution not in self._supported_proposal_distributions:
             raise ValueError(
-                "proposal composition requires deterministic point-mass backend"
+                "proposal composition requires a backend with exact proposal-law support"
             )
+        # Preserve the backend's distribution class.  In particular, a mixed
+        # PLD/DFlash block is not globally deterministic merely because PLD
+        # rows are point masses.  This keeps deterministic-only adaptive
+        # admission from inspecting stochastic rows as one-hot laws.
+        self.proposal_distribution = proposal_distribution
         if bool(getattr(backend, "requires_context_tokens", False)):
             raise ValueError(
                 "proposal composition refuses paired-context-token backends"
@@ -98,7 +105,11 @@ class ComposedDraftModel:
             "proposal_composition": {
                 **self.policy.as_dict(),
                 "priority": ["prompt_lookup", "native_mtp", "external"],
-                "q": "selected_source_deterministic_point_mass",
+                "q": (
+                    "selected_copy_or_mtp_rows_point_mass;"
+                    "external_rows_retain_backend_exact_law"
+                ),
+                "external_proposal_distribution": self.proposal_distribution,
                 "context": "external_backbone_advanced_before_arbitration",
                 "native_mtp_state": "fresh_private_recompute_and_discard",
                 "confidence": "external_proxy_only_for_unsubstituted_rows",

@@ -1,0 +1,93 @@
+{
+  "component": "Qwen3.8 packed external-DFlash scheduling, varlen row geometry, lane-budget policy, and exact-law proposal composition",
+  "date": "2026-10-05",
+  "source_repository": "https://github.com/pierre427/mlx2",
+  "integration_base_revision": "61a6b83a026ba8aec719d2e00df333ba8906ef7b",
+  "performance_base_revision": "9e2596a50245ab8c5959706abf5b3d7b33c478ef plus tracked dirty changes",
+  "reconciled_patch_sha256": "57db21b7b3e88e4f0f1d253d1043b0bc6279de7322d0d24fb965798d42ef98ab",
+  "license": "Apache-2.0",
+  "origin": "Original mlx2 implementation. No external implementation source was copied. Existing TensorFold-derived mechanisms retain their separate provenance records and pinned license notices.",
+  "source_paths": [
+    "src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/runtime/lane/installer.py",
+    "src/mlx2/runtime/lane/policy.py",
+    "src/mlx2/runtime/drafters/dflash2.py",
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/runtime/proposal_composition.py",
+    "src/mlx2/runtime/qwen38_tensorfold.py",
+    "src/mlx2/serving.py"
+  ],
+  "destination_paths": [
+    "src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/prometheus.py",
+    "src/mlx2/runtime/drafters/dflash2.py",
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/runtime/lane/installer.py",
+    "src/mlx2/runtime/lane/policy.py",
+    "src/mlx2/runtime/proposal_composition.py",
+    "src/mlx2/runtime/qwen38_tensorfold.py",
+    "src/mlx2/serving.py",
+    "tests/test_dflash_tree_bridge.py",
+    "tests/test_external_dflash2_cpu.py",
+    "tests/test_proposal_composition_cpu.py",
+    "tests/test_qwen38_dflash2_adapter.py",
+    "docs/research/2026-10-05-varlen-dflash-closeout.md"
+  ],
+  "modifications": [
+    "Hold a declared external-DFlash cohort at the prompt/decode boundary until every surviving member reaches decode.",
+    "Distinguish scheduler-phase waits from memory-admission waits for serving stall-watchdog accounting.",
+    "Clear idle allocator scratch after the final external lane retires.",
+    "Validate, apply, and receipt adapter-declared tree node budgets by active lane width while preserving fixed-15 defaults.",
+    "Add a bounded, receipt-visible tensorfold_cohort_limit policy control for reproducible cohort-geometry experiments without legacy environment overrides.",
+    "Route multi-lane tree verification through TensorFold's pinned packed multi_tree_forward and grouped commit_streams primitives, with physical packed-forward receipts.",
+    "Declare a Qwen3.8 packed varlen/tree lane window of 128 rows and retain the same row-invariant law above it by explicit row-axis chunking.",
+    "Prefer three DFlash proposals, enforce a Qwen policy minimum of two, clamp the default to configured draft width, and permit only terminal headroom to shorten a round.",
+    "Expose adapter-policy sources, chunked lane calls, proposal-floor raises, and physical packed target forwards in status and Prometheus receipts.",
+    "Emit a paired verified-span:accepted-draft histogram so live evidence can distinguish strict partial commits from independent span and acceptance marginals.",
+    "Declare DFlash2's published selector distributions as stochastic exact laws and preserve those laws on external rows when PLD or native-MTP point masses replace selected rows.",
+    "Remove the obsolete cpg_used field from paired GPU-lock receipts and retire child process groups on interruption."
+  ],
+  "validation": {
+    "cpu": {
+      "integration_base": "61a6b83a026ba8aec719d2e00df333ba8906ef7b",
+      "commands": [
+        "PYTHONPATH=src python -m pytest -q tests/test_external_dflash2_cpu.py tests/test_dflash_tree_bridge.py tests/test_qwen38_dflash2_adapter.py tests/test_proposal_composition_cpu.py tests/test_adaptive_proposal_composition_cpu.py -k 'not real_dflash2_header_schema_reconciles_without_payload_load'",
+        "PYTHONPATH=src python -m pytest -q tests/test_ab_qwen38_dflash2.py tests/test_qualification.py tests/test_batch_geometry.py tests/test_serving_quiesce.py tests/test_serving_retention.py -k 'qwen38 or external or cohort or qualification or geometry or route or retention or quiesce'"
+      ],
+      "result": "The final focused and broader adaptive/composition/hybrid/varlen/lane/Qwen/TensorFold-bridge/metrics suites passed with the worktree source under paired GPU locks. The paired span/accept receipt test and the full DFlash/tree/adaptive/Qwen regression set also passed. An unrelated legacy TensorFold-owned suite was excluded because its surviving temporary fixture lacks Git metadata. git diff --check and Python compilation passed."
+    },
+    "gpu": {
+      "scope": "source-bound candidate performance and mechanism evidence on Apple M5 Max, 128 GiB, MLX 0.32.3",
+      "result": "The context ladder and earlier campaigns retain their stated boundaries. A current-source correction run observed one physical TensorFold target forward per packed cohort round, B1-equivalent greedy hashes at B2 and B4, adapter-selected 128-row lane geometry, a three-proposal DFlash floor, 38,336 eliminated layer-level MLP padding rows, and 496 above-window chunked projection calls on a skewed B4 prompt cohort. The 16-row MPP block passed 38/38 all-format small cases and 4/4 Qwen model shapes, was neutral at B1/B2, and moved the diagnostic B4 code/chat cells from 61.52/22.45 to 64.49/23.70 tok/s per lane. A 16K exact-law ordinary/tree comparison produced identical 64-token output and receipt-proved three full-tree strict partial commits, one zero-accept rollback, and three full accepts. These are diagnostic observations, not controlled performance claims or full route qualification."
+    }
+  },
+  "states": {
+    "implemented": true,
+    "qualified": false,
+    "selected": "explicit Qwen3.8 research policies only",
+    "observed_used": [
+      "atomic external cohorts",
+      "adapter-owned varlen MLP row skipping on skewed prompts",
+      "TensorFold physically packed bounded tree target execution",
+      "adapter-selected 128-row lane geometry and exact above-window chunking",
+      "minimum DFlash proposal length three in live route receipts",
+      "paired full-tree strict partial acceptance at 16K context with ordinary-output parity",
+      "16-row MPP threadgroup geometry on B1/B2/B4 live route spots",
+      "fixed-15 node budget at widths 1 through 4",
+      "explicit TensorFold cohort limits 1, 2, and 4",
+      "PLD-to-DFlash exact-law composition on a repeating code prompt"
+    ],
+    "unselected": [
+      "decreasing tree node budgets under lane pressure",
+      "automatic PLD-to-DFlash composition"
+    ]
+  },
+  "outstanding": [
+    "current-main source-bound GPU smoke after route-identity integration",
+    "complete reverse-order 20-by-20 A/B or an equivalent deterministic skewed traffic A/B",
+    "broader sampled exact-law composition qualification",
+    "controlled, thermally counterbalanced B1/B2/B4 performance qualification",
+    "direct per-kept-row recurrent checkpoint comparison beyond the passing 16K final-output and paired partial-commit gate",
+    "Qwen4-only hyper-connection geometry probe for group-size-32 artifacts"
+  ]
+}

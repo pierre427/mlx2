@@ -100,6 +100,53 @@ def test_real_dflash2_header_schema_reconciles_without_payload_load():
     assert len(record["files"]) == 1 and record["files"][0][1] == 5_544_328_424
 
 
+def test_external_draft_proposal_floor_defaults_to_available_three_or_two():
+    m, d = tiny()
+    batch = generator(m, d)
+    assert batch.minimum_draft_proposals == 2
+    assert batch.scheduler_stats["external_minimum_draft_proposals"] == 2
+    assert batch._draft_settings_receipt()["draft_settings"] == {
+        "minimum_proposal_length": 2,
+        "proposal_floor_raises": 0,
+        "terminal_exhaustion_may_shorten": True,
+    }
+    with pytest.raises(ValueError, match="minimum_draft_proposals"):
+        generator(m, d, minimum_draft_proposals=3)
+
+
+def test_external_dflash_adaptive_depth_cannot_trim_below_declared_floor(
+    monkeypatch,
+):
+    m, d = tiny()
+    batch = generator(
+        m,
+        d,
+        adaptive_verification={
+            "verification_costs": [1.0, 2.0, 8.0],
+            "min_observations": 1,
+        },
+    )
+    fit = batch.acceptance_estimator
+    fit.observe([0, 0], 0, rejected=True)
+    fit.intercepts.fill(-4)
+    fit.rounds = 1
+    calls = []
+    original = m.forward_with_taps
+
+    def forward(tokens, *args, **kwargs):
+        calls.append(tuple(tokens.shape))
+        return original(tokens, *args, **kwargs)
+
+    monkeypatch.setattr(m, "forward_with_taps", forward)
+    batch.insert([[1, 2, 3]], max_tokens=[6])
+    batch._prefill(batch.lanes[0])
+    calls.clear()
+    batch._round([batch.lanes[0]])
+    assert calls == [(1, 3)]
+    assert batch.scheduler_stats["external_proposal_floor_raises"] == 1
+    assert batch.scheduler_stats["external_adaptive_trimmed_target_rows"] == 0
+
+
 def test_dflash2_header_schema_fails_before_payload_load(tmp_path):
     from mlx2.adapters.dflash2 import _expected_weight_shapes, inspect_drafter
 
@@ -279,6 +326,72 @@ def test_external_varlen_prefill_composes_uneven_dflash_lanes_exactly():
         assert receipt["observed_used"] is True
         assert receipt["padding_rows"] == 2
         assert receipt["coalescing"]["selected"] is False
+
+
+def test_external_atomic_cohort_holds_short_prefill_until_all_rows_reach_decode():
+    from contextlib import nullcontext
+
+    model, draft = tiny()
+    model.prefill_row_context = lambda lengths, *, width: nullcontext()
+    batch = generator(
+        model,
+        draft,
+        completion_batch_size=2,
+        external_varlen_prefill=True,
+    )
+    cohort = {"tenant_id": "default", "id": "uneven", "size": 2}
+    uids = batch.insert(
+        [[1, 2, 3, 4, 5, 6, 7, 8], [9, 10, 11, 12, 13]],
+        max_tokens=[2, 2],
+        sampling_configs=[
+            {"sampling_temp": 0.0, "batch_cohort": dict(cohort)},
+            {"sampling_temp": 0.0, "batch_cohort": dict(cohort)},
+        ],
+    )
+
+    _prompts, responses = batch.next()
+    assert responses == []
+    _prompts, responses = batch.next()
+    assert responses == []
+    assert sum(batch.lanes[uid].anchor is not None for uid in uids) == 1
+    held = next(uid for uid in uids if batch.lanes[uid].anchor is not None)
+    assert held in batch.scheduler_waiting_uids()
+    assert batch.scheduler_stats["external_atomic_cohort_prefill_holds"] > 0
+
+    _prompts, responses = batch.next()
+    assert {response.uid for response in responses} == set(uids)
+    assert batch.scheduler_stats["target_max_width"] == 2
+
+
+def test_external_atomic_cohort_missing_member_does_not_deadlock_survivor():
+    model, draft = tiny()
+    batch = generator(model, draft)
+    cohort = {"tenant_id": "default", "id": "cancelled", "size": 2}
+    uid = batch.insert(
+        [[1, 2]],
+        max_tokens=[2],
+        sampling_configs=[{"sampling_temp": 0.0, "batch_cohort": cohort}],
+    )[0]
+
+    output, _final = drain(batch)
+    assert len(output[uid]) == 2
+    assert batch.scheduler_stats["external_atomic_cohort_prefill_holds"] == 0
+    assert batch.scheduler_stats["external_idle_allocator_reclaims"] == 1
+
+
+def test_external_memory_blocked_prefill_is_not_reported_as_scheduler_waiting():
+    model, draft = tiny()
+    batch = generator(model, draft, memory_headroom=lambda: 0)
+    uid = batch.insert(
+        [[1, 2, 3, 4]],
+        max_tokens=[2],
+        sampling_configs=[{"sampling_temp": 0.0}],
+    )[0]
+
+    prompts, responses = batch.next()
+    assert prompts == []
+    assert responses == []
+    assert uid not in batch.scheduler_waiting_uids()
 
 
 def test_external_varlen_prefill_requires_adapter_row_geometry():
@@ -1401,10 +1514,23 @@ def test_external_verify_histograms_decompose_the_accepted_aggregate():
     _got,final=drain(b)
     receipt=final[0].speculative_receipt
     accept={int(k):int(v) for k,v in receipt["verify_accept_hist"].items()}
+    paired = {
+        tuple(map(int, key.split(":"))): int(value)
+        for key, value in receipt["verify_accept_span_hist"].items()
+    }
+    assert sum(paired.values()) == sum(accept.values())
     span={int(k):int(v) for k,v in receipt["verify_span_hist"].items()}
     # Recorded once per round that actually proposed, so the ordinary fast
     # path does not dilute the distribution.
     assert sum(accept.values())==sum(span.values())==receipt["external_rounds"]
+    assert {
+        accepted: sum(value for (_span, got), value in paired.items() if got == accepted)
+        for accepted in accept
+    } == accept
+    assert {
+        verified: sum(value for (got, _accepted), value in paired.items() if got == verified)
+        for verified in span
+    } == span
     assert sum(k*v for k,v in accept.items())==receipt["accepted"]
     # Every span key is one more than the number of drafts it verified.
     assert all(k>=2 for k in span)

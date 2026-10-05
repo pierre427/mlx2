@@ -129,14 +129,31 @@ class TensorfoldTransaction:
 class TensorfoldCohortTransaction:
     """One scheduler transaction over independent TensorFold lane records."""
 
-    def __init__(self, transactions, *, executor_cached=False):
+    def __init__(
+        self,
+        transactions,
+        *,
+        executor_cached=False,
+        packed_commit=None,
+    ):
         self.transactions = tuple(transactions)
         self.closed = False
         self.executor_cached = bool(executor_cached)
+        self.packed_commit = packed_commit
+        self.physical_packed = packed_commit is not None
 
     def commit_paths(self, paths):
         if self.closed or len(paths) != len(self.transactions):
             raise RuntimeError("TensorFold cohort path count mismatch")
+        if self.packed_commit is not None:
+            lane_multi, caches, records, widths, starts = self.packed_commit
+            try:
+                lane_multi.commit_streams(caches, records, paths, widths, starts)
+                return list(caches)
+            finally:
+                self.closed = True
+                for transaction in self.transactions:
+                    transaction.closed = True
         rows = []
         try:
             for transaction, path in zip(self.transactions, paths):
@@ -157,6 +174,21 @@ class TensorfoldCohortTransaction:
 
     def abort(self):
         if self.closed:
+            return
+        if self.packed_commit is not None:
+            lane_multi, caches, records, widths, starts = self.packed_commit
+            try:
+                lane_multi.commit_streams(
+                    caches,
+                    records,
+                    [[] for _ in self.transactions],
+                    widths,
+                    starts,
+                )
+            finally:
+                self.closed = True
+                for transaction in self.transactions:
+                    transaction.closed = True
             return
         error = None
         for transaction in self.transactions:
@@ -243,12 +275,13 @@ def forward_many(
     *,
     cached=False,
 ):
-    """Queue a bounded cohort of independent B1 trees behind one fence.
+    """Execute a bounded cohort as one packed, lane-owned target trunk.
 
-    TensorFold's stateful kernels remain lane-owned: each row has its own
-    parents, cache boundary and commit record.  Only the lazy target work and
-    its eventual evaluation fence are coalesced.  This is intentionally not a
-    cross-request cache pack.
+    TensorFold concatenates real tree rows, applies every projection/MLP once
+    to that packed row axis, and uses per-stream attention/GDN plans against
+    independent caches.  Logits and captured features are reshaped back to the
+    scheduler's uniform ``[lanes, rows, ...]`` contract.  Commit remains exact
+    and lane-owned, but recurrent replay is grouped across streams.
     """
 
     token_rows = tuple(token_rows)
@@ -270,23 +303,50 @@ def forward_many(
     ):
         raise ValueError("TensorFold cohort requires uniform token/parent widths")
 
-    lane_tree, hit = _modules(source_root, cached=cached)
-    results = [
-        _forward(
+    root = Path(source_root).resolve()
+    lane_tree, hit = _modules(root, cached=cached)
+    lane_multi = _import(
+        root,
+        ("tensorfold.kernels.qwen.dense.v1.lane_multi",),
+    )
+    capture_layers = tuple(int(index) for index in capture_layers)
+    storage = _capture_storage(model, capture_layers, cached)
+    starts = [_offset(cache) for cache in caches]
+    row_width = next(iter(lengths))
+    logits, records, offsets = lane_multi.multi_tree_forward(
+        model.model,
+        model.logits,
+        token_rows,
+        parent_rows,
+        caches,
+        starts,
+    )
+    expected_offsets = [row * row_width for row in range(width)]
+    if list(offsets) != expected_offsets or len(records) != width:
+        raise RuntimeError("TensorFold packed target returned misaligned lane records")
+    taps = [storage[index] for index in capture_layers]
+    if any(value is None for value in taps):
+        raise RuntimeError("TensorFold packed target did not capture every draft tap")
+    features = mx.concatenate(taps, axis=-1)
+    logits = mx.reshape(logits, (width, row_width, int(logits.shape[-1])))
+    features = mx.reshape(
+        features,
+        (width, row_width, int(features.shape[-1])),
+    )
+    transactions = [
+        TensorfoldTransaction(
             lane_tree,
-            model,
-            tokens,
-            parents,
             cache,
-            capture_layers,
-            cached=cached,
+            record,
+            row_width,
+            start,
         )
-        for tokens, parents, cache in zip(token_rows, parent_rows, caches)
+        for cache, record, start in zip(caches, records, starts)
     ]
-    logits = mx.concatenate([result[0] for result in results], axis=0)
-    features = mx.concatenate([result[1] for result in results], axis=0)
     transaction = TensorfoldCohortTransaction(
-        [result[2] for result in results], executor_cached=hit
+        transactions,
+        executor_cached=hit,
+        packed_commit=(lane_multi, caches, records, [row_width] * width, starts),
     )
     return logits, features, transaction
 

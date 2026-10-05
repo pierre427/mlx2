@@ -91,6 +91,25 @@ def test_family_defaults_then_overrides_win(monkeypatch):
     assert user["max_rows"] == 16
 
 
+def test_adapter_geometry_defaults_precede_operator_overrides():
+    detected = policy.detect(_Dense())
+    routed = policy.resolve(
+        detected,
+        family="qwen3.8-27b",
+        adapter={"max_rows": 128, "chunk_above_max": True},
+    )
+    assert routed["max_rows"] == 128 and routed["chunk_above_max"] is True
+    assert routed["sources"]["max_rows"] == "adapter:qwen3.8-27b"
+    operator = policy.resolve(
+        detected,
+        family="qwen3.8-27b",
+        adapter={"max_rows": 128, "chunk_above_max": True},
+        overrides={"max_rows": 64},
+    )
+    assert operator["max_rows"] == 64
+    assert operator["sources"]["max_rows"] == "override"
+
+
 def test_muse_family_keeps_stock_default_and_allows_explicit_opt_in():
     detected = {"moe": False, "formats": {"q4": 417}}
     default = policy.resolve(detected, family="muse-glimmer", mode="auto")
@@ -114,6 +133,7 @@ def test_muse_family_keeps_stock_default_and_allows_explicit_opt_in():
         ({"min_rows": {"q7": 4}}, "min_rows keys"),
         ({"min_rows": {"q4": 0}}, "positive integer"),
         ({"max_rows": 500}, "max_rows"),
+        ({"chunk_above_max": 1}, "chunk_above_max"),
         ({"grouping": "yes"}, "grouping"),
         ({"skip": "lm_head"}, "skip"),
         ({"moe": {"mode": "sometimes"}}, "mode must be"),
@@ -190,6 +210,39 @@ def test_call_counters_track_paths(monkeypatch):
         assert counts["group_reuses"] == 1
         assert counts["stock_below_min_rows"] == 1 and counts["stock_above_max_rows"] == 1
         assert counts["rows_8-15"] == 2 and counts["rows_1-3"] == 1
+    finally:
+        installer.STATS.clear()
+        lane.uninstall(model)
+
+
+def test_chunk_above_max_keeps_wide_rows_on_lane_law(monkeypatch):
+    monkeypatch.setattr(installer, "available", lambda: True)
+    monkeypatch.setattr(
+        installer,
+        "lane_matmul",
+        lambda x, lw: mx.zeros((*x.shape[:-1], lw.n), dtype=x.dtype),
+    )
+    model = _Dense()
+    resolved = policy.resolve(
+        policy.detect(model),
+        overrides={
+            "min_rows": {"q4": 1},
+            "max_rows": 16,
+            "chunk_above_max": True,
+            "grouping": False,
+        },
+    )
+    receipt = lane.apply_policy(model, resolved)
+    installer.STATS.clear()
+    try:
+        result = model.q_proj(mx.zeros((40, 128), dtype=mx.bfloat16))
+        assert result.shape == (40, 64)
+        counts = lane.stats()
+        assert counts["lane_chunked_calls"] == 1
+        assert counts["lane_chunked_launches"] == 3
+        assert counts["lane_chunked_rows"] == 40
+        assert counts.get("stock_above_max_rows", 0) == 0
+        assert "+rows-le-16+chunk-above-16" in receipt["law_id"]
     finally:
         installer.STATS.clear()
         lane.uninstall(model)

@@ -199,7 +199,6 @@ def main(argv: list[str] | None = None) -> int:
             "label": args.label,
             "pid": os.getpid(),
             "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "cpg_used": False,
         }
         receipt["lock_state_before"], backups = acquire(owner)
         receipt["owner"] = owner
@@ -212,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         rc = child.wait()
         receipt["command_returncode"] = rc
         receipt["status"] = "command_completed" if rc == 0 else "command_failed"
-    except Exception as exc:  # noqa: BLE001 - persist lock/acquisition failures
+    except BaseException as exc:  # noqa: BLE001 - also retire children on Ctrl-C
         receipt["status"] = "error"
         receipt["error"] = f"{type(exc).__name__}: {exc}"
         receipt["traceback"] = traceback.format_exc(limit=8)

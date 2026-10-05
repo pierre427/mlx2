@@ -6289,6 +6289,11 @@ class ServingEngine:
                 policy = resolve(
                     detect(adapter.model, artifact_config),
                     family=getattr(getattr(adapter, "descriptor", None), "family", None),
+                    adapter=(
+                        adapter.lane_policy_defaults()
+                        if callable(getattr(adapter, "lane_policy_defaults", None))
+                        else None
+                    ),
                     overrides=self.lane_policy_overrides,
                     mode=self.lane_matmul,
                 )

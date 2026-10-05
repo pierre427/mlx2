@@ -207,6 +207,9 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "gdn_prefill_chunk",
         "gdn_prefill_segment_rows",
         "batch_size_route",
+        "tree_node_budget_by_lanes",
+        "tensorfold_cohort_limit",
+        "minimum_draft_proposals",
     }
 )
 _TREE_BATCH_ROUTES = {
@@ -230,6 +233,28 @@ def _normalized_adaptive_verification(value, depth):
     settings["min_gain"] = float(policy.min_gain)
     # Detach tuples (including nested cost tables) into their receipt form.
     return json.loads(json.dumps(settings, sort_keys=True, allow_nan=False))
+
+
+def _tree_node_budgets(value, width):
+    if value is None:
+        return {lane_width: 15 for lane_width in range(1, width + 1)}
+    if not isinstance(value, dict):
+        raise ValueError("tree_node_budget_by_lanes must be a mapping")
+    normalized = {}
+    for key, nodes in value.items():
+        try:
+            lane_width = int(key)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("tree node budget widths must be integers") from exc
+        if type(nodes) is not int or not 3 <= nodes <= 15:
+            raise ValueError("tree node budgets must be integers from 3 to 15")
+        normalized[lane_width] = nodes
+    if set(normalized) != set(range(1, width + 1)):
+        raise ValueError("tree node budgets must declare every enabled tree width")
+    ordered = [normalized[lane_width] for lane_width in range(1, width + 1)]
+    if any(left < right for left, right in zip(ordered, ordered[1:])):
+        raise ValueError("tree node budgets must not increase as lanes fill")
+    return normalized
 
 
 def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
@@ -309,6 +334,23 @@ def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
         from ..runtime.qwen38_tensorfold import _validate
 
         _validate(Path(source).expanduser().resolve())
+        _tree_node_budgets(
+            policy.get("tree_node_budget_by_lanes"),
+            _TREE_BATCH_ROUTES[batch_route],
+        )
+        cohort_limit = policy.get("tensorfold_cohort_limit")
+        if cohort_limit is not None and (
+            type(cohort_limit) is not int
+            or not 1 <= cohort_limit <= _TREE_BATCH_ROUTES[batch_route]
+        ):
+            raise ValueError(
+                "tensorfold_cohort_limit must be an integer from 1 to the "
+                "selected batch route width"
+            )
+    elif "tree_node_budget_by_lanes" in policy:
+        raise ValueError("tree node budgets require a batch_size_route")
+    elif "tensorfold_cohort_limit" in policy:
+        raise ValueError("tensorfold_cohort_limit requires a batch_size_route")
     target_revision = content_revision(model_path)
     if target_revision != policy["target_revision"]:
         raise ValueError(
@@ -326,6 +368,12 @@ def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
     count = policy.get("num_draft", Qwen3827BAdapter.EXTERNAL_DEFAULT_NUM_DRAFT)
     if type(count) is not int or not 1 <= count < args.block_size:
         raise ValueError("num_draft must be a positive integer below the draft block size")
+    floor = policy.get("minimum_draft_proposals", min(3, count))
+    if type(floor) is not int or not min(2, count) <= floor <= count:
+        raise ValueError(
+            "minimum_draft_proposals must be an integer from min(2, num_draft) "
+            "to num_draft"
+        )
     adaptive = policy.get("adaptive_verification")
     if adaptive is not None:
         _normalized_adaptive_verification(adaptive, count)
@@ -923,11 +971,25 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         kwargs.setdefault("dynamic_singleton_tree", tree_width is not None)
         if tree_width is not None:
             kwargs.setdefault("dynamic_tree_max_width", tree_width)
+            kwargs.setdefault(
+                "tensorfold_cohort_limit",
+                self.external_policy.get("tensorfold_cohort_limit"),
+            )
+            kwargs.setdefault(
+                "tree_node_budget_by_lanes",
+                _tree_node_budgets(
+                    self.external_policy.get("tree_node_budget_by_lanes"),
+                    tree_width,
+                ),
+            )
         return ExternalDraftBatchGenerator(
             self.model,
             draft_model=self.draft_model,
             binding=self.identity["fingerprint"],
             num_draft=self._external_num_draft(),
+            minimum_draft_proposals=self.external_policy.get(
+                "minimum_draft_proposals", min(3, self._external_num_draft())
+            ),
             pairwise_selection=self.external_policy.get("pairwise_selection", "host"),
             # Keep B>1 lanes in lockstep (see ExternalDraftBatchGenerator).
             ready_drain="all",
@@ -942,6 +1004,16 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             ),
             **kwargs,
         )
+
+    def lane_policy_defaults(self):
+        """Declare the row-stable projection geometry for packed varlen/tree."""
+
+        if not (
+            self.external_policy.get("external_varlen_prefill")
+            and self.external_policy.get("batch_size_route")
+        ):
+            return None
+        return {"max_rows": 128, "chunk_above_max": True}
 
     def profile_name(self, mtp):
         if mtp and Capability.MTP not in self.descriptor.capabilities:
@@ -959,6 +1031,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             )
             if self.external_policy.get("pairwise_selection", "host") == "batched":
                 config["pairwise_selection"] = "batched"
+            config["minimum_draft_proposals"] = self.external_policy.get(
+                "minimum_draft_proposals", min(3, self._external_num_draft())
+            )
             if self.external_policy.get("external_varlen_prefill", False):
                 from ..runtime.prefill_plan import EXTERNAL_VARLEN_PREFILL_IDENTITY
 
@@ -987,6 +1062,14 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 config["adaptive_verification"] = adaptive
             if self.external_policy.get("batch_size_route"):
                 config["batch_size_route"] = self.external_policy["batch_size_route"]
+                config["tensorfold_cohort_limit"] = self.external_policy.get(
+                    "tensorfold_cohort_limit",
+                    _TREE_BATCH_ROUTES[self.external_policy["batch_size_route"]],
+                )
+                config["tree_node_budget_by_lanes"] = _tree_node_budgets(
+                    self.external_policy.get("tree_node_budget_by_lanes"),
+                    _TREE_BATCH_ROUTES[self.external_policy["batch_size_route"]],
+                )
             return config
         config = {
             "persistent": True,

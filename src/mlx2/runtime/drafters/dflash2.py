@@ -139,9 +139,14 @@ class CandidateSelector(nn.Module):
 
 class DFlash2DraftModel(DFlashDraftModel):
     layer_class = DFlash2DecoderLayer
+    # ``draft_distributions`` publishes the exact dense selector law for each
+    # sampled token.  Composition may therefore replace selected rows with a
+    # deterministic source while retaining these laws for untouched rows.
+    proposal_distribution = "stochastic_exact_law"
     prefer_requested_block_size = False
     dflash_initial_block_size = 3
     dflash_min_block_size = 3
+    minimum_proposal_length = 3
 
     def __init__(self, config: DFlash2Config):
         super().__init__(config)

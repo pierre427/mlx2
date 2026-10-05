@@ -180,6 +180,32 @@ def tree_forward(core, head, tokens, parents, cache, start):
 def commit_tree(cache, record, path, window, start):
     cache.append(("commit", list(path), window, start, record["parents"]))
 '''
+    lane_multi_source = '''
+import mlx.core as mx
+MULTI_CALLS = 0
+def multi_tree_forward(core, head, windows, parents, caches, starts, **kwargs):
+    global MULTI_CALLS
+    MULTI_CALLS += 1
+    offsets = []
+    total = 0
+    for window in windows:
+        offsets.append(total)
+        total += len(window)
+    for layer in core.layers:
+        storage = getattr(layer, "_storage", None)
+        if storage is not None:
+            storage[layer._idx] = mx.full((1, total, 2), float(layer._idx))
+    records = [
+        {"start": start, "parents": list(row_parents)}
+        for start, row_parents in zip(starts, parents)
+    ]
+    return mx.zeros((1, total, 4)), records, offsets
+def commit_streams(caches, records, paths, widths, starts):
+    for cache, record, path, width, start in zip(
+        caches, records, paths, widths, starts
+    ):
+        cache.append(("commit", list(path), width, start, record["parents"]))
+'''
     roots = []
     for name in ("a", "b"):
         base = tmp_path / name / "src" / "tensorfold" / "kernels" / "qwen" / "dense" / "v1"
@@ -188,7 +214,14 @@ def commit_tree(cache, record, path, window, start):
             (package / "__init__.py").write_text("")
         for module in qwen38_tensorfold._KERNEL_MODULES:
             leaf = module.rsplit(".", 1)[1]
-            (base / f"{leaf}.py").write_text(lane_tree_source if leaf == "lane_tree" else "")
+            source = (
+                lane_tree_source
+                if leaf == "lane_tree"
+                else lane_multi_source
+                if leaf == "lane_multi"
+                else ""
+            )
+            (base / f"{leaf}.py").write_text(source)
         roots.append(tmp_path / name)
     for key in [k for k in sys.modules if k == "tensorfold" or k.startswith("tensorfold.")]:
         monkeypatch.delitem(sys.modules, key)
@@ -306,6 +339,9 @@ def test_cohort_executor_keeps_parents_cache_and_commit_paths_per_lane(fake_tens
     assert caches[0][-1] == ("commit", [0, 2], 3, 5, [-1, 0, 0])
     assert caches[1][-1] == ("commit", [0, 1, 2], 3, 9, [-1, 0, 1])
     assert transaction.closed and all(item.closed for item in transaction.transactions)
+    assert transaction.physical_packed
+    lane_multi = sys.modules["tensorfold.kernels.qwen.dense.v1.lane_multi"]
+    assert lane_multi.MULTI_CALLS == 1
     assert len(calls) == 1
 
 
@@ -475,6 +511,7 @@ def test_bounded_tree_candidate_moves_b1_b2_b4_b1_at_round_boundaries(monkeypatc
     batch = generator(
         model, draft, completion_batch_size=5, ready_drain="all",
         dynamic_singleton_tree=True, dynamic_tree_max_width=4,
+        tree_node_budget_by_lanes={1: 15, 2: 7, 3: 4, 4: 3},
     )
     seen = []
     _install_reference_cohort(batch, monkeypatch, seen)
@@ -516,6 +553,53 @@ def test_bounded_tree_candidate_moves_b1_b2_b4_b1_at_round_boundaries(monkeypatc
     assert all(r["policy"] == "tree15_b1_b4_chain_b5plus_v1" and not r["qualified"]
                for r in route)
     assert all(r["current"] == "tree15_tensorfold" for r in route)
+    assert {"15", "7", "3"} <= set(
+        batch.scheduler_stats["external_tree_node_budget_histogram"]
+    )
+    assert all(
+        r["tree_node_budget_by_lanes"]
+        == {"1": 15, "2": 7, "3": 4, "4": 3}
+        for r in route
+    )
+
+
+def test_lane_pressure_tree_budget_preserves_exact_b4_tokens(monkeypatch):
+    prompts = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]]
+    model, draft = tiny(vocab=64, top_k=16, block_size=8)
+    reference = generator(model, draft, completion_batch_size=4, ready_drain="all")
+    reference.insert(
+        prompts,
+        max_tokens=[16] * 4,
+        sampling_configs=[{"sampling_temp": 0.0}] * 4,
+    )
+    expected, _ = drain(reference)
+
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused-by-cpu-oracle")
+    candidate = generator(
+        model,
+        draft,
+        completion_batch_size=4,
+        ready_drain="all",
+        dynamic_singleton_tree=True,
+        dynamic_tree_max_width=4,
+        tree_node_budget_by_lanes={1: 15, 2: 7, 3: 4, 4: 3},
+    )
+    candidate.insert(
+        prompts,
+        max_tokens=[16] * 4,
+        sampling_configs=[{"sampling_temp": 0.0}] * 4,
+    )
+    _install_reference_cohort(candidate, monkeypatch, [])
+    actual, receipts = drain(candidate)
+
+    assert actual == expected
+    histogram = candidate.scheduler_stats["external_tree_node_budget_histogram"]
+    assert int(histogram["3"]) > 0
+    assert all(
+        receipt["batch_size_route"]["tree_node_budget_by_lanes"]
+        == {"1": 15, "2": 7, "3": 4, "4": 3}
+        for receipt in receipts.values()
+    )
 
 
 def test_bounded_tree_candidate_uses_chain_reference_above_four(monkeypatch):

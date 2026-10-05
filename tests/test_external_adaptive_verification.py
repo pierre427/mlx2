@@ -7,10 +7,22 @@ import numpy as np
 import pytest
 
 mx.set_default_device(mx.cpu)
-from test_external_dflash2_cpu import committed_state, drain, generator, tiny
+from test_external_dflash2_cpu import committed_state, drain, generator as _generator, tiny
 
 from mlx2.runtime.external_speculative import HostDraftRow, RoundDecision
 from mlx2.runtime.sample_utils import LaneRNG
+
+
+def generator(model, draft, **kwargs):
+    """Keep depth-one coverage for the generic adaptive mechanism.
+
+    Production DFlash2 declares a preferred floor of three (clamped to the
+    configured width). These tests isolate adaptive grouping and therefore
+    override that separate route policy explicitly.
+    """
+
+    kwargs.setdefault("minimum_draft_proposals", 1)
+    return _generator(model, draft, **kwargs)
 
 
 def _policy(**extra):
@@ -429,6 +441,11 @@ def test_cold_heterogeneous_budget_does_not_claim_adaptive_trimming(monkeypatch)
     engine._round(list(engine.lanes.values()))
     assert engine.scheduler_stats["external_adaptive_trimmed_rounds"] == 0
     assert engine.scheduler_stats["external_adaptive_trimmed_target_rows"] == 0
+    depths = []
     for lane in engine.lanes.values():
         receipt = lane.ready[0].speculative_receipt["adaptive_verification"]
-        assert not receipt["observed_used"] and receipt["round_proposal_depth"] == 0
+        assert not receipt["observed_used"]
+        depths.append(receipt["round_proposal_depth"])
+    # The exhausted row has no draft; one surviving draft on its peer is
+    # terminal headroom, not adaptive trimming.
+    assert depths == [0, 1]

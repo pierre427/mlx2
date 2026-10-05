@@ -102,13 +102,23 @@ def _tree_gates(topology, target_execution, *, default_on=False):
     return gates
 
 
-def _tensorfold_cohort_limit(target_execution, capacity, *, default=1):
+def _tensorfold_cohort_limit(
+    target_execution, capacity, *, default=1, selected=None
+):
     """Return the explicit bounded TensorFold cohort limit (singleton default)."""
 
     from .qwen38_tensorfold import MAX_COHORT_LANES
 
     name = "MLX2_TENSORFOLD_COHORT_LIMIT"
     raw = os.environ.get(name)
+    if selected is not None:
+        if raw is not None:
+            raise ValueError(
+                f"tensorfold_cohort_limit conflicts with explicit {name} override"
+            )
+        if type(selected) is not int:
+            raise ValueError("tensorfold_cohort_limit must be an integer")
+        raw = str(selected)
     if raw is None:
         return min(int(capacity), int(default))
     if target_execution != "tensorfold":
@@ -216,6 +226,11 @@ class Lane:
     # actually run, ``verify_span_hist`` counts verified positions per round.
     verify_span_hist: dict = field(default_factory=dict)
     verify_accept_hist: dict = field(default_factory=dict)
+    # Paired ``verified positions:accepted draft tokens`` histogram.  The two
+    # marginal histograms above cannot prove that a particular short accept
+    # occurred in a full tree round; this receipt makes planted and live
+    # partial-commit gates unambiguous without retaining per-round records.
+    verify_accept_span_hist: dict = field(default_factory=dict)
 
 
 # History changes only by append inside a decode round.  Keep its committed
@@ -367,6 +382,9 @@ class ExternalDraftBatchGenerator:
                  prefill_allocator_reclaim=False, adaptive_verification=None,
                  continuation_pool=None, dynamic_singleton_tree=False,
                  dynamic_tree_max_width=1, external_varlen_prefill=False,
+                 tree_node_budget_by_lanes=None,
+                 tensorfold_cohort_limit=None,
+                 minimum_draft_proposals=None,
                  external_prefill_coalesce_ms=0,
                  external_prefill_coalesce_min_tokens=1,
                  **kwargs):
@@ -391,6 +409,23 @@ class ExternalDraftBatchGenerator:
             self.continuation_policy = draft_model.policy
         self.fly_verification = FLyVerificationPolicy.from_value(fly_verification)
         self.prefill_step = prefill_step_size; self.num_draft = int(num_draft)
+        if minimum_draft_proposals is None:
+            declared_floor = getattr(
+                draft_model, "minimum_proposal_length", 1
+            )
+            if type(declared_floor) is not int:
+                raise ValueError(
+                    "draft minimum_proposal_length must be an integer"
+                )
+            minimum_draft_proposals = min(declared_floor, self.num_draft)
+        if (
+            type(minimum_draft_proposals) is not int
+            or not 1 <= minimum_draft_proposals <= self.num_draft
+        ):
+            raise ValueError(
+                "minimum_draft_proposals must be an integer from 1 to num_draft"
+            )
+        self.minimum_draft_proposals = minimum_draft_proposals
         if type(external_varlen_prefill) is not bool:
             raise ValueError("external_varlen_prefill must be boolean")
         if external_varlen_prefill and not callable(
@@ -431,6 +466,41 @@ class ExternalDraftBatchGenerator:
             raise ValueError("bounded dynamic tree requires an enabled tree route")
         self.dynamic_singleton_tree = dynamic_singleton_tree
         self.dynamic_tree_max_width = dynamic_tree_max_width
+        if tree_node_budget_by_lanes is None:
+            tree_node_budget_by_lanes = {
+                width: 15 for width in range(1, dynamic_tree_max_width + 1)
+            }
+        if not isinstance(tree_node_budget_by_lanes, dict):
+            raise ValueError("tree_node_budget_by_lanes must be a mapping")
+        normalized_tree_budgets = {}
+        for width, nodes in tree_node_budget_by_lanes.items():
+            try:
+                width = int(width)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("tree node budget widths must be integers") from exc
+            if type(nodes) is not int:
+                raise ValueError("tree node budgets must be integers from 3 to 15")
+            normalized_tree_budgets[width] = nodes
+        tree_node_budget_by_lanes = normalized_tree_budgets
+        expected_widths = set(range(1, dynamic_tree_max_width + 1))
+        if set(tree_node_budget_by_lanes) != expected_widths:
+            raise ValueError(
+                "tree_node_budget_by_lanes must declare every enabled tree width"
+            )
+        if any(not 3 <= nodes <= 15 for nodes in tree_node_budget_by_lanes.values()):
+            raise ValueError("tree node budgets must be integers from 3 to 15")
+        ordered_budgets = [
+            tree_node_budget_by_lanes[width]
+            for width in range(1, dynamic_tree_max_width + 1)
+        ]
+        if any(
+            left < right
+            for left, right in zip(ordered_budgets, ordered_budgets[1:])
+        ):
+            raise ValueError("tree node budgets must not increase as lanes fill")
+        if not dynamic_singleton_tree and ordered_budgets != [15]:
+            raise ValueError("tree node budgets require an enabled tree route")
+        self.tree_node_budget_by_lanes = tree_node_budget_by_lanes
         self._auto_last_mode = None
         self._auto_active_width = 0
         self._auto_cohort_width = 0
@@ -500,7 +570,13 @@ class ExternalDraftBatchGenerator:
         self.layers = tuple(draft_model.config.target_layer_ids)
         self.lanes = {}; self.next_uid = 0; self.boundaries = {}
         self._lane_failures = []
-        self.scheduler_stats = {"external_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0, "external_context_token_pairings": 0, "external_verify_steer_rounds": 0, "external_verify_steered_lanes": 0, "external_allocator_reclaims": 0}
+        self._memory_waiting_uids = set()
+        self._atomic_prefill_waiting_uids = set()
+        self.scheduler_stats = {"external_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0, "external_context_token_pairings": 0, "external_verify_steer_rounds": 0, "external_verify_steered_lanes": 0, "external_allocator_reclaims": 0, "external_idle_allocator_reclaims": 0, "external_atomic_cohort_prefill_holds": 0}
+        self.scheduler_stats.update(
+            external_minimum_draft_proposals=self.minimum_draft_proposals,
+            external_proposal_floor_raises=0,
+        )
         if getattr(self, "external_varlen_prefill", False):
             self.scheduler_stats.update(
                 external_batched_prefill_rounds=0,
@@ -552,11 +628,14 @@ class ExternalDraftBatchGenerator:
                 external_tree_rounds=0,
                 external_tree_nodes=0,
                 external_tree_accepted_edges=0,
+                external_tree_node_budget_last=0,
+                external_tree_node_budget_histogram={},
             )
         if self.target_execution == "tensorfold":
             self.tensorfold_cohort_limit = _tensorfold_cohort_limit(
                 self.target_execution, self.capacity,
                 default=self.dynamic_tree_max_width if dynamic_singleton_tree else 1,
+                selected=tensorfold_cohort_limit,
             )
             self.scheduler_stats.update(
                 external_tensorfold_target_rounds=0,
@@ -564,6 +643,9 @@ class ExternalDraftBatchGenerator:
                 external_tensorfold_cohort_lanes=0,
                 external_tensorfold_cohort_max_width=0,
                 external_tensorfold_cohort_limit=self.tensorfold_cohort_limit,
+                external_tensorfold_packed_target_rounds=0,
+                external_tensorfold_packed_target_lanes=0,
+                external_tensorfold_physical_target_forwards=0,
             )
         else:
             self.tensorfold_cohort_limit = _tensorfold_cohort_limit(
@@ -899,6 +981,7 @@ class ExternalDraftBatchGenerator:
         hists = {
             "verify_span_hist": dict(lane.verify_span_hist),
             "verify_accept_hist": dict(lane.verify_accept_hist),
+            "verify_accept_span_hist": dict(lane.verify_accept_span_hist),
         }
         if self.fly_verification.enabled and not lane.processors:
             return {
@@ -960,6 +1043,17 @@ class ExternalDraftBatchGenerator:
                 },
             }
         if self.dynamic_singleton_tree:
+            tree_budgets = getattr(
+                self,
+                "tree_node_budget_by_lanes",
+                {
+                    width: 15
+                    for width in range(1, self.dynamic_tree_max_width + 1)
+                },
+            )
+            budget_width = min(
+                max(1, int(self._auto_active_width)), self.dynamic_tree_max_width
+            )
             result["batch_size_route"] = {
                 "policy": (
                     "tree15_b1_b4_chain_b5plus_v1"
@@ -967,6 +1061,11 @@ class ExternalDraftBatchGenerator:
                     else "tree15_b1_chain_b2plus_v1"
                 ),
                 "max_tree_width": self.dynamic_tree_max_width,
+                "tree_node_budget_by_lanes": {
+                    str(width): nodes
+                    for width, nodes in tree_budgets.items()
+                },
+                "current_tree_node_budget": tree_budgets[budget_width],
                 "active_lanes": self._auto_active_width,
                 "cohort_width": self._auto_cohort_width,
                 "current": (
@@ -986,6 +1085,15 @@ class ExternalDraftBatchGenerator:
             "cohort_rounds": self.scheduler_stats[
                 "external_tensorfold_cohort_rounds"
             ],
+            "packed_target_rounds": self.scheduler_stats.get(
+                "external_tensorfold_packed_target_rounds", 0
+            ),
+            "packed_target_lanes": self.scheduler_stats.get(
+                "external_tensorfold_packed_target_lanes", 0
+            ),
+            "physical_target_forwards": self.scheduler_stats.get(
+                "external_tensorfold_physical_target_forwards", 0
+            ),
         }
         return result
 
@@ -1153,12 +1261,21 @@ class ExternalDraftBatchGenerator:
         A zero-count round only appends pending draft context so the draft
         plane stays paired with the target boundary.
         """
+        tree_budget = (
+            self._tree_node_budget() if self.draft_topology == "tree15" else None
+        )
         requested_count = min(
-            15 if self.draft_topology == "tree15" else self.num_draft,
+            tree_budget if tree_budget is not None else self.num_draft,
             min(l.maximum-l.generated-1 for l in cohort),
         )
+        if tree_budget is not None:
+            self.scheduler_stats["external_tree_node_budget_last"] = requested_count
+            histogram = self.scheduler_stats["external_tree_node_budget_histogram"]
+            key = str(requested_count)
+            histogram[key] = int(histogram.get(key, 0)) + len(cohort)
         if adaptive_depth is not None:
-            requested_count = min(requested_count, int(adaptive_depth))
+            adaptive_count = min(requested_count, int(adaptive_depth))
+            requested_count = self._proposal_depth(adaptive_count, requested_count)
         if any(l.ordinary for l in cohort): requested_count = 0
         blocks = [None]*len(cohort)
         if not requested_count:
@@ -1367,6 +1484,15 @@ class ExternalDraftBatchGenerator:
                     blocks[row].feedback_payload = payloads[j]
         return blocks
 
+    def _proposal_depth(self, requested, maximum):
+        """Apply the configured floor without exceeding terminal headroom."""
+
+        requested = min(int(requested), int(maximum))
+        floor = min(int(maximum), self.minimum_draft_proposals)
+        if requested < floor:
+            _bump(self.scheduler_stats, "external_proposal_floor_raises")
+        return max(floor, requested)
+
     def _verify(self, cohort, blocks, logits):
         """Accept phase over the target logits of one verify forward."""
         vocab = int(logits.shape[-1])
@@ -1488,6 +1614,7 @@ class ExternalDraftBatchGenerator:
             cached=cached,
         )
         _bump(self.scheduler_stats, "external_tensorfold_target_rounds")
+        _bump(self.scheduler_stats, "external_tensorfold_physical_target_forwards")
         if cached:
             _bump(
                 self.scheduler_stats,
@@ -1521,6 +1648,14 @@ class ExternalDraftBatchGenerator:
         _bump(self.scheduler_stats, "external_tensorfold_target_rounds")
         _bump(self.scheduler_stats, "external_tensorfold_cohort_rounds")
         _bump(self.scheduler_stats, "external_tensorfold_cohort_lanes", len(cohort))
+        _bump(self.scheduler_stats, "external_tensorfold_physical_target_forwards")
+        if getattr(result[2], "physical_packed", False):
+            _bump(self.scheduler_stats, "external_tensorfold_packed_target_rounds")
+            _bump(
+                self.scheduler_stats,
+                "external_tensorfold_packed_target_lanes",
+                len(cohort),
+            )
         self.scheduler_stats["external_tensorfold_cohort_max_width"] = max(
             self.scheduler_stats["external_tensorfold_cohort_max_width"], len(cohort)
         )
@@ -1558,9 +1693,21 @@ class ExternalDraftBatchGenerator:
                 _bump(self.scheduler_stats, "external_tree_codebook_cache_hits")
         return options
 
-    @staticmethod
-    def _tree_count(lane):
-        return min(15, lane.maximum - lane.generated - 1)
+    def _tree_node_budget(self, active_width=None):
+        width = max(
+            1,
+            int(self._auto_active_width if active_width is None else active_width),
+        )
+        width = min(width, self.dynamic_tree_max_width)
+        budgets = getattr(
+            self,
+            "tree_node_budget_by_lanes",
+            {candidate: 15 for candidate in range(1, self.dynamic_tree_max_width + 1)},
+        )
+        return budgets[width]
+
+    def _tree_count(self, lane):
+        return min(self._tree_node_budget(), lane.maximum - lane.generated - 1)
 
     def _prelaunch_tree(self, lane, decision):
         """Queue the next round's lattice right after this round's commit.
@@ -1973,6 +2120,10 @@ class ExternalDraftBatchGenerator:
                 lane.verify_accept_hist[round_accepted] = (
                     lane.verify_accept_hist.get(round_accepted, 0) + 1
                 )
+                pair = f"{count + 1}:{round_accepted}"
+                lane.verify_accept_span_hist[pair] = (
+                    lane.verify_accept_span_hist.get(pair, 0) + 1
+                )
             lane.relaxed_accepts += decision.relaxed
             _bump(
                 self.scheduler_stats,
@@ -2084,13 +2235,22 @@ class ExternalDraftBatchGenerator:
     def _draft_settings_receipt(self):
         settings = getattr(getattr(self, "draft", None), "receipt_settings", None)
         if settings is None:
-            return {}
+            settings = {}
         if not isinstance(settings, dict):
             raise ValueError("drafter receipt_settings must be a dictionary")  # noqa: TRY004
         # Freeze settings with the response: later drafter tuning cannot change
         # the configuration attributed to an already committed token.
         json.dumps(settings, allow_nan=False)
-        return {"draft_settings": copy.deepcopy(settings)}
+        return {
+            "draft_settings": {
+                **copy.deepcopy(settings),
+                "minimum_proposal_length": self.minimum_draft_proposals,
+                "proposal_floor_raises": self.scheduler_stats[
+                    "external_proposal_floor_raises"
+                ],
+                "terminal_exhaustion_may_shorten": True,
+            }
+        }
 
     def _adaptive_receipt(self, lane=None):
         if self.adaptive_policy is None:
@@ -2212,6 +2372,10 @@ class ExternalDraftBatchGenerator:
             else:
                 # This choice cannot see any current sampled proposal token.
                 depths = self.adaptive_policy.request_depths(self.acceptance_estimator, maxima, features)
+            depths = [
+                self._proposal_depth(depth, maximum) if maximum else 0
+                for depth, maximum in zip(depths, maxima)
+            ]
             draft_groups = {}
             for row, depth in enumerate(depths):
                 draft_groups.setdefault(depth, []).append(row)
@@ -2226,6 +2390,10 @@ class ExternalDraftBatchGenerator:
                 features = [current if current is not None else lagged
                             for current, lagged in zip(current_features, features)]
                 depths = self.adaptive_policy.request_depths(self.acceptance_estimator, maxima, features)
+                depths = [
+                    self._proposal_depth(depth, maximum) if maximum else 0
+                    for depth, maximum in zip(depths, maxima)
+                ]
                 blocks = [self._trim_adaptive_block(block, depth) for block, depth in zip(blocks, depths)]
             decisions = [None] * len(cohort)
             physical = self._adaptive_physical_groups(blocks)
@@ -2585,8 +2753,9 @@ class ExternalDraftBatchGenerator:
             proposal_counts = [0 if block is None else int(block.lengths[0]) for block in blocks]
             verify_width = max(proposal_counts, default=0) + 1
             if self.adaptive_policy is not None:
+                effective_depth = max(proposal_counts, default=0)
                 _bump(self.scheduler_stats, "external_adaptive_rounds")
-                saved = max(0, fixed_depth - depth) * len(cohort)
+                saved = max(0, fixed_depth - effective_depth) * len(cohort)
                 for lane in cohort:
                     lane.adaptive_round_policy = "lagged_cohort"
                     lane.adaptive_feature_source = "lagged_q"
@@ -2595,7 +2764,7 @@ class ExternalDraftBatchGenerator:
                 _bump(self.scheduler_stats, "external_adaptive_trimmed_rounds", int(saved > 0))
                 _bump(self.scheduler_stats, "external_adaptive_trimmed_target_rows", saved)
                 _bump(self.scheduler_stats, "external_adaptive_target_rows", verify_width * len(cohort))
-                self.scheduler_stats["external_adaptive_round_depth"] = verify_width - 1
+                self.scheduler_stats["external_adaptive_round_depth"] = effective_depth
                 self.scheduler_stats["external_adaptive_verify_width"] = verify_width
             inputs = [
                 [lane.anchor]+_block_row(block, None)[0]+[0]*(verify_width-count-1)
@@ -3009,6 +3178,63 @@ class ExternalDraftBatchGenerator:
             if selected or not self._reclaim_for_admission():
                 return selected
 
+    @staticmethod
+    def _batch_cohort_key(lane):
+        cohort = lane.sampling.get("batch_cohort")
+        if not isinstance(cohort, dict):
+            return None
+        size = cohort.get("size")
+        if type(size) is not int or size < 1:
+            return None
+        return (str(cohort.get("tenant_id")), str(cohort.get("id")), size)
+
+    def _atomic_cohort_prefill_ready(self, lane):
+        """Hold a completed short prompt until its declared peers are ready.
+
+        Ingress publishes a complete ``batch_cohort`` atomically, but uneven
+        external prompts reach their final prompt token on different polls.
+        Letting the short member decode immediately turns the cohort into a
+        prefill/decode staircase and leaves TensorFold no sustained batch to
+        execute.  The ordinary/self-MTP path already applies this boundary
+        hold; external DFlash must honor the same request contract.
+
+        A cohort that lost a member after admission is released rather than
+        deadlocked.  Serving owns cancellation/failure reporting for that
+        degraded case.
+        """
+        key = self._batch_cohort_key(lane)
+        if key is None:
+            return True
+        members = [
+            candidate
+            for candidate in self.lanes.values()
+            if not candidate.cancelled and self._batch_cohort_key(candidate) == key
+        ]
+        if len(members) != key[2]:
+            return True
+        if all(candidate.anchor is not None for candidate in members):
+            return True
+        self._atomic_prefill_waiting_uids.add(lane.uid)
+        _bump(self.scheduler_stats, "external_atomic_cohort_prefill_holds")
+        return False
+
+    def scheduler_waiting_uids(self):
+        """Lanes intentionally paused by scheduling, not memory admission.
+
+        Uneven atomic cohorts can hold a short row at its prompt boundary for
+        longer than the serving stall watchdog while the longest row keeps
+        prefilling.  Report that phase wait explicitly.  Unprocessed rows are
+        also scheduler-waiting unless their own minimum prefill slice failed
+        memory admission in the most recent poll.
+        """
+        waiting = set(self._atomic_prefill_waiting_uids)
+        waiting.update(
+            lane.uid
+            for lane in self.lanes.values()
+            if lane.anchor is None and lane.uid not in self._memory_waiting_uids
+        )
+        return tuple(sorted(waiting))
+
     def disable_speculation(self, uid):
         if self._open: raise RuntimeError("Cannot change route inside a transaction")
         self.lanes[uid].ordinary = True
@@ -3016,6 +3242,8 @@ class ExternalDraftBatchGenerator:
 
     def next(self):
         prompts, responses = [], []
+        self._memory_waiting_uids.clear()
+        self._atomic_prefill_waiting_uids.clear()
         self._reclaims_left = 2; self._allocator_reclaimed = False
         ordered = list(self.lanes.values())
         if ordered:
@@ -3085,7 +3313,15 @@ class ExternalDraftBatchGenerator:
                 if append < initial_append:
                     self.scheduler_stats["prefill_adaptive_slices"] = self.scheduler_stats.get("prefill_adaptive_slices", 0) + 1
                 prompts.append(self._prefill(lane, step=append)); break
-        ready = [l for l in ordered if l.anchor is not None and not l.ready and not l.cancelled][:self.capacity]
+            self._memory_waiting_uids.add(lane.uid)
+        ready = [
+            lane
+            for lane in ordered
+            if lane.anchor is not None
+            and not lane.ready
+            and not lane.cancelled
+            and self._atomic_cohort_prefill_ready(lane)
+        ][:self.capacity]
         active_width = (
             sum(lane.anchor is not None and not lane.cancelled for lane in self.lanes.values())
             if self.dynamic_tree_max_width == 4 else len(self.lanes)
@@ -3102,11 +3338,18 @@ class ExternalDraftBatchGenerator:
         for (count, _ordinary), candidates in groups.items():
             if self.target_execution == "tensorfold" and not concurrent:
                 candidates = candidates[: self.tensorfold_cohort_limit]
-            # The tree verifier scores anchor plus 15 lattice nodes even
-            # though the configured chain draft depth may be only three.
-            append = 16 if self.dynamic_singleton_tree and not concurrent and count else count + 1
+            # Bound total target rows as lane pressure rises.  The adapter
+            # declares the tree-node budget; admission prices that exact
+            # verify shape rather than assuming 16 rows for every lane.
+            append = (
+                self._tree_node_budget(active_width) + 1
+                if self.dynamic_singleton_tree and not concurrent and count
+                else count + 1
+            )
             cohort = self._fit_cohort(candidates, append)
-            if not cohort: continue
+            if not cohort:
+                self._memory_waiting_uids.update(lane.uid for lane in candidates)
+                continue
             if self.draft_topology == "tree15" and self.target_execution != "tensorfold":
                 pending = [[lane] for lane in reversed(cohort)]
             else:
@@ -3189,14 +3432,24 @@ class ExternalDraftBatchGenerator:
     def remove(self, uids, return_prompt_caches=False, *, cancelled=True, keep_boundary=False):
         if self._open: raise RuntimeError("Cannot remove during external transaction")
         result = {}
+        removed = False
         self._discard_prelaunched(uids)
         for uid in uids:
             lane = self.lanes.pop(uid,None)
             if not keep_boundary: self.boundaries.pop(uid,None)
             if lane is not None:
+                removed = True
                 lane.cancelled = bool(cancelled); self.scheduler_stats["cancelled"] += int(cancelled)
                 if return_prompt_caches: result[uid] = self._freeze_cache(lane.cache)
                 lane.ready.clear()
+        if removed and not self.lanes:
+            # No request state can reference verify/prefill scratch now.  Free
+            # the allocator pool before the next atomic cohort is admitted;
+            # otherwise a completed long-context cell can make its successor
+            # fail admission on stale pages that a later rejection immediately
+            # reclaims anyway.
+            self.mx.clear_cache()
+            _bump(self.scheduler_stats, "external_idle_allocator_reclaims")
         return result
 
     def close(self):
