@@ -22,6 +22,11 @@ RUN = ROOT / "qualification" / "runs" / "qualify-e8861bb5-uncensored"
 
 @pytest.fixture(scope="module")
 def run_modules():
+    missing = [name for name in ("thermal_ladder.py", "qualification_verdict.py")
+               if not (RUN / name).is_file()]
+    if missing:
+        pytest.skip(f"private qualification run copies absent ({RUN.relative_to(ROOT)}: "
+                    f"{', '.join(missing)}); not exported to the public mirror")
     sys.path.insert(0, str(RUN))
     previous = os.environ.get("MLX2_CAMPAIGN_ROOT")
     os.environ["MLX2_CAMPAIGN_ROOT"] = str(ROOT)
@@ -142,6 +147,8 @@ def test_real_e8861bb5_ladders_still_qualify(run_modules, name):
 
     _, verdict = run_modules
     path = RUN / "results" / "ladder-flash-next-uncensored-mtp2" / name
+    if not path.is_file():
+        pytest.skip(f"private ladder evidence absent: {path.relative_to(ROOT)}")
     result = verdict.verdict(json.loads(path.read_text()))
     assert result["qualified"] is True, result["failures"]
     assert result["identity"]["runtime_source_sha256"] == (

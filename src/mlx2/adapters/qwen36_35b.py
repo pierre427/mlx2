@@ -19,8 +19,15 @@ from .qwen38_27b import (
 )
 
 CACHE_LAYOUT = "qwen36-35b-a3b-hybrid-layer-segments-v1"
-# Default on at width 3 (width 4 until 2026-10-02; Qwen3.8-27B and Xing stay
-# at 4).  Explicit rather than inherited through Qwen3.8.
+# Default on at width 1 since 2026-10-02 evening (width 4 until 2026-10-02,
+# then 3; Qwen3.8-27B and Xing stay at 4).  Explicit rather than inherited
+# through Qwen3.8.
+#
+# Width 1: with the decode wins on (DEFAULT_DECODE_WINS below) ordinary decode
+# beats MTP at every width up to 3; static width 1 vs 3 measured +2.5% at 1
+# lane, +10.0% at 2, +22.0% at 3 and neutral at 4
+# (qualification/runs/options-sweep-qwen36-20261002, handoff-dwnowin.json).
+# Native MTP stays the default route: a lone request still decodes on MTP.
 #
 # Width 3: a 4-lane cohort kept on MTP at width 4 loses to ordinary decode
 # (260.2 vs 284.0 tok/s, -8%); width 3 hands it off and measured 298.6 vs
@@ -28,7 +35,7 @@ CACHE_LAYOUT = "qwen36-35b-a3b-hybrid-layer-segments-v1"
 # and 8 lanes (qualification/runs/port-park-memory-20261002,
 # qwen36-width4-vs-width3.json).  Width 4 passed the earlier Qwen3.6
 # 131K/16-GiB handoff campaign for explicitly selected native MTP.
-DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = 3
+DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = 1
 
 
 def descriptor_for(*, has_mtp: bool) -> ModelDescriptor:
@@ -254,8 +261,41 @@ LIVE_APPLIED_ENV = frozenset(
         "MLX_QWEN36_FUSED_GDN_BATCH_VERIFY",
         "MLX_QWEN36_MOE_WINDOW",
         "MLX_QWEN36_DECODE_WINS",
+        # NAX sorted MoE gather: applied through moe_nax_gather.set_mode at
+        # load, as on Flash-Next.
+        "MLX2_MOE_NAX_GATHER",
     }
 )
+# oMLX #3995/#4022/#4029 NAX segmented sorted MoE gather
+# (MLX2_MOE_NAX_GATHER, runtime/models/moe_nax_gather.py), prefill forwards
+# only.  Default "fused" on Qwen3.6 since 2026-10-02 (Pierre): prefill +20%,
+# +12%, +13% at 512, 2048 and 8192 rows, logits and tokens bit-identical, 0
+# fallbacks, never engaged in decode or verify (flip-q36nax-20261002).  The
+# policy key ``moe_nax_gather`` ("off", "gather", "fused") selects it; the
+# profile pins the variable at every value, because MLX2_* variables are not
+# stripped from the inherited environment.  The module default stays "off".
+MOE_NAX_GATHER_MODES = ("off", "gather", "fused")
+DEFAULT_MOE_NAX_GATHER = "fused"
+
+
+# Decode wins the adapter selects when the execution policy does not name the
+# key, on both routes, since 2026-10-02 (Pierre): greedy tokens identical in
+# every cell on both artifacts, per-call gate 1488/1488 bit-equal; ordinary
+# B1 +42.9%, B4 +6.2%, B16 +3.0%; MTP B1 +2.9%, B4 +7.4%
+# (qualification/runs/options-sweep-qwen36-20261002, decodewins-combos.json).
+# ``fused_gdn_batch_verify`` and ``moe_window`` stay off: batched verify cost
+# mtp:2/3 -2.7/-5.4%.  An explicit policy value ("off" / false included)
+# wins; an operator's MLX_QWEN36_FUSED_GDN_DECODE is still preserved when the
+# policy omits that key, as before.  Under MoE expert streaming the routed
+# decode default steps aside (it reads resident tables); only an explicit
+# selection is refused there.
+DEFAULT_DECODE_WINS = {
+    "moe_routed_decode": "gate_up_down_shared",
+    "moe_topk_fold": "launch",
+    "fused_gdn_decode": True,
+    "fused_gdn_batch_decode": True,
+    "fused_gdn_verify": True,
+}
 
 
 def validate_kernel_choice(key, value):
@@ -271,8 +311,13 @@ def choice_selected(key, value):
     return value != "off" if key in ENUM_KERNELS else bool(value)
 
 
-def configure_environment(kernels=None) -> dict[str, str]:
+def configure_environment(kernels=None, moe_nax_gather=None) -> dict[str, str]:
+    """Pin the Qwen3.6 profile.  ``moe_nax_gather`` None leaves
+    MLX2_MOE_NAX_GATHER untouched (the 122B profile); the 35B adapter passes
+    its selected mode, which is pinned at every value."""
     require_process_numerics("the Qwen3.6 profile")
+    if moe_nax_gather is not None and moe_nax_gather not in MOE_NAX_GATHER_MODES:
+        raise ValueError(f"Qwen3.6 moe_nax_gather must be one of {MOE_NAX_GATHER_MODES}")
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
@@ -313,6 +358,8 @@ def configure_environment(kernels=None) -> dict[str, str]:
         if key in NEW_DECODE_KERNELS
     ):
         profile["MLX_QWEN36_DECODE_WINS"] = "1"
+    if moe_nax_gather is not None:
+        profile["MLX2_MOE_NAX_GATHER"] = moe_nax_gather
     for name in tuple(os.environ):
         if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
             del os.environ[name]
@@ -345,6 +392,10 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
     default_route_execution_policy = {
         "native_mtp": {"apc_interior_checkpoints": "auto"},
     }
+    # Read from this class's own __dict__ (see DEFAULT_DECODE_WINS and
+    # DEFAULT_MOE_NAX_GATHER); subclasses keep the stock route.
+    default_decode_wins = DEFAULT_DECODE_WINS
+    default_moe_nax_gather = DEFAULT_MOE_NAX_GATHER
     descriptor = QWEN36_35B
     # Per-layer eager dispatch (MTPLX #579, the Flash-Next mechanism), default
     # stride 2 (Pierre, 2026-10-01).  Bit-exact here, and this 3B-active MoE is
@@ -373,6 +424,26 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         execution_policy=None,
         weight_streaming=None,
     ):
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self,
+            lambda: self._init_qwen36(
+                model_path,
+                require_mtp=require_mtp,
+                execution_policy=execution_policy,
+                weight_streaming=weight_streaming,
+            ),
+        )
+
+    def _init_qwen36(
+        self,
+        model_path: str,
+        *,
+        require_mtp: bool = False,
+        execution_policy=None,
+        weight_streaming=None,
+    ):
         from ..runtime.streamed_load import require_declared
 
         stream_request = require_declared(type(self), weight_streaming)
@@ -382,11 +453,13 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         if set(policy) - {
             "num_draft",
             "gdn_state_dtype",
+            "moe_nax_gather",
             *KERNEL_POLICY_ENV,
             *EAGER_DISPATCH_POLICY_KEYS,
         }:
             raise ValueError(
                 "Qwen3.6 execution policy supports only num_draft, gdn_state_dtype, "
+                "moe_nax_gather, "
                 "the eager-dispatch keys and the kernel switches "
                 + ", ".join(sorted(KERNEL_POLICY_ENV))
             )
@@ -400,10 +473,27 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             gdn_state_dtype=policy.pop("gdn_state_dtype", "float32")
         ).gdn_state_dtype
         self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", 2))
+        self.moe_nax_gather = policy.pop(
+            "moe_nax_gather", vars(type(self)).get("default_moe_nax_gather", "off")
+        )
+        if self.moe_nax_gather not in MOE_NAX_GATHER_MODES:
+            raise ValueError(
+                f"Qwen3.6 moe_nax_gather must be one of {MOE_NAX_GATHER_MODES}"
+            )
         self._kernels = {}
         for key in KERNEL_POLICY_ENV:
             if key in policy:
                 self._kernels[key] = validate_kernel_choice(key, policy[key])
+        for key, value in vars(type(self)).get("default_decode_wins", {}).items():
+            if key in self._kernels:
+                continue
+            if key == "fused_gdn_decode" and KERNEL_POLICY_ENV[key] in os.environ:
+                continue  # the operator's environment value is preserved
+            if key == "moe_routed_decode" and (
+                stream_request is not None or self._kernels.get("moe_routed_candidate")
+            ):
+                continue  # streaming refuses it; the historical candidate excludes it
+            self._kernels[key] = value
         if self._kernels.get("moe_routed_candidate") and (
             self._kernels.get("moe_routed_decode", "off") != "off"
             or self._kernels.get("moe_window")
@@ -430,9 +520,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         self.identity = artifact["identity"]
         self.descriptor = descriptor_for(has_mtp=artifact["has_mtp"])
         self.environment = eager_dispatch_environment(
-            configure_environment(self._kernels)
-            if self._kernels
-            else configure_environment(),
+            configure_environment(self._kernels, self.moe_nax_gather),
             eager_dispatch,
         )
         from ..runtime.models.import_env import assert_profile_applied
@@ -440,6 +528,16 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         # Import-time latches (GDN core/packed, MoE gate/up, QSDPA) must match
         # this profile; the decode switches are re-applied live below.
         assert_profile_applied("the Qwen3.6 35B adapter", live=LIVE_APPLIED_ENV)
+        from ..runtime.models import moe_nax_gather as _moe_nax
+        from .process_globals import MOE_NAX_GATHER, claim
+
+        # A process global: refuse a mode a live adapter does not run, and
+        # roll it back if this load fails (process_globals).
+        self._process_claim = claim(
+            self,
+            "the Qwen3.6 35B adapter",
+            {MOE_NAX_GATHER: (self.moe_nax_gather, _moe_nax.set_mode)},
+        )
         self.layout = CACHE_LAYOUT
         self._tables = []
         path = Path(self.identity["path"])
@@ -704,11 +802,20 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         result["compiled_decode_selected"] = False
         result["mtp_norm_repairs"] = list(getattr(self, "mtp_norm_repairs", ()))
         result["mtp_norm_means"] = dict(getattr(self, "mtp_norm_means", {}))
-        if (getattr(self, "_kernels", None) or {}).get("fused_gdn_decode"):
-            # The A/B reads fused calls and fallback reasons here.
-            from ..runtime.models.qwen36_35b import qwen36_fused_gdn_stats
+        # Reported whenever B=1 fused GDN decode is live on the layers,
+        # whatever selected it (policy, adapter default or an operator's
+        # MLX_QWEN36_FUSED_GDN_DECODE): the qualifier reads the fused calls
+        # and fallback reasons here and fails closed when they are absent.
+        from ..runtime.models.qwen36_35b import qwen36_fused_gdn_stats
 
-            result["fused_gdn_decode"] = qwen36_fused_gdn_stats(self.model)
+        fused_gdn = qwen36_fused_gdn_stats(self.model)
+        if fused_gdn["mode"] == "fused" or fused_gdn["fused_calls"]:
+            result["fused_gdn_decode"] = fused_gdn
+        if getattr(self, "moe_nax_gather", "off") != "off":
+            # The qualifier reads the NAX gather's engaged calls here.
+            from ..runtime.models import moe_nax_gather as _moe_nax
+
+            result["moe_nax_gather"] = _moe_nax.status()
         if (getattr(self, "_kernels", None) or {}).get("moe_routed_candidate"):
             from ..runtime.models.qwen3_next import routed_candidate_stats
 
@@ -723,8 +830,8 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         ):
             from ..runtime.models.qwen36_35b import qwen36_decode_wins_stats
 
-            result["decode_wins"] = {
-                "qualification": "unqualified",
-                **qwen36_decode_wins_stats(self.model),
-            }
+            # No qualification label here: whether this route is qualified is
+            # decided by its route receipt (serving's qualification status),
+            # not by the adapter.  The wins are default-on since 2026-10-02.
+            result["decode_wins"] = qwen36_decode_wins_stats(self.model)
         return result

@@ -16,6 +16,13 @@ Configs:
   ord:N        N lanes ordinary decode
   long:T       B=1 native MTP on one T-token document prompt; reports decode
                tok/s and prefill tok/s (TTFT) per run
+  copy:1       B=1 native MTP on copy-heavy prompts (a ~400-token document
+               excerpt to reproduce verbatim; a different excerpt per rep)
+
+``--base-engine JSON`` sets the served engine options of every arm, the
+default included (e.g. ``{"mtp_ordinary_handoff": {"enabled": true,
+"max_mtp_width": 3}}``, the served policy since d7ee03da); an arm's engine
+levers (``handoff``, ``park``, ``adaptive``, ...) are merged over it.
 
 Decode tok/s counts tokens from the moment every lane has produced its first
 token to the last token (prefill excluded).  Reports per arm: median,
@@ -49,7 +56,7 @@ from flash_next_options_sweep import (  # noqa: E402
 SWITCH_LEVERS = frozenset({
     "dynamic_accept", "router_kernel", "nax_decode", "gdn_core", "indexed_merge",
     "indexed_gate", "gate_inject", "row_exact", "tf_qmv", "fp32_head", "adaptive",
-    "adaptive_single", "fly", "copy_off",
+    "adaptive_single", "fly", "copy_off", "invariant", "park",
 })
 
 
@@ -80,6 +87,18 @@ class Toggles:
             "nax": QE._QSA_NAX_DECODE,
             "gdn_core": GD._ENABLE_GDN_CORE,
         }
+        from mlx2.runtime.models import switch_layers as SL
+        from mlx2.runtime.models import moe_nax_gather as NAX
+
+        self.SL, self.NAX = SL, NAX
+        self.default.update({
+            "rhs_pad": SL._RHS_PAD_POLICY,
+            "nax_gather": NAX.MODE,
+            "qsa_sparse": (QE._QSA_BATCH_DECODE_SPARSE, QE._QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT),
+            "copy_policy": h.copy_policy,
+        })
+        self.base_engine = dict(h.engine)
+        self.invariant = None
         self.row_exact = None
         self.tf_qmv = None
         self.fp32 = None
@@ -161,6 +180,12 @@ class Toggles:
             self._fp32(False)
         if self.scan is not None:
             self._scan(0)
+        self.SL._RHS_PAD_POLICY = d["rhs_pad"]
+        self.NAX.set_mode(d["nax_gather"])
+        self.QE.set_qsa_batch_decode_sparse(d["qsa_sparse"][0], min_context=d["qsa_sparse"][1])
+        self.h.copy_policy = d["copy_policy"]
+        if self.invariant is not None and self.invariant.installed:
+            self.invariant.uninstall()
         if getattr(self, "gdn_state_set", False):
             from mlx2.runtime.models.gdn_state import is_gdn_layer
 
@@ -181,7 +206,7 @@ class Toggles:
             self._apply(part)
             engine.update(self.run_kwargs.pop("engine", {}))
         if engine:
-            self.run_kwargs["engine"] = engine
+            self.run_kwargs["engine"] = {**self.base_engine, **engine}
 
     def _apply(self, part):
         lever, _, value = part.partition(":")
@@ -246,7 +271,41 @@ class Toggles:
         elif lever == "prefill_step":
             self.run_kwargs["prefill_step"] = int(value)
         elif lever == "handoff":
-            self.run_kwargs["engine"] = {"mtp_ordinary_handoff": dict(HANDOFF, max_mtp_width=int(value or 4))}
+            if value == "off":
+                self.run_kwargs["engine"] = {"mtp_ordinary_handoff": False}
+            else:
+                self.run_kwargs["engine"] = {"mtp_ordinary_handoff": dict(HANDOFF, max_mtp_width=int(value or 4))}
+        elif lever == "park":
+            # The measured park (oMLX #4112 port) on the base handoff width.
+            base = dict(self.base_engine.get("mtp_ordinary_handoff") or HANDOFF)
+            base["adaptive_park"] = {"enabled": True}
+            self.run_kwargs["engine"] = {"mtp_ordinary_handoff": base}
+        elif lever == "rhs_pad":
+            # switch_layers reads the module global at every sorted gather.
+            if value not in ("floor", "adaptive", "always"):
+                raise ValueError(f"rhs_pad must be floor, adaptive or always, got {value!r}")
+            self.SL._RHS_PAD_POLICY = value
+        elif lever == "nax":
+            self.NAX.set_mode(value)
+        elif lever == "qsa_sparse":
+            mode, _, floor = value.partition("@")
+            self.QE.set_qsa_batch_decode_sparse(mode, min_context=int(floor) if floor else 32768)
+        elif lever == "invariant":
+            from mlx2.runtime.models import invariant_prefill as INV
+
+            self.invariant = INV.install(self.model.language_model.model)
+            if not self.invariant.installed:
+                raise ValueError(f"invariant prefill refused: {self.invariant.refusal}")
+        elif lever == "copy_span":
+            # copy_span:MAX/STRONG -> the route's copy-draft policy with
+            # max_span (and initial_span) MAX and strong_max_span STRONG.
+            from dataclasses import replace
+
+            span, _, strong = value.partition("/")
+            base = self.default["copy_policy"]
+            self.h.copy_policy = replace(
+                base, max_span=int(span), initial_span=int(span),
+                strong_max_span=int(strong) if strong else base.strong_max_span)
         elif lever == "adaptive":
             self.run_kwargs["engine"] = {"adaptive_mtp_depth": True}
         elif lever == "adaptive_single":
@@ -285,6 +344,8 @@ def main():
     ap.add_argument("--temp", type=float, default=0.0)
     ap.add_argument("--max-swapout-pages", type=int, default=20000)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--base-engine", default=None,
+                    help="JSON engine options applied to every arm (served policy)")
     ap.add_argument("--i-own-the-gpu", action="store_true")
     a = ap.parse_args()
     if not a.i_own_the_gpu:
@@ -295,6 +356,8 @@ def main():
     import mlx.core as mx
 
     h = Harness("default", model=a.model)
+    if a.base_engine:
+        h.engine = json.loads(a.base_engine)
     t = Toggles(h)
     print("LOADED", f"{h.load_s:.1f}s", f"active={mx.get_active_memory() / 2**30:.1f}GiB", flush=True)
     swap0 = swapouts()
@@ -309,6 +372,12 @@ def main():
     def prompt_set(kind, n, rep):
         if kind in ("mtp", "ord") and n == 1:
             return [chat[rep % len(chat)]]
+        if kind == "copy":
+            off = (rep * 4099) % max(1, len(ids) - 400)
+            body = h.adapter.tokenizer.decode(ids[off: off + 400])
+            req = {"messages": [{"role": "user", "content": "Copy the following passage exactly, "
+                                 "word for word, with no commentary:\n\n" + body}]}
+            return [list(h.adapter.prompt_tokens(req))]
         if kind in ("long", "longord"):
             off = (rep * 7919) % max(1, len(ids) - n)
             body = h.adapter.tokenizer.decode(ids[off: off + n])
@@ -319,20 +388,33 @@ def main():
 
     from mlx2.runtime.models import qwen4_exp as QE
 
+    from mlx2.runtime.models import switch_layers as SL
+    from mlx2.runtime.models import moe_nax_gather as NAX
+
     def diag():
-        extra = {"qsa_nax_decode_stats": dict(QE._QSA_NAX_DECODE_STATS)}  # not in diagnostics()
+        extra = {"qsa_nax_decode_stats": dict(QE._QSA_NAX_DECODE_STATS),  # not in diagnostics()
+                 # In-process levers whose counters diagnostics() shows only
+                 # when selected at load.
+                 "moe_pad_inproc": SL.moe_pad_status(),
+                 "moe_nax_gather_inproc": {"calls": dict(NAX.status().get("calls") or {})},
+                 "qsa_batch_decode_sparse_inproc": QE.qsa_batch_decode_sparse_status()}
+        from mlx2.runtime.models import invariant_prefill as INV
+
+        extra["invariant_prefill_inproc"] = INV.status()
         return flatten({**h.adapter.diagnostics(), **extra})
 
     results = {}
-    out = {"model": a.model, "arms": a.arms, "configs": a.configs, "reps": a.reps, "mlx": mx.__version__,
+    out = {"model": a.model, "arms": a.arms, "base_engine": h.engine, "configs": a.configs, "reps": a.reps, "mlx": mx.__version__,
            "gen": a.gen, "gen_batched": a.gen_batched, "gen_long": a.gen_long, "temp": a.temp,
            "policy": h.adapter.policy.as_dict(), "results": results}
     for config in a.configs:
         kind, n = config.split(":")
         n = int(n)
-        mtp = kind in ("mtp", "long")
+        mtp = kind in ("mtp", "long", "copy")
         is_long = kind in ("long", "longord")
         gen = a.gen if (n == 1 and not is_long) else (a.gen_long if is_long else a.gen_batched)
+        if kind == "copy":
+            gen = 256
         per = {arm: {"tps": [], "ttft": [], "sha": [], "tok_step": [], "eng": [], "sched": []} for arm in a.arms}
         tokens_by = {arm: [] for arm in a.arms}
         order_log = []

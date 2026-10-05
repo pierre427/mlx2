@@ -56,7 +56,22 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    # Re-pinned 2026-10-02 (qualify-f4cdb698): the batch check sends four
+    # Re-pinned 2026-10-05 (external-prefill identity): feature observations
+    # now require paired run-local counter deltas for dense/sparse live-row
+    # compaction and Qwen external packed prefill, plus target-width ingress
+    # formation. Receipts from 98c8bb88... must be regenerated.
+    # Re-pinned 2026-10-02 evening (flip-qualifier): feature observations
+    # read Qwen3.6's decode_wins shape (routed decode, top-k, GDN slices, MoE
+    # window) beside the Flash-Next one, and add decode-first, the slice
+    # floor (contention-gated "selected, not observed"), invariant prefill,
+    # fp32 head logits, fp16 GDN state, the GDN core and the sorted-MoE pad
+    # policy.  Receipts from 2f9fbc26... must be regenerated.
+    # Earlier re-pin 2026-10-02 (qsa-nax-prefill): feature observations report
+    # the NAX block-sparse QSA prefill kernel's engagements (Flash-Next
+    # diagnostics()["qsa_nax_prefill"]), now a required, M5 host-gated
+    # mechanism where the near-limit probe reaches its crossover.  Receipts
+    # from 54bb6a2f... must be regenerated.
+    # Earlier re-pin 2026-10-02 (qualify-f4cdb698): the batch check sends four
     # distinct prompts.  Four copies of one prompt were served one after
     # another by APCv2's same-prefix wait and reached only width 3, so a
     # width-3 handoff could never be observed.  Receipts from 2ce013d9...
@@ -66,7 +81,9 @@ APPROVED_QUALIFICATION_HARNESS = {
     # recorded under ({"nax_host", "device_name"}), which the loader
     # re-evaluates on the serving host.  Receipts from the previous harness
     # (8a2ced1d..., NAX gather default) must be regenerated.
-    "sha256": "54bb6a2fb28caaf019b5eca3d4187154e5c41fef1f993c36eda5f75dea224146",
+    # Re-pinned 2026-10-02 (flip integrate): benchmark_adaptive_mtp.py model
+    # defaults now use Path.home(), so APPROVED_ADAPTIVE_BENCHMARK_SHA256 moved.
+    "sha256": "f20fe7502e2c8a6d0f3807aaf0ce086dd2757c149c3e1c9ad642f7772a4452d4",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -137,6 +154,34 @@ def _environment_mode_enabled(value):
     return str(value).strip().casefold() not in {"", "0", "false", "off", "no"}
 
 
+def moe_nax_gather_selection(settings):
+    """The NAX MoE gather mode a route's settings select ("off" when none).
+
+    Flash-Next pins ``MLX2_MOE_NAX_GATHER`` in its profile environment.  An
+    adapter whose profile does not carry it (Qwen3.6) inherits the process
+    value; serving then records it as ``settings["moe_nax_gather"]``.
+    """
+    env = (settings or {}).get("environment") or {}
+    raw = env.get("MLX2_MOE_NAX_GATHER")
+    if raw is None:
+        raw = (settings or {}).get("moe_nax_gather")
+    return str(raw or "off").strip().lower()
+
+
+def moe_rhs_pad_selection(settings):
+    """The sorted-MoE pad policy a route's settings select ("floor" default).
+
+    ``settings["moe_rhs_pad"]`` is the effective law serving records when it
+    is not the default; the Flash-Next profile also pins
+    ``MLX2_MOE_RHS_PAD_POLICY`` in its environment.
+    """
+    recorded = ((settings or {}).get("moe_rhs_pad") or {}).get("policy")
+    if recorded is not None:
+        return str(recorded).strip().lower()
+    env = (settings or {}).get("environment") or {}
+    return str(env.get("MLX2_MOE_RHS_PAD_POLICY") or "floor").strip().lower()
+
+
 def required_feature_checks(settings):
     """Demand observed execution for selected mechanisms in the served domain."""
     features = _route_feature_checks(settings)
@@ -152,6 +197,11 @@ def required_feature_checks(settings):
         features.add("feature_prefill_projection")
     if prefill.get("scan"):
         features.add("feature_prefill_scan")
+    varlen_schema = (prefill.get("varlen") or {}).get("schema")
+    if varlen_schema == "mlx2.varlen-dense-mlp.v1":
+        features.add("feature_varlen_dense_mlp")
+    elif varlen_schema == "mlx2.varlen-sparse-moe.v1":
+        features.add("feature_varlen_sparse_moe")
     if settings.get("sp_qmm"):
         # Patching eligible projections does not prove that the measured
         # shape policy actually routed any model calls through the kernel.
@@ -214,6 +264,12 @@ QSA_FUSED_SCORES_MAX_MATRIX_ROWS = 32
 # qwen4_moe_window: a row window above this many rows takes the top-k launch
 # instead of the in-kernel fold (counted as "launch").
 MOE_TOPK_FOLD_MAX_ROWS = 3
+# qwen4_exp NAX block-sparse QSA prefill admission (decide_qsa_nax_admission):
+# an explicit selection on a >= MLX_QWEN4_QSA_NAX_MIN_QUERY-row slice, and in
+# "auto" a physical KV width >= MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV with
+# one lane (unless MLX_QWEN4_QSA_NAX_BATCHED).  The module defaults.
+QSA_NAX_MIN_QUERY_DEFAULT = 64
+QSA_NAX_MIN_PHYSICAL_KV_DEFAULT = 16384
 MOE_TOPK_FOLD_ROUTED_MODES = {"gate_up_down", "gate_up_down_shared"}
 
 
@@ -225,6 +281,76 @@ def _window_consumers(env):
     if raw in ("1", "all", "on", "true"):
         return frozenset({"row_exact", "batch_decode", "verify"})
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _qsa_nax_mode(env):
+    """``MLX_QWEN4_QSA_NAX_KERNEL`` as qwen4_exp's ``_env_auto_flag`` reads it."""
+    raw = str(env.get("MLX_QWEN4_QSA_NAX_KERNEL", "auto")).strip().lower()
+    if raw in {"", "auto"}:
+        return "auto"
+    if raw in {"1", "true", "on", "yes"}:
+        return "on"
+    return "off"
+
+
+def _env_int(env, name, default):
+    raw = env.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _qsa_nax_prefill_unreachable(settings, env, indexer, mode):
+    """Why the qualifier's probes cannot reach the NAX prefill kernel, or None.
+
+    The one-request near-limit probe prefills a prompt of at least
+    ``probe_context`` tokens in slices of at least ``min(prefill_step, 128)``
+    rows (``prefill_plan.depth_bounded_prefill_rows`` never goes below that).
+    A slice ending at physical width W runs an explicit selection once W has
+    more pooled blocks than the dense short-circuit covers.  If the prompt
+    reaches ``floor + min_query`` tokens, either the last slice has
+    ``min_query`` rows and ends at the prompt length, or the slice before it
+    does and ends past ``floor``: a ``min_query``-row slice at width >=
+    ``floor`` runs either way.
+    """
+    if (settings.get("prefill_execution") or {}).get("invariant"):
+        return (
+            "selected, suppressed by invariant_prefill: the slice-invariant "
+            "prefill lane keeps its own attention, so the NAX QSA prefill "
+            "kernel never engages on this route"
+        )
+    if (settings.get("approximate_kv") or {}).get("enabled") is True:
+        return (
+            "approximate (quantized) KV: the NAX QSA prefill kernel refuses "
+            "quantized cache layouts"
+        )
+    min_query = _env_int(env, "MLX_QWEN4_QSA_NAX_MIN_QUERY", QSA_NAX_MIN_QUERY_DEFAULT)
+    step = settings.get("prefill_step")
+    if type(step) is int and min(step, 128) < min_query:
+        return (
+            f"prefill_step {step}: no prefill slice reaches the kernel's "
+            f"{min_query}-row minimum"
+        )
+    crossover = (
+        0
+        if mode == "on"
+        else _env_int(
+            env, "MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV", QSA_NAX_MIN_PHYSICAL_KV_DEFAULT
+        )
+    )
+    ratio = int(indexer["geometry"]["compress_ratio"])
+    explicit_blocks = indexer["topk_blocks"] + 1 if indexer["global_shortcircuit"] else 1
+    floor = max(crossover, explicit_blocks * ratio)
+    if indexer["probe_context"] < floor + min_query:
+        return (
+            f"near-limit probe context {indexer['probe_context']} does not reach a "
+            f"{min_query}-row prefill slice at physical KV >= {floor} (NAX "
+            f"crossover {crossover})"
+        )
+    return None
 
 
 def _qsa_indexer_probe(settings, env):
@@ -259,7 +385,12 @@ def _qsa_indexer_probe(settings, env):
 
 
 def _default_on_mechanisms(settings):
-    """Default-on Flash-Next / Qwen3.8-27B kernels a selected route must engage.
+    """Selected kernels and policies a route must show engaged (sweep H1).
+
+    Default-on Flash-Next / Qwen3.8-27B kernels, the Qwen3.6 decode slices,
+    and the selectable serving policies (decode-first publication, the
+    contended slice floor, invariant prefill, fp32 head logits, fp16 GDN
+    state, MLX's GDN core, the sorted-MoE pad policy).
 
     Returns ``(required, not_observed)``: feature names (no ``feature_``
     prefix) whose engagement the receipt must show, and ``{name: reason}`` for
@@ -281,41 +412,72 @@ def _default_on_mechanisms(settings):
     attn_rows = env.get("MLX_QWEN4_ATTN_FUSED_ROWS") == "1"
     indexer = _qsa_indexer_probe(settings, env)
 
-    if env.get("MLX_QWEN4_HC_DECODE") == "1":
-        required.add("hc_decode")
-    if _environment_mode_enabled(env.get("MLX_QWEN4_FUSED_GDN_BATCH_DECODE")):
+    def batch_decode(name):
         if width < 2:
-            not_observed["fused_gdn_batch_decode"] = (
+            not_observed[name] = (
                 f"max_lanes {settings.get('max_lanes')}: no batched decode"
             )
         elif native_mtp and handoff_width is None:
-            not_observed["fused_gdn_batch_decode"] = (
+            not_observed[name] = (
                 "native MTP route without the MTP->ordinary handoff never runs "
                 "a batched one-token decode"
             )
         elif native_mtp and width <= handoff_width:
-            not_observed["fused_gdn_batch_decode"] = (
+            not_observed[name] = (
                 f"native MTP route stays MTP up to width {handoff_width}; the "
                 f"qualifier's {width}-lane batch never hands off to batched "
                 "one-token decode"
             )
         else:
-            required.add("fused_gdn_batch_decode")
-    if _environment_mode_enabled(env.get("MLX_QWEN4_FUSED_GDN_BATCH_VERIFY")):
+            required.add(name)
+
+    def batch_verify(name):
         if not native_mtp:
-            not_observed["fused_gdn_batch_verify"] = (
-                "route has no native MTP verify"
-            )
+            not_observed[name] = "route has no native MTP verify"
         elif width < 2:
-            not_observed["fused_gdn_batch_verify"] = (
+            not_observed[name] = (
                 f"max_lanes {settings.get('max_lanes')}: no batched verify"
             )
         elif handoff_width is not None and handoff_width < 2:
-            not_observed["fused_gdn_batch_verify"] = (
+            not_observed[name] = (
                 "MTP->ordinary handoff at width 1 never batches MTP verify"
             )
         else:
-            required.add("fused_gdn_batch_verify")
+            required.add(name)
+
+    if env.get("MLX_QWEN4_HC_DECODE") == "1":
+        required.add("hc_decode")
+    if _environment_mode_enabled(env.get("MLX_QWEN4_FUSED_GDN_BATCH_DECODE")):
+        batch_decode("fused_gdn_batch_decode")
+    if _environment_mode_enabled(env.get("MLX_QWEN4_FUSED_GDN_BATCH_VERIFY")):
+        batch_verify("fused_gdn_batch_verify")
+    # Qwen3.6-35B decode slices (adapters/qwen36_35b.py KERNEL_POLICY_ENV),
+    # reported under diagnostics()["fused_gdn_decode"] and
+    # diagnostics()["decode_wins"] (options-sweep-qwen36-20261002 bug 2).
+    if env.get("MLX_QWEN36_FUSED_GDN_DECODE") == "1":
+        # One-row decode: ordinary B1, and the one-lane rounds of native MTP
+        # (1,500 fused calls in the 2026-10-02 MTP smoke).
+        required.add("qwen36_fused_gdn_decode")
+    if env.get("MLX_QWEN36_FUSED_GDN_BATCH_DECODE") == "1":
+        batch_decode("qwen36_fused_gdn_batch_decode")
+    if env.get("MLX_QWEN36_FUSED_GDN_VERIFY") == "1":
+        # One-lane MTP verify: every single-request probe of a native MTP
+        # route verifies at width 1, under any handoff width.
+        if native_mtp:
+            required.add("qwen36_fused_gdn_verify")
+        else:
+            not_observed["qwen36_fused_gdn_verify"] = "route has no native MTP verify"
+    if env.get("MLX_QWEN36_FUSED_GDN_BATCH_VERIFY") == "1":
+        batch_verify("qwen36_fused_gdn_batch_verify")
+    if env.get("MLX_QWEN36_MOE_WINDOW") == "1":
+        # Row windows of 2..17 rows: batched one-token decode, MTP verify.
+        if native_mtp or width >= 2:
+            required.add("qwen36_moe_window")
+        else:
+            not_observed["qwen36_moe_window"] = (
+                f"max_lanes {settings.get('max_lanes')} on a route without MTP "
+                "verify: no multi-row MoE window"
+            )
     if attn_rows:
         # Grouped projection, norm+RoPE prep and the vector SDPA rows engage
         # on every one-request decode.  The fused indexer query (index_q) and
@@ -379,8 +541,13 @@ def _default_on_mechanisms(settings):
     if env.get("MLX2_QWEN38_FUSED_GDN") == "1":
         # Qwen3.8-27B: one-token decode on the shared fused kernels.
         required.add("qwen38_fused_gdn")
-    if str(env.get("MLX2_MOE_NAX_GATHER") or "off").strip().lower() in {"gather", "fused"}:
-        if ((settings.get("prefill_execution") or {}).get("invariant")):
+    invariant = bool((settings.get("prefill_execution") or {}).get("invariant"))
+    if moe_nax_gather_selection(settings) in {"gather", "fused"}:
+        # Any model whose route settings select it: the Flash-Next profile
+        # pins MLX2_MOE_NAX_GATHER in its environment; other adapters carry an
+        # inherited selection as settings["moe_nax_gather"] (serving).  A
+        # route that selects it and never engages it fails closed.
+        if invariant:
             # The slice-invariant prefill lane pins the stock sorted gather
             # in every prefill forward (switch_layers, qwen3_next), so the
             # NAX gather is selected but can never engage on this route
@@ -395,6 +562,75 @@ def _default_on_mechanisms(settings):
             # every qualifier route prefills prompts well past that.
             # Host-gated: see HOST_GATED_FEATURES / host_gated_not_observed.
             required.add("moe_nax_gather")
+    if moe_rhs_pad_selection(settings) in {"adaptive", "always"}:
+        # Sorted-MoE pad choice (switch_layers._adaptive_pad), recorded per
+        # sorted expert gather of a prefill (diagnostics()["moe_pad"]).
+        if invariant:
+            not_observed["moe_rhs_pad"] = (
+                "selected, suppressed by invariant_prefill: the slice-invariant "
+                "prefill lane pins the streaming kernel for every sorted prefill "
+                "gather, so the pad policy never chooses there"
+            )
+        else:
+            required.add("moe_rhs_pad")
+    lanes = int(settings.get("max_lanes") or 1)
+    if (settings.get("decode_first") or {}).get("enabled") is True:
+        # Decode-first publication splits a round with decode output from
+        # its prefill phase.  Only a route that can hold prompt work beside a
+        # decoding lane exercises it (the qualifier's mixed and batch checks).
+        if lanes < 2:
+            not_observed["decode_first"] = (
+                f"max_lanes {settings.get('max_lanes')}: no prompt work runs "
+                "beside a decoding lane"
+            )
+        else:
+            required.add("decode_first")
+    if invariant:
+        # Every prefill forward runs through the slice-invariant lane.
+        required.add("invariant_prefill")
+    fairness = settings.get("decode_time_fairness") or {}
+    slice_floor = fairness.get("slice_floor")
+    if type(slice_floor) is int and slice_floor > 0:
+        # Lifts happen only on a contended slice the stall target cut below
+        # the floor.  Reachable only with lanes to contend; a run whose
+        # contended slices never fell below the floor records it as
+        # "selected, not observed" (CONTENTION_GATED_FEATURES).
+        if fairness.get("enabled") is not True:
+            not_observed["decode_fairness_slice_floor"] = (
+                "decode-time fairness is not constructed on this route"
+            )
+        elif lanes < 2:
+            not_observed["decode_fairness_slice_floor"] = (
+                f"max_lanes {settings.get('max_lanes')}: no prefill slice runs "
+                "beside a decoding lane"
+            )
+        else:
+            required.add("decode_fairness_slice_floor")
+    policy = settings.get("execution_policy") or {}
+    adapter_policy = settings.get("adapter_policy") or {}
+    if policy.get("fp32_head_logits") is True or adapter_policy.get("fp32_head_logits") is True:
+        required.add("fp32_head_logits")
+    if (
+        adapter_policy.get("gdn_state_dtype") == "float16"
+        or (settings.get("cache_budget") or {}).get("recurrent_state_bytes") == 2
+    ):
+        # fp16 GDN recurrent state (runtime/models/gdn_state.py).  The 27B
+        # and Qwen3.6 routes record it only through the cache budget.
+        required.add("gdn_state_fp16")
+    if env.get("MLX_GDN_CORE") == "1":
+        # MLX gated_delta_update on unmasked 17-256-row prefill chunks
+        # (runtime/models/gated_delta.py gdn_core_status).
+        required.add("gdn_core")
+    nax_mode = _qsa_nax_mode(env)
+    if settings.get("qsa_indexer") is not None and nax_mode != "off":
+        # Flash-Next (the adapter that records its QSA indexer geometry) runs
+        # the NAX block-sparse QSA prefill kernel unless it is switched off.
+        # Host-gated to M5: see HOST_GATED_FEATURES / host_gated_not_observed.
+        reason = _qsa_nax_prefill_unreachable(settings, env, indexer, nax_mode)
+        if reason is None:
+            required.add("qsa_nax_prefill")
+        else:
+            not_observed["qsa_nax_prefill"] = reason
     return required, not_observed
 
 
@@ -404,7 +640,7 @@ def _default_on_mechanisms(settings):
 # or one whose canary refused the kernel, records the mechanism as "selected,
 # not observed" with the reason: not a pass, and not a failure either (the
 # route keeps the stock path, bit-identical by construction).
-HOST_GATED_FEATURES = frozenset({"moe_nax_gather"})
+HOST_GATED_FEATURES = frozenset({"moe_nax_gather", "qsa_nax_prefill"})
 
 # Fallback reasons of moe_nax_gather that mean the kernel itself was refused
 # (canary failed or the instantiation could not be built).
@@ -443,6 +679,44 @@ def moe_nax_gather_engagement(execution, initial_execution=None):
     return gather
 
 
+def qsa_nax_prefill_engagement(execution, initial_execution=None):
+    """NAX QSA prefill kernel calls this run (a counter delta)."""
+    status = (execution or {}).get("qsa_nax_prefill")
+    if not isinstance(status, dict):
+        return 0
+    after = status.get("engagements", 0)
+    before = ((initial_execution or {}).get("qsa_nax_prefill") or {}).get(
+        "engagements", 0
+    )
+    if type(after) is not int or type(before) is not int:
+        return 0
+    return max(0, after - before)
+
+
+def _qsa_nax_prefill_host_gated(execution, initial_execution):
+    status = (execution or {}).get("qsa_nax_prefill")
+    if not isinstance(status, dict) or qsa_nax_prefill_engagement(
+        execution, initial_execution
+    ):
+        return None
+    if status.get("nax_host") is False:
+        return (
+            "host is not an M5 (NAX) Metal device: QSA prefill keeps the "
+            "masked attention"
+        )
+    counts = status.get("counts") or {}
+    before = (
+        ((initial_execution or {}).get("qsa_nax_prefill") or {}).get("counts") or {}
+    )
+    refused = counts.get("kernel_unavailable", 0)
+    if type(refused) is int and refused > (before.get("kernel_unavailable", 0) or 0):
+        return (
+            "the NAX kernel probe refused this device (kernel_unavailable): "
+            "QSA prefill keeps the masked attention"
+        )
+    return None
+
+
 def host_gated_not_observed(execution, initial_execution=None):
     """``{feature: reason}`` for host-gated mechanisms this host could not run.
 
@@ -450,6 +724,9 @@ def host_gated_not_observed(execution, initial_execution=None):
     other than the host gate or the canary (that remains a failed check).
     """
     out = {}
+    reason = _qsa_nax_prefill_host_gated(execution, initial_execution)
+    if reason is not None:
+        out["qsa_nax_prefill"] = reason
     status = (execution or {}).get("moe_nax_gather")
     if isinstance(status, dict) and not moe_nax_gather_engagement(
         execution, initial_execution
@@ -492,7 +769,27 @@ def _moe_nax_gather_host_gate():
 # The serving host's gate per host-gated feature, re-evaluated at load
 # (Codex port review 2026-10-02 item 2).  Each returns
 # {"nax_host": bool, "device_name": str}.
-HOST_GATE_PROBES = {"moe_nax_gather": _moe_nax_gather_host_gate}
+def _qsa_nax_prefill_host_gate():
+    """qwen4_exp's QSA NAX device gate, without importing the tensor module
+    before an adapter pins its profile (runtime/models/import_env)."""
+    import sys
+
+    module = sys.modules.get("mlx2.runtime.models.qwen4_exp")
+    if module is not None and hasattr(module, "qsa_nax_host_gate"):
+        return module.qsa_nax_host_gate()
+    try:
+        import mlx.core as mx
+
+        name = str(mx.device_info().get("device_name", ""))
+    except Exception:  # noqa: BLE001 -- no Metal/MLX here: no NAX either
+        return {"nax_host": False, "device_name": ""}
+    return {"nax_host": "M5" in name, "device_name": name}
+
+
+HOST_GATE_PROBES = {
+    "moe_nax_gather": _moe_nax_gather_host_gate,
+    "qsa_nax_prefill": _qsa_nax_prefill_host_gate,
+}
 
 
 def host_gate_record(feature, execution):
@@ -554,6 +851,50 @@ def _host_gated_exemption(record, name):
     return recorded["device_name"] == current.get("device_name")
 
 
+# Required mechanisms whose engagement depends on the run's contention, not
+# the route: the decode-fairness slice floor lifts a prefill slice only when
+# the stall target cut a slice taken beside decoding lanes below the floor.
+# A run in which that never happened records the mechanism as "selected, not
+# observed" with the reason.  A run whose scheduler never reported the lift
+# counter at all (the floor was not constructed) stays a failed check.
+CONTENTION_GATED_FEATURES = frozenset({"decode_fairness_slice_floor"})
+SLICE_FLOOR_LIFTS = "decode_fairness_slice_floor_lifts"
+
+
+def contention_gated_not_observed(final, initial=None):
+    """``{feature: reason}`` for contention-gated mechanisms this run left
+    unreached, from the final (and initial) ``/v1/status`` snapshots."""
+    out = {}
+    after = (final or {}).get("scheduler") or {}
+    before = (initial or {}).get("scheduler") or {}
+    lifts = after.get(SLICE_FLOOR_LIFTS)
+    if type(lifts) is int:
+        base = before.get(SLICE_FLOOR_LIFTS, 0)
+        if lifts - (base if type(base) is int else 0) <= 0:
+            out["decode_fairness_slice_floor"] = (
+                "no contended prefill slice fell below the slice floor in this "
+                "run (the stall target never cut one that far); the floor was "
+                "constructed but had nothing to lift"
+            )
+    return out
+
+
+def _contention_gated_exemption(record, name):
+    feature = name.removeprefix("feature_")
+    if feature not in CONTENTION_GATED_FEATURES:
+        return False
+    if name in (record.get("checks") or {}):
+        return False
+    entry = (record.get("selected_not_observed") or {}).get(name)
+    return (
+        isinstance(entry, dict)
+        and entry.get("status") == "selected, not observed"
+        and entry.get("contention_gated") is True
+        and isinstance(entry.get("reason"), str)
+        and bool(entry["reason"])
+    )
+
+
 def _topk_fold_paths(settings, env, native_mtp, width, handoff_width):
     """Which calls of this route can run the in-kernel top-k fold.
 
@@ -602,6 +943,14 @@ def _route_feature_checks(settings):
             features.add("fly_verification")
         if (settings.get("execution_policy") or {}).get("pairwise_selection") == "batched":
             features.add("external_pairwise_selection")
+        if ((settings.get("execution_policy") or {}).get(
+            "external_varlen_prefill"
+        ) or {}).get("enabled") is True:
+            features.add("external_varlen_prefill")
+        if ((settings.get("execution_policy") or {}).get(
+            "ingress_cohort"
+        ) or {}).get("enabled") is True:
+            features.add("ingress_cohort")
     elif settings.get("speculation") == "prompt_lookup":
         features.update({
             "prompt_lookup",
@@ -744,8 +1093,11 @@ PROVENANCE_ONLY_SETTINGS = frozenset(
 # Selected candidates that no receipt may qualify yet: an environment that
 # selects one serves only as an unqualified route.  Each entry leaves when
 # its Metal gate, paired model A/B and a harness observation exist.
+# MLX_QWEN36_DECODE_WINS left on 2026-10-02: the real-weight Metal identity
+# passed 1488/1488 on both artifacts (after 90e85629), the paired full-model
+# A/B is in qualification/runs/options-sweep-qwen36-20261002, and the
+# harness observes every slice (decode_wins counters).
 UNQUALIFIABLE_CANDIDATES = {
-    "MLX_QWEN36_DECODE_WINS": "Qwen3.6 decode slices: pending real-weight Metal identity and full-model A/B",
     "MLX_QWEN36_MOE_ROUTED_CANDIDATE": (
         "omlx #4113 routed-decode candidate: pending the Metal geometry check "
         "and paired model A/B"
@@ -764,6 +1116,20 @@ def unqualifiable_candidate(settings):
         # encoded on store, decoded on restore), so a no-op codec could pass.
         # The next harness freeze adds that observation and lifts this.
         return "recurrent_state_codec (harness cannot observe codec engagement yet)"
+    execution_policy = (settings or {}).get("execution_policy") or {}
+    adaptive = execution_policy.get("adaptive_verification")
+    if adaptive is not None and adaptive is not False:
+        # Qwen external routes serialize the complete effective cost model,
+        # but the approved harness has no counter that proves trimming engaged.
+        return (
+            "adaptive_verification "
+            "(harness cannot observe external adaptive verification engagement yet)"
+        )
+    if execution_policy.get("batch_size_route") is not None:
+        return (
+            "batch_size_route "
+            "(tree target execution has no route-specific qualification gate yet)"
+        )
     return None
 
 
@@ -841,6 +1207,8 @@ def load_qualified_route(
         # Host-gated mechanisms a run could not engage on its host (not M5,
         # or the canary refused the kernel): selected, not observed.
         and not _host_gated_exemption(record, name)
+        # Contention-gated mechanisms the run's load never reached.
+        and not _contention_gated_exemption(record, name)
     )
     if missing_features:
         raise ValueError(

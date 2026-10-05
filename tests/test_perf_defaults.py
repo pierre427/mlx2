@@ -136,7 +136,7 @@ def test_flash_next_native_mtp_defaults_match_gated_copy_drafts():
     assert parsed.enabled and parsed.batched_max_span == 0
     # The measured policy: fused-verify width, match gate, strong spans.
     assert (parsed.max_span, parsed.min_match, parsed.strong_match,
-            parsed.strong_max_span, parsed.initial_span) == (7, 8, 32, 16, 7)
+            parsed.strong_max_span, parsed.initial_span) == (7, 8, 32, 14, 7)
     ServingEngine.validate_arguments("unused", execution_policy=policy)
     ordinary = resolve_execution_policy_defaults(None, ORDINARY, resolution) or {}
     assert "self_mtp_copy_draft" not in ordinary
@@ -752,6 +752,7 @@ def test_flash_next_policy_kernel_switches_are_opt_in_and_receipt_neutral():
             "moe_router_kernel": True,
             "moe_topk_fold": "off",  # the router kernel excludes the top-k launch
             "qsa_nax_decode": True,
+            "attn_fused_rows": False,  # qsa_nax_decode is refused beside them
             "gdn_core": True,
         }
     )
@@ -796,7 +797,7 @@ def test_flash_next_diagnostics_expose_qsa_nax_decode_counters():
     QE.qsa_nax_decode_status(reset=True)
     try:
         assert "qsa_nax_decode" not in adapter.diagnostics()  # default receipts unchanged
-        adapter.policy = FlashNextPolicy(qsa_nax_decode=True)
+        adapter.policy = FlashNextPolicy(qsa_nax_decode=True, attn_fused_rows=False)
         QE._record_qsa_nax_decode(engaged=True, reason="engaged", context=32768)
         QE._record_qsa_nax_decode(engaged=False, reason="dense_by_construction", context=20000)
         status = adapter.diagnostics()["qsa_nax_decode"]

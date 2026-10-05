@@ -11,6 +11,7 @@ from typing import Any, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
+from . import moe_nax_gather as _moe_nax
 from . import qwen3_next
 from . import qwen4_fused_gdn_verify as _verify
 from .gdn_state import check_state
@@ -442,6 +443,20 @@ class Qwen36TextModel(DenseTextModel):
         self.norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
         self.ssm_idx = 0
         self.fa_idx = args.full_attention_interval - 1
+
+    def __call__(self, inputs, cache=None, input_embeddings=None, *args, **kwargs):
+        # The NAX MoE gather (MLX2_MOE_NAX_GATHER, default off) is
+        # prefill-only: the trunk forward decides the phase once, as
+        # Flash-Next's does.  Decode, MTP verify (verify scope or a
+        # speculating cache) and prepared verify blocks are not prefill; the
+        # MTP head runs outside this scope; the invariant prefill lane is
+        # excluded at the MoE call sites.  A no-op while the mode is off.
+        with _moe_nax.forward_scope(
+            inputs if inputs is not None else input_embeddings, cache
+        ):
+            return super().__call__(
+                inputs, cache, input_embeddings, *args, **kwargs
+            )
 
 
 class MTPModule(nn.Module):

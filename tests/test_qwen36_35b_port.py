@@ -498,7 +498,7 @@ def test_qwen36_stops_on_the_tokenizer_chat_eos(tmp_path, monkeypatch, converted
     if converted:
         config["eos_token_id"] = [endoftext, im_end]
     (tmp_path / "config.json").write_text(json.dumps(config))
-    monkeypatch.setattr(qwen36_35b, "configure_environment", lambda: {})
+    monkeypatch.setattr(qwen36_35b, "configure_environment", lambda *_a: {})
     monkeypatch.setattr(tensors, "Model", _LoadedModel)
     monkeypatch.setattr(ubc_evict, "load_shards_evicting", lambda *_a, **_k: {})
     adapter = Qwen3635BA3BAdapter(str(tmp_path))
@@ -585,3 +585,185 @@ def test_qwen36_eager_dispatch_defaults_on_and_is_bound_to_route_identity(tmp_pa
     assert "MLX2_EAGER_DISPATCH_STRIDE" not in os.environ
     with pytest.raises(ValueError):
         Qwen3635BA3BAdapter(str(tmp_path), execution_policy={"eager_dispatch_stride": "4"})
+
+
+def _flash_next_stub_load(tmp_path, monkeypatch):
+    import mlx.nn as nn
+
+    from mlx2.adapters import flash_next
+    from mlx2.runtime import ubc_evict
+    from mlx2.runtime.models import import_env, qwen4_exp, qwen4_ple_nvme
+
+    endoftext, _ = _chat_tokenizer(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({
+        "model_type": "qwen4_exp",
+        "quantization": {"group_size": 64, "bits": 4},
+        "text_config": {"eos_token_id": endoftext, "max_position_embeddings": 4096},
+    }))
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"model.embed_tokens.weight": "model.safetensors"}})
+    )
+    (tmp_path / "model.safetensors").write_bytes(b"metadata-only")
+    (tmp_path / "ple_rows.bin").write_bytes(b"test-sidecar")
+    monkeypatch.setattr(flash_next, "configure_environment", lambda *_a, **_k: {})
+    monkeypatch.setattr(import_env, "assert_profile_applied", lambda *_a, **_k: None)
+    monkeypatch.setattr(flash_next, "artifact_identity", lambda path: {"path": str(path)})
+    monkeypatch.setattr(qwen4_exp, "Model", _LoadedModel)
+    monkeypatch.setattr(qwen4_exp.ModelArgs, "from_dict", classmethod(lambda cls, config: config))
+    monkeypatch.setattr(ubc_evict, "load_shards_evicting", lambda *_a, **_k: {})
+    monkeypatch.setattr(ubc_evict, "ubc_evict_paths", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        qwen4_ple_nvme, "install_file_backed_ple", lambda _model, weights, *_a, **_k: weights
+    )
+    monkeypatch.setattr(qwen4_ple_nvme, "verify_sidecar_against_artifact", lambda *_a: {})
+    monkeypatch.setattr(qwen4_ple_nvme, "verify_sidecar_content", lambda *_a: "converted")
+    monkeypatch.setattr(nn, "quantize", lambda *_a, **_k: None)
+    return flash_next
+
+
+def test_flash_next_installs_varlen_sparse_moe_and_binds_prefill_identity(
+    tmp_path, monkeypatch
+):
+    flash_next = _flash_next_stub_load(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        _LoadedModel,
+        "prefill_row_context",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
+    adapter = flash_next.FlashNextAdapter(
+        str(tmp_path), execution_policy={"varlen_sparse_moe": True}
+    )
+    handle = adapter.varlen_sparse_moe
+    assert handle["schema"] == "mlx2.varlen-sparse-moe.v1"
+    assert adapter.model._varlen_sparse_moe is handle
+    assert adapter.prefill_execution_identity["varlen"] == {
+        "schema": "mlx2.varlen-sparse-moe.v1",
+        "law": "gather-live-existing-sparse-moe-scatter-zero-padding",
+        "policy": {
+            "enabled": True,
+            "minimum_padding_rows": 1,
+            "minimum_padding_fraction": 0.0,
+        },
+    }
+
+
+def test_flash_next_applies_its_moe_pad_policy_live_after_load(tmp_path, monkeypatch):
+    # switch_layers latches MLX2_MOE_RHS_PAD_POLICY at import; the adapter
+    # re-applies its policy value after load, so an earlier import under
+    # another value cannot run a pad law the receipt does not name.
+    from mlx2.runtime.models import switch_layers
+
+    flash_next = _flash_next_stub_load(tmp_path, monkeypatch)
+    monkeypatch.setattr(switch_layers, "_RHS_PAD_POLICY", "floor")
+    adapter = flash_next.FlashNextAdapter(str(tmp_path))
+    assert adapter.policy.moe_rhs_pad_policy == "adaptive"
+    assert switch_layers._RHS_PAD_POLICY == "adaptive"
+    # A second policy value is a process-global change: refused while the
+    # first adapter runs, applied once it is closed (process_globals).
+    from mlx2.adapters.process_globals import ProcessGlobalConflict
+
+    with pytest.raises(ProcessGlobalConflict):
+        flash_next.FlashNextAdapter(
+            str(tmp_path), execution_policy={"moe_rhs_pad_policy": "floor"}
+        )
+    assert switch_layers._RHS_PAD_POLICY == "adaptive"
+    adapter.close()
+    flash_next.FlashNextAdapter(
+        str(tmp_path), execution_policy={"moe_rhs_pad_policy": "floor"}
+    )
+    assert switch_layers._RHS_PAD_POLICY == "floor"
+
+
+def test_qwen36_decode_wins_are_the_adapter_default(tmp_path, monkeypatch):
+    # options-sweep-qwen36-20261002: tokens identical in every cell, ordinary
+    # B1 +42.9%.  Both routes; fused_gdn_batch_verify and moe_window stay off;
+    # an explicit "off"/false wins and is visible in the environment.
+    from mlx2.adapters import qwen36_35b
+    from mlx2.runtime import ubc_evict
+    from mlx2.runtime.models import import_env
+    from mlx2.runtime.models import qwen36_35b as tensors
+
+    _chat_tokenizer(tmp_path)
+    make_artifact(tmp_path)
+    monkeypatch.setattr(tensors, "Model", _LoadedModel)
+    monkeypatch.setattr(ubc_evict, "load_shards_evicting", lambda *_a, **_k: {})
+    # Earlier tests in this file import model modules unpinned; the import
+    # order guard has its own tests.
+    monkeypatch.setattr(import_env, "assert_profile_applied", lambda *_a, **_k: None)
+    monkeypatch.delenv("MLX_QWEN36_FUSED_GDN_DECODE", raising=False)
+    adapter = Qwen3635BA3BAdapter(str(tmp_path))
+    assert adapter._kernels == {
+        "moe_routed_decode": "gate_up_down_shared",
+        "moe_topk_fold": "launch",
+        "fused_gdn_decode": True,
+        "fused_gdn_batch_decode": True,
+        "fused_gdn_verify": True,
+    }
+    env = adapter.environment
+    assert env["MLX_QWEN4_MOE_ROUTED_DECODE"] == "gate_up_down_shared"
+    assert env["MLX_QWEN4_MOE_TOPK_FOLD"] == "launch"
+    assert env["MLX_QWEN36_FUSED_GDN_DECODE"] == "1"
+    assert env["MLX_QWEN36_FUSED_GDN_BATCH_DECODE"] == "1"
+    assert env["MLX_QWEN36_FUSED_GDN_VERIFY"] == "1"
+    assert env["MLX_QWEN36_DECODE_WINS"] == "1"
+    assert "MLX_QWEN36_FUSED_GDN_BATCH_VERIFY" not in env
+    assert "MLX_QWEN36_MOE_WINDOW" not in env
+    stock = Qwen3635BA3BAdapter(str(tmp_path), execution_policy={
+        "moe_routed_decode": "off", "moe_topk_fold": "off", "fused_gdn_decode": False,
+        "fused_gdn_batch_decode": False, "fused_gdn_verify": False,
+    })
+    env = stock.environment
+    assert "MLX_QWEN4_MOE_ROUTED_DECODE" not in env
+    assert "MLX_QWEN36_DECODE_WINS" not in env
+    assert env["MLX_QWEN36_FUSED_GDN_DECODE"] == "0"
+    # Own-namespace default: subclasses do not inherit the measurement.
+    from mlx2.adapters.qwen35_122b import Qwen35122BA10BAdapter
+
+    assert "default_decode_wins" not in vars(Qwen35122BA10BAdapter)
+    assert qwen36_35b.DEFAULT_DECODE_WINS.get("fused_gdn_batch_verify") is None
+
+
+def test_qwen36_defaults_to_the_fused_nax_gather_and_applies_it_at_load(tmp_path, monkeypatch):
+    # flip-q36nax-20261002: prefill +20/+12/+13% at 512/2048/8192 rows,
+    # logits and tokens bit-identical, never engaged in decode or verify.
+    # Pinned at every value (MLX2_* is inherited, not stripped) and applied
+    # live through moe_nax_gather.set_mode, as on Flash-Next.
+    from mlx2.adapters import qwen36_35b
+    from mlx2.runtime import ubc_evict
+    from mlx2.runtime.models import import_env, moe_nax_gather
+    from mlx2.runtime.models import qwen36_35b as tensors
+
+    _chat_tokenizer(tmp_path)
+    make_artifact(tmp_path)
+    monkeypatch.setattr(tensors, "Model", _LoadedModel)
+    monkeypatch.setattr(ubc_evict, "load_shards_evicting", lambda *_a, **_k: {})
+    monkeypatch.setattr(import_env, "assert_profile_applied", lambda *_a, **_k: None)
+    monkeypatch.setenv("MLX2_MOE_NAX_GATHER", "gather")
+    monkeypatch.setattr(moe_nax_gather, "MODE", "off")
+    adapter = Qwen3635BA3BAdapter(str(tmp_path))
+    assert adapter.moe_nax_gather == "fused"
+    assert adapter.environment["MLX2_MOE_NAX_GATHER"] == "fused"
+    assert os.environ["MLX2_MOE_NAX_GATHER"] == "fused"
+    assert moe_nax_gather.MODE == "fused"
+    assert adapter.diagnostics()["moe_nax_gather"]["mode"] == "fused"
+    # The mode is a process global: each value loads once the previous
+    # adapter is closed (a live one refuses another value; process_globals).
+    adapter.close()
+    for mode in ("off", "gather"):
+        selected = Qwen3635BA3BAdapter(str(tmp_path), execution_policy={"moe_nax_gather": mode})
+        assert selected.environment["MLX2_MOE_NAX_GATHER"] == mode
+        assert moe_nax_gather.MODE == mode
+        selected.close()
+    off = Qwen3635BA3BAdapter(str(tmp_path), execution_policy={"moe_nax_gather": "off"})
+    assert "moe_nax_gather" not in off.diagnostics()
+    with pytest.raises(ValueError, match="moe_nax_gather"):
+        Qwen3635BA3BAdapter(str(tmp_path), execution_policy={"moe_nax_gather": "on"})
+    # The module default the other models reach stays off, and the 122B
+    # profile (configure_environment without a mode) leaves the variable alone.
+    assert moe_nax_gather.mode_from_env({}) == "off"
+    monkeypatch.setenv("MLX2_MOE_NAX_GATHER", "gather")
+    assert "MLX2_MOE_NAX_GATHER" not in qwen36_35b.configure_environment()
+    assert "default_moe_nax_gather" not in vars(
+        __import__("mlx2.adapters.qwen35_122b", fromlist=["x"]).Qwen35122BA10BAdapter
+    )

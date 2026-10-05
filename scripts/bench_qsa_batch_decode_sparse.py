@@ -31,7 +31,9 @@ import argparse
 import hashlib
 import json
 import statistics
+import subprocess
 import time
+from pathlib import Path
 
 import mlx.core as mx
 
@@ -55,7 +57,37 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--prompt-file", required=True)
     ap.add_argument("--configs", nargs="+", default=["ordinary:4:32768"])
-    ap.add_argument("--arms", nargs="+", default=["gather"], choices=["gather", "indexed"])
+    ap.add_argument(
+        "--arms",
+        nargs="+",
+        default=["gather"],
+        choices=[
+            "gather",
+            "indexed",
+            "varlen",
+            "tensorfold",
+            "composed",
+            "varlen_tensorfold",
+            "indexed_tensorfold",
+            "composed_tensorfold",
+        ],
+    )
+    ap.add_argument(
+        "--varlen-composition",
+        action="store_true",
+        help="install sparse-MoE live-row compaction and batch prompt rows",
+    )
+    ap.add_argument(
+        "--tensorfold-composition",
+        action="store_true",
+        help="install default-off native TensorFold prefill and toggle it per arm",
+    )
+    ap.add_argument(
+        "--lengths",
+        nargs="+",
+        type=int,
+        help="per-lane prompt lengths for a single composition config",
+    )
     ap.add_argument("--min-context", type=int, default=16384,
                     help="arm floor for this run (the policy default is 32768; 16384 measured the 16K cell)")
     ap.add_argument("--gen", type=int, default=256)
@@ -69,23 +101,64 @@ def main():
     ap.add_argument("--admission-table", action="store_true",
                     help="print what admission seats at 4/8 lanes x 16K..64K first")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--expected-source")
     ap.add_argument("--i-own-the-gpu", action="store_true")
     a = ap.parse_args()
     if not a.i_own_the_gpu:
         ap.error("refusing Metal execution without --i-own-the-gpu")
+    root = Path(__file__).resolve().parents[1]
+    source_revision = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True
+    ).strip()
+    if a.expected_source is not None:
+        if source_revision != a.expected_source:
+            raise RuntimeError("source revision differs from explicit gate binding")
+        if subprocess.check_output(["git", "status", "--porcelain"], cwd=root):
+            raise RuntimeError("source worktree must be clean")
 
     from mlx2.adapters.flash_next import FlashNextAdapter
 
-    adapter = FlashNextAdapter(a.model)
+    execution_policy = {}
+    if a.varlen_composition:
+        execution_policy["varlen_sparse_moe"] = True
+    if a.tensorfold_composition:
+        execution_policy["tensorfold_prefill"] = True
+        execution_policy["tensorfold_qmv_rows"] = True
+    adapter = FlashNextAdapter(a.model, execution_policy=execution_policy or None)
     from mlx2.memory import execution_headroom, host_memory_gib, metal_advisory_gib
     from mlx2.runtime import generate as G
     from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
     from mlx2.runtime.memory_policy import SelfMTPLaneAdmissionController
     from mlx2.runtime.models import qwen4_exp as Q
     from mlx2.runtime.models import qwen4_qsa_indexed as I
+    from mlx2.runtime.models import flash_tensorfold_qmv as TFQ
     from mlx2.runtime.sample_utils import LaneRNG
 
     model = adapter.model
+    varlen_handle = getattr(adapter, "varlen_sparse_moe", None)
+    if a.varlen_composition and varlen_handle is None:
+        raise RuntimeError("varlen composition requested but adapter installed no handle")
+    tensorfold_handle = getattr(adapter, "tensorfold_prefill", None)
+    tensorfold_qmv_handle = getattr(adapter, "tensorfold_qmv", None)
+    if a.tensorfold_composition and tensorfold_handle is None:
+        raise RuntimeError("TensorFold composition requested but adapter installed no handle")
+    if a.tensorfold_composition and tensorfold_qmv_handle is None:
+        raise RuntimeError("TensorFold composition requested but adapter installed no QMV handle")
+    tensorfold_modules = [
+        module
+        for _name, module in model.named_modules()
+        if getattr(module, "_prefill_counts", None)
+        is (None if tensorfold_handle is None else tensorfold_handle["counters"])
+    ]
+    if a.tensorfold_composition and not tensorfold_modules:
+        raise RuntimeError("TensorFold composition installed no toggleable modules")
+    tensorfold_qmv_modules = [
+        module
+        for _name, module in model.named_modules()
+        if hasattr(module, "_tensorfold_qmv_enabled")
+    ]
+    if a.tensorfold_composition and not tensorfold_qmv_modules:
+        raise RuntimeError("TensorFold composition installed no toggleable QMV modules")
     mx.eval(model.parameters())
     mx.set_cache_limit(4 << 30)
     ids = list(adapter.tokenizer.encode(open(a.prompt_file).read()))
@@ -110,16 +183,68 @@ def main():
                 "seated": all(m != "queue" for m in decision.modes)}
 
     def configure(arm):
-        Q.set_qsa_batch_decode_sparse("off" if arm == "base" else arm, min_context=a.min_context)
+        qsa_arms = {
+            "indexed", "composed", "indexed_tensorfold", "composed_tensorfold"
+        }
+        varlen_arms = {
+            "varlen", "composed", "varlen_tensorfold", "composed_tensorfold"
+        }
+        tensorfold_arms = {
+            "tensorfold", "varlen_tensorfold", "indexed_tensorfold",
+            "composed_tensorfold",
+        }
+        qsa_arm = (
+            "indexed"
+            if arm in qsa_arms
+            else "gather" if arm == "gather" else "off"
+        )
+        Q.set_qsa_batch_decode_sparse(qsa_arm, min_context=a.min_context)
+        if varlen_handle is not None:
+            object.__setattr__(
+                model,
+                "_varlen_sparse_moe",
+                varlen_handle if arm in varlen_arms else None,
+            )
+        for module in tensorfold_modules:
+            object.__setattr__(module, "_prefill_enabled", arm in tensorfold_arms)
+        for module in tensorfold_qmv_modules:
+            object.__setattr__(module, "_tensorfold_qmv_enabled", arm in tensorfold_arms)
+
+    def counter_delta(before, after):
+        keys = set(before) | set(after)
+        delta = {
+            key: int(after.get(key, 0)) - int(before.get(key, 0))
+            for key in keys
+        }
+        if any(value < 0 for value in delta.values()):
+            raise RuntimeError("varlen counters moved backwards")
+        return {key: value for key, value in sorted(delta.items()) if value}
 
     def indexed_widths():
         status = I.qsa_indexed_status()
         return {"counts": dict(status["counts"]), "widths": json.loads(json.dumps(status["query_width_counts"]))}
 
     def run(route, lanes, context, gen, arm, alternate=None):
-        prompts = [ids[a.offset + i * context: a.offset + (i + 1) * context] for i in range(lanes)]
-        assert all(len(p) == context for p in prompts), "prompt file too short"
-        kwargs = dict(completion_batch_size=lanes, prefill_batch_size=1, prefill_step_size=a.prefill_step)
+        lengths = (
+            list(a.lengths)
+            if a.lengths is not None and max(a.lengths) <= context
+            else [context] * lanes
+        )
+        if len(lengths) != lanes or any(length < 2 or length > context for length in lengths):
+            raise ValueError("lengths must provide one value in 2..context per lane")
+        cursor = a.offset
+        prompts = []
+        for length in lengths:
+            prompts.append(ids[cursor : cursor + length])
+            cursor += length
+        assert all(len(prompt) == length for prompt, length in zip(prompts, lengths)), (
+            "prompt file too short"
+        )
+        kwargs = dict(
+            completion_batch_size=lanes,
+            prefill_batch_size=lanes if a.varlen_composition else 1,
+            prefill_step_size=a.prefill_step,
+        )
         insert = {"max_tokens": [gen] * lanes, "lane_rngs": [LaneRNG(1 + i) for i in range(lanes)]}
         if route == "mtp":
             kwargs["self_mtp"] = adapter.execution_config(max_lanes=lanes, prefill_step=a.prefill_step)
@@ -128,8 +253,18 @@ def main():
             insert["self_mtp_configs"] = [{"sampling_temp": 0.0}] * lanes
         configure(arm if alternate is None else "base")
         Q.qsa_batch_decode_sparse_status(reset=True)
+        varlen_before = (
+            dict(varlen_handle["counters"]) if varlen_handle is not None else {}
+        )
+        tensorfold_before = (
+            dict(tensorfold_handle["counters"])
+            if tensorfold_handle is not None
+            else {}
+        )
+        tensorfold_qmv_before = TFQ.counters()
         before = indexed_widths()
         g = G.BatchGenerator(model, **kwargs)
+        run_started = time.perf_counter()
         uids = g.insert(prompts, **insert)
         tokens, done, started = {}, set(), set()
         t_first = t_end = None
@@ -180,9 +315,25 @@ def main():
         wall = t_end - t_first
         after = indexed_widths()
         sparse = Q.qsa_batch_decode_sparse_status()
+        varlen = counter_delta(
+            varlen_before,
+            dict(varlen_handle["counters"]) if varlen_handle is not None else {},
+        )
+        tensorfold = counter_delta(
+            tensorfold_before,
+            dict(tensorfold_handle["counters"])
+            if tensorfold_handle is not None
+            else {},
+        )
+        tensorfold_qmv = counter_delta(tensorfold_qmv_before, TFQ.counters())
         rec = {"arm": arm if alternate is None else f"alt:{alternate}", "tps": emitted / wall,
                "ms_per_step": 1e3 * wall / max(1, steps), "tokens_per_step": emitted / max(1, steps),
-               "steps": steps, "sha": sha, "batch_decode_sparse": sparse,
+               "steps": steps, "sha": sha, "prompt_lengths": lengths,
+               "ttft_seconds": t_first - run_started,
+               "complete_seconds": t_end - run_started,
+               "batch_decode_sparse": sparse, "varlen_sparse_moe": varlen,
+               "tensorfold_prefill": tensorfold,
+               "tensorfold_qmv_rows": tensorfold_qmv,
                "indexed_counts_delta": {k: v - before["counts"].get(k, 0) for k, v in after["counts"].items()
                                         if v - before["counts"].get(k, 0)},
                "handoff": {k: v for k, v in (getattr(g, "scheduler_stats", {}) or {}).items()
@@ -190,8 +341,39 @@ def main():
         if alternate is not None:
             rec["windows"] = windows
         engaged_arm = arm if alternate is None else alternate
-        if engaged_arm != "base" and sparse["engagements"] == 0:
+        qsa_expected = engaged_arm in {
+            "gather", "indexed", "composed", "indexed_tensorfold",
+            "composed_tensorfold",
+        }
+        varlen_expected = engaged_arm in {
+            "varlen", "composed", "varlen_tensorfold", "composed_tensorfold"
+        }
+        tensorfold_expected = engaged_arm in {
+            "tensorfold", "varlen_tensorfold", "indexed_tensorfold",
+            "composed_tensorfold",
+        }
+        if qsa_expected and sparse["engagements"] == 0:
             rec["INVALID"] = "mechanism counter stayed 0"
+        if not qsa_expected and sparse["engagements"]:
+            rec["INVALID"] = "QSA engaged in a control arm"
+        compacted = varlen.get("moe_compaction_calls", 0)
+        scattered = varlen.get("moe_scatter_calls", 0)
+        if varlen_expected and (compacted < 1 or compacted != scattered):
+            rec["INVALID"] = "varlen compaction proof stayed 0 or unbalanced"
+        if not varlen_expected and varlen:
+            rec["INVALID"] = "varlen engaged in a control arm"
+        tensorfold_prefill_calls = tensorfold.get(
+            "grouped_calls", 0
+        ) + tensorfold.get("swiglu_calls", 0)
+        tensorfold_qmv_calls = tensorfold_qmv.get("kernel_calls", 0)
+        if tensorfold_expected and tensorfold_prefill_calls < 1:
+            rec["INVALID"] = "TensorFold prefill proof stayed 0"
+        if tensorfold_expected and tensorfold_qmv_calls < 1:
+            rec["INVALID"] = "TensorFold decode-row proof stayed 0"
+        if not tensorfold_expected and tensorfold:
+            rec["INVALID"] = "TensorFold prefill engaged in a control arm"
+        if not tensorfold_expected and tensorfold_qmv_calls:
+            rec["INVALID"] = "TensorFold decode rows engaged in a control arm"
         return rec, lane_tokens
 
     results = {}
@@ -241,6 +423,44 @@ def main():
                     first = k if first is None else min(first, k)
             identity[arm] = {"identical": lanes_equal == len(ref), "lanes_identical": lanes_equal,
                              "lanes": len(ref), "first_divergence": first}
+        if "indexed" in lane_tokens and "composed" in lane_tokens:
+            ref, got = lane_tokens["indexed"], lane_tokens["composed"]
+            first = None
+            lanes_equal = 0
+            for lane_ref, lane in zip(ref, got):
+                k = next(
+                    (i for i, (x, y) in enumerate(zip(lane_ref, lane)) if x != y),
+                    None,
+                )
+                if k is None and len(lane_ref) == len(lane):
+                    lanes_equal += 1
+                elif k is not None:
+                    first = k if first is None else min(first, k)
+            identity["composed_vs_indexed"] = {
+                "identical": lanes_equal == len(ref),
+                "lanes_identical": lanes_equal,
+                "lanes": len(ref),
+                "first_divergence": first,
+            }
+        if "composed" in lane_tokens and "composed_tensorfold" in lane_tokens:
+            ref, got = lane_tokens["composed"], lane_tokens["composed_tensorfold"]
+            first = None
+            lanes_equal = 0
+            for lane_ref, lane in zip(ref, got):
+                k = next(
+                    (i for i, (x, y) in enumerate(zip(lane_ref, lane)) if x != y),
+                    None,
+                )
+                if k is None and len(lane_ref) == len(lane):
+                    lanes_equal += 1
+                elif k is not None:
+                    first = k if first is None else min(first, k)
+            identity["composed_tensorfold_vs_composed"] = {
+                "identical": lanes_equal == len(ref),
+                "lanes_identical": lanes_equal,
+                "lanes": len(ref),
+                "first_divergence": first,
+            }
         alt = None
         if len(a.arms) == 1 and a.alt_gen > 0:
             alt, _ = run(route, lanes, context, a.alt_gen, "base", alternate=a.arms[0])
@@ -259,8 +479,13 @@ def main():
         results[config] = {"admission": adm, "runs": runs, "identity": identity, "alternating": alt}
         print(config, "identity", identity, flush=True)
         json.dump({"partial": True, "results": results}, open(a.out, "w"), indent=1)
-    json.dump({"model": a.model, "gen": a.gen, "alt_gen": a.alt_gen, "window": a.window,
+    json.dump({"source_revision": source_revision,
+               "prompt_file_sha256": hashlib.sha256(Path(a.prompt_file).read_bytes()).hexdigest(),
+               "model": a.model, "gen": a.gen, "alt_gen": a.alt_gen, "window": a.window,
                "settle": a.settle, "arms": a.arms, "min_context": a.min_context,
+               "varlen_composition": a.varlen_composition,
+               "tensorfold_composition": a.tensorfold_composition,
+               "lengths": a.lengths,
                "policy": adapter.policy.as_dict(), "results": results,
                "peak_gib": mx.get_peak_memory() / 2**30, "mlx": mx.__version__},
               open(a.out, "w"), indent=1)

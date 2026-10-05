@@ -170,6 +170,8 @@ def test_flash_next_receipt_round_trips_every_non_default_choice():
         "qsa_fused_scores": False,
         "fused_gdn_batch_verify": "off",
         "moe_nax_gather": "off",
+        "moe_rhs_pad_policy": "floor",
+        "qsa_nax_min_physical_kv": 16384,
     }
     assert FlashNextPolicy.from_mapping(FlashNextPolicy().as_dict()) == FlashNextPolicy()
     names = {f.name for f in fields(FlashNextPolicy)}
@@ -178,6 +180,33 @@ def test_flash_next_receipt_round_trips_every_non_default_choice():
         policy = FlashNextPolicy.from_mapping({name: value})
         assert FlashNextPolicy.from_mapping(policy.as_dict()) == policy, name
         assert policy.as_dict()[name] == value, name
+
+
+def test_varlen_sparse_moe_policy_is_default_off_and_round_trips():
+    default = FlashNextPolicy()
+    assert "varlen_sparse_moe" not in default.as_dict()
+
+    selected = FlashNextPolicy.from_mapping(
+        {
+            "varlen_sparse_moe": {
+                "minimum_padding_rows": 32,
+                "minimum_padding_fraction": 0.2,
+            }
+        }
+    )
+    assert selected.as_dict()["varlen_sparse_moe"] == {
+        "enabled": True,
+        "minimum_padding_rows": 32,
+        "minimum_padding_fraction": 0.2,
+    }
+    assert FlashNextPolicy.from_mapping(selected.as_dict()) == selected
+
+    with pytest.raises(ValueError, match="varlen_sparse_moe"):
+        FlashNextPolicy.from_mapping({"varlen_sparse_moe": 1})
+    with pytest.raises(ValueError, match="cannot be combined with varlen_sparse_moe"):
+        FlashNextPolicy.from_mapping(
+            {"invariant_prefill": True, "varlen_sparse_moe": True}
+        )
 
 
 def test_flash_next_router_kernel_refuses_the_router_topk_launch_and_fold():
@@ -198,3 +227,76 @@ def test_flash_next_router_kernel_refuses_the_router_topk_launch_and_fold():
     assert policy.environment()["MLX_QWEN4_MOE_ROUTER_KERNEL"] == "1"
     assert "MLX_QWEN4_MOE_TOPK_FOLD" not in policy.environment()
     assert FlashNextPolicy.from_mapping(policy.as_dict()) == policy
+
+
+def test_flash_next_defaults_to_the_adaptive_moe_pad_and_pins_it(tmp_path, monkeypatch):
+    # Default "adaptive" on Flash-Next (options-sweep-flashnext-20261002): the
+    # profile pins MLX2_MOE_RHS_PAD_POLICY at every value (MLX2_* is not
+    # stripped), an explicit "floor" round-trips, and the module default the
+    # other models reach stays "floor".
+    import os
+
+    from mlx2.adapters.flash_next import configure_environment
+    from mlx2.runtime.models import switch_layers
+
+    assert switch_layers._rhs_pad_policy({}) == "floor"
+    policy = FlashNextPolicy()
+    assert policy.moe_rhs_pad_policy == "adaptive"
+    assert "moe_rhs_pad_policy" not in policy.as_dict()
+    monkeypatch.setenv("MLX2_MOE_RHS_PAD_POLICY", "always")
+    environment = configure_environment(tmp_path, policy)
+    assert environment["MLX2_MOE_RHS_PAD_POLICY"] == "adaptive"
+    assert os.environ["MLX2_MOE_RHS_PAD_POLICY"] == "adaptive"
+    floor = FlashNextPolicy.from_mapping({"moe_rhs_pad_policy": "floor"})
+    assert floor.as_dict()["moe_rhs_pad_policy"] == "floor"
+    assert FlashNextPolicy.from_mapping(floor.as_dict()) == floor
+    assert configure_environment(tmp_path, floor)["MLX2_MOE_RHS_PAD_POLICY"] == "floor"
+    with pytest.raises(ValueError, match="moe_rhs_pad_policy"):
+        FlashNextPolicy.from_mapping({"moe_rhs_pad_policy": "sometimes"})
+
+
+def test_flash_next_adaptive_pad_reaches_route_and_apc_identity(monkeypatch):
+    # The pad law is process-wide numerics: serving binds moe_rhs_pad into the
+    # route identity and the APCv2 execution identity whenever the effective
+    # policy is not the floor, so the Flash-Next default is bound and an
+    # explicit "floor" is not.
+    from mlx2.runtime import apc_numerics
+    from mlx2.runtime.models import switch_layers
+
+    monkeypatch.setattr(switch_layers, "_RHS_PAD_POLICY", "floor")
+    switch_layers.set_pad_policy(FlashNextPolicy().moe_rhs_pad_policy)
+    assert apc_numerics.moe_rhs_pad_identity() == {
+        "policy": "adaptive", "min_rows_per_expert": switch_layers._RHS_PAD_MIN_ROWS_PER_EXPERT,
+    }
+    identity = apc_numerics.execution_numerics_identity({})
+    assert identity is None or "MLX2_MOE_RHS_PAD_POLICY" not in identity  # env-only read
+    assert apc_numerics.execution_numerics_identity(None)["MLX2_MOE_RHS_PAD_POLICY"] == "adaptive"
+    switch_layers.set_pad_policy("floor")
+    assert apc_numerics.moe_rhs_pad_identity() is None
+
+
+def test_flash_next_qsa_nax_crossover_defaults_to_8192_and_is_pinned():
+    # 8192 since 2026-10-02 (qsa-nax-prefill-20261002: TTFT -2.6% at 8K,
+    # neutral at 16K/32K).  The module default stays 16384, so the policy
+    # default must reach the environment; an explicit 16384 round-trips and
+    # leaves the variable unset (the module default then applies).
+    policy = FlashNextPolicy()
+    assert policy.qsa_nax_min_physical_kv == 8192
+    assert "qsa_nax_min_physical_kv" not in policy.as_dict()
+    assert policy.environment()["MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV"] == "8192"
+    old = FlashNextPolicy.from_mapping({"qsa_nax_min_physical_kv": 16384})
+    assert old.as_dict()["qsa_nax_min_physical_kv"] == 16384
+    assert "MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV" not in old.environment()
+    assert FlashNextPolicy.from_mapping(old.as_dict()) == old
+
+
+def test_flash_next_refuses_qsa_nax_decode_beside_fused_attention_rows():
+    # qsa_nax_decode takes the B1 QSA-mask calls from the default fused
+    # attention rows, fails qualification on both routes and measured -15.6%
+    # (options-sweep-flashnext-20261002 item 9b).  Refused unless the fused
+    # rows are off, which keeps a deliberate A/B possible.
+    with pytest.raises(ValueError, match="qsa_nax_decode"):
+        FlashNextPolicy.from_mapping({"qsa_nax_decode": True})
+    arm = FlashNextPolicy.from_mapping({"qsa_nax_decode": True, "attn_fused_rows": False})
+    assert arm.environment()["MLX_QWEN4_QSA_NAX_DECODE"] == "1"
+    assert FlashNextPolicy.from_mapping(arm.as_dict()) == arm

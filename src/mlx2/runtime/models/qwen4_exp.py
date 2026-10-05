@@ -617,12 +617,20 @@ def qsa_stage1_status(*, reset: bool = False) -> dict:
 
 
 _QSA_NAX_MIN_QUERY = int(os.environ.get("MLX_QWEN4_QSA_NAX_MIN_QUERY", "64"))
+# Auto crossover: the physical KV width from which a >= 64-row prefill slice
+# of an explicit selection takes the NAX block-sparse kernel instead of the
+# masked SDPA (FlashNextPolicy.qsa_nax_min_physical_kv).
 _QSA_NAX_AUTO_MIN_PHYSICAL_KV = int(
     os.environ.get("MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV", "16384")
 )
+# Auto admission of B > 1 prefill slices (FlashNextPolicy.qsa_nax_batched).
+# The kernel reads ids/counts/q_pos per (lane, row) and left padding per
+# lane, so ragged left-padded lanes and per-lane selections are exact.
+_QSA_NAX_AUTO_BATCHED = _env_flag("MLX_QWEN4_QSA_NAX_BATCHED")
 _QSA_NAX_STATS_LOCK = threading.Lock()
 _QSA_NAX_STATS = Counter()
 _QSA_NAX_DEVICE_SUPPORTED = None
+_QSA_NAX_DEVICE_NAME = ""
 
 
 @dataclass(frozen=True)
@@ -639,15 +647,26 @@ def _qsa_nax_mode() -> str:
 
 def _qsa_nax_device_supported() -> bool:
     """Restrict automatic admission to the measured Apple M5 envelope."""
-    global _QSA_NAX_DEVICE_SUPPORTED
+    global _QSA_NAX_DEVICE_SUPPORTED, _QSA_NAX_DEVICE_NAME
     if _QSA_NAX_DEVICE_SUPPORTED is not None:
         return _QSA_NAX_DEVICE_SUPPORTED
     try:
-        supported = "M5" in str(mx.device_info().get("device_name", ""))
+        name = str(mx.device_info().get("device_name", ""))
     except (AttributeError, RuntimeError, TypeError):
-        supported = False
+        name = ""
+    supported = "M5" in name
+    _QSA_NAX_DEVICE_NAME = name
     _QSA_NAX_DEVICE_SUPPORTED = supported
     return supported
+
+
+def qsa_nax_host_gate() -> dict:
+    """The evaluated host gate: ``{"nax_host", "device_name"}``.
+
+    Bound into a qualification receipt that waives the NAX prefill kernel as
+    host-gated, and re-evaluated by the loader on the serving host."""
+    supported = _qsa_nax_device_supported()
+    return {"nax_host": bool(supported), "device_name": _QSA_NAX_DEVICE_NAME}
 
 
 def decide_qsa_nax_admission(
@@ -658,8 +677,19 @@ def decide_qsa_nax_admission(
     cache_layout_ok: bool = True,
     device_supported: bool | None = None,
     kernel_available: bool | None = None,
+    min_physical_kv: int | None = None,
+    batched: bool | None = None,
+    invariant_lane: bool = False,
 ) -> QSANAXAdmission:
-    """Resolve the NAX route without mutating QSA state or building a mask."""
+    """Resolve the NAX route without mutating QSA state or building a mask.
+
+    ``min_physical_kv`` / ``batched`` default to the process selections
+    (``MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV`` / ``MLX_QWEN4_QSA_NAX_BATCHED``)
+    and only apply in ``auto``; ``on`` admits every width and batch.
+    ``invariant_lane``: the slice-invariant prefill lane keeps its own
+    attention, so a call the kernel would take is declined and counted as
+    ``invariant_prefill`` instead of as an engagement it never ran.
+    """
     mode = _qsa_nax_mode()
     if mode == "off":
         return QSANAXAdmission(False, "explicit_off")
@@ -673,10 +703,15 @@ def decide_qsa_nax_admission(
         return QSANAXAdmission(False, "query_below_min")
     if not layout_ok:
         return QSANAXAdmission(False, "unsupported_layout")
+    lanes = int(selection.batch)
     if mode == "auto":
-        if selection.batch != 1:
+        if batched is None:
+            batched = _QSA_NAX_AUTO_BATCHED
+        if lanes != 1 and not batched:
             return QSANAXAdmission(False, "auto_batch_gt_one")
-        if selection.physical_width < _QSA_NAX_AUTO_MIN_PHYSICAL_KV:
+        if min_physical_kv is None:
+            min_physical_kv = _QSA_NAX_AUTO_MIN_PHYSICAL_KV
+        if selection.physical_width < int(min_physical_kv):
             return QSANAXAdmission(False, "auto_context_below_crossover")
     supported = (
         _qsa_nax_device_supported()
@@ -690,6 +725,10 @@ def decide_qsa_nax_admission(
     )
     if not available:
         return QSANAXAdmission(False, "kernel_unavailable")
+    if invariant_lane:
+        return QSANAXAdmission(False, "invariant_prefill")
+    if mode == "auto" and lanes != 1:
+        return QSANAXAdmission(True, "engaged_auto_batched")
     return QSANAXAdmission(True, f"engaged_{mode}")
 
 
@@ -705,6 +744,44 @@ def _record_qsa_nax_admission(selection, decision: QSANAXAdmission) -> None:
     with _QSA_NAX_STATS_LOCK:
         _QSA_NAX_STATS[decision.reason] += 1
         _QSA_NAX_LAST_DECISION = receipt
+
+
+def qsa_nax_status(*, reset: bool = False) -> dict:
+    """Bounded receipts of the NAX block-sparse QSA prefill kernel: one count
+    per >= ``min_query_width``-row attention call, by admission reason.
+
+    ``engagements`` counts calls that ran the kernel (reasons ``engaged_*``);
+    every other reason is a fallback to the masked or dense path.  The host
+    gate (``nax_host``/``device_name``) is what qualification binds into a
+    host-gated "selected, not observed" waiver."""
+    global _QSA_NAX_LAST_DECISION
+    from . import qwen4_qsa_nax as _nax_module
+
+    gate = qsa_nax_host_gate()
+    with _QSA_NAX_STATS_LOCK:
+        counts = dict(_QSA_NAX_STATS)
+        engagements = sum(
+            count for reason, count in counts.items() if reason.startswith("engaged_")
+        )
+        attempts = sum(counts.values())
+        report = {
+            "mode": _qsa_nax_mode(),
+            "min_query_width": int(_QSA_NAX_MIN_QUERY),
+            "min_physical_kv": int(_QSA_NAX_AUTO_MIN_PHYSICAL_KV),
+            "batched": bool(_QSA_NAX_AUTO_BATCHED),
+            **gate,
+            # None until a call reached the probe (it runs on the GPU).
+            "kernel_available": _nax_module._NAX_AVAILABLE,
+            "attempts": attempts,
+            "engagements": engagements,
+            "fallbacks": attempts - engagements,
+            "counts": counts,
+            "last_receipt": _QSA_NAX_LAST_DECISION,
+        }
+        if reset:
+            _QSA_NAX_STATS.clear()
+            _QSA_NAX_LAST_DECISION = None
+    return report
 
 
 _QSA_GATHER_KV = _env_flag("MLX_QWEN4_QSA_GATHER_KV")
@@ -6575,7 +6652,10 @@ class Attention(nn.Module):
             training=self.training,
             layout_ok=self._nax_layout_ok,
             cache_layout_ok=quantized_indexed is None,
+            invariant_lane=lane,
         )
+        if nax_admission.reason == "invariant_prefill":
+            _invariant.note("qsa_nax_declined")
         if length >= _QSA_NAX_MIN_QUERY:
             _record_qsa_nax_admission(selection, nax_admission)
         direct_nax = (
@@ -6592,8 +6672,6 @@ class Attention(nn.Module):
             and nax_kernel_available()
         )
         use_nax = (nax_admission.engage or use_direct_nax) and not lane
-        if lane and nax_admission.engage:
-            _invariant.note("qsa_nax_declined")
         if length == 1 and _QSA_NAX_DECODE:
             if use_direct_nax:
                 reason = "engaged"
@@ -7229,6 +7307,12 @@ class Model(nn.Module):
 
     def make_cache(self):
         return self.language_model.make_cache()
+
+    def prefill_row_context(self, lengths, *, width):
+        """Adapter-installed live-row scope for ordinary padded prefill."""
+        from .varlen_dense_mlp import prefill_row_context
+
+        return prefill_row_context(self, lengths, width=width)
 
     @property
     def speculative_args(self):

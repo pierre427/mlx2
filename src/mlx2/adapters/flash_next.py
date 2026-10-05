@@ -10,7 +10,8 @@ from pathlib import Path
 from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
 
-# Default on at width 3 (width 4 until 2026-10-02; Qwen3.8 and Qwen3.6 stay at 4).
+# Default on at width 3 (width 4 until 2026-10-02; Qwen3.8 stays at 4 and
+# Qwen3.6 now owns a width-one default).
 #
 # Width 3: on the served uncensored artifact, 4 lanes of ordinary decode beat
 # 4-lane batched MTP by 7.9-9.3%, and width 3 measured +9.9% over width 4 at
@@ -238,16 +239,32 @@ class FlashNextAdapter:
     # fused GDN verify kernel.  Strong spans are 16 (verify width 17) since the
     # policy's fused_gdn_verify_max_steps default became 17: vs 14 with the
     # same bound, copy-heavy B1 1.066x at T=0.7 (4/4 reps > 1), 0.995x greedy,
-    # prose and B4 within +/-2% (ab-vcap-*.json, arm s16v17).
+    # prose and B4 within +/-2% (ab-vcap-*.json, arm s16v17).  14 since
+    # 2026-10-02 (Pierre): paired against 16 on copy-heavy B1, 14 is +11.4%
+    # [+5.7, +17.7] and +11.1% [+9.7, +17.2] (8/8 reps each, P6/P7), tokens
+    # identical 8/8, chat B1 neutral; 15 +8.3%, 13 +9.7%, 12 +5.5%
+    # (qualification/runs/options-sweep-flashnext-20261002, item 8h).
+    #
+    # Decode-first publication in "order" mode (decode tokens of a round are
+    # returned before that round's prefill phase; no shared prefill budget)
+    # on both routes since 2026-10-02 (Pierre): decode-to-client lag max
+    # 469-606 ms -> 2-4 ms with TTFT, gap p50/p95 and lane tok/s unchanged
+    # (options-sweep-flashnext-20261002, item 4a).  MLX2_DECODE_FIRST=0 is
+    # the kill switch; an explicit "decode_first" in the execution policy
+    # (false included) wins.
     default_route_execution_policy = {
-        "ordinary": {"host_memory_signals": {"enabled": True}},
+        "ordinary": {
+            "host_memory_signals": {"enabled": True},
+            "decode_first": {"enabled": True, "shared_prefill_budget": False},
+        },
         "native_mtp": {
             "host_memory_signals": {"enabled": True},
             "apc_interior_checkpoints": "auto",
             "self_mtp_copy_draft": {
                 "enabled": True, "max_span": 7, "min_match": 8,
-                "strong_match": 32, "strong_max_span": 16, "initial_span": 7,
+                "strong_match": 32, "strong_max_span": 14, "initial_span": 7,
             },
+            "decode_first": {"enabled": True, "shared_prefill_budget": False},
         },
     }
     # Vendor sampling defaults: Qwen/Qwen3.8-Flash-Next model card and the
@@ -297,6 +314,14 @@ class FlashNextAdapter:
         return {}
 
     def __init__(self, model_path: str, *, execution_policy=None):
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self,
+            lambda: self._init_flash_next(model_path, execution_policy=execution_policy),
+        )
+
+    def _init_flash_next(self, model_path: str, *, execution_policy=None):
         from .flash_next_policy import FlashNextPolicy
         self.policy = FlashNextPolicy.from_mapping(execution_policy)
         path = Path(model_path).expanduser().resolve()
@@ -322,14 +347,30 @@ class FlashNextAdapter:
 
         # qwen4_exp reads its selections at import: if it was imported before
         # the profile above was pinned, this model would run another route.
-        # MLX2_MOE_NAX_GATHER is applied live (moe_nax_gather.set_mode below),
-        # so an earlier import under another value is not a reason to refuse.
+        # MLX2_MOE_NAX_GATHER and MLX2_MOE_RHS_PAD_POLICY are applied live
+        # (moe_nax_gather.set_mode, switch_layers.set_pad_policy below), so
+        # an earlier import under another value is not a reason to refuse.
         assert_profile_applied(
-            "the Flash-Next adapter", live=("MLX2_MOE_NAX_GATHER",)
+            "the Flash-Next adapter",
+            live=("MLX2_MOE_NAX_GATHER", "MLX2_MOE_RHS_PAD_POLICY"),
         )
         from ..runtime.models import moe_nax_gather as _moe_nax
+        from ..runtime.models import switch_layers as _switch_layers
+        from .process_globals import MOE_NAX_GATHER, MOE_RHS_PAD_POLICY, claim
 
-        _moe_nax.set_mode(self.policy.moe_nax_gather)
+        # Both are process globals: refuse a value a live adapter does not
+        # run, and roll them back if this load fails (process_globals).
+        self._process_claim = claim(
+            self,
+            "the Flash-Next adapter",
+            {
+                MOE_NAX_GATHER: (self.policy.moe_nax_gather, _moe_nax.set_mode),
+                MOE_RHS_PAD_POLICY: (
+                    self.policy.moe_rhs_pad_policy,
+                    _switch_layers.set_pad_policy,
+                ),
+            },
+        )
         config = json.loads((path / "config.json").read_text())
         if config.get("model_type") != "qwen4_exp" or config.get("ngram_table"):
             raise ValueError(
@@ -398,6 +439,15 @@ class FlashNextAdapter:
             )
             self.model.load_weights(list(weights.items()), strict=True)
             self.model.eval()
+            from ..runtime.models.varlen_dense_mlp import (
+                VarlenSparseMoEPolicy,
+                install as install_varlen_mlp,
+            )
+
+            self.varlen_sparse_moe = install_varlen_mlp(
+                self.model,
+                VarlenSparseMoEPolicy.from_value(self.policy.varlen_sparse_moe),
+            )
             mx.eval(self.model.parameters())
             self.tensorfold_qmv = None
             if self.policy.tensorfold_qmv_rows:
@@ -433,12 +483,14 @@ class FlashNextAdapter:
                     # loaded model cannot provide.
                     raise ValueError(f"invariant_prefill refused: {handle.refusal}")
                 self.invariant_prefill = handle
+            from ..runtime.models.varlen_dense_mlp import identity as varlen_identity
             from ..runtime.prefill_plan import execution_identity
 
             self.prefill_execution_identity = execution_identity(
                 self.tensorfold_prefill,
                 self.gdn_prefill_scan,
                 None if self.invariant_prefill is None else self.invariant_prefill.identity(),
+                varlen_identity(self.varlen_sparse_moe),
             )
             self.row_exact_verify = None
             if self.policy.row_exact_verify:
@@ -575,6 +627,7 @@ class FlashNextAdapter:
     def diagnostics(self) -> dict:
         from dataclasses import asdict
         from ..runtime.models.flash_tensorfold_qmv import counters as tensorfold_qmv_counters
+        from ..runtime.models.varlen_dense_mlp import status as varlen_mlp_status
 
         from ..runtime.models.qwen4_exp import (
             qwen4_eager_dispatch_status,
@@ -583,6 +636,7 @@ class FlashNextAdapter:
             qsa_mtp_amendment_status,
             qsa_batch_decode_sparse_status,
             qsa_nax_decode_status,
+            qsa_nax_status,
             qsa_rollback_status,
             qsa_stage1_status,
         )
@@ -680,6 +734,11 @@ class FlashNextAdapter:
         return {
             "moe": moe,
             "policy": self.policy.as_dict(),
+            **(
+                {"varlen_sparse_moe": varlen_mlp_status(self.varlen_sparse_moe)}
+                if getattr(self, "varlen_sparse_moe", None) is not None
+                else {}
+            ),
             **gdn_state_diagnostics(self),
             **(
                 {
@@ -739,6 +798,9 @@ class FlashNextAdapter:
             "ple_compile": qwen4_ple_compile_status(),
             "indexed_qsa": qsa_indexed_status(),
             "qsa_stage1": qsa_stage1_status(),
+            # NAX block-sparse QSA prefill (default auto): admission counts by
+            # reason, the crossover and batch selection in force, host gate.
+            "qsa_nax_prefill": qsa_nax_status(),
             # Opt-in NAX decode rows (measured slower on Flash-Next, -15.6% at
             # 32K ordinary); absent while off and unused so default receipts
             # are unchanged.
@@ -795,6 +857,9 @@ class FlashNextAdapter:
         }
 
     def close(self):
+        from .process_globals import release
+
+        release(self)
         tables = getattr(self, "_tables", [])
         for table in tables:
             table.close()

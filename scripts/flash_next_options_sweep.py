@@ -45,7 +45,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-MODEL = str(Path("~/mlx-models/Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP").expanduser())
+MODEL = str(Path.home() / "mlx-models/Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP")
 # The served policy file (policies/flash-next-uncensored-policy.json).  The
 # engine strips adaptive_mtp_depth / mtp_ordinary_handoff before the adapter.
 SERVED_ADAPTER_POLICY = {"num_draft": 2}

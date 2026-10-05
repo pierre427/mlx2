@@ -245,9 +245,17 @@ def test_verify_snapshot_rollback_zero_partial_and_full(monkeypatch):
     assert layer.fused_gdn_batch_verify_calls == 1
 
 
-def test_new_routes_cannot_be_qualified():
+def test_decode_win_routes_are_qualifiable_and_their_slices_required():
+    # The Metal identity (1488/1488 on both artifacts) and the paired A/B
+    # exist (options-sweep-qwen36-20261002): a decode-win route may qualify,
+    # but only with its selected slices observed.
+    from mlx2.qualification import required_feature_checks
+
     profile = A.configure_environment({"fused_gdn_verify": True})
-    assert "pending real-weight" in unqualifiable_candidate({"environment": profile})
+    assert profile["MLX_QWEN36_DECODE_WINS"] == "1"
+    settings = {"environment": profile, "mtp": True, "speculation": "self_mtp"}
+    assert unqualifiable_candidate(settings) is None
+    assert "feature_qwen36_fused_gdn_verify" in required_feature_checks(settings)
 
 
 @pytest.mark.parametrize("bits,gs", [(4, 64), (4, 128), (8, 64), (8, 128)])

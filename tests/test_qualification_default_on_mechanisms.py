@@ -525,10 +525,14 @@ def test_invariant_lane_suppresses_the_nax_requirement():
     assert "feature_moe_nax_gather" not in required_feature_checks(combined)
     reason = selected_not_observed_features(combined)["feature_moe_nax_gather"]
     assert reason.startswith("selected, suppressed by invariant_prefill")
-    # Every other default-on requirement is unchanged by the lane.
+    # Every other default-on requirement is unchanged by the lane, which is
+    # itself required to engage -- except the adaptive MoE pad (the Flash-Next
+    # default since 2026-10-02), which the lane also suppresses: inside it
+    # every prefill gather is padded by the lane's own rule.
     assert required_feature_checks(combined) == (
-        required_feature_checks(_settings()) - {"feature_moe_nax_gather"}
-    )
+        required_feature_checks(_settings())
+        - {"feature_moe_nax_gather", "feature_moe_rhs_pad"}
+    ) | {"feature_invariant_prefill"}
     # NAX off under the lane: nothing selected, nothing recorded.
     off = _invariant_settings(moe_nax_gather="off")
     assert "feature_moe_nax_gather" not in selected_not_observed_features(off)
@@ -555,7 +559,9 @@ def test_loader_qualifies_the_combined_route_without_nax_engagement(tmp_path):
         "passed": True, "runtime": {"source": "abc"}, "artifact": "weights",
         "settings": settings,
         "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
-        "checks": {c: {"passed": True} for c in REQUIRED_CHECKS | {"structured_output"}},
+        # The invariant lane itself is a required, observed mechanism.
+        "checks": {c: {"passed": True} for c in REQUIRED_CHECKS
+                   | {"structured_output", "feature_invariant_prefill"}},
     }
     path = tmp_path / "qualification.json"
     path.write_text(json.dumps(record))

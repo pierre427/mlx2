@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 
 QUALIFICATION_HARNESS_SCHEMA = "mlx2.qualification-harness.v1"
 APPROVED_ADAPTIVE_BENCHMARK_SHA256 = (
-    "6beb390d0ee56fad5e30c4cf5ec719f65b9993bc8cb27d8c82c75da6da55db04"
+    "a3467281191c7d55aa80f3fc29aa03fa19ec0402ae0e15dc0b5189c62c62d7cb"
 )
 PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v2"
 CROSS_HOST_PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v3"
@@ -1517,12 +1517,28 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
     execution = final.get("execution", {})
     initial_execution = (initial or {}).get("execution", {})
 
-    def prefill_delta(mechanism, keys):
+    def prefill_counter_delta(mechanism, key):
         if initial is None:
             return 0
         before = initial_execution.get(mechanism, {}).get("counters", {})
         after = execution.get(mechanism, {}).get("counters", {})
-        return sum(max(0, after.get(key, 0) - before.get(key, 0)) for key in keys)
+        start, end = before.get(key, 0), after.get(key, 0)
+        if type(start) is not int or type(end) is not int or end <= start:
+            return 0
+        return end - start
+
+    def prefill_delta(mechanism, keys):
+        return sum(prefill_counter_delta(mechanism, key) for key in keys)
+
+    def section_counter_delta(section, key):
+        if initial is None:
+            return 0
+        before = ((initial or {}).get(section) or {}).get(key, 0)
+        after = (final.get(section) or {}).get(key, 0)
+        if type(before) is not int or type(after) is not int or after <= before:
+            return 0
+        return after - before
+
     segmented = execution.get("segmented_mtp", {})
     indexed = execution.get("indexed_qsa", {}).get("counts", {})
     scheduler = final.get("scheduler", {})
@@ -1645,6 +1661,25 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
             "tensorfold_prefill", ("projection_calls", "grouped_calls", "swiglu_calls")
         ),
         "prefill_scan": prefill_delta("gdn_prefill_scan", ("calls",)),
+        "varlen_dense_mlp": min(
+            prefill_counter_delta("varlen_dense_mlp", "mlp_compaction_calls"),
+            prefill_counter_delta("varlen_dense_mlp", "padding_token_rows"),
+        ),
+        "varlen_sparse_moe": min(
+            prefill_counter_delta("varlen_sparse_moe", "moe_compaction_calls"),
+            prefill_counter_delta("varlen_sparse_moe", "padding_token_rows"),
+        ),
+        "external_varlen_prefill": min(
+            section_counter_delta(
+                "scheduler", "external_batched_prefill_rounds"
+            ),
+            section_counter_delta(
+                "scheduler", "external_batched_prefill_lanes"
+            ),
+        ),
+        "ingress_cohort": section_counter_delta(
+            "counts", "ingress_cohort_target_reached"
+        ),
         "sp_qmm": sp_qmm_routed_observation(initial, final),
         "qsdpa_verify_kernel": qsdpa_verify_observation(initial, final),
         "verify_bitexact": (
@@ -1730,7 +1765,11 @@ def default_on_observations(final, initial=None):
     Each value is a counter delta from the initial status (the final value
     when there is none), so a mechanism that only ran at load cannot pass.
     """
-    from mlx2.qualification import moe_nax_gather_engagement
+    from mlx2.qualification import (
+        SLICE_FLOOR_LIFTS,
+        moe_nax_gather_engagement,
+        qsa_nax_prefill_engagement,
+    )
 
     execution = final.get("execution") or {}
     initial_execution = (initial or {}).get("execution") or {}
@@ -1745,6 +1784,15 @@ def default_on_observations(final, initial=None):
                 value = value.get(key, 0)
             return value if type(value) is int and value >= 0 else 0
         return max(0, read(execution) - read(initial_execution))
+
+    scheduler = final.get("scheduler") or {}
+    initial_scheduler = (initial or {}).get("scheduler") or {}
+
+    def scheduler_delta(name):
+        def read(root):
+            value = root.get(name, 0)
+            return value if type(value) is int and value >= 0 else 0
+        return max(0, read(scheduler) - read(initial_scheduler))
 
     hc = execution.get("hc_decode") or {}
     hc_decode = (
@@ -1777,6 +1825,21 @@ def default_on_observations(final, initial=None):
         routed_parts.append(delta(*routed, "down_calls"))
     if routed_mode.endswith("_shared"):
         routed_parts.append(delta(*routed, "shared_fold_calls"))
+    # Qwen3.6 reports the same mechanisms under decode_wins.moe
+    # (runtime/models/qwen36_35b.py qwen36_decode_wins_stats): ``calls`` and
+    # ``shared_calls`` also count multi-row window calls, so the one-token
+    # share is the difference; gate_up / two_launch run the parent path,
+    # counted in ``routed_gate_up_calls``.
+    q36 = ("decode_wins", "moe")
+    q36_window = delta(*q36, "window_calls")
+    if routed_mode.startswith("gate_up_down"):
+        q36_parts = [max(0, delta(*q36, "calls") - q36_window)]
+        if routed_mode.endswith("_shared"):
+            q36_parts.append(max(0, delta(*q36, "shared_calls") - q36_window))
+        q36_routed = min(q36_parts)
+    else:
+        q36_routed = delta(*q36, "routed_gate_up_calls")
+    q36_topk = delta(*q36, "topk_launch_calls") if topk_mode in {None, "launch"} else 0
     scores = ((execution.get("tensorfold_longctx") or {}).get("qsa_fused_scores") or {})
     qwen38 = execution.get("fused_gdn") or {}
     return {
@@ -1790,8 +1853,10 @@ def default_on_observations(final, initial=None):
         "attn_fused_rows_index_q": (
             delta(*rows_counts, "index_q_rows") if attn_rows else 0
         ),
-        "moe_topk_fold": topk,
-        "moe_routed_decode": min(routed_parts),
+        # Flash-Next shape (moe.moe_window / moe.routed_decode) or the
+        # Qwen3.6 shape (decode_wins.moe), whichever this adapter reports.
+        "moe_topk_fold": max(topk, q36_topk),
+        "moe_routed_decode": max(min(routed_parts), q36_routed),
         "qsa_fused_scores": (
             delta("tensorfold_longctx", "qsa_fused_scores", "counts", "engaged")
             if scores.get("enabled") is True
@@ -1806,6 +1871,49 @@ def default_on_observations(final, initial=None):
         ),
         # NAX segmented MoE gather (prefill); "fused" needs gate/up and down.
         "moe_nax_gather": moe_nax_gather_engagement(execution, initial_execution),
+        # Qwen3.6 decode slices: one-row fused GDN decode (its own
+        # diagnostics key), batched decode / verify / batched verify and
+        # the MoE row window (decode_wins).
+        "qwen36_fused_gdn_decode": delta("fused_gdn_decode", "fused_calls"),
+        "qwen36_fused_gdn_batch_decode": delta("decode_wins", "gdn", "batch_decode", "calls"),
+        "qwen36_fused_gdn_verify": delta("decode_wins", "gdn", "verify", "calls"),
+        "qwen36_fused_gdn_batch_verify": delta("decode_wins", "gdn", "batch_verify", "calls"),
+        "qwen36_moe_window": q36_window,
+        # Sorted-MoE pad policy: one recorded choice per sorted expert gather
+        # the adaptive (or always) rule decided (switch_layers.moe_pad_status).
+        "moe_rhs_pad": sum(
+            delta("moe_pad", "choices", reason)
+            for reason in ((execution.get("moe_pad") or {}).get("choices") or {})
+        ),
+        # Prefill forwards through the slice-invariant lane.
+        "invariant_prefill": delta("invariant_prefill", "counts", "forwards"),
+        # fp16 GDN recurrent-state launches (runtime/models/gdn_state.py).
+        "gdn_state_fp16": (
+            delta("gdn_state", "counters", "kernel_launches")
+            + delta("gdn_state", "counters", "ops_calls")
+            if (execution.get("gdn_state") or {}).get("state_dtype") == "float16"
+            else 0
+        ),
+        # MLX gated_delta_update recurrences (MLX_GDN_CORE).
+        "gdn_core": (
+            delta("gdn_core", "calls")
+            if (execution.get("gdn_core") or {}).get("enabled") is True
+            else 0
+        ),
+        # A load-time weight transform with no per-call path: the head's
+        # scales and biases are stored fp32, so every later head call returns
+        # fp32 logits.  Observed as the installed receipt; the run's decode
+        # check proves the head ran.
+        "fp32_head_logits": int(
+            (execution.get("fp32_head_logits") or {}).get("enabled") is True
+            and type((execution.get("fp32_head_logits") or {}).get("extra_resident_bytes")) is int
+            and execution["fp32_head_logits"]["extra_resident_bytes"] > 0
+        ),
+        # Scheduler counters (status["scheduler"]).
+        "decode_first": scheduler_delta("decode_first_published_rounds"),
+        "decode_fairness_slice_floor": scheduler_delta(SLICE_FLOOR_LIFTS),
+        # NAX block-sparse QSA prefill (Flash-Next, M5): kernel calls.
+        "qsa_nax_prefill": qsa_nax_prefill_engagement(execution, initial_execution),
     }
 
 
@@ -2105,6 +2213,7 @@ def main():
             raise AssertionError(name)
 
     from mlx2.qualification import (
+        contention_gated_not_observed,
         host_gate_record,
         host_gated_not_observed,
         required_feature_checks,
@@ -2808,7 +2917,8 @@ def main():
                 forced,
                 report["prefill_scheduling_forcing"],
             )
-        # Host-gated mechanisms (MLX2_MOE_NAX_GATHER: M5 only, canaried) that
+        # Host-gated mechanisms (MLX2_MOE_NAX_GATHER: M5 only, canaried; the
+        # NAX QSA prefill kernel: M5 only, probed) that
         # this host could not run are "selected, not observed", neither a
         # pass nor a failure.
         host_gated = host_gated_not_observed(
@@ -2824,7 +2934,18 @@ def main():
             }
             print(f"feature_{feature}: SELECTED, NOT OBSERVED "
                   f"({host_gated[feature]})", flush=True)
-        for feature in sorted(required_features - set(host_gated)):
+        # Contention-gated mechanisms (the decode-fairness slice floor) this
+        # run's load never reached: constructed, nothing to lift.
+        contention_gated = contention_gated_not_observed(final, initial)
+        for feature in sorted((required_features & set(contention_gated)) - set(host_gated)):
+            report["selected_not_observed"]["feature_" + feature] = {
+                "status": "selected, not observed",
+                "reason": contention_gated[feature],
+                "contention_gated": True,
+            }
+            print(f"feature_{feature}: SELECTED, NOT OBSERVED "
+                  f"({contention_gated[feature]})", flush=True)
+        for feature in sorted(required_features - set(host_gated) - set(contention_gated)):
             if feature in {"adaptive_mtp_depth", "mtp_ordinary_handoff"}:
                 evidence = report.get("adaptive_benchmark")
             elif feature == "sp_qmm":
@@ -2843,6 +2964,15 @@ def main():
                 evidence = {
                     "counters": prefill_scheduling_counters(final),
                     "forcing_load": report.get("prefill_scheduling_forcing"),
+                }
+            elif feature in {"decode_first", "decode_fairness_slice_floor"}:
+                prefix = "decode_first_" if feature == "decode_first" else "decode_fairness_"
+                evidence = {
+                    "before": {k: v for k, v in (initial.get("scheduler") or {}).items()
+                               if k.startswith(prefix)},
+                    "after": {k: v for k, v in (final.get("scheduler") or {}).items()
+                              if k.startswith(prefix)},
+                    "delta": observed.get(feature, 0),
                 }
             else:
                 evidence = execution

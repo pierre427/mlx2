@@ -88,6 +88,8 @@ def test_fp32_head_receipt_cannot_select_opposite_head_mode(tmp_path, qualified_
         "checks": {
             name: {"passed": True}
             for name in REQUIRED_CHECKS | {"structured_output"}
+            # A selected fp32 head must also show its installed receipt.
+            | ({"feature_fp32_head_logits"} if qualified_fp32 else set())
         },
     }
     path = tmp_path / "qualification.json"
@@ -997,6 +999,8 @@ def test_every_selectable_feature_has_a_harness_observation():
         "host_memory_signals", "memory_preemption", "moe_expert_streaming",
         "prefill_scheduling", "tool_grammar_auto", "tool_grammar_streaming",
         "external_draft", "apc_sessions", "int8_prefill",
+        "varlen_dense_mlp", "varlen_sparse_moe",
+        "external_varlen_prefill", "ingress_cohort",
     } <= selectable
     assert sorted(selectable - set(feature_observations({}))) == []
     assert unobservable_features(selectable) == []
@@ -1117,6 +1121,177 @@ def test_prefill_candidates_require_observed_calls_during_qualification():
     assert observed["prefill_projection"] == 3
     assert observed["prefill_scan"] == 1
     assert not {"feature_prefill_projection", "feature_prefill_scan"} & required_feature_checks({})
+
+
+def test_varlen_and_external_prefill_require_run_local_engagement():
+    from mlx2.qualification import required_feature_checks
+    from scripts.qualify_serving import feature_observations
+
+    settings = {
+        "speculation": "external_draft",
+        "prefill_execution": {
+            "varlen": {"schema": "mlx2.varlen-dense-mlp.v1"},
+            "external_varlen_prefill": {
+                "schema": "mlx2.external-varlen-prefill.v1"
+            },
+        },
+        "execution_policy": {
+            "pairwise_selection": "batched",
+            "external_varlen_prefill": {
+                "enabled": True,
+                "schema": "mlx2.external-varlen-prefill.v1",
+            },
+            "ingress_cohort": {
+                "enabled": True,
+                "mechanism": "external_varlen_prefill",
+                "target_lanes": 4,
+            },
+        },
+    }
+    assert {
+        "feature_varlen_dense_mlp",
+        "feature_external_varlen_prefill",
+        "feature_ingress_cohort",
+        "feature_external_pairwise_selection",
+    } <= required_feature_checks(settings)
+    initial = {
+        "execution": {
+            "varlen_dense_mlp": {
+                "counters": {
+                    "mlp_compaction_calls": 7,
+                    "padding_token_rows": 100,
+                }
+            }
+        },
+        "scheduler": {
+            "external_batched_prefill_rounds": 3,
+            "external_batched_prefill_lanes": 6,
+            "external_pairwise_selection_groups": 4,
+        },
+        "counts": {
+            "ingress_cohort_observed_used": 2,
+            "ingress_cohort_target_reached": 1,
+        },
+    }
+    idle = feature_observations(initial, initial=initial)
+    assert idle["varlen_dense_mlp"] == 0
+    assert idle["external_varlen_prefill"] == 0
+    assert idle["ingress_cohort"] == 0
+    final = {
+        "execution": {
+            "varlen_dense_mlp": {
+                "counters": {
+                    "mlp_compaction_calls": 9,
+                    "padding_token_rows": 105,
+                }
+            }
+        },
+        "scheduler": {
+            "external_batched_prefill_rounds": 4,
+            "external_batched_prefill_lanes": 8,
+            "external_pairwise_selection_groups": 5,
+        },
+        "counts": {
+            "ingress_cohort_observed_used": 3,
+            "ingress_cohort_target_reached": 2,
+        },
+    }
+    observed = feature_observations(final, initial=initial)
+    assert observed["varlen_dense_mlp"] == 2
+    assert observed["external_varlen_prefill"] == 1
+    assert observed["ingress_cohort"] == 1
+    partial = {
+        **final,
+        "execution": {
+            "varlen_dense_mlp": {
+                "counters": {
+                    "mlp_compaction_calls": 9,
+                    "padding_token_rows": 100,
+                }
+            }
+        },
+        "scheduler": {
+            "external_batched_prefill_rounds": 4,
+            "external_batched_prefill_lanes": 6,
+        },
+    }
+    partial_observed = feature_observations(partial, initial=initial)
+    assert partial_observed["varlen_dense_mlp"] == 0
+    assert partial_observed["external_varlen_prefill"] == 0
+
+    # A physical B2 packed slab proves use, but not a target_lanes=4 ingress
+    # policy. Only the coalescer's target-reached counter can satisfy the gate.
+    b2_only = {
+        **final,
+        "counts": {
+            "ingress_cohort_observed_used": 3,
+            "ingress_cohort_executed_lanes": 2,
+            "ingress_cohort_max_execution_width": 2,
+            "ingress_cohort_target_reached": 1,
+        },
+    }
+    assert feature_observations(b2_only, initial=initial)["ingress_cohort"] == 0
+
+    sparse = {
+        "prefill_execution": {
+            "varlen": {"schema": "mlx2.varlen-sparse-moe.v1"}
+        }
+    }
+    assert "feature_varlen_sparse_moe" in required_feature_checks(sparse)
+    sparse_initial = {
+        "execution": {
+            "varlen_sparse_moe": {
+                "counters": {
+                    "moe_compaction_calls": 10,
+                    "padding_token_rows": 80,
+                }
+            }
+        }
+    }
+    sparse_final = {
+        "execution": {
+            "varlen_sparse_moe": {
+                "counters": {
+                    "moe_compaction_calls": 13,
+                    "padding_token_rows": 84,
+                }
+            }
+        }
+    }
+    assert feature_observations(
+        sparse_final, initial=sparse_initial
+    )["varlen_sparse_moe"] == 3
+
+
+def test_external_adaptive_verification_is_serialized_but_unqualifiable():
+    from mlx2.qualification import unqualifiable_candidate
+
+    assert unqualifiable_candidate({}) is None
+    reason = unqualifiable_candidate(
+        {
+            "execution_policy": {
+                "adaptive_verification": {
+                    "verification_costs": [1.0, 2.0, 4.0]
+                }
+            }
+        }
+    )
+    assert "adaptive_verification" in reason
+    assert "cannot observe" in reason
+
+
+def test_external_tree_batch_size_route_is_unqualifiable():
+    from mlx2.qualification import unqualifiable_candidate
+
+    reason = unqualifiable_candidate(
+        {
+            "execution_policy": {
+                "batch_size_route": "tree15_b1_b4_chain_b5plus_v1"
+            }
+        }
+    )
+    assert "batch_size_route" in reason
+    assert "route-specific qualification gate" in reason
 
 
 def test_a_recorded_failed_check_refuses_the_route(tmp_path):

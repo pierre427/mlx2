@@ -2,6 +2,12 @@
 
 Default matrix: B1/4/16, native MTP off/on. Records token hashes, paired
 rates, per-step time and engagement, never turns a non-engaging arm into a win.
+
+An arm may also be a ``+``-joined composite of the single slices (e.g.
+``shared+topk+gdn_batch+gdn_verify`` = ``all`` without ``window``); the routed
+mode is the widest of ``gate_up`` < ``routed`` < ``shared`` named.
+``--eager-dispatch-stride`` defaults to 0 (the original harness); pass the
+adapter default (2) to measure against today's default route.
 """
 
 import argparse
@@ -26,12 +32,30 @@ ARMS = (
 )
 
 
+SLICES = ("gate_up", "routed", "shared", "topk", "gdn_batch", "gdn_verify", "window")
+
+
+def arm_type(text):
+    if text in ARMS:
+        return text
+    parts = text.split("+")
+    if len(parts) < 2 or any(p not in SLICES for p in parts) or len(set(parts)) != len(parts):
+        raise argparse.ArgumentTypeError(f"bad arm {text!r}")
+    return text
+
+
+def arm_parts(arm):
+    if arm == "all":
+        return {"shared", "topk", "gdn_batch", "gdn_verify", "window"}
+    return set(arm.split("+"))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", required=True)
     ap.add_argument("--prompt-file", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--arms", nargs="+", choices=ARMS, default=list(ARMS[:9]))
+    ap.add_argument("--arms", nargs="+", type=arm_type, default=list(ARMS[:9]))
     ap.add_argument(
         "--configs",
         nargs="+",
@@ -41,6 +65,7 @@ def main():
     ap.add_argument("--gen", type=int, default=128)
     ap.add_argument("--reps", type=int, default=6)
     ap.add_argument("--num-draft", type=int, default=2)
+    ap.add_argument("--eager-dispatch-stride", type=int, default=0)
     ap.add_argument("--i-own-the-gpu", action="store_true")
     a = ap.parse_args()
     if not a.i_own_the_gpu:
@@ -53,8 +78,8 @@ def main():
     for item in a.configs:
         route, rows = item.split(":")
         rows = int(rows)
-        if route not in ("ordinary", "mtp") or rows not in (1, 4, 16):
-            ap.error("configs require ordinary/mtp:1/4/16")
+        if route not in ("ordinary", "mtp") or rows not in (1, 2, 3, 4, 8, 16):
+            ap.error("configs require ordinary/mtp:1/2/3/4/8/16")
         configs.append((route, rows))
     contents = Path(a.prompt_file).read_text()
     prompts = json.loads(contents) if contents.lstrip().startswith("[") else [contents]
@@ -73,7 +98,10 @@ def main():
     adapter = Qwen3635BA3BAdapter(
         a.model,
         require_mtp=any(r == "mtp" for r, _ in configs),
-        execution_policy={"eager_dispatch_stride": 0, "num_draft": a.num_draft},
+        execution_policy={
+            "eager_dispatch_stride": a.eager_dispatch_stride,
+            "num_draft": a.num_draft,
+        },
     )
     from mlx2.runtime import generate as G
     from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
@@ -103,7 +131,7 @@ def main():
         "prompt_sha256": hashlib.sha256(contents.encode()).hexdigest(),
         "arms": a.arms,
         "configs": a.configs,
-        "eager_dispatch_stride": 0,
+        "eager_dispatch_stride": a.eager_dispatch_stride,
         "num_draft": a.num_draft,
         "qualification": "unqualified",
         "runs": [],
@@ -120,6 +148,7 @@ def main():
     }
 
     def select(arm):
+        parts = arm_parts(arm)
         RD.candidate_gate_up_swiglu = original_gate
         RD.candidate_down_combine = original_down
         if arm == "candidate_views":
@@ -128,33 +157,33 @@ def main():
         for block in blocks:
             block.set_moe_routed_candidate_mode("off")
             block.set_fused_expert_kernel_mode("stock")
-            mode = {
-                "gate_up": "gate_up",
-                "routed": "gate_up_down",
-                "shared": "gate_up_down_shared",
-                "all": "gate_up_down_shared",
-            }.get(arm, "off")
+            mode = "off"
+            for name, value in (
+                ("gate_up", "gate_up"),
+                ("routed", "gate_up_down"),
+                ("shared", "gate_up_down_shared"),
+            ):
+                if name in parts:
+                    mode = value
             block.set_moe_routed_decode_mode(mode)
-            block.set_moe_topk_mode("launch" if arm in ("topk", "all") else "off")
+            block.set_moe_topk_mode("launch" if "topk" in parts else "off")
             block.set_moe_window_consumers(
-                ("batch_decode", "verify", "row_exact")
-                if arm in ("window", "all")
-                else ()
+                ("batch_decode", "verify", "row_exact") if "window" in parts else ()
             )
             if arm in ("old_candidate", "candidate_views"):
                 block.set_moe_routed_candidate_mode("two_launch")
         for layer in gdns:
             layer.set_fused_gdn_decode_mode(
-                "fused" if arm in ("gdn_batch", "all") else "stock"
+                "fused" if "gdn_batch" in parts else "stock"
             )
             layer.set_fused_gdn_batch_decode_mode(
-                "row_exact" if arm in ("gdn_batch", "all") else "off"
+                "row_exact" if "gdn_batch" in parts else "off"
             )
             layer.set_fused_gdn_verify_mode(
-                "row_exact" if arm in ("gdn_verify", "all") else "off"
+                "row_exact" if "gdn_verify" in parts else "off"
             )
             layer.set_fused_gdn_batch_verify_mode(
-                "row_exact" if arm in ("gdn_verify", "all") else "off"
+                "row_exact" if "gdn_verify" in parts else "off"
             )
 
     def counters():

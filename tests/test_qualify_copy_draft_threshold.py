@@ -28,6 +28,14 @@ def test_import_is_mlx_free():
     assert probe.returncode == 0 and probe.stdout.strip() == "False", probe.stderr
 
 
+_SUPERSEDED = pytest.mark.skip(reason=(
+    "experiment pinned to the pre-2026-10-02 Flash-Next copy-draft default "
+    "(strong_max_span 16); the default moved to 14 on the options sweep "
+    "(qualification/runs/options-sweep-flashnext-20261002), so the script "
+    "refuses by design"))
+
+
+@_SUPERSEDED
 def test_arms_differ_in_strong_match_only_and_baseline_is_the_adapter_default():
     assert Q.adapter_default_copy_policy() == Q.BASELINE == Q.ARMS["s32"]
     diff = {k for k in Q.ARMS["s32"] if Q.ARMS["s32"][k] != Q.ARMS["s16"][k]}
@@ -329,6 +337,7 @@ def tiny():
     return Q.model_mode(_args("--pairs", "2"))[1]
 
 
+@_SUPERSEDED
 def test_tiny_smoke_captures_full_evidence_and_refuses_without_engagement(tiny):
     """The random tiny model never continues its context, so copy drafts never
     fire: the cell must refuse, while every exactness artefact is present."""

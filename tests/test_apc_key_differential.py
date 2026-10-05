@@ -30,7 +30,10 @@ from mlx2.runtime.apc_numerics import CANDIDATE_ENV, execution_numerics_identity
 from mlx2.runtime.apc_v2 import APCv2
 from mlx2.runtime.int8_prefill import Int8PrefillPolicy
 from mlx2.runtime.multi_lora import lora_apc_scope
-from mlx2.runtime.prefill_plan import execution_identity
+from mlx2.runtime.prefill_plan import (
+    EXTERNAL_VARLEN_PREFILL_IDENTITY,
+    execution_identity,
+)
 from mlx2.serving import (
     apc_request_semantic,
     apc_semantic_namespace,
@@ -162,6 +165,14 @@ BOUND = {
         {"prefill": execution_identity(projection={"kernel": "tf", "installed": 3, "names_sha256": "n", "tile": 64})},
         "tiled projections",
     ),
+    "prefill execution (external packed varlen)": (
+        {
+            "prefill": execution_identity(
+                external_varlen_prefill=EXTERNAL_VARLEN_PREFILL_IDENTITY
+            )
+        },
+        "right-padded external target prefill and extracted live state",
+    ),
     **{
         f"env: {name}": (
             {"env": {name: "1" if kind == "flag" else "65536"}},
@@ -193,6 +204,12 @@ BOUND = {
             "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT": "16384",
         }},
         "which contexts take the sparse arm",
+    ),
+    # NAX block-sparse QSA prefill crossover: which prefill slices leave the
+    # masked SDPA's rounding for the NAX kernel's (qsa-nax-prefill 20261002).
+    "env: MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV": (
+        {"env": {"MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV": "8192"}},
+        "which prefill slices take the NAX kernel",
     ),
     "sp_qmm": ({"sp_qmm": True}, "M=2..16 matmuls (prefill tails), not bitwise identical"),
     "verify_bitexact": ({"verify_bitexact": True}, "every M<=max_m matmul (prefill tails)"),
@@ -294,7 +311,15 @@ def test_flash_next_policy_sparse_mode_reaches_the_identity():
     """The serving environment the policy pins is what the identity reads."""
     from mlx2.adapters.flash_next_policy import FlashNextPolicy
 
-    assert execution_numerics_identity(FlashNextPolicy().environment()) is None
+    # Since 2026-10-02 the Flash-Next default runs the adaptive MoE pad and
+    # the 8192 NAX prefill crossover, both bit-changing, so its default
+    # environment is bound; the old values leave the namespace unbound.
+    assert execution_numerics_identity(FlashNextPolicy().environment()) == {
+        "version": 1, "MLX2_MOE_RHS_PAD_POLICY": "adaptive", "qsa_nax_min_physical_kv": 8192,
+    }
+    assert execution_numerics_identity(FlashNextPolicy(
+        moe_rhs_pad_policy="floor", qsa_nax_min_physical_kv=16384
+    ).environment()) is None
     gather = FlashNextPolicy(qsa_batch_decode_sparse="gather").environment()
     indexed = FlashNextPolicy(
         qsa_batch_decode_sparse="indexed", qsa_batch_decode_sparse_min_context=65536

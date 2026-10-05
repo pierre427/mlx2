@@ -9,6 +9,10 @@ from typing import Optional
 from .mtp_depth_cap import validate_self_mtp_num_draft
 
 
+# qwen4_exp's own NAX prefill crossover when MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV
+# is unset (apc_numerics.QSA_NAX_DEFAULT_MIN_PHYSICAL_KV).
+_QSA_NAX_MODULE_MIN_PHYSICAL_KV = 16384
+
 _OPTIONAL_KERNEL_ENV = {
     "moe_router_kernel": "MLX_QWEN4_MOE_ROUTER_KERNEL",
     "qsa_nax_decode": "MLX_QWEN4_QSA_NAX_DECODE",
@@ -61,8 +65,12 @@ class FlashNextPolicy:
     #   qsa_nax_decode: NAX QSA on decode rows (MLX_QWEN4_QSA_NAX_DECODE).
     #     MEASURED SLOWER on Flash-Next: 32K B1 ordinary decode -15.6%
     #     [-18.3, -15.0], 0/6 reps faster, tokens differ in 2/6; it does not
-    #     engage at 20K (options-sweep-20261001).  Keep it off.  Its counters
-    #     are in diagnostics()["qsa_nax_decode"].
+    #     engage at 20K (options-sweep-20261001).  It also takes the B1
+    #     past-budget QSA-mask calls away from the default fused attention
+    #     rows and failed qualification on both routes
+    #     (options-sweep-flashnext-20261002), so validation refuses it unless
+    #     attn_fused_rows is off.  Its counters are in
+    #     diagnostics()["qsa_nax_decode"].
     #   gdn_core: MLX gated_delta_update for 17-256 row prefill chunks
     #     (MLX_GDN_CORE); parity on this geometry unestablished.
     moe_router_kernel: bool = False
@@ -252,6 +260,9 @@ class FlashNextPolicy:
     # so it is UNQUALIFIED and enters the APCv2 prefill-execution identity.
     # Not an environment switch; entered in receipts only when enabled.
     invariant_prefill: bool = False
+    # Default-off ordinary-prefill live-row compaction. The adapter owns the
+    # sparse-MoE geometry; scheduler/cache code remains model-agnostic.
+    varlen_sparse_moe: object = False
     # oMLX #3995/#4022/#4029 NAX segmented sorted MoE gather
     # (MLX2_MOE_NAX_GATHER, runtime/models/moe_nax_gather.py): prefill expert
     # gathers MLX would send to its row-block NAX kernel (>= 16 rows, >= 4
@@ -270,8 +281,56 @@ class FlashNextPolicy:
     # JSON file with {"moe_nax_gather": "off"}), which round-trips through
     # receipts.  Recorded in receipts only when not "fused".
     moe_nax_gather: str = "fused"
+    # NAX block-sparse QSA prefill (MLX_QWEN4_QSA_NAX_KERNEL "auto",
+    # runtime/models/qwen4_qsa_nax.py): an explicit QSA selection on a
+    # >= 64-row prefill slice runs the NAX kernel over the selected blocks
+    # instead of the masked SDPA, on M5 hosts only.  Its counters are in
+    # diagnostics()["qsa_nax"].
+    #   qsa_nax_min_physical_kv: the auto crossover, the physical KV width
+    #     from which the kernel is admitted
+    #     (MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV; the module default 16384).
+    #   qsa_nax_batched: also admit B > 1 prefill slices in auto
+    #     (MLX_QWEN4_QSA_NAX_BATCHED); the kernel reads selections, query
+    #     positions and left padding per lane, so ragged lanes are exact.
+    # Both enter the environment and receipts only when not at the default.
+    # Measured (qualification/runs/qsa-nax-prefill-20261002): NAX loses below
+    # 8K (layer -27..-42%), breaks even at 8K, wins from 12K (+18..+43%) to
+    # 32K (+157..+167%); TTFT at 8192 vs 16384: -2.6% at 8K, neutral at
+    # 16K/32K.  Batched admission is exact (ragged lanes bit-identical to
+    # B=1) but the served MTP generator prefills lanes one at a time.
+    # Default 8192 since 2026-10-02 (Pierre): TTFT -2.6% at 8K, neutral at
+    # 16K/32K against 16384 (qsa-nax-prefill-20261002).  The environment
+    # carries the value whenever it differs from the module default 16384.
+    qsa_nax_min_physical_kv: int = 8192
+    qsa_nax_batched: bool = False
+    # Sorted-MoE pad policy (MLX2_MOE_RHS_PAD_POLICY, switch_layers): which of
+    # per-row gather_qmv and the padded gather_qmm_rhs a sorted expert gather
+    # runs.  "floor" pads from 3 rows per expert (the module default);
+    # "adaptive" picks per call from a cost model calibrated on this model's
+    # expert tables; "always" pads every sorted gather.  Default "adaptive" on
+    # Flash-Next since 2026-10-02 (Pierre): B1 TTFT -11.2% MTP / -7.1%
+    # ordinary, decode neutral; bits change on short prompts only
+    # (options-sweep-flashnext-20261002, moe-adaptive-pad-20261001).  The
+    # module default stays "floor", so other models are unaffected.  The
+    # profile pins the variable at every value and the adapter applies it
+    # live after load (switch_layers.set_pad_policy).  Recorded in receipts
+    # only when not "adaptive".
+    moe_rhs_pad_policy: str = "adaptive"
 
     def __post_init__(self):
+        from ..runtime.models.varlen_dense_mlp import VarlenSparseMoEPolicy
+
+        try:
+            varlen_sparse_moe = VarlenSparseMoEPolicy.from_value(
+                self.varlen_sparse_moe
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(str(error)) from error
+        object.__setattr__(
+            self,
+            "varlen_sparse_moe",
+            varlen_sparse_moe.as_dict() if varlen_sparse_moe.enabled else False,
+        )
         validate_self_mtp_num_draft(self.num_draft)
         if self.gdn_state_dtype not in ("float32", "float16"):
             raise ValueError("gdn_state_dtype must be float32 or float16")
@@ -304,6 +363,17 @@ class FlashNextPolicy:
             )
         if self.moe_nax_gather not in {"off", "gather", "fused"}:
             raise ValueError("moe_nax_gather must be off, gather or fused")
+        if self.moe_rhs_pad_policy not in {"floor", "adaptive", "always"}:
+            raise ValueError("moe_rhs_pad_policy must be floor, adaptive or always")
+        if self.qsa_nax_decode and self.attn_fused_rows:
+            # NAX decode takes the B1 past-budget QSA-mask calls from the
+            # fused attention rows: the qualifier's attn_fused_rows QSA-mask
+            # feature is never observed (FAIL on both routes), and ordinary
+            # 32K decode measured -15.6% (options-sweep-flashnext-20261002).
+            raise ValueError(
+                "qsa_nax_decode takes the QSA-mask calls from attn_fused_rows "
+                "and failed qualification; set attn_fused_rows to false to A/B it"
+            )
         if self.fused_gdn_batch_decode not in {"off", "row_exact"}:
             raise ValueError("fused_gdn_batch_decode must be off or row_exact")
         if self.fused_gdn_batch_verify not in {"off", "row_exact"}:
@@ -328,6 +398,7 @@ class FlashNextPolicy:
             "moe_window_row_exact",
             "moe_window_batch_decode",
             "moe_window_verify",
+            "qsa_nax_batched",
             *_OPTIONAL_KERNEL_ENV,
         ):
             if type(getattr(self, name)) is not bool:
@@ -369,6 +440,7 @@ class FlashNextPolicy:
             "shared_qsa_max_remaining",
             "private_delta_min_context",
             "indexed_min_context",
+            "qsa_nax_min_physical_kv",
         ):
             value = getattr(self, name)
             if type(value) is not int or value < 0:
@@ -409,6 +481,7 @@ class FlashNextPolicy:
                     ("gdn_prefill_chunk", bool(self.gdn_prefill_chunk)),
                     ("gdn_core", self.gdn_core),
                     ("row_exact_verify", self.row_exact_verify),
+                    ("varlen_sparse_moe", bool(self.varlen_sparse_moe)),
                 )
                 if on
             ]
@@ -461,6 +534,8 @@ class FlashNextPolicy:
             del values["row_exact_verify"]
         if not self.invariant_prefill:
             del values["invariant_prefill"]
+        if not self.varlen_sparse_moe:
+            del values["varlen_sparse_moe"]
         # Inert without the route: absent then; recorded either way with it,
         # so a receipt read back reproduces an explicit "off".
         if not self.row_exact_verify:
@@ -498,6 +573,8 @@ class FlashNextPolicy:
             del values["moe_topk_fold"]
         if self.moe_nax_gather == _DEFAULTS["moe_nax_gather"]:
             del values["moe_nax_gather"]
+        if self.moe_rhs_pad_policy == _DEFAULTS["moe_rhs_pad_policy"]:
+            del values["moe_rhs_pad_policy"]
         if self.prefill_depth_budget is None:
             del values["prefill_depth_budget"]
         if self.gdn_state_dtype == "float32":
@@ -505,6 +582,9 @@ class FlashNextPolicy:
         if self.qsa_batch_decode_sparse == "off":
             del values["qsa_batch_decode_sparse"]
             del values["qsa_batch_decode_sparse_min_context"]
+        for name in ("qsa_nax_min_physical_kv", "qsa_nax_batched"):
+            if getattr(self, name) == _DEFAULTS[name]:
+                del values[name]
         return values
 
     def moe_window_consumers(self):
@@ -572,6 +652,8 @@ class FlashNextPolicy:
         # stripped from the inherited environment, so leaving it out would
         # let an operator's shell select the route behind the receipt.
         environment["MLX2_MOE_NAX_GATHER"] = self.moe_nax_gather
+        # Pinned at every value for the same reason (MLX2_* is inherited).
+        environment["MLX2_MOE_RHS_PAD_POLICY"] = self.moe_rhs_pad_policy
         if self.qsa_batch_decode_sparse != "off":
             environment["MLX_QWEN4_QSA_BATCH_DECODE_SPARSE"] = (
                 self.qsa_batch_decode_sparse
@@ -579,6 +661,15 @@ class FlashNextPolicy:
             environment["MLX_QWEN4_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT"] = str(
                 self.qsa_batch_decode_sparse_min_context
             )
+        # Absent at the module default (16384): the profile strips inherited
+        # MLX_QWEN* variables, so the module default then applies.  The
+        # policy default (8192) differs from it, so it is pinned.
+        if self.qsa_nax_min_physical_kv != _QSA_NAX_MODULE_MIN_PHYSICAL_KV:
+            environment["MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV"] = str(
+                self.qsa_nax_min_physical_kv
+            )
+        if self.qsa_nax_batched:
+            environment["MLX_QWEN4_QSA_NAX_BATCHED"] = "1"
         return environment
 
     def batch_config(self, *, max_lanes, prefill_step):

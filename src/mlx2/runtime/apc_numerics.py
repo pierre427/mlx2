@@ -42,6 +42,9 @@ CANDIDATE_ENV = {
     # Opt-in A/B kernels with no mlx2 full-model evidence (flash_next_policy).
     "MLX_QWEN4_MOE_ROUTER_KERNEL": "flag",
     "MLX_QWEN4_QSA_NAX_DECODE": "flag",
+    # NAX block-sparse QSA prefill on B > 1 slices (flash_next_policy
+    # qsa_nax_batched): those slices leave the masked SDPA's rounding.
+    "MLX_QWEN4_QSA_NAX_BATCHED": "flag",
     # Tiled quantized-SDPA scores; checked on the pinned M5 build only.
     "MLX2_QSDPA_SCORES_BUDGET_BYTES": "int",
 }
@@ -127,6 +130,31 @@ def qsa_batch_decode_sparse_effective(environ=None) -> dict:
     return {"mode": mode, "min_context": floor}
 
 
+# NAX block-sparse QSA prefill crossover (qwen4_exp, flash_next_policy
+# qsa_nax_min_physical_kv): prefill slices at or past this physical KV width
+# run the NAX kernel, which rounds differently from the masked SDPA, so a
+# prefix prefilled under another crossover carries other K/V bits.  Bound
+# only when it differs from the default, so default namespaces are unchanged.
+QSA_NAX_MIN_PHYSICAL_KV_ENV = "MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV"
+QSA_NAX_DEFAULT_MIN_PHYSICAL_KV = 16384
+
+
+def qsa_nax_min_physical_kv_effective(environ=None):
+    """The NAX prefill crossover in force (the loaded module's value when
+    ``environ`` is None and ``qwen4_exp`` is imported, else the environment)."""
+    module = sys.modules.get(_QWEN4_EXP) if environ is None else None
+    if module is not None and hasattr(module, "_QSA_NAX_AUTO_MIN_PHYSICAL_KV"):
+        return module._QSA_NAX_AUTO_MIN_PHYSICAL_KV
+    env = os.environ if environ is None else environ
+    raw = env.get(QSA_NAX_MIN_PHYSICAL_KV_ENV)
+    if raw in (None, ""):
+        return QSA_NAX_DEFAULT_MIN_PHYSICAL_KV
+    try:
+        return int(raw)
+    except ValueError:
+        return raw.strip()
+
+
 def _bound_value(kind: str, raw: str):
     value = raw.strip()
     if kind == "flag":
@@ -159,6 +187,9 @@ def execution_numerics_identity(environ=None, *, sp_qmm=False, verify_bitexact=F
     sparse = qsa_batch_decode_sparse_effective(environ)
     if sparse["mode"] != "off":
         bound["qsa_batch_decode_sparse"] = sparse
+    crossover = qsa_nax_min_physical_kv_effective(environ)
+    if crossover != QSA_NAX_DEFAULT_MIN_PHYSICAL_KV:
+        bound["qsa_nax_min_physical_kv"] = crossover
     if sp_qmm:
         bound["sp_qmm"] = True
     if verify_bitexact:
