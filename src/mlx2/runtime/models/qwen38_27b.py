@@ -22,6 +22,7 @@ from .precise_ops import gate_sigmoid
 from .rope_utils import initialize_rope
 from .. import round_levers as _lv
 from . import invariant_prefill as _invariant
+from ..ragged_verify_observation import current_observer, observed_stage
 
 
 class Qwen3NextAttention(nn.Module):
@@ -65,10 +66,25 @@ class Qwen3NextAttention(nn.Module):
         self, x: mx.array, mask: Optional[mx.array] = None, cache: Optional[Any] = None
     ) -> mx.array:
         (B, L, D) = x.shape
-        output = self._attend(
-            self.q_proj(x), self.k_proj(x), self.v_proj(x), B, L, mask, cache
-        )
-        return self.o_proj(output)
+        rows = B * L
+        observer = current_observer()
+        if observer is None:
+            output = self._attend(
+                self.q_proj(x), self.k_proj(x), self.v_proj(x), B, L, mask, cache
+            )
+            return self.o_proj(output)
+        with observed_stage("attention.qkv_projections", rows=rows) as materialize:
+            q = self.q_proj(x)
+            k = self.k_proj(x)
+            v = self.v_proj(x)
+            materialize(q, k, v)
+        with observed_stage("attention.read_eval", rows=rows) as materialize:
+            output = self._attend(q, k, v, B, L, mask, cache)
+            materialize(output)
+        with observed_stage("attention.out_projection", rows=rows) as materialize:
+            output = self.o_proj(output)
+            materialize(output)
+        return output
 
     def _attend(self, q_proj_output, keys, values, B, L, mask, cache):
         """Everything between the input and output projections (gated output).
@@ -116,18 +132,47 @@ class Qwen3NextAttention(nn.Module):
         cache, positions and mask; no variable-length kernel is needed because
         MLX's own attention kernels run once per segment.
         """
-        q_all, k_all, v_all = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+        observer = current_observer()
+        packed_rows = x.shape[0] * x.shape[1]
+        if observer is None:
+            q_all, k_all, v_all = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+        else:
+            with observed_stage(
+                "attention.qkv_projections", rows=packed_rows
+            ) as materialize:
+                q_all, k_all, v_all = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+                materialize(q_all, k_all, v_all)
         outs = []
         for rows, length, start, cache, mask in parts:
             span = slice(start, start + rows * length)
-            out = self._attend(
-                q_all[:, span].reshape(rows, length, -1),
-                k_all[:, span].reshape(rows, length, -1),
-                v_all[:, span].reshape(rows, length, -1),
-                rows, length, mask, cache,
-            )
+            if observer is None:
+                out = self._attend(
+                    q_all[:, span].reshape(rows, length, -1),
+                    k_all[:, span].reshape(rows, length, -1),
+                    v_all[:, span].reshape(rows, length, -1),
+                    rows, length, mask, cache,
+                )
+            else:
+                with observed_stage(
+                    "attention.read_eval", rows=rows * length
+                ) as materialize:
+                    out = self._attend(
+                        q_all[:, span].reshape(rows, length, -1),
+                        k_all[:, span].reshape(rows, length, -1),
+                        v_all[:, span].reshape(rows, length, -1),
+                        rows, length, mask, cache,
+                    )
+                    materialize(out)
             outs.append(out.reshape(1, rows * length, -1))
-        return self.o_proj(mx.concatenate(outs, axis=1))
+        joined = mx.concatenate(outs, axis=1)
+        if observer is None:
+            return self.o_proj(joined)
+        with observed_stage(
+            "attention.out_projection", rows=packed_rows
+        ) as materialize:
+            output = self.o_proj(joined)
+            materialize(output)
+        return output
 
 
 Attention = Qwen3NextAttention
@@ -632,6 +677,12 @@ class Model(nn.Module):
 
     def mixed_forward(self, segments):
         return self.language_model.mixed_forward(segments)
+
+    def prefill_row_context(self, lengths, *, width):
+        """Adapter-installed live-row scope for ordinary padded prefill."""
+        from .varlen_dense_mlp import prefill_row_context
+
+        return prefill_row_context(self, lengths, width=width)
 
     def make_mtp_cache(self):
         return self.language_model.make_mtp_cache()

@@ -21,9 +21,19 @@ if BASELINE:
     sys.argv.remove('--baseline')
 
 
+BASELINE_COMMIT = '531a876d'
+
+
+def baseline_available():
+    """The pre-change commit exists only in the private history."""
+    probe = subprocess.run(['git', 'cat-file', '-e', BASELINE_COMMIT + ':' + SOURCE_PATH],
+                           cwd=ROOT, capture_output=True, check=False)
+    return probe.returncode == 0
+
+
 def source(baseline=False):
     if baseline:
-        return subprocess.check_output(['git', 'show', '531a876d:' + SOURCE_PATH],
+        return subprocess.check_output(['git', 'show', BASELINE_COMMIT + ':' + SOURCE_PATH],
                                        cwd=ROOT, text=True)
     return (ROOT / SOURCE_PATH).read_text()
 
@@ -94,6 +104,9 @@ class AdmissionTests(unittest.TestCase):
                 self.assertFalse(self.admit(1, **change).accepted)
 
     def test_flash_next_admission_and_metal_sources_are_unchanged(self):
+        if not baseline_available():
+            self.skipTest(f'private baseline commit {BASELINE_COMMIT} absent '
+                          '(public mirror history does not carry it)')
         old = pure_admission(source(True))
         for rows in (1, 2, 4, 8, 16):
             name = 'admit_qwen4_fused_gdn_decode' if rows == 1 else 'admit_qwen4_fused_gdn_batch_decode'

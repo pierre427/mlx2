@@ -5,7 +5,7 @@ import math
 import os
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 import mlx.core as mx
 import mlx.nn as nn
@@ -29,6 +29,9 @@ from . import round_levers
 from . import verify_scope as _verify_scope
 from .sample_utils import LaneRNG, draw_key, make_transformed_logprobs
 from .verify_sync import record_verify_sync, verify_sync_round
+from .ragged_verify_layout import RaggedVerifyLayout, padded_capabilities
+from .ragged_verify_observation import activate as activate_ragged_observer
+from .ragged_verify_observation import observed_stage, observer_from_environment
 
 
 def _start_speculation_or_cleanup(caches, required_caches, error_message):
@@ -80,6 +83,17 @@ class HybridStats(_PromptLookupStatsBase):
     draft_cycles: int = 0
     draft_proposed: int = 0
     draft_accepted: int = 0
+    ragged_verify_rounds: int = 0
+    ragged_verify_logical_rows: int = 0
+    ragged_verify_physical_rows: int = 0
+    ragged_verify_padding_rows: int = 0
+    ragged_verify_max_query_len: int = 0
+    ragged_verify_backend_modes: dict[str, int] = field(default_factory=dict)
+    ragged_verify_diagnostic_rounds: int = 0
+    ragged_verify_evaluation_fences: bool = False
+    ragged_verify_stage_ns: dict[str, int] = field(default_factory=dict)
+    ragged_verify_stage_calls: dict[str, int] = field(default_factory=dict)
+    ragged_verify_stage_rows: dict[str, int] = field(default_factory=dict)
 
     @property
     def total_emitted(self) -> int:
@@ -248,6 +262,11 @@ class SelfMTPCycleResult:
     _bonuses: Tuple[int, ...] = field(default=(), repr=False, compare=False)
     zero_fast_path: bool = False
     true_batched: bool = False
+    verify_layout: dict = field(default_factory=dict)
+    verify_observation: dict = field(default_factory=dict)
+    _verify_layout: Optional[RaggedVerifyLayout] = field(
+        default=None, repr=False, compare=False
+    )
     relaxed_accepts: Tuple[int, ...] = ()
     # Per lane: copied-span length verified this round (0 = MTP-head lane)
     # and the copy gate's decision ("off" when the lane has no copy state).
@@ -1832,6 +1851,10 @@ def _propose_segmented_self_mtp(
             if any(item.draft_feature_tokens for item in row_proposals)
             else ()
         ),
+        _verify_layout=RaggedVerifyLayout.from_draft_depths(
+            tuple((item.lane_uids[0] for item in row_proposals)),
+            tuple((item.draft_depths[0] for item in row_proposals)),
+        ),
     )
     batch._row_states = row_states
     batch._row_proposals = row_proposals
@@ -1891,8 +1914,56 @@ def _propose_batched_self_mtp_impl(
     model: nn.Module, batch: BatchedSelfMTPState
 ) -> SelfMTPCycleResult:
     """Open one batched draft/verify transaction over the current membership."""
-    with verify_sync_round():
-        return _propose_batched_self_mtp_round(model, batch)
+    observer = observer_from_environment(evaluator=mx.eval)
+    with verify_sync_round(), activate_ragged_observer(observer):
+        result = _propose_batched_self_mtp_round(model, batch)
+    if observer is None:
+        return result
+    receipt = observer.receipt()
+    for lane in batch.lanes:
+        stats = lane.stats
+        stats.ragged_verify_diagnostic_rounds += 1
+        stats.ragged_verify_evaluation_fences |= bool(
+            receipt["evaluation_fences_inserted"]
+        )
+        for name, values in receipt["stages"].items():
+            stats.ragged_verify_stage_ns[name] = (
+                stats.ragged_verify_stage_ns.get(name, 0) + values["elapsed_ns"]
+            )
+            stats.ragged_verify_stage_calls[name] = (
+                stats.ragged_verify_stage_calls.get(name, 0) + values["calls"]
+            )
+            stats.ragged_verify_stage_rows[name] = (
+                stats.ragged_verify_stage_rows.get(name, 0) + values["rows"]
+            )
+    return replace(result, verify_observation=receipt)
+
+
+def _ragged_verify_layout(lanes, draft_depths):
+    """Build the current exact padded ABI from the shared logical layout."""
+    rows = sum(int(depth) + 1 for depth in draft_depths)
+    with observed_stage("layout.build", rows=rows):
+        layout = RaggedVerifyLayout.from_draft_depths(
+            (lane.uid for lane in lanes), draft_depths
+        )
+        plan = layout.select_backend(padded_capabilities())
+    return layout, plan
+
+
+def _record_ragged_verify_layout(lanes, layout, plan) -> None:
+    for lane in lanes:
+        stats = lane.stats
+        stats.ragged_verify_rounds += 1
+        stats.ragged_verify_logical_rows += layout.logical_rows
+        stats.ragged_verify_physical_rows += plan.physical_rows
+        stats.ragged_verify_padding_rows += plan.padding_rows
+        stats.ragged_verify_max_query_len = max(
+            stats.ragged_verify_max_query_len, layout.max_query_len
+        )
+        mode = plan.mode.value
+        stats.ragged_verify_backend_modes[mode] = (
+            stats.ragged_verify_backend_modes.get(mode, 0) + 1
+        )
 
 
 def advance_batched_self_mtp_zero(
@@ -1974,26 +2045,51 @@ def advance_batched_self_mtp_zero(
 
     old_curs = tuple(lane.cur for lane in batch.lanes)
     old_seed_hs = tuple(lane.seed_h for lane in batch.lanes)
+    layout, backend_plan = _ragged_verify_layout(batch.lanes, depths)
     inputs = mx.array([[token] for token in old_curs], mx.uint32)
-    lengths = (1,) * len(batch.lanes)
+    lengths = layout.query_lengths
     try:
-        _prepare_self_mtp_cache_group(target_caches, lengths, (0,) * len(lengths))
+        with observed_stage("target.cache_prepare", rows=layout.logical_rows):
+            _prepare_self_mtp_cache_group(
+                target_caches, lengths, layout.right_padding
+            )
         try:
             # K=0 is still a target forward. Let an adapter account for its
             # arithmetic just as in a positive-depth verify round; bypassing
             # these hooks can hide a non-exact batched one-token step.
             verifier = getattr(model, "mtp_verify_backbone", None)
             if verifier is None:
-                (logit_hidden, target_hidden) = _mtp_backbone(
-                    model, inputs, target_caches
-                )
-                batched_logits = model.logits(logit_hidden)
+                with observed_stage(
+                    "target.forward", rows=layout.logical_rows
+                ) as materialize:
+                    (logit_hidden, target_hidden) = _mtp_backbone(
+                        model, inputs, target_caches
+                    )
+                    if materialize is not None:
+                        materialize(logit_hidden, target_hidden)
+                with observed_stage(
+                    "target.head", rows=layout.logical_rows
+                ) as materialize:
+                    batched_logits = model.logits(logit_hidden)
+                    if materialize is not None:
+                        materialize(batched_logits)
             else:
-                (logit_hidden, target_hidden) = verifier(inputs, target_caches)
+                with observed_stage(
+                    "target.forward", rows=layout.logical_rows
+                ) as materialize:
+                    (logit_hidden, target_hidden) = verifier(inputs, target_caches)
+                    if materialize is not None:
+                        materialize(logit_hidden, target_hidden)
                 verify_head = getattr(model, "mtp_verify_logits", model.logits)
-                batched_logits = verify_head(logit_hidden)
+                with observed_stage(
+                    "target.head", rows=layout.logical_rows
+                ) as materialize:
+                    batched_logits = verify_head(logit_hidden)
+                    if materialize is not None:
+                        materialize(batched_logits)
         finally:
-            _finalize_self_mtp_cache_group(target_caches)
+            with observed_stage("target.cache_finalize", rows=layout.logical_rows):
+                _finalize_self_mtp_cache_group(target_caches)
 
         # The target cache forward above is already live.  Validate every
         # sampled row before changing *any* lane's committed token metadata
@@ -2056,11 +2152,14 @@ def advance_batched_self_mtp_zero(
                     1,
                     proposed=0,
                     accepted=0,
+                    verify_layout=layout,
+                    lane_index=row,
                 )
             note_segmented_self_mtp("true_batched_engaged")
             note_segmented_self_mtp("batched_target_forwards")
             note_segmented_self_mtp("committed_cycles")
             note_segmented_self_mtp("zero_depth_fast_rounds")
+        _record_ragged_verify_layout(batch.lanes, layout, backend_plan)
     except BaseException as error:
         for branch in branches:
             try:
@@ -2082,6 +2181,8 @@ def advance_batched_self_mtp_zero(
         outputs=tuple(outputs),
         zero_fast_path=True,
         true_batched=true_batched,
+        verify_layout=layout.receipt(backend_plan),
+        _verify_layout=layout,
     )
 
 
@@ -2397,9 +2498,10 @@ def _propose_batched_self_mtp_round(
         k_vector = tuple(
             len(copy) if copy else k for (copy, k) in zip(copy_rows, head_k_vector)
         )
-    valid_lengths = tuple((k + 1 for k in k_vector))
-    width = max(valid_lengths)
-    right_padding = tuple((width - valid for valid in valid_lengths))
+    layout, backend_plan = _ragged_verify_layout(batch.lanes, k_vector)
+    valid_lengths = layout.query_lengths
+    width = layout.max_query_len
+    right_padding = layout.right_padding
     verify_rows = []
     for lane, row in zip(batch.lanes, draft_tokens):
         verify_rows.append(
@@ -2411,7 +2513,10 @@ def _propose_batched_self_mtp_round(
             )
         )
     verify_ids = mx.concatenate(verify_rows, axis=0)
-    _prepare_self_mtp_cache_group(batch.caches.target, valid_lengths, right_padding)
+    with observed_stage("target.cache_prepare", rows=layout.logical_rows):
+        _prepare_self_mtp_cache_group(
+            batch.caches.target, valid_lengths, right_padding
+        )
     try:
         verifier = getattr(model, "mtp_verify_backbone", None)
         verify_head = model.logits
@@ -2421,11 +2526,22 @@ def _propose_batched_self_mtp_round(
             # A model that verifies with its own backbone may also own the
             # head for those rows (row-exact verify); default: model.logits.
             verify_head = getattr(model, "mtp_verify_logits", model.logits)
-        with _verify_scope.verify_forward():
-            (vlogit_hidden, batched_hidden) = verifier(verify_ids, batch.caches.target)
-        batched_logits = verify_head(vlogit_hidden)
+        with observed_stage(
+            "target.forward", rows=layout.logical_rows
+        ) as materialize:
+            with _verify_scope.verify_forward():
+                (vlogit_hidden, batched_hidden) = verifier(
+                    verify_ids, batch.caches.target
+                )
+            if materialize is not None:
+                materialize(vlogit_hidden, batched_hidden)
+        with observed_stage("target.head", rows=layout.logical_rows) as materialize:
+            batched_logits = verify_head(vlogit_hidden)
+            if materialize is not None:
+                materialize(batched_logits)
     finally:
-        _finalize_self_mtp_cache_group(batch.caches.target)
+        with observed_stage("target.cache_finalize", rows=layout.logical_rows):
+            _finalize_self_mtp_cache_group(batch.caches.target)
     old_curs = tuple((lane.cur for lane in batch.lanes))
     old_seed_hs = tuple((lane.seed_h for lane in batch.lanes))
     lane_logprobs: List[mx.array] = []
@@ -2716,6 +2832,7 @@ def _propose_batched_self_mtp_round(
                 + [MTPToken(bonus, logprobs[n_accept], False)]
             )
         )
+    layout.validate_acceptance(accepted)
     # The real processors see the copy rows they would have seen scored one
     # at a time: the used rows (accepted copies plus the correction/bonus
     # row), all inside the reachable prefix, known now without another sync.
@@ -2752,9 +2869,12 @@ def _propose_batched_self_mtp_round(
         _verify_windows=tuple(
             verify_windows.get(row) for row in range(len(batch.lanes))
         ),
+        verify_layout=layout.receipt(backend_plan),
+        _verify_layout=layout,
     )
     batch.proposal_open = True
     batch._open_proposal = proposal
+    _record_ragged_verify_layout(batch.lanes, layout, backend_plan)
     return proposal
 
 
@@ -2860,6 +2980,8 @@ def _commit_segmented_self_mtp(
                 proposed=proposed,
                 accepted=accepted,
                 zero_rollback_attested=count == 0 and is_terminal,
+                verify_layout=proposal._verify_layout,
+                lane_index=row,
             )
     except BaseException as error:
         for branch in batch._transaction_branches:

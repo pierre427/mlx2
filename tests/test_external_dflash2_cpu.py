@@ -85,11 +85,15 @@ def test_external_insert_accepts_shared_serving_seam_and_rejects_unsupported_inp
 def test_real_dflash2_header_schema_reconciles_without_payload_load():
     from mlx2.adapters.dflash2 import inspect_drafter
 
-    if not (Path.home() / "mlx-models/Muse-Glimmer-30B-DFlash2").exists():
-        pytest.skip("local qualification artifact is not installed")
+    drafter = Path.home() / "mlx-models/Muse-Glimmer-30B-DFlash2"
+    target = Path.home() / "mlx-models/Muse-Glimmer-30B-mlx-4bit"
+    if not (drafter / "config.json").is_file() or not (
+        target / "config.json"
+    ).is_file():
+        pytest.skip("paired local qualification artifacts are not installed")
     record = inspect_drafter(
-        str(Path.home() / "mlx-models/Muse-Glimmer-30B-DFlash2"),
-        str(Path.home() / "mlx-models/Muse-Glimmer-30B-mlx-4bit"),
+        str(drafter),
+        str(target),
     )
     assert len(record["header_sha256"]) == 1
     assert record["header_sha256"][0] == "9e37d992653b60ea5c75714e75b66115c4443c626ce1fd5152b6bad522807292"
@@ -232,6 +236,105 @@ def test_batched_variable_length_greedy_matches_reference_and_pairs():
         assert got[uid]==reference
         state=final[uid].cache_sidecar;state.validate('test',len(final[uid].all_tokens))
     assert b.scheduler_stats['target_max_width']==2
+
+
+def test_external_varlen_prefill_composes_uneven_dflash_lanes_exactly():
+    from contextlib import nullcontext
+
+    model, draft = tiny()
+    prompts = [[1, 2, 3, 4, 5, 6, 7, 8], [9, 10, 11, 12, 13]]
+    sampling = [{"sampling_temp": 0.0}] * len(prompts)
+
+    serial = generator(model, draft)
+    serial_ids = serial.insert(prompts, max_tokens=[6, 6], sampling_configs=sampling)
+    serial_output, _ = drain(serial)
+
+    row_scopes = []
+
+    def row_context(lengths, *, width):
+        row_scopes.append((tuple(lengths), width))
+        return nullcontext()
+
+    model.prefill_row_context = row_context
+    packed = generator(model, draft, external_varlen_prefill=True)
+    packed_ids = packed.insert(prompts, max_tokens=[6, 6], sampling_configs=sampling)
+    packed_output, finals = drain(packed)
+
+    assert [packed_output[uid] for uid in packed_ids] == [
+        serial_output[uid] for uid in serial_ids
+    ]
+    assert row_scopes[0] == ((3, 3), 3)
+    assert sorted(row_scopes[1][0]) == [1, 3]
+    assert row_scopes[1][1] == 3
+    assert packed.scheduler_stats["external_batched_prefill_rounds"] == 2
+    assert packed.scheduler_stats["external_batched_prefill_lanes"] == 4
+    assert packed.scheduler_stats["external_batched_prefill_max_cohort_width"] == 2
+    assert packed.scheduler_stats["external_batched_prefill_max_token_width"] == 3
+    assert packed.scheduler_stats["external_batched_prefill_padding_rows"] == 2
+    for uid in packed_ids:
+        finals[uid].cache_sidecar.validate("test", len(finals[uid].all_tokens))
+        receipt = finals[uid].speculative_receipt["external_varlen_prefill"]
+        assert receipt["selected"] is True
+        assert receipt["qualified"] is False
+        assert receipt["observed_used"] is True
+        assert receipt["padding_rows"] == 2
+        assert receipt["coalescing"]["selected"] is False
+
+
+def test_external_varlen_prefill_requires_adapter_row_geometry():
+    model, draft = tiny()
+    with pytest.raises(ValueError, match="adapter-declared prefill row geometry"):
+        generator(model, draft, external_varlen_prefill=True)
+
+
+def test_external_varlen_prefill_coalesces_a_pristine_lane_then_batches():
+    from contextlib import nullcontext
+
+    model, draft = tiny()
+    model.prefill_row_context = lambda lengths, *, width: nullcontext()
+    batch = generator(
+        model,
+        draft,
+        completion_batch_size=2,
+        external_varlen_prefill=True,
+        external_prefill_coalesce_ms=250,
+    )
+    first = batch.insert([[1, 2, 3, 4, 5]], max_tokens=[2])[0]
+    prompts, responses = batch.next()
+    assert prompts == [] and responses == []
+    assert batch.lanes[first].history == []
+    assert batch.scheduler_stats["external_prefill_coalesce_deferrals"] == 1
+    coalescing = batch._target_execution_receipt()["external_varlen_prefill"][
+        "coalescing"
+    ]
+    assert coalescing["selected"] is True
+    assert coalescing["observed_used"] is True
+    assert coalescing["qualified"] is False
+
+    batch.insert([[6, 7, 8, 9, 10]], max_tokens=[2])
+    prompts, _ = batch.next()
+    assert len(prompts) == 2
+    assert {response.external_prefill_width for response in prompts} == {2}
+    assert batch.scheduler_stats["external_batched_prefill_rounds"] == 1
+
+
+def test_external_varlen_prefill_coalesce_expires_to_serial_reference():
+    from contextlib import nullcontext
+
+    model, draft = tiny()
+    model.prefill_row_context = lambda lengths, *, width: nullcontext()
+    batch = generator(
+        model,
+        draft,
+        external_varlen_prefill=True,
+        external_prefill_coalesce_ms=250,
+    )
+    uid = batch.insert([[1, 2, 3, 4, 5]], max_tokens=[2])[0]
+    batch.lanes[uid].prefill_inserted_at -= 1
+    prompts, _ = batch.next()
+    assert len(prompts) == 1
+    assert batch.scheduler_stats["external_prefill_coalesce_expirations"] == 1
+    assert batch.scheduler_stats["external_batched_prefill_rounds"] == 0
 
 
 def test_exact_residual_distribution_and_rng_restore():
@@ -1009,6 +1112,19 @@ def test_prefill_adapts_to_admissible_slice_without_overbooking():
     assert lane.rng.snapshot()==state
     assert b.scheduler_stats['prefill_adaptive_slices']==1
     assert b.scheduler_stats['reservation_bytes']<=budget[0]
+    b.close()
+
+
+def test_prefill_reservation_uses_each_skewed_lanes_actual_append():
+    m,d=tiny();b=generator(m,d,memory_headroom=lambda:10**12)
+    b.insert([[1,2],[3,4,5,6,7]],max_tokens=[4,4])
+    short,long=list(b.lanes.values())
+    assert b._admit([short],4,prefill=True)
+    short_bytes=b.scheduler_stats['reservation_bytes']
+    assert b._admit([long],4,prefill=True)
+    long_bytes=b.scheduler_stats['reservation_bytes']
+    assert b._admit([short,long],4,prefill=True)
+    assert b.scheduler_stats['reservation_bytes']==short_bytes+long_bytes
     b.close()
 
 

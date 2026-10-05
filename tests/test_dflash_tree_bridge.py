@@ -410,6 +410,156 @@ def test_tensorfold_tree_cohort_matches_single_lane_reference(monkeypatch):
     )
 
 
+def test_dynamic_singleton_tree_switches_to_concurrent_chain_and_back(monkeypatch):
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused-by-cpu-oracle")
+    model, draft = tiny(vocab=64, top_k=16, block_size=8)
+    reference = generator(model, draft, completion_batch_size=4, ready_drain="all")
+    reference.insert(
+        [[1, 2, 3]], max_tokens=[24],
+        sampling_configs=[{"sampling_temp": 0.0}],
+    )
+    expected, _ = drain(reference)
+    batch = generator(
+        model, draft, completion_batch_size=4, ready_drain="all",
+        dynamic_singleton_tree=True,
+    )
+    seen = []
+    _install_reference_cohort(batch, monkeypatch, seen)
+    first = batch.insert(
+        [[1, 2, 3]], max_tokens=[24],
+        sampling_configs=[{"sampling_temp": 0.0}],
+    )[0]
+    receipts = []
+    first_tokens = []
+    for _ in range(6):
+        _, responses = batch.next()
+        receipts.extend(r.speculative_receipt for r in responses if r.uid == first)
+        first_tokens.extend(r.token for r in responses if r.uid == first)
+        if batch.scheduler_stats["external_auto_tree_rounds"]:
+            break
+    assert batch.scheduler_stats["external_auto_tree_rounds"] > 0
+    assert any(r.get("batch_size_route", {}).get("current") == "tree15_tensorfold" for r in receipts)
+
+    second = batch.insert(
+        [[4, 5, 6]], max_tokens=[3],
+        sampling_configs=[{"sampling_temp": 0.0}],
+    )[0]
+    for _ in range(30):
+        _, responses = batch.next()
+        receipts.extend(r.speculative_receipt for r in responses)
+        first_tokens.extend(r.token for r in responses if r.uid == first)
+        if second not in batch.lanes and batch.scheduler_stats["external_auto_chain_rounds"]:
+            break
+    assert batch.scheduler_stats["external_auto_chain_rounds"] > 0
+    assert any(r.get("batch_size_route", {}).get("current") == "chain_reference" for r in receipts)
+    assert first in batch.lanes
+    for _ in range(30):
+        _, responses = batch.next()
+        first_tokens.extend(r.token for r in responses if r.uid == first)
+        if batch.scheduler_stats["external_auto_tree_rounds"] > 1:
+            break
+    assert batch.scheduler_stats["external_auto_tree_rounds"] > 1
+    assert batch.scheduler_stats["external_auto_mode_switches"] >= 2
+    assert batch.scheduler_stats["external_tensorfold_cohort_max_width"] == 0
+    for _ in range(50):
+        if first not in batch.lanes:
+            break
+        _, responses = batch.next()
+        first_tokens.extend(r.token for r in responses if r.uid == first)
+    assert first_tokens == expected[first]
+
+
+def test_bounded_tree_candidate_moves_b1_b2_b4_b1_at_round_boundaries(monkeypatch):
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused-by-cpu-oracle")
+    model, draft = tiny(vocab=64, top_k=16, block_size=8)
+    batch = generator(
+        model, draft, completion_batch_size=5, ready_drain="all",
+        dynamic_singleton_tree=True, dynamic_tree_max_width=4,
+    )
+    seen = []
+    _install_reference_cohort(batch, monkeypatch, seen)
+    first = batch.insert([[1, 2, 3]], max_tokens=[64],
+                         sampling_configs=[{"sampling_temp": 0.0}])[0]
+    receipts = []
+
+    def until_width(width):
+        for _ in range(60):
+            _, responses = batch.next()
+            receipts.extend(r.speculative_receipt for r in responses)
+            if batch.scheduler_stats["external_auto_tree_max_width"] >= width:
+                return
+        raise AssertionError(f"tree cohort never reached width {width}")
+
+    until_width(1)
+    second = batch.insert([[4, 5, 6]], max_tokens=[32],
+                          sampling_configs=[{"sampling_temp": 0.0}])[0]
+    until_width(2)
+    third, fourth = batch.insert(
+        [[7, 8, 9], [10, 11, 12]], max_tokens=[32, 32],
+        sampling_configs=[{"sampling_temp": 0.0}] * 2,
+    )
+    until_width(4)
+    batch.remove([second, third, fourth])
+    prior = batch.scheduler_stats["external_auto_tree_rounds"]
+    for _ in range(20):
+        _, responses = batch.next()
+        receipts.extend(r.speculative_receipt for r in responses)
+        if batch.scheduler_stats["external_auto_tree_rounds"] > prior:
+            break
+    assert first in batch.lanes
+    assert batch.scheduler_stats["external_auto_tree_rounds"] > prior
+    assert batch.scheduler_stats["external_auto_chain_rounds"] == 0
+    assert batch.scheduler_stats["external_tensorfold_cohort_limit"] == 4
+    assert batch.scheduler_stats["external_tensorfold_cohort_max_width"] == 4
+    route = [r["batch_size_route"] for r in receipts if "batch_size_route" in r]
+    assert {1, 2, 4} <= {r["active_lanes"] for r in route}
+    assert all(r["policy"] == "tree15_b1_b4_chain_b5plus_v1" and not r["qualified"]
+               for r in route)
+    assert all(r["current"] == "tree15_tensorfold" for r in route)
+
+
+def test_bounded_tree_candidate_uses_chain_reference_above_four(monkeypatch):
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused-by-cpu-oracle")
+    model, draft = tiny(vocab=64, top_k=16, block_size=8)
+    batch = generator(
+        model, draft, completion_batch_size=5, ready_drain="all",
+        dynamic_singleton_tree=True, dynamic_tree_max_width=4,
+    )
+    _install_reference_cohort(batch, monkeypatch, [])
+    batch.insert([[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]],
+                 max_tokens=[32] * 5,
+                 sampling_configs=[{"sampling_temp": 0.0}] * 5)
+    routes = []
+    for _ in range(60):
+        _, responses = batch.next()
+        routes.extend(r.speculative_receipt["batch_size_route"] for r in responses)
+        if batch.scheduler_stats["external_auto_chain_rounds"]:
+            break
+    else:
+        raise AssertionError("B5 did not reach chain/reference")
+    assert any(r["active_lanes"] == 5 and r["current"] == "chain_reference"
+               for r in routes)
+    assert batch.scheduler_stats["external_auto_chain_max_width"] >= 1
+
+
+def test_dynamic_route_records_only_committed_rounds(monkeypatch):
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused-by-cpu-oracle")
+    model, draft = tiny(vocab=64, top_k=16, block_size=8)
+    batch = generator(model, draft, dynamic_singleton_tree=True)
+
+    def fail(_cohort):
+        raise RuntimeError("round failed before commit")
+
+    monkeypatch.setattr(batch, "_round", fail)
+    with pytest.raises(RuntimeError, match="before commit"):
+        batch._round_at_batch_route([], concurrent=True)
+    assert batch._auto_last_mode is None
+    assert batch.scheduler_stats["external_auto_chain_rounds"] == 0
+    assert batch.scheduler_stats["external_auto_mode_switches"] == 0
+    assert batch.draft_topology == "tree15"
+    assert batch.target_execution == "tensorfold"
+
+
 def test_tensorfold_cohort_partial_commit_restores_every_lane(monkeypatch):
     _tree_env(monkeypatch)
     monkeypatch.setenv("MLX2_QWEN_TARGET_EXECUTION", "tensorfold")

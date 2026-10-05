@@ -17,6 +17,40 @@ def layer():
     return obj
 
 
+def test_qwen35_adapter_binds_supported_fused_geometry(monkeypatch):
+    from mlx2.adapters.qwen35_4b import Qwen354BAdapter
+    from mlx2.adapters.qwen35_9b import Qwen359BAdapter
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
+    from mlx2.runtime.models import qwen38_fused_gdn as route
+
+    assert Qwen354BAdapter.fused_gdn_architecture == 'qwen35'
+    assert Qwen359BAdapter.fused_gdn_architecture == 'qwen35'
+    assert Qwen3827BAdapter.fused_gdn_architecture == 'qwen38'
+    args = TextModelArgs(hidden_size=16, intermediate_size=32, num_hidden_layers=2,
+        num_attention_heads=2, num_key_value_heads=1, head_dim=8, vocab_size=32,
+        linear_num_key_heads=16, linear_num_value_heads=32,
+        linear_key_head_dim=128, linear_value_head_dim=128, linear_conv_kernel_dim=4)
+    obj = qwen38_27b.GatedDeltaNet(args)
+    obj.set_dtype(mx.bfloat16)
+    obj.eval()
+    class Model:
+        def named_modules(self):
+            yield 'linear_attn', obj
+    c = ArraysCache(size=2)
+    c[0] = mx.zeros((1, 3, obj.conv_dim), mx.bfloat16)
+    c[1] = mx.zeros((1, 32, 128, 128), mx.float32)
+    monkeypatch.setattr(route.kernels, 'fused_gdn_runtime_supported',
+                        lambda: False)
+    obj.set_fused_gdn_enabled(True)
+    assert obj._try_fused_decode(*operands(obj), None, c) is None
+    assert obj.fused_gdn_counters['last_fallback'].startswith('unsupported geometry')
+    route.configure(Model(), True, architecture=Qwen354BAdapter.fused_gdn_architecture)
+    assert obj.fused_gdn_enabled is True
+    assert obj.fused_gdn_architecture == 'qwen35'
+    assert obj._try_fused_decode(*operands(obj), None, c) is None
+    assert obj.fused_gdn_counters['last_fallback'] == 'Metal runtime unavailable'
+
+
 def operands(obj, rows=1, width=1):
     return [mx.zeros((rows, width, n), mx.bfloat16)
             for n in (obj.conv_dim, obj.value_dim, obj.num_v_heads, obj.num_v_heads)]

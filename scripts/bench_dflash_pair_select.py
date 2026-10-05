@@ -144,8 +144,8 @@ def e2e(adapter, num_draft, width, max_tokens, temp):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="~/mlx-models/Muse-Glimmer-30B-mlx-4bit")
-    parser.add_argument("--draft", default="~/mlx-models/Muse-Glimmer-30B-DFlash2")
+    parser.add_argument("--model", default=str(Path.home() / "mlx-models/Muse-Glimmer-30B-mlx-4bit"))
+    parser.add_argument("--draft", default=str(Path.home() / "mlx-models/Muse-Glimmer-30B-DFlash2"))
     parser.add_argument("--num-draft", type=int, default=4)
     parser.add_argument("--widths", default="1,4,8")
     parser.add_argument("--trials", type=int, default=20)

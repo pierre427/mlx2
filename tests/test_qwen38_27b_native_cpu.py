@@ -88,6 +88,23 @@ assert mx.allclose(ordinary_full, ordinary_split, rtol=1e-5, atol=1e-5).item()
 assert mx.allclose(mtp_full_logits, mtp_split_logits, rtol=1e-5, atol=1e-5).item()
 assert mx.allclose(mtp_full_hidden, mtp_split_hidden, rtol=1e-5, atol=1e-5).item()
 
+# Explicit diagnostic observation inserts fences and attributes the dense
+# Qwen3.8 target stages. It is not a performance measurement.
+from mlx2.runtime.ragged_verify_observation import RaggedVerifyObserver, activate
+observer = RaggedVerifyObserver(evaluator=mx.eval)
+with activate(observer):
+    observed = model(mx.array([[1, 2]]), cache=model.make_cache())
+mx.eval(observed)
+timing = observer.receipt()
+assert timing["diagnostic_only"] and timing["evaluation_fences_inserted"]
+assert timing["stages"]["gdn.input_projections"]["calls"] == 3
+assert timing["stages"]["gdn.recurrent"]["calls"] == 3
+assert timing["stages"]["attention.qkv_projections"]["calls"] == 1
+assert timing["stages"]["attention.read_eval"]["calls"] == 1
+assert timing["stages"]["mlp.gate_up"]["calls"] == 4
+assert timing["stages"]["mlp.product"]["calls"] == 4
+assert timing["stages"]["mlp.down"]["calls"] == 4
+
 # A request-scoped deep-memory forward changes logits while keeping the same
 # token and cache geometry.  The next ordinary forward has no ambient state.
 deep_cache = model.make_cache()

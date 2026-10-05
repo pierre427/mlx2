@@ -27,7 +27,12 @@ from .cow_cache import (
     snapshot_prompt_cache_descriptors,
     snapshot_recovery_descriptors,
 )
-from .generate import ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL, _crossed_counter_interval
+from .generate import (
+    ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL,
+    _crossed_counter_interval,
+    _merge_caches,
+    _right_pad_prompts,
+)
 from .speculative_sampling import (
     FLyVerificationPolicy,
     RequestRNG,
@@ -75,7 +80,7 @@ _TREE_GATE_COUNTERS = {
 }
 
 
-def _tree_gates(topology, target_execution):
+def _tree_gates(topology, target_execution, *, default_on=False):
     """Read the tree experiment gates; fail closed on a gate the route lacks."""
 
     gates = {}
@@ -83,7 +88,7 @@ def _tree_gates(topology, target_execution):
         value = os.environ.get(name, "")
         if value not in ("", "0", enabled):
             raise ValueError(f"{name} must be unset, 0 or {enabled}")
-        gates[gate] = value == enabled
+        gates[gate] = value == enabled or (not value and default_on)
     if any(gates.values()) and topology != "tree15":
         raise ValueError("tree experiment gates require MLX2_DFLASH_TOPOLOGY=tree15")
     if gates["cache_executor"] and target_execution != "tensorfold":
@@ -97,7 +102,7 @@ def _tree_gates(topology, target_execution):
     return gates
 
 
-def _tensorfold_cohort_limit(target_execution, capacity):
+def _tensorfold_cohort_limit(target_execution, capacity, *, default=1):
     """Return the explicit bounded TensorFold cohort limit (singleton default)."""
 
     from .qwen38_tensorfold import MAX_COHORT_LANES
@@ -105,7 +110,7 @@ def _tensorfold_cohort_limit(target_execution, capacity):
     name = "MLX2_TENSORFOLD_COHORT_LIMIT"
     raw = os.environ.get(name)
     if raw is None:
-        return 1
+        return min(int(capacity), int(default))
     if target_execution != "tensorfold":
         raise ValueError(f"{name} requires MLX2_QWEN_TARGET_EXECUTION=tensorfold")
     allowed = {str(value) for value in range(1, MAX_COHORT_LANES + 1)}
@@ -192,6 +197,8 @@ class Lane:
     maximum: int
     processors: list
     sampling: dict
+    prefill_inserted_at: float = field(default_factory=time.monotonic)
+    prefill_coalesce_expired_recorded: bool = False
     generated: int = 0
     anchor: int | None = None
     ready: deque = field(default_factory=deque)
@@ -350,6 +357,7 @@ class ExternalDraftBatchGenerator:
     # Class default so instances built without __init__ (test doubles that
     # bind only the lane methods) keep the off behaviour.
     prefill_allocator_reclaim = False
+    external_varlen_prefill = False
     adaptive_policy = None
 
     def __init__(self, model, *, draft_model, binding, completion_batch_size=4,
@@ -357,7 +365,11 @@ class ExternalDraftBatchGenerator:
                  reclaim_memory=None, evict_checkpoint=None, fly_verification=None,
                  pairwise_selection="host", ready_drain="one",
                  prefill_allocator_reclaim=False, adaptive_verification=None,
-                 continuation_pool=None, **kwargs):
+                 continuation_pool=None, dynamic_singleton_tree=False,
+                 dynamic_tree_max_width=1, external_varlen_prefill=False,
+                 external_prefill_coalesce_ms=0,
+                 external_prefill_coalesce_min_tokens=1,
+                 **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
         self.memory_headroom = memory_headroom
@@ -379,15 +391,59 @@ class ExternalDraftBatchGenerator:
             self.continuation_policy = draft_model.policy
         self.fly_verification = FLyVerificationPolicy.from_value(fly_verification)
         self.prefill_step = prefill_step_size; self.num_draft = int(num_draft)
+        if type(external_varlen_prefill) is not bool:
+            raise ValueError("external_varlen_prefill must be boolean")
+        if external_varlen_prefill and not callable(
+            getattr(model, "prefill_row_context", None)
+        ):
+            raise ValueError(
+                "external_varlen_prefill requires adapter-declared prefill row geometry"
+            )
+        self.external_varlen_prefill = external_varlen_prefill
+        if (
+            type(external_prefill_coalesce_ms) is not int
+            or not 0 <= external_prefill_coalesce_ms <= 1000
+        ):
+            raise ValueError("external_prefill_coalesce_ms must be an integer from 0 to 1000")
+        if external_prefill_coalesce_ms and not external_varlen_prefill:
+            raise ValueError(
+                "external_prefill_coalesce_ms requires external_varlen_prefill"
+            )
+        if (
+            type(external_prefill_coalesce_min_tokens) is not int
+            or external_prefill_coalesce_min_tokens < 1
+        ):
+            raise ValueError(
+                "external_prefill_coalesce_min_tokens must be a positive integer"
+            )
+        self.external_prefill_coalesce_ms = external_prefill_coalesce_ms
+        self.external_prefill_coalesce_min_tokens = (
+            external_prefill_coalesce_min_tokens
+        )
         if pairwise_selection not in ("host", "batched"):
             raise ValueError("pairwise_selection must be 'host' or 'batched'")
         self.pairwise_selection = pairwise_selection
+        if type(dynamic_singleton_tree) is not bool:
+            raise ValueError("dynamic_singleton_tree must be boolean")
+        if type(dynamic_tree_max_width) is not int or dynamic_tree_max_width not in (1, 4):
+            raise ValueError("dynamic_tree_max_width must be 1 or the bounded candidate width 4")
+        if dynamic_tree_max_width != 1 and not dynamic_singleton_tree:
+            raise ValueError("bounded dynamic tree requires an enabled tree route")
+        self.dynamic_singleton_tree = dynamic_singleton_tree
+        self.dynamic_tree_max_width = dynamic_tree_max_width
+        self._auto_last_mode = None
+        self._auto_active_width = 0
+        self._auto_cohort_width = 0
         self.draft_topology = os.environ.get(
-            "MLX2_DFLASH_TOPOLOGY", "chain"
+            "MLX2_DFLASH_TOPOLOGY", "tree15" if dynamic_singleton_tree else "chain"
         )
         self.target_execution = os.environ.get(
-            "MLX2_QWEN_TARGET_EXECUTION", "reference"
+            "MLX2_QWEN_TARGET_EXECUTION", "tensorfold" if dynamic_singleton_tree else "reference"
         )
+        if dynamic_singleton_tree and (
+            self.draft_topology != "tree15" or self.target_execution != "tensorfold"
+        ):
+            raise ValueError("dynamic singleton tree requires tree15 and TensorFold target")
         if self.draft_topology not in ("chain", "tree15"):
             raise ValueError("MLX2_DFLASH_TOPOLOGY must be chain or tree15")
         if hasattr(draft_model, "last_proposal_sources") and self.draft_topology != "chain":
@@ -406,7 +462,10 @@ class ExternalDraftBatchGenerator:
             raise ValueError(
                 "TensorFold target execution requires MLX2_TENSORFOLD_SOURCE"
             )
-        self.tree_gates = _tree_gates(self.draft_topology, self.target_execution)
+        self.tree_gates = _tree_gates(
+            self.draft_topology, self.target_execution,
+            default_on=dynamic_singleton_tree,
+        )
         from .acceptance_estimator import (
             AdaptiveVerificationPolicy,
             OnlineAcceptanceEstimator,
@@ -442,6 +501,24 @@ class ExternalDraftBatchGenerator:
         self.lanes = {}; self.next_uid = 0; self.boundaries = {}
         self._lane_failures = []
         self.scheduler_stats = {"external_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0, "external_context_token_pairings": 0, "external_verify_steer_rounds": 0, "external_verify_steered_lanes": 0, "external_allocator_reclaims": 0}
+        if getattr(self, "external_varlen_prefill", False):
+            self.scheduler_stats.update(
+                external_batched_prefill_rounds=0,
+                external_batched_prefill_lanes=0,
+                external_batched_prefill_max_cohort_width=0,
+                external_batched_prefill_max_token_width=0,
+                external_batched_prefill_padding_rows=0,
+                external_prefill_coalesce_deferrals=0,
+                external_prefill_coalesce_expirations=0,
+            )
+        if dynamic_singleton_tree:
+            self.scheduler_stats.update(
+                external_auto_tree_rounds=0,
+                external_auto_chain_rounds=0,
+                external_auto_mode_switches=0,
+                external_auto_tree_max_width=0,
+                external_auto_chain_max_width=0,
+            )
         if self.adaptive_policy is not None:
             self.scheduler_stats.update(
                 external_adaptive_rounds=0,
@@ -478,7 +555,8 @@ class ExternalDraftBatchGenerator:
             )
         if self.target_execution == "tensorfold":
             self.tensorfold_cohort_limit = _tensorfold_cohort_limit(
-                self.target_execution, self.capacity
+                self.target_execution, self.capacity,
+                default=self.dynamic_tree_max_width if dynamic_singleton_tree else 1,
             )
             self.scheduler_stats.update(
                 external_tensorfold_target_rounds=0,
@@ -669,6 +747,26 @@ class ExternalDraftBatchGenerator:
         state = ExternalDraftState((draft_cache, tail), len(lane.history), self.mx.array(list(json.dumps(lane.rng.snapshot(), sort_keys=True).encode()), dtype=self.mx.uint8), lane.rng.draws, binding=self.binding)
         state.validate(self.binding, len(lane.history)); return state
 
+    def _prefill_response(self, lane, *, external_prefill_width=1):
+        """Publish progress and the paired committed boundary after a chunk."""
+        done = len(lane.remaining) == 1
+        span = len(lane.history) + len(lane.remaining)
+        progress = (span if done else len(lane.history), span)
+        if done:
+            lane.anchor = lane.remaining.popleft()
+            if lane.history:
+                if (lane.tail.shape[1] and not self.pair_context_tokens
+                        and not getattr(self.draft, "requires_pending_context_at_prefill", False)):
+                    self._append_context(lane, lane.anchor)
+                    lane.tail = lane.tail[:, :0]
+                self.boundaries[lane.uid] = {"committed_only": True, "tokens": list(lane.history), "target_cache": self._freeze_cache(lane.cache), "covered_tokens": len(lane.history), "cache_sidecar": self._sidecar(lane)}
+        return SimpleNamespace(
+            uid=lane.uid,
+            progress=progress,
+            end_of_prompt=done,
+            external_prefill_width=external_prefill_width,
+        )
+
     def _prefill(self, lane, *, step=None):
         if len(lane.remaining) > 1:
             n = min(self.prefill_step if step is None else step, len(lane.remaining)-1)
@@ -683,22 +781,74 @@ class ExternalDraftBatchGenerator:
                 # After the materialization above; lane.tail stays referenced.
                 self.mx.clear_cache()
                 _bump(self.scheduler_stats, "external_prefill_allocator_reclaims")
-        done = len(lane.remaining) == 1
-        # (done, span) over the whole prompt; the final token is consumed by
-        # the first decode round, so the prompt counts as done here.
-        span = len(lane.history) + len(lane.remaining)
-        progress = (span if done else len(lane.history), span)
-        if done:
-            lane.anchor = lane.remaining.popleft()
-            if lane.history:
-                # A pairing (EAGLE) drafter keeps the last prompt chunk pending:
-                # its final feature must be drafted from in the first round.
-                if (lane.tail.shape[1] and not self.pair_context_tokens
-                        and not getattr(self.draft, "requires_pending_context_at_prefill", False)):
-                    self._append_context(lane, lane.anchor)
-                    lane.tail = lane.tail[:, :0]
-                self.boundaries[lane.uid] = {"committed_only": True, "tokens": list(lane.history), "target_cache": self._freeze_cache(lane.cache), "covered_tokens": len(lane.history), "cache_sidecar": self._sidecar(lane)}
-        return SimpleNamespace(uid=lane.uid, progress=progress, end_of_prompt=done)
+        return self._prefill_response(lane)
+
+    def _prefill_many(self, lanes, *, step=None):
+        """Advance several external target prompts through one padded slab.
+
+        Target cache padding is handled by the same cache contract as ordinary
+        prefill. Draft state remains request-private: each lane consumes its
+        preceding target taps before the new target slab is formed.
+        """
+        lanes = [lane for lane in lanes if len(lane.remaining) > 1]
+        if len(lanes) < 2:
+            return [self._prefill(lane, step=step) for lane in lanes]
+        lengths = [
+            min(self.prefill_step if step is None else step, len(lane.remaining) - 1)
+            for lane in lanes
+        ]
+        width = max(lengths)
+        chunks = []
+        for lane, length in zip(lanes, lengths):
+            if lane.tail.shape[1]:
+                self._append_context(lane, lane.remaining[0])
+            chunks.append([lane.remaining.popleft() for _ in range(length)])
+
+        padding = [width - length for length in lengths]
+        cache = _merge_caches([lane.cache for lane in lanes])
+        for plane in cache:
+            plane.prepare(lengths=lengths, right_padding=padding)
+        tokens = _right_pad_prompts(chunks, max_length=width)
+        with self.model.prefill_row_context(lengths, width=width):
+            tails = self.model.prefill_body(tokens, cache, self.layers)
+        self.mx.eval(tails, [plane.state for plane in cache])
+        for plane in cache:
+            plane.finalize()
+        self.mx.eval([plane.state for plane in cache])
+
+        for row, (lane, chunk, length) in enumerate(zip(lanes, chunks, lengths)):
+            lane.cache = [plane.extract(row) for plane in cache]
+            lane.tail = tails[row : row + 1, :length]
+            lane.history.extend(chunk)
+            self.mx.eval(
+                lane.tail,
+                [plane.state for plane in lane.cache],
+                [plane.state for plane in lane.draft_cache if plane.offset],
+            )
+        self.scheduler_stats["prefill_rounds"] += 1
+        _bump(self.scheduler_stats, "external_batched_prefill_rounds")
+        _bump(self.scheduler_stats, "external_batched_prefill_lanes", len(lanes))
+        self.scheduler_stats["external_batched_prefill_max_cohort_width"] = max(
+            self.scheduler_stats["external_batched_prefill_max_cohort_width"],
+            len(lanes),
+        )
+        self.scheduler_stats["external_batched_prefill_max_token_width"] = max(
+            self.scheduler_stats["external_batched_prefill_max_token_width"], width
+        )
+        _bump(
+            self.scheduler_stats,
+            "external_batched_prefill_padding_rows",
+            sum(padding),
+        )
+        if self.prefill_allocator_reclaim:
+            self.mx.clear_cache()
+            _bump(self.scheduler_stats, "external_prefill_allocator_reclaims")
+        return [
+            self._prefill_response(
+                lane, external_prefill_width=len(lanes)
+            )
+            for lane in lanes
+        ]
 
     def _target_law(self, lane, logits, history, reachable=True, response_rows=None):
         """Return the verification law of one target row.
@@ -769,6 +919,63 @@ class ExternalDraftBatchGenerator:
     def _target_execution_receipt(self):
         model_receipt = getattr(self.model, "external_execution_receipt", None)
         result = {"target_protocol": dict(model_receipt)} if model_receipt else {}
+        if getattr(self, "external_varlen_prefill", False):
+            result["external_varlen_prefill"] = {
+                "implemented": True,
+                "selected": True,
+                "qualified": False,
+                "observed_used": (
+                    self.scheduler_stats["external_batched_prefill_rounds"] > 0
+                ),
+                "rounds": self.scheduler_stats["external_batched_prefill_rounds"],
+                "lanes": self.scheduler_stats["external_batched_prefill_lanes"],
+                "max_cohort_width": self.scheduler_stats[
+                    "external_batched_prefill_max_cohort_width"
+                ],
+                "max_token_width": self.scheduler_stats[
+                    "external_batched_prefill_max_token_width"
+                ],
+                "padding_rows": self.scheduler_stats[
+                    "external_batched_prefill_padding_rows"
+                ],
+                "coalesce_ms": self.external_prefill_coalesce_ms,
+                "coalesce_min_tokens": self.external_prefill_coalesce_min_tokens,
+                "coalesce_deferrals": self.scheduler_stats[
+                    "external_prefill_coalesce_deferrals"
+                ],
+                "coalesce_expirations": self.scheduler_stats[
+                    "external_prefill_coalesce_expirations"
+                ],
+                "coalescing": {
+                    "implemented": True,
+                    "selected": self.external_prefill_coalesce_ms > 0,
+                    "qualified": False,
+                    "observed_used": self.scheduler_stats[
+                        "external_prefill_coalesce_deferrals"
+                    ] > 0,
+                    "maximum_wait_ms": self.external_prefill_coalesce_ms,
+                    "minimum_prompt_tokens": (
+                        self.external_prefill_coalesce_min_tokens
+                    ),
+                },
+            }
+        if self.dynamic_singleton_tree:
+            result["batch_size_route"] = {
+                "policy": (
+                    "tree15_b1_b4_chain_b5plus_v1"
+                    if self.dynamic_tree_max_width == 4
+                    else "tree15_b1_chain_b2plus_v1"
+                ),
+                "max_tree_width": self.dynamic_tree_max_width,
+                "active_lanes": self._auto_active_width,
+                "cohort_width": self._auto_cohort_width,
+                "current": (
+                    "tree15_tensorfold"
+                    if self.draft_topology == "tree15"
+                    else "chain_reference"
+                ),
+                "qualified": False,
+            }
         if self.target_execution != "tensorfold":
             return result
         result["tensorfold_target"] = {
@@ -2164,6 +2371,41 @@ class ExternalDraftBatchGenerator:
             self._feedback_outbox = None
             self._continuation_open_selections = []
 
+    def _round_at_batch_route(self, cohort, *, concurrent, active_width=None):
+        """Select a route only between transactions, never during a round.
+
+        Tree and chain share each lane's committed draft/target cache boundary.
+        A prelaunched tree proposal belongs to the previous boundary and must
+        be discarded before a concurrent chain round can advance it.
+        """
+        if not self.dynamic_singleton_tree:
+            return self._round(cohort)
+        mode = "chain" if concurrent else "tree15"
+        saved = (self.draft_topology, self.target_execution)
+        saved_widths = (self._auto_active_width, self._auto_cohort_width)
+        self._auto_active_width = len(self.lanes) if active_width is None else int(active_width)
+        self._auto_cohort_width = len(cohort)
+        if concurrent:
+            self._discard_prelaunched([lane.uid for lane in self.lanes.values()])
+            self.draft_topology = "chain"
+            self.target_execution = "reference"
+        try:
+            self._round(cohort)
+            if mode != self._auto_last_mode and self._auto_last_mode is not None:
+                _bump(self.scheduler_stats, "external_auto_mode_switches")
+            self._auto_last_mode = mode
+            _bump(
+                self.scheduler_stats,
+                "external_auto_chain_rounds" if concurrent else "external_auto_tree_rounds",
+            )
+            maximum = "external_auto_chain_max_width" if concurrent else "external_auto_tree_max_width"
+            self.scheduler_stats[maximum] = max(
+                self.scheduler_stats[maximum], len(cohort)
+            )
+        finally:
+            self.draft_topology, self.target_execution = saved
+            self._auto_active_width, self._auto_cohort_width = saved_widths
+
     def _pool_round(self, cohort):
         from .continuation_verification import (
             SelectedContinuationTransaction,
@@ -2709,12 +2951,24 @@ class ExternalDraftBatchGenerator:
         draft_per_token = 2*draft.num_key_value_heads*draft.head_dim*4
         required = 0
         for lane in lanes:
+            lane_append = (
+                min(append, max(0, len(lane.remaining) - 1))
+                if prefill
+                else append
+            )
             target_bytes = sum(int(getattr(c,"nbytes",0)) for c in lane.cache)
             draft_bytes = sum(int(getattr(c,"nbytes",0)) for c in lane.draft_cache)
             required += 4*target_bytes + 3*draft_bytes
-            required += append*(target.num_hidden_layers*target_per_token + draft.num_hidden_layers*draft_per_token)
-            required += append*target.hidden_size*len(self.layers)*8
-            required += append*(target.num_hidden_layers*(target.intermediate_size+target.hidden_size)*16 + draft.num_hidden_layers*(draft.intermediate_size+draft.hidden_size)*16)
+            required += lane_append*(target.num_hidden_layers*target_per_token + draft.num_hidden_layers*draft_per_token)
+            required += lane_append*target.hidden_size*len(self.layers)*8
+            if prefill:
+                # Target prefill walks layers serially.  Only one layer's MLP
+                # scratch is live at once, and the draft model does not run;
+                # multiplying this transient by every target and draft layer
+                # priced a skewed B4 as tens of GiB and split it into B2 slabs.
+                required += lane_append*(target.intermediate_size+target.hidden_size)*16
+            else:
+                required += lane_append*(target.num_hidden_layers*(target.intermediate_size+target.hidden_size)*16 + draft.num_hidden_layers*(draft.intermediate_size+draft.hidden_size)*16)
             if not prefill:
                 # Four coexisting float64 q/p originals+normalized copies,
                 # native logits/exp/output buffers, selector and safety slack.
@@ -2744,13 +2998,13 @@ class ExternalDraftBatchGenerator:
                 return True
         return False
 
-    def _fit_cohort(self, candidates, append):
+    def _fit_cohort(self, candidates, append, *, prefill=False):
         # A failed B4 reservation must not block B1/B2 work. Retain each lane's
         # own proposal count; changing width never changes its random schedule.
         while True:
             selected = []
             for lane in candidates:
-                if self._admit(selected + [lane], append):
+                if self._admit(selected + [lane], append, prefill=prefill):
                     selected.append(lane)
             if selected or not self._reclaim_for_admission():
                 return selected
@@ -2770,7 +3024,53 @@ class ExternalDraftBatchGenerator:
             self._schedule_cursor += 1
         # At most one bounded prefill slice; active decode progresses every poll.
         active_count = sum(l.anchor is not None for l in self.lanes.values())
-        for lane in ordered:
+        defer_serial_prefill = False
+        if self.external_varlen_prefill and active_count < self.capacity:
+            candidates = [
+                lane for lane in ordered
+                if lane.anchor is None and len(lane.remaining) > 1
+            ][: self.capacity - active_count]
+            pristine = [lane for lane in candidates if not lane.history]
+            if (
+                self.external_prefill_coalesce_ms
+                and self.capacity - active_count > 1
+                and 0 < len(candidates) < self.capacity - active_count
+                and len(pristine) == len(candidates)
+                and all(
+                    len(lane.remaining) >= self.external_prefill_coalesce_min_tokens
+                    for lane in pristine
+                )
+            ):
+                oldest = min(pristine, key=lambda lane: lane.prefill_inserted_at)
+                age_ms = (time.monotonic() - oldest.prefill_inserted_at) * 1000
+                if age_ms < self.external_prefill_coalesce_ms:
+                    defer_serial_prefill = True
+                    _bump(
+                        self.scheduler_stats,
+                        "external_prefill_coalesce_deferrals",
+                    )
+                elif not oldest.prefill_coalesce_expired_recorded:
+                    oldest.prefill_coalesce_expired_recorded = True
+                    _bump(
+                        self.scheduler_stats,
+                        "external_prefill_coalesce_expirations",
+                    )
+            append = max(
+                (
+                    min(self.prefill_step, len(lane.remaining) - 1)
+                    for lane in candidates
+                ),
+                default=0,
+            )
+            cohort = (
+                self._fit_cohort(candidates, append, prefill=True)
+                if append and not defer_serial_prefill else []
+            )
+            if len(cohort) > 1:
+                prompts.extend(self._prefill_many(cohort))
+        # A multirow slab is this poll's one bounded physical prefill slice.
+        # If it could not form, retain the unchanged serial admission path.
+        for lane in (() if prompts or defer_serial_prefill else ordered):
             if lane.anchor is not None or active_count >= self.capacity:
                 continue
             append = min(self.prefill_step, max(1, len(lane.remaining)-1))
@@ -2786,6 +3086,11 @@ class ExternalDraftBatchGenerator:
                     self.scheduler_stats["prefill_adaptive_slices"] = self.scheduler_stats.get("prefill_adaptive_slices", 0) + 1
                 prompts.append(self._prefill(lane, step=append)); break
         ready = [l for l in ordered if l.anchor is not None and not l.ready and not l.cancelled][:self.capacity]
+        active_width = (
+            sum(lane.anchor is not None and not lane.cancelled for lane in self.lanes.values())
+            if self.dynamic_tree_max_width == 4 else len(self.lanes)
+        )
+        concurrent = self.dynamic_singleton_tree and active_width > self.dynamic_tree_max_width
         groups = {}
         for lane in ready:
             # Another lane's token budget must not change this lane's proposal
@@ -2795,9 +3100,12 @@ class ExternalDraftBatchGenerator:
             # transient final-budget rows, whose draft context remains exact.
             groups.setdefault((count, lane.ordinary),[]).append(lane)
         for (count, _ordinary), candidates in groups.items():
-            if self.target_execution == "tensorfold":
+            if self.target_execution == "tensorfold" and not concurrent:
                 candidates = candidates[: self.tensorfold_cohort_limit]
-            cohort = self._fit_cohort(candidates, count+1)
+            # The tree verifier scores anchor plus 15 lattice nodes even
+            # though the configured chain draft depth may be only three.
+            append = 16 if self.dynamic_singleton_tree and not concurrent and count else count + 1
+            cohort = self._fit_cohort(candidates, append)
             if not cohort: continue
             if self.draft_topology == "tree15" and self.target_execution != "tensorfold":
                 pending = [[lane] for lane in reversed(cohort)]
@@ -2806,7 +3114,9 @@ class ExternalDraftBatchGenerator:
             while pending:
                 group = pending.pop()
                 try:
-                    self._round(group)
+                    self._round_at_batch_route(
+                        group, concurrent=concurrent, active_width=active_width
+                    )
                 except DraftUnavailable as error:
                     failed_uids = set(
                         getattr(error, "failed_uids", ())

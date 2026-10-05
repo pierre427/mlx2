@@ -23,6 +23,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
     def __init__(self, args):
         super().__init__(args)
         self.fused_gdn_enabled = False
+        self.fused_gdn_architecture = 'qwen38'
         object.__setattr__(self, 'fused_gdn_counters', {
             'decode_calls': 0, 'batch_decode_calls': 0, 'batch_decode_rows': 0,
             'fallbacks': 0, 'last_fallback': None, 'reasons': {},
@@ -32,6 +33,11 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         if type(enabled) is not bool:
             raise ValueError('fused_gdn must be boolean')
         self.fused_gdn_enabled = enabled
+
+    def set_fused_gdn_architecture(self, architecture: str):
+        if architecture not in ('qwen35', 'qwen38'):
+            raise ValueError('unsupported fused_gdn architecture')
+        self.fused_gdn_architecture = architecture
 
     def _fallback(self, reason):
         counts = self.fused_gdn_counters
@@ -58,7 +64,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         rows = int(qkv.shape[0])
         admit = (kernels.admit_qwen4_fused_gdn_decode if rows == 1
                  else kernels.admit_qwen4_fused_gdn_batch_decode)
-        geometry = dict(architecture='qwen38', num_key_heads=self.num_k_heads,
+        geometry = dict(architecture=self.fused_gdn_architecture, num_key_heads=self.num_k_heads,
             num_value_heads=self.num_v_heads, key_head_dim=self.head_k_dim,
             value_head_dim=self.head_v_dim, conv_kernel=self.conv_kernel_size)
         admission = admit(qkv=qkv, z=z, b=b, a=a, conv_state=cache[0],
@@ -99,10 +105,11 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         return output
 
 
-def configure(model, enabled):
+def configure(model, enabled, *, architecture='qwen38'):
     """Adapter-owned switch; explicit false is also the immediate kill switch."""
     for _, module in model.named_modules():
         if isinstance(module, GatedDeltaNet):
+            module.set_fused_gdn_architecture(architecture)
             module.set_fused_gdn_enabled(enabled)
 
 

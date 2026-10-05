@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import asdict
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
@@ -199,10 +200,36 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "draft_quantization",
         "tensorfold_prefill",
         "tensorfold_prefill_backend",
+        "varlen_dense_mlp",
+        "external_varlen_prefill",
+        "external_prefill_coalesce_ms",
+        "external_prefill_coalesce_min_tokens",
         "gdn_prefill_chunk",
         "gdn_prefill_segment_rows",
+        "batch_size_route",
     }
 )
+_TREE_BATCH_ROUTES = {
+    "tree15_b1_chain_b2plus_v1": 1,
+    "tree15_b1_b4_chain_b5plus_v1": 4,
+}
+
+
+def _normalized_adaptive_verification(value, depth):
+    """Return the effective JSON settings, not a caller's shorthand."""
+    if value is None or value is False:
+        return None
+    from ..runtime.acceptance_estimator import AdaptiveVerificationPolicy
+
+    policy = AdaptiveVerificationPolicy.from_value(value, depth)
+    if policy is None:
+        return None
+    settings = asdict(policy)
+    # These fields accept integers, but their execution law is floating point.
+    settings["draft_cost"] = float(policy.draft_cost)
+    settings["min_gain"] = float(policy.min_gain)
+    # Detach tuples (including nested cost tables) into their receipt form.
+    return json.loads(json.dumps(settings, sort_keys=True, allow_nan=False))
 
 
 def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
@@ -234,6 +261,54 @@ def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
             raise ValueError(f"Qwen3.8 27B external draft policy must pin {key}")
     if policy.get("pairwise_selection", "host") not in ("host", "batched"):
         raise ValueError("pairwise_selection must be 'host' or 'batched'")
+    if "external_varlen_prefill" in policy and type(
+        policy["external_varlen_prefill"]
+    ) is not bool:
+        raise ValueError("external_varlen_prefill must be boolean")
+    from ..runtime.models.varlen_dense_mlp import VarlenDenseMLPPolicy
+
+    varlen_dense_mlp = VarlenDenseMLPPolicy.from_value(
+        policy.get("varlen_dense_mlp", False)
+    )
+    if policy.get("external_varlen_prefill") and not varlen_dense_mlp.enabled:
+        raise ValueError(
+            "external_varlen_prefill requires varlen_dense_mlp selection"
+        )
+    coalesce_ms = policy.get("external_prefill_coalesce_ms", 0)
+    if type(coalesce_ms) is not int or not 0 <= coalesce_ms <= 1000:
+        raise ValueError(
+            "external_prefill_coalesce_ms must be an integer from 0 to 1000"
+        )
+    if coalesce_ms and not policy.get("external_varlen_prefill"):
+        raise ValueError(
+            "external_prefill_coalesce_ms requires external_varlen_prefill"
+        )
+    coalesce_min_tokens = policy.get("external_prefill_coalesce_min_tokens", 1)
+    if type(coalesce_min_tokens) is not int or coalesce_min_tokens < 1:
+        raise ValueError(
+            "external_prefill_coalesce_min_tokens must be a positive integer"
+        )
+    batch_route = policy.get("batch_size_route")
+    if batch_route is None and os.environ.get("MLX2_DFLASH_TOPOLOGY") == "tree15":
+        raise ValueError("tree15 requires an explicit batch_size_route policy")
+    if batch_route is not None:
+        if type(batch_route) is not str or batch_route not in _TREE_BATCH_ROUTES:
+            raise ValueError("unsupported Qwen3.8 external batch_size_route")
+        if any(key in policy for key in (
+            "adaptive_verification", "proposal_composition", "continuation_pool",
+        )):
+            raise ValueError("tree15 bounded route conflicts with chain-only proposal policy")
+        if any(os.environ.get(name) is not None for name in (
+            "MLX2_DFLASH_TOPOLOGY", "MLX2_QWEN_TARGET_EXECUTION",
+            "MLX2_TENSORFOLD_COHORT_LIMIT",
+        )):
+            raise ValueError("tree15 bounded route conflicts with explicit topology override")
+        source = os.environ.get("MLX2_TENSORFOLD_SOURCE")
+        if not source:
+            raise ValueError("tree15 bounded route requires MLX2_TENSORFOLD_SOURCE")
+        from ..runtime.qwen38_tensorfold import _validate
+
+        _validate(Path(source).expanduser().resolve())
     target_revision = content_revision(model_path)
     if target_revision != policy["target_revision"]:
         raise ValueError(
@@ -253,9 +328,7 @@ def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
         raise ValueError("num_draft must be a positive integer below the draft block size")
     adaptive = policy.get("adaptive_verification")
     if adaptive is not None:
-        from ..runtime.acceptance_estimator import AdaptiveVerificationPolicy
-
-        AdaptiveVerificationPolicy.from_value(adaptive, count)
+        _normalized_adaptive_verification(adaptive, count)
     quantization = validate_runtime_quantization(policy.get("draft_quantization"))
     if quantization is not None:
         # Numerics differ from the bf16 drafter: a distinct cache identity.
@@ -296,9 +369,13 @@ def configure_environment() -> dict[str, str]:
     return profile
 
 
-def fused_gdn_policy(policy: dict) -> bool:
-    """27B decode switch in the existing execution policy; false kills it."""
-    enabled = policy.get("fused_gdn", False)
+def fused_gdn_policy(policy: dict, default: bool = False) -> bool:
+    """27B decode switch in the existing execution policy; false kills it.
+
+    ``default`` is the adapter's own preference (``default_fused_gdn``),
+    used when the policy does not name the key.
+    """
+    enabled = policy.get("fused_gdn", default)
     if type(enabled) is not bool:
         raise ValueError("fused_gdn must be boolean")
     return enabled
@@ -378,7 +455,8 @@ def resolve_eos_token_ids(config: dict, tokenizer) -> list[int]:
 
 class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     default_route = "native_mtp"
-    # Explicit because Flash-Next deliberately defaults its handoff off.
+    # Explicit because Qwen3.8 retains its independently measured threshold
+    # instead of inheriting Flash-Next's width-three default.
     default_mtp_ordinary_handoff_max_width = (
         DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH
     )
@@ -394,21 +472,69 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     # STATUS-rm01-gpu.md, ab-27b-t0-v2.json).  Above the handoff width the
     # cohort runs ordinary and copies are inert.  Not declared on Qwen3.6:
     # its prose dispersion did not clear.
+    #
+    # Decode-first publication in "order" mode on both routes since
+    # 2026-10-02 (Pierre): decode-to-client lag max 670-765 -> 57-101 ms,
+    # TTFT, gaps and lane tok/s unchanged (options-sweep-27b-20261002, item
+    # 3).  MLX2_DECODE_FIRST=0 is the kill switch; an explicit "decode_first"
+    # in the execution policy (false included) wins.
     default_route_execution_policy = {
+        "ordinary": {
+            "decode_first": {"enabled": True, "shared_prefill_budget": False},
+        },
         "native_mtp": {
             "apc_interior_checkpoints": "auto",
             "self_mtp_copy_draft": {"enabled": True},
+            "decode_first": {"enabled": True, "shared_prefill_budget": False},
         },
     }
     """Dense text adapter using shared chat parsing and modern runtime state."""
 
     descriptor = QWEN38_27B
+    packed_prefill_dense_mlp_semantics = {
+        "schema": "mlx2.dense-glu-semantics.v1",
+        "gate_projection": "gate_proj",
+        "up_projection": "up_proj",
+        "down_projection": "down_proj",
+        "activation": "silu",
+        "combination": "activated_gate_times_up",
+    }
+
+    def create_native_paged_hybrid_b2(self, requests, *, profile,
+                                       permit_candidate=False, cancelled=lambda: False):
+        """Explicit default-off adapter capability; ordinary route remains available."""
+        from ..runtime.qwen35_paged_graph_factory import create_shared_hybrid_graph_pack
+        return create_shared_hybrid_graph_pack(self, requests, profile=profile,
+            permit_candidate=permit_candidate, cancelled=cancelled)
+    def create_native_packed_prefill_b2(self, requests, *, profile, live_identity,
+                                         permit_candidate=False, cancelled=lambda: False):
+        """Explicit source-bound short/long research capability; real-row math stays adapter-owned."""
+        from ..runtime.hybrid_packed_prefill import create_cold_packed_hybrid
+        language=getattr(self.model,"language_model",self.model);args=language.args
+        if (args.num_hidden_layers,args.num_attention_heads,args.num_key_value_heads,args.head_dim)!=(64,24,4,256):
+            raise ValueError("packed-prefill serving adapter geometry unavailable")
+        return create_cold_packed_hybrid(self,requests,profile=profile,live_identity=live_identity,
+            permit_candidate=permit_candidate,cancelled=cancelled)
+
+    def native_cohort_memory_admission(self,requests,*,profile_path,manifest_path,mlx_wheel_path,permit_candidate=False):
+        """Explicit adapter-owned shared cost; scheduler does not infer model math."""
+        from ..runtime.hybrid_packed_prefill_n import estimate_cold_cohort_memory_n
+        return estimate_cold_cohort_memory_n(self,requests,profile_path=profile_path,manifest_path=manifest_path,mlx_wheel_path=mlx_wheel_path,permit_candidate=permit_candidate)
+
+    def create_native_packed_prefill_n(self,requests,*,profile,live_identity,source_input_ids,permit_candidate=False,cancelled=lambda:False,phase_boundary=None):
+        """Distinct source-bound N1..20 private native candidate, default off."""
+        from ..runtime.hybrid_packed_prefill_n import create_cold_packed_hybrid_n
+        language=getattr(self.model,"language_model",self.model);args=language.args
+        if (args.num_hidden_layers,args.num_attention_heads,args.num_key_value_heads,args.head_dim)!=(64,24,4,256):raise ValueError("nativeN20 adapter geometry unavailable")
+        return create_cold_packed_hybrid_n(self,requests,profile=profile,live_identity=live_identity,source_input_ids=source_input_ids,permit_candidate=permit_candidate,cancelled=cancelled,phase_boundary=phase_boundary)
+
     # Candidate external route: Inco's DFlash2 block drafter
     # (incoai/Qwen3.8-27B-DFlash2, block 8, taps 5/19/33/47/61) verified on
     # the hybrid target through ``runtime/hybrid_verify_rows``.  Opt-in via
     # ``--external-draft`` and a pinned policy
     # (qualification/policies/qwen38-27b-dflash2.json); implemented, not
-    # qualified.  The default stays self-MTP K=2.
+    # qualified.  The native default is self-MTP K=3; K=2 remains an explicit
+    # historical comparator.
     EXTERNAL_DEFAULT_NUM_DRAFT = 7
     EXTERNAL_ROUTE_TAG = "external-dflash2-qwen38-v1"
     EXTERNAL_PROFILE = "qwen38-27b-apcv2-dflash2"
@@ -424,9 +550,23 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     weight_streaming_modes = frozenset({"dense_mlp"})
 
     # Per-layer eager dispatch stays off on the dense 27B: bit-exact, but
-    # neutral end to end (native MTP B1 1.001x, ordinary B1 0.996x, B4
-    # 0.995x; qualification/runs/recon-20261001/l7-decode-perf).
+    # neutral end to end in the internal controlled decode comparison.
     default_eager_dispatch_stride = 0
+    # Fused GDN decode (qwen38_fused_gdn) on every route since 2026-10-02
+    # (Pierre): bit-identical everywhere (264/264 lanes), ordinary B1-B16
+    # improved ordinary B1-B16 while remaining neutral for MTP in the
+    # internal controlled options sweep.
+    # {"fused_gdn": false} in the execution policy is the kill switch.  Read
+    # from this class's own __dict__: the Qwen3.5 9B and Qwen3.6 subclasses
+    # carry no measurement and keep it off.
+    default_fused_gdn = True
+    fused_gdn_architecture = "qwen38"
+    # Self-MTP draft depth on the native-MTP route when the policy names no
+    # num_draft: 3 since 2026-10-02 (Pierre): in-process mtp:2 +30.7%, mtp:3
+    # +14.0%, mtp:4 +9.0%; served B2 +15%, B4 +11% (interior off), B1 within
+    # noise; B1 tokens identical (options-sweep-27b-20261002).  Own __dict__
+    # only, like default_fused_gdn: subclasses keep 2.
+    default_num_draft = 3
 
     def __init__(
         self, model_path: str, *, require_mtp: bool = False, execution_policy=None,
@@ -438,7 +578,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
-        self.fused_gdn = fused_gdn_policy(policy)
+        self.fused_gdn = fused_gdn_policy(
+            policy, vars(type(self)).get("default_fused_gdn", False)
+        )
         policy.pop("fused_gdn", None)
         if stream_request is not None:
             if "draft_model" in policy:
@@ -473,6 +615,15 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 if key in policy
             }
         )
+        from ..runtime.models.varlen_dense_mlp import VarlenDenseMLPPolicy
+
+        # Target-side arithmetic remains adapter-owned when an external
+        # drafter is selected.  Keep the setting in the source-bound external
+        # policy receipt, but parse it before the external-only fields are
+        # separated from the target's construction policy.
+        varlen_dense_mlp_policy = VarlenDenseMLPPolicy.from_value(
+            policy.get("varlen_dense_mlp", False)
+        )
         self.external_policy = {}
         self.draft_model = None
         draft_record = None
@@ -484,6 +635,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             draft_record = inspect_external_policy(policy, model_path)
             self.external_policy = policy
             policy = {}
+        else:
+            policy.pop("varlen_dense_mlp", None)
         if set(policy) - {
             "num_draft",
             "gdn_core",
@@ -499,6 +652,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 "Qwen3.8 27B execution policy supports only num_draft, gdn_core, "
                 "fp32_head_logits, tensorfold_prefill, tensorfold_prefill_backend, "
                 "gdn_prefill_chunk, gdn_prefill_segment_rows, invariant_prefill, "
+                "varlen_dense_mlp, "
                 "eager_dispatch_stride and eager_dispatch_max_rows"
             )
         eager_dispatch = eager_dispatch_policy(policy, self.default_eager_dispatch_stride)
@@ -507,7 +661,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         fp32_head = policy.get("fp32_head_logits", False)
         if type(fp32_head) is not bool:
             raise ValueError("fp32_head_logits must be boolean")
-        self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", 2))
+        self._num_draft = validate_self_mtp_num_draft(
+            policy.get("num_draft", vars(type(self)).get("default_num_draft", 2))
+        )
         # A/B switch for MLX's native gated_delta_update on 17-256 row prefill
         # chunks (MLX_GDN_CORE).  Absent keeps the pinned "0" profile and its
         # qualification identity; parity on this geometry is unestablished.
@@ -612,7 +768,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             self._finish_load(
                 weights, prefill_policy, fp32_head, path, config,
                 AutoTokenizer, TokenizerWrapper, BPEStreamingDetokenizer,
-                eager_dispatch, gdn_state_dtype,
+                eager_dispatch, gdn_state_dtype, varlen_dense_mlp_policy,
             )
         except BaseException:
             if self.weight_stream is not None:
@@ -640,7 +796,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     def _finish_load(
         self, weights, prefill_policy, fp32_head, path, config,
         AutoTokenizer, TokenizerWrapper, BPEStreamingDetokenizer, eager_dispatch,
-        gdn_state_dtype,
+        gdn_state_dtype, varlen_dense_mlp_policy,
     ):
         """Everything after the weights load: installs, probe, tokenizer.
 
@@ -651,9 +807,18 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         import mlx.core as mx
 
         self.model.eval()
+        from ..runtime.models.varlen_dense_mlp import (
+            install as install_varlen_dense_mlp,
+        )
+
+        self.varlen_dense_mlp = install_varlen_dense_mlp(
+            self.model, varlen_dense_mlp_policy
+        )
         from ..runtime.models.qwen38_fused_gdn import configure as configure_fused_gdn
 
-        configure_fused_gdn(self.model, self.fused_gdn)
+        configure_fused_gdn(
+            self.model, self.fused_gdn, architecture=self.fused_gdn_architecture
+        )
         mx.eval(self.model.parameters())
         if eager_dispatch[0]:
             self.model.model.set_eager_dispatch(*eager_dispatch)
@@ -682,12 +847,26 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             if not handle.installed:
                 raise ValueError(f"invariant_prefill refused: {handle.refusal}")
             self.invariant_prefill = handle
-        from ..runtime.prefill_plan import execution_identity
+        from ..runtime.models.varlen_dense_mlp import identity as varlen_identity
+        from ..runtime.prefill_plan import (
+            EXTERNAL_VARLEN_PREFILL_IDENTITY,
+            execution_identity,
+        )
+
+        external_varlen_prefill = None
+        if self.external_policy.get("external_varlen_prefill"):
+            if self.varlen_dense_mlp is None:
+                raise ValueError(
+                    "external_varlen_prefill requires an installed varlen dense MLP"
+                )
+            external_varlen_prefill = EXTERNAL_VARLEN_PREFILL_IDENTITY
 
         self.prefill_execution_identity = execution_identity(
             self.tensorfold_prefill,
             self.gdn_prefill_scan,
             None if self.invariant_prefill is None else self.invariant_prefill.identity(),
+            varlen_identity(self.varlen_dense_mlp),
+            external_varlen_prefill=external_varlen_prefill,
         )
         self.fp32_head = None
         if fp32_head:
@@ -726,6 +905,24 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         adaptive = self.external_policy.get("adaptive_verification")
         if adaptive is not None:
             kwargs.setdefault("adaptive_verification", adaptive)
+        route = self.external_policy.get("batch_size_route")
+        tree_width = _TREE_BATCH_ROUTES.get(route) if type(route) is str else None
+        if route is not None and tree_width is None:
+            raise ValueError("unsupported Qwen3.8 external batch_size_route")
+        if tree_width is not None and (
+            kwargs.get("dynamic_singleton_tree", True) is not True
+            or kwargs.get("dynamic_tree_max_width", tree_width) != tree_width
+        ):
+            raise ValueError("tree15 bounded route cannot be overridden at batch creation")
+        if tree_width is None and (
+            kwargs.get("dynamic_singleton_tree") is True
+            or kwargs.get("dynamic_tree_max_width", 1) != 1
+            or os.environ.get("MLX2_DFLASH_TOPOLOGY") == "tree15"
+        ):
+            raise ValueError("tree15 requires an explicit batch_size_route policy")
+        kwargs.setdefault("dynamic_singleton_tree", tree_width is not None)
+        if tree_width is not None:
+            kwargs.setdefault("dynamic_tree_max_width", tree_width)
         return ExternalDraftBatchGenerator(
             self.model,
             draft_model=self.draft_model,
@@ -734,6 +931,15 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             pairwise_selection=self.external_policy.get("pairwise_selection", "host"),
             # Keep B>1 lanes in lockstep (see ExternalDraftBatchGenerator).
             ready_drain="all",
+            external_varlen_prefill=bool(
+                self.external_policy.get("external_varlen_prefill", False)
+            ),
+            # Formation is an ingress concern: concurrent tokenization has
+            # finished and no physical executor step has started yet.
+            external_prefill_coalesce_ms=0,
+            external_prefill_coalesce_min_tokens=self.external_policy.get(
+                "external_prefill_coalesce_min_tokens", 1
+            ),
             **kwargs,
         )
 
@@ -748,9 +954,40 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
 
     def execution_config(self, *, max_lanes, prefill_step):
         if getattr(self, "draft_model", None) is not None:
-            return self._external_execution_config(
+            config = self._external_execution_config(
                 max_lanes=max_lanes, prefill_step=prefill_step
             )
+            if self.external_policy.get("pairwise_selection", "host") == "batched":
+                config["pairwise_selection"] = "batched"
+            if self.external_policy.get("external_varlen_prefill", False):
+                from ..runtime.prefill_plan import EXTERNAL_VARLEN_PREFILL_IDENTITY
+
+                config["external_varlen_prefill"] = {
+                    "enabled": True,
+                    **EXTERNAL_VARLEN_PREFILL_IDENTITY,
+                }
+            coalesce_ms = self.external_policy.get(
+                "external_prefill_coalesce_ms", 0
+            )
+            if coalesce_ms:
+                config["ingress_cohort"] = {
+                    "enabled": True,
+                    "mechanism": "external_varlen_prefill",
+                    "maximum_wait_ms": coalesce_ms,
+                    "minimum_prompt_tokens": self.external_policy.get(
+                        "external_prefill_coalesce_min_tokens", 1
+                    ),
+                    "target_lanes": max_lanes,
+                }
+            adaptive = _normalized_adaptive_verification(
+                self.external_policy.get("adaptive_verification"),
+                self._external_num_draft(),
+            )
+            if adaptive is not None:
+                config["adaptive_verification"] = adaptive
+            if self.external_policy.get("batch_size_route"):
+                config["batch_size_route"] = self.external_policy["batch_size_route"]
+            return config
         config = {
             "persistent": True,
             "num_draft": getattr(self, "_num_draft", 2)
@@ -777,6 +1014,30 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         from ..runtime.approximate_kv import standard_kv_quantization_operations
 
         return standard_kv_quantization_operations(group_size=64)
+
+    def _external_execution_numerics(self):
+        """Import-free external target laws used by direct and served users."""
+        contract = {}
+        if self.external_policy.get("external_varlen_prefill"):
+            from ..runtime.prefill_plan import EXTERNAL_VARLEN_PREFILL_IDENTITY
+
+            if getattr(self, "varlen_dense_mlp", None) is None:
+                raise ValueError(
+                    "selected external varlen prefill is not installed on the target"
+                )
+            contract["external_varlen_prefill"] = dict(
+                EXTERNAL_VARLEN_PREFILL_IDENTITY
+            )
+        adaptive = _normalized_adaptive_verification(
+            self.external_policy.get("adaptive_verification"),
+            self._external_num_draft(),
+        )
+        if adaptive is not None:
+            contract["external_adaptive_verification"] = {
+                "algorithm": "exact-chain-adaptive-target-verify-width-v1",
+                "policy": adaptive,
+            }
+        return contract
 
     def cache_budget(self, *, mtp):
         from .flash_next import gdn_state_bytes
@@ -823,6 +1084,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         }
 
     def diagnostics(self):
+        from ..runtime.models.varlen_dense_mlp import status as varlen_dense_mlp_status
         from ..runtime.segmented_self_mtp import segmented_self_mtp_stats
 
         return {
@@ -876,6 +1138,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 else {}
             ),
             **(
+                {"varlen_dense_mlp": varlen_dense_mlp_status(self.varlen_dense_mlp)}
+                if getattr(self, "varlen_dense_mlp", None) is not None
+                else {}
+            ),
+            **(
                 {"fused_gdn": self._fused_gdn_diagnostics()}
                 if getattr(self, "fused_gdn", False) else {}
             ),
@@ -900,7 +1167,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             module.fused_gdn_enabled is not enabled for module in layers
         ):
             raise ValueError("selected fused_gdn policy disagrees with live target layers")
-        contract = {}
+        contract = self._external_execution_numerics()
         if enabled:
             contract["fused_gdn"] = {
                 "algorithm": "qwen35-served-silu-decode-v1",
@@ -944,6 +1211,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 "algorithm": "affine-head-fp32-scales-v1",
                 "bits": int(head.bits),
                 "group_size": int(head.group_size),
+            }
+        if self.external_policy.get("batch_size_route"):
+            from ..runtime.qwen38_tensorfold import EXPECTED_REVISION
+
+            contract["external_batch_size_route"] = {
+                "algorithm": self.external_policy["batch_size_route"].replace("_", "-"),
+                "tensorfold_revision": EXPECTED_REVISION,
             }
         if not contract:
             return None

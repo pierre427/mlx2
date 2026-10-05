@@ -6,6 +6,7 @@ checkpoints are absent.
 import json
 import struct
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -78,6 +79,332 @@ def test_pinned_policy_inspects_without_payload(tmp_path):
     record = inspect_external_policy({**_pins(target, draft), "num_draft": 5}, target)
     assert record["args"].target_layer_ids == [1, 6]
     assert record["runtime_quantization"] is None
+
+
+def test_external_policy_accepts_target_varlen_selection(tmp_path):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+
+    target, draft = _write_artifacts(tmp_path)
+    record = inspect_external_policy(
+        {
+            **_pins(target, draft),
+            "num_draft": 7,
+            "varlen_dense_mlp": True,
+            "external_varlen_prefill": True,
+        },
+        target,
+    )
+    assert record["args"].block_size == 8
+
+
+def test_external_policy_rejects_non_boolean_varlen_prefill(tmp_path):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+
+    target, draft = _write_artifacts(tmp_path)
+    with pytest.raises(ValueError, match="external_varlen_prefill must be boolean"):
+        inspect_external_policy(
+            {**_pins(target, draft), "external_varlen_prefill": 1}, target
+        )
+
+
+def test_external_varlen_prefill_requires_target_varlen_selection(tmp_path):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+
+    target, draft = _write_artifacts(tmp_path)
+    with pytest.raises(ValueError, match="requires varlen_dense_mlp selection"):
+        inspect_external_policy(
+            {**_pins(target, draft), "external_varlen_prefill": True}, target
+        )
+
+    with pytest.raises(ValueError, match="requires varlen_dense_mlp selection"):
+        inspect_external_policy(
+            {
+                **_pins(target, draft),
+                "varlen_dense_mlp": {"enabled": False},
+                "external_varlen_prefill": True,
+            },
+            target,
+        )
+
+
+@pytest.mark.parametrize("value", [True, -1, 1001, 1.5])
+def test_external_prefill_coalesce_policy_is_bounded_integer(tmp_path, value):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+
+    target, draft = _write_artifacts(tmp_path)
+    with pytest.raises(ValueError, match="integer from 0 to 1000"):
+        inspect_external_policy(
+            {
+                **_pins(target, draft),
+                "varlen_dense_mlp": True,
+                "external_varlen_prefill": True,
+                "external_prefill_coalesce_ms": value,
+            },
+            target,
+        )
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, 1.5])
+def test_external_prefill_coalesce_min_tokens_is_positive_integer(tmp_path, value):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+
+    target, draft = _write_artifacts(tmp_path)
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        inspect_external_policy(
+            {
+                **_pins(target, draft),
+                "varlen_dense_mlp": True,
+                "external_varlen_prefill": True,
+                "external_prefill_coalesce_min_tokens": value,
+            },
+            target,
+        )
+
+
+@pytest.mark.parametrize("route", ["tree15_b1_chain_b2plus_v1", "tree15_b1_b4_chain_b5plus_v1"])
+def test_bounded_route_requires_pinned_tensorfold_source(tmp_path, monkeypatch, route):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+    from mlx2.runtime import qwen38_tensorfold
+
+    target, draft = _write_artifacts(tmp_path)
+    policy = {**_pins(target, draft), "batch_size_route": route}
+    monkeypatch.delenv("MLX2_TENSORFOLD_SOURCE", raising=False)
+    with pytest.raises(ValueError, match="requires MLX2_TENSORFOLD_SOURCE"):
+        inspect_external_policy(policy, target)
+    source = tmp_path / "tensorfold"
+    source.mkdir()
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(source))
+    checked = []
+    monkeypatch.setattr(qwen38_tensorfold, "_validate", lambda path: checked.append(path))
+    assert inspect_external_policy(policy, target)["args"].block_size == 8
+    assert checked == [source.resolve()]
+
+    def reject_source(path):
+        raise RuntimeError("TensorFold revision mismatch")
+
+    monkeypatch.setattr(qwen38_tensorfold, "_validate", reject_source)
+    with pytest.raises(RuntimeError, match="revision mismatch"):
+        inspect_external_policy(policy, target)
+
+
+@pytest.mark.parametrize("extra,error", [
+    ({"batch_size_route": "other"}, "unsupported"),
+    ({"adaptive_verification": {}}, "chain-only"),
+    ({"proposal_composition": {}}, "chain-only"),
+    ({"continuation_pool": {}}, "chain-only"),
+])
+def test_bounded_route_refuses_incompatible_policy(tmp_path, monkeypatch, extra, error):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+
+    target, draft = _write_artifacts(tmp_path)
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(tmp_path))
+    policy = {**_pins(target, draft), "batch_size_route": "tree15_b1_b4_chain_b5plus_v1", **extra}
+    with pytest.raises(ValueError, match=error):
+        inspect_external_policy(policy, target)
+
+
+@pytest.mark.parametrize("name", [
+    "MLX2_DFLASH_TOPOLOGY", "MLX2_QWEN_TARGET_EXECUTION", "MLX2_TENSORFOLD_COHORT_LIMIT",
+])
+def test_bounded_route_refuses_explicit_topology_override(tmp_path, monkeypatch, name):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+
+    target, draft = _write_artifacts(tmp_path)
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(tmp_path))
+    monkeypatch.setenv(name, "1")
+    with pytest.raises(ValueError, match="explicit topology override"):
+        inspect_external_policy({**_pins(target, draft), "batch_size_route": "tree15_b1_b4_chain_b5plus_v1"}, target)
+
+
+def test_tensorfold_source_alone_does_not_select_tree(monkeypatch):
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
+    from mlx2.runtime import external_speculative
+
+    adapter = object.__new__(Qwen3827BAdapter)
+    adapter.model = object()
+    adapter.draft_model = type("Draft", (), {"propose_tree": lambda self: None})()
+    adapter.external_policy = {}
+    adapter.identity = {"fingerprint": "test"}
+    monkeypatch.setattr(Qwen3827BAdapter, "_initialize_external_feedback", lambda self: None)
+    monkeypatch.setattr(Qwen3827BAdapter, "_external_num_draft", lambda self: 7)
+    monkeypatch.setattr(Qwen3827BAdapter, "_external_execution_config",
+                        lambda self, **kwargs: {"route": "chain"})
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/pinned/source")
+    calls = []
+    monkeypatch.setattr(external_speculative, "ExternalDraftBatchGenerator",
+                        lambda *args, **kwargs: calls.append(kwargs) or object())
+
+    adapter.create_external_batch(completion_batch_size=1)
+    assert calls[-1]["dynamic_singleton_tree"] is False
+    assert "batch_size_route" not in adapter.execution_config(max_lanes=4, prefill_step=16)
+    with pytest.raises(ValueError, match="explicit batch_size_route"):
+        adapter.create_external_batch(dynamic_singleton_tree=True)
+    monkeypatch.setenv("MLX2_DFLASH_TOPOLOGY", "tree15")
+    with pytest.raises(ValueError, match="explicit batch_size_route"):
+        adapter.create_external_batch()
+    monkeypatch.delenv("MLX2_DFLASH_TOPOLOGY")
+
+    adapter.external_policy = {"batch_size_route": "tree15_b1_b4_chain_b5plus_v1"}
+    adapter.create_external_batch()
+    assert calls[-1]["dynamic_singleton_tree"] is True
+    assert calls[-1]["dynamic_tree_max_width"] == 4
+    assert adapter.execution_config(max_lanes=4, prefill_step=16)["batch_size_route"] == "tree15_b1_b4_chain_b5plus_v1"
+
+    adapter.external_policy = {"batch_size_route": "tree15_b1_chain_b2plus_v1"}
+    adapter.create_external_batch()
+    assert calls[-1]["dynamic_singleton_tree"] is True
+    assert calls[-1]["dynamic_tree_max_width"] == 1
+    assert adapter.execution_config(max_lanes=4, prefill_step=16)["batch_size_route"] == "tree15_b1_chain_b2plus_v1"
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        adapter.create_external_batch(dynamic_tree_max_width=4)
+
+
+def test_external_varlen_prefill_cohort_policy_moves_to_ingress(monkeypatch):
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
+    from mlx2.runtime import external_speculative
+
+    adapter = object.__new__(Qwen3827BAdapter)
+    adapter.model = object()
+    adapter.draft_model = object()
+    adapter.external_policy = {
+        "external_varlen_prefill": True,
+        "external_prefill_coalesce_ms": 250,
+        "external_prefill_coalesce_min_tokens": 256,
+    }
+    adapter.identity = {"fingerprint": "test"}
+    monkeypatch.setattr(Qwen3827BAdapter, "_initialize_external_feedback", lambda self: None)
+    monkeypatch.setattr(Qwen3827BAdapter, "_external_num_draft", lambda self: 4)
+    monkeypatch.setattr(
+        Qwen3827BAdapter,
+        "_external_execution_config",
+        lambda self, **kwargs: {"route": "chain"},
+    )
+    calls = []
+    monkeypatch.setattr(
+        external_speculative,
+        "ExternalDraftBatchGenerator",
+        lambda *args, **kwargs: calls.append(kwargs) or object(),
+    )
+
+    adapter.create_external_batch()
+    assert calls[-1]["external_varlen_prefill"] is True
+    assert calls[-1]["external_prefill_coalesce_ms"] == 0
+    assert calls[-1]["external_prefill_coalesce_min_tokens"] == 256
+    config = adapter.execution_config(max_lanes=4, prefill_step=16)
+    assert config["external_varlen_prefill"] == {
+        "enabled": True,
+        "schema": "mlx2.external-varlen-prefill.v1",
+        "law": "right-padded-target-prefill-merge-private-extract-live",
+    }
+    assert config["ingress_cohort"] == {
+        "enabled": True,
+        "mechanism": "external_varlen_prefill",
+        "maximum_wait_ms": 250,
+        "minimum_prompt_tokens": 256,
+        "target_lanes": 4,
+    }
+
+
+def test_external_execution_config_normalizes_pairwise_and_adaptive_policy():
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
+
+    adapter = object.__new__(Qwen3827BAdapter)
+    adapter.draft_model = object()
+    adapter.external_policy = {"num_draft": 2}
+    baseline = adapter.execution_config(max_lanes=4, prefill_step=16)
+    assert "pairwise_selection" not in baseline
+    assert "adaptive_verification" not in baseline
+    assert "external_varlen_prefill" not in baseline
+    assert "ingress_cohort" not in baseline
+
+    adapter.external_policy = {
+        "num_draft": 2,
+        "pairwise_selection": "host",
+    }
+    assert "pairwise_selection" not in adapter.execution_config(
+        max_lanes=4, prefill_step=16
+    )
+
+    adapter.external_policy = {
+        "num_draft": 2,
+        "pairwise_selection": "batched",
+        "adaptive_verification": {
+            "verification_costs": [1, 2, 4],
+            "mode": "per_request",
+        },
+    }
+    selected = adapter.execution_config(max_lanes=4, prefill_step=16)
+    assert selected["pairwise_selection"] == "batched"
+    adaptive = selected["adaptive_verification"]
+    assert adaptive["verification_costs"] == [1.0, 2.0, 4.0]
+    assert adaptive["verification_costs_by_cohort"] == []
+    assert adaptive["continuation_costs"] == []
+    assert adaptive["draft_cost"] == 0.0
+    assert adaptive["min_gain"] == 0.05
+    assert adaptive["mode"] == "per_request"
+
+    adapter.varlen_dense_mlp = object()
+    adapter.external_policy["external_varlen_prefill"] = True
+    numerics = adapter._external_execution_numerics()
+    assert numerics["external_varlen_prefill"] == {
+        "schema": "mlx2.external-varlen-prefill.v1",
+        "law": "right-padded-target-prefill-merge-private-extract-live",
+    }
+    assert numerics["external_adaptive_verification"] == {
+        "algorithm": "exact-chain-adaptive-target-verify-width-v1",
+        "policy": adaptive,
+    }
+
+
+def test_external_varlen_prefill_has_a_distinct_counter_free_identity():
+    from mlx2.runtime.prefill_plan import (
+        EXTERNAL_VARLEN_PREFILL_IDENTITY,
+        apc_prefill_fingerprint,
+        execution_identity,
+    )
+
+    off = execution_identity()
+    on = execution_identity(
+        external_varlen_prefill=EXTERNAL_VARLEN_PREFILL_IDENTITY
+    )
+    assert off is None
+    assert on == {
+        "version": 1,
+        "external_varlen_prefill": {
+            "schema": "mlx2.external-varlen-prefill.v1",
+            "law": "right-padded-target-prefill-merge-private-extract-live",
+        },
+    }
+    assert apc_prefill_fingerprint("base", off) != apc_prefill_fingerprint(
+        "base", on
+    )
+
+
+def test_explicit_b1_route_receipt_names_policy_and_remains_unqualified():
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    route = SimpleNamespace(model=object(), dynamic_singleton_tree=True,
+                            dynamic_tree_max_width=1, _auto_active_width=1,
+                            _auto_cohort_width=1, draft_topology="tree15",
+                            target_execution="tensorfold", tensorfold_cohort_limit=1,
+                            scheduler_stats={"external_tensorfold_cohort_max_width": 1,
+                                             "external_tensorfold_cohort_rounds": 0})
+    receipt = ExternalDraftBatchGenerator._target_execution_receipt(route)["batch_size_route"]
+    assert receipt == {"policy": "tree15_b1_chain_b2plus_v1", "max_tree_width": 1,
+                       "active_lanes": 1, "cohort_width": 1,
+                       "current": "tree15_tensorfold", "qualified": False}
+
+
+def test_tree_topology_override_requires_explicit_route_before_artifact_load(tmp_path, monkeypatch):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+
+    target, draft = _write_artifacts(tmp_path)
+    policy = _pins(target, draft)
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(tmp_path / "unused"))
+    assert inspect_external_policy(policy, target)["args"].block_size == 8
+    monkeypatch.setenv("MLX2_DFLASH_TOPOLOGY", "tree15")
+    with pytest.raises(ValueError, match="explicit batch_size_route"):
+        inspect_external_policy(policy, target)
 
 
 @pytest.mark.parametrize("key", ["draft_revision", "target_revision"])

@@ -173,6 +173,11 @@ assert 'mlx2.runtime.models.qwen38_27b' not in sys.modules
         ):
             with self.assertRaises(ValueError):
                 Qwen3827BAdapter("/nonexistent/artifact", execution_policy=policy)
+        with self.assertRaises(TypeError):
+            Qwen3827BAdapter(
+                "/nonexistent/artifact",
+                execution_policy={"varlen_dense_mlp": 1},
+            )
         adapter = object.__new__(Qwen3827BAdapter)
         adapter.descriptor = descriptor_for(has_mtp=False)
         config = adapter.execution_config(max_lanes=4, prefill_step=2048)

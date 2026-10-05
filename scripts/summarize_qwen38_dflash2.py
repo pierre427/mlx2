@@ -40,7 +40,10 @@ def load(paths):
     for path in paths:
         for line in Path(path).read_text().splitlines():
             record = json.loads(line)
-            (summaries if "summary" in record else cells).append(record)
+            if "summary" in record:
+                summaries.append(record)
+            elif "arm" in record and "rows" in record:
+                cells.append(record)
     return cells, summaries
 
 
@@ -73,7 +76,17 @@ def greedy_gate(cells):
     for cell in cells:
         if cell["arm"] == "ord" and cell["temperature"] == 0:
             for row in cell["rows"]:
-                reference[(cell["rep"], cell["workload"], cell["width"], row["prompt_index"])] = row
+                key = (
+                    cell["rep"],
+                    cell["workload"],
+                    cell["width"],
+                    row["prompt_index"],
+                )
+                if key in reference:
+                    raise ValueError(
+                        f"duplicate ordinary greedy reference for {key}"
+                    )
+                reference[key] = row
     results = []
     for cell in cells:
         if cell["arm"] == "ord" or cell["temperature"] != 0:
@@ -81,11 +94,17 @@ def greedy_gate(cells):
         for row in cell["rows"]:
             key = (cell["rep"], cell["workload"], cell["width"], row["prompt_index"])
             ref = reference.get(key)
+            entry = {"arm": cell["arm"], "rep": cell["rep"], "workload": cell["workload"],
+                     "width": cell["width"], "prompt_index": row["prompt_index"]}
             if ref is None:
+                entry.update({
+                    "equal": False,
+                    "reason": "missing_ordinary_reference",
+                })
+                results.append(entry)
                 continue
             same = ref["output_sha256"] == row["output_sha256"]
-            entry = {"arm": cell["arm"], "rep": cell["rep"], "workload": cell["workload"],
-                     "width": cell["width"], "prompt_index": row["prompt_index"], "equal": same}
+            entry["equal"] = same
             if not same:
                 a, b = ref["output"], row["output"]
                 common = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
