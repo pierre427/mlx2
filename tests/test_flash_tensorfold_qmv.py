@@ -10,13 +10,13 @@ from mlx2.runtime.models.flash_tensorfold_qmv import (
 )
 
 
-def _quantized():
+def _quantized(bits=4):
     prior = mx.default_device()
     try:
         mx.set_default_device(mx.cpu)
         linear = nn.Linear(512, 128, bias=False)
         linear.weight = linear.weight.astype(mx.bfloat16)
-        quantized = nn.QuantizedLinear.from_linear(linear, group_size=64, bits=4)
+        quantized = nn.QuantizedLinear.from_linear(linear, group_size=64, bits=bits)
         mx.eval(quantized.parameters())
         return quantized
     finally:
@@ -48,3 +48,14 @@ def test_installer_skips_file_backed_ple_and_experts():
     assert type(model.dense) is TensorFoldQMVLinear
     assert type(model.ple.table) is nn.QuantizedLinear
     assert type(model.switch_mlp.gate) is nn.QuantizedLinear
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_installer_accepts_affine_q4_and_q8(bits):
+    model = nn.Module()
+    model.dense = _quantized(bits)
+    assert eligible(model.dense)
+    receipt = install(model)
+    assert receipt["installed"] == 1
+    assert receipt["kernel"] == "qmv_rows_q4q8g64"
+    assert type(model.dense) is TensorFoldQMVLinear

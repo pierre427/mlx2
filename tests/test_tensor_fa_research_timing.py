@@ -652,6 +652,10 @@ def test_admission_reuses_the_qualifier_admission_first(monkeypatch):
 
 
 def test_admission_requires_timing_files_committed_and_unchanged(monkeypatch):
+    missing = [rel for rel in T.TIMING_FILES if not (T.ROOT / rel).is_file()]
+    if missing:
+        pytest.skip(f"timing file absent: {missing[0]} (private provenance is not "
+                    "exported to the public mirror)")
     base = {"commit": "a" * 40, "source_expected": {}, "mlx_files_before": {}}
     monkeypatch.setattr(Q, "native_admission", lambda a, e: dict(base))
     monkeypatch.setattr(Q, "_git", lambda *a: None)

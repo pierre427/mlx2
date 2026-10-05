@@ -496,7 +496,11 @@ def test_layout_contract_is_declared_not_verified():
     assert plan.layout_contract["row_contiguity_host_verified"] is False
     assert "measured separately" in plan.layout_contract["materialization"]
     assert "cannot prove" in plan.layout_contract["key_set"]
-    prov = (ROOT / "provenance/tensor-fa-research.json").read_text().lower()
+    prov_path = ROOT / "provenance/tensor-fa-research.json"
+    if not prov_path.is_file():
+        pytest.skip("private provenance absent: provenance/tensor-fa-research.json "
+                    "(the host-side layout contract above was still checked)")
+    prov = prov_path.read_text().lower()
     assert "strided arrays refused" not in prov and "stride cases refused" not in prov
     assert "row_contiguity_host_verified" in prov
 

@@ -110,6 +110,36 @@ def eligible(module):
     )
 
 
+def native_eligible(module):
+    """Native grouped QMM supports validated affine q4/q8 group-64 tables."""
+    if not isinstance(module, nn.QuantizedLinear):
+        return False
+    bits = getattr(module, "bits", None)
+    group_size = getattr(module, "group_size", None)
+    if bits not in (4, 8) or group_size != 64:
+        return False
+    if getattr(module, "mode", "affine") != "affine":
+        return False
+    w, s, b = module.weight, module.scales, module.biases
+    if w.ndim != 2 or s.ndim != 2 or b.shape != s.shape:
+        return False
+    n, packed_k = w.shape
+    values_per_word = 32 // bits
+    k = packed_k * values_per_word
+    return (
+        n > 0
+        and k > 0
+        and k % group_size == 0
+        and s.shape == (n, k // group_size)
+        and w.dtype == mx.uint32
+        and s.dtype == b.dtype == mx.bfloat16
+        and (
+            "bias" not in module
+            or (module.bias.shape == (n,) and module.bias.dtype == mx.bfloat16)
+        )
+    )
+
+
 def project(x, modules):
     """Project arbitrary prefill rows, with masked M/N tails and fused bias."""
     modules = tuple(modules)
@@ -167,6 +197,15 @@ class PackedProjectionGroup:
 
     def __init__(self, modules):
         modules = tuple(modules)
+        if not modules or any(not native_eligible(module) for module in modules):
+            raise ValueError("native packed projections require affine q4/q8 group-64")
+        formats = {
+            (module.bits, module.group_size, getattr(module, "mode", "affine"))
+            for module in modules
+        }
+        if len(formats) != 1:
+            raise ValueError("native packed projections require one quantization format")
+        self.bits, self.group_size, self.mode = formats.pop()
         self.widths = tuple(int(m.weight.shape[0]) for m in modules)
         self.weight, self.scales, self.biases = (
             mx.concatenate([getattr(m, key) for m in modules], axis=0)
@@ -198,8 +237,9 @@ class PackedProjectionGroup:
             scales=self.scales,
             biases=self.biases,
             transpose=True,
-            group_size=64,
-            bits=4,
+            group_size=self.group_size,
+            bits=self.bits,
+            mode=self.mode,
         )
         cuts, total = [], 0
         for n in self.widths[:-1]:
@@ -261,7 +301,8 @@ def fused_mlp(layer, x):
     ):
         return None
     gate, up = layer.gate_proj, layer.up_proj
-    if not eligible(gate) or not eligible(up) or gate.weight.shape != up.weight.shape:
+    candidate = native_eligible if getattr(layer, "_prefill_backend", "metal") == "native" else eligible
+    if not candidate(gate) or not candidate(up) or gate.weight.shape != up.weight.shape:
         counts["swiglu_reference_calls"] += 1
         return None
     packed = getattr(layer, "_prefill_mlp_group", None)
@@ -313,7 +354,8 @@ def grouped_input(layer, x):
         return None
     names = ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
     modules = tuple(getattr(layer, name, None) for name in names)
-    if any(not eligible(m) for m in modules):
+    candidate = native_eligible if getattr(layer, "_prefill_backend", "metal") == "native" else eligible
+    if any(not candidate(m) for m in modules):
         counts["group_reference_calls"] += 1
         return None
     if getattr(layer, "_prefill_backend", "metal") == "native":
@@ -360,7 +402,7 @@ def install(model, *, backend="native"):
 
     counts = Counter()
     installed, groups, mlps = [], 0, 0
-    skip = {"switch_mlp", "shared_expert", "ple", "lm_head", "mtp_draft_head", "mtp"}
+    skip = {"switch_mlp", "ple", "lm_head", "mtp_draft_head", "mtp"}
     modules = list(model.named_modules())
     for name, module in modules:
         if skip.intersection(name.split(".")):
@@ -380,10 +422,11 @@ def install(model, *, backend="native"):
             installed.append(name)
         if isinstance(module, (DenseDecoder, FlashDecoder)):
             module.__class__ = _scoped_decoder_type(type(module))
+        candidate = native_eligible if backend == "native" else eligible
         if isinstance(module, GatedDeltaNet) and all(
             type(getattr(module, part, None))
             in (nn.QuantizedLinear, TensorFoldQMVLinear)
-            and eligible(getattr(module, part))
+            and candidate(getattr(module, part))
             for part in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
         ):
             object.__setattr__(module, "_prefill_counts", counts)
@@ -410,7 +453,7 @@ def install(model, *, backend="native"):
         if isinstance(module, Qwen3NextMLP) and all(
             type(getattr(module, part, None))
             in (nn.QuantizedLinear, TensorFoldQMVLinear)
-            and eligible(getattr(module, part))
+            and candidate(getattr(module, part))
             for part in ("gate_proj", "up_proj")
         ):
             # Only the explicit Qwen3NextMLP hook consumes this marker.
@@ -431,7 +474,7 @@ def install(model, *, backend="native"):
     return {
         "kernel": "q4g64_prefill_m32n64k64_nax"
         if backend == "metal"
-        else "q4g64_prefill_native_qkv_z_swiglu",
+        else "q4q8g64_prefill_native_qkv_z_swiglu",
         "installed": len(installed),
         "grouped_layers": groups,
         "mlp_layers": mlps,

@@ -12,12 +12,12 @@ from mlx2.runtime.models import tensorfold_prefill as prefill
 from mlx2.runtime.prefill_plan import prefill_rows, recurrence_segments
 
 
-def quantized(k=64, n=33, bias=False):
+def quantized(k=64, n=33, bias=False, bits=4):
     layer = nn.Linear(k, n, bias=bias)
     layer.weight = layer.weight.astype(mx.bfloat16)
     if bias:
         layer.bias = layer.bias.astype(mx.bfloat16)
-    return nn.QuantizedLinear.from_linear(layer, group_size=64, bits=4)
+    return nn.QuantizedLinear.from_linear(layer, group_size=64, bits=bits)
 
 
 @pytest.mark.parametrize("alignment", [8, 16])
@@ -154,6 +154,19 @@ def test_packed_native_group_replaces_weights_with_views_and_invalidates_on_relo
         assert mx.array_equal(a, b).item()
     modules[0].weight = mx.zeros_like(modules[0].weight)
     assert not group.matches(modules)
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_packed_native_group_preserves_q4_and_q8_outputs(bits):
+    modules = [quantized(k=128, n=65, bits=bits), quantized(k=128, n=17, bits=bits)]
+    x = mx.random.normal((2, 73, 128)).astype(mx.bfloat16)
+    reference = [module(x) for module in modules]
+    group = prefill.PackedProjectionGroup(modules)
+    assert group.bits == bits
+    assert group.group_size == 64
+    assert prefill.native_eligible(modules[0])
+    for actual, expected in zip(group(x, modules), reference):
+        assert mx.array_equal(actual, expected).item()
 
 
 def test_gdn_candidate_policy_rejects_dead_and_invalid_knobs():

@@ -127,6 +127,14 @@ def _git_ok(head="a" * 40, status=b"", blobs=True):
 ENV = {"MLX2_INTAKE_SOURCE_COMMIT": "a" * 40}
 
 
+def _require_sources():
+    """Admission past the blob check needs every Q.SOURCE_FILES file, two of
+    which are private provenance records not exported to the public mirror."""
+    missing = [rel for rel in Q.SOURCE_FILES if not (Q.ROOT / rel).is_file()]
+    if missing:
+        pytest.skip(f"bound source absent: {missing[0]} (private provenance)")
+
+
 @pytest.mark.parametrize("args,env,git,reason", [
     (_args(run_native=False), ENV, _git_ok(), "no CPU fallback"),
     (_args(i_own_the_gpu=False), ENV, _git_ok(), "acknowledgement"),
@@ -144,12 +152,14 @@ def test_native_admission_refuses_before_any_mlx_or_device(monkeypatch, args, en
     monkeypatch.setattr(Q, "_git", git)
     monkeypatch.setattr(Q, "mlx_files", _forbid("mlx_files before git/source checks"))
     if reason in ("--out is required", "refusing to overwrite"):
+        _require_sources()
         monkeypatch.setattr(Q, "mlx_files", lambda: {"f": "0" * 64})
     with pytest.raises(Q.Refused, match=reason):
         Q.native_admission(args, env)
 
 
 def test_working_source_must_equal_head_blobs(monkeypatch):
+    _require_sources()
     git = _git_ok()
 
     def tampered(*args):
