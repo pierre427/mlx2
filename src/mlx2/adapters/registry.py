@@ -103,6 +103,9 @@ ADAPTER_DEFAULT_POLICY_KEYS = frozenset(
         "self_mtp_copy_draft",
         "prefill_scheduling",
         "host_memory_signals",
+        # Publication order only (decode tokens before the round's prefill
+        # phase); device work and token math are unchanged.
+        "decode_first",
     }
 )
 # The subset that snapshots hybrid state; the engine refuses these on

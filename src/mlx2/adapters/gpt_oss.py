@@ -127,13 +127,29 @@ def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> 
     required = {"model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"}
     for layer in range(n):
         prefix = f"model.layers.{layer}."
-        required.update({prefix + "self_attn.q_proj.weight", prefix + "self_attn.sinks", prefix + "mlp.router.weight"})
+        required.update(prefix + name for name in (
+            "input_layernorm.weight", "post_attention_layernorm.weight",
+            "self_attn.sinks", "mlp.router.weight", "mlp.router.bias",
+            "self_attn.q_proj.weight", "self_attn.q_proj.bias",
+            "self_attn.k_proj.weight", "self_attn.k_proj.bias",
+            "self_attn.v_proj.weight", "self_attn.v_proj.bias",
+            "self_attn.o_proj.weight", "self_attn.o_proj.bias",
+        ))
         if model_type == "gpt_oss_puzzle":
-            required.add(prefix + "mlp.experts.gate_proj.weight")
+            required.update(prefix + "mlp.experts." + name for name in (
+                "gate_proj.weight", "gate_proj.scales", "gate_proj.bias",
+                "up_proj.weight", "up_proj.scales", "up_proj.bias",
+                "down_proj.weight", "down_proj.scales", "down_proj.bias",
+            ))
         else:
-            required.add(prefix + "mlp.experts.gate_up_proj_blocks")
+            required.update(prefix + "mlp.experts." + name for name in (
+                "gate_up_proj_blocks", "gate_up_proj_scales",
+                "gate_up_proj_bias", "down_proj_blocks",
+                "down_proj_scales", "down_proj_bias",
+            ))
     if not required <= weight_map.keys():
-        raise ValueError("GPT-OSS indexed tensor topology is incomplete")
+        missing = sorted(required - weight_map.keys())
+        raise ValueError(f"GPT-OSS indexed tensor topology is incomplete: {missing[0]}")
     if any(marker in key.lower() for key in weight_map for marker in ("mtp.", "draft.")):
         raise ValueError("GPT-OSS target index contains speculative tensors")
     names = sorted(set(weight_map.values()))

@@ -19,7 +19,7 @@ from .deepseek_v4_vision_layout import (
 )
 
 
-SOURCE_ROOT = "~/Desktop/mlx-uag/worktrees/agnes-vlm-support"
+SOURCE_ROOT = str(Path.home() / "Desktop/mlx-uag/worktrees/agnes-vlm-support")
 SOURCE_REVISION = "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5"
 SOURCE_PATHS = (
     "mlx_vlm/models/deepseek_v4", "mlx_vlm/generate/dispatch.py",

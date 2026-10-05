@@ -325,6 +325,60 @@ def test_execution_policy_has_no_hidden_legacy_fallback():
         NorthMiniCodeAdapter("/missing", execution_policy={"num_draft": 2})
 
 
+def test_north_claims_shared_moe_modes_and_releases_them(monkeypatch):
+    from mlx2.adapters import process_globals
+    from mlx2.runtime.models import moe_nax_gather, switch_layers
+
+    monkeypatch.setattr(process_globals, "_HOLDERS", {})
+    monkeypatch.setattr(process_globals, "_PENDING", {})
+    monkeypatch.setattr(moe_nax_gather, "MODE", "fused")
+    monkeypatch.setattr(switch_layers, "_RHS_PAD_POLICY", "adaptive")
+    north = object.__new__(NorthMiniCodeAdapter)
+
+    process_globals.guarded_construction(north, north._claim_moe_globals)
+    assert moe_nax_gather.MODE == "off"
+    assert switch_layers._RHS_PAD_POLICY == "floor"
+    assert process_globals.live_selections() == [
+        ("the North Mini Code adapter", {
+            "moe_nax_gather": "off", "moe_rhs_pad_policy": "floor"
+        })
+    ]
+    other = object.__new__(NorthMiniCodeAdapter)
+    with pytest.raises(process_globals.ProcessGlobalConflict):
+        process_globals.guarded_construction(
+            other,
+            lambda: process_globals.claim(
+                other, "competing adapter", {
+                    "moe_nax_gather": ("fused", moe_nax_gather.set_mode)
+                }
+            ),
+        )
+    assert moe_nax_gather.MODE == "off"
+    north.close()
+    assert process_globals.live_selections() == []
+
+
+def test_north_failed_moe_claim_rolls_back_process_modes(monkeypatch):
+    from mlx2.adapters import process_globals
+    from mlx2.runtime.models import moe_nax_gather, switch_layers
+
+    monkeypatch.setattr(process_globals, "_HOLDERS", {})
+    monkeypatch.setattr(process_globals, "_PENDING", {})
+    monkeypatch.setattr(moe_nax_gather, "MODE", "fused")
+    monkeypatch.setattr(switch_layers, "_RHS_PAD_POLICY", "adaptive")
+    north = object.__new__(NorthMiniCodeAdapter)
+
+    def fail_after_claim():
+        north._claim_moe_globals()
+        raise RuntimeError("stub load failed")
+
+    with pytest.raises(RuntimeError, match="stub load failed"):
+        process_globals.guarded_construction(north, fail_after_claim)
+    assert moe_nax_gather.MODE == "fused"
+    assert switch_layers._RHS_PAD_POLICY == "adaptive"
+    assert process_globals.live_selections() == []
+
+
 def test_prompt_policy_uses_native_north_controls_only():
     class Tokenizer:
         def apply_chat_template(self, messages, **kwargs):

@@ -15,6 +15,7 @@ _GDN_FUSED_MAX_ROWS = 8
 # Opt-in: stage a one-graph per-row rollback that takes the accepted count as
 # a device array (see GatedDeltaNet._masked_rollback).
 from .import_env import snapshot as _import_env_snapshot
+from ..ragged_verify_observation import current_observer, observed_stage
 
 _import_env_snapshot(__name__)
 _GDN_ARRAY_ACCEPT = os.environ.get("MLX_LM_GDN_ARRAY_ACCEPT") == "1"
@@ -225,12 +226,37 @@ class GatedDeltaNet(nn.Module):
         (B, S, _) = inputs.shape
         if self.sharding_group is not None:
             inputs = sum_gradients(self.sharding_group)(inputs)
-        (qkv, z, b, a) = self._input_projections(inputs)
-        fused = self._try_fused_decode(qkv, z, b, a, mask, cache)
+        rows = B * S
+        observer = current_observer()
+        if observer is None:
+            (qkv, z, b, a) = self._input_projections(inputs)
+        else:
+            with observed_stage("gdn.input_projections", rows=rows) as materialize:
+                (qkv, z, b, a) = self._input_projections(inputs)
+                materialize(qkv, z, b, a)
+        if observer is None:
+            fused = self._try_fused_decode(qkv, z, b, a, mask, cache)
+        else:
+            with observed_stage("gdn.fused", rows=rows) as materialize:
+                fused = self._try_fused_decode(qkv, z, b, a, mask, cache)
+                if fused is not None:
+                    materialize(fused)
         if fused is not None:
             return fused
-        out = self._recurrent_core(qkv, z, b, a, mask, cache, dtype=inputs.dtype)
-        out = self.out_proj(out.reshape(B, S, -1))
+        if observer is None:
+            out = self._recurrent_core(
+                qkv, z, b, a, mask, cache, dtype=inputs.dtype
+            )
+            out = self.out_proj(out.reshape(B, S, -1))
+        else:
+            with observed_stage("gdn.recurrent", rows=rows) as materialize:
+                out = self._recurrent_core(
+                    qkv, z, b, a, mask, cache, dtype=inputs.dtype
+                )
+                materialize(out)
+            with observed_stage("gdn.out_projection", rows=rows) as materialize:
+                out = self.out_proj(out.reshape(B, S, -1))
+                materialize(out)
         if self.sharding_group is not None:
             out = mx.distributed.all_sum(out, group=self.sharding_group)
         return out
@@ -347,7 +373,16 @@ class GatedDeltaNet(nn.Module):
         """
         if self.sharding_group is not None:
             raise ValueError("mixed forward is not qualified with tensor sharding")
-        (qkv, z, b, a) = self._input_projections(inputs)
+        observer = current_observer()
+        packed_rows = inputs.shape[0] * inputs.shape[1]
+        if observer is None:
+            (qkv, z, b, a) = self._input_projections(inputs)
+        else:
+            with observed_stage(
+                "gdn.input_projections", rows=packed_rows
+            ) as materialize:
+                (qkv, z, b, a) = self._input_projections(inputs)
+                materialize(qkv, z, b, a)
         outs = []
         for rows, length, start, cache, mask in parts:
             if bool(getattr(cache, "speculating", False)):
@@ -357,8 +392,87 @@ class GatedDeltaNet(nn.Module):
             def seg(t):
                 return t[:, span].reshape(rows, length, -1)
 
-            out = self._recurrent_core(
-                seg(qkv), seg(z), seg(b), seg(a), mask, cache, dtype=inputs.dtype
-            )
+            if observer is None:
+                out = self._recurrent_core(
+                    seg(qkv), seg(z), seg(b), seg(a), mask, cache, dtype=inputs.dtype
+                )
+            else:
+                with observed_stage(
+                    "gdn.recurrent", rows=rows * length
+                ) as materialize:
+                    out = self._recurrent_core(
+                        seg(qkv), seg(z), seg(b), seg(a), mask, cache,
+                        dtype=inputs.dtype,
+                    )
+                    materialize(out)
             outs.append(out.reshape(1, rows * length, -1))
-        return self.out_proj(mx.concatenate(outs, axis=1))
+        joined = mx.concatenate(outs, axis=1)
+        if observer is None:
+            return self.out_proj(joined)
+        with observed_stage(
+            "gdn.out_projection", rows=packed_rows
+        ) as materialize:
+            output = self.out_proj(joined)
+            materialize(output)
+        return output
+
+    def mixed_materialized(self, inputs, parts, *, materialize):
+        """Same full-row projections/core law with bounded segment roots.
+
+        The explicit research caller owns evaluation and failure roots. No
+        cache boundary becomes public here. Ordinary ``mixed`` is unchanged.
+        """
+        if (self.sharding_group is not None or hasattr(self, "_prefill_counts")
+                or not callable(materialize)):
+            raise ValueError("materialized mixed requires ordinary unsharded projection ownership")
+        plan=getattr(materialize,'gdn_wave_plan',None)
+        if plan is not None:
+            groups=plan['groups']
+            if (plan.get('segment_lengths')!=tuple(rows*length for rows,length,_,_,_ in parts) or
+                    tuple(i for group in groups for i in group)!=tuple(range(len(parts))) or
+                    any(not 1<=len(group)<=4 for group in groups) or
+                    any(rows!=1 or mask is not None for rows,_,_,_,mask in parts) or
+                    not callable(getattr(materialize,'retain_pending_roots',None))):
+                raise ValueError('GDN wave plan differs from exact segment order/mask')
+        dtype = inputs.dtype
+        qkv, z, b, a = self._input_projections(inputs)
+        materialize("gdn_projections", qkv, z, b, a)
+        del inputs
+        outs = []
+        if plan is None:
+            for rows, length, start, cache, mask in parts:
+                if bool(getattr(cache, "speculating", False)):
+                    raise ValueError("materialized mixed forbids speculative cache")
+                span = slice(start, start + rows * length)
+                def seg(t):
+                    return t[:, span].reshape(rows, length, -1)
+                out = self._recurrent_core(
+                    seg(qkv), seg(z), seg(b), seg(a), mask, cache, dtype=dtype)
+                materialize("gdn_segment", out, *(v for v in cache.cache if v is not None))
+                outs.append(out.reshape(1, rows * length, -1))
+        else:
+            for group in groups:
+                wave_roots=[]
+                for index in group:
+                    materialize.retain_pending_roots(qkv,z,b,a,*outs,
+                        *(v for _,_,_,c,_ in parts for v in c.cache if v is not None))
+                    rows,length,start,cache,mask=parts[index]
+                    if bool(getattr(cache, "speculating", False)):
+                        raise ValueError("materialized mixed forbids speculative cache")
+                    span = slice(start, start + rows * length)
+                    def seg(t):
+                        return t[:, span].reshape(rows, length, -1)
+                    out = self._recurrent_core(
+                        seg(qkv), seg(z), seg(b), seg(a), mask, cache, dtype=dtype)
+                    outs.append(out.reshape(1, rows * length, -1))
+                    wave_roots.extend((out,*(v for v in cache.cache if v is not None)))
+                    materialize.retain_pending_roots(qkv,z,b,a,*outs,
+                        *(v for _,_,_,c,_ in parts for v in c.cache if v is not None))
+                materialize("gdn_segment_wave", *wave_roots)
+        del qkv, z, b, a
+        packed = mx.concatenate(outs, axis=1)
+        materialize("gdn_join", packed)
+        del outs
+        result = self.out_proj(packed)
+        materialize("gdn_output", result)
+        return result

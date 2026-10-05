@@ -725,7 +725,29 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
 
         return NorthCacheBudget.from_config(self.config, mtp=mtp)
 
+    def _claim_moe_globals(self):
+        """Pin the shared SwitchGLU kernel choices for this live model."""
+        from ..runtime.models import moe_nax_gather, switch_layers
+        from .process_globals import MOE_NAX_GATHER, MOE_RHS_PAD_POLICY, claim
+
+        self._process_claim = claim(
+            self,
+            "the North Mini Code adapter",
+            {
+                MOE_NAX_GATHER: ("off", moe_nax_gather.set_mode),
+                MOE_RHS_PAD_POLICY: ("floor", switch_layers.set_pad_policy),
+            },
+        )
+
     def __init__(self, model_path: str, *, execution_policy=None):
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self,
+            lambda: self._init_north(model_path, execution_policy=execution_policy),
+        )
+
+    def _init_north(self, model_path: str, *, execution_policy=None):
         external = self._parse_external_policy(execution_policy, family="North")
         artifact = inspect_artifact(model_path)
         draft_record = None
@@ -742,6 +764,12 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
         self.identity = artifact["identity"]
         self.config = artifact["config"]
         self.environment = configure_environment()
+        # SwitchGLU consults both selectors on every routed expert forward.
+        # North has no measured NAX gain or calibrated adaptive pad table, so
+        # keep its ordinary path on stock gather and the shared floor policy.
+        # Claim both before loading tensors; another live adapter may not
+        # silently change North's math, including on an external draft route.
+        self._claim_moe_globals()
         self.layout = CACHE_LAYOUT
         path = Path(self.identity["path"])
         config = artifact["config"]
@@ -877,6 +905,9 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
 
     def close(self):
         """Release model ownership before the shared worker shuts down."""
+        from .process_globals import release
+
+        release(self)
 
         had_resources = any(
             getattr(self, name, None) is not None for name in ("model", "tokenizer")

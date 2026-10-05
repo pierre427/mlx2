@@ -102,6 +102,16 @@ def inspect_artifact(model_path: str | Path) -> dict:
         raise ValueError("Granite SWA per-layer rope (layer_rope_theta) is not implemented")
     if config.get("head_dim") not in (None, expected["hidden_size"] // expected["num_attention_heads"]):
         raise ValueError("Granite SWA head_dim differs from hidden_size / num_attention_heads")
+    # The port always uses SwiGLU, unbiased projections and ordinary global
+    # RoPE.  These same-shaped configuration changes otherwise load cleanly
+    # while changing the expected model math.
+    if config.get("hidden_act", "silu") != "silu" or config.get("mlp_bias", False):
+        raise ValueError("Granite SWA MLP activation or bias is not implemented")
+    if config.get("attention_bias", False):
+        raise ValueError("Granite SWA attention bias is not implemented")
+    rope = config.get("rope_parameters", {"rope_theta": 10000, "rope_type": "default"})
+    if config.get("rope_scaling") is not None or rope != {"rope_theta": 10000, "rope_type": "default"}:
+        raise ValueError("Granite SWA RoPE variant is not implemented")
     layers = config.get("layer_types")
     if layers != ["full_attention" if i in (0, 3, 7, 11, 15, 19, 23, 27)
                   else "sliding_attention" for i in range(28)]:

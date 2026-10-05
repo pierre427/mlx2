@@ -585,8 +585,8 @@ class LFM25VLAdapter:
         processed = self.processor(text=prompt, images=images, return_tensors="np")
         ids, kwargs = _ids_and_kwargs(processed)
         positions = [i for i, token in enumerate(ids) if token == self.identity["image_token_id"]]
-        if not positions:
-            raise ValueError("LFM processor produced no image placeholders")
+        if len(positions) != len(images):
+            raise ValueError("LFM processor image placeholders do not match resolved media")
         if positions[-1] >= len(ids) - 1:
             # PromptBatch.generate holds the final prompt token as its decode
             # anchor.  It cannot pass image features to that separate forward.

@@ -77,8 +77,11 @@ def inspect_artifact(model_path: str | Path) -> dict:
         required.add(prefix + "self_attn.q_proj.weight")
         required.add(prefix + "self_attn.o_proj.weight")
         if i:
-            required.add(prefix + "mlp.shared_expert.gate_proj.weight")
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                required.add(prefix + f"mlp.shared_expert.{projection}.weight")
             required.add(prefix + ("mlp.gate.proj.weight" if quant else "mlp.gate.weight"))
+            required.add(prefix + ("mlp.gate.e_score_correction_bias" if quant
+                                   else "mlp.experts.e_score_correction_bias"))
             if quant:
                 for projection in ("gate_proj", "up_proj", "down_proj"):
                     for suffix in ("weight", "scales", "biases"):

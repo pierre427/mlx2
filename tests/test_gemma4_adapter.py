@@ -32,6 +32,7 @@ def _artifact(path, *, sparse):
             "enable_moe_block": sparse,
             "num_experts": 128 if sparse else None,
             "sliding_window": 1024,
+            "num_kv_shared_layers": 0,
             "max_position_embeddings": 262144,
             "layer_types": [
                 "full_attention" if index % 6 == 5 else "sliding_attention"
@@ -85,11 +86,37 @@ def test_conversion_provenance_must_match_resolved_variant(tmp_path):
     config = _artifact(tmp_path, sparse=False)
     config["quantization"] = {"bits": 8, "group_size": 64, "mode": "affine"}
     (tmp_path / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="source provenance is required"):
+        inspect_gemma4_artifact(tmp_path)
     (tmp_path / "source-and-quantization.json").write_text(json.dumps({
         "source_repo": "google/gemma-4-26B-A4B",
         "source_revision": "24548b62aa021d562695c04aaf7758a1ea47990b",
     }))
     with pytest.raises(ValueError, match="conversion source"):
+        inspect_gemma4_artifact(tmp_path)
+
+
+@pytest.mark.parametrize("change", [
+    lambda c: c["text_config"]["layer_types"].reverse(),
+    lambda c: c["text_config"].update(num_kv_shared_layers=20),
+    lambda c: c["text_config"].pop("num_kv_shared_layers"),
+])
+def test_mismatched_cache_layout_fails_before_load(tmp_path, change):
+    config = _artifact(tmp_path, sparse=True)
+    change(config)
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="full/sliding attention layout"):
+        inspect_gemma4_artifact(tmp_path)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("vision_config", None), ("video_token_id", 7),
+])
+def test_mismatched_media_artifact_fails_before_load(tmp_path, field, value):
+    config = _artifact(tmp_path, sparse=False)
+    config[field] = value
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="Expected vision/video"):
         inspect_gemma4_artifact(tmp_path)
 
 

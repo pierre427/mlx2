@@ -114,6 +114,7 @@ def inspect_artifact(
         "linear_num_value_heads": 32,
         "linear_key_head_dim": 128,
         "linear_value_head_dim": 128,
+        "linear_conv_kernel_dim": 4,
     }
     if config.get("model_type") != "qwen3_5" or text.get("num_experts", 0):
         raise ValueError(f"Qwen3.5 {family} requires the dense qwen3_5 artifact layout")
@@ -178,6 +179,9 @@ class Qwen359BAdapter(Qwen3827BAdapter):
     """Ordinary-decode, text-only adapter for the dense Qwen3.5 9B artifact."""
 
     default_route = "ordinary"
+    fused_gdn_architecture = "qwen35"
+    # The parent 27B decode-first default has only been measured on 27B.
+    default_route_execution_policy = {}
     descriptor = QWEN35_9B
     artifact_inspector = staticmethod(inspect_artifact)
     descriptor_builder = staticmethod(descriptor_for)
@@ -356,7 +360,7 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         budget = Qwen38CacheBudget.from_config(
             self.model.args.text_config, mtp=False
         )
-        return _Qwen359BCacheBudget(budget)
+        return _Qwen35CacheBudget(budget, family="9b")
 
     def diagnostics(self):
         result = {
@@ -377,16 +381,17 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         return result
 
 
-class _Qwen359BCacheBudget:
-    """Naming wrapper around the shared dense Qwen3.5 geometry."""
+class _Qwen35CacheBudget:
+    """Family-specific receipt schema around shared dense Qwen3.5 geometry."""
 
-    def __init__(self, budget):
+    def __init__(self, budget, *, family):
         self._budget = budget
+        self._family = family
 
     def __getattr__(self, name):
         return getattr(self._budget, name)
 
     def as_dict(self):
         value = self._budget.as_dict()
-        value["schema"] = "qwen35-9b-cache-geometry-v1"
+        value["schema"] = f"qwen35-{self._family}-cache-geometry-v1"
         return value

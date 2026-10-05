@@ -8,7 +8,7 @@ from pathlib import Path
 from ._direct_mlx_vlm import load_backend, validate_media_paths
 
 
-SOURCE_ROOT = "~/Desktop/mlx-uag/mlx-vlm-qwen4-exp"
+SOURCE_ROOT = str(Path.home() / "Desktop/mlx-uag/mlx-vlm-qwen4-exp")
 SOURCE_REVISION = "653f1f13e238abb313fd45071bbd04b3de414635"
 SOURCE_PATHS = (
     "mlx_vlm/models/phi4mm", "mlx_vlm/generate/dispatch.py",

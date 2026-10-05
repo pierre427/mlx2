@@ -240,6 +240,9 @@ class SmolVLM2CandidateAdapter(PinnedVisionCandidateAdapter):
         prepared = super().prepare_multimodal_request(
             request, file_loader=file_loader
         )
+        if ("_mlx2_prefill_inputs" in prepared
+                and prepared["_mlx2_prefill_inputs"].get("pixel_values") is None):
+            raise ValueError("SmolVLM2 processor produced no image pixels for media prefill")
         if "_mlx2_prefill_inputs" in prepared and (
             prepared["_mlx2_media_token_end"] >= len(prepared["_mlx2_prompt_tokens"])
         ):

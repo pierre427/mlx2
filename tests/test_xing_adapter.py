@@ -68,7 +68,12 @@ def test_descriptor_tracks_embedded_mtp(tmp_path):
     assert with_mtp.default_route == "native_mtp"
     assert {Capability.MTP, Capability.SEGMENTED_MTP} <= with_mtp.descriptor.capabilities
     assert with_mtp.descriptor.cache_layout == xing.CACHE_LAYOUT
-    ordinary = inspect_model(_artifact(tmp_path / "b", mtp=False))
+    ordinary_config = {
+        **CONFIG,
+        "num_nextn_predict_layers": 0,
+        "mlx2_conversion": {**CONFIG["mlx2_conversion"], "mtp": False},
+    }
+    ordinary = inspect_model(_artifact(tmp_path / "b", config=ordinary_config, mtp=False))
     assert ordinary.default_route == "ordinary"
     assert Capability.MTP not in ordinary.descriptor.capabilities
     for capability in (Capability.APC_V2, Capability.PROMPT_LOOKUP, Capability.GRAMMAR,
@@ -96,6 +101,12 @@ def test_unconverted_or_incomplete_artifacts_fail_closed(tmp_path):
         xing.inspect_artifact(_artifact(tmp_path / "partial", mtp=False, extra_keys=MTP_KEYS[:2]))
     with pytest.raises(ValueError, match="disagree"):
         xing.inspect_artifact(_artifact(tmp_path / "count", config={**CONFIG, "num_nextn_predict_layers": 0}))
+    with pytest.raises(ValueError, match="disagree"):
+        xing.inspect_artifact(_artifact(tmp_path / "missing-head", mtp=False))
+    with pytest.raises(ValueError, match="disagree"):
+        xing.inspect_artifact(_artifact(tmp_path / "false-flag", config=_conversion(mtp=False)))
+    with pytest.raises(ValueError, match="disagree"):
+        xing.inspect_artifact(_artifact(tmp_path / "missing-flag", config=_conversion(mtp=None)))
     with pytest.raises(ValueError, match="tokenizer.json"):
         xing.inspect_artifact(_artifact(tmp_path / "tok", drop=("tokenizer.json",)))
     with pytest.raises(ValueError, match="parity"):

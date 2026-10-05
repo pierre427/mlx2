@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from .qwen35_9b import Qwen359BAdapter, configure_environment
+from .qwen35_9b import Qwen359BAdapter, _Qwen35CacheBudget, configure_environment
 from .qwen35_9b import inspect_artifact as inspect_dense_artifact
 
 
@@ -23,6 +23,7 @@ _TOPOLOGY = {
     "linear_num_value_heads": 32,
     "linear_key_head_dim": 128,
     "linear_value_head_dim": 128,
+    "linear_conv_kernel_dim": 4,
 }
 
 
@@ -81,6 +82,16 @@ class Qwen354BAdapter(Qwen359BAdapter):
         if mtp:
             raise ValueError("Qwen3.5 4B MTP is not implemented")
         return "qwen35-4b-apcv2-ordinary"
+
+    def cache_budget(self, *, mtp):
+        if mtp:
+            raise ValueError("Qwen3.5 4B MTP is not implemented")
+        from .qwen38_memory import Qwen38CacheBudget
+
+        budget = Qwen38CacheBudget.from_config(
+            self.model.args.text_config, mtp=False
+        )
+        return _Qwen35CacheBudget(budget, family="4b")
 
     def approximate_kv_operations(self):
         return {}

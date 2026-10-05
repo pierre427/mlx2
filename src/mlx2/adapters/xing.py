@@ -154,7 +154,8 @@ def inspect_artifact(model_path: str | Path) -> dict:
         raise ValueError(
             "Xing4.0 artifacts must be converted with scripts/convert_xing4_0.py"
         )
-    if int(config.get("num_nextn_predict_layers", 0)) not in (0, 1):
+    mtp_layers = config.get("num_nextn_predict_layers", 0)
+    if type(mtp_layers) is not int or mtp_layers not in (0, 1):
         raise ValueError("only the single-layer Xing4.0 MTP head is implemented")
     index = _load_json(path / "model.safetensors.index.json").get("weight_map")
     if not isinstance(index, dict) or not index:
@@ -172,6 +173,8 @@ def inspect_artifact(model_path: str | Path) -> dict:
         raise ValueError("unconverted Xing4.0 MTP tensors; rerun the converter")
     mtp_keys = [key for key in index if key.startswith("mtp.layers.0.")]
     has_mtp = bool(mtp_keys)
+    if mtp_layers != int(has_mtp) or type(conversion.get("mtp")) is not bool or conversion["mtp"] != has_mtp:
+        raise ValueError("Xing4.0 MTP head, configured layer count, and conversion metadata disagree")
     if has_mtp:
         required = {
             "mtp.layers.0.enorm.weight",
@@ -183,8 +186,6 @@ def inspect_artifact(model_path: str | Path) -> dict:
         }
         if not required <= set(index) or not any(k.startswith("mtp.layers.0.eh_proj.") for k in index):
             raise ValueError("embedded Xing4.0 MTP head is incomplete")
-        if int(config.get("num_nextn_predict_layers", 0)) != 1:
-            raise ValueError("MTP tensors and configured head count disagree")
         # Absence means "shared with the trunk" only when the converter proved
         # equality and recorded it; otherwise a missing tensor is a defect.
         for flag, key in (

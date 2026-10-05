@@ -12,6 +12,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.nn.layers.distributed import sum_gradients
 from .import_env import snapshot as _import_env_snapshot
+from ..ragged_verify_observation import current_observer, observed_stage
 
 _import_env_snapshot(__name__)
 from .activations import swiglu
@@ -1475,13 +1476,115 @@ class Qwen3NextMLP(nn.Module):
         self.up_proj = nn.Linear(dim, hidden_dim, bias=False)
 
     def __call__(self, x) -> mx.array:
+        from .varlen_dense_mlp import compact_rows
+
+        compacted = compact_rows(x)
+        if compacted is not None:
+            return compacted.restore(self(compacted.values))
         if hasattr(self, "_prefill_counts"):
             from .tensorfold_prefill import fused_mlp
 
             fused = fused_mlp(self, x)
             if fused is not None:
                 return fused
-        return self.down_proj(swiglu(self.gate_proj(x), self.up_proj(x)))
+        observer = current_observer()
+        if observer is None:
+            return self.down_proj(swiglu(self.gate_proj(x), self.up_proj(x)))
+        rows = x.shape[0] * x.shape[1]
+        with observed_stage("mlp.gate_up", rows=rows) as materialize:
+            gate = self.gate_proj(x)
+            up = self.up_proj(x)
+            materialize(gate, up)
+        with observed_stage("mlp.product", rows=rows) as materialize:
+            product = swiglu(gate, up)
+            materialize(product)
+        with observed_stage("mlp.down", rows=rows) as materialize:
+            output = self.down_proj(product)
+            materialize(output)
+        return output
+
+    def materialized(self, x, *, materialize):
+        """Source-selected full-row MLP with explicit bounded evaluation roots."""
+        if not callable(materialize) or hasattr(self, "_prefill_counts"):
+            raise ValueError("materialized dense MLP requires ordinary projection ownership")
+        mode = getattr(self, "_prefill_materialization_mode", "staged_qmm")
+        if mode not in (
+            "staged_qmm", "single_eval_qmm",
+            "staged_bf16", "single_eval_bf16",
+            "tiled_q4_swiglu", "packed_gate_up_qmm",
+        ):
+            raise ValueError("unknown materialized dense MLP experiment")
+        use_bf16 = mode.endswith("_bf16")
+        single_eval = mode.startswith("single_eval_")
+        project = _prefill_bf16_projection if use_bf16 else lambda module, value: module(value)
+        retain = getattr(materialize, "retain_pending_roots", None)
+        if callable(retain):
+            retain(x)
+        if mode == "tiled_q4_swiglu":
+            from .tensorfold_prefill import project_swiglu
+            from ..dense_mlp_geometry import infer_dense_glu_geometry
+            geometry = infer_dense_glu_geometry(self, self._prefill_mlp_semantics)
+            if geometry != self._prefill_mlp_geometry:
+                raise ValueError("loaded dense SwiGLU geometry changed after admission")
+            product = project_swiglu(x, self.gate_proj, self.up_proj)
+            materialize("mlp_tiled_gate_up_swiglu", product)
+            result = self.down_proj(product)
+            materialize("mlp_output", result)
+            return result
+        if mode == "packed_gate_up_qmm":
+            from .tensorfold_prefill import PackedProjectionGroup
+            from ..dense_mlp_geometry import infer_dense_glu_geometry
+            geometry = infer_dense_glu_geometry(self, self._prefill_mlp_semantics)
+            group = getattr(self, "_prefill_mlp_group", None)
+            if (
+                geometry != self._prefill_mlp_geometry
+                or not isinstance(group, PackedProjectionGroup)
+                or not group.matches((self.gate_proj, self.up_proj))
+            ):
+                raise ValueError("packed gate/up group differs from admitted geometry")
+            gate, up = group(x, (self.gate_proj, self.up_proj))
+            product = swiglu(gate, up)
+            materialize("mlp_packed_gate_up_swiglu", product)
+            result = self.down_proj(product)
+            materialize("mlp_output", result)
+            return result
+        gate, up = project(self.gate_proj, x), project(self.up_proj, x)
+        if callable(retain):
+            retain(x, gate, up)
+        if single_eval:
+            product = swiglu(gate, up)
+            if callable(retain):
+                retain(x, gate, up, product)
+            result = project(self.down_proj, product)
+            materialize("mlp_graph", result)
+            return result
+        materialize("mlp_projections", gate, up)
+        del x
+        product = swiglu(gate, up)
+        materialize("mlp_product", product)
+        del gate, up
+        result = project(self.down_proj, product)
+        materialize("mlp_output", result)
+        return result
+
+
+def _prefill_bf16_projection(module, x):
+    """Large-M research path: affine q4/g64 dequantization followed by BF16 GEMM."""
+    if (not isinstance(module, nn.QuantizedLinear) or
+            getattr(module, "group_size", None) != 64 or
+            getattr(module, "bits", None) != 4 or
+            getattr(module, "mode", None) != "affine" or
+            getattr(module, "biases", None) is None or
+            x.dtype != mx.bfloat16):
+        raise ValueError("BF16 prefill projection requires affine q4/g64 and BF16 input")
+    weight = mx.dequantize(
+        module.weight, scales=module.scales, biases=module.biases,
+        group_size=module.group_size, bits=module.bits, mode=module.mode)
+    result = x @ weight.T
+    if "bias" in module:
+        result = result + module.bias
+    return result
+
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
@@ -1621,6 +1724,11 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.moe_router_mode = mode
 
     def __call__(self, x: mx.array) -> mx.array:
+        from .varlen_dense_mlp import compact_rows
+
+        compacted = compact_rows(x, operation="sparse_moe")
+        if compacted is not None:
+            return compacted.restore(self(compacted.values))
         if self.sharding_group is not None:
             x = sum_gradients(self.sharding_group)(x)
         windowed = _try_moe_window(self, x)

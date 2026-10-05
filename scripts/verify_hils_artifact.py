@@ -172,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
             "last_modified": upstream.get("lastModified"),
             "local_path": str(source),
             "acquisition_command": [
-                "~/Desktop/mlx-uag/.venv/bin/hf",
+                str(Path.home() / "Desktop/mlx-uag/.venv/bin/hf"),
                 "download",
                 REPO_ID,
                 "--revision",

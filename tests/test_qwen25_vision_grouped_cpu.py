@@ -208,3 +208,40 @@ def test_adapter_candidate_flag_defaults_off_and_reports_engagement(monkeypatch)
     monkeypatch.setenv("MLX2_QWEN25_GROUPED_VISION_CANDIDATE", "yes")
     with pytest.raises(ValueError, match="must be 0 or 1"):
         qwen25_vl.Qwen25VLCandidateAdapter("ignored")
+
+
+@pytest.mark.parametrize("name,value", [
+    ("MLX2_QWEN25_GROUPED_VISION_CANDIDATE", "yes"),
+    ("MLX2_QWEN25_VISION_FEATURE_REUSE_CANDIDATE", "yes"),
+    ("MLX2_QWEN25_VISION_TOWER_REUSE_CANDIDATE", "yes"),
+])
+def test_invalid_candidate_flags_fail_before_model_load(monkeypatch, name, value):
+    from mlx2.adapters import qwen25_vl
+    from mlx2.adapters.pinned_vlm_candidate import PinnedVisionCandidateAdapter
+
+    loads = []
+    monkeypatch.setattr(PinnedVisionCandidateAdapter, "__init__",
+                        lambda *args, **kwargs: loads.append(args))
+    for flag in ("MLX2_QWEN25_GROUPED_VISION_CANDIDATE",
+                 "MLX2_QWEN25_VISION_FEATURE_REUSE_CANDIDATE",
+                 "MLX2_QWEN25_VISION_TOWER_REUSE_CANDIDATE"):
+        monkeypatch.delenv(flag, raising=False)
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=f"{name} must be 0 or 1"):
+        qwen25_vl.Qwen25VLCandidateAdapter("ignored")
+    assert loads == []
+
+
+def test_conflicting_reuse_scopes_fail_before_model_load(monkeypatch):
+    from mlx2.adapters import qwen25_vl
+    from mlx2.adapters.pinned_vlm_candidate import PinnedVisionCandidateAdapter
+
+    loads = []
+    monkeypatch.setattr(PinnedVisionCandidateAdapter, "__init__",
+                        lambda *args, **kwargs: loads.append(args))
+    monkeypatch.setenv("MLX2_QWEN25_GROUPED_VISION_CANDIDATE", "1")
+    monkeypatch.setenv("MLX2_QWEN25_VISION_FEATURE_REUSE_CANDIDATE", "1")
+    monkeypatch.setenv("MLX2_QWEN25_VISION_TOWER_REUSE_CANDIDATE", "1")
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        qwen25_vl.Qwen25VLCandidateAdapter("ignored")
+    assert loads == []

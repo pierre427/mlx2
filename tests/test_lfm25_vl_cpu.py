@@ -115,6 +115,17 @@ class LFM25VLCPUTest(unittest.TestCase):
         self.assertEqual(adapter.execution_config(max_lanes=1, prefill_step=2048)[
             "lfm_media_checkpoint"], "candidate_v1")
 
+    def test_default_route_and_unqualified_capabilities(self):
+        adapter = object.__new__(LFM25VLAdapter)
+        self.assertEqual(adapter.default_route, "ordinary")
+        self.assertEqual(adapter.execution_config(max_lanes=1, prefill_step=256)[
+            "lfm_shortconv"], "source")
+        with self.assertRaisesRegex(ValueError, "speculative route"):
+            adapter.profile_name(True)
+        with self.assertRaisesRegex(ValueError, "tool calling"):
+            adapter.output_parser({"tools": [{"type": "function"}]})
+        self.assertEqual(adapter.profile_name(False), "lfm25-vl-ordinary-candidate")
+
     def test_generic_media_boundary_rejects_an_adapter_outside_media_end(self):
         tokens = [10, 124907, 11, 12]
         request = {"_mlx2_media_token_end": 2}
@@ -256,6 +267,14 @@ class LFM25VLCPUTest(unittest.TestCase):
             self.assertEqual(resolve.call_args.kwargs["fps"], 1)
             self.assertEqual(resolve.call_args.kwargs["max_frames"], 16)
             self.assertEqual(fingerprint.call_args.kwargs["policy"]["video_fps"], 1)
+            original_call = Processor.__call__
+            def missing_frame_placeholder(self, **kwargs):
+                result = original_call(self, **kwargs)
+                result["input_ids"] = np.asarray([[10, image_token, 11, 12]])
+                return result
+            with patch.object(Processor, "__call__", missing_frame_placeholder):
+                with self.assertRaisesRegex(ValueError, "placeholders do not match"):
+                    adapter.prepare_multimodal_request(request)
         self.assertNotIn("mlx", sys.modules)
 
     def test_video_without_frames_is_rejected(self):

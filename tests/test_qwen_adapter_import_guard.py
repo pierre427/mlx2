@@ -135,6 +135,50 @@ def test_matching_profile_constructs(monkeypatch, tmp_path):
         _qwen27(monkeypatch, tmp_path)
 
 
+def test_qwen27_varlen_dense_mlp_policy_reaches_model_construction(
+    monkeypatch, tmp_path
+):
+    from mlx2.adapters.qwen38_27b import configure_environment
+
+    seen = configure_environment()
+    _latched(
+        monkeypatch,
+        {key: value for key, value in seen.items() if key.startswith(import_env.PREFIXES)},
+    )
+    with pytest.raises(_Loaded):
+        _qwen27(monkeypatch, tmp_path, {"varlen_dense_mlp": True})
+
+
+def test_qwen27_external_draft_preserves_target_varlen_policy(
+    monkeypatch, tmp_path
+):
+    from mlx2.adapters import qwen38_27b
+    from mlx2.adapters.qwen38_27b import configure_environment
+    from mlx2.runtime.models.varlen_dense_mlp import VarlenDenseMLPPolicy
+
+    seen = configure_environment()
+    _latched(
+        monkeypatch,
+        {key: value for key, value in seen.items() if key.startswith(import_env.PREFIXES)},
+    )
+    parsed = []
+    original = VarlenDenseMLPPolicy.from_value.__func__
+
+    def record(cls, value):
+        parsed.append(value)
+        return original(cls, value)
+
+    monkeypatch.setattr(VarlenDenseMLPPolicy, "from_value", classmethod(record))
+    monkeypatch.setattr(qwen38_27b, "inspect_external_policy", lambda *_a: {})
+    with pytest.raises(_Loaded):
+        _qwen27(
+            monkeypatch,
+            tmp_path,
+            {"draft_model": "draft", "varlen_dense_mlp": True},
+        )
+    assert parsed == [True]
+
+
 @pytest.mark.parametrize("latched,selected,expected", [
     (True, "0", "stock"),   # policy kill switch beats a stale "1" latch
     (False, "1", "fused"),  # a later selection takes effect without re-import
@@ -178,6 +222,24 @@ def test_explicit_tf32_is_refused_not_overwritten(monkeypatch, module):
     with pytest.raises(process_env.ProcessNumericsConflict, match="MLX_ENABLE_TF32"):
         configure()
     assert os.environ["MLX_ENABLE_TF32"] == "1"
+
+
+def test_standard_decoder_refuses_explicit_tf32(monkeypatch, tmp_path):
+    # The standard decoder pins no profile, so an explicit TF32 used to run
+    # unrecorded; it is refused like every pinned profile (flip 2026-10-02).
+    from mlx2.adapters import standard_decoder
+
+    def inspect(_path):
+        raise _Loaded
+
+    monkeypatch.setattr(standard_decoder, "inspect_artifact", inspect)
+    monkeypatch.setenv("MLX_ENABLE_TF32", "1")
+    with pytest.raises(process_env.ProcessNumericsConflict, match="standard decoder"):
+        standard_decoder.StandardDecoderAdapter(str(tmp_path))
+    monkeypatch.setenv("MLX_ENABLE_TF32", "0")
+    monkeypatch.setattr(process_env, "_EXPLICIT_AT_IMPORT", None)
+    with pytest.raises(_Loaded):
+        standard_decoder.StandardDecoderAdapter(str(tmp_path))
 
 
 def test_explicit_zero_and_default_are_accepted(monkeypatch):
@@ -316,3 +378,69 @@ def test_every_profile_that_spreads_process_numerics_is_covered():
     }
     assert spreading <= refusing, sorted(spreading - refusing)
     assert spreading == set(PROFILE_MODULES) | {"olmo_hils", "granite_swa"}
+
+
+def test_qwen36_routed_decode_default_steps_aside_for_the_candidate(monkeypatch, tmp_path):
+    # The default decode wins (flip 2026-10-02) must not turn an explicit
+    # historical-candidate selection into an exclusivity refusal.
+    from mlx2.adapters import qwen36_35b
+
+    seen = {}
+
+    def load(self, *_a, **_k):
+        seen.update(self._kernels)
+        raise _Loaded
+
+    monkeypatch.setattr(qwen36_35b, "inspect_artifact", lambda _p: _artifact(tmp_path))
+    monkeypatch.setattr(qwen36_35b.Qwen3635BA3BAdapter, "_load_weights", load)
+    monkeypatch.setattr(import_env, "_SNAPSHOTS", {})
+    with pytest.raises(_Loaded):
+        qwen36_35b.Qwen3635BA3BAdapter(
+            str(tmp_path), execution_policy={"moe_routed_candidate": True}
+        )
+    assert seen["moe_routed_candidate"] is True
+    assert "moe_routed_decode" not in seen
+    assert seen["moe_topk_fold"] == "launch"
+    with pytest.raises(ValueError, match="exclusive"):
+        _qwen36(monkeypatch, tmp_path, {
+            "moe_routed_candidate": True, "moe_routed_decode": "gate_up_down_shared"})
+
+
+@pytest.mark.parametrize("selected", ["1", "0"])
+def test_qwen36_fused_gdn_diagnostics_follow_the_live_mode(monkeypatch, selected):
+    # An operator's MLX_QWEN36_FUSED_GDN_DECODE (policy silent) selects the
+    # fused decode live; its counters must be reported, or the qualifier
+    # fails the route closed.  The decode-wins block carries no hard-coded
+    # qualification label: the route receipt decides that.
+    import mlx.core as mx
+
+    from mlx2.adapters.qwen36_35b import Qwen3635BA3BAdapter
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
+    from mlx2.runtime.models import qwen36_35b as tensors
+    from mlx2.runtime.models.qwen3_5 import TextModelArgs
+
+    mx.set_default_device(mx.cpu)
+    monkeypatch.setattr(tensors, "_FUSED_GDN_DECODE", False)
+    layer = tensors.GatedDeltaNet(TextModelArgs(
+        hidden_size=64, linear_num_value_heads=4, linear_num_key_heads=2,
+        linear_key_head_dim=32, linear_value_head_dim=32, num_attention_heads=4,
+    ))
+
+    class Model:
+        def named_modules(self):
+            return [("layer", layer)]
+
+    monkeypatch.setattr(Qwen3827BAdapter, "diagnostics", lambda self: {})
+    adapter = object.__new__(Qwen3635BA3BAdapter)
+    adapter.model = Model()
+    adapter._kernels = {"fused_gdn_verify": True}
+    adapter.layout = "fixture-layout"
+    adapter.environment = {"MLX_QWEN36_FUSED_GDN_DECODE": selected}
+    adapter._select_decode_wins()
+    monkeypatch.setattr(tensors, "qwen36_decode_wins_stats", lambda _m: {"calls": 0})
+    result = adapter.diagnostics()
+    if selected == "1":
+        assert result["fused_gdn_decode"]["mode"] == "fused"
+    else:
+        assert "fused_gdn_decode" not in result
+    assert result["decode_wins"] == {"calls": 0}

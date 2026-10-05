@@ -159,6 +159,39 @@ def test_wrong_cache_depth_fails_before_vision_or_text_forward():
     assert model.media == []
 
 
+def test_media_request_refuses_processor_output_without_pixels(monkeypatch):
+    from mlx2.adapters import pinned_vlm_candidate as pinned
+    from mlx2.adapters.smolvlm2 import SmolVLM2CandidateAdapter
+
+    mlx = SimpleNamespace(core=SimpleNamespace(array=lambda value: value))
+    monkeypatch.setitem(sys.modules, "mlx", mlx)
+    monkeypatch.setitem(sys.modules, "mlx.core", mlx.core)
+    monkeypatch.setattr(
+        pinned, "resolve_media",
+        lambda *_args, **_kwargs: SimpleNamespace(kind="image", value="pixels"),
+    )
+    monkeypatch.setattr(pinned, "media_fingerprint", lambda *_args, **_kwargs: "media-id")
+    adapter = object.__new__(SmolVLM2CandidateAdapter)
+    adapter.identity = {"config": {"image_token_id": 42}}
+    adapter._media_proof_key = b"test-key"
+
+    class Processor:
+        image_token = "<image>"
+
+        def apply_chat_template(self, *_args, **_kwargs):
+            return "prompt"
+
+        def __call__(self, **_kwargs):
+            return {"input_ids": [[1, 42, 2]]}
+
+    adapter.processor = Processor()
+    request = {"messages": [{"role": "user", "content": [
+        {"type": "image_url", "image_url": "image-data"},
+    ]}]}
+    with pytest.raises(ValueError, match="no image pixels"):
+        adapter.prepare_multimodal_request(request)
+
+
 def test_descriptor_declares_kv_reuse_but_keeps_qualification_pending():
     from mlx2.adapters.smolvlm2 import DESCRIPTOR
     from mlx2.contracts import Capability

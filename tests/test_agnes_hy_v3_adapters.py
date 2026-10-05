@@ -98,6 +98,57 @@ def test_missing_indexed_shard_fails(tmp_path):
         inspect_artifact(tmp_path)
 
 
+@pytest.mark.parametrize("missing", [
+    "model.layers.0.mlp.down_proj.weight",
+    "model.layers.1.mlp.router.expert_bias",
+    "model.layers.1.mlp.shared_mlp.up_proj.weight",
+    "model.layers.1.self_attn.q_norm.weight",
+    "model.layers.1.post_attention_layernorm.weight",
+])
+def test_hy_missing_trunk_tensor_fails_before_model_import(tmp_path, missing):
+    _metadata_fixture(HY_FULL, tmp_path)
+    from mlx2.adapters.hy_v3 import inspect_artifact
+
+    index_path = tmp_path / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    index["weight_map"].pop(missing)
+    index_path.write_text(json.dumps(index))
+    with pytest.raises(ValueError, match="ordinary trunk tensors are incomplete"):
+        inspect_artifact(tmp_path)
+    assert "mlx.core" not in sys.modules
+
+
+def test_hy_missing_quantization_companion_fails_before_model_import(tmp_path):
+    _metadata_fixture(HY_FULL, tmp_path)
+    from mlx2.adapters.hy_v3 import inspect_artifact
+
+    index_path = tmp_path / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    index["weight_map"].pop("model.layers.1.mlp.switch_mlp.down_proj.scales")
+    index_path.write_text(json.dumps(index))
+    with pytest.raises(ValueError, match="quantized projection is incomplete"):
+        inspect_artifact(tmp_path)
+    assert "mlx.core" not in sys.modules
+
+
+@pytest.mark.parametrize("field,value", [
+    ("hidden_act", "gelu"),
+    ("tie_word_embeddings", True),
+    ("rope_parameters", {"rope_type": "yarn", "rope_theta": 11158840.0}),
+])
+def test_hy_unsupported_math_config_fails_before_model_import(tmp_path, field, value):
+    _metadata_fixture(HY_FULL, tmp_path)
+    from mlx2.adapters.hy_v3 import inspect_artifact
+
+    config_path = tmp_path / "config.json"
+    config = json.loads(config_path.read_text())
+    config[field] = value
+    config_path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="topology is unsupported"):
+        inspect_artifact(tmp_path)
+    assert "mlx.core" not in sys.modules
+
+
 def test_hy_embedded_mtp_candidate_is_gated_and_unselected(tmp_path):
     if not HY_REAP.is_dir():
         pytest.skip("HY REAP artifact absent")

@@ -47,6 +47,17 @@ class ModelArgs:
     def __post_init__(self):
         if self.hidden_activation != "silu":
             raise ValueError("Muse port requires silu activation")
+        if any(
+            value <= 0
+            for value in (
+                self.hidden_size,
+                self.intermediate_size,
+                self.head_dim,
+                self.vocab_size,
+                self.max_position_embeddings,
+            )
+        ):
+            raise ValueError("Muse model dimensions and context must be positive")
         if self.num_hidden_layers <= 0 or self.sliding_window <= 0:
             raise ValueError("Layer count and attention window must be positive")
         if (

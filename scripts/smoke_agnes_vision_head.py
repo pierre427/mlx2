@@ -15,8 +15,8 @@ import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL = Path("~/mlx-models/Agnes-3.0-Flash-Preview-MLX-6bit")
-FORK = Path("~/Desktop/mlx-uag/worktrees/agnes-vlm-support")
+MODEL = Path.home() / "mlx-models/Agnes-3.0-Flash-Preview-MLX-6bit"
+FORK = Path.home() / "Desktop/mlx-uag/worktrees/agnes-vlm-support"
 PROMPT = "What color is the square on the right? Answer with one word."
 
 

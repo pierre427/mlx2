@@ -69,21 +69,22 @@ class Qwen25VLCandidateAdapter(PinnedVisionCandidateAdapter):
         return converted
 
     def __init__(self, model_path: str, *, execution_policy=None):
-        super().__init__(model_path, execution_policy=execution_policy)
+        # Reject bad candidate selections before loading weights or installing
+        # a model-local replacement on the pinned source path.
         enabled = os.environ.get(_GROUPED_VISION_ENV, "0")
-        if enabled not in ("0", "1"):
-            raise ValueError(f"{_GROUPED_VISION_ENV} must be 0 or 1")
+        feature_reuse = os.environ.get(_FEATURE_REUSE_ENV, "0")
+        tower_reuse = os.environ.get(_TOWER_REUSE_ENV, "0")
+        for name, value in ((_GROUPED_VISION_ENV, enabled),
+                            (_FEATURE_REUSE_ENV, feature_reuse),
+                            (_TOWER_REUSE_ENV, tower_reuse)):
+            if value not in ("0", "1"):
+                raise ValueError(f"{name} must be 0 or 1")
+        if feature_reuse == tower_reuse == "1":
+            raise ValueError("vision feature reuse scopes are mutually exclusive")
+        super().__init__(model_path, execution_policy=execution_policy)
         self._grouped_vision_enabled = enabled == "1"
         if self._grouped_vision_enabled:
             install_grouped_vision_attention(self.model._model, enable=True)
-        feature_reuse = os.environ.get(_FEATURE_REUSE_ENV, "0")
-        tower_reuse = os.environ.get(_TOWER_REUSE_ENV, "0")
-        if feature_reuse not in ("0", "1"):
-            raise ValueError(f"{_FEATURE_REUSE_ENV} must be 0 or 1")
-        if tower_reuse not in ("0", "1"):
-            raise ValueError(f"{_TOWER_REUSE_ENV} must be 0 or 1")
-        if feature_reuse == tower_reuse == "1":
-            raise ValueError("vision feature reuse scopes are mutually exclusive")
         self._vision_feature_reuse_scope = (
             "tower_inputs_v1" if tower_reuse == "1" else "prompt_v1"
         )

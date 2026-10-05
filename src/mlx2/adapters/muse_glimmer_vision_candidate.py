@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-SOURCE_ROOT = Path("~/Desktop/mlx-uag/worktrees/agnes-vlm-support")
+SOURCE_ROOT = Path.home() / "Desktop/mlx-uag/worktrees/agnes-vlm-support"
 SOURCE_REVISION = "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5"
 SOURCE_PATHS = (
     "mlx_vlm/models/muse_glimmer",

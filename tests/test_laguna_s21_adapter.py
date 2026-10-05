@@ -72,6 +72,28 @@ def test_bf16_missing_expert_weight_fails(tmp_path):
         inspect_artifact(tmp_path)
 
 
+@pytest.mark.parametrize(
+    "source,key",
+    [
+        (S4, "model.layers.47.mlp.gate.e_score_correction_bias"),
+        (SBF, "model.layers.47.mlp.experts.e_score_correction_bias"),
+        (S4, "model.layers.47.mlp.shared_expert.up_proj.weight"),
+        (SBF, "model.layers.47.mlp.shared_expert.down_proj.weight"),
+    ],
+)
+def test_missing_router_or_shared_expert_tensor_fails_before_model_import(tmp_path, source, key):
+    _fixture(source, tmp_path)
+    from mlx2.adapters.laguna_s21 import inspect_artifact
+
+    index_path = tmp_path / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    del index["weight_map"][key]
+    index_path.write_text(json.dumps(index))
+    with pytest.raises(ValueError, match="ordinary trunk tensors"):
+        inspect_artifact(tmp_path)
+    assert "mlx.core" not in sys.modules
+
+
 def test_speculative_policy_rejected_before_weight_loading():
     from mlx2.adapters.laguna_s21 import LagunaS21Adapter
 

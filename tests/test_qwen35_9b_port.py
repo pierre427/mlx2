@@ -19,6 +19,7 @@ from mlx2.adapters.qwen35_9b import (
 )
 from mlx2.adapters.qwen38_27b import resolve_eos_token_ids
 from mlx2.adapters.registry import inspect_model
+from mlx2.adapters.registry import AdapterResolution
 from mlx2.contracts import Capability
 
 
@@ -104,6 +105,10 @@ class Qwen359BPortTests(unittest.TestCase):
         self.assertEqual(adapter.profile_name(False), "qwen35-9b-apcv2-ordinary")
         with self.assertRaisesRegex(ValueError, "not implemented"):
             adapter.profile_name(True)
+
+    def test_27b_decode_first_default_does_not_transfer_to_9b(self):
+        resolution = AdapterResolution(Qwen359BAdapter, descriptor_for(), {})
+        self.assertEqual(resolution.default_execution_policy("ordinary"), {})
 
     def test_classifier_labels_must_be_distinct_single_tokens(self):
         class Tokenizer:

@@ -58,17 +58,24 @@ def inspect_gemma4_artifact(model_path):
     if variant is None:
         raise ValueError(f"No mlx2 Gemma 4 adapter for topology {topology!r}")
     layers = text.get("layer_types")
-    if (not isinstance(layers, list) or len(layers) != topology[0]
-            or set(layers) != {"full_attention", "sliding_attention"}
-            or text.get("sliding_window") != 1024):
+    expected_layers = [
+        "full_attention" if index % 6 == 5 else "sliding_attention"
+        for index in range(topology[0])
+    ]
+    if (layers != expected_layers or text.get("sliding_window") != 1024
+            or text.get("num_kv_shared_layers") != 0):
         raise ValueError("Gemma 4 full/sliding attention layout is unsupported")
-    if config.get("audio_config") is not None or not isinstance(config.get("video_token_id"), int):
+    if (config.get("audio_config") is not None
+            or (config.get("vision_config") or {}).get("model_type") != "gemma4_vision"
+            or config.get("video_token_id") != 258884):
         raise ValueError("Expected vision/video Gemma 4 artifact without an audio tower")
     quant = config.get("quantization")
     if quant and any(quant.get(key) != value for key, value in
                      {"bits": 8, "group_size": 64, "mode": "affine"}.items()):
         raise ValueError("Only the local affine 8-bit Gemma 4 conversion is supported")
     provenance = path / "source-and-quantization.json"
+    if quant and not provenance.is_file():
+        raise ValueError("Gemma 4 conversion source provenance is required")
     if provenance.is_file():
         source = json.loads(provenance.read_text())
         expected_repo, expected_rev = _SOURCE_REVISIONS[variant]

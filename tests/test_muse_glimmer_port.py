@@ -111,6 +111,11 @@ def test_muse_cache_projection_keeps_rolling_boundaries():
         {"layer_types": ["unknown"] * 52},
         {"final_logit_softcapping": 0},
         {"num_attention_heads": 31},
+        {"head_dim": 0},
+        {"hidden_size": 0},
+        {"intermediate_size": 0},
+        {"vocab_size": 0},
+        {"max_position_embeddings": 0},
     ],
 )
 def test_invalid_topology_fails_closed(kwargs):

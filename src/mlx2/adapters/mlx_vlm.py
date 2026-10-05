@@ -624,6 +624,22 @@ class MiniCPMOAdapter(_MLXVLMAdapter):
         processed = self.processor(text=self._render(messages), images=images or None, audios=audios or None)
         media_token_end = _media_token_end(processed)
         ids, kwargs = _ids_and_kwargs(processed)
+        # The pinned processor computes bounds from token markers, while its
+        # model silently clips feature insertion to the bounds it finds.
+        # A literal marker in request text or processor drift can otherwise
+        # shift or discard a later image/audio input without an error.
+        for name, expected in (("image_bound", len(images)), ("audio_bounds", len(audios))):
+            bounds = processed.get(name)
+            if bounds is None or len(bounds) != 1:
+                raise ValueError(f"MiniCPM-o processor returned invalid {name}")
+            import numpy as np
+
+            pairs = np.asarray(bounds[0]).reshape(-1, 2)
+            if len(pairs) != expected or any(
+                int(start) < 0 or int(end) <= int(start) or int(end) > len(ids)
+                for start, end in pairs
+            ):
+                raise ValueError(f"MiniCPM-o processor {name} does not match media inputs")
         if images:
             kwargs["_mlx2_vision_cache_key"] = f"{self.identity['fingerprint']}:{media_fingerprint([value for value in media if value.kind == 'image'], policy=self.media_policy.receipt())}"
         vision_batches = math.ceil(vision_slices / self.media_policy.vision_batch_size) if self.media_policy.batch_vision_input else vision_slices

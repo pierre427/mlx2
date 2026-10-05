@@ -280,6 +280,52 @@ class Model(nn.Module):
         out = self.model(inputs, cache)
         return self.logits(out)
 
+    def paged_embed(self, token_ids):
+        """Flattened packed rows; ordinary ``__call__`` remains the reference."""
+        return self.model.embed_tokens(mx.array(token_ids, dtype=mx.int32))
+
+    def paged_project(self, index, hidden, row_counts, offsets, *,
+                      vector_q1_rope=False):
+        """Qwen3-owned Q/K/V, including per-lane absolute RoPE positions."""
+        layer = self.layers[index]
+        attention = layer.self_attn
+        normalized = layer.input_layernorm(hidden)
+        rows = hidden.shape[0]
+        q = attention.q_proj(normalized).reshape(rows, attention.n_heads, attention.head_dim)
+        k = attention.k_proj(normalized).reshape(rows, attention.n_kv_heads, attention.head_dim)
+        v = attention.v_proj(normalized).reshape(rows, attention.n_kv_heads, attention.head_dim)
+        q, k = attention.q_norm(q), attention.k_norm(k)
+        if vector_q1_rope:
+            if (tuple(row_counts) != (1, 1) or len(offsets) != 2 or
+                    any(type(offset) is not int or not 0 <= offset < 2**31
+                        for offset in offsets)):
+                raise ValueError("vector Q1 RoPE requires two bounded one-row lanes")
+            # MLX RoPE accepts one offset per batch item. Keep the two rows
+            # separate in the batch dimension, avoiding four lane-local RoPE
+            # calls and two concatenations in every model layer.
+            positions = mx.array(offsets, dtype=mx.int32)
+            q = attention.rope(q[:, :, None, :], offset=positions)[:, :, 0, :]
+            k = attention.rope(k[:, :, None, :], offset=positions)[:, :, 0, :]
+            return q, k, v
+        q_rows, k_rows = [], []
+        begin = 0
+        for count, offset in zip(row_counts, offsets):
+            end = begin + count
+            q_lane = q[begin:end].transpose(1, 0, 2)[None, ...]
+            k_lane = k[begin:end].transpose(1, 0, 2)[None, ...]
+            q_rows.append(attention.rope(q_lane, offset=offset)[0].transpose(1, 0, 2))
+            k_rows.append(attention.rope(k_lane, offset=offset)[0].transpose(1, 0, 2))
+            begin = end
+        return mx.concatenate(q_rows), mx.concatenate(k_rows), v
+
+    def paged_finish_layer(self, index, hidden, attended):
+        layer = self.layers[index]
+        h = hidden + layer.self_attn.o_proj(attended.reshape(hidden.shape[0], -1))
+        return h + layer.mlp(layer.post_attention_layernorm(h))
+
+    def paged_logits(self, hidden):
+        return self.logits(self.model.norm(hidden))
+
     def logits(self, hidden, *, row_exact=False):
         projector = (
             self.model.embed_tokens.as_linear

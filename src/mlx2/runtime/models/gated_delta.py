@@ -20,6 +20,23 @@ _CORE_GDN_HEADS = frozenset(
     {(24, 24), (32, 32), (16, 16), (16, 32), (16, 48), (16, 64)}
 )
 _core_gated_delta_update = getattr(mx.fast, "gated_delta_update", None)
+# Observed-use counter of MLX_GDN_CORE (graph-build count, no device sync):
+# recurrences routed to mx.fast.gated_delta_update by the 17..256-row rule.
+_GDN_CORE_CALLS = 0
+
+
+def _count_gdn_core_call() -> None:
+    global _GDN_CORE_CALLS
+    _GDN_CORE_CALLS += 1
+
+
+def gdn_core_status() -> dict:
+    """``MLX_GDN_CORE`` selection, primitive availability and engaged calls."""
+    return {
+        "enabled": _ENABLE_GDN_CORE,
+        "available": _core_gated_delta_update is not None,
+        "calls": _GDN_CORE_CALLS,
+    }
 
 
 def _readout_needs_widening(input_type, state_type) -> bool:
@@ -585,6 +602,7 @@ def gated_delta_update(
         if result is not None:
             return result
     if _can_use_core_gated_delta(q, k, v, g, state, mask):
+        _count_gdn_core_call()
         return _core_gated_delta_update(
             q,
             k,

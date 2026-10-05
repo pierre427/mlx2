@@ -42,6 +42,15 @@ def inspect_artifact(model_path: str | Path) -> dict:
                 "moe_router_enable_expert_bias": True}
     if any(config.get(key) != value for key, value in expected.items()):
         raise ValueError("HY V3 topology mismatch")
+    if (config.get("hidden_act", "silu") != "silu" or
+            config.get("tie_word_embeddings", False)):
+        raise ValueError("HY V3 activation or embedding topology is unsupported")
+    rope = config.get("rope_parameters")
+    if (not isinstance(rope, dict) or
+            rope.get("rope_type", "default") != "default" or
+            not isinstance(rope.get("rope_theta"), (int, float)) or
+            rope["rope_theta"] <= 0):
+        raise ValueError("HY V3 RoPE topology is unsupported")
     n_experts = config.get("num_experts")
     reap = n_experts == 96 and config.get("mtp_num_experts") == 192
     if not reap and (n_experts != 192 or config.get("mtp_num_experts") not in (None, 192)):
@@ -57,16 +66,40 @@ def inspect_artifact(model_path: str | Path) -> dict:
         required.update({prefix + "self_attn.q_proj.weight",
                          prefix + "self_attn.k_proj.weight",
                          prefix + "self_attn.v_proj.weight",
-                         prefix + "self_attn.o_proj.weight"})
+                         prefix + "self_attn.o_proj.weight",
+                         prefix + "self_attn.q_norm.weight",
+                         prefix + "self_attn.k_norm.weight",
+                         prefix + "input_layernorm.weight",
+                         prefix + "post_attention_layernorm.weight"})
         if i:
             required.update({prefix + "mlp.router.gate.weight",
+                             prefix + "mlp.router.expert_bias",
+                             prefix + "mlp.shared_mlp.gate_proj.weight",
+                             prefix + "mlp.shared_mlp.up_proj.weight",
+                             prefix + "mlp.shared_mlp.down_proj.weight",
                              prefix + "mlp.switch_mlp.gate_proj.weight",
                              prefix + "mlp.switch_mlp.up_proj.weight",
                              prefix + "mlp.switch_mlp.down_proj.weight"})
         else:
-            required.add(prefix + "mlp.gate_proj.weight")
+            required.update({prefix + "mlp.gate_proj.weight",
+                             prefix + "mlp.up_proj.weight",
+                             prefix + "mlp.down_proj.weight"})
     if not required <= weights.keys():
-        raise ValueError("HY V3 ordinary trunk tensors are incomplete")
+        missing = sorted(required - weights.keys())
+        raise ValueError(f"HY V3 ordinary trunk tensors are incomplete: {missing[0]}")
+    # These indexed snapshots are fully affine-quantized. A missing companion
+    # makes the loader choose a different module layout after reading shards.
+    projections = (
+        key for key in required
+        if key.endswith(".weight") and (
+            (".self_attn." in key and not key.endswith("_norm.weight")) or
+            ".mlp." in key or key == "lm_head.weight"
+        )
+    )
+    for weight in projections:
+        stem = weight[:-len(".weight")]
+        if stem + ".scales" not in weights or stem + ".biases" not in weights:
+            raise ValueError(f"HY V3 quantized projection is incomplete: {stem}")
     mtp_count = sum(k.startswith(("mtp.", "model.layers.80.")) for k in weights)
     if reap and mtp_count == 0:
         raise ValueError("HY V3 REAP50 artifact is missing its declared sidecar")

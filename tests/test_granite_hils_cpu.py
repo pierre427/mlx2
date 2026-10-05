@@ -19,7 +19,10 @@ HILS_ROOT = Path("~/Desktop/mlx-uag/models")
 
 
 def _require_artifact(path):
-    if not all(((path / "config.json").is_file(), (path / "model.safetensors.index.json").is_file())):
+    if not (path / "config.json").is_file() or not (
+        (path / "model.safetensors.index.json").is_file()
+        or (path / "model.safetensors").is_file()
+    ):
         pytest.skip(f"optional local model fixture is absent: {path}")
 
 
@@ -106,6 +109,11 @@ def test_granite_layer_order_rejected(tmp_path):
     [
         ("layer_rope_theta", [10000.0] * 28, "layer_rope_theta"),
         ("head_dim", 128, "head_dim"),
+        ("hidden_act", "gelu", "MLP activation"),
+        ("mlp_bias", True, "MLP activation"),
+        ("attention_bias", True, "attention bias"),
+        ("rope_parameters", {"rope_theta": 10000, "rope_type": "linear"}, "RoPE variant"),
+        ("rope_scaling", {"type": "linear", "factor": 2.0}, "RoPE variant"),
     ],
 )
 def test_granite_unimplemented_config_fails_closed(tmp_path, field, value, message):

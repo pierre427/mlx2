@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 SOURCE_REVISION = "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5"
-SOURCE_ROOT = Path("~/Desktop/mlx-uag/worktrees/agnes-vlm-support")
+SOURCE_ROOT = Path.home() / "Desktop/mlx-uag/worktrees/agnes-vlm-support"
 SOURCE_PATHS = (
     "mlx_vlm/models/qwen4_exp", "mlx_vlm/generate/dispatch.py",
     "mlx_vlm/split_mtp.py", "mlx_vlm/speculative/drafters/qwen4_exp_mtp",

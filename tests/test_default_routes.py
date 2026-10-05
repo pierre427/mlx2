@@ -112,14 +112,15 @@ def test_flash_next_declares_default_handoff_width_three():
     ).default_mtp_ordinary_handoff == {"enabled": True, "max_mtp_width": 3}
 
 
-def test_qwen36_declares_default_handoff_width_three():
-    # Width 3 measured 298.6 vs 260.2 tok/s over width 4 at 4 lanes, equal at
-    # 3 and 8 lanes (qualification/runs/port-park-memory-20261002).
-    assert QWEN36_HANDOFF_WIDTH == 3
+def test_qwen36_declares_default_handoff_width_one():
+    # With the decode wins on, static width 1 beat width 3 by +10.0% at 2
+    # lanes and +22.0% at 3, neutral at 4 (options-sweep-qwen36-20261002,
+    # handoff-dwnowin.json).  Native MTP stays the default route.
+    assert QWEN36_HANDOFF_WIDTH == 1
     assert "default_mtp_ordinary_handoff_max_width" in Qwen3635BA3BAdapter.__dict__
-    assert _resolution(
-        Qwen3635BA3BAdapter, qwen36(has_mtp=True)
-    ).default_mtp_ordinary_handoff == {"enabled": True, "max_mtp_width": 3}
+    resolution = _resolution(Qwen3635BA3BAdapter, qwen36(has_mtp=True))
+    assert resolution.default_route == "native_mtp"
+    assert resolution.default_mtp_ordinary_handoff == {"enabled": True, "max_mtp_width": 1}
 
 
 def test_handoff_default_resolves_only_for_native_mtp_and_can_be_disabled():
@@ -135,9 +136,9 @@ def test_handoff_default_resolves_only_for_native_mtp_and_can_be_disabled():
     assert selected["mtp_ordinary_handoff"] == {
         "enabled": True, "max_mtp_width": 4
     }
-    assert resolve_execution_policy_defaults(
+    assert "mtp_ordinary_handoff" not in resolve_execution_policy_defaults(
         None, RouteSelection("ordinary", "explicit_flag"), resolution
-    ) is None
+    )
     assert resolve_execution_policy_defaults(
         {"mtp_ordinary_handoff": False},
         RouteSelection("native_mtp", "explicit_flag"),
@@ -284,3 +285,95 @@ def test_qualification_matches_resolved_route_not_selection_spelling(tmp_path):
             descriptor=QWEN4_FLASH_NEXT,
             name="native-mtp",
         )
+
+
+DECODE_FIRST_ORDER = {"enabled": True, "shared_prefill_budget": False}
+
+
+@pytest.mark.parametrize(
+    ("adapter_type", "descriptor"),
+    [(FlashNextAdapter, QWEN4_FLASH_NEXT), (Qwen3827BAdapter, QWEN38_27B)],
+)
+@pytest.mark.parametrize("route", ["ordinary", "native_mtp"])
+def test_decode_first_order_is_the_default_on_flash_next_and_the_27b(
+    adapter_type, descriptor, route
+):
+    # Publication order only: decode-to-client lag max ~0.5-0.8 s -> 2-101 ms
+    # with TTFT and throughput unchanged (options-sweep-*-20261002).  An
+    # explicit value (false included) wins; prompt-lookup gets nothing.
+    from mlx2.runtime.adaptive_policy import DecodeFirstPublish
+    from mlx2.server import RouteSelection, resolve_execution_policy_defaults
+
+    resolution = _resolution(adapter_type, descriptor)
+    resolved = resolve_execution_policy_defaults(
+        None, RouteSelection(route, "adapter_default"), resolution
+    )
+    assert resolved["decode_first"] == DECODE_FIRST_ORDER
+    parsed = DecodeFirstPublish.from_value(resolved["decode_first"])
+    assert parsed.mode({}) == "order"
+    assert parsed.mode({"MLX2_DECODE_FIRST": "0"}) == "off"  # kill switch kept
+    assert resolve_execution_policy_defaults(
+        {"decode_first": False}, RouteSelection(route, "explicit_flag"), resolution
+    )["decode_first"] is False
+    assert resolution.default_execution_policy("prompt_lookup") == {}
+
+
+@pytest.mark.parametrize(
+    ("adapter_type", "descriptor"),
+    [
+        (Qwen3635BA3BAdapter, qwen36(has_mtp=True)),
+        (XingAdapter, xing(has_mtp=True)),
+    ],
+)
+def test_decode_first_stays_off_where_it_was_not_approved(adapter_type, descriptor):
+    from mlx2.server import RouteSelection, resolve_execution_policy_defaults
+
+    for route in ("ordinary", "native_mtp"):
+        resolved = resolve_execution_policy_defaults(
+            None, RouteSelection(route, "adapter_default"), _resolution(adapter_type, descriptor)
+        ) or {}
+        assert "decode_first" not in resolved
+
+
+def test_flash_next_copy_draft_strong_span_defaults_to_fourteen():
+    # 14 vs 16 on copy-heavy B1: +11.4% and +11.1% (8/8 reps each), tokens
+    # identical (options-sweep-flashnext-20261002 item 8h).
+    from mlx2.runtime.copy_draft import CopyDraftPolicy
+    from mlx2.server import RouteSelection, resolve_execution_policy_defaults
+
+    resolved = resolve_execution_policy_defaults(
+        None, RouteSelection("native_mtp", "adapter_default"),
+        _resolution(FlashNextAdapter, QWEN4_FLASH_NEXT),
+    )
+    copy = resolved["self_mtp_copy_draft"]
+    assert copy["strong_max_span"] == 14
+    assert CopyDraftPolicy.from_value(copy).strong_max_span == 14
+
+
+def test_qwen38_27b_defaults_fused_gdn_and_num_draft_three(monkeypatch):
+    # options-sweep-27b-20261002: fused_gdn bit-identical, ordinary +1.5..3.2%;
+    # num_draft 3 served B2 +15%, B4 +11%.  Own-namespace defaults: the 9B
+    # and Qwen3.6 subclasses keep fused_gdn off and num_draft 2.
+    from mlx2.adapters.qwen35_9b import Qwen359BAdapter
+
+    class _Stop(Exception):
+        pass
+
+    def built(adapter_type, policy=None):
+        adapter = object.__new__(adapter_type)
+
+        def stop(_path):
+            raise _Stop
+
+        monkeypatch.setattr(adapter_type, "artifact_inspector", staticmethod(stop))
+        with pytest.raises(_Stop):
+            adapter_type.__init__(adapter, "/unused", execution_policy=policy)
+        return adapter
+
+    default = built(Qwen3827BAdapter)
+    assert default.fused_gdn is True and default._num_draft == 3
+    explicit = built(Qwen3827BAdapter, {"fused_gdn": False, "num_draft": 2})
+    assert explicit.fused_gdn is False and explicit._num_draft == 2
+    nine = built(Qwen359BAdapter)
+    assert nine.fused_gdn is False and nine._num_draft == 2
+    assert "default_fused_gdn" not in vars(Qwen3635BA3BAdapter)

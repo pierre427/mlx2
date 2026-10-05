@@ -41,8 +41,26 @@ def _artifact(path, *, puzzle=False):
     keys = {"model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"}
     for layer in range(n):
         prefix = f"model.layers.{layer}."
-        keys.update({prefix + "self_attn.q_proj.weight", prefix + "self_attn.sinks", prefix + "mlp.router.weight"})
-        keys.add(prefix + ("mlp.experts.gate_proj.weight" if puzzle else "mlp.experts.gate_up_proj_blocks"))
+        keys.update(prefix + name for name in (
+            "input_layernorm.weight", "post_attention_layernorm.weight",
+            "self_attn.sinks", "mlp.router.weight", "mlp.router.bias",
+            "self_attn.q_proj.weight", "self_attn.q_proj.bias",
+            "self_attn.k_proj.weight", "self_attn.k_proj.bias",
+            "self_attn.v_proj.weight", "self_attn.v_proj.bias",
+            "self_attn.o_proj.weight", "self_attn.o_proj.bias",
+        ))
+        if puzzle:
+            keys.update(prefix + "mlp.experts." + name for name in (
+                "gate_proj.weight", "gate_proj.scales", "gate_proj.bias",
+                "up_proj.weight", "up_proj.scales", "up_proj.bias",
+                "down_proj.weight", "down_proj.scales", "down_proj.bias",
+            ))
+        else:
+            keys.update(prefix + "mlp.experts." + name for name in (
+                "gate_up_proj_blocks", "gate_up_proj_scales",
+                "gate_up_proj_bias", "down_proj_blocks",
+                "down_proj_scales", "down_proj_bias",
+            ))
     (path / "config.json").write_text(json.dumps(config))
     (path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {k: "model.safetensors" for k in keys}}))
     (path / "model.safetensors").write_bytes(b"metadata test only")
@@ -100,4 +118,20 @@ def test_missing_and_unsafe_shards_fail_closed(tmp_path):
     value["weight_map"]["lm_head.weight"] = "../elsewhere.safetensors"
     index_path.write_text(json.dumps(value))
     with pytest.raises(ValueError, match="unsafe shard"):
+        inspect_artifact(tmp_path)
+
+
+@pytest.mark.parametrize("puzzle,missing", [
+    (False, "mlp.experts.down_proj_scales"),
+    (False, "self_attn.v_proj.bias"),
+    (True, "mlp.experts.up_proj.scales"),
+    (True, "post_attention_layernorm.weight"),
+])
+def test_incomplete_layer_index_fails_before_weight_load(tmp_path, puzzle, missing):
+    _artifact(tmp_path, puzzle=puzzle)
+    index_path = tmp_path / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    del index["weight_map"]["model.layers.0." + missing]
+    index_path.write_text(json.dumps(index))
+    with pytest.raises(ValueError, match="indexed tensor topology is incomplete"):
         inspect_artifact(tmp_path)

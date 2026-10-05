@@ -46,7 +46,8 @@ _RHS_PAD_MIN_ROWS_PER_EXPERT = _rhs_pad_floor()
 rhs_pad_calls = 0
 rhs_pad_rows = 0
 
-# Adaptive kernel choice (default off: MLX2_MOE_RHS_PAD_POLICY=adaptive).
+# Adaptive kernel choice (module default off: MLX2_MOE_RHS_PAD_POLICY=adaptive;
+# Flash-Next selects it through its policy, see flash_next_policy).
 # Instead of one rows-per-expert floor for every table, each sorted gather
 # picks per-row ``gather_qmv`` or the padded ``gather_qmm_rhs`` from a cost
 # model calibrated per expert-table class (format, bits, group, experts,
@@ -72,6 +73,20 @@ def _rhs_pad_policy(environ=os.environ) -> str:
 
 
 _RHS_PAD_POLICY = _rhs_pad_policy()
+
+
+def set_pad_policy(policy: str) -> str:
+    """Select the pad policy at run time; returns the previous one.
+
+    An adapter that owns the choice (Flash-Next ``moe_rhs_pad_policy``) pins
+    ``MLX2_MOE_RHS_PAD_POLICY`` and calls this after load, so an import of
+    this module under another value cannot change the route behind the
+    receipt (the same contract as ``moe_nax_gather.set_mode``).
+    """
+    global _RHS_PAD_POLICY
+    value = _rhs_pad_policy({"MLX2_MOE_RHS_PAD_POLICY": policy})
+    old, _RHS_PAD_POLICY = _RHS_PAD_POLICY, value
+    return old
 # (mode, bits, group_size, experts, output_dims, input_dims) -> (q0, q1, r0, r1),
 # ms per call.  Fitted in-model on M5 Max (mlx 39400a0d4) from real weights
 # and real routing, every sorted gather of one forward replayed both ways at

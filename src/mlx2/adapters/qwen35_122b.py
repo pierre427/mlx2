@@ -8,7 +8,13 @@ from dataclasses import replace
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from .qwen36_35b import Qwen3635BA3BAdapter, configure_environment
+from ..sampling_defaults import SamplingDefaults
+from .qwen36_35b import (
+    ENUM_KERNELS,
+    KERNEL_POLICY_ENV,
+    Qwen3635BA3BAdapter,
+    configure_environment,
+)
 from .qwen38_27b import resolve_eos_token_ids
 
 CACHE_LAYOUT = "qwen35-122b-a10b-hybrid-layer-segments-v1"
@@ -155,16 +161,46 @@ def inspect_artifact(model_path: str | Path) -> dict:
     }
 
 
+def configure_122b_environment() -> dict[str, str]:
+    """Select the 122B stock tensor path independently of 35B experiments."""
+    stock_kernels = {
+        key: ("off" if key in ENUM_KERNELS else False)
+        for key in KERNEL_POLICY_ENV
+    }
+    return configure_environment(stock_kernels, moe_nax_gather="off")
+
+
 class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
     default_route = "ordinary"
     descriptor = QWEN35_122B
-    sampling_defaults = None
+    # Pinned oQ4 checkpoint generation_config.json, revision c1a3fcdec50c.
+    # It supplies one profile, without a mode-specific recommendation.
+    sampling_defaults = SamplingDefaults(
+        temperature=0.6, top_p=0.95, top_k=20,
+        source="generation_config.json (mlx-community/Qwen3.5-122B-A10B-oQ4-mtp, c1a3fcdec50c)",
+    )
     default_route_execution_policy = {}
     default_mtp_ordinary_handoff_max_width = None
     # Declared on this class itself; never inherited from Qwen3.6.
     weight_streaming_modes = frozenset({"moe_experts"})
 
     def __init__(
+        self, model_path: str, *, execution_policy=None, require_mtp=False,
+        weight_streaming=None,
+    ):
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self,
+            lambda: self._init_qwen35_122b(
+                model_path,
+                execution_policy=execution_policy,
+                require_mtp=require_mtp,
+                weight_streaming=weight_streaming,
+            ),
+        )
+
+    def _init_qwen35_122b(
         self, model_path: str, *, execution_policy=None, require_mtp=False,
         weight_streaming=None,
     ):
@@ -180,12 +216,29 @@ class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
         self.identity = artifact["identity"]
         self.config = artifact["config"]
         self.descriptor = QWEN35_122B
-        self.environment = configure_environment()
+        # The 35B kernel wins are artifact-specific. Pin this adapter's stock
+        # profile even when an earlier load left Qwen3.6 switches in the env.
+        self.environment = configure_122b_environment()
         from ..runtime.models.import_env import assert_profile_applied
 
         # Strict: this adapter builds Qwen3.6 GDN layers but re-applies none
         # of their import-time switches, so every latch must match.
         assert_profile_applied("the Qwen3.5 122B adapter")
+        from ..runtime.models import moe_nax_gather as _moe_nax
+        from ..runtime.models import switch_layers as _switch_layers
+        from .process_globals import MOE_NAX_GATHER, MOE_RHS_PAD_POLICY, claim
+
+        # The MoE gather is process-global; select stock through the claim so
+        # a live model using another mode cannot be silently changed.
+        self.moe_nax_gather = "off"
+        self._process_claim = claim(
+            self,
+            "the Qwen3.5 122B adapter",
+            {
+                MOE_NAX_GATHER: ("off", _moe_nax.set_mode),
+                MOE_RHS_PAD_POLICY: (_switch_layers._RHS_PAD_POLICY, None),
+            },
+        )
         self.layout = CACHE_LAYOUT
         self._tables = []
         self._num_draft = 0
@@ -198,6 +251,7 @@ class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
         import mlx.core as mx
         import mlx.nn as nn
         from transformers import AutoTokenizer
+
         from ..runtime.models.qwen35_122b import Model, ModelArgs
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         from ..runtime.ubc_evict import load_shards_evicting
@@ -276,5 +330,3 @@ class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
             "vision_selected": False, "qualification": "pending",
         })
         return result
-
-

@@ -2,12 +2,14 @@
 
 import json
 import sys
+from types import SimpleNamespace
 
 import pytest
 from mlx_blocker import block_mlx_imports
 
 from mlx2.adapters.registry import inspect_model, resolve_adapter
 from mlx2.contracts import Capability
+from mlx2.adapters.qwen35_4b import Qwen354BAdapter
 
 
 def _artifact(path):
@@ -25,6 +27,7 @@ def _artifact(path):
         "linear_num_value_heads": 32,
         "linear_key_head_dim": 128,
         "linear_value_head_dim": 128,
+        "linear_conv_kernel_dim": 4,
         "mtp_num_hidden_layers": 1,
     }
     (path / "config.json").write_text(json.dumps(config))
@@ -63,3 +66,20 @@ def test_4b_requires_exact_topology_and_shard_closure(tmp_path):
     (path / "config.json").write_text(json.dumps(config))
     with pytest.raises(ValueError, match="topology"):
         inspect_model(path)
+
+
+def test_4b_budget_receipt_uses_4b_geometry_and_refuses_mtp():
+    adapter = object.__new__(Qwen354BAdapter)
+    adapter.model = SimpleNamespace(args=SimpleNamespace(text_config={
+        "num_hidden_layers": 32, "hidden_size": 2560,
+        "num_attention_heads": 16, "num_key_value_heads": 4,
+        "head_dim": 256, "linear_num_key_heads": 16,
+        "linear_num_value_heads": 32, "linear_key_head_dim": 128,
+        "linear_value_head_dim": 128, "full_attention_interval": 4,
+        "linear_conv_kernel_dim": 4,
+    }))
+    assert adapter.cache_budget(mtp=False).as_dict()["schema"] == (
+        "qwen35-4b-cache-geometry-v1"
+    )
+    with pytest.raises(ValueError, match="MTP is not implemented"):
+        adapter.cache_budget(mtp=True)

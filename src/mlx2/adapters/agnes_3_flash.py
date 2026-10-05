@@ -38,9 +38,20 @@ def inspect_artifact(model_path: str | Path) -> dict:
                 "head_dim": 256, "linear_num_key_heads": 16,
                 "linear_num_value_heads": 48, "linear_key_head_dim": 128,
                 "linear_value_head_dim": 128, "attn_output_gate": True,
-                "output_gate_type": "swish"}
+                "output_gate_type": "swish", "hidden_act": "silu",
+                "attention_bias": False, "linear_conv_kernel_dim": 4,
+                "mamba_ssm_dtype": "float32", "rms_norm_eps": 1e-6,
+                "tie_word_embeddings": False,
+                "partial_rotary_factor": 0.25}
     if any(text.get(key) != value for key, value in expected.items()):
         raise ValueError("Agnes 3 Flash text topology mismatch")
+    rope = text.get("rope_parameters")
+    if (not isinstance(rope, dict) or rope.get("rope_type") != "default"
+            or rope.get("rope_theta") != 10_000_000
+            or rope.get("partial_rotary_factor") != 0.25
+            or rope.get("mrope_section") != [11, 11, 10]
+            or rope.get("mrope_interleaved") is not True):
+        raise ValueError("Agnes 3 Flash rotary topology mismatch")
     layers = ["agnes_global_attention" if (i + 1) % 4 == 0
               else "agnes_delta_attention" for i in range(72)]
     if text.get("layer_types") != layers:
@@ -52,11 +63,29 @@ def inspect_artifact(model_path: str | Path) -> dict:
         raise ValueError("embedded Agnes MTP is outside the ordinary text contract")
     required = {"language_model.model.embed_tokens.weight", "language_model.lm_head.weight",
                 "language_model.model.norm.weight"}
+    quantized = {"language_model.lm_head"}
     for i, kind in enumerate(layers):
         prefix = f"language_model.model.layers.{i}."
-        required.add(prefix + ("global_attn.q_proj.weight" if kind.endswith("global_attention")
-                               else "delta_attn.in_proj_qkv.weight"))
-        required.add(prefix + "mlp.parallel_ffn.gate_proj.weight")
+        required.update({prefix + "input_layernorm.weight",
+                         prefix + "post_attention_layernorm.weight"})
+        projections = ["mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
+                       "mlp.parallel_ffn.gate_proj", "mlp.parallel_ffn.up_proj",
+                       "mlp.parallel_ffn.down_proj"]
+        if kind.endswith("global_attention"):
+            projections += ["global_attn.q_proj", "global_attn.k_proj",
+                            "global_attn.v_proj", "global_attn.o_proj"]
+            required.update({prefix + "global_attn.q_norm.weight",
+                             prefix + "global_attn.k_norm.weight"})
+        else:
+            projections += ["delta_attn.in_proj_qkv", "delta_attn.in_proj_z",
+                            "delta_attn.in_proj_b", "delta_attn.in_proj_a",
+                            "delta_attn.out_proj"]
+            required.update({prefix + "delta_attn.A_log", prefix + "delta_attn.dt_bias",
+                             prefix + "delta_attn.conv1d.weight",
+                             prefix + "delta_attn.norm.weight"})
+        quantized.update(prefix + name for name in projections)
+    for prefix in quantized:
+        required.update(prefix + "." + suffix for suffix in ("weight", "scales", "biases"))
     if not required <= weights.keys():
         raise ValueError("Agnes 3 Flash text tensors are incomplete")
     artifact["has_mtp"] = False

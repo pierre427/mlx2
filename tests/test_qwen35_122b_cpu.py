@@ -1,19 +1,25 @@
 """CPU-only validation for 122B ordinary and embedded candidate contracts."""
 
 import json
+import os
 import sys
 import tempfile
 import unittest
-from mlx_blocker import install_for_test_case
 from pathlib import Path
+from unittest.mock import patch
 
-
+from mlx_blocker import install_for_test_case
 
 from mlx2.adapters.qwen35_122b import (  # noqa: E402
-    EXPECTED, QWEN35_122B, Qwen35122BA10BAdapter, inspect_artifact,
+    EXPECTED,
+    QWEN35_122B,
+    Qwen35122BA10BAdapter,
+    configure_122b_environment,
+    inspect_artifact,
 )
-from mlx2.contracts import Capability  # noqa: E402
 from mlx2.adapters.qwen35_122b_vision import Qwen35122BVisionCandidate  # noqa: E402
+from mlx2.contracts import Capability  # noqa: E402
+from mlx2.sampling_defaults import resolve_sampling, vendor_sampling  # noqa: E402
 
 
 class Qwen35122BCPUTest(unittest.TestCase):
@@ -103,6 +109,19 @@ class Qwen35122BCPUTest(unittest.TestCase):
             (path / "model.safetensors").unlink()
             with self.assertRaisesRegex(ValueError, "missing weight shard"):
                 inspect_artifact(path)
+
+    def test_pinned_sampling_and_stock_kernel_profile(self):
+        vendor = vendor_sampling(object.__new__(Qwen35122BA10BAdapter))
+        defaults, receipt = resolve_sampling({}, vendor, thinking=None)
+        self.assertEqual((defaults["temperature"], defaults["top_p"], defaults["top_k"]), (0.6, 0.95, 20))
+        self.assertIn("generation_config.json", receipt["sources"]["temperature"])
+        override, _ = resolve_sampling({"temperature": 0}, vendor, thinking=None)
+        self.assertEqual(override["temperature"], 0)
+        with patch.dict(os.environ, {"MLX_QWEN36_FUSED_GDN_DECODE": "1", "MLX2_MOE_NAX_GATHER": "fused"}):
+            profile = configure_122b_environment()
+            self.assertEqual(profile["MLX_QWEN36_FUSED_GDN_DECODE"], "0")
+            self.assertEqual(profile["MLX2_MOE_NAX_GATHER"], "off")
+            self.assertNotIn("MLX_QWEN36_DECODE_WINS", profile)
 
 
 if __name__ == "__main__":
