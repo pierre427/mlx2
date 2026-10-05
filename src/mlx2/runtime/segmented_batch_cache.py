@@ -952,6 +952,13 @@ def build_segmented_batch_cache_group(groups, *, note=None, shared_qsa_prefix=Fa
     groups = [list(group) for group in groups]
     if not groups:
         return []
+    # The private paged leaf has an explicit plan/lease ABI. Do not let a
+    # mixed row group enter a legacy update_and_fetch adapter by accident.
+    from .paged_kv_cache import PagedKVPrivateCache
+    if any(isinstance(layer, PagedKVPrivateCache) for group in groups for layer in group):
+        raise SegmentedBatchUnsupported(
+            "private paged KV requires an explicit segmented paged consumer"
+        )
     widths = {len(group) for group in groups}
     if len(widths) != 1:
         raise SegmentedBatchUnsupported("segmented cache groups have different layers")

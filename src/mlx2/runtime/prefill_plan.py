@@ -4,9 +4,27 @@ import hashlib
 import json
 
 
-def execution_identity(projection=None, scan=None, invariant=None):
+EXTERNAL_VARLEN_PREFILL_IDENTITY = {
+    "schema": "mlx2.external-varlen-prefill.v1",
+    "law": "right-padded-target-prefill-merge-private-extract-live",
+}
+
+
+def execution_identity(
+    projection=None,
+    scan=None,
+    invariant=None,
+    varlen=None,
+    external_varlen_prefill=None,
+):
     """Numerical law identity, excluding counters that change during a run."""
-    if not projection and not scan and not invariant:
+    if (
+        not projection
+        and not scan
+        and not invariant
+        and not varlen
+        and not external_varlen_prefill
+    ):
         return None
     result = {"version": 1}
     if invariant:
@@ -19,6 +37,14 @@ def execution_identity(projection=None, scan=None, invariant=None):
     if scan:
         result["scan"] = {
             key: scan[key] for key in ("chunk_size", "segment_max_rows", "layers")
+        }
+    if varlen:
+        result["varlen"] = {
+            key: varlen[key] for key in ("schema", "law", "policy")
+        }
+    if external_varlen_prefill:
+        result["external_varlen_prefill"] = {
+            key: external_varlen_prefill[key] for key in ("schema", "law")
         }
     return result
 
