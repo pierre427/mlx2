@@ -1,0 +1,44 @@
+{
+  "component": "Default-off Qwen3.6 Flash-Next decode slices",
+  "status": "implemented; CPU tensor and host suites pass; Metal untested; unqualified and unselected",
+  "source_repository": "mlx2 local repository",
+  "source_revision": "531a876d202dcc42bdf6b6d91f5ed91105879943",
+  "source_paths": [
+    "src/mlx2/runtime/models/qwen4_routed_decode.py",
+    "src/mlx2/runtime/models/qwen4_moe_window.py",
+    "src/mlx2/runtime/models/qwen4_fused_gdn.py",
+    "src/mlx2/runtime/models/qwen4_fused_gdn_verify.py",
+    "src/mlx2/runtime/models/qwen3_next.py"
+  ],
+  "licenses": [
+    "Apache-2.0 (routed MoE transcription and ports)",
+    "MIT (GDN runtime and MLX numerical transcription)"
+  ],
+  "inherited_provenance": [
+    "provenance/omlx-fn-2026-09-25.json",
+    "provenance/omlx-4113-routed-candidate.json",
+    "provenance/qwen36-35b.json",
+    "docs/PROVENANCE.md"
+  ],
+  "upstream_inherited_revision": "jundot/omlx#4113 1335263e8503b3f632819b0d3985a5b7b45fe92c; no new upstream/network interaction",
+  "modifications": [
+    "Exact top-8 E256/H2048/I512 split gate/up admission and dynamic launch extent; existing Metal source unchanged",
+    "Distinct Qwen3.6 stock qmv_fast down row/window body with bf16 reduction and expert views; does not change Flash-Next tile4 arithmetic",
+    "Shared 4/8-bit qmv_fast fold with independent group-64/128 affine header namespaces",
+    "Top-k launch templates support NE256/top-8 while Flash-Next defaults remain NE512/top-10",
+    "Reuse Qwen3.5 32-head decode numerical contract in a distinct snapshot verify source; default Flash-Next source bodies and launch templates unchanged",
+    "Geometry-specific Qwen3.6 probes, independent off-by-default batch decode and verify switches, snapshot per-row rollback",
+    "Explicit-only adapter switches, environment receipts, unqualifiable marker, bounded fallback counters and live kill switches",
+    "Real-weight per-call gate and one-load interleaved full-model benchmark, both coordinator-only behind ownership flag",
+    "Finishing pass (Claude, real venv): Qwen3.6 block top-k launch now runs the router admission (bf16 logits, row bound) and falls back counted; router refusal reason names the requested E/top-k"
+  ],
+  "validation": {
+    "host_tests": "tests/test_qwen36_decode_sources_host.py: 12 passed; baseline failures recorded separately in handoff",
+    "cpu_tensor_tests": "tests/test_qwen36_decode_wins.py 23 passed, tests/test_qwen36_decode_sources_host.py 12 passed on the real venv (CPU). Three codex fixtures were wrong (cache.state misuse x2, unregistered non-array table params) and were fixed without loosening; the new tests fail on base 531a876d",
+    "static": "Python compilation, Ruff E9/F/B023, git diff --check",
+    "metal": "not run; coordinator commands in qualification/runs/qwen36-flash-next-decode-20261001/README.md",
+    "performance": "not run; historical candidate regression is not assumed to be resolved",
+    "flash_next_regression": "CPU suites test_omlx_fn_ports, test_qwen4_moe_window, test_qwen4_gdn_batch_verify, test_qwen4_gdn_batch_decode, test_qwen4_hc_decode, test_qwen36*, test_qwen35*, test_perf_defaults, test_routed_candidate_4113, test_execution_policy, test_import_env_coverage, test_served_exp_gates, test_fused_gdn_served_silu: 419 passed, 12 skipped"
+  },
+  "git_status": "committed on codex/omlx-campaign-cx-q36-35b; not pushed or merged"
+}

@@ -1,0 +1,17 @@
+{
+  "name": "default-off varlen opaque-arena numeric and atomic state parity matrix",
+  "status": "gpu-candidate-screen-passed-not-qualified",
+  "source_repository": "original mlx2 implementation at 955ffdffa6d31cda453d80918c7dc694f01dc0df; pinned local mlx-lm-unified Qwen3 reference at 1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+  "source_paths": [
+    "native/paged_kv/arena.cpp",
+    "src/mlx2/runtime/paged_attention_native.py",
+    "src/mlx2/runtime/paged_native_atomic_owner.py",
+    "scripts/research/varlen_qwen3_06b_artifact_gate.py",
+    "scripts/research/varlen_atomic_qwen3_m5_spot.py",
+    "~/Desktop/mlx-uag/mlx-lm-unified/mlx_lm/models/qwen3.py"
+  ],
+  "license": "original mlx2 matrix under Apache-2.0; local mlx-lm-unified source imported by the existing offline gate without copying implementation",
+  "modifications": "Added a bounded six-cell native fp16 attention matrix and exact source, native binary, model artifact, GPU owner, and Music3 preflight. Reused pinned Qwen3 and two-layer atomic gates under the same lease. Added a CPU matrix geometry guard and explicit BF16 native refusal test; corrected a stale failed-page retirement diagnostic.",
+  "validation": "Exact source-built native extension SHA256 3b65e76179bd354fa5fe63a4541c9df7e6f107924d06b355db52da294134cf. M5 Max shared gpuq batch2 passed six native attention cells with worst normalized RMS 5.624e-6 versus float64 CPU oracle, nine pinned Qwen3-0.6B top-1 matches with worst full-vocabulary normalized RMS 0.0059613, and two-layer atomic 63/63 then 1/3 acceptance with all pages retired. Zero additional swapouts. Forty focused CPU checks passed. Full details and frozen hashes are in qualification/runs/varlen-numeric-state-20261003/.",
+  "limitations": "Native BF16, live BatchGenerator sampler and response handoff, serving reader lifetime, actual failed Metal command buffers, other model families, request-level performance, and serving route qualification are not established. Candidate stays default-off."
+}

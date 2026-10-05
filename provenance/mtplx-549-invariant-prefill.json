@@ -1,0 +1,42 @@
+{
+  "component": "Opt-in slice-invariant prefill lane (MTPLX #549 mechanism) for Flash-Next and the Qwen3.8 27B",
+  "kind": "behavioral-design-input",
+  "recorded_at": "2026-10-02",
+  "code_copied": false,
+  "status": "implemented, default off (policy field invariant_prefill); not qualified; not selected; observed-used only in qualification/runs/port-mtplx-invariant-20261002",
+  "sources": [
+    {
+      "repository": "youssofal/MTPLX",
+      "pull_request": 549,
+      "state": "open (read 2026-10-02, read-only fetch of refs/pull/549/head)",
+      "head": "5880a7b8cec66270fa3422e42f34980d8782a917",
+      "commit_read": "07fa7d48f845d6a28075c8d7cac9df27ed5098ba (perf(prefill): opt-in batch-invariant prefill for MoE models)",
+      "paths": {
+        "mtplx/batch_invariant_prefill.py": "4f262386c967e4509640707ea43dfdafe2be3071cb4521c4c19ce0b717a64386"
+      },
+      "license": "Apache-2.0 (repository LICENSE; the repository NOTICE adds an in-product attribution requirement for products that include MTPLX code)",
+      "used": "Mechanism and MLX facts only: two-batch quantized matmul with >= 33 rows per batch to avoid split-K and keep the 64-row NAX tile; padding sorted expert gathers to 4 rows per expert; forcing the fused SDPA kernel with zero query rows in front below 9 rows; refusing the lane unless every projection is covered; the >= 16 expert floor. No code, docstring or test was copied: mlx2's module, hooks, tests and scripts are written for mlx2's models, so the NOTICE attribution clause (which binds products that include MTPLX code) is not triggered. The MLX dispatch conditions were re-read from MLX 39400a0d4 (quantized.cpp, matmul.cpp, scaled_dot_product_attention.cpp) rather than taken from the PR."
+    }
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/models/invariant_prefill.py",
+    "src/mlx2/runtime/models/switch_layers.py (QuantizedSwitchLinear pad, SwitchGLU sort)",
+    "src/mlx2/runtime/models/qwen3_next.py (switch sort, MoE window decline)",
+    "src/mlx2/runtime/models/qwen3_5.py (fused GDN in-projection slices)",
+    "src/mlx2/runtime/models/qwen4_exp.py (Attention route, QSA indexer stage1/fused scores, GroupRMSNorm, GatedResidual, GDN fused in-projection)",
+    "src/mlx2/runtime/models/qwen38_27b.py (attention SDPA)",
+    "src/mlx2/runtime/prefill_plan.py (execution_identity binds the lane law)",
+    "src/mlx2/adapters/flash_next_policy.py, src/mlx2/adapters/flash_next.py, src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/serving.py (refuses lane_matmul/sp_qmm/int8_prefill beside the lane; re-audits coverage after expert streaming)",
+    "scripts/check_invariant_prefill.py, scripts/measure_fn_slice_floor.py (+inv arms)",
+    "tests/test_invariant_prefill.py"
+  ],
+  "modifications": [
+    "Scope: MTPLX reads an attention-phase context set by its runtime; mlx2 wraps the model's trunk class and opens a ContextVar scope for a forward of >= 2 rows that is not inside a speculative verify scope, a row-exact verify window, or a speculating cache.  The LM head and the MTP head stay outside the scope.",
+    "Dense (bf16) projections are covered too: Flash-Next's mixed artifacts keep the HC block_inject_weight (N=4) and the shared-expert gate (N=1) dense, and MLX folds a broadcast weight back into M, so the lane multiplies against a cached two-copy W.T stack (refused above 64 MiB per module).",
+    "Model-specific width switches are disabled inside the scope in the model modules: Flash-Next's fast GroupRMSNorm (<= 8 rows), the HC decode kernels (1..8 rows), the fused attention rows, the QSA NAX / indexed / gather kernels and the stage-one selector and fused block scores (all width-gated), the GDN fused in-projection table; every lane attention call takes the dense-mask fused SDPA.",
+    "No scoring-trunk or tail-grid changes (MTPLX commits 2 and 3): mlx2 has neither route.",
+    "Admission is a policy field, not an environment variable; a refusal fails the load (the policy asked for a capability the model cannot provide) instead of logging a warning.  The lane law enters the APCv2 prefill-execution identity, so lane and stock prefixes never share entries, and like other prefill candidates it requires qualification mode or a receipt to serve."
+  ],
+  "validation": "See qualification/runs/port-mtplx-invariant-20261002/README.md and tests/test_invariant_prefill.py."
+}

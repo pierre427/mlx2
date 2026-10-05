@@ -1,0 +1,43 @@
+{
+  "component": "Bit-exact reduction order for the sorted-order MoE weighted sum (qwen4_moe_weighted_sum): MLX col_reduce_small's partial order with bf16-rounded accumulation",
+  "status": "implemented; bit-identical to the eager tail on Metal (kernel bits at K=10 and K=8, full-model Flash-Next logits); selected: default ON in the Flash-Next adapter profile (MLX_QWEN4_MOE_WEIGHTED_SUM=1, code default 0) since 2026-10-01; observed-used in the e2e probe (mechanism counter 48 calls per 8192-token chunk). Not qualified by a qualification receipt; the profile change needs the Flash-Next route requalified. Qwen3.6-35B (K=8): admitted and kernel-bit-exact, not enabled by any profile.",
+  "sources": [
+    {
+      "source_repository": "https://github.com/ddalcu/mlx-serve",
+      "source_pr": "ddalcu/mlx-serve#653 (perf(moe): prefill takes the fused expert reduction (+4.8% Flash Next prefill, bit-identical)), merged 2026-09-30",
+      "source_revision": "a453794f9e95b8588b9338464ca13599d28caf33 (merge commit; PR head 74742f878ffdae2b703a07319b16ad81f1198d3e)",
+      "license": "MIT, Copyright (c) 2026 David Dalcu",
+      "source_files": {
+        "src/transformer.zig": "9bf8cf0c6fe445e3afc820cdb64c7f954b9dba9335f6e79d3610ce014bdfbcb2"
+      },
+      "source_regions": [
+        "VERIFY_EXPERT_REDUCE_SOURCE (lines 41657-41674): eight bf16 partials, partial[e % 8], folded 1..7 into partial 0 -- the reduction order and the bf16 accumulation are what mlx2 took; mlx2's kernel keeps its own structure (one threadgroup per token, ids/scores staged in threadgroup memory) and generalizes the partial count to min(8, K)",
+        "test \"prefill expert reduction is bit-identical to unsort multiply and sum\" (lines 68805-68826): shapes 1x33, 1x2048, 2x1024, 1x8192 and the one-partial falsifier, re-expressed as tests/test_qwen4_moe_weighted_sum_metal.py"
+      ]
+    },
+    {
+      "source_repository": "MLX as installed in the mlx2 venv (0.32.2.dev20260919+39400a0d4), read only to confirm the order",
+      "license": "MIT (Apple); nothing copied",
+      "source_files": {
+        "mlx/include/mlx/backend/metal/kernels/reduction/reduce_col.h": "9bb7b8b15612230c5f91cea3220048d09219809dbbc1adab4b2dabfd44315810",
+        "mlx/include/mlx/backend/metal/kernels/reduction/ops.h": "78d06730fc9564a73944e7f1fe3897d25c8789b28a939bf418e1968db311da41"
+      },
+      "note": "col_reduce_small (y-thread partials over rows j, j+lsize.y, ...; Sum<U> with U = bfloat16_t for bf16 sums; serial fold of partials 1..lsize.y-1). Host dispatch read from ~/Desktop/mlx-uag/mlx-src mlx/backend/metal/reduce.cpp (strided_reduce_small for reduction_size * non_col_reductions < 32, threadgroup_y = min(8, ...)); that checkout is not at 39400a0d4, so the dispatch was confirmed empirically on Metal rather than by source identity."
+    }
+  ],
+  "notice": "provenance/omlx-3903-qwen4-prefill.NOTICE (section 3)",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_moe_weighted_sum.py",
+    "src/mlx2/adapters/flash_next.py (profile MLX_QWEN4_MOE_WEIGHTED_SUM=1)",
+    "tests/test_qwen4_moe_weighted_sum_metal.py",
+    "tests/test_omlx3903_port.py",
+    "tests/test_prefill_step_and_import_guard.py",
+    "qualification/runs/recon-20261001/l4-moe-wsum/"
+  ],
+  "modifications": [
+    "The kernel reduces in the eager product's promoted dtype O (bf16 for bf16 scores, fp32 for fp32 scores) with P = min(8, K) partials; mlx-serve's kernel is bf16-only, top-10 only, one thread per output element.",
+    "Admission widened from top_k == 10 to top_k in (8, 10) (Qwen3.6-35B routes 8); both are gated bit-exact on Metal.",
+    "moe_weighted_sum gains a test-only partials override for the falsifier; at K=8 the one-partial sum equals MLX's order, so the K=8 falsifier is four partials."
+  ],
+  "validation": "GPU, M5 Max laptop, mlx 0.32.2.dev20260919+39400a0d4, qualification/runs/recon-20261001/l4-moe-wsum (branch claude/recon-20261001-l4-moe-wsum). (1) kernel_bits.json: raw output bits vs _scatter_unsort + (x * scores[..., None]).sum(-2) at 1x33, 1x64, 1x2048, 2x1024, 1x8192 tokens: 0 mismatches for K=10/D=2560 and K=8/D=2048; the a3f07334 kernel (fp32 slot-order accumulation) mismatched 57% of top-10 outputs, a one-partial bf16 sum 61%. Microbench at 8192 tokens (chained marginal per call): K=10 6.40 -> 0.90 ms, K=8 3.50 -> 0.48 ms. (2) tests/test_qwen4_moe_weighted_sum_metal.py (MLX2_RUN_METAL_TESTS=1): 14 passed, including fp32 scores and an order falsifier (one partial at K=10, four at K=8) that must mismatch. (3) e2e_exact.json, Flash-Next 4-bit MTP artifact, 16384-token prompt, chunks 2048 and 8192: lever on vs off bit-identical in a per-position hash of all 16384 positions' full logits, all argmaxes, the last-position logits (max |diff| 0) and 8 greedy decode tokens; off vs off2 also identical; mechanism counter 384 (2048 chunks) / 96 (8192) calls on, 0 off, 0 fallbacks. (4) e2e_perf.json, same process, served 8192 chunk, trunk + last-position head, ABBA x 6 after warm-up: on faster in 12/12 paired reps; 8K median -2.5% (-0.1..-3.7%), 32K median -4.7% (-1.3..-8.8%); thermal drift visible across reps, so indicative only. Swap-outs 0. CPU: tests/test_omlx3903_port.py mirrors the new order and checks the launch template (PARTIALS=8, dtype)."
+}

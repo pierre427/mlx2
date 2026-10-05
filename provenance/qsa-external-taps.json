@@ -1,0 +1,21 @@
+{
+  "component": "Qwen4 QSA and GDN external speculative target protocol",
+  "implementation_kind": "original mlx2 integration over existing model math",
+  "source_repository": "mlx2",
+  "source_revision": "2207af9a980f7def6173a3a057221267de634f9a",
+  "source_paths": ["src/mlx2/runtime/models/qwen4_exp.py", "src/mlx2/runtime/hybrid_verify_rows.py"],
+  "base_provenance": "provenance/flashnext.json",
+  "license": "MIT for existing model math; Apache-2.0 for original transaction integration",
+  "source_code_copied": false,
+  "modifications": [
+    "Declare exact QSA KV trim support for raw index keys, pooled summaries and target KV; unknown or inherited subclass declarations remain refused",
+    "Select specialized transaction ownership by cache topology including targets with indexed KV and no recurrent layers",
+    "Expose H-wide target taps through the existing learned hyper-connection mixer; declare post_layer_shared_hc_mixer convention explicitly",
+    "Preserve ordinary logits and shape-stable B1 forwarding; retain full block geometry for prepared segmented verification cohorts",
+    "Expose body-only prefill and top-level text-target protocol without model-name branches in request lifecycle",
+    "Emit explicit unqualified target protocol receipts"
+  ],
+  "validation_paths": ["tests/test_qwen4_external_taps_cpu.py", "tests/test_external_qsa_verify_rows_cpu.py", "tests/test_external_adaptive_hybrid_cpu.py"],
+  "validation": "CPU-only real tiny Qwen4 GDN, PLE and QSA: independent learned HC mixing oracle, tied/untied ordinary logits, uniform/ragged B2 committed prefix states and raw/pooled index ledger, adaptive mixed-temperature physical groups, later-group failure and authoritative snapshot recovery. Includes tokenwise option regression. No trained compatible hybrid draft artifact, Metal numerical qualification or performance evidence.",
+  "status": {"implemented": true, "qualified": false, "selected": false, "observed_used": false}
+}

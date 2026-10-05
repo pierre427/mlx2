@@ -1,0 +1,45 @@
+{
+  "source_repository": null,
+  "source_revision": "arXiv:2609.26368v1; arXiv:2602.03560v1",
+  "source_paths": [
+    "https://arxiv.org/html/2609.26368v1",
+    "https://arxiv.org/html/2602.03560v1"
+  ],
+  "license": "Original mlx2 implementation under Apache-2.0; papers used as architectural references, no source or weights copied",
+  "destination_paths": [
+    "src/mlx2/experimental/hysparse2",
+    "configs/hysparse2",
+    "tests/experimental",
+    "docs/research/hysparse2"
+  ],
+  "modifications": [
+    "Scaled 49-layer self/cross architecture with MQA, SWA partial RoPE, FA/SA NoPE, outer bridged KV and inner KV/oracle reuse.",
+    "Original MLX tiled online softmax and stable token-level oracle selection with forced-local union; bounded score tiles and request-private caches.",
+    "Explicit research choices for head aggregation, simplified-mHC parameterization, MoE/router loss, MTP internals and AdamW training; not an exact undisclosed training recipe.",
+    "Original local corpus preparation, group split, exact deduplication, archive final-answer extraction, bounded credential filtering and byte-level BPE tokenization. Private records are excluded from Git.",
+    "Pinned public-file downloads with complete size/SHA256 verification; distinct public-tool trace reader, reusable tokenizer, per-source token shards and deterministic token-weighted sampling. GPU admission preserves live waiters and foreign locks without CPG.",
+    "Added an experimental permanent n-gram PLE knowledge sidecar, bidirectional masked-diffusion auxiliary student layers with 8x residual internal width, and cache-fragment-stable block candidate selection.",
+    "Bound block-selector and PLE geometry plus an immutable semantic-capsule digest into an APCv2 identity contract without claiming a selected serving route.",
+    "Extended private Codex archive preparation to bounded tool calls and results while continuing to exclude hidden reasoning and reject credential-bearing trajectories."
+  ],
+  "validation": [
+    "tests/experimental/test_hysparse2.py",
+    "tests/experimental/test_hysparse2_corpus.py",
+    "docs/research/hysparse2/validation.json",
+    "tests/experimental/test_hysparse2_data_resources.py",
+    "docs/research/hysparse2/gpu-training-validation.json",
+    "docs/research/hysparse2/expanded-corpus-receipt.json"
+  ],
+  "status": "implemented research reference; full-size GPU training and resume smoke passed; 2M remains unqualified",
+  "bug_sweep_20261002": {
+    "implementation": "Original mlx2 source/admission repairs: context validation uses initialize_from_checkpoint to verify capsule binding and permanent PLE byte/tensor mirror before evaluation; receipts include verified model/state/PLE hashes. Training admits only finite nonnegative diffusion auxiliary weights before allocation. Pinned public-file and receipt writes resolve within the caller-selected output root, rejecting existing escaping links before downloads and rechecking receipt containment before publication.",
+    "source_revision": "Reviewed local base ff3877a33fa3e1dda19fbceb687cc325d377a423 through 9ef2d9582dfa7f9be1bd92e5c283d544e04dd17f; no external source copied.",
+    "tests": [
+      "tests/experimental/test_hysparse2_validator_checkpoint_cpu.py",
+      "tests/experimental/test_hysparse2_diffusion_weight_cli.py",
+      "tests/experimental/test_hysparse2_download_containment.py"
+    ],
+    "reproduction": "Original validator accepted corrupt PLE sidecar under copied SHA identity; invalid negative/NaN/Inf diffusion weights reached training; lexical-only dataset path gate followed repository symlink outside output root. Fixed tests reject each before the relevant computation/network/write boundary.",
+    "boundary": "Tiny synthetic CPU checkpoint math, host poison admission and fake one-file download only. No GPU work, no real data downloads, no checkpoint rewriting or route qualification."
+  }
+}

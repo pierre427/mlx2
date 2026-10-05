@@ -1,0 +1,27 @@
+{
+  "component": "small-M affine quantized matmul on simdgroup matrices (sp_qmm), opt-in",
+  "source_repository": "incoai/splash (read-only clone)",
+  "source_revision": "f786bed (PR #88 merge 868f793; commits 2c788c0, 3a20983)",
+  "source_paths": [
+    "runtime/metal/kernels/decode/linear_q4_sgmatrix.metal",
+    "runtime/metal/kernels/common/q4_sgmatrix.h",
+    "runtime/metal/kernels/common/sgmatrix.h",
+    "dev/benchmarks/apple9-simdgroup.md"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/runtime/models/sp_qmm.py",
+    "src/mlx2/serving.py (execution policy sp_qmm / MLX2_SP_QMM)"
+  ],
+  "modifications": [
+    "Mechanism mined, code rewritten: the exact bfloat operand 128 + q built by OR-ing the nibble into 0x4300, the 8x8x8 simdgroup_multiply_accumulate on register operands with an fp32 accumulator, the per-group epilogue s * (dot - 128 * sum_x) + b * sum_x, and the lane mapping (fm, fn) of the 8x8 fragment (identical to MLX steel's).",
+    "Runs on MLX's own packed layout (no StorageN=256 repack, no prepared activation table): the k order inside each fragment is permuted so each lane reads two 4-element activation runs directly, and group sums come from simd_shuffle_xor instead of a producer-written sums buffer.",
+    "Adds 5-bit weights (MLX's little-endian 40-bit chunks; 0x4300 | q is exact for q < 128) and M up to 32 via 8-row M tiles sharing one weight decode.",
+    "Deterministic K split across simdgroups of one threadgroup, reduced in fixed order through threadgroup memory, instead of Splash's cross-threadgroup split with arrival counters.",
+    "Instance-scoped routing (class swap on selected QuantizedLinear instances, as int8_prefill does) with a measured per-(M, N, bits) policy; default off."
+  ],
+  "validation": [
+    "tests/test_sp_qmm.py (CPU: exact emulation of the fragment mapping on MLX-packed 4/5-bit weights, 5-bit unpack, policy, routing, serving switch)",
+    "qualification/runs/sp-qmm-20260925 (GPU: per-shape error vs fp32 reference and stock, cache-cold timing, 27B forward and teacher-forced quality)"
+  ]
+}

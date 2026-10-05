@@ -1,0 +1,23 @@
+{
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_revision": "0ba66d545824872a65f0b698fd6a58c038930de5",
+  "source_paths": [
+    "src/mlx2/runtime/paged_attention_pack.py",
+    "src/mlx2/runtime/paged_attention_native.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "native/paged_kv/arena.cpp"
+  ],
+  "source_license": "MIT (repository LICENSE)",
+  "upstream_research_only": [
+    "https://github.com/sgl-project/sglang/issues/2273",
+    "https://github.com/sgl-project/sglang/pull/1383",
+    "https://github.com/sgl-project/sglang/pull/36065",
+    "https://github.com/sgl-project/sglang/pull/33196",
+    "https://github.com/sgl-project/sglang/issues/23500",
+    "https://github.com/vllm-project/vllm/issues/3130",
+    "https://github.com/flashinfer-ai/flashinfer/pull/728",
+    "https://github.com/flashinfer-ai/flashinfer/pull/4794"
+  ],
+  "modifications": "Original host-only work counters and optional profiling; pinned-handle generation validation avoids full arena scans. No upstream code or CUDA kernel copied. No Metal kernel or route default changed.",
+  "validation": "Focused CPU tests; no GPU or native performance claim."
+}

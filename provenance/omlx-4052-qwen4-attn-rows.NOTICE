@@ -1,0 +1,41 @@
+Scoped notices for code adapted into src/mlx2/runtime/models/qwen4_attn_rows.py
+(fused Qwen4 attention rows). See provenance/omlx-4052-qwen4-attn-rows.json for
+paths, hashes and modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx PR #4052, head
+   d05afc7a7a59a871531b89ee769460581a26aabb,
+   omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/attn_fused.py.
+   The fused-row structure (q/k norm + RoPE in one launch per head and row;
+   one-pass SDPA chains split over simdgroups and closed by a separate
+   combine launch that also applies the output gate) is adapted from it.
+   The full Apache-2.0 text is this repository's LICENSE.
+
+2. MLX — MIT License (scoped to the arithmetic transcribed inside the Metal
+   sources of qwen4_attn_rows.py: rms_single_row from rms_norm.metal,
+   rope/rope_single from rope.metal, sdpa_vector / sdpa_vector_2pass_1 /
+   sdpa_vector_2pass_2 from sdpa_vector.h, and select_sdpa_blocks from
+   scaled_dot_product_attention.cpp, at ml-explore/mlx revision
+   39400a0d4cf1641bc6e543cb5e3585757f491854)
+
+MIT License
+
+Copyright © 2023 Apple Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

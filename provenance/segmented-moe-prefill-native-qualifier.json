@@ -1,0 +1,131 @@
+{
+  "name": "segmented-moe-prefill-native-qualifier",
+  "status": "implemented (original harness); CPU-tested with a substituted fake backend only; the native path has never run; nothing is qualified",
+  "license": "Apache-2.0 (mlx2 LICENSE); original code, no third-party text copied; no Apple copyright header. The subject adapter keeps its own oMLX Apache-2.0 attribution and reads the installed MLX kernel headers (MIT, Apple Inc.) at kernel-build time; this harness only hashes those installed files and copies none of them.",
+  "destination_paths": [
+    "scripts/qualify_segmented_moe_prefill_research.py",
+    "tests/test_segmented_moe_prefill_native_qualifier.py",
+    "provenance/segmented-moe-prefill-native-qualifier.json",
+    "tests/test_segmented_moe_native_identity_cpu.py"
+  ],
+  "subject": {
+    "path": "src/mlx2/adapters/segmented_moe_prefill_research.py",
+    "committed_in": "03e75c4fdc9c85b27c2eeb9dd6bb20ab0e7b17e3",
+    "sha256": "cf115b607513a85c4d7ba0d7af907605be812b7b6a552521197ff8db5c404dcc",
+    "tests_sha256": "202ce9404ca6634bbdb24f1d68b09257d4343d5ebd3e4c3d50cf5d20226c2da9",
+    "provenance_sha256": "008dd14b52973a8c8475edd175874c8eb019f8d544322d53baa5cdf921f75882",
+    "review_receipt": "qualification/runs/mechanism-intake-20260930/segmented-moe-prefill-review.json",
+    "frozen": "all three hashes are pinned in the harness (FROZEN) and re-checked at admission, after import and before every dispatch; the harness never edits them",
+    "used": [
+      "admit / MoEPrefillRequest / projection_plan / Plan (expected plans, pinned sweep)",
+      "validate_sorted_routes (routes carrying the ordinary _gather_sort order) and sort_routes_host (run/pad cross-check)",
+      "research_mapped_gate_up_swiglu and research_segmented_down with research_opt_in=True",
+      "ENGAGEMENT successful-chain counters (fresh deltas per call)",
+      "the import-captured native class, only for a separate dispatch of its own tile scan (_tiles) on the same sorted ids",
+      "read_mlx_headers (hash of the flattened header text it builds) and tile_table_host (cross-check of the independent tile law)"
+    ],
+    "states": "implemented research candidate; NOT qualified, NOT selected, NOT observed-used; this harness cannot flip those"
+  },
+  "reference": {
+    "files": [
+      "src/mlx2/runtime/models/switch_layers.py",
+      "src/mlx2/runtime/models/activations.py",
+      "src/mlx2/runtime/models/qwen3_next.py"
+    ],
+    "path": "served local layer code on the same sorted assignments: switch_layers._gather_sort (mx.argsort order, its tie order, its > 32768-row seam pad) -> QuantizedSwitchLinear.__call__ holding the fused [gate | up] table (mx.gather_qmm sorted_indices=True, transpose, affine 4-bit g64, bf16) -> switch_layers.SwiGLU (compiled activations.swiglu) on gate_up[..., :I] / gate_up[..., I:] exactly as FusedGateUpSwitchGLU splits it -> down QuantizedSwitchLinear sorted -> _scatter_unsort",
+    "witnesses": "exact source lines of that path in the three files are required at admission (REFERENCE_WITNESSES); their hashes are bound",
+    "not_used": "no handwritten SiLU, upstream LUT, fp32 proxy or candidate-internal helper as reference; quantized arithmetic is never changed"
+  },
+  "design_patterns_read": [
+    "scripts/qualify_tensor_fa_research.py: source-before-MLX admission, evidence-vs-execution split and live-run witness re-implemented here (not imported); its attention tolerances, host float64 softmax and SDPA baseline are NOT used"
+  ],
+  "gate": {
+    "comparison": "bf16 outputs compared as raw uint16 bits, zero mismatches; non-finite bit patterns in either arm fail even when identical; exact shapes; reference nonzero fraction >= 0.5; no tolerance of any kind",
+    "routes": "sorted ids equal router ids[order] and the order-independent host law, nondecreasing, seam pad rows repeat the last row, inv_order a permutation, the ordinary replicated x equals x_tokens[row_map]; the same tie order feeds both arms",
+    "restoration": "candidate chain (candidate gate/up -> candidate down) restored by _scatter_unsort equals the reference restoration bit for bit; both restorations equal the host inverse of their sorted rows",
+    "engagement": "every candidate call: exactly one fresh native successful chain of its kind and no other counter movement, paired with its evaluated, checked output; the run total must equal the evaluated native stages and the catalogue's expected count",
+    "scan_probe": "separate dispatch of the candidate's own tile scan on the same sorted ids per tile height used: count within capacity, equal to an independent tile law, every row covered exactly once by single-expert tiles of at most bm rows",
+    "native_stamp": "only native_verdict(live) on an in-process _LiveNativeRun built by _run_native with the real NativeBackend, the full mandatory catalogue and clean post-run source/build/module checks"
+  },
+  "catalogue": {
+    "geometries": {
+      "default35b": "E256 k8 D2048 I512",
+      "flash_next": "E512 k10 D2560 I640"
+    },
+    "cells": "per geometry: row-block boundary (T128 / T205) uniform and interleaved-empty-subset, ragged uniform, hot edge experts with full-length runs, Zipf-skewed with empty experts, a planner + six pinned plan sweep, one > 32768 sorted-row seam pad control (T4097 pad 56 / T3277 pad 62); decode T1, MTP verify T4 and one-below-admission cells refused before any backend",
+    "inputs": "seed-bound host numpy: router ids by Gumbel top-k (k distinct experts per token), bf16 token rows, and affine q4 g64 tables generated directly in packed form (uniform 4-bit codes, bf16 scales in [0.006, 0.014), biases -scale * U[7, 8)); one geometry's tables live at a time and one cell at a time"
+  },
+  "validation": [
+    "PYTHONPATH=src:. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ~/Desktop/mlx2/.venv/bin/python -m pytest --noconftest -p no:cacheprovider -o addopts= -q tests/test_segmented_moe_prefill_native_qualifier.py: 97 passed on CPU (MLX blocked before collection-time import and around every test, cached MLX modules hidden, NativeBackend construction forbidden); fresh subprocesses for import, --help, --catalogue, --timing and an unacknowledged --run-native end with no mlx module loaded",
+    "the substituted fake runs the real run_gate/recorder/evaluate path (reverse tie order, so the stable host order is never assumed); its best verdict is bit_identity_evidence_pass, which is evidence only; a full-catalogue fake with matching native-labelled counters, the real witness and run class and a rebound NativeBackend stays non-native (root falsifier 4a7d10cc)",
+    "admission controls on a temporary git checkout and a fake installed-MLX tree: missing run flag or acknowledgement, relative or symlink-alias source root, foreign MLX2_INTAKE_SOURCE_ROOT, short or mismatched commit, moved HEAD, tracked edit, untracked file, ignored non-bytecode file, assume-unchanged edit caught by HEAD-blob bytes, frozen candidate drift, reference witness drift, sister-checkout PYTHONPATH, existing or missing --out, uncommitted bound file, missing MLX header; source_guard refuses bound, unbound-tracked, untracked, HEAD, transitive-header, metallib and extra-MLX-Python changes; import identity refuses another file, swapped bytes or another version",
+    "deliberate failures shown: one-bit difference in any stage, identical NaN/+inf/-inf in both arms, all-zero outputs, wrong shape/dtype/missing arrays, route tampering (order, sortedness, router law, row-map copy, pad), unusable ordinary routes stop the run, restoration tampering, seven engagement defects, scan probe missing/duplicate/wrong-expert/reordered tiles, plan or kind drift, dispatch without a guard, refuse cells with outputs, incomplete full gate, verdict fields or timing in evidence, input/table identity drift, unexpected stages, guard failure and partial backend failure (both stop and release), no receipt for refused/failed runs, a receipt path appearing mid-run is never overwritten",
+    "30/30 in-memory mutations of the harness text (no file written) each fail a targeted test subset; baseline passes (scratch runner /tmp/mlx2-intake/stage20-moe-qualifier-mutations.py, log stage20-moe-qualifier-mutations.log)",
+    "ruff F/E9/B clean on the harness and tests; the native path is otherwise unexecuted"
+  ],
+  "limitations": [
+    "the NativeBackend code has never run: MLX import, device checks, gather_qmm/SwiGLU reference, candidate JIT/dispatch, readbacks and the scan probe are reviewed and lint-checked only",
+    "system Metal headers (metal_stdlib, MetalPerformancePrimitives), the Metal compiler and the OS are not hash-bound; the run records platform.platform() and device_info only. The utils.h preamble mx.fast.metal_kernel prepends is compiled into libmlx (bound by the libmlx hash); the installed preamble headers are hashed but not proven identical to it",
+    "the scan probe is a separate dispatch of the candidate's own scan on the same sorted ids, not the scan instance inside an evaluated chain; chain coverage is evidenced by the bit identity of the evaluated outputs",
+    "successful-chain counters count lazy chains, not GPU executions; nativeness is evidence association (import-time class/witness capture), not protection against arbitrary in-process code",
+    "both arms use the tie order of one mx.argsort run; tie-order invariance across runs is not claimed",
+    "the reference QuantizedSwitchLinear is created with __new__ + nn.Module.__init__ (its __init__ would draw random weights) and holds the synthetic tables; its served __call__ is used unchanged",
+    "two named geometries, affine 4-bit g64 bf16, synthetic uniform 4-bit codes only; no generic-shape, model, state, batching or performance claim",
+    "the full-catalogue fake test peaks near 2.5 GB host RSS"
+  ],
+  "pending": [
+    "native run under the parent wrapper's CPG lease and both flocks (native GPU task db5b6758ea9d4781ba87a1e6a10ab834 in session 50172f73, unclaimed by this builder), after root review and a commit of these files",
+    "separate mapped-input / fused-activation / down ablations, controlled paired latency and peak memory (not in this harness)",
+    "teacher-forced model/state/continuation and integration qualification"
+  ],
+  "native_run": false,
+  "qualified": false,
+  "selected": false,
+  "observed_used": false,
+  "model_gain": false,
+  "native_identity_repair_2026_10_01": {
+    "author": "exact claude-opus-5-5 (agent opus-intake-stage25-moe-caller-identity), CPU only, no commit; CPG session 6e06c202510a479dbc17e6dc96a519f2 task f38f7e452ccd4e279b23b8f3bbb1959b",
+    "base": "worktree HEAD 1239dbe4cccfd8b02f4fb3d1a8ee5e94a2e66946; pre-repair committed script sha256 3dfdec64f8a15e9c45bfcae11ba0782d570ae376ddeb04f7085835da90decd9e (bound files unchanged by the concurrent attention/docs commits)",
+    "defect_reproduced_by_root": "/tmp/mlx2-intake/stage25-moe-caller-argument-control.log: without rebinding any module name or evaluator, the retained FakeBackend(prefix=\"native\", native=True) over the full 21-cell catalogue through the actual run_gate and evaluate (66 chains: gate_up 26, down 40) gives bit_identity_evidence_pass; a _LiveNativeRun built with the real _WITNESS and matching fresh native counters was correctly refused by native_verdict(live), but native_verdict(live, FakeBackend) returned native_synthetic_gate=True with reasons [] because the native class (_cls), run type (_live), witness (_witness) and evaluator (_evaluate) were overridable default arguments; _run_native(admission, cells, full, _cls=...) likewise let a caller choose the constructed class. No MLX import; source unchanged",
+    "modification": [
+      "scripts/qualify_segmented_moe_prefill_research.py: _run_native and native_verdict are now built once at import by _bind_native_identity(NativeBackend, _LiveNativeRun, _WITNESS, evaluate) and hold those objects in closure cells (native_verdict: class, run type, witness, evaluator; _run_native: class, run type, witness), not default arguments; signatures are exactly native_verdict(live) and _run_native(admission, cells, full_requested), so any class/run/witness/evaluator argument is a TypeError raised before construction. Function bodies, reason strings, counter checks and post-run checks are unchanged",
+      "module docstring: identity-association paragraph and its limits; the old default-argument comment removed",
+      "HARNESS_FILES (hence BOUND_FILES) appends tests/test_segmented_moe_native_identity_cpu.py at the end (index 2 stays this provenance file), so native admission requires it committed at HEAD with working bytes equal to the HEAD blob; expected bytes come from git ls-tree HEAD at run time, no SHA is pinned for it and it is not in FROZEN",
+      "unchanged: frozen candidate, its tests and provenance (hashes below), catalogue, input/table laws, ordinary reference path, bit-identity gate (no tolerance), evaluate(), admission order (source/build before any MLX import), NativeBackend class body, run_gate, guards, CLI behaviour"
+    ],
+    "validation": [
+      "PYTHONPATH=src:. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ~/Desktop/mlx2/.venv/bin/python -m pytest --noconftest -p no:cacheprovider -o addopts= -q tests/test_segmented_moe_native_identity_cpu.py: 36 passed, run alone; log /tmp/mlx2-intake/stage25-moe-identity-tests.log; peak RSS about 2.5 GB (one full-catalogue fake run per module)",
+      "host-only: an mlx/mlx.* meta-path blocker is installed before the collection-time harness/candidate import and around every test, cached MLX modules hidden and restored, no mlx module loaded; the test asserts no plugin autoload and no conftest; the captured original NativeBackend constructor and every method, the candidate's captured _MLXBackend (constructor, capability, upload, kernel, scan, both dispatches) and both research entries are replaced by raising stubs in every test (class identities kept so candidate_refusal still passes), and candidate engagement counters must not move; the fake is the retained FakeBackend extracted from tests/test_segmented_moe_prefill_native_qualifier.py as source text (ast), that module is neither imported nor collected",
+      "controls: root reproduction inputs (full 21 cells, 26/40 = 66 chains, actual evaluate pass, real witness/run type, matching counters): native_verdict(live, FakeBackend) is a TypeError and native_verdict(live) refuses with exactly [\"backend is not the native backend\"]; keyword (_cls, _live, _witness, _evaluate, native_cls, live_cls, witness, evaluator) and positional (1-4 extra) overrides of native_verdict and _run_native are TypeErrors; closure cells hold the import-time originals; module-name rebinding of NativeBackend/_LiveNativeRun/_WITNESS/evaluate neither changes construction (_run_native and main() reach the forbidden ORIGINAL constructor, the rebound class is never built, no receipt) nor makes the full fake native, and the rebound evaluator is never consulted; subclass, look-alike, wrong witness, run-type subclass, report/JSON/evaluation/None evidence refuse; fresh-process --catalogue/unacknowledged --run-native/--timing stay host-only; committed-HEAD guard on a temporary checkout (dirty new test refuses, re-committed bytes admitted without a pin, removed new test refuses as not committed at HEAD)",
+      "HOST ASSOCIATION CHECKS (explicitly labelled; not native execution): an uninitialized instance of the captured original class with the real witness/run type, full scope and matching counters is admissible to the association logic; the same with a post-run refusal, six counter defects, or partial/mismatched scope evaluated by the actual evaluator is rejected",
+      "scratch in-memory variants, never written to the checkout (/tmp/mlx2-intake/stage25-moe-identity-mutations.py, log stage25-moe-identity-mutations.log): baseline 36 passed; the pre-repair HEAD source and six repair mutants (default-argument class, class check/constructor/evaluator/run type+witness by module name, post-run dropped) each fail targeted tests",
+      "ruff F/E9/B clean on the script and the new test",
+      "NOT re-run by instruction: the 97 native-harness tests, 117 frozen-candidate tests, the 30 stage-20 mutations, attention 24/69 and timing 80 suites"
+    ],
+    "compatibility_for_root": "HISTORICAL (stage 25 handoff state; superseded by compatibility_follow_up_2026_10_01 below, which repaired the fixture named here): tests/test_segmented_moe_prefill_native_qualifier.py was not edited or re-run (instruction). By reading: test_native_verdict_requires_matching_fresh_native_counters calls native_verdict(live, _evaluate=passing) and will now raise TypeError (its counter controls are re-covered here with the actual evaluator on the full-catalogue report); the other identity tests there use native_verdict(live)/_run_native(admission, cells, full) and their reason strings are preserved. The scratch stage-20 mutation runner entries verdict-ignores-backend-type and rebindable-native-class substitute text containing _cls that no longer exists",
+    "limitations": "Evidence-association hygiene only: code that edits closure cells, class attributes (for example the original class __init__ or an instance __class__), live-run slots or the witness object, or that rebinds native_verdict/_run_native themselves or helpers they call by module name (run_gate, source_guard, post_run_refusals, KINDS), is out of scope. An uninitialized instance of the original class is not proof of native execution; the controls use it only to isolate association logic. No MLX, Metal, device, weights, model or timing observed.",
+    "frozen_sha256": {
+      "src/mlx2/adapters/segmented_moe_prefill_research.py": "cf115b607513a85c4d7ba0d7af907605be812b7b6a552521197ff8db5c404dcc",
+      "tests/test_segmented_moe_prefill_research.py": "202ce9404ca6634bbdb24f1d68b09257d4343d5ebd3e4c3d50cf5d20226c2da9",
+      "provenance/segmented-moe-prefill-research.json": "008dd14b52973a8c8475edd175874c8eb019f8d544322d53baa5cdf921f75882"
+    },
+    "compatibility_follow_up_2026_10_01": {
+      "author": "exact claude-opus-5-5 (agent opus-intake-stage26-counter-fixture, same conversation as the stage 25 repair), CPU only, no commit; CPG session 99250aa189c94938a3e0ae30490f1b40 task 103431b775c744ad9c161bb8b824cfa4; scope authorized by root radio 2969 and the stage 26 user task",
+      "trigger": "root ran only tests/test_segmented_moe_prefill_native_qualifier.py::test_native_verdict_requires_matching_fresh_native_counters on the stage 25 API: TypeError at line 459 (native_verdict() got an unexpected keyword argument _evaluate), no MLX modules (/tmp/mlx2-intake/stage26-old-counter-fixture-before.log). The API rejection is intended; the obsolete fixture was repaired, not the API",
+      "modification": "tests/test_segmented_moe_prefill_native_qualifier.py, ONLY the body of test_native_verdict_requires_matching_fresh_native_counters (everything outside that function byte-identical to HEAD 5092c932, checked by ast line ranges): the one-cell partial report and caller-supplied passing evaluator are replaced by the ACTUAL full 21-cell catalogue through the existing host FakeBackend(prefix=\"native\", native=True), run_gate and evaluate; expected fresh counters are computed per kind from the catalogue stages (gate_up 26, down 40, total 66) and asserted; native_verdict(live) is called with no evaluator injection and its evaluation verdict/chains/expected_chains/refusals must equal the module evaluate() result. Kept, as an explicitly labelled HOST ASSOCIATION CHECK with an UNINITIALIZED original NativeBackend (not native execution): the positive full association (gate true, reasons []), the six negative counter checks adapted to the real counts (empty; down 39; backend_raised 1; a substituted down chain; calls 67; calls 65 with down 39) and the post-run refusal (gate false, reasons exactly the refusal)",
+      "validation": "PYTHONPATH=src:. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 ~/Desktop/mlx2/.venv/bin/python -B -c <mlx meta-path blocker installed before pytest/collection; pytest.main(--noconftest -p no:cacheprovider -o addopts= -q NODE)> on ONLY that node: 1 passed in 8.86s, no mlx module loaded, exit 0; log /tmp/mlx2-intake/stage26-old-counter-fixture-after.log; ruff F/E9/B clean. NOT re-run by instruction: the other 96 old tests, the 36 new identity tests (root ran them once), the 117 frozen-candidate tests, old 30 mutations, attention and timing suites; no new mutants (fixture-only change)",
+      "unchanged": "qualifier script 66ceca9ce32afe266bff0873b11be9ad3ce7cea4b5a13a70cce7d4a828b273b7, new identity test a6cf0485a907eae6ab5264a02a5ca21d6a2af3cad9b981c839b08f9fc9bdf8a6, frozen candidate/test/provenance hashes above; no source arithmetic, reference, tolerance or catalogue change",
+      "still_open": "the scratch stage-20 mutation runner entries verdict-ignores-backend-type and rebindable-native-class still substitute _cls text that no longer exists (scratch tooling, not edited); the top-level 97-passed validation line predates this change and the full old module was not re-run after it",
+      "native_run": false,
+      "qualified": false,
+      "selected": false,
+      "observed_used": false,
+      "model_gain": false
+    },
+    "native_run": false,
+    "qualified": false,
+    "selected": false,
+    "observed_used": false,
+    "model_gain": false
+  }
+}

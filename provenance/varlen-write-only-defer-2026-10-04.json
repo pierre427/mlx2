@@ -1,0 +1,10 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "default-off native ready B2 write-only evaluation deferral",
+  "source_repository": "lab-owned mlx2",
+  "source_revision": "ae9aa3d1d4c96f035aff969511862bfb46adba51",
+  "source_paths": ["src/mlx2/runtime/paged_kv_write.py", "src/mlx2/runtime/paged_attention_native.py", "src/mlx2/adapters/qwen3_paged_candidate.py", "src/mlx2/runtime/paged_native_graph_group.py"],
+  "license": "existing lab-owned mlx2 project terms; no external implementation copied",
+  "modifications": ["Separate default-off write-only Q1 scope from existing full deferral", "Retain grouped write roots without async submission; retain read roots while eagerly submitting reads", "Preserve final logits evaluation, exact terminal drain, and failure-flush ownership", "Validate distinct physical submission counter pattern", "Record process CPU nanoseconds alongside existing graph_eval host wall nanoseconds when profiling"],
+  "validation": {"cpu_fault_tests": "6 direct AST-extracted source contracts passed", "runtime_imports": "none; MLX and native imports removed from extracted methods and replaced with explicit doubles", "gpu": "not executed", "performance": "unmeasured", "qualification": "unqualified"}
+}

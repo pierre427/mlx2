@@ -1,5 +1,5 @@
 {
-  "source_repository": "local read-only mlx-lm-unified checkout",
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
   "source_revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
   "source_paths": [
     "mlx_lm/models/laguna.py"

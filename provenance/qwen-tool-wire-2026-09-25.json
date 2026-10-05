@@ -1,0 +1,29 @@
+{
+  "kind": "behavioral-design-inputs",
+  "recorded_at": "2026-09-25",
+  "code_copied": false,
+  "sources": [
+    {
+      "repository": "Blaizzy/mlx-vlm",
+      "revision": "b47ed811",
+      "pull_request": "https://github.com/Blaizzy/mlx-vlm/pull/2344",
+      "paths": [
+        "mlx_vlm/tools/parsers/qwen3_coder.py",
+        "mlx_vlm/server/responses_state.py"
+      ],
+      "license": "MIT",
+      "lesson": "A closed Qwen3-Coder value may quote \"<parameter=\" (maintainer review: \"Use <parameter=name> in the template.\"); an unclosed middle parameter is the same text, so only evidence outside the text can tell them apart. Whitespace between streamed parallel tool calls is template structure, not content."
+    }
+  ],
+  "mlx2_changes": [
+    {
+      "path": "src/mlx2/runtime/tool_parsers/qwen3_coder.py",
+      "change": "Non-strict tools: an opener inside a closed raw value is text unless it is a well-formed tag naming a declared parameter. Strict tools and tools that declare no parameters still reject any opener; the constrained grammar is unchanged."
+    },
+    {
+      "path": "src/mlx2/output.py",
+      "change": "OutputParser holds whitespace-only content after a tool call: dropped at the end of the output, and before another call when no text has been shown; otherwise emitted with the next text. Streamed and non-streamed content both follow."
+    }
+  ],
+  "validation": "tests/test_output.py (new cases for quoted undeclared tags, declared-name rejection for non-strict, strict and schema-less tools, and whitespace between calls whole and per character, including a tolerant fallback). Real Qwen3.5-9B-4bit tool-call outputs from the mlx-vlm GPU run (nine scenarios) replayed through OutputParser: all parse, identical whole and per character, no stray content."
+}

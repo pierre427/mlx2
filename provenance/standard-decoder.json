@@ -1,0 +1,42 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "notice": "provenance/standard-decoder.NOTICE",
+  "source_files": {
+    "mlx_lm/models/qwen3.py": {
+      "sha256": "9facb9e667b7372771d4c68a54213eaa0b47fe0d0443c4f73328520300d3b66d"
+    },
+    "mlx_lm/models/qwen3_moe.py": {
+      "sha256": "77daf5f0f4c92dab6cc8423190529455e5cb77999d41587be0f5b8271a64d350"
+    },
+    "mlx_lm/models/qwen2.py": {
+      "sha256": "30d38786f3c598bf58c1dafcdffbeac6f3c507442bde768944350c57222cf391"
+    },
+    "mlx_lm/models/llama.py": {
+      "sha256": "8b46ac7f11c7134c1d83f12ec6e05b3d64a30f18aa7468798437b2e413f80cdb"
+    }
+  },
+  "destinations": [
+    "src/mlx2/runtime/models/standard_decoder.py",
+    "src/mlx2/adapters/standard_decoder.py"
+  ],
+  "mined_mechanisms": {
+    "qwen3.py": "Q/K RMS normalization, unbiased grouped-query attention, tied or separate output head",
+    "qwen3_moe.py": "router softmax, top-k and optional renormalization, SwitchGLU experts",
+    "qwen2.py": "biased Q/K/V projections and configured RoPE",
+    "llama.py": "configurable attention and MLP biases, head dimension and Llama 3 RoPE"
+  },
+  "modifications": [
+    "Combined four full-attention families behind one model interface with family-specific tensor math",
+    "Removed distributed sharding, draft capture and speculative routes",
+    "Added CPU-safe artifact inspection, exact shard closure and ordinary-only capability declaration",
+    "Reused mlx2 attention, rotary, SwitchGLU, tokenizer and APCv2 interfaces"
+  ],
+  "validation": {
+    "status": "CPU-only inspection and static tests; GPU output parity and route qualification pending",
+    "weight_loading": "not run",
+    "model_execution": "not run"
+  }
+}

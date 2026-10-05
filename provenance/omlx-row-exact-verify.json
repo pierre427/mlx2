@@ -1,0 +1,54 @@
+{
+  "component": "Flash-Next (qwen4_exp) row-exact self-MTP verify: row-exact quantized projections (omlx #4023/#4050 kernel) plus per-row attention/MoE and the existing fused GDN verify, so greedy MTP-on output equals MTP-off output",
+  "status": "implemented; Metal bit-exact on the real model (4/4 prompts, 1024/1024 verify rows incl. 17-row copy windows); costs 31-44% of stock MTP decode; opt-in policy field row_exact_verify, default off; not qualified, not selected",
+  "sources": [
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_pr": "jundot/omlx#4050 (fix(mtp): greedy verify picks like the serial sampler; qmv_fast K-alignment), carrying #4023's row_exact_qmv.py",
+      "source_revision": "65a07cab0cea09c9797ccc2c7744db85274f9252",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/row_exact_qmv.py": "a07333213ec87760f2c4f2d9c3c6b0089a9df430735b63d5a8600d1792706671",
+        "omlx/patches/moe_verify_gather.py": "dbe0437d5163c86b65d4ca0ff2ffea04c573a8943823aef8860789c3e88bf03a"
+      },
+      "source_regions": [
+        "row_exact_qmv.py: _TILE (Metal row_exact_tile), _SOURCE, _DECODED_DOT (decode_w/wdot), _launch_geometry and its constants, _Plan/_plan, quantized_linear",
+        "moe_verify_gather.py: qmv_fast_layout (rule only; rewritten, see modifications) and _HEADER (already carried as QMV_HEADER in models/qwen4_routed_decode.py, provenance/omlx-fn-2026-09-25.json)"
+      ]
+    },
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_pr": "jundot/omlx#4023 (bit-exact Lightning MTP verify), #4041 (fused row-exact verify windows), #4052 (unrolled tiles), #4105 (16-row windows); issues #4014, #4102",
+      "source_revision": "#4023 e247eb6104bce9aa3097d857081a8871bbd00f4d; #4041 7ef4d997b5713aaef53aaadca9a656736a12fa74; #4052 d05afc7a7a59a871531b89ee769460581a26aabb; #4105 93e708a816a70a8183b5cefca4e81c1c3d48bef8",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/row_exact_qmv.py@e247eb61": "982f593cbb4f97cf9b6e4bbf7ec6ac6d9cfbe2860e222be8c6a54cf97097bfa7",
+        "omlx/patches/row_exact_qmv.py@93e708a8": "0fccdd5179188537204073b0cd467c2a65d41fe0b7058535fc67e5b2ee6c37be"
+      },
+      "note": "Read for the component inventory (projections incl. lm_head, norms, attention rows, GDN, MoE window), the fail-closed labelling and the unrolled-tile miscompile warning (#4052: not carried; mlx2 keeps the looped tile). No code from these heads beyond the #4050 file above."
+    }
+  ],
+  "notice": "provenance/omlx-row-exact-verify.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/models/row_exact_qmv.py",
+    "src/mlx2/runtime/models/qwen4_row_exact.py (original mlx2 route on top of the kernel)",
+    "src/mlx2/runtime/row_exact_verify.py (original)",
+    "src/mlx2/runtime/hybrid_speculative.py (mtp_verify_logits hook)",
+    "src/mlx2/runtime/segmented_batch_cache.py (per-row lineage attention inside a window)",
+    "src/mlx2/runtime/models/qwen4_exp.py (PLE compile signature carries the window state)",
+    "src/mlx2/adapters/flash_next_policy.py, src/mlx2/adapters/flash_next.py, src/mlx2/serving.py",
+    "scripts/gpu_check_row_exact_components.py, scripts/check_mtp_row_exact.py, scripts/bench_row_exact_verify.py",
+    "tests/test_qwen4_row_exact_verify.py"
+  ],
+  "modifications": [
+    "Dot-product helpers: mlx2's QMV_HEADER (float input sums, as the venv MLX fork 39400a0d4 does) instead of omlx's verbatim 0.32.2 header.",
+    "qmv_fast_layout keys only on K alignment for affine weights: the venv fork runs N % 8 != 0 outputs on the fast traversal (affine_qmv_fast_rows). omlx's N-keyed rule picked the qmv traversal for the 1-column shared_expert_gate and 4-column hc.inject and differed from the one-row call (1 element at 16 rows, GPU 2026-09-30).",
+    "MAX_ROWS 32 (covers the 17-row copy-draft window); OneRowQmv/RowsQmv/grouped launches not carried; a declined layout or a non-Metal device runs one stock one-row call per row and reports route per_row.",
+    "The omlx route is a monkey-patch of mlx-vlm/mlx-lm; mlx2 installs instance-scoped class swaps on the loaded trunk (QuantizedLinear, Attention, MoE block) that act only inside a verify window opened by Model.mtp_verify_backbone/mtp_verify_logits.",
+    "Attention rows: per-row one-token QSA forwards with the ordinary B=1 mask instead of omlx's 2-row vector SDPA chunks / fused attention rows. MoE: per-row one-token block instead of omlx's fused window (wave 2). GDN: mlx2's existing fused verify kernel, Metal-checked bit-identical to sequential one-token fused decode at 2..17 rows incl. rollback; omlx needed a q/k L2 fix that mlx2's kernel does not.",
+    "Fail closed: per-window stage accounting; a GDN layer that leaves the fused verify, a shared-suffix QSA row, a fused QSA projection table, a pre-selected or batched attention call marks the window not row-exact; receipts say row_exact only when no window since the request began fell back.",
+    "No Apple copyright header is added.",
+    "Grouped launch (_group_source/_group_kernel/quantized_linears) used for the attention q/k/v/index_qk and GDN qkv/z/b/a projections; MoE: router gate and shared expert batched through the kernel, routed experts per row."
+  ],
+  "validation": "CPU: tests/test_qwen4_row_exact_verify.py (10 tests). Metal (M5 Max, mlx 0.32.2.dev20260919+39400a0d4, TF32 off): scripts/gpu_check_row_exact_components.py -- row-exact qmv 561/561 cells bit-equal to per-row stock M=1 (17 Flash-Next shapes x 11 row counts 2..17 x 3 seeds; stock M=R 151/561); fused GDN verify and compact replay+reconstruct bit-equal to sequential one-token fused decode at 2..17 rows; batched SDPA equal to per-row only 5/48 cells; fast RMSNorm, grouped fp32 RMSNorm, HC stream mean, vocab logsumexp row-invariant; eager vs fast norm arms differ. Real model, scripts/check_mtp_row_exact.py, 4 prompts x 256 greedy tokens: stock MTP 2/4 prompts identical to MTP-off, 4/842 comparable verify rows bit-equal, max |dlogit| 6.84, first difference in layer 0; row-exact route 4/4 identical, 1024/1024 rows bit-equal, 0 not-exact windows. Evidence: qualification/runs/row-exact-verify-20260930/. Grouped same-input launch (omlx _group_source): 16/16 cells bit-equal; PLE depthwise conv row-invariant. v2 (grouped launches, batched MoE router/shared expert, per-row routed experts): 4/4 identical, 1024/1024 rows. Cost (scripts/bench_row_exact_verify.py, in-process interleaved, 4 reps): rowexact/mtp 0.56-0.69, rowexact/off 0.98-1.34."
+}

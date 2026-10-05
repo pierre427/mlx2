@@ -1,0 +1,31 @@
+{
+  "source_repository": "~/Desktop/mlx-uag",
+  "source_revision": "7525ed0eb3fe254784cf2dfbcea179607eb18fe3",
+  "source_paths": [
+    "puzzle_openai_server.py (FORCE_TO_FINAL, NUDGE_TEXT, Lane.logits_processor)"
+  ],
+  "source_commits": {
+    "soft_landing_nudge": "1c72610f35abc515666c2917d54c20dfa73f5cbb"
+  },
+  "license": "Lab-internal (same owner as mlx2); no third-party code copied",
+  "destination_paths": [
+    "src/mlx2/thinking_guard.py",
+    "src/mlx2/adapters/gpt_oss.py",
+    "src/mlx2/serving.py"
+  ],
+  "mechanisms": [
+    "Force the harmony analysis-to-final switch <|end|><|start|>assistant<|channel|>final<|message|> (ids 200007, 200006, 173781, 200005, 17196, 200008) token by token when a reasoning budget is exhausted.",
+    "JUICE soft landing: write the lab's plain-text wrap-up nudge into the analysis once at the soft budget, before the hard close."
+  ],
+  "modifications": [
+    "Reimplemented inside mlx2's ThinkingGuard instead of a per-lane force deque. Which marker or nudge token comes next is a pure function of the generated ids, so speculative verify rows and rollbacks need no forcing state.",
+    "The release ramp boosts the next marker token after any prefix the model already wrote. A forced close continues that prefix and does not restart it.",
+    "The nudge is skipped when nudge plus close marker do not fit before the hard budget. The receipt reports it as 'nudged'.",
+    "The JUICE budget ladder already existed in mlx2 (resolve_thinking_budget, EFFORT_SCALE). It now drives the multi-token guard.",
+    "New: a thinking-off Puzzle request still reasons (hidden, Reasoning: low). It gets an adapter-declared hidden budget: (max_tokens - 6) * 2 // 3, between 1 and 512; two thirds beat one half 137/150 vs 130/150 (hidden-split-battery.json)."
+  ],
+  "not_ported": {
+    "CHAIN routing steering (chain_steering.py @ 8e7e12120409b13a3c750bd52180769341fdd26a, layer-15 self-replace)": "Measured on Puzzle-88B q6dense with a test-only port (qualification/experiments/gpt-oss-harmony-20260930/chain-battery.json, 30 prompts x 6 small-budget configs, greedy). Guard+JUICE scored 146/180 and +CHAIN 144/180: 6 fixes vs 8 breaks, sign-test p=0.79. CHAIN halved final-channel run-ons (12 to 6) but broke arithmetic and date answers. This matches the lab's own closeout that k=1 is a stability choice, not a quality lever."
+  },
+  "validation": "CPU unit and engine tests: multi-token forced close identical across ordinary, native-MTP, physical-MTP and prompt-lookup routes; randomized rollback purity with and without the nudge; hidden budget including history mode; parser header and fallback cases. GPU served-path runs on gpt-oss-puzzle-88B-q6dense and gpt-oss-20b are recorded under qualification/experiments/gpt-oss-harmony-20260930/."
+}

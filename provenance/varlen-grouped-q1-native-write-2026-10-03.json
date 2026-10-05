@@ -1,0 +1,16 @@
+{
+  "mechanism": "default-off two-lane grouped Q1 native KV write",
+  "source_revision": "995705c6ab507e370486c21808f49c863e349675",
+  "source_paths": [
+    "native/paged_kv/arena.cpp",
+    "native/paged_kv/arena.h",
+    "native/paged_kv/binding.cpp",
+    "src/mlx2/runtime/paged_kv_write.py",
+    "src/mlx2/runtime/paged_kv_token.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py"
+  ],
+  "license": "original mlx2 code",
+  "prior_negative_arm": "34c960613937665951b4b96517a9aae15f3c27cd batched async_eval only; d458c4ce recorded no useful speed gain",
+  "modifications": "One scatter primitive and shared completion lease cover two private Q1 token rows in one arena, replacing 16 per-head write primitives and tickets per layer when no shared-tail COW is needed. Validation or unsupported shapes fall back before native enqueue. Terminal and rollback still gate publication.",
+  "validation": "CPU fault tests cover success, delayed second-owner polling, terminal failure, ambiguous enqueue, second reservation failure, partial adoption, foreign ticket refusal, and COW fallback. Focused suite 89 passed with compiled binding on PYTHONPATH. AppleClang native extension and offline Metal source compilation passed. At source 614aedfd, direct Metal oracle passed exact strided K/V destination bytes on two private pages, one grouped/zero ordinary write dispatch, one terminal, zero pending/retained, GPUQ rc0 and zero swapouts; qualification/runs/varlen-grouped-q1-614aedfd-native-oracle. Full-request grouped engagement and speed remain unproven. No upstream code copied. Integrated source 74df3559 passed one source-bound live B2 63/65 diagnostic pair with exact ordinary token IDs, 84/84 terminals, zero pending/retained, and 28 grouped versus 448 stock direct writes; see qualification/runs/varlen-grouped-integrated-74df3559-b2-diagnostic. One pair is insufficient for performance selection. Sequential lane publication is not cross-lane atomic rollback; genuine Metal failure remains unverified. Source 27811f59 alternating S-G-G-S-S-G B2 diagnostic passed exact parity and retirement in all six cells: stock 448 direct writes versus grouped 28 grouped writes; median ready 34.083 versus 17.449 ms, complete 106.521 versus 89.871 ms, with matched ordinary controls. See qualification/runs/varlen-grouped-integrated-27811f59-b2-alternating. This is a small diagnostic screen, price_usable=false; no serving selection."
+}

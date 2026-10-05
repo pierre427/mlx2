@@ -80,3 +80,10 @@ tool_parsers/_schema.py
 
 
 os_memory.py
+
+Online acceptance calibration (src/mlx2/runtime/acceptance_estimator.py)
+Adapted from vLLM PR #52228, revision 3bb0a03f35269185b6358753e64932bb946cc531.
+Copyright contributors to the vLLM project.
+SPDX-License-Identifier: Apache-2.0
+The NumPy implementation and lagged cohort cost allocator are documented in
+provenance/adaptive-verification.json. No CUDA/Triton serving code is imported.

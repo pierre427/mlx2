@@ -1,0 +1,67 @@
+{
+  "mechanism": "complete composed long packed native factory and serving candidate",
+  "source_repository": "mlx2 private Forgejo",
+  "license": "project license; MLX-derived kernels retain MIT source provenance",
+  "components": {
+    "python_factory_serving": "70cb1cc2e096d561daa02e503f19cbb1367d4dc2",
+    "native_long_initial": "979a837d",
+    "native_long_corrected_capability_and_matrix_counter": "3dce8457",
+    "native_oracle_host_metadata_and_history": "f03ef1d656b4e62326f3f2526453ccf330fca2c1",
+    "finite_validation": "c81cc78860a44d3903e4bb8e629e7ad0e39fc9af",
+    "private_main_into_candidate": "18f65547",
+    "composition_before_binary_pin": "b6609a0c5092283f96f6213473aaf3dff665c1b3"
+  },
+  "modifications": [
+    "compose all long native header/arena/binding and Python long planner/factory/profile/serving/gates in one source",
+    "preserve short/ordinary/Tree15 paths and defaults",
+    "fix generated long model-profile legacy-loader schema dispatch with actual CPU regression",
+    "fresh composed native build and runner path/SHA pins",
+    "retain root70cb failed profile-loader receipt and initial native comparator/planner failures"
+  ],
+  "native_source_files_sha256": {
+    "native/paged_kv/CMakeLists.txt": "9d917399b3cd03403fc5c97bdcd6e36756cce44e241d30c7ff73eada650f6c10",
+    "native/paged_kv/README.md": "c02e1ee56555802224ce0026896b3f5d12f75b4cf7cdca60fbadd91b5b4f485d",
+    "native/paged_kv/arena.cpp": "a9bae50b787361ac300bc06d3b188e190e07d4df20c06dc3af6a3668f2c1b88a",
+    "native/paged_kv/arena.h": "672e5ff39792b95d379a31831bcfe265e99857d3c1edfa15cba66d28ccf45922",
+    "native/paged_kv/binding.cpp": "2228ccab53f21b8520eda36a4a38a05a63315fd54c78f812d3016bb8e769cf49",
+    "native/paged_kv/packed_multirow_write.h": "dbb4f798da00d2e0dcc656ed21481c5461c617b1586e0052956872bcf4b6f1c7",
+    "native/paged_kv/prefill_long_nax.h": "dc11e21a0e48ae390a0c973bbeced39f9415b3554a36e64638a2fee2521bb89a",
+    "native/paged_kv/prefill_matrix.h": "a3ace048b079ee9e0d82c62b53144413f32f36179c320363cbfc75d96d319277",
+    "native/paged_kv/prefill_nax.h": "6657259e0eeb2a3226159fa48a9a56072fb41786c855cb8eaff1b8e01784c06b",
+    "native/paged_kv/q1_geometry.h": "10cb7ef6a24534e126d43fb579c1fc3e4d3e91c04b4f8a1f8aaeadc016510059",
+    "native/paged_kv/q1_metadata.h": "96716c926482b0eca32c083c5c2dc0a264fa98153e8b4e51f72786f0548472a3",
+    "native/paged_kv/q1_splitkv.h": "ac961034e723faa127b7de02d008b54f91da477fd3c4c3123b62842c2d11a03b",
+    "native/paged_kv/q1_stock_long.h": "4f6fea444c21125768c5bcf9cb111d08c6ca935b758cb147d9e549241e37980d",
+    "native/paged_kv/q1_stock_long_metadata.h": "eb8e3c829ca141c504d8aa98b4ecc3e65eed2257c72727dc6587dd288555a145",
+    "native/paged_kv/q1_stock_reduction.h": "9b92009298b5fd2acb0b7f07a616e33a9f4d9fc2322dac9c5a2e17158c2e0989",
+    "native/paged_kv/storage_dtype.h": "48e5dc7ea8864c0afdace836934de703b53c2d11495a0bf3b6543b0224870225",
+    "native/paged_kv/vendor/MLX-LICENSE": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
+    "native/paged_kv/vendor/steel_attn_mma_source.h": "2bf2fcc6004a53934eb3e5017e315860969db6dc8fd9e8b0e5d5cd81a4e0a5ec",
+    "native/paged_kv/vendor/stock_nax_source.h": "9cd31733ba401563e37be1da3bab05584c034c1dd42431317e991158a24f426b"
+  },
+  "build": {
+    "binary": "/tmp/mlx2-packed-long-composed-build-1004/_paged_kv_native.cpython-312-darwin.so",
+    "binary_sha256": "0b735aaddb4ffe1e761cd3dcf27e467912ccfe6b477e80415e41379d22117993",
+    "cmake_build_type": "Release",
+    "mlx_config": "~/Desktop/mlx2/.venv/lib/python3.12/site-packages/mlx/share/cmake/MLX",
+    "mlx_library": "~/Desktop/mlx2/.venv/lib/python3.12/site-packages/mlx/lib/libmlx.dylib",
+    "python": "~/Desktop/mlx2/.venv/bin/python",
+    "nanobind_revision": "a47983000e9dda68177fc1fd426f7147d785c2c0",
+    "metal_standard": "metal4.0",
+    "metal_source_sha256": "c9b35f2a050b5daa9c056cee49cdd724097463e224cb6226acc74a96be7d036d",
+    "metal_air_sha256": "1e2d8f732fb43494d511de5008d676abb5d5cf28506f45f52126a07ba40a9780"
+  },
+  "validation": {
+    "focused_python_cpu_checks": 87,
+    "native_cpp_plan_source_checks": 67,
+    "tree15_cpu_checks": 55,
+    "total_cpu_checks": 209,
+    "native_cpp_build": "passed",
+    "offline_metal_compile": "passed",
+    "gpu_executed_by_worker": false,
+    "dynamic_native_capability_tested": false,
+    "qualified": false,
+    "price_usable": false,
+    "serving_default": false
+  }
+}

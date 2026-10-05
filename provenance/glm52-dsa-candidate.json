@@ -1,0 +1,17 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+  "source_files": {
+    "mlx_lm/models/glm_moe_dsa.py": "716a62c649a7e632cdae5493474379472e57ca73dfd38232ef24c629f5aac5c4",
+    "mlx_lm/models/deepseek_v32.py": "913fc29eacee5d37cf0b34c599a1c4601bf1f4ef20d2fcfc96ca0677bf9bed22"
+  },
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "destination": ["src/mlx2/adapters/glm52_dsa_candidate.py"],
+  "modifications": [
+    "Added original mlx2 CPU-only GLM-5.2 topology and complete indexed-artifact gate; no source model code was copied",
+    "Kept MTP tensors outside the required ordinary trunk",
+    "Blocked serving because the pinned source inherits a per-layer indexer and ignores the checkpoint's shared-indexer schedule"
+  ],
+  "validation": "Four import-guarded CPU tests; local five-shard fragment rejected before model import; no real MLX, model weights, or GPU were used"
+}

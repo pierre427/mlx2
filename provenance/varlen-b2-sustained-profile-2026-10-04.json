@@ -1,0 +1,14 @@
+{
+  "feature": "default-off 32-token Qwen3 B2 sustained decode research profile",
+  "source_repository": "mlx2 local varlen B2 serving branch",
+  "source_revision": "1e2eaa2a0b3af8c8a26afe48ab713e47c38c7c55",
+  "source_paths": [
+    "src/mlx2/runtime/paged_b2_research_profile.py",
+    "src/mlx2/runtime/paged_native_graph_group.py",
+    "src/mlx2/runtime/paged_native_batch_lifecycle.py",
+    "scripts/research/varlen_b2_http_performance.py"
+  ],
+  "license": "mlx2 original project code; no upstream code copied",
+  "modifications": "Added a separate v4 source-bound admission for exactly 32 greedy output tokens with explicit packed-prefill and sustained-decode flags. The two-request cohort keeps using one private staged prompt graph and one paired Q1 graph per subsequent step. Factory capacity now reflects the pinned token count. HTTP functional and alternating-order performance drivers verify every token, physical proof, partner progress, and full retirement, and compute generator decode tokens per second only from actual response ordinals 2-32.",
+  "validation": "V3 packed two-token HTTP functional gate passed on source 1e2eaa2a, receipt SHA-256 ea2c2dce54099f60ac59ff29c9150f4aa736edb842494f96e25efaa6c6b41503. V4 source is CPU-tested but its 32-token HTTP and controlled performance GPU gates remain pending. V4 is unqualified, default-off and price_usable=false. No t/s or speed claim is made from the two-token v3 gate. Source 0cbfed35 passed one 32/96 32-token HTTP functional gate, exact ordinary/native tokens and text, 896 native terminals, 868 grouped/tile ready dispatches across 31 steps and full retirement; raw receipt SHA-256 64db51e1149883503505d0c37a89bdd17012b46f1bf8e6426fc52aa0dd0df9ea. Same-source six-cell alternating performance screen passed parity/retirement but showed grouped steady 146.18 and 144.02 aggregate generator decode tokens/s versus ordinary 592.53 and 601.88, complete-pair 587.85 and 600.91 ms versus 142.59 and 134.76 ms. Raw SHA-256 1e412cec7a27ce4e9e110ab98a26cc2b994da944d09994bb5e67a50a2e53dcdb. It is a measured regression for this 32/96 32-token small-model workload, not a usable price or default promotion."
+}

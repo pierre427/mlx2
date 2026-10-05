@@ -1,0 +1,37 @@
+{
+  "schema": "mlx2.singleton-serving-gates-source.v1",
+  "date": "2026-10-04",
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_commit": "d5a1cbe7",
+  "source_paths": [
+    "scripts/research/varlen_hybrid_http_gate.py",
+    "scripts/research/varlen_hybrid_serving_smoke.py"
+  ],
+  "license": "Apache-2.0",
+  "modifications": "Runner-only explicit defaultfalse stock-singleton profile flag and required environment, flag-aware physical totals and final selected/observed survivor receipts. Existing binary defaults, model dtype, zero-tolerance numeric gate and route qualification labels unchanged.",
+  "validation": {
+    "CPU_tests": 25,
+    "CPU_status": "passed",
+    "GPU_executed_by_author": false,
+    "MLX_native_runtime_imports": false,
+    "HTTP_device_gate": "not_run",
+    "route_qualification_promoted": false
+  },
+  "physical_expected": {
+    "flag0": {
+      "stock": 16,
+      "singleton": 0,
+      "stripe32": 16,
+      "stripe16": 32,
+      "tile": 48
+    },
+    "flag1": {
+      "stock": 48,
+      "singleton": 32,
+      "stripe32": 48,
+      "stripe16": 0,
+      "tile": 48
+    }
+  },
+  "native_candidate_sha256": "97052617daaf7e374bcd5eafbc652b13ccf14f030f9203f5f887e48c4d8c4fce"
+}

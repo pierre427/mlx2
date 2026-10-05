@@ -1,0 +1,30 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "default-off two-lane packed multirow paged-KV scatter",
+  "source_repository": "lab-owned mlx2",
+  "source_revision": "1e79c1a5f790dc2c9fee6338d0f584583759bf09",
+  "source_paths": [
+    "native/paged_kv/arena.cpp",
+    "native/paged_kv/arena.h",
+    "native/paged_kv/binding.cpp",
+    "src/mlx2/runtime/paged_kv_write.py",
+    "src/mlx2/runtime/paged_kv_token.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py"
+  ],
+  "license": "lab-owned mlx2 Apache-2.0; original project implementation, no external source copied",
+  "modifications": [
+    "Add explicit lane-major variable-row K/V scatter from contiguous [sum(rows), KV head, channel] inputs into [page, KV head, token, channel] storage",
+    "Bind all touched page generations to one submitted writer lease and one native command-buffer terminal",
+    "Stage both owners before submission and publish each exact logical suffix only after successful shared terminal",
+    "Refuse shared-tail COW, aliased destination blocks, malformed tables, wrong dtype/geometry, and missing explicit selector",
+    "Expose distinct physical packed dispatch and row counters without changing grouped-Q1 or direct-write counters",
+    "Bind the vector page-table payload with its pointer and element count; binding the std::vector object itself produced incorrect physical pages in the first device oracle"
+  ],
+  "validation": {
+    "cpu": "native geometry C++ guard and focused host ownership/failure tests",
+    "native": "separate CMake build and offline FP16/BF16 Metal compilation",
+    "gpu": "first direct oracle on bc215646 failed raw bytes at lane 0 row 0; corrected vector-payload binding has not yet been run on GPU",
+    "serving": "not integrated or qualified",
+    "performance": "unmeasured"
+  }
+}

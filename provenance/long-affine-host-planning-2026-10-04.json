@@ -1,0 +1,11 @@
+{
+  "feature": "exact long-profile affine host attention planning",
+  "source_repository": "mlx2",
+  "source_revision": "b0dcd699512e0b572d6300425b415a6afb2513b1",
+  "license": "project license",
+  "source_paths": ["src/mlx2/runtime/paged_attention_plan.py", "src/mlx2/runtime/paged_attention_metal.py", "src/mlx2/runtime/paged_attention_pack.py"],
+  "modifications": "Algebraic visibility/work proof after exact long-span validation; explicitly omit unused native long host row map, preserve generic map and scalar/short/Q1 checks.",
+  "validation": "54 guarded CPU checks and 10 subtests passed, one runtime query-stride test deselected; no GPU or runtime imports. Root hardware rerun pending.",
+  "qualified": false,
+  "default_changed": false
+}

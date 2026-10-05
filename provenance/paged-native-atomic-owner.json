@@ -1,0 +1,15 @@
+{
+  "name": "native paged atomic request owner",
+  "source_repository": "mlx2 (original project implementation)",
+  "source_revision": "c3c96fed",
+  "source_paths": [
+    "src/mlx2/runtime/paged_kv_pool.py",
+    "src/mlx2/runtime/paged_kv_token.py",
+    "src/mlx2/runtime/paged_request_transaction.py",
+    "src/mlx2/runtime/paged_atomic_owner.py"
+  ],
+  "license": "Apache-2.0",
+  "copied_code": false,
+  "modifications": "New default-off native request branch and one-pointer host publication; no existing serving, APCv2, or native kernel source modified.",
+  "validation": "CPU-only tests/test_paged_native_atomic_owner_cpu.py; no native GPU qualification"
+}

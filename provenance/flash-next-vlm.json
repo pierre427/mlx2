@@ -1,0 +1,39 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+  "source_revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "notice": "provenance/flash-next-vlm.NOTICE",
+  "source_files": {
+    "mlx_vlm/models/qwen4_exp/qwen4_exp.py": "e08a0b73b258d7d3a4fd4043452ea1ed68ac334a03c3c8e0447964afc398cd8d",
+    "mlx_vlm/models/qwen4_exp/vision.py": "a1db23800b564caaedcc79d6a27d76e3186b9315cb68b612d61afbfa69487600",
+    "mlx_vlm/models/qwen4_exp/language.py": "7a07090ea414f1f05fcebe4934690695bfad30401ed5970946c083287a305887",
+    "mlx_vlm/models/qwen4_exp/config.py": "629f2dc26b081f1aca814e297b669c5cdc3c94344f21c85129e48756288b549d",
+    "mlx_vlm/speculative/drafters/qwen4_exp_mtp/split.py": "680b887612fe66a95fd4f0efffcb40b800a89ac86dfb5e839090464c340176b5",
+    "mlx_vlm/split_mtp.py": "27390ca2e415904059ba6e0a7f4262c661bba8a6924dab10420be835bc93aeb5",
+    "mlx_vlm/generate/dispatch.py": "89d9b08ec8316a6eed881486cc5a5129afbde481d693293ec20964146ef50842",
+    "mlx_vlm/prompt_utils.py": "3880171f3ed450b62979c47ca7e14eaa0356cd54bfc44718c5d4a46561691a57",
+    "mlx_vlm/speculative/drafters/__init__.py": "a7c8c527fd2f42213ea6c109528c1cef8a3b4c21d6f4698dbe084c2d7bf99b22"
+  },
+  "destination": ["src/mlx2/adapters/flash_next_vlm.py"],
+  "modifications": [
+    "Added a CPU-only gate for the indexed PLE, embedded vision and MTP source checkpoint",
+    "Added an explicit direct image/video candidate using the pinned mlx-vlm model and processor",
+    "Added an offline MTP splitter entry point and an explicit direct generation option that loads an extracted compatible draft; ordinary mlx2 Flash-Next resolution still requires ple_rows.bin",
+    "Required the exact local source revision and clean source paths before importing optional mlx-vlm"
+  ],
+  "validation": {
+    "local_artifact": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP-VLM",
+    "indexed_tensors": 3845,
+    "shards": 22,
+    "vision_tensors": 333,
+    "mtp_tensors": 78,
+    "indexed_ple_tensors": 384,
+    "ple_rows_bin": false,
+    "CPU_inspection": "passed",
+    "real_model_load": "not run",
+    "MTP_split": "not run",
+    "image_video_generation": "not run",
+    "execution_qualified": false
+  }
+}

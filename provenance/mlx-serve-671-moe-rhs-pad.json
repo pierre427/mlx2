@@ -1,0 +1,42 @@
+{
+  "kind": "behavioral-design-input",
+  "recorded_at": "2026-10-01",
+  "code_copied": false,
+  "source": {
+    "repository": "ddalcu/mlx-serve",
+    "license": "MIT (c) 2026 David Dalcu",
+    "pull_request": 671,
+    "state_when_read": "open",
+    "head": "2376551a9f2bfe44b06bc251ec7cc96fa0b741ee",
+    "paths": [
+      "src/transformer.zig (nemotronMoeExperts, gatherRhsPadRows, nemotron_rhs_pad_min)"
+    ],
+    "idea": "pad the sorted MoE rows to 4 per expert once there are >= 2 per expert so MLX's GatherQMM selects gather_qmm_rhs; pad rows are spread over the experts (e % E), read x row 0 and are dropped after the unsort"
+  },
+  "mlx_rule_checked": {
+    "build": "mlx 0.32.2.dev20260919+39400a0d4",
+    "source": "~/Desktop/mlx-core-qmm-4392 at 39400a0d4, mlx/backend/metal/quantized.cpp GatherQMM::eval_gpu",
+    "condition": "M == 1 && B >= 16 && right_sorted_ && B / E >= 4 -> gather_qmm_rhs (NAX variant on M5 for bf16, bm 32 when M/E < 64); else gather_qmm if M >= vector_limit; else gather_qmv",
+    "dense_gather_mm": "GatherMM::eval_gpu takes gather_mm_rhs for every sorted M == 1 gather: no rows-per-expert cliff"
+  },
+  "destination_paths": [
+    "src/mlx2/runtime/models/switch_layers.py",
+    "src/mlx2/runtime/models/import_env.py",
+    "tests/test_moe_rhs_stream_pad.py",
+    "qualification/runs/recon-20261001/l5-moe-pad/"
+  ],
+  "modifications": [
+    "Re-expressed in Python inside QuantizedSwitchLinear.__call__ (per projection), not in a model-specific MoE function: no caller or model-name branching.",
+    "Pad rows repeat the LAST sorted row (expert id and activation) instead of being spread over e % E: the rows stay sorted with no re-sort, no expert outside the routed set is touched, and the outputs are sliced to the real rows before activation/unsort.",
+    "Threshold is a rows-per-expert floor read at call time (MLX2_MOE_RHS_PAD_MIN_ROWS, default 3, 0 = off); the expert count is the bank's own (weight.shape[0]). The disk-streamed StreamedQuantizedSwitchLinear overrides __call__ and is not padded."
+  ],
+  "default": "on at 3 rows/expert from 2026-10-01 (Pierre's decision; MLX2_MOE_RHS_PAD_MIN_ROWS=0 turns it off); implemented, selected, unqualified until the next qualification campaign",
+  "validation": {
+    "artifacts": "qualification/runs/recon-20261001/l5-moe-pad/ (README.md, micro_*.json, ttft_*.json)",
+    "bit_exact": false,
+    "ttft_floor3": "Nemotron-3.5 Lightning 8-bit T 72-84: -5..-13%; Qwen3.6-35B-A3B 4-bit T 96-120: -12..-23%; no measured loss elsewhere",
+    "ttft_floor2": "adds Qwen T 72-84 (-5..-11%) but Nemotron T=48 +11% (loss)",
+    "greedy": "not bit-identical when padded; token divergence at step 15-16 on T=80 prompts; identical tokens on T=48 (Nemotron) and T=112 (Qwen)",
+    "tests": "tests/test_moe_rhs_stream_pad.py (CPU index/order/counter tests; Metal bit test gated by MLX2_RUN_METAL_TESTS)"
+  }
+}

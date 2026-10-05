@@ -1,0 +1,20 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "source_revision": "5adac2e7fda0290b85938d527a81d838316b5e6f",
+  "source_paths": [
+    "native/paged_kv/binding.cpp",
+    "src/mlx2/runtime/paged_native_arena_geometry.py"
+  ],
+  "license": "MIT",
+  "modifications": [
+    "Require actual provider exact_byte_allocation boolean True in strict six-field consumer schema",
+    "Preflight all20 source-bound domain raw native ABIs and maximum exact arena plane before adapter/model imports; retain admission checks"
+  ],
+  "validation": {
+    "cpu_checks": 33,
+    "gpu_executed": false,
+    "actual_provider_receipt": "/tmp/mlx2-n20-large-plane-463e-device.json",
+    "provider_consumer_keys_checked": true
+  },
+  "qualified": false
+}

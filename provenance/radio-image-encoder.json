@@ -1,0 +1,59 @@
+{
+  "component": "RADIO image encoder",
+  "sources": [
+    {
+      "repository": "https://github.com/Blaizzy/mlx-vlm",
+      "revision": "06ff63d6e9c8e14649ed3e5cb380810d27c790b8",
+      "paths": [
+        "mlx_vlm/models/nemotron_h_nano_omni/vision.py"
+      ],
+      "license": "MIT"
+    },
+    {
+      "repository": "https://github.com/nicedreamzapp/nemotron-omni-mlx",
+      "revision": "9702e3de0f2bdd02c6130f83e657a060b605b16b",
+      "paths": [
+        "src/vision.py"
+      ],
+      "license": "MIT"
+    }
+  ],
+  "modifications": [
+    "Standalone image tower only; no language, audio, video or projector modules",
+    "Strict checkpoint loading and source-bound artifact receipts",
+    "Recipe-derived teacher and register counts; summary selection",
+    "Original mlx2 config, preprocessing, CLI and validation harness",
+    "Generation-specific position interpolation: align_corners true for v2/v3, false for v4"
+  ],
+  "validation": {
+    "status": "passed",
+    "scope": "CPU float32 C-RADIOv2-B image encoder; not full VL serving or GPU qualification",
+    "reference_repository": "nvidia/C-RADIOv2-B",
+    "reference_revision": "cb109caa670ee8cc38ccf23b8ab0331fa487db0f",
+    "evidence": "qualification/runs/radio-v2-b-cpu-parity.json",
+    "cases": 6,
+    "minimum_cosine": 0.9999999999873755,
+    "source_sha256": {
+      "src/mlx2/runtime/models/radio.py": "3528ff4f44347befdece10e3d8516eb6ca2483bbc6b241ee3e59b757d172a0a9",
+      "src/mlx2/adapters/radio.py": "a1ad4c1503675e57ee6e00453cc14fa88ef7f61709f9a3f727599516ba2cdc4b",
+      "src/mlx2/adapters/radio_config.py": "9aef9b534db5de5dd4b6dc232e4e6589e026a1e98b1714d7a7e1002b3f3004ad"
+    },
+    "regressions": "11 recipe checks and 13 isolated CPU tensor/loading checks",
+    "cli": "explicit rectangle and default 768x768 CPU NPZ outputs observed"
+  },
+  "test_checkpoint": {
+    "repository": "nvidia/C-RADIOv2-B",
+    "revision": "cb109caa670ee8cc38ccf23b8ab0331fa487db0f",
+    "license": "NVIDIA Open Model License",
+    "download_receipt": "/Volumes/T7/models/C-RADIOv2-B/mlx2-download-receipt.json"
+  },
+  "bug_sweep_20261002": {
+    "implementation": "Original scientific evidence gate repair: require finite actual/reference features and finite comparison metrics; malformed/empty shapes and overflow/undefined comparison evidence fail. Equal all-zero vectors explicitly use cosine 1 and exact all-zero tensors relative L2 0, preserving valid zero equality. Final receipt serialization forbids NaN.",
+    "source_revision": "Reviewed local base ff3877a33fa3e1dda19fbceb687cc325d377a423 through 9ef2d9582dfa7f9be1bd92e5c283d544e04dd17f; no external source copied.",
+    "tests": [
+      "tests/test_radio_validation_metrics_cpu.py"
+    ],
+    "reproduction": "Host/CPU fake reference returned all NaN while actual features were finite; original validate_radio_encoder.py emitted passed=True with NaN metrics. Fixed gate refuses reference NaN/Inf and undefined metrics while valid/zero exact comparisons pass.",
+    "boundary": "Validator arithmetic only; this was not observed corruption of a real C-RADIO checkpoint and adds no model or GPU qualification."
+  }
+}

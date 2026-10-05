@@ -1,0 +1,54 @@
+{
+  "schema": "mlx2.source-provenance.v1",
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_revision": "02004b21d57d394a1be0081ba955e4e2e499a723",
+  "source_paths": [
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "src/mlx2/runtime/qwen35_paged_graph_factory.py",
+    "scripts/research/varlen_hybrid_packed_prefill_long_geometry_gate.py"
+  ],
+  "license": "project license; no external code mined",
+  "modifications": [
+    "Idempotent failed-read draining after terminal-proved one-way arena teardown; closed arenas with orphaned leases still fail closed",
+    "Preserve the first model/Q1 exception and its phase/traceback if cleanup separately fails; retain failure roots"
+  ],
+  "validation": {
+    "guarded_cpu_tests": 10,
+    "mlx_imports": false,
+    "native_runtime_imports": false,
+    "gpu_executed": false,
+    "additional_production_contract_orchestrator_serving_tests": 58
+  },
+  "qualification": false,
+  "default_changes": false,
+  "native_component_revision": "b93482a08214db1b373d22baab4c62c225c57768",
+  "native_component_modifications": "Persistent long-prefill selector admits independently selected stock-long B2 Q1 and bounded existing BF16 D256 H24/KV4 scalar B1; unsupported Q1 remains refused",
+  "native_build": {
+    "path": "/tmp/mlx2-packed-long-q1-handoff-build-1004/_paged_kv_native.cpython-312-darwin.so",
+    "sha256": "599e57b2648acd0d2cf896eca78bb3f88087fe0fed16f13abf5896c3637afbdb",
+    "cmake_release": "passed",
+    "offline_metal4": "passed",
+    "runtime_imported": false
+  },
+  "native_source_sha256": {
+    "native/paged_kv/storage_dtype.h": "48e5dc7ea8864c0afdace836934de703b53c2d11495a0bf3b6543b0224870225",
+    "native/paged_kv/prefill_nax.h": "6657259e0eeb2a3226159fa48a9a56072fb41786c855cb8eaff1b8e01784c06b",
+    "native/paged_kv/CMakeLists.txt": "9d917399b3cd03403fc5c97bdcd6e36756cce44e241d30c7ff73eada650f6c10",
+    "native/paged_kv/binding.cpp": "2228ccab53f21b8520eda36a4a38a05a63315fd54c78f812d3016bb8e769cf49",
+    "native/paged_kv/q1_geometry.h": "10cb7ef6a24534e126d43fb579c1fc3e4d3e91c04b4f8a1f8aaeadc016510059",
+    "native/paged_kv/q1_stock_long_metadata.h": "eb8e3c829ca141c504d8aa98b4ecc3e65eed2257c72727dc6587dd288555a145",
+    "native/paged_kv/arena.cpp": "4ae25f10d79af392b5176c8c0f7f0530588fbe5ede1659fd810b57f91ae49a9b",
+    "native/paged_kv/README.md": "c02e1ee56555802224ce0026896b3f5d12f75b4cf7cdca60fbadd91b5b4f485d",
+    "native/paged_kv/prefill_matrix.h": "da481babfddb4e4fd45c56c1cde209dbcac7148a5f34fbf33b5f4a1c499d4e44",
+    "native/paged_kv/q1_stock_long.h": "4f6fea444c21125768c5bcf9cb111d08c6ca935b758cb147d9e549241e37980d",
+    "native/paged_kv/q1_stock_reduction.h": "9b92009298b5fd2acb0b7f07a616e33a9f4d9fc2322dac9c5a2e17158c2e0989",
+    "native/paged_kv/prefill_long_nax.h": "dc11e21a0e48ae390a0c973bbeced39f9415b3554a36e64638a2fee2521bb89a",
+    "native/paged_kv/packed_multirow_write.h": "dbb4f798da00d2e0dcc656ed21481c5461c617b1586e0052956872bcf4b6f1c7",
+    "native/paged_kv/q1_metadata.h": "96716c926482b0eca32c083c5c2dc0a264fa98153e8b4e51f72786f0548472a3",
+    "native/paged_kv/arena.h": "672e5ff39792b95d379a31831bcfe265e99857d3c1edfa15cba66d28ccf45922",
+    "native/paged_kv/q1_splitkv.h": "ac961034e723faa127b7de02d008b54f91da477fd3c4c3123b62842c2d11a03b",
+    "native/paged_kv/vendor/stock_nax_source.h": "9cd31733ba401563e37be1da3bab05584c034c1dd42431317e991158a24f426b",
+    "native/paged_kv/vendor/steel_attn_mma_source.h": "2bf2fcc6004a53934eb3e5017e315860969db6dc8fd9e8b0e5d5cd81a4e0a5ec",
+    "native/paged_kv/vendor/MLX-LICENSE": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01"
+  }
+}

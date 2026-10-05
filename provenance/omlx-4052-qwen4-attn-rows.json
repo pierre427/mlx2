@@ -1,0 +1,76 @@
+{
+  "component": "Qwen4 (Flash-Next) fused attention rows: grouped q/k/v/index projection launch, q/k norm + RoPE launch, MLX vector SDPA with the output gate folded into its closing reduction, the dense-region indexer short-circuit (attention part of omlx #4052), plus mlx2-original one-launch QSA mask and indexer-query norm + RoPE for the sparse region",
+  "status": "implemented; Metal bit-exact on real Flash-Next layers; full-model token-identical; default OFF (policy attn_fused_rows / MLX_QWEN4_ATTN_FUSED_ROWS); not qualified, not selected",
+  "sources": [
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "d05afc7a7a59a871531b89ee769460581a26aabb",
+      "source_pr": "jundot/omlx#4052 (perf(qwen4): fused attention rows, unrolled verify tiles, deferred GDN states, MoE top-k fold); only the fused attention rows are ported here",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/attn_fused.py": "b38660ad4c561a29d799ff4db4768e2a4ac93f236520bf29b316dade4d2cad58",
+        "omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/language.py": "9a887d3a8128f364529355c184c86a0318a2bcbb425477a0a9efd6619894ca58",
+        "omlx/patches/row_exact_qmv.py": "958787900796286d54297002209970457d3b11887703a844f84aa5e43cf31a08",
+        "tests/test_qwen4_attn_fused.py": "5e8d5b5923ccbb4150cd4df436facf2d97b6d1ef231fa20a31f54f77228da187"
+      },
+      "source_regions": [
+        "attn_fused.py: _PREP_SOURCE (lines 60-145: one 64-thread threadgroup per head and row doing rms_single_row then RoPE), _ONE_PASS_CHAINS / _ONE_PASS_COMBINE (215-300: sdpa_vector's 32 key chains moved to separate simdgroups across threadgroups, closed by a second launch with the gate multiply), _TWO_PASS_COMBINE (346-406: the gate multiply in sdpa_vector_2pass_2), dense_sdpa_gate/prep_qk dispatch geometry (495-604)",
+        "language.py: _fused_rows / _fused_prologue / _fused_forward (2197-2376: one grouped projection launch, dense arm below the indexer budget skips the selection)",
+        "row_exact_qmv.py: the grouped same-input projection launch idea only (_group_source); not copied"
+      ]
+    },
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "cca20961d9c1086debeb1b5b1b43531655c6704f",
+      "source_pr": "jundot/omlx#4062 (keep long-context steps on the masked QSA path while fused rows run), issue #4061",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/models/vlm.py": "248633b548ac3b835dc81fd538266b4b4491384c5cebafc2bdcee1e14aa9ddea"
+      },
+      "source_regions": [
+        "_STEP_TEXT_POSITIONS_MIN_CONTEXT (lines 40-60): the idea measured here as a threshold sweep; no code taken"
+      ]
+    },
+    {
+      "source_repository": "https://github.com/ml-explore/mlx",
+      "source_revision": "39400a0d4cf1641bc6e543cb5e3585757f491854 (the wheel in the shared venv; read from the lab checkout ~/Desktop/mlx-uag/mlx-src)",
+      "license": "MIT (Copyright 2023 Apple Inc.); scoped notice in provenance/omlx-4052-qwen4-attn-rows.NOTICE",
+      "source_files": {
+        "mlx/backend/metal/kernels/sdpa_vector.h": "2100a4d1eaa8a524c5147c82c771cad75197495c72daffa03e7ea4c259aebf10",
+        "mlx/backend/metal/scaled_dot_product_attention.cpp": "575e29a36b2d0c653f17b4f55062b644243d2e3dbc362f6725686bef959dd9dd",
+        "mlx/backend/metal/kernels/rms_norm.metal": "b2e04e377fdad1d645581f9beeaf9cbb06d1ad32926161e06cbc15240caf12bf",
+        "mlx/backend/metal/kernels/rope.metal": "2b35221ebea033ff43100b85eaaddec5c0e34e3cfd52e7c692573764b2b7d0ab",
+        "mlx/backend/metal/rope.cpp": "9ec2d2f298381af6445b1e2281dd90521988861ed170a602944ec0f1fca17ecc",
+        "mlx/backend/metal/quantized.cpp": "98b1a39dd821eb94104462eaa33f644e370278f2ea35cc0ec835cf292df0b179"
+      },
+      "source_regions": [
+        "sdpa_vector.h: sdpa_vector (per-key online softmax, bool-mask walk, closing reduction), sdpa_vector_2pass_1, sdpa_vector_2pass_2 -- arithmetic transcribed",
+        "scaled_dot_product_attention.cpp: select_sdpa_blocks ('s' and 'd' classes), the one-/two-pass routing (k >= 1024 on 'd'/'s'), the R * GQA > 32 unfused fallback rule, mask broadcast strides",
+        "rms_norm.metal: rms_single_row (axis 256, N_READS 4); rope.metal: rope_single / rope (non-traditional, exp2(-d * log2 base) frequencies, fast::cos/sin); rope.cpp: dims < D copies the input first and log2(base) is computed with std::log2(float)",
+        "quantized.cpp: get_qmv_batch_limit / use_qmv_nax / qmv_wide tiling, read to establish that M < 8 picks the qmv family by M alone (the grouped projection's admission)"
+      ]
+    }
+  ],
+  "notice": "provenance/omlx-4052-qwen4-attn-rows.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_attn_rows.py",
+    "src/mlx2/runtime/models/qwen4_exp.py (Attention._attn_rows_admit/_attn_rows_prep/_attn_rows_mask/_attn_rows_sdpa_ok, the fused branches of Attention.__call__ and _project_segmented_qsa, QSAIndexer.__call__ dense_shortcircuit/fused_query and QSAIndexer._fused_query)",
+    "src/mlx2/adapters/flash_next_policy.py (attn_fused_rows)",
+    "src/mlx2/adapters/flash_next.py (attn_fused_rows status when enabled)",
+    "scripts/check_qwen4_attn_rows.py",
+    "scripts/bench_qwen4_attn_rows.py",
+    "tests/test_qwen4_attn_rows.py"
+  ],
+  "modifications": [
+    "Grouped projection: omlx runs its own row-exact qmv tile over the four projections; mlx2 reuses the attention layer's existing concatenated q|k|v|index_qk table (Attention._fused_projection_table, the MLX_QWEN4_QSA_FUSED_PROJ mechanism) with ONE stock quantized_matmul, admitted at M <= 7 where MLX's kernel family depends on M only (M >= 8 reaches NAX small-M qmv for the wide q projection and differs). Costs a second resident copy of the four projections (~18.7 MB per attention layer, ~0.24 GB for the 12 trunk layers + MTP head).",
+    "prep_qk: omlx transcribes mlx-vlm's FP32 (1 + w) RMS norm and its MRoPE kernel; mlx2's Attention uses nn.RMSNorm (bf16 weight) and nn.RoPE (mx.fast.rope, partial rotary 64 of 256, non-traditional), so the kernel transcribes MLX's rms_single_row output expression w * T(x * inv) and rope/rope_single with log2f(base) passed from the host; it also reads the query half straight out of the strided q|gate projection (stock MLX copies it first), and accepts int or per-batch array offsets.",
+    "sdpa_gate: omlx transcribes the 'd' (M5 Ultra) plan only (128 partitions below 16K keys); mlx2 transcribes select_sdpa_blocks for 's' (this M5 Max: 64/128/256/512/1024 partitions by context) and 'd', every context, and the boolean mask walk MLX does (omlx's dense arm is unmasked), so the masked QSA arm above the indexer budget also runs fused. The 2-pass chains are MLX's own sdpa_vector_2pass_1 geometry (no four-keys-ahead macro). R * GQA <= 32 only (R <= 2 at GQA 12): wider verify rows keep MLX's unfused SDPA and take only the projections and prep_qk.",
+    "omlx's '#if POS_NDIM == 3' / template-argument preprocessor switches are replaced by Python-side source specialization (template arguments are C++ template parameters, not macros).",
+    "Dense short-circuit: below the indexer budget (n_blocks <= block_topk) the fused rows ask the indexer for its existing implicit_all selection (the MLX_QWEN4_QSA_DENSE_SHORTCIRCUIT logic) instead of the explicit all-blocks selection; the mask is the causal mask cell for cell (tests/test_qwen4_attn_rows.py). Not used when the gather arm is enabled.",
+    "mlx2-original additions (not in omlx; omlx's masked arm keeps its selection ops): qsa_mask rebuilds QSASelection.dense_mask() for an explicit selection in one launch (chosen-block bitmap in threadgroup memory from the selected ids & valid_blocks, clipped floor-divided token block, causal tail, left-padding floor, causal mask; integer/bool logic, MLX's signed floor_divide), and index_q runs the indexer query's q_layernorm + _apply_rope_positions (unscaled table) in one launch, transcribing the composed MLX ops (rms_single_row at axis 128, f32 position x freqs, precise::cos/sin, each product and sum separately rounded under '#pragma METAL fp contract(off)', round to bf16). The scores matmul, argpartition and pooled-key path stay MLX ops.",
+    "Admission: batch 1, rows <= 17, bf16/fp16, unquantized cache, Metal 's'/'d' class, nn.RMSNorm q/k norms with equal eps, nn.RoPE non-traditional, head_dim 256, sdpa admission per plan/mask/dtype; every refusal is counted by reason (qwen4_attn_rows.status()). Kill switch: the policy field / env var; set_enabled() for in-process A/B.",
+    "No unrolled verify tiles, deferred GDN states or MoE top-k fold (other lanes / existing mlx2 mechanisms). No Apple copyright header added."
+  ],
+  "validation": "CPU: tests/test_qwen4_attn_rows.py (26: policy default-off/receipts, env parsing, transcribed SDPA plan table for 's'/'d', CPU fallback identical with counted refusal, dense short-circuit mask equals the explicit mask cell for cell, admission reasons for prep/sdpa/mask/index_q); related qwen4/qsa/flash_next/segmented/omlx suites 603 passed, 76 skipped (Metal), 2 pre-existing tests/test_flash_next_vlm_cpu.py failures that also fail on the base revision. Metal (2026-09-30, M5 Max applegpu_g17s, mlx 39400a0d4; qualification/runs/attn-rows-20260930/check_full.*): on real layers 3/23/47 and the MTP head, raw-byte identical: grouped projection at M=1..7 (differs at M>=8, refused), prep_qk 112/112, index_q 70/70, sdpa_gate 118/118 (1..131072 keys, R=1,2, none/all-true/sparse masks), qsa_mask 24/24, Attention.__call__ fused vs stock 30/30 (700-70000 tokens, plain and batched cache, widths 1-3, outputs and K cache). Launches per attention layer (graph count): one token below 2048 tokens 70 (98 on a pooling step) -> 8; 32768 tokens 70 -> 44; verify width 3 105 -> 15. Full model B1 (ab_main2, 6 reps ABBA, one process, tokens identical in every run): ordinary 1K +11.1% median, MTP 1K +2.2%, ordinary 32K +2.4%, MTP 32K +0.2% (flat). Threshold (#4062): masked arm faster than indexed up to ~49K, slower from 65536 (layer time +9/+12/+22% at 64K/96K/128K); recommendation keep 65536.",
+  "selection": "2026-09-30: selected as the Flash-Next default (attn_fused_rows=True) on the omlx roadmap campaign branch at Pierre's request. Not qualified: the default policy receipt changed, so Flash-Next serves labelled unqualified until it is requalified. The status field above records the evidence as of implementation."
+}

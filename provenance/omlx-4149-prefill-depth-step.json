@@ -1,0 +1,28 @@
+{
+  "component": "Depth-bounded prefill chunk (opt-in) and Metal GPU-timeout step recovery",
+  "kind": "idea-only",
+  "code_copied": false,
+  "recorded_at": "2026-10-01",
+  "status": "implemented; default off; unqualified; unselected",
+  "source_repository": "https://github.com/jundot/omlx",
+  "source_pr": "jundot/omlx#4149 (open, unmerged when read)",
+  "source_revision": "6c6975970204a5e8c69e32c4ae4c8acb91202881",
+  "source_license": "Apache-2.0",
+  "source_paths": [
+    "omlx/patches/prefill_depth_step.py",
+    "tests/test_prefill_depth_step.py"
+  ],
+  "source_read": "PR description only (local pr-index snapshot); the patch body was not read or copied",
+  "idea": "A fixed prefill chunk at deep KV can run one Metal command buffer past the GPU watchdog (kIOGPUCommandBufferCallbackErrorTimeout). omlx makes the step min(configured step, largest power of two <= budget / (depth + step)), floored at 128, with an empirical budget of 1.6e8 tokens^2 measured on a two-node M5 Pro pipeline of Qwen3.8-27B-oQ4e-mtp.",
+  "modifications": [
+    "Own implementation: runtime/prefill_plan.depth_bounded_prefill_rows keeps the configured step while rows x (depth + rows) <= budget (so every chunk ending at or before budget // step is unchanged), else the largest power of two that fits, floor 128.",
+    "Applied in BatchGenerator on the ordinary, mixed and self-MTP prefill paths, before APC interior checkpoint clamping; engagement counter prefill_depth_bounded_chunks; chunk receipt field depth_budget.",
+    "Policy-driven, no model-name branching: --prefill-depth-budget or adapter prefill_depth_budget_default() (FlashNextPolicy.prefill_depth_budget = None). Bound into qualification settings only when set; fails closed on external-draft / prompt-lookup routes.",
+    "Not in omlx#4149: serving now classifies the Metal GPU-timeout step failure and recovers it exactly as Metal OOM (fail in-flight lanes 503, verify memory, rebuild), plus a qualification mlx_fault kind gpu_timeout."
+  ],
+  "validation": {
+    "cpu": "PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_prefill_depth_bound.py tests/test_device_oom_recovery.py",
+    "gpu_probe": "qualification/runs/recon-20261001/l3-depth-chunk/README.md",
+    "default_state": "off: on this M5 Max the shipped chunks (Flash-Next 8192, engine 2048) stay far below the watchdog through 262K; see README"
+  }
+}

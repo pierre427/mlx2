@@ -1,0 +1,28 @@
+{
+  "component": "Nemotron-H Mamba2 external speculative target protocol",
+  "implementation_kind": "original mlx2 integration over existing mined model math",
+  "source_repository": "mlx2",
+  "source_revision": "2207af9a980f7def6173a3a057221267de634f9a",
+  "source_paths": ["src/mlx2/runtime/models/nemotron_h.py"],
+  "base_provenance": "provenance/nemotron3-super-5bit.json",
+  "license": "MIT",
+  "modifications": [
+    "Added optional post-layer capture sink to the ordinary backbone walk without changing tensor math or the ordinary decode path",
+    "Added forward_with_taps and body-only prefill protocol, using full backbone layer IDs including MLP/MoE positions and the existing compact Mamba/attention cache counter",
+    "Exposed architecture-neutral embed_tokens property backed by existing backbone.embeddings, preserving checkpoint parameter names and shared target embedding/head binding",
+    "Declared existing ArraysCache speculative record-and-replay support after decisive CPU prefix replay and different-context B2 transaction tests",
+    "B1 external speculative verification uses tokenwise calls matching the existing ordinary and mtp_verify_backbone numerical strategy; nonspeculative prefill and true B2 block execution retain their existing kernels",
+    "Added external_execution_receipt that distinguishes ordinary-tokenwise single-row verification from unqualified batched block verification and real-artifact qualification",
+    "No model-name branches in scheduler or target transaction owner and no changes to Mamba internals"
+  ],
+  "validation": "9 CPU tests: post-layer captures match an independent layer walk and ordinary logits; real DFlash target embedding/head bind; malformed tap/cache topology rejection; all kept-prefix lengths 0..3 restore bitwise convolution/recurrent states against independent tokenwise accepted-prefix runs; single-row speculative logits, taps and state are bitwise equal to independent ordinary tokenwise calls for both plain and merged caches with per-step length metadata; actual B2 hybrid cohorts with distinct context lengths, equal and padded verification widths, ragged accepted lengths match independent prefix states and next logits within FP32 tolerances. No GPU execution or real target/draft artifact qualification.",
+  "limitations": [
+    "A target-trained drafter/head artifact is required; Qwen3 artifacts do not establish compatibility with Nemotron-H",
+    "Existing real Nemotron provenance documents long-context block-versus-tokenwise numerical differences; B1 speculative tap verification therefore follows ordinary tokenwise math. B2 external block verification has no real-artifact numerical qualification or fully ordinary-law claim",
+    "Tiny CPU protocol parity does not establish performance or qualification for 120B, MoE, or GPU variants"
+  ],
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "observed_used": false
+}

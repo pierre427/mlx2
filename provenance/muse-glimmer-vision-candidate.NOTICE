@@ -1,0 +1,5 @@
+Muse Glimmer direct vision generation uses the MIT-licensed, lab-owned
+mlx-vlm source at commit 8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5.
+The vision tower, image processor, projection, and generation implementation
+remain in that pinned runtime. mlx2 adds artifact checks and a direct
+candidate wrapper; no source implementation was copied into this adapter.

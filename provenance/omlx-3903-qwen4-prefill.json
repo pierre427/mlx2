@@ -1,0 +1,52 @@
+{
+  "component": "Qwen4 (Flash-Next) fused GDN prefill prework + gated norm, and sorted-order MoE weighted sum (omlx #3903 port)",
+  "status": "GDN prefill: implemented, GPU bit-identical, default ON in the Flash-Next profile (MLX_QWEN4_FUSED_GDN_PREFILL=1). MoE weighted sum: implemented; held 2026-09-25 as 1 bf16 ulp off (fp32 accumulate); since 2026-10-01 it replays MLX's col_reduce_small order (mlx-serve#653, see provenance/mlx-serve-653-moe-prefill-reduce.json), is GPU bit-identical, and is default ON in the Flash-Next profile (MLX_QWEN4_MOE_WEIGHTED_SUM=1; code default 0).",
+  "sources": [
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "3e2bdb1fea5571c7e85f160a9c3df9ad76516be9",
+      "source_pr": "jundot/omlx#3903 (perf(qwen4): speed up Flash-Next prefill)",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/qwen35_gdn_prework.py": "e47276468d96f93aaadd7e9e8be78be8b3739062d18ef480aafea9890334634d",
+        "omlx/patches/qwen35_moe_weighted_sum.py": "14d6f9731aaa404a9c28914118ee3a928e4ff2355ed3d51bf4669ec50f9716e6",
+        "omlx/custom_kernels/common/csrc/kernels/quantized_moe.h": "9e6440b6e5437e7671d9f399eb230058e4733567f0705015b94be79b8826fd39",
+        "omlx/custom_kernels/qwen35_prefill/csrc/qwen35_prefill.cpp": "cf16951224704661d045cbf45f6945ce4c5c91513e3eb38237e60f8f1d18b898"
+      },
+      "source_regions": [
+        "qwen35_gdn_prework.py: _SOURCE (verify prework, lines 53-157), _QWEN4_NORM_GATE_SOURCE (283-304), _qwen4_prefill_prework_source/_qwen4_prefill_norm_gate_source/_qwen4_prefill_eligible/_qwen4_prefill (445-601), _qwen4_gdn_geometry_ok (654-685)",
+        "qwen35_moe_weighted_sum.py: _should_route/_native_switch_weighted_sum (idea and routing only)",
+        "quantized_moe.h: moe_weighted_sum_tiled (lines 2629-2659; read for structure only, not copied; that file carries an Apple MIT header inherited from MLX)"
+      ]
+    },
+    {
+      "source_repository": "https://github.com/ddalcu/mlx-serve",
+      "source_revision": "09970f9b (tag v26.8.11-pre-release.1)",
+      "license": "MIT, Copyright (c) 2026 David Dalcu",
+      "source_files": {
+        "src/transformer.zig": "bd0951034319e2437037f9f5fc7bfef3776eeba205874022e3181ae674154584"
+      },
+      "note": "Origin of the GDN prework (GDN_PREWORK_SOURCE) and Qwen4 norm-gate kernels as carried by omlx; the scoped MIT notice is kept beside the kernel sources and in the NOTICE file."
+    }
+  ],
+  "notice": "provenance/omlx-3903-qwen4-prefill.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_fused_gdn_prefill.py",
+    "src/mlx2/runtime/models/qwen4_moe_weighted_sum.py",
+    "src/mlx2/runtime/models/qwen4_exp.py (GatedDeltaNet._try_fused_prefill, counters, qwen4_fused_gdn_stats)",
+    "src/mlx2/runtime/models/qwen3_next.py (_routed_tail, set_moe_weighted_sum, block routing)",
+    "scripts/check_omlx3903_port.py",
+    "tests/test_omlx3903_port.py"
+  ],
+  "modifications": [
+    "Prework and norm-gate Metal sources kept verbatim from omlx (so the prefill substitution stays diffable); kernel names changed; ensure_row_contiguous made explicit.",
+    "The omlx monkey-patch of mlx-vlm Qwen3_5GatedDeltaNet.__call__ is replaced by an mlx2 adapter hook: GatedDeltaNet._try_fused_prefill in qwen4_exp, reached from _try_fused_decode for non-speculative multi-token forwards; the recurrence stays mlx2's own _gated_delta_update (beta_input_dtype=True).",
+    "Boolean eligibility replaced by admit_qwen4_fused_gdn_prefill, which refuses with a reason (training, sharding, no cache, speculating, mask, ragged lengths, left padding, non-sigmoid gate, geometry, batch, rows < 64, dtypes, state shapes); refusals are counted per layer (fused_gdn_prefill_* counters, surfaced by qwen4_fused_gdn_stats only when selected).",
+    "Cache writes happen after both kernels are built, so a dispatch failure falls back to eager with the cache untouched; a non-bf16 recurrence output runs the eager RMSNormGated instead of the fused norm-gate.",
+    "GDN prefill gate MLX_QWEN4_FUSED_GDN_PREFILL: code default 0; the Flash-Next adapter profile (adapters/flash_next.py configure_environment) sets it to 1 since 2026-09-25, after the GPU gate found it bit-identical to eager. omlx defaults its equivalent on.",
+    "MoE weighted sum re-expressed as an mx.fast.metal_kernel (no native extension); it rounds each weighted product to the activation dtype before fp32 accumulation when scores share that dtype, matching the eager x*scores graph (omlx accumulates unrounded products); output dtype follows the eager promotion (fp32 when scores are fp32). Superseded 2026-10-01: the kernel now reduces in the promoted dtype with MLX col_reduce_small's partial order (bit-identical); see provenance/mlx-serve-653-moe-prefill-reduce.json.",
+    "Weighted sum wired into mlx2's FusedGateUpSwitchGLU/FusedDownSwitchGLU sorted tail for top_k == 10 and routed rows >= 64 behind MLX_QWEN4_MOE_WEIGHTED_SUM=0 (default off); omlx also admits top_k 6/8 and a 1024-token floor. Since 2026-10-01: top_k 8 or 10, and the Flash-Next profile sets the flag to 1.",
+    "_try_qwen4_fused_down gains variant='stock' so the weighted-sum route can pass scores without engaging the fused-down decode kernel."
+  ],
+  "validation": "CPU plumbing only; GPU bit/ULP gate pending. tests/test_omlx3903_port.py: numpy mirrors of both GDN kernels and the weighted sum; mirror vs eager at tolerance (CPU reductions/sigmoid differ from Metal); admission refusals; wiring with the kernels monkeypatched to the mirrors (cache[0] bit-equal to eager, advance widths, output shape/dtype, dispatch-failure fallback, stats); a mutation dropping the cache[0] write fails the wiring test. GPU gate script: scripts/check_omlx3903_port.py --i-own-the-gpu (not yet run). GPU (2026-09-25, M5 Max, mlx 39400a0d4; qualification/runs/triage-20260925 on claude/triage-20260925): check_omlx3903_port.py: prework q/k/v/conv_out and norm-gate bit-identical at 64/2048/8192 rows, cold and warm conv state; weighted sum not bit-identical (1 bf16 ulp, fp32 accumulate). Flash-Next in-process prefill: fused GDN -1.8% (16K) / -2.7% (64K) with final logits bit-identical to eager; teacher-forced 16K x 3 offsets x 256 tokens bit-identical to eager at 2048 and 8192 chunks. Weighted sum: -2..3% more but KL to the unchunked result 0.040 vs 0.033 at 2048 chunks: held. Served smoke: 108 fused prefill calls, 0 fallbacks. 2026-10-01 (recon-20261001/l4-moe-wsum): reworked weighted sum bit-identical (kernel bits and full-model logits); default on for Flash-Next."
+}

@@ -1,0 +1,23 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "source_revision": "42c550fa6a26486104d97125141bd7fdd28cbce4",
+  "source_paths": [
+    "src/mlx2/runtime/paged_n20_phase_control.py",
+    "scripts/research/spomin_400case_phased_http_bench.py",
+    "src/mlx2/serving.py",
+    "src/mlx2/adapters/flash_next.py"
+  ],
+  "license": "MIT",
+  "modifications": [
+    "Restore ordinary engine/adapter prefill default; optional recorded --prefill-step override",
+    "Atomic condition-locked clock samples accumulated active lease elapsed plus current active interval",
+    "Record both original sample wall timestamps and owned elapsed including CPU/GPU completion, excluding terminal-proved operator pauses",
+    "Compute per-case and aggregate prefill/decode/complete owned elapsed rates alongside unchanged wall rates"
+  ],
+  "validation": {
+    "cpu_checks": 27,
+    "gpu_executed": false,
+    "real_controller_pause_resume_test": true
+  },
+  "qualified": false
+}

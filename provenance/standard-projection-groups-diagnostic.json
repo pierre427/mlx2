@@ -1,0 +1,43 @@
+{
+  "implementation": "original mlx2 target-only projection geometry diagnostic",
+  "license": "MIT",
+  "source_repository": "mlx2",
+  "source_revision": "278f82c04e605d1c6c1233b5a08826a007934f8d",
+  "source_paths": [
+    "src/mlx2/runtime/models/standard_decoder.py",
+    "scripts/validate_adaptive_metal.py",
+    "scripts/validate_xpress_metal_matrix.py"
+  ],
+  "read_only_primary_api_sources": [
+    "installed mlx/nn/layers/linear.py: Linear.__call__ uses native matmul or addmm",
+    "installed mlx/core/__init__.pyi: matmul leading batch broadcasting and optional vmap callable"
+  ],
+  "modifications": [
+    "Collect materialized native B1/S1 inputs to every dense attention and MLP projector plus the tied or untied output head from two ordinary target trajectories",
+    "Require captured logits to replay bitwise through untouched ordinary S1 before interpreting projection measurements",
+    "Compare groups 1, 2, 4, 8 and 16 with native B1/SG and BG/S1 input layouts; optional documented vmap is a separate geometry control",
+    "Preserve fixed values and flattened row order; independently test B15/S1 inputs for each projector",
+    "Record exactness, maximum and RMS numerical errors, fixed-input hashes and uncontrolled synchronized diagnostic timing",
+    "A nontrivial diagnostic geometry must match all projectors on both fixed input sets; otherwise use the group1 control and report no optimization found",
+    "Compare selected geometry at all positions of a B15/S4 frozen French cache against original S1 logits, temperature-transformed target laws and committed KV; configurable bounded query width",
+    "Temporary projector override applies only to explicit row_exact verification calls; native S1-prefix attention, normalization, RoPE, ordinary calls and prefill are unchanged",
+    "Restore class capture hooks and verification projector hook in finally; abort a later failed target transaction",
+    "Require operator GPU ownership and M3 Metal, reject other precision, guard memory, cap cases and wall time, and make dry-run tensor-free",
+    "Candidate admission and committed-cache bitwise evidence use native byte views with shape/dtype pins; float-expanded value errors remain separate",
+    "Check all source hashes again at completion; report selected_full_math_exact and optimized_candidate_exact separately from measurement completion"
+  ],
+  "validation": {
+    "cpu": "tests/test_standard_projection_groups_metal_cli.py: 10 passed; tensor-free CLI, bounded inputs, row order and tail mapping, complete tiny BF16 tied and untied targets, later projector-failure restoration and native-byte signed-zero distinction",
+    "metal": "pending; parent owns M3 execution",
+    "timing_scope": "resident fixed-input diagnostic; not controlled performance evidence",
+    "limitations": [
+      "Input-shape exactness on these fixed rows does not establish universal target parity or a safe production optimization",
+      "A successful diagnostic run reports completed measurements; its passed field does not turn nonzero numerical errors into parity passes",
+      "No external draft head, production scheduler, model weight or default policy changes"
+    ]
+  },
+  "implemented": true,
+  "qualified": false,
+  "production_selected": false,
+  "performance_claim": false
+}

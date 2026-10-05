@@ -1,0 +1,25 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "default-off all-valid recurrent Q1 cache-view metadata bypass",
+  "source_repository": "lab-owned mlx2",
+  "source_revision": "d9971060baf06df0f6e641e095682c7e7964721a",
+  "source_paths": [
+    "src/mlx2/runtime/models/cache.py:ArraysCache.prepare/finalize/advance",
+    "src/mlx2/runtime/segmented_batch_cache.py:SegmentedBatchArraysCache",
+    "src/mlx2/runtime/models/qwen3_5.py:GatedDeltaNet._recurrent_core",
+    "src/mlx2/adapters/qwen35_paged_candidate.py"
+  ],
+  "licenses": "Original project code under MIT; existing segmented cache provenance remains Apache-2.0",
+  "modifications": [
+    "Opt-in candidate constructor and diagnostic CLI flag; default remains the original prepare/finalize path",
+    "Before native mutation require exact ordinary ArraysCache rows, initialized two-slot B1 state, nonspeculative state, and absent length/padding arrays and host mirrors",
+    "For explicit one-token, mask-None recurrent layers, retain segmented view concatenation, row splitting and GDN advance while skipping only prepare/finalize metadata construction",
+    "Record actual number of recurrent layers taking the bypass in the candidate receipt"
+  ],
+  "validation": {
+    "cpu": "37 direct NumPy candidate contracts including default-vs-opt-in logits and recurrent-state equality, metadata call counts and prewrite foreign-cache refusal; Python compile and diff check",
+    "gpu": "not executed",
+    "qualified": false,
+    "performance": "unmeasured"
+  }
+}

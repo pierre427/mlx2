@@ -1,0 +1,19 @@
+{
+  "component": "HiLS Attention 7B landmark sparse candidate",
+  "source_repository": "local read-only lab-owned mlx-lm checkout",
+  "source_revision": "458e7ff1e6b521445537590f68625d39c28794f6",
+  "source_ref": "remotes/forgejo/feature/olmo-hils (read locally only)",
+  "source_paths": ["mlx_lm/models/olmo_hils.py"],
+  "support_source_repository": "local read-only mlx-lm-unified checkout",
+  "support_source_revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+  "support_source_paths": ["mlx_lm/models/olmo3.py"],
+  "license": "MIT",
+  "notice": "provenance/hils-attention.NOTICE",
+  "modifications": [
+    "copied source landmark attention and its Olmo3MLP dependency into mlx2.runtime.models",
+    "added exact 7B topology, landmark tensor, and indexed shard checks",
+    "limited adapter to one plain-text lane; APCv2 and prefix reuse are absent pending custom-cache validation",
+    "left qualification pending and exposed no tool or speculative route"
+  ],
+  "validation": ["both local bf16 and q6 artifacts passed CPU metadata inspection", "tests/test_granite_hils_cpu.py"]
+}

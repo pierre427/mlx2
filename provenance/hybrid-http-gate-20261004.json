@@ -1,0 +1,41 @@
+{
+  "schema": "mlx2.hybrid-http-gate-source.v1",
+  "date": "2026-10-04",
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_commit": "81bae74b",
+  "source_paths": [
+    "scripts/research/varlen_b2_http_gate.py",
+    "scripts/research/varlen_hybrid_serving_smoke.py",
+    "src/mlx2/server.py",
+    "src/mlx2/serving.py",
+    "src/mlx2/runtime/qwen35_paged_graph_factory.py",
+    "src/mlx2/runtime/paged_hybrid_research_profile.py"
+  ],
+  "license": "Apache-2.0",
+  "modifications": "Original bounded hybrid27B loopback HTTP runner with three-return factory capture, actual sampled IDs, native/default ordinary comparison, source-bound stock32 profile and physical lifecycle counters. No core changes, weight casts or sampled-token replacement.",
+  "validation": {
+    "CPU_preflight_tests": 7,
+    "CPU_preflight_status": "passed",
+    "MLX_native_runtime_imports": "forbidden during author verification",
+    "GPU_executed": false,
+    "numeric_tensor_parity": "not_tested",
+    "token_parity": "not_tested",
+    "qualified": false,
+    "price_usable": false,
+    "local_tokenizer_fixture": "CPU tokenizer.json test and local_files_only AutoTokenizer probe: stable text-first32/96 exact encode/decode/encode IDs; no MLX imports"
+  },
+  "bounds": {
+    "seconds": 100,
+    "RSS_bytes": 51539607552,
+    "context_tokens": [
+      32,
+      96
+    ],
+    "max_tokens": [
+      2,
+      4
+    ]
+  },
+  "native_sha256": "7092b8a9649cea11edbb71c84438465a8500257c4327a65d8d901f76dbfa6d48",
+  "fixture_correction": "Root first HTTP attempt failed before request admission due arbitrary token-ID slicing. Replace with complete lexical words plus bounded suffix search, preserving database domain."
+}

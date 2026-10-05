@@ -1,0 +1,38 @@
+{
+  "mechanism": "merged serving numerical laws pin external continuation learning and native target mutation admission",
+  "implementation": "original mlx2 integration",
+  "source_repository": "local mlx2",
+  "source_revisions": [
+    "5bf46f1319a4fbff2bfacb0eb6ef549adc7a9ce3",
+    "05f306c7a0f6e166493e383492cad8903442c4d5"
+  ],
+  "license": "project license",
+  "paths": [
+    "src/mlx2/serving.py",
+    "src/mlx2/adapters/external_draft_policy.py",
+    "src/mlx2/runtime/models/standard_decoder.py",
+    "tests/test_external_serving_numerical_binding_cpu.py"
+  ],
+  "modifications": [
+    "Compose the same main APCv2 process/prefill/lane/int8/stream/recurrent-codec numerical namespace before qualification lookup, APC creation and external batch construction; reuse it for live and persistent APC namespaces.",
+    "A default namespace is an identity. A nondefault namespace rebinds only an unconsumed continuation pool's target/model/session and route execution pins, preserving source artifact revisions, tokenizer revision, original backend/providers and shared ranking registry. Feedback manager creation follows the new pins.",
+    "Selected native standard row-exact math refuses an eligible lane projection replacement plan before installer mutation and refuses dynamic single-LoRA before installation. Disabled/unsupported-device/skipped lane plans remain identities; quant-only modes and storage codec on a nonrecurrent standard target are not blanket refused.",
+    "Revalidate native target module topology after the unchanged homogeneous dtype invariant and before any verification cache append, so post-configuration replacement modules fail closed.",
+    "Preserve main default GDN/QSA mechanisms and qualification-versus-permission distinction; these guards refuse unsupported capabilities, not unqualified execution."
+  ],
+  "validation": {
+    "cpu_cases": 12,
+    "merged_review_cpu_result": "143 passed: APC differential keys, prefill-depth, recurrent codec, Qwen4 row-exact and continuation lifecycle",
+    "targeted_combined_cpu_result": "153 passed: numerical binding, source-session identity, row-exact math, prefix dedup, APCv2 batching, key differential, complete-pool executor",
+    "evidence": [
+      "Default chain/pool route pins unchanged; effective process/codec laws split model/session/source keys while retaining artifacts and tokenizer.",
+      "Idempotent binding; active/consumed pools refuse rebinding without partial mutation; feedback manager receives final target and route execution pins.",
+      "Real rebound pool decodes and publishes a revision-bound paired sidecar and ranking metadata.",
+      "Lane plan, dynamic LoRA and replaced projection guards fail before mutation/cache writes; harmless stock/device/skip cases remain admitted."
+    ],
+    "qualified": false,
+    "metal": "qualification/runs/parallel-draft-merge-20261002/m3-http17.json",
+    "performance_claim": false,
+    "m3_final_http": "PASS pinned Qwen3-4B BF16/XPress pool and ordinary reference; max17; reused fixed128 cost estimate; no performance claim"
+  }
+}

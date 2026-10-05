@@ -1,0 +1,52 @@
+{
+  "schema": "mlx2.hybrid-b1-numeric-gate-source.v1",
+  "date": "2026-10-04",
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_commit": "80a57205",
+  "source_paths": [
+    "scripts/research/varlen_hybrid_q1_gate.py",
+    "scripts/research/varlen_hybrid_ordinary_b2_reference.py",
+    "scripts/research/varlen_hybrid_http_gate.py",
+    "src/mlx2/runtime/qwen35_paged_graph_factory.py",
+    "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/runtime/paged_hybrid_research_profile.py",
+    "scripts/research/varlen_hybrid_fa_boundary_probe.py"
+  ],
+  "license": "Apache-2.0",
+  "modifications": "Original standalone diagnostic: real shared factory plus same-input ordinary B2 reference, runtime cache.filter survivor, exact full logits and all conv/GDN slots across B2 then B1 then B1. Existing native/profile/source identity and charge/terminal/publication contracts. No model casts, adapter/core or stock32-domain changes.",
+  "validation": {
+    "CPU_tests": 11,
+    "CPU_status": "passed",
+    "GPU_executed": false,
+    "MLX_native_runtime_imports": false,
+    "B1_numeric_parity": "not_tested",
+    "qualified": false,
+    "price_usable": false
+  },
+  "bounds": {
+    "seconds": 100,
+    "RSS_bytes": 51539607552,
+    "contexts": [
+      32,
+      96
+    ],
+    "widths": [
+      2,
+      1,
+      1
+    ]
+  },
+  "native_sha256": "7092b8a9649cea11edbb71c84438465a8500257c4327a65d8d901f76dbfa6d48",
+  "followup_source_commit": "a2efa889",
+  "followup": "Correct ordinary bootstrap last-token vocabulary projection and require exact baseline before decode. Optional actual B1 FA3/7/55 capture + existing terminal raw KV export; explicitly diagnostic same-native-QKV stock replay. No model/core/kernel changes or relaxed tolerance.",
+  "root_observed_failure": {
+    "receipt": "/tmp/mlx2-hybrid-b1-numeric-gate-a2efa889.json",
+    "B2": "exact",
+    "B1_logits_max_abs": 0.125,
+    "B1_first_recurrent_layer_step1": 56,
+    "B1_first_conv_max_abs": 0.0625,
+    "B1_first_GDN_max_abs": 0.007762432098388672,
+    "greedy_match": true,
+    "cleanup": "all retired"
+  }
+}

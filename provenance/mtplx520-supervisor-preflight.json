@@ -1,0 +1,30 @@
+{
+  "schema": "mlx2.mined-research-provenance.v1",
+  "subject": "MTPLX #520 external supervisor CPU preflight",
+  "source_repository": "https://github.com/youssofal/MTPLX",
+  "source_revision": "ccb383d2a585299638d400a39517b929f92cfe6e",
+  "source_paths": [
+    "mtplx/supervisor/proxy.py",
+    "mtplx/supervisor/registry.py",
+    "mtplx/supervisor/service.py",
+    "mtplx/supervisor/budget.py"
+  ],
+  "source_license": "Apache-2.0",
+  "modifications": "No source copied. Independent CPU-only fake-child policy and loopback HTTP models for mlx2 exact-model admission, qualified child identity, revision isolation, lease fencing, drain, streaming, cancellation, and crash rules. Added a source-bound prelaunch checker and separate research-only candidate real-child wire/residency runner.",
+  "local_files": [
+    "scripts/research/mtplx520_supervisor_preflight.py",
+    "scripts/research/mtplx520_http_preflight.py",
+    "scripts/research/mtplx520_real_child_gate.py",
+    "tests/test_mtplx520_supervisor_preflight.py",
+    "tests/test_mtplx520_http_preflight.py",
+    "tests/test_mtplx520_real_child_gate.py",
+    "qualification/runs/mtplx520-real-child-20260926/preflight.json",
+    "docs/research/mtplx520-supervisor-preflight-2026-09-26.md"
+  ],
+  "validation": {
+    "date": "2026-09-26",
+    "method": "pytest --noconftest with builtins import guard that rejects mlx",
+    "result": "40 passed with mlx import guard. Prelaunch receipt refuses stale source and interpreter qualification identity for both proposed models; no GPU or model loaded",
+    "limits": "Policy and loopback fake HTTP plus static qualification check only; candidate real-child subprocess, cache, SSE and residency run is prepared but not yet executed"
+  }
+}

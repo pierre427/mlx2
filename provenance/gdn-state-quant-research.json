@@ -1,0 +1,24 @@
+{
+  "component": "GDN recurrent-state quantization drift probe (research only)",
+  "source_repository": "none (idea only, no code mined); original mlx2 harness",
+  "source_revision": null,
+  "source_references": [
+    "arXiv 2608.27513 'DAMP' (SGLang, Qwen3.6-35B): INT8 recurrent state with K_hi=16 key channels per head kept in FP16, INT8 groups of 32 value entries per key channel, per-value-dimension scaling and reordering (SR); 9.9 bits/value, 69.1% less state storage, up to 2.59x update kernel, up to 19.0% lower TPOT; INT4 breaks reasoning",
+    "arXiv 2609.39185: deterministic golden-ratio Weyl dither u = frac(o_i + t*phi^-1) with R2 (plastic-number) per-entry offsets; Q(x) = s*floor(x/s + u); phase reduced in float64",
+    "jundot/omlx tests/test_gdn_sidecar_quantization.py and omlx/cache/boundary_snapshot_store.py (read-only via gh api; PR #2644 merged 2026-08-15): storage-only fp32/bf16/int8/rht_int8/rht_int16 codecs for persisted GDN sidecars, live state stays fp32"
+  ],
+  "license": "n/a (papers read for ideas; omlx is Apache-2.0 and no omlx code was copied)",
+  "destination_paths": [
+    "qualification/runs/recon-20261001/l6-gdn-stateq/gdn_state_drift.py",
+    "qualification/runs/recon-20261001/l6-gdn-stateq/analyze.py",
+    "docs/research/GDN-STATE-QUANT-2026-10-01.md"
+  ],
+  "modifications": [
+    "No source code copied. The harness re-derives the codecs from the paper descriptions: bf16 cast, int8/int4 RTN with per-(head, value-row) or DAMP group-32 scales, DAMP fp16 key-channel split (calibrated on a separate prompt), and the Weyl dither with the paper's R2 offset constants.",
+    "GDN's decay is a per-head scalar, so DAMP's retention weight is constant within a head; channel selection reduces to calibrated per-channel quantization error (group-32 variant) or channel RMS (row variant). This is stated, not hidden.",
+    "No runtime, serving, cache or kernel default changed."
+  ],
+  "validation": [
+    "GPU drift runs (2026-10-01, M5, via gpuq): Qwen3.6-35B-A3B 4-bit uniform x3 prompts and Qwen3.8-27B 4-bit x2 prompts; raw JSON, logs and summary under qualification/runs/recon-20261001/l6-gdn-stateq/. fp32 arm KL exactly 0; bf16 arm reproduced bit-for-bit across three processes; int4 negative control breaks; per-step int8 4-45x above the sensitivity floor; once-at-boundary int8 at the floor. Verdict and caveats in docs/research/GDN-STATE-QUANT-2026-10-01.md."
+  ]
+}

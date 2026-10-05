@@ -1,0 +1,67 @@
+{
+  "component": "Flash-Next row-exact verify speed-up (wave 2, lane W2-B): row-exact attention window (dense arm in one prep/append/windowed-SDPA pass; masked arm with the rows' one-row SDPA calls deferred into one windowed SDPA) and the HC decode kernels' one-row law for row-exact windows",
+  "status": "implemented; Metal bit-exact on real Flash-Next layers and full-model MTP-on == MTP-off with the stages engaged; default OFF (policy row_exact_window_kernels; MLX_QWEN4_ROW_EXACT_ATTN_WINDOW / MLX_QWEN4_HC_ROW_EXACT); not qualified, not selected",
+  "sources": [
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "93e708a816a70a8183b5cefca4e81c1c3d48bef8",
+      "source_pr": "jundot/omlx#4105 (row-exact verify windows up to 16 rows), carrying #4052's attn_fused.py",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/attn_fused.py": "da1a773e25e8ade65427e4d4058892be47c5503ee6505405f378b19cefda3750",
+        "omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/language.py": "9a887d3a8128f364529355c184c86a0318a2bcbb425477a0a9efd6619894ca58",
+        "tests/test_qwen4_verify_attention_rows.py": "fdaae4d4e7f74236b55b82baee9ba144a0f69f6fb1cb15077bc6f8d2e67d3866"
+      },
+      "source_regions": [
+        "attn_fused.py: MAX_ROWS = 16 (line 41), row_plan (483-493: rows share one plan or the window is split/refused), dense_sdpa_gate (541-604: row r of a window sees N - R + r + 1 keys, rows on the grid, one launch pair)",
+        "language.py: _row_exact_masked_verify (1987-2090: per-row one-row selection and SDPA after batched projections/appends), _row_exact_gathered_verify (1842-1946), _fused_rows dispatch (2197-)"
+      ]
+    },
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "7ef4d997b5713aaef53aaadca9a656736a12fa74",
+      "source_pr": "jundot/omlx#4041 (MoE/GDN/attention verify windows; correctness fixes to #4023's guarantee at plan boundaries)",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/language.py": "0dd53b1b2a73492bc125b41a41753fbf72da26a7038e13faad7a14349abb5d46",
+        "tests/test_qwen4_verify_attention_rows.py": "2a01d8ed262d563c6a7ac6ed3033d7771576200e6f335710afbd7896372ed1ba"
+      },
+      "source_regions": [
+        "language.py: _row_exact_masked_verify (1974-: the masked arm design), the PR body's plan-boundary cases (1,024 and 16,384 keys) used as the check's boundary contexts; no code copied"
+      ]
+    },
+    {
+      "source_repository": "mlx2 (this repository)",
+      "source_revision": "a8ea2c491768014aa7ffa425d4e7ddfe0868a161",
+      "license": "Apache-2.0 AND MIT (MLX transcription; see provenance/omlx-4052-qwen4-attn-rows.NOTICE)",
+      "source_files": {
+        "src/mlx2/runtime/models/qwen4_attn_rows.py": "ac0e8519034090ac2e366e28e2a96f43b1864191ebf342095243c7fc83fc67d1"
+      },
+      "source_regions": [
+        "_ONE_PASS_CHAINS / _TWO_PASS_CHAINS / _KEY_STEP / one_combine_gate / two_combine_gate: the MLX 39400a0d4 vector-SDPA transcription, reused by text substitution (key count per row, row index from the grid, mask base per row)"
+      ]
+    }
+  ],
+  "notice": "provenance/omlx-4041-4105-qwen4-attn-window.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_attn_window.py",
+    "src/mlx2/runtime/models/qwen4_row_exact.py (_RowExactAttention: dense window, deferred SDPA; _subclass marks _row_exact_base)",
+    "src/mlx2/runtime/models/qwen4_exp.py (Attention.__call__ _defer_sdpa hook at the fused sdpa_gate leaf)",
+    "src/mlx2/runtime/models/qwen4_hc_decode.py (row-exact window law 0, _row_exact_base admission, MLX_QWEN4_HC_ROW_EXACT)",
+    "src/mlx2/adapters/flash_next_policy.py (row_exact_window_kernels)",
+    "scripts/check_row_exact_window.py",
+    "scripts/check_mtp_row_exact.py (arm route uninstall, per-arm kernel counters)",
+    "scripts/bench_row_exact_verify.py (rowexact_base arm, --execution-policy)",
+    "tests/test_qwen4_attn_window.py",
+    "tests/test_qwen4_hc_decode.py"
+  ],
+  "modifications": [
+    "omlx transcribes the 'd' (M5 Ultra) plan with 128 partitions below 16K keys and refuses windows that straddle a plan; mlx2 computes every row's own plan with L3's select_sdpa_blocks transcription ('s' and 'd', every context) and runs one launch pair per run of rows sharing a plan, so windows straddling 1,024 / 8,192 / 32,768 keys are served.",
+    "omlx's dense arm is unmasked; mlx2's dense window is too (the one-token step's mask there is all-valid, the same arithmetic), and its masked arm adds a per-row boolean mask read from the rows' concatenated one-token masks (base offset computed in the kernel).",
+    "omlx batches projections/norms/appends and runs per-row scoring + selection + SDPA in its masked arm; mlx2 keeps each row's whole one-token forward (selection, QSA mask, append) and defers only the SDPA into one window launch, because mlx2's indexer state (index-key ledger cursor = cache offset) is row-sequential. Dense windows batch the index-key and K/V appends and the norm/RoPE launch after an admission check that runs before any state changes.",
+    "Rows up to 32 per window (copy drafts reach 17; omlx 16).",
+    "HC row-exact mode is mlx2-original: the L4 kernels' law 0 over grid rows, never qmv_wide, inside a window.",
+    "No omlx source text copied; no Apple copyright header added."
+  ],
+  "validation": "CPU: tests/test_qwen4_attn_window.py (11), tests/test_qwen4_hc_decode.py (row-exact additions: law 0 at 2..17 rows in a window, wide law unchanged outside, guard, kill switch, default-off env, class-swapped projections admitted); related qwen4/flash_next/row_exact/omlx/segmented/qsa suites 684 passed, 77 skipped. Metal (qualification/runs/row-exact-window-20260930/): attention windows 192/192 bit-identical to R one-token forwards (layers 3/23/47/mtp, plain and B=1 batched caches, R=2,3,4,8,16,17, from 1,010/2,030/8,180/32,750 keys; outputs, K, V, index keys); HC 288/288; full model 4/4 prompts and 1024/1024 verify rows MTP-on == MTP-off with every window row-exact and the dense window engaged on all 13,776 window attention calls. Cost (one process, interleaved): row-exact over the wave-1 route +8.9% prose, +6.4% code, 0.0% copy; row-exact over stock MTP 1.003 / 1.008 / 0.826."
+}

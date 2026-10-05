@@ -1,0 +1,39 @@
+{
+  "component": "Flash-Next batched one-token sparse QSA arm (oMLX #4070 'batched QSA decode/verify without per-row re-pooling or dense masked SDPA')",
+  "status": "Implemented, default off (FlashNextPolicy.qsa_batch_decode_sparse = \"off\", floor 32768), unqualified, not selected. GPU: indexed arm +2.5..+3.5% at 32K (4/8 lanes ordinary, 4 lanes MTP+handoff), -3.6% at 16K, inert at 64K; tokens diverge from the masked arm by reduction-order rounding (layer outputs within 1 bf16 ulp, K/V identical); gather arm -4.0% at 4x32K. See qualification/runs/port-qsa-rowbanks-20261002/README.md for the applicability analysis and GPU evidence.",
+  "sources": [
+    {
+      "source_repository": "https://github.com/jundot/omlx (pull request #4070, head AureliusClaw/omlx qwen4-batched-qsa)",
+      "source_revision": "d8821af608d02ac851a23126bf23274ea21f35fc",
+      "source_commits": {
+        "df1d176b": "perf(qwen4_exp): keep per-row QSA pooled banks across batched steps -- read, NOT ported: mlx2 already keeps batched pooled banks (MLX_QWEN4_QSA_POOLED_KEY_CACHE, pinned on by the Flash-Next profile, plus the ragged pooled tail MLX_QWEN4_QSA_POOLED_TAIL, default on) and never builds per-row singleton caches in the batched indexer",
+        "797ae8f6": "perf(qwen4_exp): attend batched decode/verify rows over their QSA selection -- mechanism ported for one-token batched steps only (verify windows >= 16K already take mlx2's indexed QSA kernel)"
+      },
+      "license": "Apache-2.0 (omlx LICENSE at the revision). The patched file is omlx's vendored mlx-vlm qwen4_exp (mlx-vlm is MIT); no file or code text was copied.",
+      "source_files": {
+        "omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/language.py": "47700959dc552759e940ef6957a1b3f92970127003ce6ea5a554851d0698499a",
+        "omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/qsa_fast.py": "6c9df8a2cbb656dbebdefd33cb3dd4331304296452e884bb6e4808aa44ddac98"
+      },
+      "source_regions": [
+        "language.py Attention._gathered_batch_paddings / _gathered_batch (+ _GATHERED_BATCH_DISABLED, _GATHERED_BATCH_MAX_QUERY): eligibility (B >= 2, one query row, a row past the crossover) and the arithmetic (gather each row's selected K/V, one bool-masked SDPA) -- behaviour only",
+        "qsa_fast.py batched_causal_block_selection: read; mlx2 keeps its own batched indexer selection (QSAIndexer.__call__), unchanged"
+      ]
+    }
+  ],
+  "modifications": [
+    "No selection code ported: the arm consumes mlx2's existing QSASelection (same indexer, same pooled keys, same argpartition), so the selected key set is the masked arm's by construction (no tie-order difference as in #4070).",
+    "Two arithmetic choices behind one switch: 'gather' runs mlx2's existing _gather_qsa_attention (gather + bool-masked MLX SDPA, #4070's arithmetic); 'indexed' runs mlx2's indexed QSA kernel through decide_qsa_indexed_admission with a min_context_override (MLX_QWEN4_QSA_INDEXED=0 still refuses).",
+    "Scope: only B >= 2, L == 1 calls that no other sparse arm (NAX, indexed, gather) already took, at physical width >= qsa_batch_decode_sparse_min_context (default 32768). Verify windows unchanged.",
+    "Kill switch MLX_QWEN4_QSA_BATCH_DECODE_SPARSE=off (default); every candidate counted (attempts, engaged_<arm>, engaged_rows, fallback_<reason>) in qsa_batch_decode_sparse_status(), surfaced in FlashNextAdapter.diagnostics() only when used or selected."
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_exp.py (_QSA_BATCH_DECODE_SPARSE*, set_qsa_batch_decode_sparse, _decide_qsa_batch_decode_sparse, qsa_batch_decode_sparse_status, Attention.__call__ wiring)",
+    "src/mlx2/runtime/models/qwen4_qsa_indexed.py (decide_qsa_indexed_admission min_context_override)",
+    "src/mlx2/adapters/flash_next_policy.py (qsa_batch_decode_sparse, qsa_batch_decode_sparse_min_context)",
+    "src/mlx2/adapters/flash_next.py (diagnostics)",
+    "scripts/bench_qsa_batch_decode_sparse.py",
+    "scripts/check_qsa_batch_decode_sparse.py",
+    "tests/test_qsa_batch_decode_sparse.py"
+  ],
+  "validation": "CPU: tests/test_qsa_batch_decode_sparse.py. GPU: qualification/runs/port-qsa-rowbanks-20261002/."
+}

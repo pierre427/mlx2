@@ -1,0 +1,12 @@
+{
+ "feature": "optional source-bound N20 GDN evaluation wave profile integration",
+ "source_repository": "mlx2",
+ "source_revision": "a01ea0ff691b978b36838d8322e3348f5eb50aae",
+ "component_revisions": ["6865533baf6ecf6a92cc2e4680cb776ff137082c", "82d8409c5b7f3c7dae8a96b8940dc3f71d83071d", "907d1251394db73372d82e1d80e1a0def30b555f"],
+ "source_paths": ["src/mlx2/runtime/hybrid_packed_prefill_n.py", "src/mlx2/runtime/hybrid_packed_prefill.py", "src/mlx2/runtime/packed_prefill_lifetime.py", "src/mlx2/runtime/models/qwen3_5.py", "scripts/research/varlen_hybrid_packed_prefill_n2_geometry_gate.py"],
+ "license": "project license with original pinned MLX394 mechanism provenance retained",
+ "modifications": "Optional strict profile2/4 selection binds import environment; both memory estimator/factory select before unchanged-charge admission; actual completed hostwave/segment/plan receipt validation before attribution; default1 and physical counters unchanged.",
+ "validation": "75 focused guarded CPU tests passed; all20 actual corpus domain cohorts fit5x4 waves under existing charge. No runtime imports/GPU. Strict model equality and actual performance pending root.",
+ "qualified": false,
+ "default_changed": false
+}

@@ -1,0 +1,15 @@
+{
+  "name": "default-off private paged attention admission and receipt contract",
+  "status": "implemented-unqualified-default-off-host-contract",
+  "source_repository": "original mlx2 implementation based on local codex/varlen-paged-attention revision adfe44d6970e39eddd044d5481d5b9503826712b",
+  "source_paths": [
+    "docs/research/varlen-paged-attention-build-plan-2026-10-03.md",
+    "src/mlx2/runtime/paged_attention_plan.py",
+    "src/mlx2/runtime/paged_attention_metal.py",
+    "src/mlx2/runtime/paged_kv_cache.py"
+  ],
+  "license": "original mlx2 project code; no third-party implementation copied",
+  "modifications": "Added candidate-only preflight pricing for one fixed two-plane arena and per-use page metadata, split scratch, COW copy staging and payload staging. Added explicit page-capacity and requested-feature refusals and a terminal-success-only receipt for actual paged rows and touched logical pages. Ordinary admission and routing APIs remain unchanged.",
+  "validation": "CPU-only tests cover cold versus warm arena pricing, table/scratch/COW/staging terms, default-off and feature/page/headroom refusals, success/failure/abort and duplicate receipt behavior, and sliding-window touched-page counts; existing private-cache and plan tests rerun.",
+  "limitations": "This is an estimate and host receipt contract. Arena residency and available headroom are caller-supplied; native allocation overhead is not measured. Fake-backend CPU completion is not a GPU proof. No serving route calls this API, no model adapter is selected, and no paged model-serving use or qualification is claimed."
+}

@@ -1,0 +1,51 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "explicit source-bound hybrid B2 serving bootstrap and atomic queued attachment",
+  "source_repository": "lab-owned mlx2",
+  "source_revision": "cf2f2c7229e2b56cf4c61efb560c7969b6dc4f02",
+  "source_paths": [
+    "src/mlx2/runtime/qwen3_paged_graph_factory.py",
+    "src/mlx2/runtime/paged_native_continuation.py",
+    "src/mlx2/runtime/paged_native_graph_group.py",
+    "src/mlx2/runtime/paged_native_batch_lifecycle.py",
+    "src/mlx2/runtime/paged_native_atomic_owner.py",
+    "src/mlx2/runtime/paged_price_identity.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/serving.py"
+  ],
+  "license": "existing lab-owned project terms; model/segmented-cache math provenance remains qwen35-paged-candidate-2026-10-04.json",
+  "destination_paths": [
+    "src/mlx2/runtime/qwen35_paged_graph_factory.py",
+    "src/mlx2/runtime/paged_hybrid_research_profile.py",
+    "src/mlx2/runtime/paged_native_contract.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/serving.py",
+    "src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/server.py"
+  ],
+  "modifications": [
+    "Adapter capability creates a default-off exact same-dtype B2 native lifecycle with ordinary generation-zero prefill import",
+    "Two queued rows and their sampler/RNG/stop state attach in one host commit after complete validation",
+    "Singleton survivor continues adapter math with scalar native attention and atomic recurrent replacement",
+    "Conservative aggregate arena/recurrent/bootstrap/scratch charge retained until all native epochs and owners retire",
+    "Source-bound profile refuses stale identity, undeclared flags, warm APC and qualification/performance claims",
+    "Attestation supports indexed sharded model artifacts and binds every shard byte",
+    "Generic lifecycle contracts carry physical versus logical depth and bootstrap generation",
+    "Hybrid final receipts preserve actual selected/used route and emitted token IDs, native APC no-write telemetry includes hybrid",
+    "Regular/idle native reaper polls hybrid bootstrap orphans without another admission",
+    "Per-lane output caps may differ within source-bound profile maximum",
+    "Optional exact boolean stock_reduction serving permit defaultsfalse; true requires aligned short B2, source-bound flag1 and native counter ABI before allocation/bootstrap; survivor8/16 geometry unchanged",
+    "Private hybrid bootstrap does not acquire the nonreentrant engine publication lock; generator attachment acquires it once for atomic two-lane publication, with cancellation and failure abort preserved",
+    "Grouped serving receipt preserves ordinary-completed-import bootstrap and obtains actual SIMD geometry from adapter physical proof; singleton receipt retains its own successfully published forward proof rather than generic B2 defaults"
+  ],
+  "validation": {
+    "cpu": "31 helper tests and31 serving/HTTP/profile/artifact/default-off stock-bound admission CPU contracts pass",
+    "syntax": "changed Python sources compile",
+    "runtime_imports": "MLX/native runtime imports prohibited during CPU tests",
+    "gpu": "not executed by implementation worker",
+    "qualification": "unqualified",
+    "performance": "unmeasured",
+    "http_lock_cpu": "34 direct lifecycle/source contracts pass, including actual serving installer plus generator attachment with bounded nonreentrant lock and cancellation after bootstrap; no runtime imports or GPU",
+    "receipt_cpu": "36 lifecycle/source contracts pass including grouped stock32 receipt, unchanged pure Qwen3 generic receipt and singleton16 stockcounter0 receipt; no MLX/native imports"
+  }
+}

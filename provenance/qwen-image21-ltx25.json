@@ -1,0 +1,43 @@
+{
+  "sources": [
+    {
+      "repository": "https://github.com/Blaizzy/mlx-vlm",
+      "revision": "67599f2e8ec31bf35cbb7b02794114f20844f0bb",
+      "previous_revision": "cc8b86f110278505296d461f612ee41c21d5fd65",
+      "paths": ["mlx_vlm/models/qwen_image/model.py", "mlx_vlm/models/qwen_image/weights.py", "mlx_vlm/models/qwen_image/download.py"],
+      "license": "MIT",
+      "use": "Inspected the Qwen-Image-2.1 backend call, transformer key mapping and official 8-bit conversion API. The adapter imports the external package at execution time; no source code was copied. Re-pinned 2026-09-25 from local fork commit cc8b86f1 (upstream 884bbd93 plus a cache.py-only change) to the shared mlx-vlm pin 67599f2e. The qwen_image diff is #2355 num_images batching only, and the convert/weights code is unchanged. Generation and edit smokes are byte-identical to the cc8b86f1 receipts."
+    },
+    {
+      "repository": "local ltx-2-mlx checkout",
+      "upstream_project": "https://github.com/dgrauet/ltx-2-mlx",
+      "revision": "fbc4b0524dd1e01da2d07a44e14dd9dfe0a74d5e",
+      "paths": ["packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/cli.py", "scripts/convert_ltx25_to_mlx.py"],
+      "license": "MIT",
+      "use": "Inspected the LTX-2.5 conversion layout and CLI contract. Applied patches/ltx25-converter-bias.patch to the local converter for ff_bias=false; patched converter SHA-256 is 2c880778d7772275b96f4eef4ee32376a29de0c94de52f4ca2b0aaccad9af98e. No source code was copied into the adapter."
+    },
+    {
+      "repository": "https://huggingface.co/Qwen/Qwen-Image-2.1",
+      "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+      "paths": ["model_index.json", "transformer/config.json", "transformer/diffusion_pytorch_model-*.safetensors"],
+      "license": "Qwen Research License",
+      "use": "Official architecture and tensor-layout reference; no weights are committed."
+    },
+    {
+      "repository": "https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-GGUF",
+      "revision": "40319fb15542f0ad22921e0124a191a8a935a60a",
+      "paths": ["qwen-image-2.1-UC-Q4_K_M.gguf"],
+      "license": "Qwen Research License",
+      "use": "GGUF quantized transformer input; converted weights remain outside Git."
+    },
+    {
+      "repository": "https://huggingface.co/Lightricks/LTX-2.5",
+      "revision": "5e6e71018ee1756ed329b697a7b4aedc934dfce9",
+      "paths": ["diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors", "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors", "vae/", "latent_upscale_models/", "model_patches/"],
+      "license": "LTX-2.5 Community License",
+      "use": "Distilled source checkpoint layout; no weights are committed."
+    }
+  ],
+  "modifications": "New mlx2 adapter, CPU GGUF dequantization, optional CPU MLX affine 4-bit repacking, official GPU MLX affine 8-bit conversion, and a narrow bias fix to the local LTX converter; no upstream implementation copied into the adapter.",
+  "validation": "CPU artifact tests, 297-key/shape GGUF conversion audit, BF16 sample parity, strict MLX loads, offline full 4-bit image pipeline load, and source-bound 512x512 20-step GPU generation/edit smokes for official 8-bit and GGUF-derived 4-bit Qwen. LTX selected snapshot completed with verified bytes and no partials; all eight CPU conversion steps completed and the direct adapter generated source-bound 9-frame 256x256 and 33-frame 512x384 H.264 GPU smokes with visual and temporal inspection. Neither adapter has serving-route qualification."
+}

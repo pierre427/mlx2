@@ -1,0 +1,32 @@
+{
+  "component": "Verify-block attention over kv_q8 (affine int8) K/V: one pass per KV head for all GQA heads and verify rows",
+  "source_repository": "Splash (https://github.com/incoai/splash)",
+  "source_revision": "f786bed",
+  "source_paths": [
+    "runtime/metal/kernels/decode/attention_q8.metal",
+    "runtime/metal/kernels/common/paged_attention_tile.h",
+    "runtime/metal/kernels/common/q8_paging.h"
+  ],
+  "context_prs": ["#91 (a85b086, optional BF16 target KV, shared attention kernels)", "#141 (151432a, fp32 logits)"],
+  "license": "Apache-2.0",
+  "notice": "provenance/splash-verify-attention.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qsdpa_verify_metal.py",
+    "src/mlx2/runtime/models/base.py",
+    "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/runtime/segmented_plain_kv.py",
+    "src/mlx2/runtime/models/qsdpa_decode_metal.py"
+  ],
+  "modifications": [
+    "Design only; no Splash code copied. Taken: a threadgroup per (KV head, history split) owning the fused M = verify rows x query heads tile, per-row causal limits inside each split, fp32 normalized split partials merged in fixed order.",
+    "Rewritten for mlx2's MLX affine kv_q8 format (packed uint32 codes, bf16/fp16 scale and bias per 64 channels, 2/4/8 bits, separate key/value widths) read from strided live cache views; each 16-token tile is dequantized once into threadgroup memory.",
+    "QK and PV use 8x8 simdgroup_matrix products under mx.fast.metal_kernel instead of Splash's Metal 4 tensor ops; fused rows above 32 split into fused-row groups.",
+    "Adds per-batch-row left padding (BatchQuantizedKVCache) and an identity-checked mask contract: batch caches register the causal masks they build, so the seam never reads a mask array.",
+    "Segmented self-MTP quantized rows pass 'causal' for their row slices (also moves B>1 single-row decode onto the existing decode kernel).",
+    "Default on above MIN_CONTEXT for 1-8 rows; MLX2_QSDPA_VERIFY_KERNEL=0 restores the previous composed path and explicit row masks exactly."
+  ],
+  "validation": [
+    "tests/test_qsdpa_verify_metal.py: CPU reference of the kernel's split ranges, causal limits, left padding, fused groups and merge vs dequantize + SDPA; mask contract; routing; Metal equivalence (MLX2_RUN_GPU_TESTS=1)",
+    "qualification/runs/sp-verifyattn-20260925: error sweep, microbenchmarks, 27B server A/B with self-MTP K=2"
+  ]
+}

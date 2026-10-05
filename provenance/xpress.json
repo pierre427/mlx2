@@ -1,0 +1,38 @@
+{
+  "source_repository": "https://github.com/ZKBig/vllm",
+  "source_revision": "15ba199f070f4bb4d1d394108525b4101117c067",
+  "upstream_pull_request": "https://github.com/vllm-project/vllm/pull/54448",
+  "license": "Apache-2.0",
+  "source_paths": [
+    "vllm/model_executor/models/qwen3_xpress.py"
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/drafters/xpress.py",
+    "src/mlx2/adapters/xpress.py"
+  ],
+  "modifications": [
+    "Expressed the causal refiner and exact I + tril(L) checkpoint fold in MLX using the existing DFlash backbone",
+    "One backbone pass and one cached hidden/global projection per full trained block, followed by configurable simultaneous greedy Jacobi passes",
+    "Preserved tok_am1 predecessor at position zero; fixed anchor and explicit empty-history anchor convention",
+    "Returned deterministic point-mass proposal laws for exact target rejection verification, including sampled targets; finite-pass stochastic Jacobi sampling is not implemented",
+    "Always compute the full trained block before truncating returned proposals, preserving global-mean and noncausal backbone semantics",
+    "CPU-safe strict configuration, source tensor schema, shard index, complete payload coverage, target geometry and full shard SHA256 inspection before allocation",
+    "Rechecked config, headers, file identity and full tensor bytes immediately before load; no pickle or remote-code execution",
+    "Original mlx2 batched context-cache contract, isolated draft-side logits processors and receipts",
+    "Explicit per-layer runtime draft_attention_windows overrides bound committed draft context with rotating KV caches and preserve absolute RoPE offsets; trained source config, full proposal block and ordinary target cache/math are unchanged; setting appears in route receipts and source-bound policy identity"
+  ],
+  "checkpoint_reference": {
+    "repository": "UIUC-SSAIL/Qwen3-4B-XPress-b16",
+    "revision": "fce84732637e1fb70bea3c70ca341131b8d49b61",
+    "tensor_count": 67,
+    "tensor_payload_bytes": 1235155456,
+    "role": "co-trained DFlash backbone plus XPress causal refiner; target embedding and output projection shared separately",
+    "qualification": "unqualified"
+  },
+  "validation": "CPU-only independent scalar/NumPy oracle parity, causal predecessor invariance, exact mixer fold, simultaneous Jacobi recurrence, full-block truncation, deterministic proposal laws, processor prefixes, real tiny backbone/cache execution, strict BF16 source load, pass overrides, schema/target/index/config mutation rejection and metadata MLX import guard. No GPU model qualification or performance claims. Per-layer finite/full draft-window validation before tensor allocation, 18-position absolute-RoPE context oracle across long chunks and ring wrap, bounded draft KV planes, target greedy equality, sampled target point-mass rejection-law Monte Carlo, APCv2 paired resume and revision separation, exact rollback of both planes and RNG after target failure. Bounded M3 Pro Metal smoke loaded the pinned real Qwen3-4B companion: exact 16-token B1 greedy, mixed B2 greedy-row parity, sampled target probability-law parity and paired APCv2 resume, nonzero draft activity, zero fallback. This is not a qualification receipt or performance evidence.",
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "observed_used": true,
+  "observed_use_evidence": "qualification/runs/parallel-draft-20261001/m3/xpress-m3-smoke.json"
+}

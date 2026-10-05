@@ -1,0 +1,15 @@
+Scoped notice for the batched one-token GDN decode adapted from jundot/omlx
+PR #4106 (head 0b4babcf54e6b6bbb4eaddeec0e73e9dc6063a35, open, unmerged when
+read on 2026-09-30). See provenance/omlx-4106-gdn-batch-decode.json for paths
+and modifications.
+
+omlx — Apache License 2.0
+Source: https://github.com/jundot/omlx, omlx/patches/qwen35_gdn_prework.py
+(_QWEN4_BATCH_DECODE_STEP_SOURCE, qwen4_batch_decode_step_fused).
+The batch-row prefix in src/mlx2/runtime/models/qwen4_fused_gdn.py
+(_BATCH_ROW_PREFIX, _SOURCE_BATCH) follows that design: grid z is
+(row, value head), each threadgroup rebinds the per-row buffers in a nested
+scope and runs the one-row kernel source with threadgroup_position_in_grid.z
+replaced by the in-row head index.  The one-row kernel body itself is mlx2's
+existing qwen4_fused_gdn _SOURCE (provenance/flashnext.json), not omlx's.
+The full Apache-2.0 text is this repository's LICENSE.

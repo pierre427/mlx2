@@ -1,0 +1,30 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+  "source_revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "notice": "provenance/diffusion-gemma.NOTICE",
+  "source_files": {
+    "mlx_vlm/models/diffusion_gemma/diffusion_gemma.py": "9d20ab8bade3e50ae5d464707ccab26194a1c20b5fbc606f915190a249211147",
+    "mlx_vlm/models/diffusion_gemma/language.py": "890d153733722731f8755ac969bf499df2eade15222d50e25904c2f98352109f",
+    "mlx_vlm/models/diffusion_gemma/config.py": "0da8ff1840d027c166ed55d74a00d3a8df7fe605469c440eeb051399a0f1994e",
+    "mlx_vlm/generate/diffusion.py": "bf808f25b1056d2d5efd364d72c5bedc9ea1c11183a35811e7424c95d5cba868",
+    "mlx_vlm/generate/dispatch.py": "89d9b08ec8316a6eed881486cc5a5129afbde481d693293ec20964146ef50842",
+    "mlx_vlm/prompt_utils.py": "3880171f3ed450b62979c47ca7e14eaa0356cd54bfc44718c5d4a46561691a57"
+  },
+  "destination": ["src/mlx2/adapters/diffusion_gemma.py"],
+  "modifications": [
+    "Kept denoising math in the pinned optional mlx-vlm source; added a direct candidate lifecycle outside the causal resolver",
+    "Added CPU-only topology, generation configuration, processor-file and four-shard index/header closure checks",
+    "Bound generated text to an artifact fingerprint and refused unsupported requests before loading the optional backend"
+  ],
+  "validation": {
+    "local_tensor_count": 1647,
+    "local_shards": 4,
+    "CPU_inspection": "passed",
+    "import_guarded_tests": "passed",
+    "real_model_load": "not run",
+    "text_image_video_generation": "not run",
+    "execution_qualified": false
+  }
+}

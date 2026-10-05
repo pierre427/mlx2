@@ -1,0 +1,23 @@
+{
+  "source_repository": "original mlx2 implementation extending the private codex/varlen-paged-attention branch",
+  "source_revision": "2e9fe2d4d3c3d056b8229ad5e487d9367d7d1f30",
+  "source_paths": [
+    "src/mlx2/runtime/paged_attention_pack.py",
+    "src/mlx2/runtime/paged_kv_token.py",
+    "src/mlx2/runtime/models/standard_decoder.py",
+    "src/mlx2/adapters/standard_decoder.py"
+  ],
+  "license": "MIT",
+  "destinations": [
+    "src/mlx2/adapters/qwen3_paged_candidate.py",
+    "src/mlx2/adapters/standard_decoder.py",
+    "src/mlx2/runtime/models/standard_decoder.py",
+    "tests/test_qwen3_paged_candidate_cpu.py"
+  ],
+  "modifications": [
+    "Added an explicit default-off dense Qwen3 packed-row adapter entry point and completion-aware backend protocol",
+    "Projected flattened ragged rows through Qwen3 Q/K/V normalization and per-lane RoPE offsets, then layer output and logits",
+    "Preserved ordinary decode and APCv2 serving routes; no automatic selection or native backend is installed"
+  ],
+  "validation": "CPU fake backend exercises unequal rows, completed page publication, read pin closure and fail-closed admission; no GPU model or native-read parity run"
+}

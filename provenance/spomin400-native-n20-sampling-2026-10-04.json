@@ -1,0 +1,45 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "source_repository": "mlx2",
+  "source_revision": "a01ea0ff691b978b36838d8322e3348f5eb50aae",
+  "source_paths": [
+    "src/mlx2/adapters/qwen.py",
+    "src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/sampling_defaults.py",
+    "src/mlx2/runtime/sample_utils.py",
+    "src/mlx2/runtime/paged_native_continuation.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/serving.py"
+  ],
+  "license": "MIT",
+  "modifications": [
+    "Preserve original request bodies and vendor-resolved instruct presence_penalty1.5.",
+    "Pass exact existing ordinary generated-only/history-pure presence processor to native continuation after strict source contract verification.",
+    "Keep repetition/frequency neutral and reject unsupported processors/features with named ready-job/queued diagnostics.",
+    "Record actual ordinary processor count/policy on native attachment; no model math or native kernel changes."
+  ],
+  "validation": {
+    "cpu_checks_passed": 45,
+    "actual_job_instances": 20,
+    "actual_source_contracts": [
+      "vendor_sampling/resolve_sampling",
+      "Job",
+      "make_presence_penalty",
+      "BatchGenerator.install_native_hybrid_n_cohort",
+      "NativeQwen3Continuation._stage_sample/_response_from_sample",
+      "StopSequenceMatcher",
+      "GenerationBatch.Response",
+      "BatchGenerator.next native arm"
+    ],
+    "eos_width_shrink": [
+      20,
+      19,
+      1,
+      0
+    ],
+    "body_sampling_modified": false,
+    "gpu_executed": false,
+    "mlx_native_runtime_imports": false
+  },
+  "qualified": false
+}

@@ -1,0 +1,27 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "bounded revision- and lane-bound GDN checkpoint replacement with atomic native KV publication",
+  "source": {
+    "repository": "lab-owned mlx2",
+    "revision": "2cb2d2ad3c9594c25eda7afb37aa082b36a09897",
+    "paths": [
+      "src/mlx2/runtime/models/cache.py:ArraysCache",
+      "src/mlx2/runtime/paged_native_atomic_owner.py:NativeAtomicRequestOwner",
+      "src/mlx2/runtime/paged_request_transaction.py:CandidateRequest"
+    ],
+    "license": "ArraysCache source carries SPDX-License-Identifier: MIT; new checkpoint ownership code is original mlx2 code under the project's Apache-2.0 license"
+  },
+  "modifications": [
+    "Added an immutable checkpoint descriptor bound to revision, lane, KV offset and generation; mutable cache containers are private per branch while immutable tensor leaves may share references",
+    "Changed native KV/GDN companion handling from append history to exactly one checkpoint replacement per one-token accepted boundary",
+    "Kept the active checkpoint, unpublished private successor, and reader-retained retired generations in the existing atomic state-pointer owner",
+    "Required exact per-layer read terminal proof, idle nonpoisoned writer, and full one-token acceptance before atomic KV+GDN publication",
+    "Kept private cache roots with quarantined branches after pending or failed native work until terminal proof or one-way failed arena teardown"
+  ],
+  "validation": {
+    "cpu": "52 focused existing and new tests passed, including nine new checkpoint tests for bootstrap-container alias isolation, six repeated replacements, reader retention, stale prepared rollback, malformed lane/revision/offset/private clones, 63-token private-tail grouped ownership, pending and failed terminal retirement",
+    "gpu": "not executed",
+    "serving": "not attached; default off and unqualified",
+    "approximation": "none"
+  }
+}

@@ -1,0 +1,14 @@
+Scoped notice for the measured MTP park with memory adapted from jundot/omlx
+PR #4112 (head 276097ab3402928a741678bfb29f2d97ffd15d1f, "perf(mtp): stop
+shared MTP from slowing down busy batches"), read on 2026-10-02. See
+provenance/omlx-4112-park-memory.json for paths and modifications.
+
+omlx — Apache License 2.0
+Source: https://github.com/jundot/omlx, omlx/patches/mlx_lm_mtp/batch_policy.py
+(ParkMemory, the _CLEAR_LOSS rule, the 16-decision losing streak, held_up,
+start_parked cooldown doubling) and omlx/patches/mlx_lm_mtp/batch_generator.py
+(_batch_park_memory: one memory per live model object behind a weak reference).
+src/mlx2/runtime/mtp_park_memory.py re-expresses those decisions over mlx2's
+one-way MTP->ordinary handoff; no omlx code is copied verbatim. The rate
+measurement, ordinary lower bound and scheduler wiring are mlx2's own.
+The full Apache-2.0 text is this repository's LICENSE.

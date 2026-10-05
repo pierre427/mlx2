@@ -1,0 +1,86 @@
+{
+  "source_repository": "https://github.com/ashhart/TensorFold.git",
+  "source_revision": "71377a5373ed7b394f1b480ba2a6a3986b03af1c",
+  "source_paths": [
+    "src/tensorfold/families/qwen3_5/__init__.py",
+    "src/tensorfold/families/qwen3_5/family.py",
+    "src/tensorfold/kernels/qwen/dense/v1/lane_qmm.py",
+    "src/tensorfold/kernels/qwen/dense/v1/lane_tree.py",
+    "src/tensorfold/kernels/qwen/dense/v1/lane_multi.py",
+    "src/tensorfold/engine/lane_engine.py",
+    "src/tensorfold/engine/lane_family.py",
+    "src/tensorfold/engine/family_shared.py",
+    "src/tensorfold/engine/family_prefill.py",
+    "src/tensorfold/families/qwen3_5/dflash_head.py"
+  ],
+  "license": "MIT",
+  "additional_source": {
+    "repository": "https://github.com/pierre427/mlx-lm-unified.git",
+    "revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+    "paths": [
+      "mlx_lm/__init__.py",
+      "mlx_lm/utils.py",
+      "mlx_lm/models/qwen3_5.py",
+      "mlx_lm/models/qwen3_next.py"
+    ],
+    "use": "worker-only native Qwen3.8 model loader; source is imported, not copied"
+  },
+  "modifications": [
+    "Original mlx2 worker IPC and default-off profile boundary; no TensorFold source copied.",
+    "Require clean pinned TensorFold and mlx-lm-unified source checkouts, hash key source bytes and all target/drafter safetensors bytes before loading.",
+    "Run native TensorFold model installation, serial and tree forwards, and cache commits only inside a dedicated child process because its installers replace global MLX callables.",
+    "Give the worker a distinct numerical identity and reserved APCv2 namespace. APCv2 state publication remains disabled until a cache bridge is implemented and qualified.",
+    "Add a default-off token-only live admission and round API using TensorFold LaneEngine. At one active stream native tree drafting is eligible; at multiple streams queued drafts are discarded and the pinned shared hidden_rows path verifies one ordinary row per stream. Caches never leave the worker.",
+    "Add an opt-in HTTP token-ID endpoint to the existing mlx2 service with a dedicated router thread owning worker IPC. Restrict to greedy Qwen3.8 tokens, never use APCv2 lookup/store for worker requests, and emit unqualified per-request route and draft-count receipts. Same-worker B1 serial is an explicit performance control.",
+    "Add an explicit X-MLX2-TensorFold-Owned header for greedy text chat/completion requests, using adapter prompt rendering, tokenizer decode, and worker EOS semantics. Fail closed on unsupported sampling/capabilities and keep ordinary unheaded requests unchanged.",
+    "Adapt only the HTTP admission and receipt layer of the frozen Spomin 20-domain by 20-case benchmark. Reuse its corpus, prepare_case, make_body, and acceptance code; preserve source reconciliation, 40 immutable capped cell receipts, and one source/worker identity across full-suite scoring.",
+    "In a separate research branch, add a fail-closed serial-control header and emitted-token digest for complete-request B1 tree versus native serial pairs on exact frozen Spomin full/compacted transcripts. This does not change the default or frozen 40-cell quality campaign.",
+    "Add an explicit cache-disabled receipt through native worker and router, plus a bounded route-specific feature screen; omitted greedy options are normalized only within the owned header. No default or qualification state is changed.",
+    "Cancel an owned native request when its HTTP peer disconnects, close a session cancelled during prefill before any decode round, and expose aggregate worker admission counts without publishing cache data.",
+    "Record host-monotonic native admission-to-first-token prefill timing and per-round token-ready timestamps, separate router queue wait and client HTTP wall, and retain actual native active-width counts. Report effective prompt throughput and post-first-token decode throughput without treating queue or HTTP wall as model compute."
+  ],
+  "validation": [
+    "tests/test_qwen38_tensorfold_owned_cpu.py: opt-in, source pin, weight-byte identity, path validation, isolated IPC lifecycle and namespace checks.",
+    "qualification/runs/tree15-b1-discriminator-20261003/tensorfold-owned-b1/tree15-owned-b1-54f7e462.json: native exact width 32 and four accepted logits/tokens bitwise; initial physical-allocation cache comparison failed.",
+    "qualification/runs/tree15-b1-discriminator-20261003/tensorfold-owned-b1/tree15-owned-b1-80142445.json: four accepted logits/tokens, visible KV, nested GDN state, offsets, and the next serial step all bitwise exact; raw backing differs only beyond committed KV offset.",
+    "tests/test_qwen38_tensorfold_owned_cpu.py: worker live IPC, fail-closed APC flags, B1/B2+ round policy and queued-draft discard, plus pinned source path checks.",
+    "qualification/runs/tree15-b1-discriminator-20261003/tensorfold-owned-b1/tree15-owned-live-f896b879-v2.json: native live B1 drafted and B2 did not; initial serial audit cache comparison failed with mismatched prompt-prefill geometry.",
+    "qualification/runs/tree15-b1-discriminator-20261003/tensorfold-owned-b1/tree15-owned-live-92a43922.json: same-prefill native LaneEngine serial controls match B1, B2 both streams, and B1 return in token IDs, visible cache, and next logits bitwise; HTTP and crossover still pending.",
+    "tests/test_tensorfold_owned_http_cpu.py: default-off HTTP 404, explicit token-ID 200 and fail-closed 400, concurrent B2 and B1/B2/B1 scheduling, per-session counters, invalid admission cleanup, and a fake full service-gate call order.",
+    "qualification/runs/tree15-b1-discriminator-20261003/tensorfold-owned-b1/tree15-owned-service-d44131d6.json: first HTTP gate stopped after initial requests due a service-gate script local-name shadowing error; no HTTP parity or crossover result.",
+    "qualification/runs/tree15-b1-discriminator-20261003/tensorfold-owned-b1/tree15-owned-service-ec0d7dda.json: one-service HTTP B1 and overlapping B2 token IDs equal native serial controls, expected active-width modes and APCv2 disabled; three alternating 48-token synthetic B1 pairs showed tree/serial time ratio 0.69524. This is a narrow same-service screen, not a rendered-chat crossover or default qualification.",
+    "qualification/runs/tree15-b1-discriminator-20261003/tensorfold-owned-b1/spomin-prepared-qwen38.json: original 20x20 --prepare-only reconciled 400 frozen source receipts with zero mismatches; native HTTP cell campaign is prepared but has no GPU result yet.",
+    "tests/test_tensorfold_owned_http_cpu.py: explicit normal completion header, EOS stop, fail-closed sampling, 20-request bounded queue, source/identity-bound partial Spomin report aggregation, and scoped long-cell/ordinary-gate timeout caps.",
+    "qualification/runs/tree15-b1-discriminator-20261003/tensorfold-owned-b1/tree15-owned-spomin-cell-00-0508e696.json: first long-context 20-request cell ended after five responses due the 115-second HTTP read timeout; all five observed shared width eight, with zero swapouts and 32.64 GB peak process-tree RSS. No benchmark cell or full-suite score was established.",
+    "tests/test_tensorfold_owned_http_cpu.py: explicit normal endpoint serial header, emitted-token digest equality, and full/compacted Spomin B1 alternating-pair call order checked with a fake service; later source-bound real-chat crossover receipt is under tensorfold-owned-b1/tree15-spomin-b1-271dd6ba.json.",
+    "qualification/runs/tree15-b1-discriminator-20261003/tensorfold-owned-b1/tree15-owned-feature-8b502c11.json: normal greedy defaults, EOS/length, 1K/4K/near-8K needles, B1/B2 native-serial parity, fail-closed refusals and cache-disabled receipt passed; explicit route remains unqualified.",
+    "tests/test_tensorfold_owned_http_cpu.py: 28 focused tests pass, including local HTTP client disconnect, native fake-session close/recovery and prefill cancellation with no decode round.",
+    "qualification/runs/tree15-b1-discriminator-20261003/tensorfold-owned-b1/tree15-owned-disconnect-5b9d1a36.json: source-bound live HTTP peer disconnect returned worker active count to zero and recovered exact B1 tree/native-serial token output; zero swapouts; no default or qualification promotion.",
+    "tests/test_tensorfold_owned_http_cpu.py: deterministic queue/prefill/decode boundary and undefined one-token rate checks, source-bound rate-aware partial report aggregation, and a combined feature-gate timing receipt fixture; 29 focused owned-route CPU checks pass on the integrated source. No integrated GPU timing has been measured."
+  ],
+  "status": "implemented-default-off-unqualified",
+  "main_integration": {
+    "mined_mlx2_revision": "6a102e3992dd3b2a6e123a2e6a0d4b8e957ed686",
+    "b1_spomin_reference_revision": "271dd6bafce1fe93e6d33997572e5fc18277e782",
+    "base_revision": "f728da2fef79dfb4c6908616db3ab0bf74a50cb4",
+    "paths": [
+      "src/mlx2/adapters/qwen38_tensorfold_owned.py",
+      "src/mlx2/runtime/tensorfold_owned_worker.py",
+      "src/mlx2/runtime/tensorfold_owned_router.py",
+      "src/mlx2/server.py"
+    ],
+    "license": "MIT",
+    "modifications": [
+      "Port the newer owned-cache worker/router and explicit normal HTTP header to current main without transplanting native caches into mlx2 paged B2.",
+      "Add bounded per-request ordered mode transitions and completed-round status for actual B1/B2/B1 observability.",
+      "Add a new single-service frozen software_architecture.01/.02 Spomin gate, 192/64 caps, same-native serial controls, real peer FIN, dual lock/source binding and process-group deadline/RSS supervisor. This does not resume any stopped series.",
+      "Treat 192/64 completion caps as upper bounds: accept a valid early EOS stop, require length finishes to reach their cap, retain exact control usage/finish and ordered actual transition requirements.",
+      "Add a separate fresh complete-request performance gate: three fixed alternating pairs per width, B1 cap192 tree/serial, B2 matched64/64 auto/forced ordinary, exact controls, recorded B1-edge contributions, native peer-prefill pause annotations, thermal/swap snapshots and a420-second maximum supervisor. No default promotion."
+    ],
+    "validation": [
+      "35 host-only CPU tests pass with MLX/native imports blocked, including actual ordered width transitions, source/lease refusal and whole-process-group deadline/RSS teardown. No GPU execution, integrated qualification or controlled performance claim.",
+      "43 host-only CPU checks pass with MLX/native imports blocked after the cap-semantics repair, including the actual98 stop/192 cap case and refusal of mismatched exact usage or missing B1 return.",
+      "47 host-only tests pass under MLX/native import guard with the performance gate, covering fixed alternating call order, exact actual completion parity, physical B2 width and B1-edge accounting, full-cohort aggregate wall rates and isolated deadline bounds. GPU performance is pending root execution."
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_revision": "132afef1b7247f1dec8d147f39f2f63324f04f38",
+  "source_paths": ["scripts/research/varlen_hybrid_packed_prefill_gate.py", "src/mlx2/runtime/models/qwen38_27b.py"],
+  "license": "MIT",
+  "modifications": "New explicitly labelled same-packed-geometry full native-component control. Preserves serial-exact failure separately, same counters/cleanup/generation/sampler and exact comparison gates; no core edits or policy changes.",
+  "validation": "Three guarded CPU geometry/independent-cache/fail-closed tests, py_compile, dry plan and diff checks. No author GPU or MLX/native runtime import. Hardware pending.",
+  "qualified": false
+}

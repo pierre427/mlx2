@@ -1,0 +1,75 @@
+{
+  "component": "Qwen4 (Flash-Next) routed MoE row window (MoE half of omlx #4106, #4041 verify windows, #4105 16-row windows) and the router top-k launch/fold (#4052)",
+  "status": "implemented; Metal bit-exact per row vs one-token block calls on real Flash-Next weights (qualification/runs/omlx-w2a-moe-window-20260930/); default OFF behind FlashNextPolicy.moe_window_row_exact / moe_window_batch_decode / moe_window_verify (MLX_QWEN4_MOE_WINDOW) and moe_topk_fold (MLX_QWEN4_MOE_TOPK_FOLD). Not qualified, not selected.",
+  "sources": [
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "0b4babcf54e6b6bbb4eaddeec0e73e9dc6063a35",
+      "source_pr": "jundot/omlx#4106 (perf(qwen4): batched one-token decode on the MoE row window and a batched GDN step), open when read 2026-09-30",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/qwen35_moe_routed_decode.py": "1199b53e9ef529fc7504120ebb0ec1eb3b1dbf2789814d727465eca60c45840c",
+        "omlx/patches/qwen35_moe_router.py": "6b23f93fe3fcf37fe61405cdc0d183915b5451aeb2841923882c6c6640bab297",
+        "tests/test_qwen35_moe_verify_window.py": "9a66caf7d956d77e25a88e01e282e4415b1e0154b437e19b5b92562128576e7b"
+      },
+      "source_regions": [
+        "qwen35_moe_routed_decode.py: _GATE_UP_WINDOW_HEAD / _DOWN_WINDOW_HEAD (356-398): one threadgroup per row running the one-token source on its own row's pointers (the design; mlx2 substitutes offsets into its own one-token sources instead of nesting scopes)",
+        "qwen35_moe_routed_decode.py: _GATE_UP_TOPK_HEAD and _GATE_UP_TOPK_ROUTED (400-450): the routing recomputed by every gate+up simdgroup, the first block storing the selection for the down launch",
+        "qwen35_moe_routed_decode.py: routed_verify_window and patched_call (879-1028): batched [B, 1, H] decode routed into the window; the window replacing the verifier's composed MoE",
+        "qwen35_moe_router.py: _SOFTMAX_ROW_HEADER omlx_router_softmax_row (73-120): one simdgroup reproducing MLX's 128-thread single-row softmax partials, adopted nearly verbatim",
+        "qwen35_moe_router.py: omlx_router_topk<bfloat16_t> keys (196-260): packing (bf16 bits + 1) << 16 | expert into one integer key; adopted, with a plain per-step lane scan instead of the three-key heads"
+      ]
+    },
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "d05afc7a7a59a871531b89ee769460581a26aabb",
+      "source_pr": "jundot/omlx#4052 (fused attention rows, unrolled verify tiles, deferred GDN states, MoE top-k fold), open when read 2026-09-30",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/qwen35_moe_routed_decode.py": "449916b67e805eec1aa167ee7e7f5aff0b29f090e710f0d197f494d8ff323066",
+        "omlx/patches/qwen35_moe_router.py": "6b23f93fe3fcf37fe61405cdc0d183915b5451aeb2841923882c6c6640bab297"
+      },
+      "note": "The top-k fold first appears here (_TOPK_FOLD, _TOPK_FOLD_MAX_ROWS = 3); the router file is identical at #4106's head."
+    },
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "7ef4d997b5713aaef53aaadca9a656736a12fa74",
+      "source_pr": "jundot/omlx#4041 (fused row-exact MTP verify windows for MoE, DeltaNet and attention), merged",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/qwen35_moe_routed_decode.py": "1f7e6fd76a48bfe644b3185670969323cf59d9c4fe005a2b131558c309e20968"
+      },
+      "note": "Read for the verify-window MoE stage (8 rows); superseded in detail by #4106."
+    },
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "93e708a816a70a8183b5cefca4e81c1c3d48bef8",
+      "source_pr": "jundot/omlx#4105 (row-exact verify windows up to 16 rows), open",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/qwen35_moe_routed_decode.py": "3e617c58827b6d340d56281916a53fb6cfd50c06fa81d1904a44f8a944e75b1a"
+      },
+      "note": "WINDOW_MAX_ROWS = 16; mlx2 admits 17 (16 copy drafts plus the pending token, the widest row-exact window lane L5 runs)."
+    }
+  ],
+  "notice": "provenance/omlx-4106-moe-window.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_moe_window.py",
+    "src/mlx2/runtime/models/qwen3_next.py (_try_moe_window, _run_moe_window, _moe_rows_refusal, _try_topk_fold_decode, _try_topk_launch, set_moe_window_consumers, set_moe_topk_mode, window/top-k counters)",
+    "src/mlx2/runtime/verify_scope.py and the verify-forward scope in src/mlx2/runtime/hybrid_speculative.py",
+    "src/mlx2/adapters/flash_next_policy.py (moe_window_*, moe_topk_fold), src/mlx2/adapters/flash_next.py (moe.moe_window status)",
+    "scripts/check_fn_moe_window.py",
+    "tests/test_qwen4_moe_window.py"
+  ],
+  "modifications": [
+    "Kernels: the routed window is lane L2's own one-token kernels (split gate+up/SwiGLU, served_down = tile4 arithmetic), unchanged, with the token on grid z; the shared-fold window is L2's one-token shared-fold source with the token's pointer offsets substituted (asserted, one occurrence each). omlx's per-format gate+up/down sources and its in-kernel 8-bit shared-gate row are not used (lane L2 measured a 1-ulp miss of that row on 1/36960 calls); the gate logit stays a projection outside the kernel.",
+    "Routing matched to mlx2's served stock routing, not to omlx's: omlx's selection is descending with fp32 renormalization (its own router baseline); mlx2's stock argpartition is a stable ascending sort (slot j = selection 9 - j) and the normalization is a sequential bf16 sum over slots then a bf16 divide, both established on Metal (60000 synthetic rows) and reproduced exactly.",
+    "router_topk ('launch'): one simdgroup per row, stock-identical routing in one launch, also usable where the routed kernels do not run. 'fold' recomputes the routing in the gate+up launch (every routed simdgroup selects the full ten and takes its slot) at one token and in windows up to topk_fold_max_rows (default 17; omlx 3).",
+    "Window projections (router gemv, shared gate, and the shared expert when it is not folded) run through lane L5's row-exact qmv kernel, so every row of the MoE block equals its one-token call; omlx keeps its own router gemv kernel.",
+    "Consumers are explicit and separately switched: row-exact verify windows (L5; replaces the per-row routed-expert loop, the window stays row-exact either way), batched one-token decode [B, 1, H], and plain MTP verify windows marked by a model-neutral verify-forward scope. omlx serves the first two only.",
+    "Strict admission (split resident tables, tile4 down at width 1, stock or launch routing, no fused router / compiled router / glue / two_launch reference, bf16, 512 experts top-10 normalized, 2..17 rows) with counted, reasoned refusals per consumer; default off (omlx defaults on).",
+    "Measured caps: the fold runs at most 3 rows (above: the launch); the batched-decode consumer declines quietly above 8 lanes (B16 was -7%). Both live-settable."
+  ],
+  "validation": "CPU: tests/test_qwen4_moe_window.py. Metal (M5 Max, mlx 0.32.2.dev20260919+39400a0d4; qualification/runs/omlx-w2a-moe-window-20260930/moe-window-exact.json): real layers 0/23/47/mtp.0, R = 2/3/4/8/16/17, natural windows (scales 0.5..4) and repeated-row windows, three consumers x top-k off/launch/fold x shared fold on/off: 3456/3456 window outputs bit-identical to the R one-token block calls; skewed routings (high ids, dominant, uniform, consecutive, two rows on the same experts) through routed_rows/shared_rows vs the one-token kernels: 96/96; routing (launch and fold-stored) vs stock: 384/384 natural window rows and 4240/4240 synthetic rows (normal, coarse ties, three-valued logits, natural); B1 top-k launch (routed off/gate_up_down/gate_up_down_shared) and fold (gate_up_down/gate_up_down_shared) vs the reference block: 480/480; negative control (one-bit flip detected) 96/96. Full-model per-call and A/B evidence: see the README in that directory. Full-model per-call hunt (percall-hunt*.json): 0 mismatches over 40683 one-token calls (top-k launch, fold) and every natural window of 2..17 rows in batched decode (B=4/8/16), plain MTP verify and row-exact verify, 4 arms each. Full-model A/Bs (campaign defaults, docs corpus): B1 top-k launch +5.1% / fold +4.4% decode tok/s, tokens identical (10 reps); batched decode with the GDN batch step B2 +11.2%, B4 +7.6%, B8 +2.0%, B16 -7.3% (consumer capped at 8 lanes), tokens differ from stock batched and no lane equals solo; row-exact verify with the window 1.00/1.03/0.80/1.01x stock MTP (was 0.85/0.88/0.83/0.93x) on prose/code/copy/reason, output still equal to MTP off on 4/4; plain-verify window 0.98-1.02x MTP, output changed on 3/4 prompts with no move toward MTP off.",
+  "selection": "2026-10-01: moe_topk_fold='launch' selected as the Flash-Next default (B1 +5.1%, tokens identical); moe_window_row_exact defaults on but is inert unless row_exact_verify (default off) runs. moe_window_batch_decode and moe_window_verify stay opt-in (batched tokens change, -7% at 16 lanes; plain-verify window no gain). Combined row-exact A/B with every window kernel on (2026-10-01, 4 prompts x 4 reps): row-exact/stock-MTP 1.00 prose, 0.98 code, 0.99 reason, 0.78 copy; output equal to MTP-off on 4/4, 1600/1600 windows row-exact. Not qualified."
+}

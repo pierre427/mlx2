@@ -1,5 +1,5 @@
 {
-  "source_repository": "local read-only mlx-lm-unified checkout",
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
   "source_revision": "1e2bc604f71d070bee970c3e7db8b60f7855599b",
   "source_paths": [
     "mlx_lm/models/muse_glimmer.py"
@@ -30,7 +30,7 @@
   ],
   "inspected_not_mined": [
     {
-      "repository": "local read-only Agnes VLM support checkout",
+      "repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
       "revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
       "path": "mlx_vlm/speculative/drafters/dflash2/dflash2.py"
     }

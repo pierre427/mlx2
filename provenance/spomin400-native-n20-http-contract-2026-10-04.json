@@ -1,0 +1,24 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "source_repository": "mlx2",
+  "source_revision": "3833cf233dfc0c06c183bc83aff48048dc3dc37d",
+  "source_paths": [
+    "src/mlx2/server.py",
+    "scripts/research/spomin_400case_phased_http_bench.py",
+    "scripts/research/spomin_400case_native_suite.py"
+  ],
+  "license": "MIT",
+  "modifications": [
+    "Public parser supports explicit N20 capability and strict research case/hash metadata; ordinary defaults unchanged.",
+    "Preflight all20 actual requests through real parser before granting work; retain HTTP status/body and settle all client futures.",
+    "Unentered failed domain may pause only with all clients settled and zero samples/captures/jobs/queues/native charge.",
+    "Ambiguous active failure cannot return a releasable lease; bounded process retirement is separately labelled, not native terminal cleanup."
+  ],
+  "validation": {
+    "cpu_checks_passed": 28,
+    "actual_native_and_ordinary_bodies_validated": 40,
+    "runtime_imports": false,
+    "gpu_executed": false
+  },
+  "qualified": false
+}

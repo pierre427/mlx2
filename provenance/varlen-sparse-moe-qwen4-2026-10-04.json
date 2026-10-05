@@ -1,0 +1,72 @@
+{
+  "component": "default-off live-row compaction for padded Qwen4 sparse-MoE prefill",
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_revision": "16080c261ccd7589a7ee470bee01706f6ff9798c",
+  "license": "mlx2 project license",
+  "source_paths": [
+    "src/mlx2/runtime/models/varlen_dense_mlp.py",
+    "src/mlx2/runtime/models/qwen3_next.py",
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "src/mlx2/adapters/flash_next.py",
+    "src/mlx2/adapters/flash_next_policy.py",
+    "scripts/research/varlen_dense_mlp_http_gate.py",
+    "scripts/research/prepare_deterministic_arbitrary_traffic.py"
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/models/varlen_dense_mlp.py",
+    "src/mlx2/runtime/models/qwen3_next.py",
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "src/mlx2/adapters/flash_next.py",
+    "src/mlx2/adapters/flash_next_policy.py",
+    "tests/test_varlen_dense_mlp.py",
+    "tests/test_execution_policy.py",
+    "tests/test_qwen36_35b_port.py",
+    "scripts/bench_qsa_batch_decode_sparse.py",
+    "scripts/research/varlen_dense_mlp_http_gate.py",
+    "scripts/research/prepare_deterministic_arbitrary_traffic.py",
+    "docs/research/2026-10-04-varlen-sparse-moe-qwen4.md"
+  ],
+  "origin": "Original mlx2 implementation generalized from mlx2's Qwen3.8 dense live-row compaction. No external implementation source was copied.",
+  "modifications": [
+    "Add a separate sparse-MoE policy, numerical-law identity, model attribute and counter namespace to the shared live-row compaction core.",
+    "Compact around the complete Qwen3NextSparseMoeBlock so router, routed experts and shared expert all avoid padded rows while the residual slab remains rectangular.",
+    "Let the Qwen4 outer model declare the same adapter-owned prefill row context without adding model-family branches to the scheduler.",
+    "Expose varlen_sparse_moe through FlashNextPolicy, install it in FlashNextAdapter, include it in APCv2 prefill execution identity and emit explicit diagnostics.",
+    "Refuse combination with invariant_prefill because live-row compaction and slice-invariant prefill impose incompatible shape laws.",
+    "Generalize the source-bound HTTP A/B harness to Qwen4 sparse MoE and add tokenizer-root override to produce a Qwen4-bound deterministic trace.",
+    "Extend the existing QSA benchmark with a source-bound four-arm baseline, varlen, indexed-QSA and composed gate using skewed batched prefill lengths and separate mechanism counters."
+  ],
+  "validation": {
+    "stage": "implemented and observed-used on the complete Qwen4 artifact; unqualified and default-off",
+    "commands": [
+      "PYTHONPATH=src ~/Desktop/mlx2/.venv/bin/python -m pytest -q tests/test_varlen_dense_mlp.py tests/test_execution_policy.py tests/test_prefill_step_and_import_guard.py",
+      "~/Desktop/mlx2/.venv/bin/python -m ruff check --select E9,F63,F7,F82 <changed paths>",
+      "~/Desktop/mlx2/.venv/bin/python -m py_compile <changed Python paths>",
+      "git diff --check"
+    ],
+    "result": "52 focused contracts passed under the GPU lock. Two six-wave ordinary-decode orders passed exact HTTP parity with a combined 2.10 percent wall-time reduction, balanced sparse-MoE counters, clean cleanup and zero swapout increase. A memory-clean 3x32K composition cell proved simultaneous varlen and indexed-QSA engagement, exact varlen parity, and exact composed-vs-QSA parity; its single-pass 0.27 percent improvement is compatibility evidence, not an additive performance claim. A follow-up q8 TensorFold factorial observed all three mechanisms and improved decode throughput by 2.10 percent over varlen plus QSA, but complete time was 0.24 percent worse, the cohort averaged only 2.96 rows per q8 kernel, and generated tokens diverged. TensorFold therefore remains approximate and unqualified.",
+    "prepared_inputs": {
+      "path": "/tmp/mlx2-qwen4-varlen-sparse-moe-inputs-mlx2-20261004.json",
+      "sha256": "45c390caf45c41f64919a659b0805f4b90da9556e422ccbdfaeb1f790886a2bd",
+      "logical_inputs_sha256": "d4cad6ff22590840e6e6981e028acae2029ebc3281a06aa36f9f4ec4493ece23"
+    },
+    "prepared_trace": {
+      "path": "/tmp/mlx2-qwen4-varlen-sparse-moe-trace-mlx2-20261004.json",
+      "sha256": "3d0f92ee10899943274b865c265a14e37178ee6d56ec61cf2ce6cc2a490857dd",
+      "seed": 20261004,
+      "waves": 6
+    }
+  },
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "default": "off",
+  "observed_used": "complete Qwen4 artifact in two ordinary-decode arm orders and a memory-clean indexed-QSA composition cell",
+  "outstanding": [
+    "repeat the composition cell in paired or reversed windows before claiming an additive varlen-plus-QSA performance gain",
+    "calibrate a nonzero selection threshold across padding fractions and traffic shapes",
+    "run broader route qualification separately from performance testing",
+    "run a deterministic wide-cohort TensorFold factorial near 16 live decode rows before making a multi-user synergy claim",
+    "treat native self-MTP prefill as inapplicable to this multirow compaction until it exposes a packed recurrent-prefill slab"
+  ]
+}

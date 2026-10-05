@@ -1,0 +1,8 @@
+MIT License
+
+Copyright © 2023 Apple Inc.
+
+Source: local mlx-lm-unified revision e555a7f94012708a6d7cd7f7ba38336004672f32,
+mlx_lm/models/nemotron_h.py, mlx_lm/models/ssm.py, and
+mlx_lm/models/switch_layers.py. See that repository's LICENSE for the full
+MIT terms. Adapted code in mlx2 is identified in provenance/nemotron3-super-5bit.json.

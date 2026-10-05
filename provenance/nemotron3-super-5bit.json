@@ -1,0 +1,27 @@
+{
+  "component": "Nemotron 3 Super 120B-A12B 5-bit MTP model adapter",
+  "source_repository": "mlx-lm-unified (read-only source checkout)",
+  "source_revision": "e555a7f94012708a6d7cd7f7ba38336004672f32",
+  "source_files": {
+    "mlx_lm/models/nemotron_h.py": "9a39ebdce393f8d37a3b245a0641c58c3725ae968f9a25d4c00426b37a93d937",
+    "mlx_lm/models/ssm.py": "62b8e5759a1d16351ac87c0dad1ab8221acdcf5fa7ffd4a9b83bb72068d5bf93",
+    "mlx_lm/models/switch_layers.py": "b14c41460604ea5094bad98d45c08bc014dbc39e5785ceb2bdff0e4c2e3a4885"
+  },
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "notice": "provenance/nemotron3-super-5bit.NOTICE",
+  "artifact": "Nemotron-3-Super-120B-A12B-5bit-MTP (weights not included)",
+  "modifications": [
+    "Port only Nemotron H tensor math and Mamba SSM mechanisms needed for this checkpoint into mlx2 model-specific runtime modules",
+    "Bind the exact 88-layer affine-5bit artifact to a CPU-safe resolver and fail-closed capability descriptor",
+    "Use mlx2 shared APCv2 cache classes, quantized expert gathering, streaming tokenizer, and shard-evicting loader",
+    "Retain the embedded MTP weights and map its stateful layers to mlx2 native self-MTP cache slots",
+    "Record pre-step Mamba convolution and recurrent states for exact speculative rollback and accepted-prefix replay",
+    "Keep ordinary decode as the reference and default route until production serving qualification",
+    "Cap this artifact's native MTP at depth three after repeated depth-four greedy divergence in the direct-model sweep",
+    "Bypass all-true B1 Mamba and attention masks during native MTP verification",
+    "Verify Nemotron target drafts tokenwise to preserve ordinary-decode recurrent and KV state at long context",
+    "Align fresh uncached MTP prompt prefill's final chunk with ordinary prefill when APC boundary capture is not requested"
+  ],
+  "validation": "CPU: 17 safetensors headers and 1511 indexed tensors resolved; tiny hybrid prefill/incremental and speculative rollback parity; affine-5-bit expert gather and quantized-layer key parity; 19 focused adapter tests after the B1 verifier and prefill changes. GPU candidate: exact 5-bit artifact loaded; 64-token short-prompt greedy ordinary/MTP2/MTP3 parity with nonzero accepted drafts and direct-model timing; native MTP HTTP request, APCv2 reuse, tool call, and four-request concurrent comparison. Historical context ladder passed parity at 2K but diverged at 8K, 32K and 64K; 131K and near-limit were stopped after 64K swap growth exceeded 2 GiB. A post-fix one-run-per-route 8K and 32K ladder matched all 32 greedy tokens at both sizes and followed the prompt instruction. MTP3 proposed/accepted 32/20 drafts at 8K and 30/20 at 32K. Decode took 0.94 s versus ordinary 0.74 s at 8K and 1.00 s versus ordinary 0.79 s at 32K. A post-fix 64K MTP3-only run matched the 32-token ordinary sequence from the earlier receipt, with 27 drafts proposed and 22 accepted; that comparison uses an older ordinary source hash. Batched, cached-prefix, 64K same-source, and higher-context parity remain unqualified. This is candidate evidence, not a production serving qualification."
+}

@@ -1,0 +1,352 @@
+{
+  "what": "Per-lane ordinary-decode forward transient (SlidingKVCacheBudget.transient_gib_per_lane) for the Gemma 4 mlx-vlm adapters.",
+  "definition": "Peak device memory during one ordinary decode forward (width 1 per lane), above the active memory that survives it: transient = mx.get_peak_memory() - active after the forward and mx.clear_cache(). Reported per lane as total/N. Same definition as provenance/lane-transient-moe.json.",
+  "method": "qualification/runs/gemma4-defaults-20260925/probe_model.py --mode transient: N-lane cache built by a real prefill of repository text (31B in 512-token chunks, 26B-A4B in 2048, the adapters' prefill defaults), then 3 decode forwards; rep 0 is the first decode after prefill.",
+  "date": "2026-09-25",
+  "host": {
+    "machine": "Apple M5 Max",
+    "physical_gib": 128,
+    "mlx_vlm_revision": "67599f2e8ec31bf35cbb7b02794114f20844f0bb"
+  },
+  "models": {
+    "gemma-4-31B-MLX-8bit": {
+      "evidence": "qualification/runs/gemma4-defaults-20260925/results/transient-31b-q8.json",
+      "resident_weights_gib": 31.4478,
+      "summary": {
+        "max_per_lane_steady_gib": 0.0064,
+        "max_per_lane_cold_gib": 0.5355,
+        "max_total_any_gib": 1.0207
+      },
+      "cells": [
+        {
+          "context": 1024,
+          "lanes": 1,
+          "rep": 0,
+          "cache_gib": 0.875,
+          "transient_total_gib": 0.0155,
+          "transient_per_lane_gib": 0.0155
+        },
+        {
+          "context": 1024,
+          "lanes": 1,
+          "rep": 1,
+          "cache_gib": 0.875,
+          "transient_total_gib": 0.0063,
+          "transient_per_lane_gib": 0.0063
+        },
+        {
+          "context": 1024,
+          "lanes": 1,
+          "rep": 2,
+          "cache_gib": 0.875,
+          "transient_total_gib": 0.0058,
+          "transient_per_lane_gib": 0.0058
+        },
+        {
+          "context": 1024,
+          "lanes": 2,
+          "rep": 0,
+          "cache_gib": 1.7461,
+          "transient_total_gib": 0.0289,
+          "transient_per_lane_gib": 0.0145
+        },
+        {
+          "context": 1024,
+          "lanes": 2,
+          "rep": 1,
+          "cache_gib": 1.7461,
+          "transient_total_gib": 0.0111,
+          "transient_per_lane_gib": 0.0056
+        },
+        {
+          "context": 1024,
+          "lanes": 2,
+          "rep": 2,
+          "cache_gib": 1.7461,
+          "transient_total_gib": 0.0121,
+          "transient_per_lane_gib": 0.006
+        },
+        {
+          "context": 4096,
+          "lanes": 1,
+          "rep": 0,
+          "cache_gib": 1.5337,
+          "transient_total_gib": 0.4657,
+          "transient_per_lane_gib": 0.4657
+        },
+        {
+          "context": 4096,
+          "lanes": 1,
+          "rep": 1,
+          "cache_gib": 1.5337,
+          "transient_total_gib": 0.0064,
+          "transient_per_lane_gib": 0.0064
+        },
+        {
+          "context": 4096,
+          "lanes": 1,
+          "rep": 2,
+          "cache_gib": 1.5337,
+          "transient_total_gib": 0.006,
+          "transient_per_lane_gib": 0.006
+        },
+        {
+          "context": 4096,
+          "lanes": 2,
+          "rep": 0,
+          "cache_gib": 2.9673,
+          "transient_total_gib": 0.8807,
+          "transient_per_lane_gib": 0.4404
+        },
+        {
+          "context": 4096,
+          "lanes": 2,
+          "rep": 1,
+          "cache_gib": 2.9673,
+          "transient_total_gib": 0.0112,
+          "transient_per_lane_gib": 0.0056
+        },
+        {
+          "context": 4096,
+          "lanes": 2,
+          "rep": 2,
+          "cache_gib": 2.9673,
+          "transient_total_gib": 0.0121,
+          "transient_per_lane_gib": 0.0061
+        },
+        {
+          "context": 16384,
+          "lanes": 1,
+          "rep": 0,
+          "cache_gib": 2.4219,
+          "transient_total_gib": 0.5355,
+          "transient_per_lane_gib": 0.5355
+        },
+        {
+          "context": 16384,
+          "lanes": 1,
+          "rep": 1,
+          "cache_gib": 2.4219,
+          "transient_total_gib": 0.0057,
+          "transient_per_lane_gib": 0.0057
+        },
+        {
+          "context": 16384,
+          "lanes": 1,
+          "rep": 2,
+          "cache_gib": 2.4219,
+          "transient_total_gib": 0.0062,
+          "transient_per_lane_gib": 0.0062
+        },
+        {
+          "context": 16384,
+          "lanes": 2,
+          "rep": 0,
+          "cache_gib": 4.8423,
+          "transient_total_gib": 1.0207,
+          "transient_per_lane_gib": 0.5104
+        },
+        {
+          "context": 16384,
+          "lanes": 2,
+          "rep": 1,
+          "cache_gib": 4.8423,
+          "transient_total_gib": 0.0121,
+          "transient_per_lane_gib": 0.006
+        },
+        {
+          "context": 16384,
+          "lanes": 2,
+          "rep": 2,
+          "cache_gib": 4.8423,
+          "transient_total_gib": 0.0111,
+          "transient_per_lane_gib": 0.0056
+        }
+      ]
+    },
+    "gemma-4-26B-A4B-MLX-8bit": {
+      "evidence": "qualification/runs/gemma4-defaults-20260925/results/transient-26b-q8.json",
+      "resident_weights_gib": 26.0365,
+      "summary": {
+        "max_per_lane_steady_gib": 0.0183,
+        "max_per_lane_cold_gib": 0.4445,
+        "max_total_any_gib": 0.8881
+      },
+      "cells": [
+        {
+          "context": 1024,
+          "lanes": 1,
+          "rep": 0,
+          "cache_gib": 0.2349,
+          "transient_total_gib": 0.0066,
+          "transient_per_lane_gib": 0.0066
+        },
+        {
+          "context": 1024,
+          "lanes": 1,
+          "rep": 1,
+          "cache_gib": 0.2349,
+          "transient_total_gib": 0.0021,
+          "transient_per_lane_gib": 0.0021
+        },
+        {
+          "context": 1024,
+          "lanes": 1,
+          "rep": 2,
+          "cache_gib": 0.2349,
+          "transient_total_gib": 0.0026,
+          "transient_per_lane_gib": 0.0026
+        },
+        {
+          "context": 1024,
+          "lanes": 2,
+          "rep": 0,
+          "cache_gib": 0.4697,
+          "transient_total_gib": 0.0367,
+          "transient_per_lane_gib": 0.0184
+        },
+        {
+          "context": 1024,
+          "lanes": 2,
+          "rep": 1,
+          "cache_gib": 0.4697,
+          "transient_total_gib": 0.0356,
+          "transient_per_lane_gib": 0.0178
+        },
+        {
+          "context": 1024,
+          "lanes": 2,
+          "rep": 2,
+          "cache_gib": 0.4697,
+          "transient_total_gib": 0.0366,
+          "transient_per_lane_gib": 0.0183
+        },
+        {
+          "context": 4096,
+          "lanes": 1,
+          "rep": 0,
+          "cache_gib": 0.6641,
+          "transient_total_gib": 0.4191,
+          "transient_per_lane_gib": 0.4191
+        },
+        {
+          "context": 4096,
+          "lanes": 1,
+          "rep": 1,
+          "cache_gib": 0.6641,
+          "transient_total_gib": 0.0021,
+          "transient_per_lane_gib": 0.0021
+        },
+        {
+          "context": 4096,
+          "lanes": 1,
+          "rep": 2,
+          "cache_gib": 0.6641,
+          "transient_total_gib": 0.0022,
+          "transient_per_lane_gib": 0.0022
+        },
+        {
+          "context": 4096,
+          "lanes": 2,
+          "rep": 0,
+          "cache_gib": 1.3438,
+          "transient_total_gib": 0.8382,
+          "transient_per_lane_gib": 0.4191
+        },
+        {
+          "context": 4096,
+          "lanes": 2,
+          "rep": 1,
+          "cache_gib": 1.3438,
+          "transient_total_gib": 0.0044,
+          "transient_per_lane_gib": 0.0022
+        },
+        {
+          "context": 4096,
+          "lanes": 2,
+          "rep": 2,
+          "cache_gib": 1.3438,
+          "transient_total_gib": 0.0044,
+          "transient_per_lane_gib": 0.0022
+        },
+        {
+          "context": 16384,
+          "lanes": 1,
+          "rep": 0,
+          "cache_gib": 0.8985,
+          "transient_total_gib": 0.4445,
+          "transient_per_lane_gib": 0.4445
+        },
+        {
+          "context": 16384,
+          "lanes": 1,
+          "rep": 1,
+          "cache_gib": 0.8985,
+          "transient_total_gib": 0.0021,
+          "transient_per_lane_gib": 0.0021
+        },
+        {
+          "context": 16384,
+          "lanes": 1,
+          "rep": 2,
+          "cache_gib": 0.8985,
+          "transient_total_gib": 0.0022,
+          "transient_per_lane_gib": 0.0022
+        },
+        {
+          "context": 16384,
+          "lanes": 2,
+          "rep": 0,
+          "cache_gib": 1.8047,
+          "transient_total_gib": 0.8881,
+          "transient_per_lane_gib": 0.444
+        },
+        {
+          "context": 16384,
+          "lanes": 2,
+          "rep": 1,
+          "cache_gib": 1.8047,
+          "transient_total_gib": 0.0044,
+          "transient_per_lane_gib": 0.0022
+        },
+        {
+          "context": 16384,
+          "lanes": 2,
+          "rep": 2,
+          "cache_gib": 1.8047,
+          "transient_total_gib": 0.0054,
+          "transient_per_lane_gib": 0.0027
+        }
+      ]
+    }
+  },
+  "conclusion": {
+    "gemma4_31b_transient_gib_per_lane": 2.0,
+    "gemma4_26b_a4b_transient_gib_per_lane": 1.7,
+    "basis": "3 x 1.25 x the largest per-lane transient observed (the first decode after prefill, when each sliding layer folds its window + chunk prefill buffer back to the window). The constant keeps the admission controller's k=2 convention; the ordinary route is charged TRANSIENT_SCALE[0] = 1/3 of it: 0.67 GiB/lane (31B) and 0.57 GiB/lane (26B-A4B).",
+    "replaces": {
+      "31b": "3.1 (dense Qwen3.8-27B placeholder; ordinary charge 1.03, about 2x the measurement)",
+      "26b_a4b": "0.35 (small-active MoE figure from other models; ordinary charge 0.12, below the measured 0.44 spike)"
+    },
+    "unchanged": "Gemma 3n and MiniCPM-o keep the provisional 3.1; not measured here."
+  },
+  "serving_cache_confirmation": {
+    "note": "Repeated on the caches BatchGenerator actually decodes on (each lane prefilled on its own B=1 merged Batch* cache, lanes then extended into one batch): same figures.",
+    "gemma-4-31B-MLX-8bit": {
+      "evidence": "qualification/runs/gemma4-defaults-20260925/results/transient-31b-q8-batchcache.json",
+      "summary": {
+        "max_per_lane_steady_gib": 0.0063,
+        "max_per_lane_cold_gib": 0.5357,
+        "max_total_any_gib": 1.0211
+      }
+    },
+    "gemma-4-26B-A4B-MLX-8bit": {
+      "evidence": "qualification/runs/gemma4-defaults-20260925/results/transient-26b-q8-batchcache.json",
+      "summary": {
+        "max_per_lane_steady_gib": 0.0028,
+        "max_per_lane_cold_gib": 0.4446,
+        "max_total_any_gib": 0.8883
+      }
+    }
+  }
+}

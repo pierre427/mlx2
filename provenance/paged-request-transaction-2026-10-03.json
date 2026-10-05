@@ -1,0 +1,13 @@
+{
+  "name": "default-off paged request state transaction and age-ordered prefill admission",
+  "status": "implemented-unqualified-default-off-host-contract",
+  "source_repository": "original mlx2 implementation based on local codex/varlen-paged-attention revision 04ab0b218f87af42fe59b66b75ff3b4e95e25ad9",
+  "source_paths": [
+    "src/mlx2/runtime/paged_pack_scheduler.py",
+    "docs/research/varlen-paged-attention-build-plan-2026-10-03.md"
+  ],
+  "license": "original mlx2 project code; no third-party implementation copied",
+  "modifications": "The optional pack chooser now honors caller age order among feasible prefill offers after reserving decode/verify rows. Added a per-request protocol for a private candidate, revision-bound accepted-prefix preparation, and one atomic publish of requested KV, GDN, QSA and MTP planes. Unsupported atomic capability, unselected lanes and default-off requests refuse before beginning a candidate. Cancellation and exceptions discard private state.",
+  "validation": "CPU-only fake-owner tests cover accept-zero/partial/all, four-plane publication, age fairness, decoder deadline, default-off and capability refusals, cancellation, invalid acceptance, exception rollback, failed publish and revision mismatch. Focused paged scheduler and request transaction tests passed 13/13 on Python 3.11.",
+  "limitations": "The atomic publish guarantee is a required adapter contract, not an implemented concrete cache owner. No normal serving request invokes this coordinator. No GPU, native array, model decoding, multi-lane atomic publication, selected route, observed use, or qualification is claimed. The measured PackPrice identity and actual deadline budget must be supplied and verified by serving integration."
+}

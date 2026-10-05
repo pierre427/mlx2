@@ -1,0 +1,33 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "default-off stock-long Q1 inline Metal metadata binding",
+  "source_repository": "lab-owned mlx2, with stock arithmetic compared against installed MIT MLX source",
+  "source_revision": "4de2ada2497ef29a902eba0c16d3922f840836df",
+  "source_paths": [
+    "native/paged_kv/arena.cpp",
+    "native/paged_kv/q1_stock_long.h",
+    "native/paged_kv/q1_metadata.h",
+    "native/paged_kv/arena.h",
+    "native/paged_kv/binding.cpp"
+  ],
+  "upstream_reference": {
+    "repository": "ml-explore/mlx, read-only",
+    "revision": "39400a0d4",
+    "license": "MIT",
+    "use": "Existing stock-long arithmetic and buffer-index reference only; this change does not copy or alter upstream kernel arithmetic"
+  },
+  "modifications": [
+    "A dedicated strict MLX2_PAGED_Q1_STOCK_LONG_INLINE_METADATA=0|1 selector defaults off and admits only the validated stock-long B2 128-partition geometry",
+    "After the existing complete span/page checks, retain the same eight immutable uint32 metadata vectors in the read primitive and reject any vector above the 4096-byte Metal setBytes cap",
+    "Compile the unchanged stock-long math with exactly eight metadata address spaces changed from device to constant under a distinct inline library cache key",
+    "Bind the same buffer slots 4..11 with set_bytes; leave Q/K/V, dependency, scratch slot 12, scale/stride slots 13..20, reduction, resource barrier and terminal callback unchanged",
+    "Expose a dedicated actual post-partial-dispatch metadata counter without changing existing short inline, old split or stock-long partial/reduce counters"
+  ],
+  "validation": {
+    "cpu": "31 focused pytest checks (including 4 new C++/source/FP16-BF16 offline Metal checks and exact arithmetic source identity) plus 3 direct stock-long source checks passed; native CMake compile/link with -Werror passed",
+    "native_binary_sha256": "0fdc02a2fca880a2b52cbcecce32532c8cd94edd5acf131c583bdcd29694a26a",
+    "gpu": "not executed",
+    "qualified": false,
+    "performance": "unmeasured"
+  }
+}

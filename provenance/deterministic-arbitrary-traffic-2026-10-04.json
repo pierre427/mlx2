@@ -1,0 +1,54 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "date": "2026-10-04",
+  "implementation": {
+    "paths": [
+      "scripts/research/prepare_deterministic_arbitrary_traffic.py",
+      "scripts/research/deterministic_arbitrary_http_campaign.py",
+      "tests/test_prepare_deterministic_arbitrary_traffic.py"
+    ],
+    "origin": "original mlx2 research harness built on existing local N20 and HTTP gate contracts",
+    "license": "Apache-2.0",
+    "external_code_copied": false
+  },
+  "source_contracts": [
+    {
+      "path": "scripts/research/varlen_n20_prompt_lookup_http_gate.py",
+      "purpose": "existing source-bound actual-HTTP request, parity, timing and retirement helpers"
+    },
+    {
+      "path": "scripts/research/prepare_varlen_skew_inputs.py",
+      "purpose": "existing text-bound prompt resizing with authoritative-note preservation"
+    }
+  ],
+  "determinism": {
+    "seed": 20261004,
+    "fixed": [
+      "source case IDs",
+      "user and turn mapping",
+      "prompt token targets",
+      "arrival offsets",
+      "output caps",
+      "draft depth",
+      "wave membership",
+      "alternating arm order"
+    ],
+    "not_claimed_deterministic": [
+      "host thread dispatch",
+      "device timing",
+      "thermal state"
+    ]
+  },
+  "validation": {
+    "cpu_tests": [
+      "tests/test_prepare_deterministic_arbitrary_traffic.py"
+    ],
+    "qualification_claim": false,
+    "selected_by_default": false,
+    "performance_claim_pending_campaign": false,
+    "gpu_executed": true,
+    "gpu_scope": "600-second deterministic arrival-window actual-HTTP A/B on Apple M5 Max",
+    "gpu_receipt": "qualification/runs/deterministic-arbitrary-traffic-5885d93b-20261004/receipt-summary.json",
+    "decision": "unconditional packed N20 selection performance-rejected; ordinary batch-geometry observed use not proven by this receipt"
+  }
+}

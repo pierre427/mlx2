@@ -1,0 +1,37 @@
+{
+  "feature": "DeepSeek V4 complete-component preflight and direct text candidate",
+  "source": {
+    "repository": "local lab-owned mlx-vlm worktree",
+    "revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+    "paths": [
+      "mlx_vlm/models/deepseek_v4/deepseek_v4.py",
+      "mlx_vlm/models/deepseek_v4/language.py",
+      "mlx_vlm/models/deepseek_v4/hisa_kernel.py",
+      "mlx_vlm/models/deepseek_v4/hyper_connection.py",
+      "mlx_vlm/models/deepseek_v4/processing_deepseek_v4.py",
+      "mlx_vlm/speculative/drafters/deepseek_v4_mtp/deepseek_v4_mtp.py",
+      "mlx_vlm/speculative/drafters/deepseek_v4_mtp/split.py"
+    ],
+    "license": "MIT"
+  },
+  "model": {
+    "path": "~/mlx-models/DeepSeek-V4-Flash-Vision-Exp-Q4",
+    "acquisition_revision": "6821d6ad3681a4b137b066b76094fa82ebd0a380",
+    "weights_redistributed": false
+  },
+  "official_reference": {
+    "repository": "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+    "revision": "86f746b36186f0e567729a5c06a8c918caba82a9",
+    "paths": [
+      "inference/vision.py",
+      "inference/image_processor.py",
+      "inference/model.py",
+      "inference/README.md"
+    ],
+    "license": "MIT",
+    "usage": "source-bound adaptation of vision/aligner/N-layout math; no PyTorch code copied verbatim"
+  },
+  "modifications": "Original strict index inspector includes vision, image, hyper-connection and MTP tensor inventory. Direct text candidate delegates to exact-revision local MLX-VLM. Embedded MTP splitter is exposed for separate preparation. Original CPU N-layout image prefill, embedding insertion, visibility computation, structural MLX ViT/aligner, and strict mixed-Q4 vision loading plan were adapted from official reference. Vision and MTP generation fail closed because the pinned target model ignores pixel_values and drops mtp.* target weights.",
+  "validation": "Guarded static local artifact inspection, mocked text routing, N-layout/patch geometry, fake-array embedding/visibility, exact 529-tensor/131-module Q4 plan and fake strict loading tests; no real MLX import, model load, GPU run or numerical qualification. Exact-revision CPU AST/index contract check confirms the decoder embedding seam, absent image-visibility attention, absent bias_vl gate, and 46 checkpoint bias_vl tensors.",
+  "capability_state": "direct text candidate; CPU vision prefill and structural MLX ViT/aligner and Q4 loader candidates; MTP preparation candidate; vision and MTP generation unsupported; no mlx2 serving route; image decoder integration blocked by pinned source visibility and expert routing gaps"
+}

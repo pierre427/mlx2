@@ -1,0 +1,22 @@
+{
+  "feature": "source-bound default-off B2 combined performance profile",
+  "source_repository": "mlx2 local integrated performance branch",
+  "source_revisions": [
+    "b3041e7634fb79273adc6d6656f9b4967d6cc407",
+    "104622c23da8f941cc502f435a2949b102230b1e",
+    "436616a1145ad4a8434943f1d5fb85edee9e1b94"
+  ],
+  "source_paths": [
+    "native/paged_kv/arena.cpp",
+    "src/mlx2/runtime/paged_kv_write.py",
+    "src/mlx2/runtime/paged_attention_native.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "src/mlx2/runtime/paged_native_graph_group.py",
+    "src/mlx2/adapters/qwen3_paged_candidate.py",
+    "src/mlx2/runtime/paged_b2_research_profile.py",
+    "src/mlx2/serving.py"
+  ],
+  "license": "mlx2 original project code; no upstream code copied",
+  "modifications": "One v7 profile opts into deferred staged Q1 evaluation, inline short-Q1 metadata, and grouped sampler evaluation together. Legacy v4/v6 profiles require all three new flags off. Per-ready route receipts prove physical grouped/tile dispatch, eager or retained write/read roots, final eval count, inline metadata dispatch count, and sampler mode. The ordinary route remains the reference.",
+  "validation": "CPU source and lifecycle checks pass; source-bound Metal functional parity, full native terminal/retirement, and controlled performance are pending. The profile remains unqualified, price unusable, and default off."
+}

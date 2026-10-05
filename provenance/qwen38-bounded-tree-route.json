@@ -1,0 +1,14 @@
+{
+  "name": "qwen38-bounded-tree-route",
+  "status": "implemented, unqualified, unselected, default-off",
+  "source_repository": "https://github.com/ashhart/TensorFold.git",
+  "source_revision": "71377a5373ed7b394f1b480ba2a6a3986b03af1c",
+  "source_paths": [
+    "src/tensorfold/drafters/dflash_proposer.py",
+    "src/tensorfold/drafters/dflash_tree.py",
+    "src/tensorfold/kernels/qwen/dense/v1/lane_tree.py"
+  ],
+  "license": "MIT; see provenance/LICENSE.TensorFold-MIT",
+  "modifications": "Original mlx2 policy and scheduler control over the existing pinned TensorFold target bridge. An explicit Qwen3.8 external-draft policy selects tree15/TensorFold for active widths 1-4 and exact chain/reference above four, only at transaction boundaries. No TensorFold source text is copied. The existing ordinary and chain/reference paths remain available.",
+  "validation": "CPU tests in tests/test_dflash_tree_bridge.py exercise 1-to-2-to-4-to-1 transitions, observed physical cohort width four, and B5 chain fallback. Header-only tests in tests/test_qwen38_dflash2_adapter.py check the source revision pin and refuse incompatible policies and explicit topology overrides. No live one-service transition or route qualification is claimed."
+}

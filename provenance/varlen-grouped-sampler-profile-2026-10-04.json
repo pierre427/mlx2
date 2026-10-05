@@ -1,0 +1,37 @@
+{
+  "feature": "default-off grouped B2 sampler evaluation and bounded host profile snapshots",
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_revision": "b190655ced22be5d40893e671ee37c4a7c62f520",
+  "source_paths": [
+    "src/mlx2/runtime/paged_native_continuation.py",
+    "src/mlx2/runtime/paged_native_graph_group.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "src/mlx2/adapters/qwen3_paged_candidate.py",
+    "scripts/research/varlen_staged_graph_request_driver.py",
+    "scripts/research/varlen_b2_http_performance.py"
+  ],
+  "license": "Apache-2.0; original mlx2 source refactor, no upstream code copied",
+  "modifications": [
+    "Split native continuation sampling graph construction from evaluated response construction without changing the ordinary lane path.",
+    "MLX2_PAGED_GROUPED_SAMPLER=1 stages both lanes in original processor/sampler invocation order, evaluates the four existing graph outputs once, and constructs independent lane responses. Default remains separate per-lane eval. Route receipts expose grouped_sampler_eval and cumulative grouped_sampler_evals.",
+    "Add constant-size profile_counters_snapshot with host spans, read_count and existing physical dispatch counters. Staged graph receipts and physical proof checks use counters only. Research drivers copy cumulative detailed read work once after timed request completion. Full profile_snapshot remains an independent detail copy.",
+    "Do not change native arena, write/read terminal protocols, branch publication, public reader lifetime or cancellation ownership. Existing owning lifecycle suppresses the entire cohort on errors."
+  ],
+  "validation": {
+    "command": "python3 tests/test_paged_grouped_sampling_source_cpu.py",
+    "results": "5 source-extracted standard-library fake contract tests passed",
+    "coverage": [
+      "Processor context includes committed input; processor and sampler invocation order preserved across lanes",
+      "One eval with four outputs when enabled versus two evals with two outputs when disabled",
+      "Independent UID, output token, pending-token and per-lane RNG state",
+      "Stop and length terminal state, closed-lane refusal",
+      "Second sampler, eval, malformed shape and invalid token failures suppress cohort response and retain existing rollback behavior",
+      "Counters do not iterate detailed read history; full snapshots and host counters are independent copies"
+    ],
+    "device_guard": "Standalone test imports no MLX runtime; explicit import finder rejects mlx and mlx.* before any Metal/device initialization. Actual MLX CPU tests were not run because imports can construct Metal resources.",
+    "gpu_executed": false,
+    "qualified": false,
+    "performance_claim": false
+  },
+  "shortest_native_gate": "With fresh GPU ownership and both locks: paired B2 max_tokens=2 on the frozen model/artifact/environment, separate versus grouped sampling at identical lane seeds; compare exact token IDs/logprobs and per-lane RNG draws, require one grouped eval receipt and two independent responses, cancellation/error retirement with zero pending epochs/pages, then matched ordinary/v6/grouped complete-request performance runs with profiling counters only. Promotion requires parity and repeated request-level non-regression."
+}

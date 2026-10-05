@@ -1,0 +1,74 @@
+{
+  "source_repository": "https://github.com/pierre427/mlx.git",
+  "source_revision": "d3d6c38ab1c89a2cc515db870f52d8aa46b21e58",
+  "source_paths": [
+    "mlx/backend/metal/kernels/steel/defines.h",
+    "mlx/backend/metal/kernels/steel/utils/type_traits.h",
+    "mlx/backend/metal/kernels/steel/utils/integral_constant.h",
+    "mlx/backend/metal/kernels/steel/attn/transforms.h",
+    "mlx/backend/metal/kernels/steel/attn/mma.h",
+    "mlx/backend/metal/kernels/steel/attn/kernels/steel_attention.h"
+  ],
+  "source_file_sha256": {
+    "mlx/backend/metal/kernels/steel/defines.h": "b03cea6a7d5cfe814e6838d8536e2aacdcafd2744cb408e954fda336ce21759a",
+    "mlx/backend/metal/kernels/steel/utils/type_traits.h": "4766c5a3809d3cf7740e63acc5703ef76b6b4e85d8baf16602c9d517a2fd426c",
+    "mlx/backend/metal/kernels/steel/utils/integral_constant.h": "5a4c559c092132b54d3959054fd1fb01bd01adfa65f95d3a60a01b161f11f0e6",
+    "mlx/backend/metal/kernels/steel/attn/transforms.h": "5865a55ec7bfbe47e86fb21e18939ecc7e2b53e6df2214461fbe06be8789cb04",
+    "mlx/backend/metal/kernels/steel/attn/mma.h": "7f502d66cf30eba95c35faaeed65da3385c62a48716b739fec65ea5130e13a85",
+    "mlx/backend/metal/kernels/steel/attn/kernels/steel_attention.h": "82d25e646d442a0a3da755a7f04941b0db2d71a72e41d0dcd6e089ea021f6f6a"
+  },
+  "arithmetic_reference_path": "mlx/backend/metal/kernels/steel/attn/kernels/steel_attention.h",
+  "license": "MIT",
+  "license_copy": "native/paged_kv/vendor/MLX-LICENSE",
+  "modifications": [
+    "Mine the exact pinned Steel MMA/row-reduction helpers into a runtime Metal source string, removing local include directives and retaining original copyright notices. No upstream checkout was modified.",
+    "Original segmented page loader and native reader implementation:16x16 query/key tiles,D256,BF16 stored values,64threads,FP32 matrix score/online-softmax/value accumulation. Supports ragged lane counts, positive evaluated query strides, offsets,page tables,per-row causal/window bounds and GQA.",
+    "Reuse the existing native read primitive epoch/dependency/callback and host generation lease. Strict explicit selector activates only multiquery reads, preservesQ1 reference, refuses unsupported selected geometry before lazy graph creation.",
+    "Runtime pipeline threadgroup resource bounds are checked before dispatch.20,736bytes of static threadgroup storage, zero extra global scratch; raw dispatch counter increments only after physical encoding.",
+    "Add a default-off source/binary/dual-lease-bound60second/4GiB device oracle for ragged tail/page-edge/prefix and requested head-major stride2 query layouts. It reports stock multiquerySDPA BF16 errors/raw equality and checks an explicit numerical tolerance, not a bit-exact qualification claim.",
+    "Retain all ambiguous/failure roots and unattached pages through bounded process exit; successful cleanup requires matched native write/read terminals, zero pending ledger/epochs and all physical pages free.",
+    "After frozen5f2f GPU oracle failed first17/33 case, mine the exact pinned wheel394 short-D256 unfused arithmetic: BF16 scale and scaledQ, BF16 matrix scores, natural fast exp FP32 normalization, BF16 globally normalized probabilities, BF16 output. Two tiled passes recompute scores to avoid quadratic/global scratch. Original paged address and terminal laws unchanged.",
+    "Fail closed outside query counts9..1023 because <=8 stock vector and >=1024 stock NAX follow different arithmetic. Causal ends remain<=8192; no general long-prefill capability claimed.",
+    "Oracle now quiesces and retires known-success read/write roots after a numerical failure; ambiguous/failed native terminals still retain all roots and private pages. Numerical atol/rtol and raw bit reports unchanged."
+  ],
+  "validation": {
+    "gpu_executed": false,
+    "qualified": false,
+    "selected_default": false,
+    "cpu": "43 passed,1 runtime stride test deselected,10 subtests passed under MLX/native import guard; adds stock-rounding discrepancy and quiescent/poison/pending/failing-sync retirement tests.",
+    "offline_metal": "Full amalgamated BF16 D256 matrix kernel compiled with xcrun metal-std=metal3.1. Donor constexpr-if emits a compatibility warning; compilation succeeds.",
+    "native_build": "Full pinned-wheel native C++ module build succeeded without import/evaluation. Linker notedwheelmacOS26.7 versus build26.0 target.",
+    "binary_path": "/tmp/mlx2-prefill-matrix-short-fix-build-1004/_paged_kv_native.cpython-312-darwin.so",
+    "binary_sha256": "31f1f0500b4a40f6351e157befc22b789667ee80c9f7d4d90f57285ccbc861ed"
+  },
+  "status": "implemented-default-off-short-arithmetic-repair-unqualified-device-rerun-pending",
+  "stock_short_arithmetic_source": {
+    "repository": "https://github.com/ml-explore/mlx",
+    "revision": "39400a0d4cf1641bc6e543cb5e3585757f491854",
+    "local_read_only_repository": "~/Desktop/mlx-uag/mlx-src",
+    "license": "MIT",
+    "paths": [
+      "mlx/fast.cpp",
+      "mlx/backend/metal/scaled_dot_product_attention.cpp",
+      "mlx/backend/metal/kernels/softmax.h"
+    ],
+    "sha256": {
+      "mlx/fast.cpp": "e2d16dd5deb6eb4c43d5d2ff80659554d71df35a4f1512102f525ffac37bd23f",
+      "mlx/backend/metal/scaled_dot_product_attention.cpp": "575e29a36b2d0c653f17b4f55062b644243d2e3dbc362f6725686bef959dd9dd",
+      "mlx/backend/metal/kernels/softmax.h": "cb233fe42a7358f5f658c9a1ef52cd2ee9dd3786ddfad01793a976d58f4d4051"
+    }
+  },
+  "prior_device_failure": {
+    "source": "5f2f34536146f3b9b4eeeb5b193d22f57997f2e2",
+    "receipt": "/tmp/mlx2-prefill-read-5f2f/receipt.json",
+    "case_counts": [
+      17,
+      33
+    ],
+    "max_abs_error": 0.0009765625,
+    "exact_elements_fraction": 0.598275,
+    "allclose": false,
+    "native_terminal_success": true,
+    "note": "Root executed; preserved failure is not qualification."
+  }
+}

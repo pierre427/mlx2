@@ -1,0 +1,5 @@
+Qwen3.5 vision candidate adapter uses the MIT-licensed, lab-owned mlx-vlm
+source at commit 8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5. The model,
+processor, image/video generation, and optional MTP verification remain in
+that pinned runtime. mlx2 adds artifact gates and a direct candidate wrapper;
+no source implementation was copied into the new adapter.

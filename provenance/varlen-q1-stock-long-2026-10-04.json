@@ -1,0 +1,34 @@
+{
+  "mechanism": "default-off stock-style two-pass paged Q1 long-KV attention",
+  "source_repository": "ml-explore/mlx (read-only research input)",
+  "source_revision": "39400a0d4",
+  "source_paths": [
+    "mlx/backend/metal/kernels/sdpa_vector.h:665-804",
+    "mlx/backend/metal/kernels/sdpa_vector.h:949-1023",
+    "mlx/backend/metal/scaled_dot_product_attention.cpp:18-38,540-561",
+    "native/paged_kv/q1_splitkv.h"
+  ],
+  "source_license": "MIT",
+  "implementation_license": "MIT",
+  "modifications": [
+    "Original project kernel retains paged-KV page lookup and native read epoch/terminal lifecycle",
+    "Select 128 interleaved token residues for installed architecture-s stock SDPA at N1025..8192 with GQA above four",
+    "Represent dense ragged left padding through virtual token indices before page lookup",
+    "Round each first-pass numerator through the arena storage dtype before second-pass FP32 reduction",
+    "Use 32-SIMD-group streamed final reduction and fast exponential, with separate actual encoded partial/reduce counters",
+    "Retain older contiguous split128/256 kernels and flags unchanged"
+  ],
+  "validation": {
+    "cpu_source_contracts": "10 focused stock-long and older split source tests passed",
+    "metal_compile": "four generated FP16/BF16 D128/D256 variants compiled offline with Metal 3.2",
+    "native_cpp": "Integrated CMake build from root 64fe78a9 plus long arm compiled against pinned MLX wheel; binary SHA256 7092b8a9649cea11edbb71c84438465a8500257c4327a65d8d901f76dbfa6d48",
+    "gpu_executed": false,
+    "qualified": false,
+    "performance_claim": false
+  },
+  "limitations": [
+    "Requires explicit MLX2_PAGED_Q1_STOCK_LONG=1, no older split flag or MLX_SDPA_BLOCKS override, unwindowed retained0 B2, max visible1025..8192, and architecture s",
+    "Exact kernel output and whole-model recurrent state parity remain unverified until source-bound GPU oracle",
+    "Stock block policy is device and wheel revision specific; this arm refuses other architectures"
+  ]
+}

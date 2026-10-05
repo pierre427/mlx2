@@ -1,0 +1,23 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "source_revision": "cdfe35539758280498f435215c3690e0d8ef0539",
+  "source_paths": [
+    "src/mlx2/serving.py",
+    "scripts/research/spomin_400case_phased_http_bench.py"
+  ],
+  "license": "MIT",
+  "observed_failure": "42c full private bootstrap completed64 layers then generic last_progress memory-stall watchdog rejected all20 lanes before first sample",
+  "modifications": [
+    "Refresh all cohort progress clocks atomically only after successful native bootstrap and atomic BatchGenerator attachment",
+    "Preserve original shared grants through actual first sample; preserve ordinary admission and normal stall timeout",
+    "Seal failed postbootstrap commands only with settled clients, idle product queues, retired captured owners/resources, terminal/pool proof and restored charge; retain ambiguous failures"
+  ],
+  "validation": {
+    "cpu_checks": 40,
+    "gpu_executed": false,
+    "real_job_watchdog_and_grant_law": true,
+    "atomic_attachment_rollback_tests": true,
+    "known_failure_and_ambiguous_retirement_tests": true
+  },
+  "qualified": false
+}

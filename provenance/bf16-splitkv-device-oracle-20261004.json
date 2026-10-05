@@ -1,0 +1,65 @@
+{
+  "schema": "mlx2.bf16-splitkv-device-oracle-source.v1",
+  "date": "2026-10-04",
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_commit": "bafa71d1",
+  "source_paths": [
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "src/mlx2/runtime/paged_kv_token.py",
+    "src/mlx2/runtime/paged_native_atomic_owner.py",
+    "scripts/research/varlen_pack_price_bench.py"
+  ],
+  "license": "Apache-2.0",
+  "modifications": "Original bounded research driver using existing exact BF16 native ownership APIs; no native changes, model weights or production selection. Dry by default; root owns GPU execution.",
+  "native_binary_sha256": "f220d9391ea4c48c56c5fb11c4e0ab37a62298dcc9d9d270a9d0394a894577f1",
+  "validation": {
+    "CPU_preflight_tests": 5,
+    "CPU_preflight_status": "passed",
+    "runtime_imports": "forbidden during CPU validation",
+    "GPU_executed": false,
+    "qualified": false
+  },
+  "gate": {
+    "cases": [
+      [
+        63,
+        129
+      ],
+      [
+        127,
+        128
+      ],
+      [
+        128,
+        129
+      ],
+      [
+        4096,
+        8192
+      ]
+    ],
+    "partition_tokens": [
+      128,
+      256
+    ],
+    "dtype": "bfloat16",
+    "D": 256,
+    "Hq": 24,
+    "Hkv": 4,
+    "B": 2,
+    "seconds": 60,
+    "RSS_bytes": 4294967296,
+    "reference": "independent stock unpadded per-lane SDPA over exact same BF16 QKV",
+    "atol": 0.00025,
+    "rtol": 0.01,
+    "proofs": [
+      "exact frozen binary path/hash",
+      "actual split partial/reduce, short tile and grouped-write counter deltas",
+      "staged write/read terminal epoch",
+      "atomic public generation/offset",
+      "exact raw BF16 first/page-edge/last samples",
+      "all physical pages and native leases retired",
+      "scratch device access terminal; allocation size calculated, not allocator-observed"
+    ]
+  }
+}

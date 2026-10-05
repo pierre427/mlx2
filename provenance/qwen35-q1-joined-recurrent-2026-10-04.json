@@ -1,0 +1,27 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "default-off revision-bound B2 joined recurrent state reuse",
+  "source_repository": "lab-owned mlx2",
+  "source_revision": "a578348fb7fb50c931719fc7077d7e13562e6ae4",
+  "source_paths": [
+    "src/mlx2/runtime/segmented_batch_cache.py:SegmentedBatchArraysCache",
+    "src/mlx2/runtime/paged_native_atomic_owner.py:NativeBranch",
+    "src/mlx2/runtime/paged_gdn_checkpoint.py:GDNBoundaryCheckpoint",
+    "src/mlx2/adapters/qwen35_paged_candidate.py"
+  ],
+  "licenses": "Original adapter and state-owner implementation under project MIT terms; existing segmented cache Apache-2.0 provenance retained",
+  "modifications": [
+    "Explicit candidate and diagnostic CLI flag, default false and dependent on all-valid recurrent Q1",
+    "Adapter-local SegmentedBatchArraysCache subclass preloads exactly validated joined B2 tensor leaves before the base constructor calls _refresh_state, avoiding both concatenations on a true hit",
+    "Immutable binding validates revision, ordered lane IDs and owner identities, generation, offsets, GDN checkpoint, layer ordinal, per-slot B1 tensor object identity, shape and dtype",
+    "Stale, changed, rolled-back and singleton cohorts clear bindings and construct the ordinary segmented cache view",
+    "Retain at most one cohort binding with a charged two-generation joined-state bound through owner retirement; failure roots stay held through native teardown",
+    "Receipt reports selected flag, actual reused slots, fallback materializations and reserved bytes"
+  ],
+  "validation": {
+    "cpu": "42 direct candidate NumPy contracts, 32 serving lifecycle source contracts and 5 source launch contracts; includes actual constructor concat bypass, next-generation output/state equality, stale leaf, membership, owner, revision, rollback, B1, charge and clean source pin guards",
+    "gpu": "not executed",
+    "qualified": false,
+    "performance": "unmeasured"
+  }
+}

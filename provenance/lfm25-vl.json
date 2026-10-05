@@ -1,0 +1,108 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+  "source_revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "notice": "provenance/lfm25-vl.NOTICE",
+  "source_files": {
+    "mlx_vlm/models/lfm2/language.py": {
+      "sha256": "2c03c4f0ec788a8be4f198b6ab549034538e1a7daa96f7a55ba53d8d3746b11f"
+    },
+    "mlx_vlm/models/base.py": {
+      "sha256": "64067fa94380c262133c7cce3ed9145519eafd06c03e3d6a74664018c9fa6dc8"
+    },
+    "mlx_vlm/models/cache.py": {
+      "sha256": "a85e9f6ad5e570358550463b4fd740c13a70f46f8d993b62f838e74b02a19269"
+    },
+    "mlx_vlm/models/lfm2_vl/lfm2_vl.py": {
+      "sha256": "96d41dff362ec57ab544ebd305a5de302313b1ce38b8de37efa0579f51ffe9f2"
+    },
+    "mlx_vlm/models/lfm2_vl/language.py": {
+      "sha256": "5a25a5010c84c2ceb556872a2aad8217576ceefc2f265e31b7701c20f74544e6"
+    },
+    "mlx_vlm/models/lfm2_vl/vision.py": {
+      "sha256": "43cc8d3f10609dfe5d55c844221c0fe9481b68397c832398c4a67eba2d70a492"
+    },
+    "mlx_vlm/models/lfm2_vl/config.py": {
+      "sha256": "2bb87792171d8481c8b9f288da7ac2d13806c45c41598f20da7b5d6198efd874"
+    },
+    "mlx_vlm/models/lfm2_vl/processing_lfm2_vl.py": {
+      "sha256": "33ee3a78a87b3f743477b63d4777750dc42b5aa48f4ab248f19a9a724e989282"
+    },
+    "mlx_vlm/speculative/drafters/dspark/dspark.py": {
+      "sha256": "5992f260dee6d1916ec2d304139020de38556e33f35d5d9dd61cbd0adb95fc0f"
+    },
+    "mlx_vlm/speculative/drafters/dspark/config.py": {
+      "sha256": "4ad8c3957a933d75da99b1100e4373890a26079c390ef755d8fd7827612c8e57"
+    },
+    "mlx_vlm/generate/dispatch.py": {
+      "sha256": "89d9b08ec8316a6eed881486cc5a5129afbde481d693293ec20964146ef50842"
+    },
+    "mlx_vlm/prompt_utils.py": {
+      "sha256": "3880171f3ed450b62979c47ca7e14eaa0356cd54bfc44718c5d4a46561691a57"
+    },
+    "mlx_vlm/models/lfm2/speculative_verifier.py": {
+      "sha256": "e8a122639e44703fd704e1936c67d7b6e0104b9bdbf2fca5651a94ef1b4df07c"
+    },
+    "mlx_vlm/speculative/dflash.py": {
+      "sha256": "f18499746eb796e0c47c57d2203e551ac6a46e3d0a727d2b4fe61c265fe9456d"
+    },
+    "mlx_vlm/speculative/utils.py": {
+      "sha256": "ed15d2f35168437081b2683f385e416798717cea819bbc80cf3bbfe2167a99f0"
+    },
+    "mlx_vlm/generate/ar.py": {
+      "sha256": "e7659f342dfbbc225a73c25df200fe79712ca3937dcef110c2a75d8edd4a1286"
+    }
+  },
+  "secondary_text_reference": {
+    "repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+    "revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+    "path": "mlx_lm/models/lfm2-vl.py",
+    "sha256": "1ec76d720051d56b186bf1703ade5497eb29796fcd3f3682a68d4968556a7ec8",
+    "scope": "text-only; not used for image projection or processing"
+  },
+  "destination": [
+    "src/mlx2/adapters/lfm25_vl.py",
+    "src/mlx2/adapters/lfm25_memory.py",
+    "src/mlx2/adapters/lfm25_fused_shortconv.py",
+    "scripts/qualify_lfm25_media_serving.py",
+    "src/mlx2/lfm25_media_qualification.py",
+    "tests/test_qualify_lfm25_media_serving_cpu.py",
+    "src/mlx2/adapters/lfm25_dspark_compat.py",
+    "tests/test_lfm25_dspark_compat_cpu.py"
+  ],
+  "modifications": [
+    "Preserved the MLX-VLM implementation as a pinned optional runtime dependency rather than copying its vision and processor trees",
+    "Added strict CPU-only target and draft artifact header/config gates",
+    "Added ordinary image request preparation with image-placeholder boundary and media fingerprint",
+    "Replaced pinned mlx-vlm's non-checkpointable convolution ArraysCache allocation with mlx2's compatible checkpoint-aware ArraysCache, alongside mlx2 KVCache; APCv2 can clone and replay at exact hybrid boundaries",
+    "Added a static fp32 upper bound for retained KV, convolution state, and APCv2 convolution snapshots; forward workspace remains provisional",
+    "Kept DSpark as an auxiliary, unqualified draft that no route selects",
+    "Provided a separate offline-only lazy draft loader with strict weight load and target bind",
+    "Added explicit offline DSpark candidate generation with target verification, never selected by serving",
+    "Added opt-in, unqualified one-token Metal ShortConv candidate for pinned three-tap 2048-channel BF16 layout; the source ShortConv method remains the fallback and the candidate has no default serving selection",
+    "Resolve the pinned source checkout from the installed mlx_vlm package for portable revision verification and use the tokenizer-owned checkpoint chat template when the processor has none",
+    "Refuse a second model-local fused ShortConv installation so fallback cannot reenter a previously wrapped operator and mutate convolution state twice",
+    "Route bounded one-fps sampled video frames through the pinned multi-image processor, preserving frame order and timestamps in text labels; LFM has no separate video tower or video token",
+    "Added default-off candidate_v1 post-media APCv2 checkpoint declaration bound to adapter-prepared tokens, media fingerprint, and boundary; generic serving budgets and persists the exact interior state without model-name scheduling",
+    "Added CPU-only DSpark target compatibility preflight before draft-weight loading; reject a pinned target lacking the required rollback method",
+    "Added a SHA-pinned image/video qualification companion for the source ShortConv path, all 22 convolution states, eight attention offsets, and ordinary B1 APCv2 branches with the post-media checkpoint policy",
+    "Added an offline-only instance bridge for the pinned VL language model: exact target hidden capture, exact speculative verification, and source rollback over 22 ShortConv plus eight KV planes, with pinned-cache class guards. Serving remains ordinary-only and DSpark unselected."
+  ],
+  "validation": {
+    "target_tensors": 707,
+    "draft_tensors": 51,
+    "source_revision_verified": true,
+    "CPU_only": false,
+    "real_model_load": "M3 isolated pinned-source image prompt; see docs/experiments/MULTIMODAL-M3-CANDIDATE-SMOKE-2026-09-26.md",
+    "image_output_parity": "One 64x64 synthetic image prompt; source and fused ShortConv prefill/decode logits max absolute difference 0.0",
+    "video_frame_path": "CPU import-guarded frame-order/timestamp/boundary tests; M3 two-sampled-frame source and fused model-path prefill/decode logits max absolute difference 0.0, one-token hybrid replay max difference 0.0, qualification-mode serving warm APCv2 reuse 176/177 tokens. No native temporal tower or broader video qualification.",
+    "APCv2_reuse": "One-token post-media hybrid cache replay matched logits exactly on source and fused image and two-frame video paths; qualification-mode serving warm image 79/80 and video 176/177 tokens. A fresh M3 ServingEngine restored the image prompt from persisted APCv2 state after shutdown (79/80 tokens cached), registered two entries with no restore failures, and emitted the same visible two-token output.",
+    "DSpark_acceptance": "CPU import-guarded fake-target tests cover chunked hidden capture, four-token exact-verification handoff, accepted and rejected block rollback across all 22 ShortConv and eight KV planes, cache-class/snapshot fail-closed gates, and failure transaction restoring the original VL class. An additional real pinned-source tiny-weight mx.cpu probe captured five target layers and 22 conv snapshots; accepted lengths 0, 1, 2 produced next-token logit max absolute difference <=1.14e-6 and conv-state max absolute difference <=1.44e-6 versus ordinary decode. No GPU, real-weight DSpark acceptance, confidence calibration, or serving route. The offline bridge requires the pinned mlx-vlm source revision and native source cache classes.",
+    "ShortConv_kernel": "CPU structural/fake-dispatch tests include repeated-install refusal; seeded BF16 Metal operator smoke and M3 full-model single-image and two-frame video prefill/decode and one-token APC replay max absolute logit difference 0.0. Qualification-mode image/video serving engaged with zero build failures. No timing or broader qualification.",
+    "hybrid_checkpoint_roundtrip": "Import-guarded CPU state/meta roundtrip covered nine checkpoint positions, thinning to five, exact earlier landing, and two independent branches; full M3 image ServingEngine shutdown/rescan/restore also passed.",
+    "extended_M3_branch": "Pinned source and opt-in fused ShortConv each passed independent image and two-frame-video eight-token cold A/B versus shared post-media checkpoint/trim/B branches: every full-logit and all 22 recurrent-state comparisons were exact (max absolute difference 0.0). Raw safetensors cache save/load B was also exact. Fused route installed 22 layers, engaged 880 times per invocation, zero build failures. A separate video serving run completed cold, three warm APCv2 reuses, changed-tail and return-original with 14-token matching original responses; image did the same with 16 completion tokens. APCv2 manifest restart plus divergent branches and timing remain open. See docs/experiments/MULTIMODAL-M3-EXTENDED-2026-09-26.md.",
+    "post_media_apcv2_checkpoint": "Import-guarded CPU proof and boundary refusal tests; four bounded M3 restart branch receipts for image/video and source/fused ShortConv passed. Reader registered three persisted entries with zero discarded, restored changed-tail branches at media boundaries 74/171 and originals at committed prompt boundaries 92/189, with two APCv2 hits each and cold-equivalent 12-token outputs. Fused restored readers engaged 572 ShortConv calls each with zero build failures; cold checkpoint capture used source fallback. Candidate default-off, no timing or broader qualification. See docs/experiments/MULTIMODAL-M3-EXTENDED-2026-09-26.md.",
+    "live_media_qualification": "Final-source M3 producer SHA 0c3dddacb985589a66d8bdbc91b4e74e2f17e19d72f59345374a71c33e2fd779 passed eleven recomputed source-path image/video, text, hybrid-cache, and APCv2 checks. Full prefill and four decode logits, all 22 ShortConv states, and eight attention offsets matched exactly for both arms. Candidate receipt: docs/experiments/LFM25-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json. Full generic serving qualification remains open."
+  }
+}

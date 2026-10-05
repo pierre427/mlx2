@@ -1,0 +1,26 @@
+{
+  "kind": "idea-only",
+  "component": "APCv2 differential key checker and execution-numerics namespace",
+  "source_repository": "original mlx2 implementation; idea from arXiv 2609.38706 (\"KV provenance in shared caches\")",
+  "source_revision": null,
+  "source_references": [
+    "arXiv 2609.38706 as cited in the recon-20261001 coordinator brief: shared KV tiers keyed on token ids only (vLLM/SGLang) let state from one adapter configuration be served to another; its differential checker varies each dimension that changes the KV and flags any that leaves the cache key unchanged. The paper was not re-read in this lane."
+  ],
+  "license": "n/a (idea only; no text or code copied)",
+  "code_copied": false,
+  "destination_paths": [
+    "src/mlx2/runtime/apc_numerics.py",
+    "src/mlx2/runtime/apc_v2.py",
+    "src/mlx2/serving.py",
+    "tests/test_apc_key_differential.py"
+  ],
+  "modifications": [
+    "Table-driven differential test over artifact files, runtime revision, cache layout, tenant, media bytes, audio front end, LoRA, hyper-directory, int8 prefill, lane matmul, prefill execution and process numerics switches, plus a pinned table of deliberately unbound dimensions and persistent-tier identity checks.",
+    "New execution-numerics-v1 namespace wrapper binds non-default process switches (MLX_ENABLE_TF32, MLX_GDN_CORE, MLX_QWEN4_MOE_WEIGHTED_SUM, MLX_QWEN4_MOE_ROUTER_KERNEL, MLX_QWEN4_QSA_NAX_DECODE, MLX2_QSDPA_SCORES_BUDGET_BYTES, sp_qmm, verify_bitexact); it is the identity when every switch is default, so default namespaces and their persisted blocks are unchanged.",
+    "Serving composes the persistent template and every request key through apc_request_semantic / apc_semantic_namespace, so the two cannot drift."
+  ],
+  "validation": [
+    "tests/test_apc_key_differential.py: 44 passed. With the new wrapper disabled, 11 fail (8 dimensions and 3 persistence cases). That is the committed falsifier.",
+    "The KV-bit effects of the bound switches come from reading the code, not from a GPU measurement."
+  ]
+}

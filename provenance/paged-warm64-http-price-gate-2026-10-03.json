@@ -1,0 +1,27 @@
+{
+  "feature": "default-off Qwen3 native paged warm64 research calibration and live HTTP gate",
+  "source_repository": "mlx2 canonical varlen research branch",
+  "source_revision": "b709b716c18a1b7de401434b145cc593ba9c386c",
+  "source_paths": [
+    "src/mlx2/runtime/paged_pack_price.py",
+    "src/mlx2/runtime/paged_request_route.py",
+    "src/mlx2/runtime/paged_native_batch_lifecycle.py",
+    "src/mlx2/serving.py",
+    "scripts/research/varlen_live_request_price.py",
+    "scripts/research/varlen_live_qwen3_request_driver.py",
+    "scripts/research/varlen_warm_request_price.py",
+    "scripts/research/varlen_http_cold_warm_price_gate.py",
+    "scripts/research/varlen_cold_warm_gate_run.py",
+    "tests/test_varlen_warm_price_gate_cpu.py",
+    "tests/test_varlen_research_bootstrap_cpu.py"
+  ],
+  "license": "original mlx2 project code; no external implementation copied",
+  "modifications": [
+    "Validate exact three-pair unselected APCv2 warm64 complete-request and q1 evidence in a distinct research price type",
+    "Admit only the exact warm64 suffix-one shape through an explicit research permit and unchanged serving price gate",
+    "Produce physical BatchGenerator warm response, native read, APCv2 restore and retirement proofs without synthetic selection",
+    "Check genuine selected and observed-used cold and warm loopback HTTP routes after source-bound calibrations"
+  ],
+  "validation": "132 focused CPU tests passed on integrated implementation b709b716 before this review; GPU warm64 and HTTP gates remain unrun at this provenance entry",
+  "limitations": "Research price is not MeasuredPackPrice; native route remains default-off and unqualified. Actual Metal failed-command-buffer retirement requires a separate reviewed experiment. Earlier cb5 and 12fad06a price receipts are stale for this source."
+}

@@ -1,0 +1,25 @@
+Scoped notices for code adapted into src/mlx2/runtime/models/qwen4_attn_window.py
+(row-exact attention window for Flash-Next self-MTP verify) and the HC row-exact
+mode in src/mlx2/runtime/models/qwen4_hc_decode.py. See
+provenance/omlx-4041-4105-qwen4-attn-window.json for paths, hashes and
+modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx PR #4041 (head
+   7ef4d997b5713aaef53aaadca9a656736a12fa74) and PR #4105 (head
+   93e708a816a70a8183b5cefca4e81c1c3d48bef8),
+   omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/attn_fused.py
+   (dense_sdpa_gate, row_plan) and .../language.py (_row_exact_masked_verify,
+   _row_exact_gathered_verify). The window layout -- every row of a verify
+   window runs the vector-SDPA plan of its own one-token step over its own key
+   count, rows indexed from the grid, windows up to 16 rows -- is adapted from
+   them. No omlx source text is copied. The full Apache-2.0 text is this
+   repository's LICENSE.
+
+2. MLX — MIT License. The Metal arithmetic inside qwen4_attn_window.py is
+   generated from the sources of src/mlx2/runtime/models/qwen4_attn_rows.py
+   (sdpa_vector / sdpa_vector_2pass_1 / sdpa_vector_2pass_2 from sdpa_vector.h
+   and select_sdpa_blocks from scaled_dot_product_attention.cpp at
+   ml-explore/mlx revision 39400a0d4cf1641bc6e543cb5e3585757f491854); the MIT
+   notice for that transcription is provenance/omlx-4052-qwen4-attn-rows.NOTICE
+   and applies here unchanged.

@@ -1,0 +1,42 @@
+{
+  "source_repository": "https://github.com/vllm-project/vllm",
+  "source_revision": "2a52715ef7ca533a0ce287e14dc1c0702bdc2e8d",
+  "license": "Apache-2.0",
+  "source_paths": [
+    "vllm/model_executor/models/lilicorr.py",
+    "vllm/v1/worker/gpu/spec_decode/lilicorr/speculator.py",
+    "vllm/model_executor/models/nemotron_h.py",
+    "docs/features/speculative_decoding/lilicorr.md"
+  ],
+  "source_attribution": "Copyright contributors to the vLLM project. Upstream head adapted from sgl-project/sglang PR #37462 under Apache-2.0.",
+  "references": [
+    "https://arxiv.org/abs/2608.20530",
+    "https://research.nvidia.com/labs/nemotron/lilicorr/",
+    "https://github.com/sgl-project/sglang/pull/37462",
+    "https://github.com/NVIDIA/Model-Optimizer/pull/2342"
+  ],
+  "modifications": [
+    "MLX nongated-SiLU lattice transformer, exported QKV layout, learned relative/same-slot additive bias, full-vocabulary candidate confidence features, frozen target embeddings and normalized committed-target-tap anchor",
+    "Exact normalized outgoing/incoming-factor cosine similarities and correlation-only left-to-right predecessor-conditioned greedy walk",
+    "Reused existing DFlash backbone, grouped-convolution layers, external rejection sampler and APCv2 paired cache contract; no replacement cache/backend",
+    "Full trained block computed before proposal truncation, maintaining noncausal lattice and backbone feature dependence",
+    "Exact deterministic point-mass proposal distributions for sampled or greedy target verification; no finite-pass stochastic-law claim",
+    "Head confidence features exposed separately from point-mass q for online acceptance estimation",
+    "Pending final prefill context capability prevents losing the real target anchor; cached context with missing pending features fails closed",
+    "CPU-safe strict complete head/backbone/convolution source-schema checks and source tensor byte hashes; unsupported owned LM heads, reduced vocabulary and quantization fail closed",
+    "Separate explicit bounded CPU teacher buffer and shadow-head training helper; frozen target/backbone features, emitted teacher prefix censoring after first rejection or teacher leaving candidate set, immutable source head, unselected revision-bound head-only export",
+    "Explicit per-layer runtime draft_attention_windows overrides bound committed draft context with rotating KV caches and preserve absolute RoPE offsets; trained source config, full proposal block and ordinary target cache/math are unchanged; setting appears in route receipts and source-bound policy identity",
+    "Shadow export rechecks trained geometry and head parameters before publication and records initial-head, frozen-example and final-head hashes; target/draft revision pins are explicitly caller declarations rather than independent teacher attestation"
+  ],
+  "checkpoint_availability": {
+    "checked_on": "2026-10-01",
+    "public_checkpoint_found": false,
+    "evidence": "Current SGLang PR #37462 explicitly states checkpoints are not yet published and its E2E test is disabled pending a published drafter; Hugging Face API search lilicorr returned no models. NVIDIA page and pinned vLLM documentation supply no released checkpoint identifier.",
+    "no_substitute": "A DFlash2 selector or heuristic lattice cannot stand in for a co-trained LiLiCorr head."
+  },
+  "validation": "CPU-only independent NumPy parity for attention, learned biases, candidate confidence inputs, factor fusion/cosines and scaled transition table; plain/grouped-convolution strict BF16 tiny artifacts; exact point-mass proposals; full-block prefix preservation; initial/chunked prefill target-anchor parity; APCv2 first-boundary paired resume parity; strict config/schema/conv closure under hard metadata MLX import guard; bounded censored teacher capture and synthetic shadow-head loss decrease without source mutation plus hashed unselected export. No real checkpoint qualification or performance claims. Per-layer finite/full draft-window validation before tensor allocation, 18-position absolute-RoPE context oracle across long chunks and ring wrap, bounded draft KV planes, target greedy equality, sampled target point-mass rejection-law Monte Carlo, APCv2 paired resume and revision separation, exact rollback of both planes and RNG after target failure.",
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "observed_used": false
+}

@@ -1,0 +1,44 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "default-off hybrid Q1 packed math with native full-attention KV",
+  "source_repository": "lab-owned mlx2",
+  "source_revision": "2cb2d2ad3c9594c25eda7afb37aa082b36a09897",
+  "source_paths": [
+    "src/mlx2/runtime/models/qwen38_27b.py",
+    "src/mlx2/runtime/models/qwen3_5.py",
+    "src/mlx2/runtime/models/qwen38_fused_gdn.py",
+    "src/mlx2/runtime/models/precise_ops.py",
+    "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/runtime/segmented_batch_cache.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py"
+  ],
+  "licenses": {
+    "model_math": "MIT; existing provenance/qwen38-27b.json pins mlx-lm-unified 1e2bc604f71d070bee970c3e7db8b60f7855599b",
+    "segmented_batch_cache": "Apache-2.0; existing provenance/flashnext.json",
+    "native_host_lifecycle": "existing lab-owned project terms"
+  },
+  "destination": "src/mlx2/adapters/qwen35_paged_candidate.py",
+  "modifications": [
+    "Adapter-owned explicit 8-of-32 and 16-of-64 FA mapping",
+    "Reuse loaded ordinary quantized projections, Q/gate split, partial RoPE, GDN flags/dtypes and eager stride",
+    "Private recurrent host-container clone retaining immutable tensor inputs",
+    "Short B2 FP16 native boundary with exact tile/stripe/grouped dispatch proof",
+    "Materialize logits and recurrent successors before native drain/proofs/checkpoint staging",
+    "Ordinary prefill imports logical KV while charging rounded source allocations and retaining failure roots",
+    "Explicit float16_candidate native QKV/cache conversion with compute/GDN/projection dtype preserved, output cast back, prepublication finite/representability checks, converted bootstrap staging charged",
+    "Same-dtype BF16 boundary preserves original QKV array identities and requires exact arena/profile storage dtype",
+    "Explicit bounded split-KV128/256 long selector through8192 visible tokens, exact partial/reduce physical counters, conservative all-layer scratch reservation",
+    "Same adapter math for a singleton survivor with head-local scalar writes and actual short tile or long scalar proof",
+    "Optional FA-boundary callback retains actual QKV/native outputs without extra evaluation",
+    "Singleton dispatch proof follows actual head-local planned spans, excludes COW copy dependencies from write count, and admits actual short tile versus long scalar selection; stock32 flag uses configured8/16 survivor geometry",
+    "Admitted serving stock selector is retained on candidate and any environment drift fails before native mutation",
+    "Explicit default-off q1_direct_grouped_fence reuses the exact existing one-byte grouped WriteTicket output, requiring actual per-forward physical fence-read counter proof; singleton/head-local and COW multi-ticket dependencies keep the original joined chain. Diagnostic launch binds clean source HEAD/native SHA256; no serving profile/default promotion"
+  ],
+  "validation": {
+    "cpu": "46 direct helper contracts, 4 extracted backend raw-fence/failure-zero/B1-COW/ambiguous-retention contracts, 6 frozen-launch/counter contracts and 36 serving lifecycle/source contracts pass; no MLX/native runtime imports",
+    "runtime_imports": "MLX/native prohibited by import guard in direct tests",
+    "gpu": "not executed",
+    "qualification": "unqualified",
+    "performance": "unmeasured"
+  }
+}

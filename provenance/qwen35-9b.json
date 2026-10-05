@@ -1,0 +1,19 @@
+{
+  "schema": "mlx2-provenance-v1",
+  "component": "qwen35-9b-adapter",
+  "source": {
+    "repository": "mlx2",
+    "revision": "cc728bdd678589f04c691bb74607f7813ef1ad25",
+    "paths": [
+      "src/mlx2/adapters/qwen38_27b.py",
+      "src/mlx2/runtime/models/qwen38_27b.py"
+    ],
+    "license": "MIT"
+  },
+  "modifications": [
+    "Added topology-specific artifact validation and registry dispatch for the 32-layer dense 9B checkpoint",
+    "Reused the parameterized dense Qwen3.5 text runtime while omitting vision weights",
+    "Exposed ordinary decode only; config-advertised MTP and vision do not confer capabilities"
+  ],
+  "validation": "CPU artifact inspection and registry tests; live qualification recorded separately"
+}

@@ -1,0 +1,36 @@
+{
+  "component": "geometry-inferred N20 tiled Q4 SwiGLU projection candidate",
+  "date": "2026-10-04",
+  "source_repository": "https://github.com/ashhart/TensorFold.git",
+  "source_revision": "71377a5373ed7b394f1b480ba2a6a3986b03af1c",
+  "source_paths": [
+    "src/tensorfold/kernels/qwen/flash_next/v1/prefill_mm.py"
+  ],
+  "license": "MIT",
+  "notice": "provenance/LICENSE.TensorFold-MIT",
+  "destination_paths": [
+    "src/mlx2/runtime/dense_mlp_geometry.py",
+    "src/mlx2/runtime/models/tensorfold_prefill.py",
+    "src/mlx2/runtime/models/prefill_metal.py",
+    "src/mlx2/runtime/models/qwen3_next.py",
+    "src/mlx2/runtime/hybrid_packed_prefill_n.py"
+  ],
+  "modifications": [
+    "Reuses mlx2's existing original M5 32x64x64 tiled q4/group-64 gate-up-SwiGLU kernel; no new external source was copied.",
+    "Adds a CPU-safe contract in which an adapter declares projection names and exact SwiGLU semantics while the loader derives dimensions, affine quantization layout, dtypes, linear-bias presence and a stable geometry digest from loaded modules.",
+    "Adds default-off tiled_q4_swiglu and packed_gate_up_qmm N20 profile modes. Admission requires uniform inferred geometry across all dense layers, and execution revalidates the loaded geometry before either projection.",
+    "The packed mode reuses mlx2's existing view-backed PackedProjectionGroup so gate and up execute as one stock MLX quantized matmul, followed by the ordinary SwiGLU and stock down projection.",
+    "Emits inferred geometry in the bootstrap and route attribution receipt. Ordinary decode, stock QMM and all serving defaults remain unchanged."
+  ],
+  "validation": {
+    "cpu_source": "70 established N20 checks plus 2 geometry-inference checks and 2 Qwen native CPU checks passed",
+    "gpu": "Both arms passed exact HTTP parity, real route use and cleanup. The tiled stage took 81.47 seconds and native wall was 98.02 seconds versus 31.17 seconds ordinary. Packed stock-QMM native wall was 28.277 seconds versus 27.855 seconds ordinary, while the packed stage was 0.96 percent slower than the earlier separate stock gate/up plus product total. Both are rejected."
+  },
+  "status": {
+    "implemented": true,
+    "qualified": false,
+    "selected": false,
+    "serving_default": false,
+    "observed_used": true
+  }
+}

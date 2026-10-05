@@ -1,0 +1,15 @@
+{
+  "mechanism": "default-off same-request private partial-tail reuse for native staged KV",
+  "source_repository": "mlx2",
+  "source_revision": "2350249f",
+  "source_paths": [
+    "src/mlx2/runtime/paged_kv_pool.py",
+    "src/mlx2/runtime/paged_kv_token.py",
+    "src/mlx2/runtime/paged_native_atomic_owner.py",
+    "src/mlx2/runtime/paged_native_graph_group.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py"
+  ],
+  "license": "LICENSE in this repository; original project code, no upstream code copied",
+  "modifications": "An explicit request-owner reader exclusion guard permits an unpublished staged suffix to reuse a parent-shared partial page only with exactly two page references: public parent and its private child. An external APCv2, reader, or other owner reference preserves ordinary COW. The research graph closes metadata-only snapshot leases before guarded begin. The feature remains environment opt-in.",
+  "validation": "CPU ownership and fault suite covers offsets 63/65, grouped single ticket, external third reference and active reader fallback, pending cancellation, successful-write rollback followed by exact logical continuation, and failed one-way teardown. Source-bound live GPU exactness and economics remain unverified. Integrated source 74df3559 passed one source-bound live B2 63/65 diagnostic pair with exact ordinary token IDs, 84/84 terminals, zero pending/retained, and 28 grouped versus 448 stock direct writes; see qualification/runs/varlen-grouped-integrated-74df3559-b2-diagnostic. One pair is insufficient for performance selection. Sequential lane publication is not cross-lane atomic rollback; genuine Metal failure remains unverified. Source 27811f59 alternating S-G-G-S-S-G B2 diagnostic passed exact parity and retirement in all six cells: stock 448 direct writes versus grouped 28 grouped writes; median ready 34.083 versus 17.449 ms, complete 106.521 versus 89.871 ms, with matched ordinary controls. See qualification/runs/varlen-grouped-integrated-27811f59-b2-alternating. This is a small diagnostic screen, price_usable=false; no serving selection."
+}

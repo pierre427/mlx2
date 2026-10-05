@@ -1,0 +1,48 @@
+{
+  "component": "Per-layer eager dispatch on the shared Qwen3.8-27B / Qwen3.6-35B-A3B trunk",
+  "kind": "behavioral-design-input",
+  "recorded_at": "2026-10-01",
+  "code_copied": false,
+  "sources": [
+    {
+      "repository": "youssofal/MTPLX",
+      "pull_request": 579,
+      "state": "open (read 2026-10-01)",
+      "head": "063d77b561fc1b61ccce5b0395dc549d1b86bbe0",
+      "paths": [
+        "mtplx/gdn_capture.py",
+        "tests/test_verify_async_chunk.py"
+      ],
+      "license": "Apache-2.0 (repository license, gh repo view)",
+      "used": "Idea only, read from the PR description: chunked mx.async_eval every N layers on decode-sized eager verify forwards so the GPU starts while the host builds later layers; bit-identical by construction. No code read or copied."
+    },
+    {
+      "repository": "lab-owned mlx2 (this tree)",
+      "paths": [
+        "src/mlx2/runtime/models/qwen4_exp.py (Qwen4ExpTextModel.__call__)"
+      ],
+      "license": "MIT (project)",
+      "used": "Same mechanism already shipped for Flash-Next (provenance/eager-dispatch-2026-09-20.json): stride/max-rows shape, round_levers counter names."
+    }
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen38_27b.py",
+    "src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/adapters/qwen36_35b.py",
+    "src/mlx2/qualification.py",
+    "tests/test_qwen38_eager_dispatch.py"
+  ],
+  "modifications": [
+    "Qwen3_5TextModel (shared by qwen38_27b and qwen36_35b) gains eager_dispatch_stride/eager_dispatch_max_rows, set only through set_eager_dispatch; 0 = off.",
+    "Adapters accept execution-policy keys eager_dispatch_stride (int) and eager_dispatch_max_rows (int, default 64) over a per-adapter default_eager_dispatch_stride (0 on the 27B; 2 on the 35B from 2026-10-01); no model-name branch in shared code.",
+    "A selected stride is recorded in adapter.environment as MLX2_EAGER_DISPATCH_STRIDE/MAX_ROWS (route identity, present only when on) and makes feature_eager_dispatch a required observed-use qualification check; diagnostics expose eager_dispatch and round_levers.",
+    "Unlike MTPLX, the last layer also submits (as Flash-Next does); pipeline-parallel forwards never submit."
+  ],
+  "validation": [
+    "GPU (M5 Max): greedy B1/B4 tokens and final logits bitwise equal at strides 2 and 4 on Qwen3.8-27B-MLX-4bit and Qwen3.6-35B-A3B-MLX-4bit-uniform; engine token streams identical across strides on both oQ4e-mtp artifacts (native MTP B1, ordinary B1/B4).",
+    "Engine: 27B neutral (MTP B1 1.001x, ordinary B1 0.996x, B4 0.995x); 35B ordinary B4 1.070x (every round 1.061-1.080), MTP B1 1.039x then 1.029x on a 6-round confirmation with 4/6 rounds ahead (pre-registered bar not met).",
+    "CPU: tests/test_qwen38_eager_dispatch.py, tests/test_qwen36_35b_port.py.",
+    "qualification/runs/recon-20261001/l7-decode-perf/README.md"
+  ],
+  "qualification": "implemented; 27B opt-in; 35B selected by default (stride 2, max_rows 64) on Pierre's decision 2026-10-01; unqualified until the 35B route is requalified with feature_eager_dispatch observed-use evidence"
+}

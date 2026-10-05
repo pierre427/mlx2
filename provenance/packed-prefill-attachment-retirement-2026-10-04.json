@@ -1,0 +1,22 @@
+{
+  "mechanism": "terminal-safe post-factory serving attachment retirement",
+  "source_repository": "mlx2 private Forgejo",
+  "source_revision": "2ec99afe187ce54fa0676e91a6d62f2890b9a320",
+  "license": "project license; original local integration",
+  "source_paths": [
+    "src/mlx2/runtime/qwen35_paged_graph_factory.py",
+    "src/mlx2/serving.py"
+  ],
+  "modifications": [
+    "register generic resource before fallible abort cleanup",
+    "retain diagnostics and admission charge through late orphan retirement",
+    "attempt cleanup after batch removal failure and preserve attachment exception"
+  ],
+  "validation": {
+    "cpu_checks": 67,
+    "unpatched_regressions_fail": 2,
+    "gpu_executed": false,
+    "native_rebuilt": false,
+    "qualified": false
+  }
+}

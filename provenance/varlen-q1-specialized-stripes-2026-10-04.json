@@ -1,0 +1,28 @@
+{
+  "mechanism": "default-off short-Q1 compile-time head dimension and wider SIMD stripe geometry",
+  "source_repository": "mlx2",
+  "source_revision": "f053367a5f1689345caee346259e99645c962f48",
+  "source_paths": [
+    "native/paged_kv/arena.cpp:kAttentionReadQ1TileSource"
+  ],
+  "license": "MIT",
+  "modifications": [
+    "Generate separate 8/16/32-stripe kernels with compile-time D128/D256 from unchanged four-stripe source",
+    "Compute stripe merge factors once per head and share across output channels",
+    "Bound threadgroup storage to32KiB and reject D256/S32 before read graph construction",
+    "Check actual pipeline thread and device static memory limits before encoding",
+    "Record actual encoded dispatches by stripe count"
+  ],
+  "validation": {
+    "cpu_source_contracts": "4 unittest cases passed;10 supported Metal variants compile offline",
+    "native_cpp": "syntax-only compile against pinned MLX wheel headers",
+    "gpu_executed": false,
+    "qualified": false,
+    "performance_claim": false
+  },
+  "constraints": [
+    "Four-stripe and scalar references unchanged",
+    "Explicit native read/write fence edges, callback registration, lease and page generation checks unchanged",
+    "Requires fresh native functional/numerical and controlled performance gate before selection"
+  ]
+}

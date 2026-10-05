@@ -1,0 +1,38 @@
+{
+  "component": "N20 packed-prefill MLP materialization and grouped GDN evaluation experiment",
+  "date": "2026-10-04",
+  "license": "mlx2 project license for original local code",
+  "local_sources": [
+    "src/mlx2/runtime/models/qwen3_next.py",
+    "src/mlx2/runtime/packed_prefill_lifetime.py",
+    "src/mlx2/runtime/hybrid_packed_prefill.py",
+    "src/mlx2/runtime/hybrid_packed_prefill_n.py",
+    "scripts/research/varlen_n20_prompt_lookup_http_gate.py"
+  ],
+  "external_research": [
+    {
+      "source": "https://github.com/ml-explore/mlx/issues/4621",
+      "use": "Research prompt for comparing explicit affine-weight dequantization followed by BF16 matrix multiplication against stock quantized matmul at large M.",
+      "copied_code": false
+    }
+  ],
+  "modifications": [
+    "Added default-off staged and single-evaluation stock quantized-matmul modes.",
+    "Added default-off staged and single-evaluation full-table BF16 dequantization modes with explicit three-projection temporary-memory charge.",
+    "Added an explicit expanded-charge profile for grouping all three N3 GDN segments into one evaluation wave.",
+    "Bound every experimental mode to the N20 candidate profile and route receipt; ordinary decode and production defaults are unchanged."
+  ],
+  "validation": {
+    "cpu_source_checks": 68,
+    "gpu_receipts": "qualification/runs/native-n20-mlp-gdn-factorial-afd5c3d5d-20261004/receipt-summary.json",
+    "correctness": "All completed arms preserved exact HTTP token, text, finish and usage parity and real native route-use proof.",
+    "performance": "Full-table BF16 dequantization and one-evaluation MLP scheduling were rejected. GDN wave4 reduced the paired native regression from 6.34 percent to 3.20 percent but did not pass admission."
+  },
+  "state": {
+    "implemented": true,
+    "qualified": false,
+    "selected": false,
+    "serving_default": false,
+    "observed_used": true
+  }
+}

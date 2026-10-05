@@ -1,0 +1,40 @@
+{
+  "source_repository": "https://github.com/ashhart/TensorFold (local clone ~/Desktop/TensorFold, origin/main)",
+  "source_revision": "9cd52ab4daba68ddd09be89be8f23ad43175e821",
+  "source_paths": [
+    "src/tensorfold/kernels/qwen/dense/v1/simd_qmm.py",
+    "src/tensorfold/kernels/qwen/dense/v1/simd_qmm_bits.py",
+    "src/tensorfold/kernels/qwen/dense/v1/affine_rows.py",
+    "src/tensorfold/kernels/qwen/dense/v1/row_matmul.py",
+    "src/tensorfold/kernels/threads.py",
+    "src/tensorfold/kernels/inputs.py"
+  ],
+  "license": "MIT",
+  "notice": "NOTICE (TensorFold section)",
+  "destination_paths": [
+    "src/mlx2/runtime/lane/simd.py",
+    "src/mlx2/runtime/lane/matmul.py",
+    "src/mlx2/runtime/lane/installer.py",
+    "tests/test_lane_simd.py",
+    "scripts/lane_matmul_gate.py",
+    "scripts/lane_mlxlm_forward_ab.py"
+  ],
+  "mined": [
+    "simd_qmm: the 4-bit row-exact matmul on simdgroup_matrix units (scalar kernel for 1-4 rows, MMA kernel, pre-scaled input fragments for 2-8 rows), its shape-only chunk split, tiling and launch plans, and the install-time scalar/MMA twin check.",
+    "simd_qmm_bits: the same arithmetic for 5/6/8-bit codes in groups of 64 with its scalar twin and fallback.",
+    "affine_rows: the general 2-8-bit, group 32/64/128 row-exact reader.",
+    "row_matmul.simd_qmm_backend: the per-weight kernel-family dispatch.",
+    "threads.fit: probing the per-pipeline thread limit on M1/M2.",
+    "inputs.padded: padding sub-8-element kernel inputs."
+  ],
+  "modifications": [
+    "Metal kernel sources copied unchanged; the kernel name prefix is mlx2_lane_simd_.",
+    "Dropped TensorFold's fused input prologues (Prologue), dependency inputs (DEP) and the class-level nn.QuantizedLinear.__call__ patch; the backend is reached through mlx2's per-module lane classes (installer.py) instead.",
+    "Twin-check outcomes are recorded in module-level sets keyed by weight shape (as in TensorFold) and run once per launched shape by lane.install, including grouped stacks and their members; the receipt reports simd_twins.",
+    "Integrated as a second lane backend: matmul.backend() selects mpp (M5 tensor units) or simd (every other Apple GPU); the simd law is lane-simd-v1, distinct from lane-matmul-v1, and joins the law id / APCv2 namespace like the mpp law.",
+    "simd preparation reads MLX's scales and biases in place (no interleaved scale/bias copy) and refuses unquantized weights and non-bf16 activations, which stay on stock kernels.",
+    "force_backend() pins a backend for gates and paired A/B; the simd kernels also run on an M5.",
+    "Admission keeps TensorFold's layout checks (rank-2 packed weights, scale and bias dtypes equal; bf16 for the matrix kernels). A 5/6/8-bit twin fallback to affine_rows adds +simd-affine[digest] to the law and is re-reported on every install; a backend switch re-installs from scratch (independent codex review, 2026-09-30)."
+  ],
+  "validation": "CPU: tests/test_lane_simd.py (25 test functions) plus the existing lane tests (78). GPU: scripts/lane_matmul_gate.py --backend simd, 36/36 small cases forced on the M5 Max and 36/36 small + 16/16 Qwen3.8-27B model shapes natively on an M3 Pro (applegpu_g15s, mlx 0.32.2): every row of 1-128-row calls (incl. 33-48/65-80/97-112 with freshly allocated exact-size inputs) bitwise equal to the row alone, error vs fp32 reference at or below stock on layer shapes. Whole model: scripts/lane_mlxlm_forward_ab.py on Qwen3.8-27B-MLX-4bit, M3 Pro. Receipts: qualification/runs/lane-edge-simd-20260930/."
+}

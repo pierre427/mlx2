@@ -1,0 +1,6 @@
+Flash-Next VLM candidate source reference
+
+Image/video model math and MTP splitting are delegated to optional mlx-vlm
+revision 8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5. The source is MIT
+licensed; see its LICENSE. No upstream source files were copied into mlx2.
+These direct candidates are unqualified and are not selected by serving.

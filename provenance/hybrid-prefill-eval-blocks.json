@@ -1,0 +1,35 @@
+{
+  "schema": "mlx2-source-provenance-v1",
+  "base_revision": "98a4cff89e6ccc6f76401a3a1be3276ade82127d",
+  "source_repository": "mlx2 private Forgejo",
+  "source_paths": [
+    "src/mlx2/runtime/hybrid_packed_prefill.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "src/mlx2/runtime/paged_kv_write.py"
+  ],
+  "license": "original project host orchestration; existingnative provenance unchanged",
+  "modifications": [
+    "Explicit profile/CLI prefill_eval_block_size1(default eager reference),4or16. Old profile missing field defaults1. Batching requires explicitNAX arm and binds environment/sourceidentity.",
+    "Retain existing per-FA writer/read async_eval enqueue contracts, exact dependency edges and nativekernels. Remove immediate attention mx.eval onlyfor batchedarm; materializehidden+allrecurrent roots and drainALLcurrentblock owners/uses at chosenFA boundary; final logits materialization and exactterminal/physicalproof before anyjointgen0owner creation.",
+    "Precharge retained projectionactivation bound and ALLsimultaneous nativeNAXscratch for min(blocksize,FAdepth), plus persistent/recurrent staging and64MiBworkspace. Real27B32/96 computed bootstrap reservation: eager1363750912,block42105196544,block165070979072bytes; these are conservativeadmissionbounds, notmeasuredpeakpricing.",
+    "Retain perpendingFA Q/K/V, tickets/owners and nativeattention outputs untilmatchingblockterminal. Evaluation/terminalfailure and cancellation keep ALLambiguous roots plus orphan exact submittedreads for late retirement; no statepublication or page recycling.",
+    "Emit source-bound block policy, exacteval/draincounts, maximumsimultaneousreads, componentcharges and scratchoverlap. Nativephysicalcounterproof and strictstockgeometry full-logit/GDN/KV gate unchanged.",
+    "Copy previouslyfrozen98combinednative binary unchanged to newisolatedartifactpath; no native source/kernel rebuild or edits."
+  ],
+  "native_binary_path": "/tmp/mlx2-prefill-eval-blocks-build-1004/_paged_kv_native.cpython-312-darwin.so",
+  "native_binary_sha256": "7dcbefd3ad0b4aa91d8abea5435217d2af4b33fa26d4481cbc19eea5924962b9",
+  "root_prior_model_gate": {
+    "receipt": "/tmp/mlx2-nax98a4-model.json",
+    "full_stock_geometry_exact": true,
+    "actual_b2_handoff_exact": true,
+    "note": "Root executed eager98reference only; blockarm GPU pending, serialB1difference retained."
+  },
+  "validation": {
+    "cpu": "30 direct MLX/native import-guarded orchestration checks +3geometrycontrol checks passed, including eagerboundary,batchedjointdrain, conservativecharge, cancellation,evalfailure,terminalambiguity and exactorphanroot counts.",
+    "gpu_executed_by_worker": false,
+    "batched_numeric_parity": "not_tested",
+    "controlled_performance": "not_tested"
+  },
+  "qualified": false,
+  "default_enabled": false
+}

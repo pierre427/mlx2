@@ -1,0 +1,56 @@
+{
+  "component": "Qwen4 (Flash-Next) batched fused GDN speculative verify: B lanes x S rows in one launch, each lane its B=1 fused verify arithmetic at its own width (ragged right padding), with per-lane snapshot / compact-tape rollback",
+  "status": "implemented; Metal bit-exact per lane vs the B=1 fused verify (and so one-token decode), rollback included, on both Flash-Next artifacts; default OFF behind FlashNextPolicy.fused_gdn_batch_verify (MLX_QWEN4_FUSED_GDN_BATCH_VERIFY). Full-model A/B: no speed gain (-0.3..-2.1% median at 2..16 lanes), tokens identical. Not qualified, not selected.",
+  "sources": [
+    {
+      "source_repository": "https://github.com/ashhart/TensorFold.git",
+      "source_revision": "17c73e189f5e6a5304cda7ea37f086f9c49b4788",
+      "source_version": "0.6.1",
+      "license": "Apache-2.0 (LICENSE at 17c73e18, sha256 cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30; earlier TensorFold revisions mined by mlx2 were MIT, see provenance/LICENSE.TensorFold-MIT)",
+      "source_files": {
+        "src/tensorfold/kernels/qwen/flash_next/v1/gdn.py": "abcd9b6aeb4f98783a30a695820041a008af26d98fe1453b58a213edfeee07dc",
+        "src/tensorfold/kernels/qwen/flash_next/v1/base.py": "81807c7a4d799565c63a3191f3fd26bd9abf267b3d6b7c5b777f20e47e790fce",
+        "src/tensorfold/kernels/qwen/dense/v1/lane_multi.py": "053180f7653eac56d6146c97455a787fed8c0667b76c8a0c00aa71799340ef5f",
+        "src/tensorfold/kernels/qwen/dense/v1/lane_gdn.py": "f9636470b8600289cff1c891b7d50ed66b5402d31a1cb5dfcdb1178dcfa03056",
+        "src/tensorfold/engine/lane_engine.py": "07b18373e1eef56776d7220528d138c5702f861707a79eca514cd926377fef9c",
+        "src/tensorfold/engine/lane_family.py": "da59903769be4c63eb48958700717d7d3c2d8e07abcef5f87f4210af39a87fee",
+        "tests/cuda/test_flashnext_multi.py": "a4ab881b9bddc861f7e1beab94944e57c75e5b650cf981a547384f12c548923b",
+        "tests/test_lane_gdn.py": "fd8b2772803852f35766202fa8ab7501ba9a9a569c23f99c30fd7072be0ba455"
+      },
+      "source_regions": [
+        "flash_next/v1/gdn.py: _gdn_source and gdn_step_multi (lines 256-318): the multi-stream GDN step is a checked textual derivation of the single-stream body (each replacement must occur exactly once), the stream index is a grid dimension, and each stream's row count is read at run time (R = STARTS[sb + 1] - STARTS[sb]) so ragged streams share one launch while every row keeps single-stream arithmetic. Design taken; no source copied.",
+        "dense/v1/lane_multi.py (module docstring, _gdn, commit_streams): the design target -- verify several streams with single-stream bits by keeping row-local arithmetic and recurrent state independent per stream, and commit each stream's accepted path from its own record.",
+        "dense/v1/lane_gdn.py: shared-prefix-state GDN (S_t = G_t S0 + ...); its docstring says reordered arithmetic may change near-ties and its test is allclose. Read as the contrast, NOT adopted.",
+        "engine/lane_engine.py, engine/lane_family.py: per-lane verify and roll back to accepted rows so shared rounds match serial decoding (read for the rollback contract).",
+        "tests/cuda/test_flashnext_multi.py test_segments_give_each_stream_its_own_rows: ragged chains, a half accept per stream, then the next step compared with each stream alone -- the shape of the Metal gate's layer check."
+      ],
+      "note": "Design only: no TensorFold source text is copied, so no NOTICE file is needed. TensorFold's kernel is its own GDN step (packed rows, per-stream buffers bound one per stream, MAX_STREAMS = 8, every row's state stored); mlx2 keeps its own proven fused verify bodies."
+    },
+    {
+      "source_repository": "mlx2 (this repository)",
+      "license": "MIT (mlx2 fused GDN kernels, provenance/flashnext.json) / original",
+      "source_regions": [
+        "src/mlx2/runtime/models/qwen4_fused_gdn.py _BATCH_ROW_PREFIX (lane L1, omlx #4106 GDN half, provenance/omlx-4106-gdn-batch-decode.json): grid z = (row, value head) and per-row buffer rebinding around an unchanged one-row body, with the B=1 probe's threadgroup_y.",
+        "src/mlx2/runtime/models/qwen4_fused_gdn_verify.py _SOURCE / _REPLAY_SOURCE / st16 forms (lane L5 proved the B=1 verify's per-token arithmetic equals one-token decode, rollback included: qualification/runs/row-exact-verify-20260930/) and the dynamic-count reconstruct (provenance/splash-01-gpu-accept-count.json)."
+      ]
+    }
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_fused_gdn_verify.py (BATCH_VERIFY_MAX_ROWS, admit_qwen4_fused_gdn_batch_verify, batch_verify_row_steps, _lane_prefix, _derive_batch_verify_source, _BATCH_SOURCE[_ST16], _BATCH_REPLAY_SOURCE[_ST16], qwen4_fused_gdn_batch_verify, qwen4_fused_gdn_batch_replay_verify, probe_qwen4_fused_gdn_batch_verify)",
+    "src/mlx2/runtime/models/qwen4_exp.py (MLX_QWEN4_FUSED_GDN_BATCH_VERIFY, GatedDeltaNet._try_fused_batch_verify, _batch_replay_rollback, set_fused_gdn_batch_verify_mode, batch-verify counters, qwen4_fused_gdn_stats batch_verify block)",
+    "src/mlx2/runtime/models/qwen4_row_exact.py (_gdn_engaged counts batched verify calls)",
+    "src/mlx2/adapters/flash_next_policy.py (fused_gdn_batch_verify)",
+    "scripts/check_qwen4_gdn_batch_verify.py",
+    "scripts/bench_fn_batch_verify.py",
+    "tests/test_qwen4_gdn_batch_verify.py"
+  ],
+  "modifications": [
+    "mlx2 layout, not TensorFold's: the verify block is the padded (B, S) slab the batched self-MTP round builds (right padding, cache.lengths per lane), states are stacked [B, ...] arrays, so lanes are rebound by offset (L1 prefix) instead of one buffer argument per stream; no stream cap below the validated 16 lanes.",
+    "The per-lane body is derived from mlx2's own B=1 verify bodies by checked replacement: the template width S stays the slab extent, while the token loop, the restore-point bound SNAPS and the final conv-window position read the lane's count RS = row_steps[lane] (TensorFold's runtime R). A lane of RS rows therefore runs the B=1 kernel specialized at S = RS. Rows past RS are written as zeros.",
+    "Rollback: compact mode rebuilds every lane in one dynamic-count reconstruct dispatch (counts per lane, 0 keeps the checkpoint) and records per_row_fn for a merged ArraysCache; the segmented cache slices per-row results of fn(m). Snapshot mode returns the lane's snapshot.",
+    "Admission: speculating, 2..16 lanes, width 2..MAX_VERIFY_STEPS, spans describable (no leading pad), one span per lane in 1..S, a mask only when the spans explain it, the B=1 verify's gate/geometry/shape/dtype checks with the lane extent; refusals counted per reason; mode 'off' is the kill switch (B>1 blocks then take the stock chain and the B=1 path's counted 'batch of N rows' refusal)."
+  ],
+  "validation": "CPU: tests/test_qwen4_gdn_batch_verify.py (36; all fail on the base a6b87145: missing API/attributes). Metal (M5 Max, mlx 0.32.2.dev20260919+39400a0d4; qualification/runs/batched-gdn-verify-20261001/metal-gate-{uncensored,4bit}.json, scripts/check_qwen4_gdn_batch_verify.py --layers 0 1 2 44 46 --st16): per artifact 135 kernel cases / 1020 lanes (B 2/4/8/16 x S 3/9/17 x full/ragged, fp32; B8 ragged fp16): lane r == B=1 verify/replay-verify launch at width row_steps[r] (output, conv, state, snapshots, tape), one-row lanes == B=1 one-token decode kernel, padded rows zero, per-lane partial-accept restore in one batched dynamic reconstruct == B=1 template and dynamic restore and == the snapshot; nudged-state falsifier detected 135/135; decode chain per layer equal; 120 layer cases (B 2..16 x S 3/9/17 x compact/snapshots) on merged ArraysCache (2 ragged rounds) and SegmentedBatchArraysCache (3 rounds with lane churn) with per-lane trim_ragged: every lane == the lane alone through the B=1 fused verify. all_equal true, 0 failures, both artifacts. The stock multi-row chain with the same one-token projections is also per-lane equal (120/120). Full model (qualification/runs/batched-gdn-verify-20261001/ab-uncensored.json; served uncensored artifact, served batched self-MTP config + route copy-draft policy, greedy, 192 tokens/lane, 16 real chat prompts, both arms warmed, 3 reps AB/BA in one process): median tok/s off -> row_exact: B1 81.96 -> 81.66 (-0.37%, control), B2 101.42 -> 101.17 (-0.25%), B4 112.67 -> 111.32 (-1.20%), B8 127.72 -> 125.00 (-2.13%), B16 147.04 -> 144.87 (-1.47%); every lane's tokens identical to the off arm at every width; 0 batched fallbacks. Row-exact route (rowexact-route-b4.json, policy row_exact_verify): B4 off arm 52/63 windows failed closed (gdn_fused_verify_not_engaged); row_exact arm 63/63 windows row-exact with no stage failure; all lanes == their MTP-off B=1 output in both arms. B8 (rowexact-route-b8.json): row_exact 62/62 windows row-exact, 8/8 lanes == MTP-off B=1; off 60/62 failed closed. B16 (rowexact-route-b16.json): row_exact 58/58 windows counted row-exact but only 10/16 lanes == MTP-off B=1, diverging at the same tokens in the off arm: a false green of the route's window accounting outside this kernel (open). Layer timing (layer-timing.json, layer 0, sync per call): fused/stock verify+trim 0.58-1.03, verify alone 0.85-1.16; the gain does not survive in the full model.",
+  "qualification": "implemented, Metal bit-exact, performance neutral-to-negative, default off, unqualified, unselected.",
+  "selection": "2026-10-01: selected as the Flash-Next default (fused_gdn_batch_verify='row_exact') by Pierre. Plain batched MTP: -0.3..-2.1% at 2-16 lanes, tokens identical; enables batched row-exact verify windows. Not qualified until the next requalification. Open: at 16 lanes the row-exact route labels all windows exact while 6/16 lanes differ from MTP-off (also without this kernel)."
+}

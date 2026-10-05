@@ -1,0 +1,15 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "research-only ordinary hybrid B2 merged-cache reference and recurrent drift comparator",
+  "source_repository": "mlx2",
+  "source_revision": "54befa05f",
+  "source_paths": [
+    "src/mlx2/runtime/generate.py:_merge_caches",
+    "src/mlx2/runtime/generate.py:GenerationBatch._step",
+    "src/mlx2/runtime/models/cache.py:KVCache.merge",
+    "src/mlx2/runtime/models/cache.py:ArraysCache.merge"
+  ],
+  "license": "MIT",
+  "modifications": "New import-safe research helper calls the existing ordinary cache merge and loaded model; it checks ragged KV offsets, recurrent slot shape/dtype, finite values, and absolute/relative drift. No model tensor math or serving route is changed.",
+  "validation": "CPU-only focused tests; no GPU or parity result claimed by this entry."
+}

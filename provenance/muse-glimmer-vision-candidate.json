@@ -1,0 +1,28 @@
+{
+  "component": "Muse Glimmer direct vision candidate",
+  "source_repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+  "source_revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "source_files": {
+    "mlx_vlm/models/muse_glimmer/muse_glimmer.py": "04071f7d4c07f2cf44d5f98fc78358cc33d73e7df04959e8fca3a0ffb48d48f7",
+    "mlx_vlm/models/muse_glimmer/processing_muse_glimmer.py": "db7d04a77f5941f2e7c7b0892c7baa4abd222666990dc80a5c640ddde9de84b0",
+    "mlx_vlm/models/muse_glimmer/vision.py": "062cbf8729f79f7cc1184a7848d30e0d31373b4c908a677e12d1ec592bbd3db6",
+    "mlx_vlm/generate/dispatch.py": "89d9b08ec8316a6eed881486cc5a5129afbde481d693293ec20964146ef50842"
+  },
+  "destination": "src/mlx2/adapters/muse_glimmer_vision_candidate.py",
+  "modifications": [
+    "Added CPU-only local checkpoint and full vision component gates for original and converted layouts",
+    "Added a direct image generation bridge through an exact-revision clean local MLX-VLM source",
+    "Kept the ordinary mlx2 Muse route text-only pending media state qualification",
+    "Bound direct results to a local artifact fingerprint",
+    "Aligned no-tool image prompts with the ordinary Muse direct-answer recipient and parsed generated channels before publishing client-visible text"
+  ],
+  "validation": {
+    "CPU_static_inspection": "Six local target layouts each have 806 normalized vision tower tensors and complete local shards",
+    "real_mlx_import_guard": "Nine CPU-only candidate tests passed with real mlx import blocked; 64 Muse parser tests passed separately",
+    "model_load": "Prior 4-bit direct smoke loaded and generated a reasoning-channel image description; direct-answer prompt and parser change need a new GPU smoke",
+    "vision_output_parity": "not run",
+    "selection": "unqualified direct candidate only"
+  }
+}

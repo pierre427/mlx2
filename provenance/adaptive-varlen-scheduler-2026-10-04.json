@@ -1,0 +1,77 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "date": "2026-10-04",
+  "implementation": {
+    "paths": [
+      "src/mlx2/runtime/batch_geometry.py",
+      "src/mlx2/runtime/generate.py",
+      "src/mlx2/serving.py",
+      "scripts/research/adaptive_multiuser_geometry_replay.py"
+    ],
+    "license": "Apache-2.0",
+    "origin": "original mlx2 implementation",
+    "external_code_copied": false
+  },
+  "design_references": [
+    {
+      "project": "vLLM",
+      "revision": "155488d853a0bc42df227dbfc74005b3fd488e94",
+      "license": "Apache-2.0",
+      "paths": [
+        "vllm/config/scheduler.py",
+        "vllm/v1/core/sched/scheduler.py",
+        "tests/v1/core/test_scheduler.py"
+      ],
+      "concepts": [
+        "one scheduled-token budget",
+        "chunked prefill",
+        "decode and speculative-token accounting"
+      ]
+    },
+    {
+      "project": "SGLang",
+      "revision": "bab04cd7913ff50d1bf1a677a2d10e5015dc4c3b",
+      "license": "Apache-2.0",
+      "paths": [
+        "python/sglang/srt/managers/scheduler.py",
+        "python/sglang/srt/managers/schedule_batch.py"
+      ],
+      "concepts": [
+        "mixed chunked prefill",
+        "decode rows represented as one-token extensions",
+        "multi-dimensional admission budgets"
+      ]
+    },
+    {
+      "project": "TensorRT-LLM",
+      "revision": "fc0876cfd6c5d661f186707857a4e5bfeb12bc6f",
+      "license": "Apache-2.0",
+      "paths": [
+        "docs/source/features/paged-attention-ifb-scheduler.md"
+      ],
+      "concepts": [
+        "in-flight batching",
+        "packed no-padding inputs",
+        "generation-priority chunked context"
+      ]
+    }
+  ],
+  "modifications": [
+    "mlx2 uses adapter-declared capabilities instead of model-name scheduler branches",
+    "speculative draft tokens are charged explicitly as verification rows",
+    "receipts preserve implemented, qualified, selected-by-default and observed-used state",
+    "the prototype is host-only and does not alter production route defaults"
+  ],
+  "validation": {
+    "cpu_tests": [
+      "tests/test_batch_geometry.py",
+      "tests/test_batch_geometry_serving.py",
+      "tests/test_adaptive_multiuser_geometry_replay.py"
+    ],
+    "gpu_executed": true,
+    "gpu_scope": "one source-bound high-skew N3 K2 actual-HTTP packed-versus-ordinary anchor",
+    "gpu_receipt": "qualification/runs/adaptive-varlen-skew-k2-5cb40ee6-20261004/receipt-summary.json",
+    "qualification_claim": false,
+    "performance_claim": false
+  }
+}

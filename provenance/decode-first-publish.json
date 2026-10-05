@@ -1,0 +1,36 @@
+{
+  "source_repository": "https://github.com/Blaizzy/mlx-vlm",
+  "source_revision": "4c2aecaeedd7c628668f07dfb0b99f64b883c61b",
+  "source_base_revision": "3f09d925b701840c359a7f39caa030d313b85fc2",
+  "upstream_pull_request": "https://github.com/Blaizzy/mlx-vlm/pull/1630",
+  "license": "MIT",
+  "license_notice": "Copyright (c) 2025 Prince Canuma; MIT License (mlx-vlm LICENSE at the source revision)",
+  "source_paths": [
+    "mlx_vlm/generate/ar.py",
+    "mlx_vlm/server/generation.py"
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/adaptive_policy.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/serving.py",
+    "src/mlx2/prometheus.py",
+    "tests/test_decode_first_publish.py",
+    "scripts/measure_decode_first.py"
+  ],
+  "mechanism": "Publish a scheduler round's decode tokens before that round's prefill work runs, and share one prefill token budget (rows x padded width) across the rows that prefill in the same round.",
+  "modifications": [
+    "No code copied; the mechanism was re-expressed on mlx2's BatchGenerator. mlx-vlm splits next() into decode_step()/prefill_step() called by its server; mlx2 instead turns the existing _next/_next_mtp rounds into generators that yield once at the decode/prefill boundary, and BatchGenerator.next returns at that yield when the policy is on. The pending prefill phase runs at the start of the next call. The serving loop is unchanged: every response it gets from next() is emitted to the request's event queue (the SSE writer's queue) before next() is called again, so the decode tokens reach the client while the prefill phase runs.",
+    "Device work and its order are unchanged (decode k, prefill k, decode k+1, ...). What moves: the host return point, so prompt-progress responses of round k return together with decode k+1; and a request inserted between calls is seen by round k's pending admission/prefill phase, i.e. one decode step earlier than today.",
+    "Not reordered: a mixed round (_next_mixed, one fused forward carrying the prompt slice and every decode row) has no decode-only point; its decode rows emerge from the shared trunk with the slice (wiki/docs/plans/varlen-paged-attention.md section 5). Counted as decode_first_fused_rounds.",
+    "Shared budget, ordinary path: rows prefilling in the same round get budget // rows tokens each, where budget is the round's chosen slice (decode-fairness/adaptive slice when bounded, else prefill_step_size), optionally capped by prefill_token_budget. Encoder-payload rows keep their unchunked policy, as in #1630.",
+    "Shared budget, self-MTP path: _make_mtp_batch prepares every admitted one-call prompt to its end in one call; the port caps how many such prompts one round admits so their summed residual fits the budget (the oldest always admitted; declared cohorts exempt). The multi-slice self-MTP prefill (_advance_mtp_prefill) is already one row per round and is unchanged.",
+    "Not ported: #1630's prompt-length bucketing around the oldest request (mlx2 has PrefillOrder SRPT with a bypass cap) and its removal of the llguidance scheduling hint (no counterpart).",
+    "Default off. Server-owned execution-policy key decode_first (true, or {enabled, shared_prefill_budget, prefill_token_budget}); refused on prompt-lookup and external-draft routes; recorded in settings only when configured. MLX2_DECODE_FIRST is read per round: 0 = kill switch, order = ordering only, 1/all = ordering and shared budget. Counters decode_first_* in scheduler stats and Prometheus (mechanism=decode_first)."
+  ],
+  "validation": "CPU: tests/test_decode_first_publish.py (16 tests): policy parsing/refusal, env kill switch and forcing, serving refusal on prompt-lookup/external-draft routes, default ordering (tokens wait for the slice), decode-first ordering on the ordinary and self-MTP routes with identical greedy tokens and identical device work, shared-budget split (ordinary) and burst deferral (self-MTP), kill switch with a pending phase, close() with a pending phase, mixed rounds not split, Prometheus export. GPU (M5 Max, served Flash-Next native-MTP route, arms alternated after warm-up): ordering engaged (decode_first_published_rounds > 0 every on-arm run); decode-to-client lag max 0.5-0.7 s -> <10 ms contended, ~110 ms burst; neighbour gaps, TTFT and lane throughput unchanged within noise; shared budget never engaged on this route (interior-checkpoint plan sends 2K prompts down the one-row incremental path). Greedy outputs not bit-identical to the default, at the same rate as the default vs itself (wall-clock-driven fairness scheduling). Evidence: qualification/runs/port-decode-first-20261002/README.md.",
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "observed_used": true,
+  "observed_use_evidence": "qualification/runs/port-decode-first-20261002/ab.json"
+}

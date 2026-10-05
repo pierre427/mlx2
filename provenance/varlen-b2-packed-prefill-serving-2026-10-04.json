@@ -1,0 +1,15 @@
+{
+  "feature": "default-off source-bound Qwen3 B2 packed-prompt serving profile v3",
+  "source_repository": "mlx2 local varlen B2 serving branch",
+  "source_revision": "e8ef9507",
+  "source_paths": [
+    "src/mlx2/adapters/qwen3_paged_candidate.py",
+    "src/mlx2/runtime/paged_native_atomic_owner.py",
+    "src/mlx2/runtime/paged_native_batch_lifecycle.py",
+    "src/mlx2/runtime/paged_native_graph_group.py",
+    "scripts/research/varlen_b2_packed_prefill_oracle.py"
+  ],
+  "license": "mlx2 original project code; no upstream code copied",
+  "modifications": "Added a distinct v3 research admission profile and explicit packed-prefill flag. Two pristine queued Qwen3 requests in one arena enter private owner branches; one two-lane staged prompt forward proves one two-span read terminal per layer, publishes the two request-private prompt states under the cohort attachment lock, and then installs first-token continuations. Route receipts carry a packed-prefill proof and retain unqualified, default-off, and price-unusable status. Existing v1/v2 serial serving paths remain available.",
+  "validation": "The source e8ef9507 direct real-model oracle passed bitwise first and second last-row logits parity and greedy token IDs for 32/127 prompts, 28 packed prompt read terminals versus 56 serial terminals, exact subsequent grouped Q1 read/write proof, and full owner retirement; receipt SHA-256 8db773d5d557384246d911f65c9363c60504fae010622c66063375e6bc7c61bc. V3 serving has focused CPU profile, queued-pair, cancellation, terminal, second-publish and attach-failure tests. Live HTTP parity, failure retirement under real Metal, and controlled service performance are pending. The one ordered oracle timing is not a service speed claim. Cross-owner publication is sequential and fail-contained, not an atomic two-owner pointer swap. Frozen source 1e2eaa2a subsequently passed one two-request 32/127 loopback HTTP gate under GPUQ: exact ordinary/native IDs and text [[14582,198],[14582,14582]], packed prompt proof 28 two-span terminals, cumulative 56 native reads/terminals, 28 grouped and tile ready dispatches with zero direct writes, fully retired owners and zero pending epochs/pages. Receipt SHA-256 ea2c2dce54099f60ac59ff29c9150f4aa736edb842494f96e25efaa6c6b41503 in qualification/runs/varlen-b2-http-v3-1e2eaa2a-passed. The first harness attempt failed before GPU because GPUQ_LEASE was omitted and is preserved separately. One live cell does not establish qualification or a speed claim."
+}

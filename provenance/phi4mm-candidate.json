@@ -1,0 +1,17 @@
+{
+  "feature": "Phi-4 multimodal complete-artifact preflight",
+  "source": {
+    "repository": "local mlx-vlm-qwen4-exp",
+    "revision": "653f1f13e238abb313fd45071bbd04b3de414635",
+    "paths": ["mlx_vlm/models/phi4mm/phi4mm.py", "mlx_vlm/models/phi4mm/language.py", "mlx_vlm/models/phi4mm/vision.py", "mlx_vlm/models/phi4mm/audio.py", "mlx_vlm/models/phi4mm/processing_phi4mm.py", "mlx_vlm/models/phi4mm/config.py"],
+    "license": "MIT"
+  },
+  "model": {
+    "repository": "microsoft/Phi-4-multimodal-instruct",
+    "revision": "93f923e1a7727d1c4f446756212d9d3e8fcc5d81",
+    "weights_redistributed": false
+  },
+  "modifications": "Original static inspector checks all local language, SigLIP vision, Conformer audio, projector, dual modality LoRA, processor files, and three indexed shards. A standalone candidate delegates text, image, audio, and combined prompts to pinned local MLX-VLM load, chat-template, LoRA switching, and generate APIs. No mlx2 serving route is registered.",
+  "validation": "Local artifact static inspection, mocked direct modality wiring, and real-MLX import-blocked CPU tests; no model load, GPU execution, or numerical generation claim.",
+  "capability_state": "direct tri-modal candidate; serving route absent and qualification pending"
+}

@@ -1,0 +1,28 @@
+{
+  "implementation": "original mlx2 optional adaptive-policy HTTP validation seam",
+  "license": "MIT",
+  "source_repository": "mlx2",
+  "source_revision": "3f00bee9cc2fc5504d629def3e7c39b4177a53c6",
+  "source_paths": [
+    "scripts/validate_parallel_serving_metal.py",
+    "src/mlx2/runtime/acceptance_estimator.py"
+  ],
+  "modifications": [
+    "Add explicit --adaptive-policy JSON path without changing disabled policy, request or reference defaults",
+    "Read at most 1 MiB plus a bounded overflow byte; reject malformed UTF-8, duplicate keys, nonfinite JSON constants and nondictionary inputs",
+    "Validate the supplied dictionary with CPU AdaptiveVerificationPolicy.from_value at num_draft15 before any server launch or model access",
+    "Record captured input path, byte count, SHA256 and exact configuration, with operator-supplied cost provenance and unverified freshness, artifact/environment binding and context applicability",
+    "Forward the captured adaptive configuration only to enabled XPress full, windowed and continuation-pool routes; ordinary reference has no external policy",
+    "Keep all existing correctness and HTTP cancellation criteria unchanged"
+  ],
+  "validation": {
+    "cpu": "tests/test_parallel_serving_metal_cli.py: 24 passed; optional-policy no-MLX/no-model/no-server dry run, source hash and policy geometry, dictionary/schema/size/duplicate/nonfinite rejection, all enabled-route forwarding, ordinary exclusion and disabled default regression",
+    "gpu_execution": false,
+    "http_execution": false,
+    "cost_qualification": "Policy preparation does not establish cost freshness, current route applicability, qualification or speedup"
+  },
+  "implemented": true,
+  "qualified": false,
+  "default_selected": false,
+  "performance_claim": false
+}

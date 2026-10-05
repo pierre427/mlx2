@@ -1,0 +1,61 @@
+{
+  "mechanism": "explicit native BF16 Q/K/V/output storage specialization",
+  "decision": "implemented_unqualified_candidate",
+  "source_repository": "mlx2 private repository",
+  "source_revision": "695673d66571630ad3bb50d29ffdb336c8905944",
+  "source_paths": [
+    "native/paged_kv/arena.cpp",
+    "native/paged_kv/q1_splitkv.h"
+  ],
+  "license": "Apache-2.0; original storage helper and integration, no copied Apple header",
+  "modifications": "Explicit immutable dtype at arena creation, FP16 default and historical entrypoints retained. Native Metal bfloat storage for readers/output with unchanged FP32 accumulation; ushort exact-bit BF16 grouped/gather copies. Dtype guards and dtype-separated Metal cache identities; callbacks/counters unchanged.",
+  "api": {
+    "create_arena": "create_arena(plane_bytes,storage_dtype=\"float16\")",
+    "supported_storage_dtypes": [
+      "float16",
+      "bfloat16"
+    ],
+    "dtype_receipt": "storage_dtype(arena)",
+    "generic_aliases": [
+      "attention_read",
+      "gather_q1"
+    ]
+  },
+  "default_storage_dtype": "float16",
+  "default_selected": false,
+  "serving_qualified": false,
+  "gpu_used": false,
+  "mlx_runtime_imported": false,
+  "validation": {
+    "new_stdlib_compiler_source_tests": 5,
+    "preserved_geometry_split_tests": 11,
+    "bf16_offline_metal_variants": 20,
+    "metal_standard": "3.2",
+    "metal_compiler": "32023.883 (metalfe-32023.883)",
+    "full_native_compile": "Release linked pinned wheel libmlx, -Wall -Wextra -Werror; binary not imported",
+    "linker_warnings": [
+      "redundant -U with dynamic_lookup",
+      "target26.0 versus wheel26.7"
+    ],
+    "cpu_bit_contract": "65,536 raw ushort payloads; source-only proof, not GPU runtime bit-copy evidence"
+  },
+  "binary_path": "/tmp/mlx2-native-bf16-storage-build-1004/_paged_kv_native.cpython-312-darwin.so",
+  "binary_sha256": "f220d9391ea4c48c56c5fb11c4e0ab37a62298dcc9d9d270a9d0394a894577f1",
+  "mlx_library_path": "~/Desktop/mlx2/.venv/lib/python3.12/site-packages/mlx/lib/libmlx.dylib",
+  "mlx_library_sha256": "e19f759923b8e32f253d142eb46141d0c577911c93cf20aeed6dbb23790a242f",
+  "source_hashes": {
+    "native/paged_kv/storage_dtype.h": "48e5dc7ea8864c0afdace836934de703b53c2d11495a0bf3b6543b0224870225",
+    "native/paged_kv/arena.cpp": "d79a576e4b4ed85891cbff80ebb0c8ece3c41b2dbbeae96e1505f2026655bb99",
+    "native/paged_kv/arena.h": "7d5559bb5d2c876336f13e5960f133c306d12ca42047db1a74ff93e9b4df8302",
+    "native/paged_kv/binding.cpp": "bf1d2a32914d97456b6106bbcc1605f462cf13568abb0a10643d023ace4f61f0",
+    "tests/test_paged_storage_dtype_source_cpu.py": "d087a1f2545573265fe25e53b1008e7076e567b2856f6d420bd4e923b07e4287"
+  },
+  "preserved_fp16_source_sha256": {
+    "kAttentionReadSource": "892ae8e2dec62a613005a4ef476d2d3f3b40a28fc5a4c6d3f888f17c6c620b17",
+    "kAttentionReadQ1TileSource": "71b80b5d43992f5eee7031cfbd4ed964c004268e13f2e6bfdf61bb2e3147897d",
+    "kGroupedQ1WriteSource": "f00cad56fe4afee61ebf74917d933985e28409a2f967ea4dac3ff6f28aef6c68",
+    "kQ1GatherSource": "5ce44148af22edae5206e73e55c4e90052623cd6918deb450b16f2cb7067f50c",
+    "kWriteSource": "3441f06dfff7bda295eabd0323c8898c7f139f8300e702ab44158d01bc497537"
+  },
+  "next_gate": "Root binds BF16 model/profile/cache/native arena, then device/runtime exact dtype boundary and numeric/output/logit/token parity, actual dispatch and terminal completion, controlled performance."
+}

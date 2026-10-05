@@ -1,0 +1,29 @@
+{
+  "component": "M=1 quantized decode split-K probe (lane matmul vs stock MLX qmv)",
+  "kind": "behavioral-design-input",
+  "recorded_at": "2026-10-01",
+  "code_copied": false,
+  "sources": [
+    {
+      "repository": "incoai/splash",
+      "pull_request": 242,
+      "state": "merged 2026-10-01T04:49:39Z (merge a1056620e32c54ef533c2ea09910ea0787e07e8a, head 348d6e4b76ddd5b3dadb5eb35d8ac7ac2fd57c88)",
+      "paths": [
+        "runtime/ops/Linear.cpp (apple10Splits)",
+        "runtime/metal/kernels/decode/linear_q4_grid_split.metal",
+        "runtime/metal/kernels/common/q4_mpp_tiles.h"
+      ],
+      "license": "Apache-2.0 (repository license, gh repo view)",
+      "used": "Idea and split heuristic only, read from the PR description: split K across threadgroups when the N128 column-tile grid leaves cores idle (largest power of two S <= 8 with (N/128) x S <= 4 threadgroups per core and >= 256 inputs per partition; S = 1 above two tiles per core); S never depends on batch width. No code read or copied."
+    }
+  ],
+  "destination_paths": [
+    "qualification/runs/recon-20261001/l7-decode-perf/probe_splitk_m1.py",
+    "qualification/runs/recon-20261001/l7-decode-perf/probe_lane_exact_e2e.py"
+  ],
+  "modifications": [
+    "Probe only. mlx2's split-K is the lane matmul's in-threadgroup K slicing (runtime/lane/matmul.py split_k), not a cross-threadgroup split; stock MLX one-row qmv already launches N/8 threadgroups, so the idle-core premise of the splash tile does not carry over directly. The probe measures it rather than assuming."
+  ],
+  "validation": "qualification/runs/recon-20261001/l7-decode-perf/README.md",
+  "qualification": "no runtime change; probe artifacts only"
+}

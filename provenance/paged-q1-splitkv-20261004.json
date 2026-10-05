@@ -1,0 +1,70 @@
+{
+  "mechanism": "default-off B2 Q1 two-stage paged split-KV attention",
+  "decision": "implemented_unqualified_candidate",
+  "source_repository": "mlx2 private repository",
+  "source_revision": "2cb2d2ad3c9594c25eda7afb37aa082b36a09897",
+  "source_paths": [
+    "native/paged_kv/arena.cpp:kAttentionReadQ1TileSource",
+    "native/paged_kv/arena.cpp:AttentionReadPrimitive"
+  ],
+  "license": "Apache-2.0; original implementation, no Apple copyright header",
+  "modifications": "Separate partial/reduce Metal source and bounded plans; preserved scalar/short tile; reused page validation, MLX barriers, callback/read epoch lifetime. No model/scheduler changes.",
+  "flags": {
+    "MLX2_PAGED_Q1_SPLIT_KV": [
+      "0",
+      "128",
+      "256"
+    ]
+  },
+  "bounds": {
+    "rows": 2,
+    "query_rows_per_span": 1,
+    "dimensions": [
+      128,
+      256
+    ],
+    "query_heads_max": 128,
+    "visible_tokens_max": 8192,
+    "partition_tokens": [
+      128,
+      256
+    ],
+    "max_partitions": 64,
+    "threads_per_group": 128
+  },
+  "default_selected": false,
+  "serving_qualified": false,
+  "gpu_used": false,
+  "mlx_runtime_imported": false,
+  "validation": {
+    "split_cpu_tests": 7,
+    "preserved_geometry_tests": 4,
+    "offline_metal_variants": 4,
+    "metal_standard": "3.2",
+    "numeric_oracle": "FP32 online and partition merge versus independent stable double dense oracle, abs error<2e-6 on bounded fixtures; not GPU arithmetic compatibility",
+    "native_compile": "complete cmake Release build, -Wall -Wextra -Werror; no runtime import; linker target26.0 versus wheel26.7 warning observed"
+  },
+  "binary_path": "/tmp/mlx2-q1-long-splitkv-build-1004/_paged_kv_native.cpython-312-darwin.so",
+  "binary_sha256": "2faca5d1d90f67045edbfeff3a131e338b7db785284ac7b4a443ed7c71ee1ae0",
+  "mlx_library_path": "~/Desktop/mlx2/.venv/lib/python3.12/site-packages/mlx/lib/libmlx.dylib",
+  "mlx_library_sha256": "e19f759923b8e32f253d142eb46141d0c577911c93cf20aeed6dbb23790a242f",
+  "source_hashes": {
+    "native/paged_kv/q1_splitkv.h": "ac961034e723faa127b7de02d008b54f91da477fd3c4c3123b62842c2d11a03b",
+    "native/paged_kv/arena.cpp": "af4c3c9dcdab78ea1723d3b2a8590f3d235b7d1a10e1d5508059a7b60f4ea01b",
+    "native/paged_kv/arena.h": "d0a6936377cf89e4feed1e2c92544fd21a25f9961e79061d81eda33fb490a577",
+    "native/paged_kv/binding.cpp": "bf485cbd21679ccbf16ccd864de40fde04a8c8964ef5a96574410bc53fd897e8",
+    "tests/test_paged_q1_splitkv_source_cpu.py": "2f3b177496da7c3e4a005192760766a45d618c4aa7bb3b1eb6abd91fa5102b2a"
+  },
+  "preserved_kernel_sha256": {
+    "kAttentionReadSource": "892ae8e2dec62a613005a4ef476d2d3f3b40a28fc5a4c6d3f888f17c6c620b17",
+    "kAttentionReadQ1TileSource": "71b80b5d43992f5eee7031cfbd4ed964c004268e13f2e6bfdf61bb2e3147897d",
+    "kWriteSource": "3441f06dfff7bda295eabd0323c8898c7f139f8300e702ab44158d01bc497537",
+    "kGroupedQ1WriteSource": "f00cad56fe4afee61ebf74917d933985e28409a2f967ea4dac3ff6f28aef6c68",
+    "kQ1GatherSource": "5ce44148af22edae5206e73e55c4e90052623cd6918deb450b16f2cb7067f50c"
+  },
+  "counter_names": [
+    "q1_split_partial_dispatch_count",
+    "q1_split_reduce_dispatch_count"
+  ],
+  "next_gate": "Root-owned bounded GPU attention/complete-request parity, counters, terminal completion and controlled performance; then profile/adapter binding."
+}

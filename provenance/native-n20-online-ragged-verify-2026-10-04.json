@@ -1,0 +1,50 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "name": "native-n20-online-ragged-verify",
+  "date": "2026-10-04",
+  "base_revision": "f8f5a82a",
+  "origin": "original mlx2 integration over existing project mechanisms; no peer source copied",
+  "license": "Apache-2.0 project license",
+  "existing_inputs": [
+    "src/mlx2/runtime/ragged_verify_layout.py",
+    "src/mlx2/runtime/proposal_providers.py",
+    "src/mlx2/adapters/qwen35_paged_n_candidate.py",
+    "src/mlx2/runtime/paged_native_atomic_owner.py"
+  ],
+  "design_inputs": [
+    "Existing ragged layout provenance records pinned vLLM, SGLang and FlashInfer architecture research",
+    "Sister-session Strata comparison: complete transition planning, safe batch-to-solo handoff and per-request counters; no source copied"
+  ],
+  "modifications": [
+    "Online target verification over a shrinking active cohort",
+    "One selected accepted-prefix recurrent checkpoint per lane",
+    "Exact per-layer executed-prefix terminal proof and atomic KV/GDN publication",
+    "All-owner cohort publication preflight before public pointer swaps",
+    "Explicit default-off deterministic prompt-lookup proposal binding",
+    "Per-request proposal, acceptance, executed-row and physical-width receipts"
+  ],
+  "validation": {
+    "focused_isolated_cpu_checks": 168,
+    "runtime_compatibility_cpu_checks": 150,
+    "python_compile": "passed",
+    "git_diff_check": "passed",
+    "gpu": "bounded synthetic native Q1 and atomic KV/GDN publication gate passed",
+    "device_gate_source_revision": "50f87d62533f1b2cc029fab2c7474d2c0337cd3b",
+    "device_gate_receipt": "qualification/runs/native-n20-online-ragged-50f87d625-20261004/receipt.json",
+    "device_gate_round_widths": [3, 1, 1],
+    "device_gate_raw_bf16_equal": true,
+    "device_gate_all_state_retired": true,
+    "device_gate_swapouts_delta": 0,
+    "native_binary": "unchanged",
+    "native_binary_sha256": "1f67961f3185196c963505568a2443afde289ecb1d4fe6933a20a1132b63396a"
+  },
+  "status": {
+    "implemented": true,
+    "qualified": false,
+    "selected_by_default": false,
+    "observed_used_on_device": false,
+    "native_q1_and_atomic_publication_observed_used_on_device": true,
+    "observed_used_scope": "synthetic native layer and ownership gate only; model adapter, generator and HTTP route not observed",
+    "performance_claim": false
+  }
+}

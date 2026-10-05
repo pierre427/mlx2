@@ -1,0 +1,17 @@
+{
+  "name": "default-off native token-profile paged KV owner",
+  "status": "implemented-unqualified-default-off-host-contract",
+  "source_repository": "original mlx2 implementation based on private codex/varlen-paged-attention revision 6127ad4eb975f1a56b6f8b4b33e4c1bca672f61a",
+  "source_paths": [
+    "src/mlx2/runtime/paged_attention_metal.py",
+    "src/mlx2/runtime/paged_attention_plan.py",
+    "src/mlx2/runtime/paged_kv_pool.py",
+    "src/mlx2/runtime/paged_kv_write.py",
+    "native/paged_kv/binding.cpp",
+    "docs/research/varlen-paged-attention-build-plan-2026-10-03.md"
+  ],
+  "license": "original mlx2 project code; no third-party implementation copied",
+  "modifications": "Added a candidate-only token profile and completion-gated private owner. Page-local writes use the immutable reader's [page, KV head, token, channel] byte address, with one validated source chunk per head per page segment. Native source shape checks run before page reservation. No shared-tail copy, adapter conversion, or serving route is added.",
+  "validation": "CPU MLX-array/fake-backend tests cover 63/64/65-token addresses for two KV heads, source/capacity preflight, out-of-order successful callbacks, failed callback retirement, and shared-tail COW refusal; focused paged cache and write tests also pass.",
+  "limitations": "The fake backend does not prove native GPU token writes, same-stream diagnostic reads, real command-buffer failure retirement, APCv2 ownership, numerical attention parity, or any model serving route."
+}

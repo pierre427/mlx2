@@ -1,0 +1,16 @@
+Scoped notice for the routed MoE row window and router top-k launch/fold
+adapted from jundot/omlx PRs #4106 (head 0b4babcf54e6b6bbb4eaddeec0e73e9dc6063a35),
+#4052 (head d05afc7a7a59a871531b89ee769460581a26aabb), #4041 (merged,
+7ef4d997b5713aaef53aaadca9a656736a12fa74) and #4105 (head
+93e708a816a70a8183b5cefca4e81c1c3d48bef8), read on 2026-09-30. See
+provenance/omlx-4106-moe-window.json for paths and modifications.
+
+omlx — Apache License 2.0
+Source: https://github.com/jundot/omlx, omlx/patches/qwen35_moe_router.py
+(omlx_router_softmax_row; the integer key packing of omlx_router_topk) and
+omlx/patches/qwen35_moe_routed_decode.py (the window and top-k fold designs).
+mlx2_router_keys in src/mlx2/runtime/models/qwen4_moe_window.py follows
+omlx_router_softmax_row closely; the selection, slot order, normalization and
+all window kernels are mlx2's own (the window kernels are mlx2's one-token
+routed-decode sources, provenance/omlx-routed-split-flash-next.json).
+The full Apache-2.0 text is this repository's LICENSE.

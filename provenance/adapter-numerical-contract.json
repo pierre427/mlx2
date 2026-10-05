@@ -1,0 +1,44 @@
+{
+  "mechanism": "adapter-declared target numerical laws bind external learning and APCv2",
+  "implementation": "original mlx2 integration",
+  "source_repository": "local mlx2",
+  "source_revision": "e6b2be8910d6b6ded7364849009feebd7d2666fa",
+  "license": "Apache-2.0",
+  "paths": [
+    "src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/adapters/external_draft_policy.py",
+    "src/mlx2/serving.py",
+    "tests/test_adapter_numerical_contract_cpu.py"
+  ],
+  "modifications": [
+    "Qwen3.8 declares its selected fused GDN decode numerical contract, validating the live target layer switches against constructor policy before publication. Disabled math remains a None identity.",
+    "Direct external adapter binding derives an effective execution target pin before creating continuation sources and sessions, preserving raw target/tokenizer/draft artifact pins and binding the effective law to the external route and paired sidecars.",
+    "Serving snapshots optional generic adapter contracts into the same composed APCv2 numerical namespace used by both persistent and live keys and external learning rebinds. No model-name or environment branch is added to the scheduler.",
+    "Teacher feedback receives effective target/route pins while retaining the raw draft artifact revision. No training result or performance claim follows from this identity change.",
+    "2026-10-02 sweep: extend the existing schema to bind selected fp16 GDN storage and fp32 affine vocabulary-head logits before direct external source/session construction; validate live recurrent layers and head format/dtypes. Default missing/None/explicit-float32 state remains None, and the fused-only contract spelling/content remains unchanged."
+  ],
+  "validation": {
+    "cpu_only": true,
+    "result": "134 passed, 15 subtests passed in 1.11s; focused new contract plus source/session, sidecar/feedback, APC keys, fused-GDN admission and row-exact guards",
+    "lint": "New contract tests and shared external-draft policy pass Ruff; git diff --check passes. Existing whole-serving/adapter lint findings were not broadly rewritten.",
+    "focused_checks": "disabled identity preservation; direct/serving source/session/model isolation; raw tokenizer/artifact retention; executed paired sidecar and ranking; teacher feedback pins; canonical frozen contracts; live target disagreement refusal; APC key differential",
+    "qualified": false,
+    "metal_run": false,
+    "performance_claim": false,
+    "historical_m3_receipts": "Existing c702/6f source-bound receipts are unchanged and do not qualify this latest-main integration.",
+    "bug_sweep_precision_identity": {
+      "cpu_only": true,
+      "result": "62 passed in 0.35s",
+      "raw_log": "qualification/runs/bug-sweep-20261002/model-precision-identity-cpu.txt",
+      "checks": [
+        "selected fp16 storage/fp32 head/combined settings split direct target, source, model ranking and session pins",
+        "raw tokenizer/draft artifact pins retained",
+        "APC semantic namespace split",
+        "default None and explicit float32 storage unchanged",
+        "stale live storage/head receipt refused"
+      ],
+      "gpu_run": false,
+      "qualification_change": false
+    }
+  }
+}

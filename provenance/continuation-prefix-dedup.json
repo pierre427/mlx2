@@ -1,0 +1,48 @@
+{
+  "mechanism": "stable truncated-prefix sharing for ranked complete continuation pools",
+  "implementation": "original mlx2 host and lifecycle code",
+  "source_repository": "local mlx2",
+  "source_revision": "3f00bee9cc2fc5504d629def3e7c39b4177a53c6",
+  "license": "project license",
+  "paths": [
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/runtime/acceptance_estimator.py",
+    "src/mlx2/runtime/models/standard_decoder.py",
+    "tests/test_continuation_prefix_dedup_cpu.py"
+  ],
+  "execution_algorithm": "stable-truncated-prefix-dedup-v2",
+  "modifications": [
+    "Rank every complete candidate first; apply lagged adaptive width/depth admission, then share identical admitted truncated token paths using their first ranked representative.",
+    "Keep the full immutable ranked selection and every source contributor for reached-prefix calibration and global/model/session source ranking. Physical indices exclusively own target cache, tapped hidden state and steering; semantic indices exclusively select source credit and response metadata.",
+    "Bind shape costs to actual unique physical width at each candidate depth; missing physical full-shape cost retains the complete full-depth conservative backstop. Synthetic CPU costs are solely mechanism tests.",
+    "Require an explicit strict-True target contextual-prefix-equivalence capability and absence of residual-tap steering. Standard dense target advertises the unqualified candidate contract only for selected row-exact BF16 backbone math. FP32, FP16, ordinary, hybrid and unknown numerical geometries retain literal rows by default.",
+    "Expose ranked/admitted complete sequence counts separately from executed physical width, stable mappings, selected physical/semantic indices and observed duplicate reduction. Enabled pool identities pin the v2 algorithm; disabled ordinary/chain identity is unchanged.",
+    "Whole-cohort recovery restores physical mappings, target/draft state, RNG and diagnostic counters. Source ranking and teacher feedback remain committed-only after all requests succeed."
+  ],
+  "validation": {
+    "cpu_cases": 11,
+    "combined_cpu_result": "109 passed: dedup, complete-pool executor, estimator, row-exact, continuation-session binding",
+    "evidence": [
+      "Actual tiny BF16 standard target: four complete ranked paths at depth one share two target rows (B2S2), with second physical row mapped to semantic index two and byte-identical committed KV against serving-shaped ordinary replay.",
+      "Both complete-source contributors receive reached-prefix labels and global/model/session ranking credit; paired draft sidecar validates.",
+      "Mixed greedy/sampled lanes match actual-prefix serving laws and consume one RNG draw per reached token.",
+      "Later target failure restores both requests' KV/draft/RNG/mapping/coverage state, discards all tickets and submits no ranking or teacher labels; retry commits both once.",
+      "BF16/off, FP32, FP16 and steering gate tests; stable first-ranked mapping, actual physical cost lookup, unknown-width full backstop and malformed-map rejection."
+    ],
+    "qualified": false,
+    "metal_validation": {
+      "receipt": "qualification/runs/parallel-draft-thorough-20261001/m3/continuation-prefix-dedup.json",
+      "source_commit": "77758e62",
+      "result": "PASS fixed/adaptive greedy and mixed sampling on pinned Qwen3-4B BF16 + XPress; 11 duplicate branches removed and43 target rows saved in adaptive greedy; all34 reached sampled prefixes have zero law delta and exact numeric F32-host logits. Mixed sampled case naturally keeps full shape; CPU mixed sharing is a separate exercised check.",
+      "qualified": false,
+      "performance_claim": false
+    },
+    "performance_claim": false,
+    "default_selected": false,
+    "http": {
+      "receipt": "qualification/runs/parallel-draft-thorough-20261001/m3/http-adaptive-prefix-final.json",
+      "result": "PASS 17-token bounded HTTP integration: 690 ranked complete candidates,563 admitted,256 physical sequence rows,307 deduplicated branches,8 paired APCv2 resumes,cancellation1,no draft fallback; global/model/session ranking retained. Counters include diagnostic attempted/committed rounds as defined by scheduler; not throughput evidence.",
+      "qualified": false
+    }
+  }
+}

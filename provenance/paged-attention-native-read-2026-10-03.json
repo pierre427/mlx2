@@ -1,0 +1,19 @@
+{
+  "name": "default-off native fp16 paged attention arena read",
+  "status": "implemented-unqualified-default-off",
+  "source_repository": "original mlx2 implementation extending codex/varlen-paged-attention 05feadc7; MLX wheel 0.32.2.dev20260919+39400a0d4, MLX source 39400a0d4cf1641bc6e543cb5e3585757f491854; nanobind a47983000e9dda68177fc1fd426f7147d785c2c0",
+  "source_paths": [
+    "src/mlx2/runtime/paged_attention_metal.py",
+    "src/mlx2/runtime/paged_attention_plan.py",
+    "src/mlx2/runtime/paged_attention_pack.py",
+    "native/paged_kv/arena.h",
+    "native/paged_kv/arena.cpp",
+    "native/paged_kv/binding.cpp",
+    "mlx/include/mlx/primitives.h",
+    "mlx/include/mlx/backend/metal/device.h"
+  ],
+  "license": "original mlx2 project code; MLX and nanobind APIs used without copied implementation",
+  "modifications": "separate fp16-only native paged attention primitive over the opaque K/V arena, validated host span/page metadata, distinct read terminal events, Python candidate admission and pinned packed-read lease, default-dry-run native gate",
+  "validation": "CMake compiled and linked against the pinned wheel; native extension imported and exposed read symbols; 48 pure CPU host tests passed on the isolated source. The integrated checkout passed 25 focused CPU tests and a bounded M5 native 65/63-token two-lane, four-row opaque-arena attention probe against the CPU oracle under gpuq; raw result and exact source/binary hashes are in qualification/runs/varlen-native-attention-20261003/.",
+  "limitations": "Bit invariance under companion churn, real failed command-buffer retirement, cross-stream ordering, bf16/q8/QSA/sinks, small-model serving and performance remain unverified. No route selects this candidate."
+}

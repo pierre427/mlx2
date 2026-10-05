@@ -1,0 +1,35 @@
+{
+  "component": "Agnes quantized GDN projection-loading candidate",
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx-lm-unified.git",
+  "source_revision": "9c9731b66fdcb5a6e1d4b472981d7db6240995a5",
+  "source_paths": ["mlx_lm/utils.py", "mlx_lm/models/qwen3_5.py", "tests/test_agnes_fusion_load.py"],
+  "upstream_mechanism": "Rapid-MLX PR 2159, merge e1785bc (Apache-2.0)",
+  "license": "MIT source repository plus Apache-2.0 fusion mechanism",
+  "destination_paths": ["src/mlx2/runtime/agnes_projection_fusion.py", "tests/test_agnes_projection_fusion.py", "scripts/probe_agnes_projection_fusion_cpu.py"],
+  "modifications": [
+    "Made installation a default-off Agnes-only explicit candidate API, not a load hook or serving route.",
+    "Require exact quantized affine projection geometry and per-layer byte parity on the current device before replacing four projections.",
+    "Return a receipt that distinguishes fused layers, declined layers, and serving selection."
+  ],
+  "qualification": {
+    "device": "CPU",
+    "artifact": "~/mlx-models/Agnes-3.0-Flash-Preview-MLX-6bit",
+    "config_sha256": "578c8f66695c32ea96c4fae278467611ca747960939a01d0f78b9077b3af5f36",
+    "index_sha256": "c2c742ecc43070de0a7cafa369838e543ad086681ddca4e19bcc934f65fddc3f",
+    "metadata_audited_gdn_layers": 54,
+    "real_weight_probed_layers": [0, 34, 70],
+    "real_weight_probe_dtypes": ["bfloat16", "float16"],
+    "wide_row_split_exact": true,
+    "limitations": "Real-weight byte parity was sampled on three of 54 GDN layers. No full-layer, Metal, memory, throughput, or serving qualification; never selected for serving."
+  },
+  "gpu_probe": {
+    "receipt": "qualification/runs/agnes-compact-head-gpu-20260930/results.json",
+    "lock_receipt": "qualification/runs/agnes-compact-head-gpu-20260930/lock-window-complete.json",
+    "real_weight_probed_layers": [0, 34, 70],
+    "dtypes": ["float16", "bfloat16"],
+    "widths": [9, 16],
+    "stock_projection_parity_exact": true,
+    "selected_for_serving": false,
+    "limitations": "Bounded component probe only; no full-model route, APCv2 replay, or serving-throughput qualification."
+  }
+}

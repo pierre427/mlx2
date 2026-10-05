@@ -1,0 +1,34 @@
+{
+  "schema": "mlx2-source-provenance-v1",
+  "implementation": "explicit cold real-row hybrid packed prefill and source-bound root diagnostic",
+  "source_repository": "mlx2 private Forgejo",
+  "source_revision": "682fef0633b371afa542e8f424cd5bf929d5eaae",
+  "source_paths": [
+    "src/mlx2/runtime/models/qwen3_5.py:GatedDeltaNet.mixed",
+    "src/mlx2/adapters/qwen35_paged_candidate.py",
+    "src/mlx2/adapters/qwen3_paged_candidate.py:forward_staged",
+    "src/mlx2/runtime/qwen35_paged_graph_factory.py",
+    "scripts/research/varlen_hybrid_b1_numeric_gate.py"
+  ],
+  "license": "original project orchestration; existing model math reused through MIT adapter/model APIs; no external source copied",
+  "modifications": [
+    "Real packed projection/MLP rows with ordinary independent GDN segment cores",
+    "Strict preallocation native capability/source profile checks and physical write/row/read proof",
+    "Charged cold unattached state then generation-zero joint owner construction after full materialization/terminals",
+    "Generic packed-versus-imported bootstrap receipts preserving generation guards",
+    "Root-only bounded 27B full numeric/cache comparison and actual paired continuation/sampler handoff"
+  ],
+  "native_dependencies": {
+    "grouped_multirow_writer": "bc215646afe24fb58c6cf65a92623be06f06b764",
+    "segmented_matrix_reader": "5f2f34536146f3b9b4eeeb5b193d22f57997f2e2"
+  },
+  "validation": [
+    "18 direct CPU control-flow/protocol tests with MLX/native import guard passed",
+    "7 preceding host row-addressing checks passed",
+    "AST/py_compile/diff checks and dry planned runner passed",
+    "GPU/kernel/model runtime untested by author; no exact numeric or performance claim"
+  ],
+  "qualified": false,
+  "default_enabled": false,
+  "observed_device_use_by_author": false
+}

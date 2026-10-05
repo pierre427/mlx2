@@ -1,0 +1,15 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "research-only actual full-attention boundary probe for hybrid B2",
+  "source_repository": "mlx2",
+  "source_revision": "bafa71d1cfff5d9905e821f665a792f7aa3220a9",
+  "source_paths": [
+    "src/mlx2/runtime/models/qwen38_27b.py:Qwen3NextAttention._attend",
+    "src/mlx2/runtime/models/base.py:scaled_dot_product_attention",
+    "src/mlx2/runtime/paged_kv_write.py:NativeWriteBackend.diagnostic_read",
+    "src/mlx2/runtime/paged_kv_token.py:PagedKVTokenOwner.accepted_handles"
+  ],
+  "license": "MIT",
+  "modifications": "New import-safe, bounded research probe captures the actual loaded ordinary SDPA call and optional candidate native result at layers 7 and 27, exports completed private KV pages, and separately labels a stock-SDPA replay on identical native Q/K/V. No model math, route, or native primitive changed.",
+  "validation": "Three CPU tests cover actual callback capture, 16-layer ordinary interception, and logical page export. GPU numeric outcome remains unmeasured."
+}

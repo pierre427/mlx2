@@ -1,0 +1,43 @@
+{
+  "source_repository": "https://github.com/ml-explore/mlx",
+  "source_revision": "39400a0d4cf1641bc6e543cb5e3585757f491854",
+  "source_paths": [
+    "mlx/backend/metal/matmul.cpp",
+    "mlx/backend/metal/softmax.cpp",
+    "mlx/backend/metal/kernels/softmax.h",
+    "mlx/backend/metal/kernels/steel/gemm/nax.h",
+    "mlx/backend/metal/kernels/steel/gemm/gemm_nax.h",
+    "mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_fused_nax.h",
+    "mlx/backend/metal/device.cpp"
+  ],
+  "source_file_sha256": {
+    "mlx/backend/metal/matmul.cpp": "904d2173f5b915e8a502993978a44224202974f7efa85fd68a016bbaa15d371a",
+    "mlx/backend/metal/softmax.cpp": "e0f8028a3a41659ff85cf6d2b9f318dff50f85ab61b3f0260bb535f3980deffa",
+    "mlx/backend/metal/kernels/softmax.h": "cb233fe42a7358f5f658c9a1ef52cd2ee9dd3786ddfad01793a976d58f4d4051",
+    "mlx/backend/metal/kernels/steel/gemm/nax.h": "fb10bcae44095e9fed5c81213d03527dd5fe5ac11be11ec7784bd357c6f317ec",
+    "mlx/backend/metal/kernels/steel/gemm/gemm_nax.h": "8f8d11f3c29e30dbfcaa6799963edd5fb71b81f912c4f3494e294d3002e3d337",
+    "mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_fused_nax.h": "149ffe9006edd26daf8c1379ced976f39d929c2cf7cdb57d075be24fc1779765",
+    "mlx/backend/metal/device.cpp": "008b67e599f5508ab670a91f2ea80372162a8767b5226fbbeb9f3d23c85cdb7c"
+  },
+  "license": "MIT",
+  "license_copy": "native/paged_kv/vendor/MLX-LICENSE",
+  "modifications": [
+    "Mine exact pinned NAX fragment mapping and MPP matrix arithmetic with original notices; strip local include directives. Existing Steel utility donor recorded separately in paged-prefill-matrix-reader.json. No upstream edits or publication.",
+    "Replace dense GEMM fragment loads with unwindowed origin-zero page loads, BF16 scaledQ for scores, using exact stock regular BM64 BN128 BK256 WM2 WN4 per-SIMD32x32 tiles and 32-wide reduction chunks. Score/P@V float accumulator and BF16 stores remain.",
+    "Separate masked BF16 score, pinned precise-softmax N_READS4/simd_sum, and NAX P@V dispatches. Softmax uses64threads; for axis<=128 second SIMD contributes exactzero. Padding beyond actual axis never participates.",
+    "Default-off explicit new selector MLX2_PAGED_PREFILL_NAX_EXACT requires existing matrix selector. Counts9..129/end<=129,24query/4KV heads,D256,BF16,1..2spans,origin/window0,architecture s. AllQ1 reference remains unchanged.",
+    "Declare independent new charged capability: two BF16 score/P matrices sized totalrows*24*129 each, totalrows<=258, scratch<=3195072bytes. Old zero-global-scratch matrix capability unchanged. Native MLX temporary and callback captures retain both arrays; callback success only after allthree encoded kernels and successfulcommandbuffer; exact stage counters increments after physical dispatch.",
+    "Source/binary-bound standalone oracle adds --nax-exact, requires raw bit equality and exactstagecounterdeltas[1,1,1], reports scratchcharge/release and terminal/quiescent page retirement. No serving/default admission added."
+  ],
+  "validation": {
+    "gpu_executed": false,
+    "qualified": false,
+    "selected_default": false,
+    "offline_metal": "Full source compiled with installed xcrun Metal4.0 (required for NAX MPP/lambdas); Metal3.1 is unsupported. Exact pinned device.cpp choosesMetal4.0 onmacOS26.",
+    "native_build": "Full native C++module compiled/linked against pinned wheel without runtime import.",
+    "cpu": "54 passed,1 runtime-only stride test deselected,10 subtests passed under MLX/native import guard. Eleven new NAX short admission/charge, fragment unique-ownership/tail, strict oracle and physical scratch-dependency/callback tests.",
+    "binary_path": "/tmp/mlx2-prefill-nax-exact-build-1004/_paged_kv_native.cpython-312-darwin.so",
+    "binary_sha256": "b3e9d0878ae1048f0337bc6b45a5982058eae74580ad70e66186299cb4ed2ca0"
+  },
+  "status": "implemented-default-off-exactness-candidate-unqualified-device-oracle-pending"
+}

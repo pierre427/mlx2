@@ -1,0 +1,15 @@
+Scoped notice for code adapted from jundot/omlx pull request #4113 (open,
+head 1335263e8503b3f632819b0d3985a5b7b45fe92c, read 2026-09-30). See
+provenance/omlx-4113-routed-candidate.json for paths and modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx
+   omlx/patches/qwen35_moe_routed_decode.py: the two-table qmv_rows gate+up,
+   the qmv_fast/qmv down traversal and the top-k-generic combine fold,
+   re-expressed in the candidate section of
+   src/mlx2/runtime/models/qwen4_routed_decode.py.
+   The full Apache-2.0 text is this repository's LICENSE.
+
+2. MLX — MIT License: the quantized dot-product helpers are the existing
+   QMV_HEADER already covered by provenance/omlx-fn-2026-09-25.NOTICE.
+   No Apple copyright header is added to mlx2 source files.

@@ -1,0 +1,39 @@
+{
+  "component": "fp16 GDN recurrent-state storage class (gdn_state_dtype policy; default off, unqualified)",
+  "source_repository": "none (idea only, no code mined); original mlx2 implementation",
+  "source_revision": null,
+  "source_references": [
+    "arXiv 2608.27513 'DAMP' (SGLang, Qwen3.6-35B): narrows the live GDN recurrent state (INT8 with 16 FP16 key channels per head) and requantizes it every decode step in a fused kernel; reports FP16 state near FP32 on AIME (84.6 vs 85.5) where BF16 is not (79.7), up to 2.59x update kernel and up to 19% lower TPOT. mlx2 takes the idea of a narrowed live state and uses an fp16 layout instead of int8, per the recon-20261001 l6 drift probe (provenance/gdn-state-quant-research.json).",
+    "jundot/omlx PR #2644 (merged 2026-08-15, Apache-2.0), read-only for comparison: storage-only fp32/bf16/int8/rht_int8/rht_int16 codecs for persisted GDN sidecars; omlx's live state stays fp32 and restored tensors return as fp32. Nothing copied."
+  ],
+  "license": "n/a (paper read for the idea; no third-party code copied)",
+  "destination_paths": [
+    "src/mlx2/runtime/models/gdn_state.py",
+    "src/mlx2/runtime/models/gated_delta.py",
+    "src/mlx2/runtime/models/qwen4_fused_gdn.py",
+    "src/mlx2/runtime/models/qwen4_fused_gdn_verify.py",
+    "src/mlx2/runtime/models/qwen4_fused_gdn_prefill.py",
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "src/mlx2/runtime/models/qwen3_5.py",
+    "src/mlx2/runtime/models/qwen36_35b.py",
+    "src/mlx2/adapters/flash_next.py",
+    "src/mlx2/adapters/flash_next_policy.py",
+    "src/mlx2/adapters/flash_next_memory.py",
+    "src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/adapters/qwen38_memory.py",
+    "src/mlx2/adapters/qwen36_35b.py",
+    "tests/test_gdn_state_fp16_cpu.py",
+    "tests/test_gdn_state_fp16_metal.py",
+    "qualification/runs/recon-20261001/l6b-fp16-state/"
+  ],
+  "modifications": [
+    "Numerics law (mlx2's own): the state is loaded as fp16, each token's update and readout run in fp32 registers, and the state is rounded to fp16 (round to nearest even) after every token's readout, also inside multi-token prefill, verify and replay launches. Stored bits therefore do not depend on launch grouping, and the composed stock chain is the bit reference for every fused kernel.",
+    "fp16 kernel bodies are checked textual derivations (gdn_state.derive_source) of the unchanged fp32 sources: half state pointers, one per-token rounding loop, half stores. The fp32 kernels keep their exact source and kernel names.",
+    "Selection is per layer from the adapter execution policy (gdn_state_dtype: float32|float16) on Flash-Next, Qwen3.8 27B and Qwen3.6 35B; never an environment switch. fp16 appends 'gdn-state-fp16-v1' to the APCv2 cache layout fingerprint (memory and persistent namespaces); a carried state of the other class is refused (ValueError) on the stock and fused paths.",
+    "Not covered (refused or fall back, counted): MLX's mx.fast.gated_delta_update core scan (MLX_GDN_CORE / gdn_prefill_chunk; fp32-only, falls back with reason fp16_state), the fused_outproj decode epilogue (fallback), and the Qwen3.8 tree-GDN research route (refuses non-fp32 state).",
+    "Cache budgets (FlashNextCacheBudget, Qwen38CacheBudget) charge 2 bytes per recurrent-state value (live and rollback) under fp16; conv state and K/V unchanged; default receipts unchanged."
+  ],
+  "validation": [
+    "See qualification/runs/recon-20261001/l6b-fp16-state/README.md for the Metal bit gates, the fp32-unchanged comparison against main a3f07334, the teacher-forced drift runs with the real kernels, the decode A/B and the serving smoke."
+  ]
+}

@@ -1,0 +1,29 @@
+Scoped notices for code adapted from jundot/omlx pull requests #4113, #4039
+and #4055 (read 2026-09-30). See provenance/omlx-routed-split-flash-next.json
+for paths, revisions and modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx
+   - PR #4113 head 1335263e8503b3f632819b0d3985a5b7b45fe92c:
+     the two-table gate+up (qmv_rows) structure of
+     omlx/patches/qwen35_moe_routed_decode.py, carried (via mlx2's top-8
+     candidate) as SPLIT_GATE_UP_SOURCE in
+     src/mlx2/runtime/models/qwen4_routed_decode.py.
+   - PR #4039 head 3d433694214f5082aabd754d27cb3ee57f9889f1 (merged):
+     the one-expert view technique (_expert_view/_address) of
+     omlx/patches/qwen35_moe_routed_decode.py, re-expressed as
+     expert_operands/_expert_view in the same file.
+   - PR #4055 head e6108149a4b4feb707d54c0ab33f8e02a6a8652a:
+     the two-rows-per-launch-unit idea for one-token down, applied to
+     mlx2's own tile4 arithmetic (SERVED_DOWN_SOURCE).
+   The full Apache-2.0 text is this repository's LICENSE.
+
+2. MLX — MIT License: the quantized dot-product helpers used by the gate+up
+   kernel are the QMV_HEADER already recorded in
+   provenance/omlx-fn-2026-09-25.NOTICE (Copyright © 2023-2026 Apple Inc.;
+   text in provenance/LICENSE.unified-MIT). No Apple copyright header is
+   added to mlx2 source files.
+
+3. mlx-lm-unified — MIT License: SERVED_DOWN_SOURCE copies the per-row
+   arithmetic of qwen4_fused_moe's tile4 kernel, itself adapted from
+   mlx-lm-unified (provenance/flashnext.json; provenance/LICENSE.unified-MIT).

@@ -1,0 +1,30 @@
+{
+  "mechanism": "whole-prompt long native real-row packed hybrid research serving",
+  "source_repository": "mlx2 private Forgejo",
+  "source_revision": "95b3a761e9552aad2056eb900a79e53417920810",
+  "native_source_revisions": [
+    "979a837d",
+    "3dce8457"
+  ],
+  "native_sha256": "713550511e98213b62793d8df2d9eb1c77062c5264503980099e2ef0daf8015a",
+  "license": "project license; original local integration",
+  "modifications": [
+    "distinct strict long capability/profile/environment",
+    "whole real-row factory stock-long Q1 and terminal handoff",
+    "zero-score-scratch long host plan preserving page and causal validation",
+    "explicit40GiB host-bound conservative admission with12GiB default unchanged",
+    "new bounded same-geometry model and actual HTTP gates"
+  ],
+  "validation": {
+    "gpu_executed_by_worker": false,
+    "whole_prompt_cpu_token_roundtrip": [
+      6950,
+      6929
+    ],
+    "qualified": false,
+    "price_usable": false,
+    "serving_default": false,
+    "focused_cpu_checks": 86
+  },
+  "finite_validation_revision": "c81cc78860a44d3903e4bb8e629e7ad0e39fc9af"
+}

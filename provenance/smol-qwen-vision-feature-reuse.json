@@ -1,0 +1,46 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+  "source_revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+  "license": "MIT",
+  "license_source": "pyproject.toml",
+  "source_files": {
+    "mlx_vlm/models/idefics3/idefics3.py": {
+      "sha256": "6441d479c5da66667fc450478e66e5198a0bb9d493ee1880768bee73a332c573"
+    },
+    "mlx_vlm/models/qwen2_5_vl/qwen2_5_vl.py": {
+      "sha256": "5f0c0f5928e248cb14746b59f961bb9b51181536130007db9065da065b331e13"
+    }
+  },
+  "destination": [
+    "src/mlx2/adapters/vision_feature_reuse.py",
+    "src/mlx2/adapters/pinned_vlm_candidate.py",
+    "src/mlx2/adapters/qwen25_vl.py",
+    "src/mlx2/adapters/smolvlm2.py"
+  ],
+  "modifications": [
+    "Kept source embedding and merge operations; cache only the exact features accepted by each pinned cached_image_features seam",
+    "For Smol, capture projected source features after the connector using a model-local merge hook with per-context capture state",
+    "For Qwen, call the pinned vision tower with the same cast pixel tensor and selected image/video grid before the source merge",
+    "Require an adapter-owned HMAC over generated prompt tokens, ordered media fingerprint and boundary, then certify the full cold serving token span and artifact/source/processor identity",
+    "Keep feature reuse base-only until selected LoRA vision weights have a revision-bound snapshot",
+    "Install only under explicit candidate selections with distinct execution-config route identities; indexed Smol scatter remains a separate option",
+    "Count feature reuse refusals only on media-bearing forwards; ordinary text decode and APCv2 continuation bypass the vision tower without incrementing refusal telemetry",
+    "Added default-off tower-only scope: HMAC binds bounded exact processor pixel/mask/grid tensor digest, including host materialization when the pinned processor already returns MLX arrays; cache key excludes trailing prompt tokens only in this scope, while the donor still performs each prompt-specific merge",
+    "Tower-only scope has a separate 16-entry, 256 MiB evaluated-feature LRU and refuses selected LoRA, unsupported processor values, mixed image/video inputs, and oversized CPU tensor digests",
+    "Generic serving admission hook reserves one full 256 MiB possible new feature tensor only for a cold tower-only media prefill; live measured headroom already includes resident feature arrays"
+  ],
+  "validation": {
+    "CPU_only": false,
+    "fake_source_order_and_cache_contract": "import-guarded tests passed, including neutral text-only continuations for Smol and Qwen",
+    "real_model_load": "M3 isolated pinned-source image prompts for SmolVLM2-256M and Qwen2.5-VL-3B; see docs/experiments/MULTIMODAL-M3-CANDIDATE-SMOKE-2026-09-26.md",
+    "image_video_output_parity": "One image prompt per model: source vs miss/hit logits max absolute difference 0.0; video not tested",
+    "APCv2_reuse": "One-token post-media replay trimmed one token and matched logits exactly for both image prompts",
+    "performance": "not measured",
+    "serving": "M3 qualification-mode Smol and Qwen two-cold-image runs with APCv2 publication skipped: each candidate recorded one feature miss, store, and hit; no speed measurement. See docs/experiments/MULTIMODAL-M3-CANDIDATE-SMOKE-2026-09-26.md",
+    "tower_only_scope": "Import-guarded CPU fake-source tests cover Smol/Qwen distinct trailing prompts, exact pixel/grid/mask identity, order/refusal, bounded eviction. Bounded M3 source-versus-candidate image and two-frame video runs for each family changed trailing text with identical media: candidate feature miss/store then hit, changed-pixel miss/store, full prefill and four teacher-forced decode logits max absolute difference 0.0 in all cases. See docs/experiments/SMOLVLM2-M3-TOWER-TAIL-2026-09-26.json, SMOLVLM2-M3-TOWER-VIDEO-2026-09-26.json, QWEN25-M3-TOWER-TAIL-2026-09-26.json, and QWEN25-M3-TOWER-VIDEO-2026-09-26.json.",
+    "tower_only_limit": "Separate 256 MiB feature LRU and cold peak increment are bounded; M3 physical pressure and concurrent-lane gates remain. Bounded tower-only APCv2 serving coexistence passed on M3 for one image and two-frame video per family, but mode remains unqualified and unselected. Direct-model synthetic timing measured the exact MLX-to-host digest cost and tower-hit prefill; this does not establish HTTP latency or serving throughput.",
+    "tower_only_apcv2": "M3 qualification-mode source and candidate runs for Smol/Qwen image/video completed cold, warm, changed-tail, changed-leading-text, changed-pixel, and returned-original requests with identical visible output/reasoning/finish reason per pair. Candidate feature counters: one hit, two misses/stores, zero refusals; changed lead had zero APCv2 cached tokens and hit the tower cache, while changed tail reused a post-media APCv2 prefix. Four or five APCv2 hits per run. See docs/experiments/TOWER-ONLY-M3-APCV2-COEXISTENCE-2026-09-26.json.",
+    "tower_only_admission": "Focused import-guarded CPU tests cover cold reserve, warm/text/LoRA omission, default-off adapter hook, and invalid size refusal. No M3 pressure or concurrent-lane receipt yet. The 256 MiB reserve bounds only a cache-admissible retained result; oversize results and donor vision activations can transiently exceed it before cache.put refuses storage.",
+    "tower_only_direct_timing": "M3 synthetic-image direct model screen, eight changed-leading-text prompt repetitions per source/candidate process after two warmups, reversed process order in a second pass: source/candidate median preparation-plus-prefill 1093/242 and 1091/242 ms for Smol, 665/372 and 664/372 ms for Qwen. Candidate counters had nine hits, one miss/store, zero refusals per process. Exact input digest increased Smol median preparation by about 31 ms and Qwen by about 1.7 ms. No APCv2 instance or full-logit comparison for those timing prompts; no HTTP or serving throughput claim. See docs/experiments/TOWER-ONLY-M3-DIRECT-TIMING-2026-09-26.json."
+  }
+}

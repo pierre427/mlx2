@@ -1,0 +1,17 @@
+{
+  "name": "deterministic external proposal composition",
+  "implementation": "original mlx2 integration using existing MIT prompt-lookup and native-MTP protocols",
+  "sources": [
+    {"repository": "mlx2", "revision": "6ae4e6ba65e2fdbb26533ff7f4363c306886e9e4", "paths": ["src/mlx2/runtime/prompt_lookup.py", "src/mlx2/runtime/hybrid_speculative.py", "src/mlx2/adapters/external_draft_policy.py"], "license": "MIT", "upstream_notice": "provenance/flashnext.json"}
+  ],
+  "modifications": [
+    "Explicit revision-bound external policy with PLD then optional bounded private native-MTP then external arbitration",
+    "External backbone maintains committed feature caches before selected point-mass proposals replace rows",
+    "Reconstruct copy index solely from committed history and current anchor each round",
+    "Adapter-owned native-MTP teacher forcing and full-vocabulary greedy chain using fresh private target and head caches, discarded on success or failure",
+    "Invalidate current external confidence proxy for substituted rows; unchanged exact target rejection verification"
+  ],
+  "validation": {"cpu": "19 focused composition cases and 42 combined composition/adaptive/APCv2 cases passed on CPU; Ruff passed for new source and tests", "gpu": "not run by this worker"},
+  "status": {"implemented": true, "qualified": false, "selected": "explicit proposal_composition policy only", "trained_hybrid_checkpoint": false},
+  "limitations": ["No avoided external-backbone compute claim", "Native-MTP private recomputation is bounded and does not publish a paired persistent MTP sidecar", "Stochastic external and paired-context-token backends fail closed", "DPara remains a single-request research candidate and can consume selected spines without a serving route"]
+}

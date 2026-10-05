@@ -1,0 +1,30 @@
+Scoped notices for code adapted from jundot/omlx pull requests #4023 and
+#4050 (merged; read 2026-09-30). See provenance/omlx-row-exact-verify.json
+for paths, revisions, hashes and modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx
+   - PR #4050 head 65a07cab0cea09c9797ccc2c7744db85274f9252 (which carries
+     PR #4023's row_exact_qmv.py with #4050's K-alignment fix):
+     omlx/patches/row_exact_qmv.py — the Metal tile ``_TILE``, the decoded
+     dot product ``_DECODED_DOT``, the launch source ``_SOURCE``, the launch
+     geometry (``_launch_geometry``, ``_RPS``, ``_SHARED_ROWS_MIN_TILES``,
+     ``_ROW_VALUES_BUDGET``) and the per-module plan cache, carried in
+     src/mlx2/runtime/models/row_exact_qmv.py.
+   - PRs #4023, #4041, #4052, #4105 and issues #4014, #4102 were read for the
+     component inventory (projections, norms, attention rows, GDN, MoE
+     window) and the fail-closed design; no other code is copied.
+   The full Apache-2.0 text is this repository's LICENSE.
+
+2. MLX — MIT License (scoped to the quantized dot-product helpers
+   load_vector, load_vector_safe and qdot_n that the tile calls; they are the
+   QMV_HEADER already carried in src/mlx2/runtime/models/qwen4_routed_decode.py,
+   see provenance/omlx-fn-2026-09-25.NOTICE)
+
+   Copyright © 2023-2026 Apple Inc.
+
+   omlx transcribed these from MLX 0.32.2
+   mlx/backend/metal/kernels/quantized.h; mlx2 uses its float-sum
+   adaptation for the lab MLX fork in the mlx2 venv. The MIT text is
+   provenance/LICENSE.unified-MIT (same terms). No Apple copyright header is
+   added to mlx2 source files.

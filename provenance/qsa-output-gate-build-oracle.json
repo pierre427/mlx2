@@ -1,0 +1,67 @@
+{
+  "name": "qsa-output-gate-build-oracle",
+  "status": "implemented (opt-in test code only); host vector builder CPU-tested; native tests NOT executed; nothing is qualified, selected or observed-used, and no performance, model or serving claim is made",
+  "license": "Apache-2.0 (mlx2 LICENSE); original local validation harness code, no third-party code, text or math copied; no Apple copyright header",
+  "origin": "original mlx2 test harness for the existing QSA output-gate epilogues; not mined from mlx-lm-unified or any other repository",
+  "destination_paths": [
+    "tests/test_qsa_output_gate_build_metal.py",
+    "tests/test_qsa_output_gate_vectors_cpu.py",
+    "provenance/qsa-output-gate-build-oracle.json"
+  ],
+  "baseline": {
+    "revision": "4a8d0e799aed657b322be86372d59c7e41f4a9fd",
+    "production_paths_unchanged": [
+      {
+        "path": "src/mlx2/runtime/models/qwen4_qsa_indexed_merge.py",
+        "blob": "1fbe4d86dd4ebddb2abbf52395002f0040e47cd2",
+        "sha256": "46dfadde1808edf7ed46b04f3ba23408b0c3c6ee3f8bd19871d6378e14b54ce9",
+        "entry_points": "combine_indexed_partials (gated fused kernel _SOURCE_GATED, gate_path sequential_fused_merge); mlx_apply_output_gate (ordinary reference); fused_merge_status"
+      },
+      {
+        "path": "src/mlx2/runtime/models/qwen4_qsa_indexed.py",
+        "blob": "f75259714b01ae89479552c32e940f71c9501ed1",
+        "sha256": "a4eae03fac51343ceefc0cf8893ff1f4628a000aa8fa1905bab6c9ff957f40db",
+        "entry_points": "_combine_sdpa_partials with fused merge off and output_gate passed (gated pass-2 kernel _COMBINE_SOURCE_GATED, record_native_gate_engaged, gate_path native_sdpa_merge)"
+      }
+    ],
+    "ordinary_reference": "mlx_apply_output_gate: transpose to (B, L, H*D), flat * mx.sigmoid(output_gate) at the storage dtype (standalone sigmoid then dtype multiply; not nn.silu), transpose back",
+    "fused_arithmetic_under_test": "both gated kernels compute the sigmoid at the storage dtype as T(1) / (T(1) + metal::exp(|x|)), select by sign, apply a bf16-only correction at x == -6.84375, then multiply the storage-dtype attention value"
+  },
+  "design": {
+    "routes": {
+      "sequential_fused_merge": "merge.combine_indexed_partials with MLX_QWEN4_QSA_INDEXED_FUSED_MERGE=1; ungated call with FUSED_GATE=0, gated call with FUSED_GATE=1; on_fallback recorded; status must show engaged, fallbacks 0, gate_engaged true, gate_path sequential_fused_merge",
+      "native_sdpa_merge": "indexed._combine_sdpa_partials with FUSED_MERGE=0 (FUSED_GATE 0 ungated, 1 gated); the engaged sentinel must be returned as the same object and evaluate to [1]; status must show gate_engaged true, gate_path native_sdpa_merge, merge not engaged, fallbacks 0"
+    },
+    "dtypes": ["bfloat16", "float16", "float32"],
+    "cells": 6,
+    "oracle": "gated raw bits == raw bits of mlx_apply_output_gate(ungated output of the same route and geometry, same gate); ungated output evaluated before the gated call; status reset before the gated call so the ungated call cannot satisfy engagement; gated bits must differ from ungated bits somewhere (an ignored gate fails); dtype, shape and element count checked; refusal, fallback or mismatch fails the test, never skips",
+    "bit_view": "mx.view to uint16 (bf16, fp16) or uint32 (fp32); the uploaded gate is read back through the same view and compared with the host encodings",
+    "geometry": "B2 H2 L64 D256, P128 partials (the SDPA combine's fixed block count); 65536 gate cells per native cell; an activation/epilogue sweep geometry, not a verify window",
+    "partials": "m = -((p*5) % 8)/4, l = 1 + (p % 4)/4, O = amplitude(b,h,l,d) * scale(p) formed in fp32 and cast to the output dtype; 13 dyadic amplitudes (positive, negative, +0, -0, down to 2**-10, up to 64) and 4 partial scales; every product is exact in bf16 and fp16 and |O| <= 80",
+    "gate_vectors": {
+      "bfloat16": "exhaustive-finite: all 65280 finite encodings ascending (incl. +/-0, subnormals, +/-max, correction 0xC0DB and +/-4 neighbours), padded with 256 cyclic edge encodings",
+      "float16": "exhaustive-finite: all 63488 finite encodings ascending (incl. +/-0, subnormals, +/-max, -6.84375 = 0xC6D8 and +/-4 neighbours), padded with 2048 cyclic edge encodings",
+      "float32": "sampled-finite, NOT exhaustive: 31 explicit edges (+/-0, +/-min and max subnormal, +/-min normal, +/-max, +/-1, +/-0.5, 0xC0DB0000 +/-4 ulps, bf16 correction neighbours widened) plus splitmix64 raw-bit mantissas (seed 0x51A06A7E): 64 per finite exponent per sign and 1160 per exponent per sign over |x| in [2**-8, 2**6); 65148 unique, padded with 388 cyclic edge encodings"
+    },
+    "host_scope": "gate encodings, m/l tables, amplitude grid and partial scales are built with the Python standard library only; module import pulls in os, struct and pytest; mlx, numpy and mlx2.runtime are imported only inside the native test body after the MLX2_TEST_OPTIONAL_METAL skip gate",
+    "gpu_ownership": "the native test does not acquire CPG GPU ownership, locks or a queue slot; exclusive CPG ownership and both GPU locks are externally mandatory before MLX2_TEST_OPTIONAL_METAL=1. Default device and environment are restored; fused merge status (no public restore) is reset after each cell"
+  },
+  "validation": [
+    "PYTHONPATH=src PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ~/Desktop/mlx2/.venv/bin/python -m pytest --noconftest -p no:cacheprovider -o addopts= -q tests/test_qsa_output_gate_vectors_cpu.py: 15 passed on CPU. mlx, mlx_lm and mlx2.runtime are blocked while the native module loads and checked absent afterwards",
+    "CPU coverage: exhaustive finite-set equality for bf16/fp16 against an independent struct decode; signed zeros, min subnormal, max finite, correction encodings and monotone +/-4 neighbours; fp32 finiteness, uniqueness, every exponent for both signs, dense band size, edges and determinism; pinned sha256 of all three padded vectors; geometry, minimal L and bijective cell mapping; safe finite m/l and exact O products; correction encodings meet at least two distinct nonzero attention amplitudes",
+    "skip gate: a subprocess with MLX2_TEST_OPTIONAL_METAL unset and an import blocker runs pytest on the native file; all 6 cells are skipped at setup, no body runs and no mlx/mlx_lm/mlx2.runtime module loads",
+    "mutation control: a module-level 'import mlx.core as mx' added to the native file makes the CPU suite fail (4 failed, 11 errors); reverted with apply_patch and the file hash restored",
+    "ruff check on both new test files: clean"
+  ],
+  "limitations": [
+    "native tests NOT executed: no gated or ungated kernel has run under this harness, so no native bit result exists",
+    "epilogue arithmetic only: the oracle isolates the fused sigmoid and storage multiply from the combine math; ungated merge, attention, model, verify-window and serving qualification are not claimed",
+    "fp32 gate coverage is a bounded deterministic sample, not exhaustive",
+    "one geometry per cell (B2 H2 L64 D256 P128); other head dims, lengths and partial counts are not covered",
+    "routed BF16 served-SiLU refusal and FP16 refusal belong to a different, completed probe and are not touched or repeated here"
+  ],
+  "pending": [
+    "native execution of the 6 cells under the root's exclusive CPG GPU ownership with both locks held (GPU currently blocked by a foreign waiter)",
+    "independent root review, test file hashes and commit"
+  ]
+}

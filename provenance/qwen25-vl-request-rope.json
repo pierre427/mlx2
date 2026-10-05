@@ -1,0 +1,32 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+  "source_revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "source_files": {
+    "mlx_vlm/models/qwen2_5_vl/qwen2_5_vl.py": "5f0c0f5928e248cb14746b59f961bb9b51181536130007db9065da065b331e13",
+    "mlx_vlm/models/qwen2_5_vl/language.py": "3b9ccaaac609d8b1ea9ac38bc4a65a4894e9eb150f7839ffd3ba5d4411d0dc4d"
+  },
+  "destination": [
+    "src/mlx2/adapters/qwen25_rope.py",
+    "src/mlx2/adapters/qwen25_vl.py",
+    "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/runtime/apc_v2.py",
+    "scripts/qualify_qwen25_media_serving.py",
+    "src/mlx2/qwen25_media_qualification.py",
+    "tests/test_qualify_qwen25_media_serving_cpu.py"
+  ],
+  "modifications": [
+    "Moved source model-global M-RoPE position/delta state into a request-owned cache plane that participates in merge, extract, trim, copy, and serialization, rejecting trims inside the media span",
+    "Supplied explicit positions on each forward, including cold image/video prefill and subsequent batched decode; cleared shared source fields after use",
+    "Kept route candidate-only until real model parity and APCv2 restore checks",
+    "Preserve typed image and ordered video frame parts for the checkpoint chat template before processor expansion",
+    "Validate all batched right-padding rows and media floors before mutating request-owned M-RoPE state; failed finalize preserves every row",
+    "Supply BatchKVCache per-row attention masks on multi-lane decode; forward through the decoder because the pinned language wrapper drops mask, and apply masks after KV cache append on this model instance because pinned attention slices them before append",
+    "Preflight each batched KV plane as an aligned unquantized BatchKVCache and validate the full mask geometry before model forward; reject quantized or mismatched batched planes before cache mutation",
+    "Added an adapter-owned, read-only uniform trim preflight; generic APCv2 prefix selection declines an unsafe media-interior landing before cache copy, and prefix pruning/tip-subsumption preserve earlier boundaries that the longer state cannot recreate",
+    "Added a SHA-pinned image/video qualification companion that compares full pinned-source and request-owned M-RoPE prefill/decode logits, then records APCv2 cold, warm, media-tail, changed-lead/pixels, and return-original paths"
+  ],
+  "trim_preflight_validation": "CPU PrefixIndex and Qwen M-RoPE lifecycle tests cover safe exact/post-media trim, unsafe interior fallback to an earlier prefix, preservation of the stored source state, prefix retention, and tip subsumption. M3 source/candidate Qwen image/video serving had initially failed with Qwen2.5 M-RoPE cannot trim inside media span for a changed leading prompt; after this fix both sequences completed and matched source visible outputs. See docs/experiments/TOWER-ONLY-M3-APCV2-COEXISTENCE-2026-09-26.json.",
+  "validation": "Import-guarded CPU source forwarding, typed image/video framing, atomic batch padding, and cache lifecycle tests; 56 CPU tests across the seven multimodal candidate modules. Bounded M3 two-image direct one-token APC replay, qualification-mode image/video warm APCv2 reuse (539/540 and 281/282 tokens), and restart restore (539/540 tokens) with matching visible output and zero failures. Two-lane M3 mixed image/text serving matched each subsequent single-lane warm 12-token response after the batch mask fix and again after the exact mlx2 BatchKVCache preflight correction (281/282 image and 29/30 text tokens cached). Direct two-row versus single-row maximum absolute logits differed by 0.1875 (short row) and 0.140625 (long row), and a separate text-only pair differed on later token choices. Deterministic batch parity and production qualification remain open. See docs/experiments/MULTIMODAL-M3-CANDIDATE-SMOKE-2026-09-26.md. Extended M3 Qwen text-only B2/B1 trace found first-step short-row token tie shift (32 and 3966 tied at 21.875 for B1; B2 favored 3966 by 0.125); layer 0 Q/K/V differed on both rows, including the unpadded row. Root cause and deterministic B2 qualification remain open. Two-image and two-frame video candidate serving completed cold, three warm, changed-tail and return-original sequences; video grouped vision fell back. See docs/experiments/MULTIMODAL-M3-EXTENDED-2026-09-26.md. A follow-up M3 first-divergence trace found historical layer-0 K/V exactly equal before/after forward. Identical token embedding and input normalization were exact, while raw B2-vs-B1 q/k/v projections differed by up to 0.0625/0.5/0.0078125 before RoPE/cache/mask/attention. This supports shape-dependent projection numerics at the earliest observed divergence, not deterministic B2 qualification. See docs/experiments/QWEN25-M3-BATCH-STAGE-2026-09-26.json. Final-source M3 source-path companion at scripts/qualify_qwen25_media_serving.py SHA 61e2cfc82dfbcc1bf216c329f5fa8f1ab29d4dc7043ab5a210dbacf7adb10f3f passed seven recomputed image/video M-RoPE/APCv2 checks, with zero full-prefill and four-step decode logit differences in both arms; docs/experiments/QWEN25-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json. This is candidate media evidence; full generic qualification and B2 numerical parity remain open."
+}

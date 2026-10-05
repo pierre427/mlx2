@@ -1,0 +1,16 @@
+{
+  "component": "Granite SWA 3B-A600M ordinary candidate",
+  "source_repository": "local read-only mlx-lm-unified checkout",
+  "source_revision": "a1fe2bb5056858bc8285b605ebee6b0276c7ea7b",
+  "source_ref": "pr/granitemoe-swa",
+  "source_paths": ["mlx_lm/models/granitemoe_swa.py"],
+  "license": "MIT",
+  "notice": "provenance/granite-swa.NOTICE",
+  "modifications": [
+    "copied source model math into mlx2.runtime.models using existing shared primitives",
+    "added exact local topology checks and bounded safetensors header inspection for the unindexed bf16 artifact",
+    "kept full and sliding attention cache layers, tied embeddings, shared expert, and Granite scaling behind the adapter",
+    "declared ordinary APCv2 candidate with qualification pending and no speculative route"
+  ],
+  "validation": ["both local bf16 and 4-bit artifacts passed CPU metadata inspection", "tests/test_granite_hils_cpu.py"]
+}

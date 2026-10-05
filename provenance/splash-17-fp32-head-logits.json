@@ -1,0 +1,26 @@
+{
+  "component": "opt-in fp32 logits from the quantized vocabulary head (execution policy fp32_head_logits)",
+  "source_repository": "Inco Splash (Apache-2.0), design input only",
+  "source_revision": "f786bed",
+  "source_paths": [
+    "PR #141 'Keep all logits in fp32' (merge 151432a; fca1a8b, 79b2521): the head stores its fp32 accumulator instead of rounding to bf16"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/runtime/fp32_head.py",
+    "src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/adapters/flash_next.py",
+    "src/mlx2/adapters/flash_next_policy.py",
+    "scripts/measure_fp32_head.py",
+    "scripts/smoke_fp32_head_serving.py",
+    "tests/test_fp32_head.py"
+  ],
+  "modifications": [
+    "No Splash code used. Splash templates its Metal kernels' final store on an fp32 destination; mlx2 instead widens the head's bf16 scales and biases to fp32 once, so MLX quantized_matmul (which computes in promote(x, scales)) runs the same quantized weights on the exactly-widened hidden state and returns fp32 sums.",
+    "Opt-in per adapter policy; fails closed on a tied, unquantized or biased head; the adapter diagnostics carry a receipt (bits, group size, extra resident bytes)."
+  ],
+  "validation": [
+    "tests/test_fp32_head.py (dtype, unchanged parameter names and weights, agreement with the fp32 dequantized reference, fail-closed cases, policy parsing).",
+    "GPU, M5 Max: qualification/runs/sp-fp32-head-20260925/ -- 27B top-1 vs exact head 99.00% -> 100% (82/82 near-tie flips removed), vs fp32 trunk 98.80% -> 99.50%; Flash-Next vs exact head 99.01% -> 100%; in-process B1 ordinary decode +0.73% (27B) / -0.09% (Flash-Next) ABBA; 27B native-MTP server ABBA B1 -1.2%, B4 about -9%: kept opt-in."
+  ]
+}

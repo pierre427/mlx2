@@ -1,0 +1,55 @@
+{
+  "name": "online acceptance estimator and physically grouped adaptive verification candidate",
+  "state": "implemented_unqualified_default_off",
+  "source_repository": "https://github.com/vllm-project/vllm",
+  "source_revision": "3bb0a03f35269185b6358753e64932bb946cc531",
+  "source_pull_request": "https://github.com/vllm-project/vllm/pull/52228",
+  "source_paths": [
+    "vllm/v1/worker/gpu/spec_decode/acceptance_estimator.py",
+    "vllm/v1/worker/gpu/spec_decode/speculator.py"
+  ],
+  "license": "Apache-2.0",
+  "attribution": "Copyright contributors to the vLLM project",
+  "implementation_paths": [
+    "src/mlx2/runtime/acceptance_estimator.py",
+    "src/mlx2/runtime/external_speculative.py"
+  ],
+  "modifications": [
+    "Reimplemented the shared nonnegative slope, per-position intercepts and damped arrowhead Newton solve in bounded NumPy host state; no CUDA, Triton, Torch or upstream serving imports.",
+    "Compute logit(max q) from the actual normalized dense or compact proposal law after processors and temperature, never the sampled token probability.",
+    "Observe only delivered accepted proposals and a first reached rejection; subsequent and stop-truncated positions are censored.",
+    "Original lagged cohort-wide allocator decides depth before current proposal draws; it uses feature history from earlier committed rounds rather than current-block survival ranking.",
+    "Require an explicit caller cost table bound to cohort size, minimum gain and observations, with periodic fixed-depth exploration. A mismatch, nonfinite model state or predicted no-gain uses fixed depth.",
+    "Shorten requested proposal count and actual target input width; do not merely mask padded verifier rows.",
+    "Keep all policy and estimator state process-local; restore it with lanes, target/draft caches, processors, RNG and counters if an execution round fails.",
+    "Only exact chain verification can opt in. Default off preserves existing receipt keys and execution calls. No MTP confidence scheduler is changed.",
+    "Trimmed-target-row counters report reduced admission budget against configured fixed depth; actual executed verifier width and total target rows are reported separately. They are not a measured latency benefit.",
+    "Added opt-in per_request mode with physical forwards grouped by actual proposal depth, and explicit per-cohort cost tables. Both singleton and original-cohort costs must justify the full grouped cost against fixed-depth batching; absent tables preserve the lagged cohort backstop.",
+    "Deterministic point-mass drafters may publish max-softmax log-odds of unprocessed refined logits as a separate confidence proxy. This proxy does not replace q. Current-block confidence never controls truncation for stochastic drafters, which use earlier committed per-request feature history.",
+    "Bounded every online Newton update to at most two log-odds units over the clamped feature domain, avoiding saturated one-hot feature divergence while retaining a nonnegative shared slope.",
+    "Snapshot the whole cohort once so a later physical-group failure restores earlier committed group state and all estimator updates. Receipts distinguish configured mode, current policy, proxy versus lagged feature source, actual physical grouping, target rows, and adaptive trimming relative to the old fixed-cohort baseline.",
+    "Grouped admission charges the caller-supplied draft upper bound once per distinct proposal depth, conservatively accounting for separate stochastic draft forwards.",
+    "Mixed deterministic proposer rows may omit their current confidence proxy and use only committed lagged q features, while other rows retain validated current proxies. Every declared deterministic dense or compact proposal law is validated as point mass before post-proposal admission.",
+    "Validate selected PLD/native-MTP/external source metadata before target forwarding; carry it through depth trims, count request-private source verification only after commit, and restore those counters if later groups fail. Composition remains chain-only until a separate complete-continuation verifier is implemented."
+  ],
+  "validation": {
+    "tests": [
+      "tests/test_acceptance_estimator.py",
+      "tests/test_external_adaptive_verification.py",
+      "tests/test_standard_xpress_serving_cpu.py",
+      "tests/test_external_adaptive_hybrid_cpu.py",
+      "tests/test_standard_parallel_draft_adapter.py",
+      "tests/test_xpress_acquisition.py",
+      "tests/test_adaptive_proposal_composition_cpu.py"
+    ],
+    "device": "CPU only",
+    "performance_qualified": false,
+    "note": "Tiny CPU tests establish calibration/censoring math, actual forward-width reduction, exact greedy output and committed cache/RNG recovery. Caller-supplied costs are not a measured performance claim.",
+    "result": "132 focused CPU tests passed after per-request grouping; subsequent 35 estimator/executor tests, 17 real tiny adapter tests, and 10 acquisition corruption/reconciliation tests passed. The subsequent hybrid suite passed 12 CPU tests against full tiny GDN, Mamba2+KV, and QSA+GDN targets with mixed sampling and different request depths. Subsequent 40 focused CPU tests passed after per-row missing-confidence composition and deterministic-law validation. Independent adaptive/source composition and wrapper suites passed 32 CPU tests, including actual private native MTP proposals combined with XPress or LiLiCorr against tiny QSA/GDN targets.",
+    "sampling": "12,000 online lagged-budget target-law trials, 10,000 real Qwen3 pointmass-XPress verifier trials, and 10,000 mixed-depth current-confidence trials passed statistical target-distribution tolerances.",
+    "production_model_artifact_loads": false,
+    "synthetic_tiny_artifact_loads": true,
+    "hybrid_contracts": "Actual tiny target math and random tiny XPress heads: independent committed-prefix replay of recurrent/conv/KV/QSA index/pool state, stateful processor settlement, cancellation and final-budget ordinary boundaries, late physical-group atomic rollback, and paired-sidecar validation. No compatible trained hybrid draft checkpoint was loaded.",
+    "tensorfold": "CPU dispatch seam exercised forward/forward_many signatures and physical groups using HybridVerifyRows as an explicit substitute; native TensorFold kernels were not executed."
+  }
+}

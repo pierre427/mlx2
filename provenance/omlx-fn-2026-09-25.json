@@ -1,0 +1,61 @@
+{
+  "component": "Flash-Next ideas from jundot/omlx PRs read 2026-09-25: one-token routed-expert kernels (#3912, ported), resident MTP head under MoE expert streaming (#3935, ported); #3934, #3890, #3873 mapped and not ported",
+  "status": "#3912: implemented, GPU-checked, opt-in (FlashNextPolicy.moe_routed_decode / MLX_QWEN4_MOE_ROUTED_DECODE, default off). #3935: implemented, opt-in (moe_expert_streaming.mtp_resident, default false). #3934: already equivalent. #3890: already equivalent. #3873: not applicable.",
+  "sources": [
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_pr": "jundot/omlx#3912 (perf(qwen4): fuse one-token routed experts into two launches), open",
+      "source_revision": "e3d4a213743041ce884861f93c87dbdabe4c3a6e",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/qwen35_moe_routed_decode.py": "6098955accf99ede78ea53da9698f30ef15912f856944403b8dd7fe5a24d287a",
+        "omlx/patches/moe_verify_gather.py": "24fee8964744311b331dac3e204d8e22e9ff2be6f6d133e8bf1ecffd902f36ce"
+      },
+      "source_regions": [
+        "qwen35_moe_routed_decode.py: _SIGMOID, _GATE_UP_SOURCE, _DOWN_SOURCE, _header, _kernels, routed_decode_eligible, routed_decode (grid/threadgroup geometry)",
+        "moe_verify_gather.py: _HEADER (omlx's transcription of MLX 0.32.2 quantized.h load_vector/load_vector_safe/qdot_n; MIT, Apple)"
+      ]
+    },
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_pr": "jundot/omlx#3935 (feat(qwen4_exp): allow Lightning MTP with MoE expert offload), open",
+      "source_revision": "5c5517558d3e3621fdc9911a0ae9a4190b8cf4ff",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/moe_expert_offload.py": "caf1ac4404a0715eb3ba44d02c2b50f9590949136670bc1846796a666b167c8c"
+      },
+      "source_regions": [
+        "moe_expert_offload.py: _is_mtp_path and the mtp_resident skip in apply_moe_expert_offload (idea and predicate only)"
+      ]
+    }
+  ],
+  "read_not_ported": {
+    "jundot/omlx#3934 d2b6249f1c476184c1379f07b5aea6338a6cdad8 (perf(qwen4): widen native QSA prefill tiles)": "Already equivalent. omlx loops its native QSA prefill over query tiles (1024 -> 4096/2048/1024 rows by key count) inside one prefill chunk. mlx2 has no query-tile loop: QSAIndexer scores and selects for the whole prefill chunk in one pass and Attention dispatches NAX QSA (qwen4_qsa_nax.py, one grid over all rows) or dense-mask SDPA once per chunk, so the tile is the prefill chunk, 8192 rows in the Flash-Next profile since 623b6975 (triage-20260925: 2048 -> 8192 is -9..11% prefill at 16K/64K). No port and no A/B.",
+    "jundot/omlx#3890 f9424f9327eb665cef9e3581da64a7acf85ab250 (merged; opt in to any canonical GDN recipe for fused decode)": "Already equivalent. omlx's fused decode prework gated on an oQe (bits, group) allow-list for in_proj_* and out_proj. mlx2's admit_qwen4_fused_gdn_decode reads the projected qkv/z/b/a activations, not the projection storage, so any in-projection recipe reaches the kernel; the fused in-projection table concatenates any homogeneous quantized quartet and falls back to four calls otherwise; the optional out-proj epilogue (fused_outproj) is q4/g64-only and refuses with a reason to the stock out_proj.",
+    "jundot/omlx#3873 2416093953eec14944d84b0f1242d95e3b0c3f52 (preserve FP16 PLE compute dtype and enable HC kernels)": "Not applicable. It enables an FP16-compute Flash-Next (target M2 Ultra). mlx2 serves the bf16 artifact on M5; its PLE sidecar decodes bf16 bits (qwen4_ple_nvme.py) and the fused GroupRMSNorm admits bf16 only, refusing with a reason. There is no FP16 Flash-Next artifact or profile to carry it."
+  },
+  "notice": "provenance/omlx-fn-2026-09-25.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_routed_decode.py",
+    "src/mlx2/runtime/models/qwen3_next.py (_enable_routed_decode, _try_routed_decode, FusedGateUpSwitchGLU.__call__, Qwen3NextSparseMoeBlock.set_moe_routed_decode_mode, _MOE_ROUTED_DECODE)",
+    "src/mlx2/adapters/flash_next_policy.py (moe_routed_decode)",
+    "src/mlx2/adapters/flash_next.py (moe.routed_decode diagnostics, present only when selected)",
+    "src/mlx2/runtime/weight_stream.py (is_mtp_path, install_expert_streaming(mtp_resident=), ExpertStreamPlan.resident_paths)",
+    "src/mlx2/serving.py (moe_expert_streaming.mtp_resident)",
+    "scripts/check_fn_routed_decode.py",
+    "scripts/bench_fn_routed_decode.py",
+    "scripts/bench_fn_stream_mtp_resident.py",
+    "tests/test_omlx_fn_ports.py",
+    "tests/test_moe_expert_streaming.py (mtp_resident cases)"
+  ],
+  "modifications": [
+    "#3912: kernel sources carried from omlx with renamed kernels. One arithmetic adaptation: the input sums in load_vector/load_vector_safe cast each element to float before adding, as the lab MLX fork in the mlx2 venv does since 2d6705923 (mlx 39400a0d4). With omlx's verbatim 0.32.2 transcription the gate/up rows differed from gather_qmm in ~78% of elements and were ~3x further from an fp32 reference (routed-micro-verbatim-header.json); after the adaptation both kernels are bit-identical to MLX on this venv.",
+    "#3912: the omlx monkey-patch of mlx-vlm Qwen3_5MoeSparseMoeBlock.__call__ (which also required omlx's fused router) is replaced by a hook in mlx2's FusedGateUpSwitchGLU; routing stays mlx2's own (stock or the opt-in qwen4_moe_router).",
+    "#3912: split into two modes. gate_up runs only the gate+up/SwiGLU kernel and keeps whatever down path the block runs (mlx2's tile4 fused down in the Flash-Next profile), so it is bit-identical to the current default. two_launch is the literal omlx pairing; its down kernel reproduces the stock gather_qmm + (x*scores).sum tail, not mlx2's tile4 fused down (fp32 accumulation), so it changes numerics relative to the Flash-Next default.",
+    "#3912: admission is a structural check with a reason (counted as routed_decode_fallbacks); multi-token (sorted-gather) forwards decline quietly; streamed expert tables (no resident weight) decline; no first-launch self-disable (a kernel error propagates).",
+    "#3912: default off; selected by FlashNextPolicy.moe_routed_decode (off | gate_up | two_launch), which enters the environment and receipts only when not off.",
+    "#3935: omlx keeps the MTP head resident automatically whenever MTP and offload are both on. mlx2 makes it an explicit, default-off moe_expert_streaming.mtp_resident flag (present in the resolved policy only when true); kept tables are excluded from the per-layer capacity plan and listed in plan.resident_paths.",
+    "2026-09-30 (original mlx2, no new source mined; found while assessing jundot/omlx#4113 @1335263e): the MoE block's stock expert branch called the switch module without scores, so a selected two_launch silently ran gate+up only while routed_decode_calls rose. The block now passes the scores for a one-token two_launch forward with variant='stock'; a declined admission runs the same ops as before, so its output is bit-identical. New integer counters routed_decode_down_calls and routed_decode_degraded (a two_launch call without scores) appear in the Flash-Next routed_decode diagnostics. CPU tests in tests/test_omlx_fn_ports.py; the block test fails without the pass-through."
+  ],
+  "validation": "See qualification/runs/fn-omlx-ab-20260925/README.md. CPU: tests/test_omlx_fn_ports.py (kernels replaced by composed-op references: admission, shapes, down-path selection, counters, declines, policy) and tests/test_moe_expert_streaming.py mtp_resident cases. GPU (M5 Max, mlx 39400a0d4): check_fn_routed_decode.py 64/64 bit-exact for gate_up vs the default composition and two_launch vs the stock composition; full-model teacher-forced gate (4 offsets x 256 M=1 tokens) gate_up logprobs bit-identical to default, two_launch bit-identical to the stock-down composition; decode A/B in-process with rotated arms."
+}

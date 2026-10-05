@@ -1,0 +1,14 @@
+{
+  "implementation":"explicit_bounded_gdn_evaluation_waves",
+  "source_repository":"private mlx2",
+  "source_revision":"3eb5c4fd9930396b15986412f4da8e0149d4b7ca",
+  "source_paths":["src/mlx2/runtime/packed_prefill_lifetime.py","src/mlx2/runtime/models/qwen3_5.py","src/mlx2/runtime/hybrid_packed_prefill.py"],
+  "license":"project Apache-2.0; existing model MIT provenance retained",
+  "reference_repository":"read-only local ml-explore/mlx source objects",
+  "reference_revision":"39400a0d4",
+  "reference_paths":["mlx/backend/metal/conv.cpp","mlx/backend/metal/custom_kernel.cpp","python/mlx/nn/layers/activations.py","mlx/array.cpp","mlx/transforms.cpp"],
+  "modifications":["optional1/2/4 segment evaluation maximum with default1 unchanged","source live-array wave planner before allocation under existing activation charge","pending graph/evaluation failure root ownership","same per-segment core/cache law and full-row projections","host completed-wave receipts distinguish device counters"],
+  "validation":{"cpu_checks":85,"runtime_imports":false,"gpu_executed":false,"grouped_device_parity":"pending","performance_benefit":"unmeasured"},
+  "states":{"implemented_math_lifetime":true,"qualified":false,"selected_by_default":false,"device_observed_used":false},
+  "integration":"generic source-bound constructor/profile composition remains explicit optional follow-on; initial default1 N2 source untouched"
+}

@@ -1,0 +1,38 @@
+{
+  "implementation_kind": "original mlx2 diagnostic harness",
+  "source_repository": "mlx2",
+  "source_revision": "6ba8eea2959bcca520ce9a033cc838322fb10cf1",
+  "license": "project license; no new upstream code copied",
+  "source_paths": [
+    "src/mlx2/runtime/models/standard_decoder.py",
+    "src/mlx2/runtime/segmented_plain_kv.py",
+    "src/mlx2/runtime/models/base.py",
+    "scripts/validate_xpress_metal_matrix.py"
+  ],
+  "destinations": [
+    "scripts/diagnose_standard_bf16_metal.py",
+    "tests/test_standard_bf16_metal_cli.py"
+  ],
+  "modifications": [
+    "Actual cold French chat prompt, thinking disabled, trained full XPress block and second actual target verification input/pre-cache capture",
+    "Identical frozen committed cache compared across segmented block, plain block and sequential ordinary S1; independent ordinary cache rebuild preserves original prompt[:-1] prefill plus S1 anchor geometry",
+    "All postlayer/pre-finalnorm target features compared per row/layer with exact equality, max absolute difference and RMS; raw logits top5 expose margins and ties",
+    "Pre-cache K/V drift compared with ordinary; logical prefix buffer hashes retained and verified unchanged after controls",
+    "B4/B15 identical branch controls include withinbatch row spread, first-three-row invariance to perturbed future suffix, S3 versus S16, whole-prompt versus prefix+anchor prefill, scalar/vector RoPE offset and S1 absent/alltrue mask controls",
+    "Fixed materialized same-input projection matrix-versus-single-row controls for first-layer Q/K/V, O, gate/up/down and tied or untied output head",
+    "Temporary diagnostic rowwise Linear plus tied Embedding output-head calls and FP32 SDPA compute patches restored in finally; no model weights or production source changed",
+    "Explicit GPU ownership, M3 Metal device and original unquantized BF16 source guards, header-only resident-memory admission, tensor-free dryrun, 900-second cap and complete source hashes",
+    "v2 fixed materialized Q/K/V controls distinguish full-query causal attention, S1 with full K extent and causal boolean row, S1 causal prefix K extent with no mask, and S1 causal prefix with alltrue boolean; fixed norms preserve true B1,S1 token-axis shape including all Q/K heads; fixed SwiGLU and RoPE querylength controls isolate independent operator dispatch",
+    "v2 rowwise linear controls include both prior flat-row surrogate and true B1,S1 token geometry; combined target-only rowwise Linear/tied-head plus per-query prefix attention optionally include token RMSNorm/RoPE/SwiGLU and are compared full-versus-sequential under the identical patch, separately from original S1 law",
+    "v2 fresh French runtime decodes17 tokens under each combined patch and compares to same-patched ordinary reference as well as original ordinary reference; separate fields prevent interpreting changed target computation as lossless with respect to original BF16 law",
+    "v3 verification-only fresh French control leaves original Model.__call__ and body_only prefill arithmetic intact and scopes combined rowwiseLinear/tiedhead+prefixS1attention only around the actual forward_with_taps(body_only=False) call. Committed cache is compared to independently rebuilt original ordinary state before each block, all actually reached greedy logits and unit-temperature softmax diagnostics are compared to original S1, and committed next logits are checked after completion. Function/class hooks restore in finally."
+  ],
+  "validation": "7 CPU/CLI tests passed, Ruff clean. Full original diagnostic runs on real tiny BF16 target+XPress tensors under hard CPU device assertion for both tied/untied heads; postlayer trace reproduces original logits, all primitive controls execute and class/module patches restore. Dryrun under hard tensor import guard. Author executed no GPU. v2:full tinyCPU BF16 tied/untied diagnostic executes18 layertrace comparisons,4 fixedQKV comparisons,5 fixed-token norm controls and two fresh patched runtime comparisons. Both external patched runtimes match their same-patched ordinary IDs; Linear/Embedding/RMSNorm/RoPE/SwiGLU/SDPA hooks all restore. Seven CPU/CLI tests remain green; no GPU by author. Parent-owned original v1 M3 receipt exists separately and v2 M3 remains pending. v3:eight CPU/CLI tests pass, including fresh tiny BF16 tied/untied verification-only control preserving original prefill; every reached raw logit row is bitwise original S1 with zero T1 softmax delta, precaches and committed next logits agree, complete external IDs match original ordinary IDs, and speculative draft width is nonzero. Parent-owned v2 Metal result and pending v3 Metal result remain separate; no GPU by author. Parent-owned real M3 v2/v3 receipts now preserved in qualification/runs/parallel-draft-thorough-20261001/m3/: v2 fixed-cache combined geometry bitwise original S1; v3 verification-only 17 original IDs, 17 reached raw logit rows, all 11 precaches and committed next logits bitwise original S1, zero T1 softmax L1. Source/frozen cache and temporary hooks restored. Eight focused CPU tests passed in parent with PYTHONPATH=src.",
+  "result_interpretation": "passed means diagnostic completed with original math/weights/source and frozen committed cache restored; numerical equality remains separately reported, not qualification",
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "observed_used": true,
+  "performance_claim": false,
+  "observed_used_scope": "diagnostic harness on M3 only; no production numerical route selected"
+}

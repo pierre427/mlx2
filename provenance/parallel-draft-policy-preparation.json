@@ -1,0 +1,30 @@
+{
+  "implementation": "original mlx2 metadata-only policy preparation and reference-alignment harness",
+  "license": "MIT",
+  "source_repository": "mlx2",
+  "source_revision": "278f82c04e605d1c6c1233b5a08826a007934f8d",
+  "source_paths": [
+    "scripts/prepare_parallel_draft_policy.py",
+    "src/mlx2/adapters/standard_decoder.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/runtime/external_speculative.py"
+  ],
+  "modifications": [
+    "Default-off target_verify_row_exact policy preparation inspects artifact geometry and safetensors backbone dtype without live model or MLX imports",
+    "Preserve the original output policy keyset when disabled; selected policy and preparation summary distinguish selection from qualification and observed execution",
+    "Reject nonboolean settings, unsupported dense/full-attention topology, quantization, mixed or nonfloating backbone dtype and custom decode-kernel selection before policy publication",
+    "Adaptive diagnostic reference follows ordinary serving: B1 chunked prompt excluding the final anchor, original S1 anchor, then original S1 emitted-token trajectory",
+    "Record independent initial prefix-cache and anchor-law alignment probe; optional whole-prompt first-law diagnostic is excluded from verifier parity",
+    "After an explicitly requested float32 diagnostic cast, reconfigure the selected target row-exact dtype pin before cache construction"
+  ],
+  "validation": {
+    "cpu": "tests/test_prepare_parallel_draft_policy_cli.py, tests/test_validate_adaptive_metal_cli.py and tests/test_xpress_metal_matrix_cli.py; tensor-free subprocess gates, exact disabled keyset, supported and unsupported metadata, CPU real tiny prefix/cache/anchor-law oracle and CLI regression",
+    "ordinary_reference_source": "src/mlx2/runtime/generate.py PromptProcessingBatch.generate reserves t[:-1] for prompt processing and passes t[-1] to GenerationBatch; external_speculative._prefill likewise reserves its last remaining token",
+    "gpu_execution": false,
+    "corrected_adaptive_metal_validation": "pending; parent owns execution"
+  },
+  "implemented": true,
+  "qualified": false,
+  "default_selected": false,
+  "performance_claim": false
+}

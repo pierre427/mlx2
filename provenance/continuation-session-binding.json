@@ -1,0 +1,32 @@
+{
+  "feature": "effective continuation session identity",
+  "implementation_origin": "Original mlx2 adapter identity orchestration",
+  "source_revision": "6ae4e6ba65e2fdbb26533ff7f4363c306886e9e4",
+  "source_paths": [
+    "src/mlx2/adapters/external_draft_policy.py",
+    "src/mlx2/runtime/proposal_pool.py",
+    "src/mlx2/runtime/proposal_providers.py"
+  ],
+  "license": "MIT",
+  "local_paths": [
+    "src/mlx2/adapters/external_draft_policy.py",
+    "src/mlx2/runtime/proposal_providers.py"
+  ],
+  "modifications": [
+    "Pin raw effective drafter receipt settings before composition wrappers",
+    "Pin proposal depth and normalized adaptive cost policy in continuation session identity",
+    "Keep actual artifact revisions and the existing final route fingerprint formula",
+    "Isolate revision-bound source model and session critic entries via source.session_revision",
+    "Normalize fixed verification_algorithm stable-truncated-prefix-dedup-v2 into every enabled pool policy, receipt, APC route hash and critic source/session identity; actual prefix deduplication requires a separately declared target equivalence capability and no steering facade, unknown or legacy algorithms fail closed, and ordinary/off/chain formula remains unchanged"
+  ],
+  "validation": {
+    "cpu": "9 focused cases and 83 combined session/provider/composition/pool cases passed on 2026-10-01; same artifacts with different passes/windows/depth/adaptive policies separate source keys at model and request-session critic tiers; equivalent adaptive defaults/numeric types canonicalize; existing final off/pool route hash formula preserved; Ruff passed",
+    "dedup_identity_cpu": "16 focused session/identity cases and57 combined session/provider/Metal-harness CPU cases pass: current normalized algorithm roundtrips, explicit/default current algorithm canonicalize, legacy/unknown algorithm rejects, enabled pool route and source residual identity differs from the old no-algorithm formula, actual artifact revision remains intact, ordinary/off final formula unchanged",
+    "gpu": "not executed by this worker"
+  },
+  "status": {
+    "implemented": true,
+    "qualified": false,
+    "selected": "explicit continuation_pool policy only"
+  }
+}

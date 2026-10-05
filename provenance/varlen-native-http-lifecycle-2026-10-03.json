@@ -1,0 +1,21 @@
+{
+  "feature": "actual-native Qwen3 HTTP failure and cancellation lifecycle gate",
+  "source_repository": "mlx2",
+  "source_revision": "f12066d445bfd127d949a27526bbe2f9d62c4a95",
+  "source_paths": [
+    "src/mlx2/serving.py",
+    "src/mlx2/server.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/runtime/paged_native_continuation.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "scripts/research/varlen_native_http_gate.py"
+  ],
+  "license": "project code",
+  "modifications": [
+    "Add a source-bound loopback HTTP gate that injects a host exception after one real native read has terminal proof",
+    "Close a real HTTP stream after its first native token and observe worker cancellation and owner retirement",
+    "Require one logical close transition, no pending or quarantined native state, APCv2 no-write, and ordinary service survival"
+  ],
+  "validation": "Combined paged/varlen CPU suite passed with one GPU-only skip. Exact-source M5 Max calibration and actual-native loopback HTTP lifecycle gate passed on b54ecfb6; raw receipts in qualification/runs/varlen-native-http-lifecycle-20261003",
+  "qualification": "default-off, cold-only, unqualified; host post-terminal fault injection is not a GPU device fault"
+}

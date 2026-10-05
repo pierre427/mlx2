@@ -1,0 +1,34 @@
+{
+  "implementation": "original target-only mlx2 diagnostic; no production changes",
+  "source_repository": "mlx2",
+  "source_revision": "278f82c04e605d1c6c1233b5a08826a007934f8d",
+  "license": "MIT",
+  "source_paths": [
+    "src/mlx2/runtime/generate.py:generate",
+    "scripts/validate_adaptive_metal.py",
+    "scripts/validate_xpress_metal_matrix.py",
+    "src/mlx2/runtime/models/standard_decoder.py",
+    "src/mlx2/runtime/cow_cache.py"
+  ],
+  "destinations": [
+    "scripts/diagnose_adaptive_bf16_reference.py",
+    "tests/test_diagnose_adaptive_bf16_reference_cpu.py"
+  ],
+  "mechanisms": [
+    "Select two to four exact reached mismatch contexts from token and sampled-law evidence, prioritizing distinct requests",
+    "Compare original serving prefix-prefill plus S1 anchor against original whole-prompt prefill at identical delivered contexts",
+    "Record raw vocabulary logits, logical-prefix cache hashes and temperature-0.8 probability differences",
+    "Rebuild one frozen original prefix and compare row-exact tapped verification with original ordinary S1 calls bitwise",
+    "Restore target verification flag and abort private target transaction on every path",
+    "Before allocation require exact target artifact fingerprint from input receipt, homogeneous BF16 headers and conservative available/recommended memory admission",
+    "Bind complete source file closure and input receipt hash; detect changed source after independent context checks",
+    "No head download, training, GPU lock acquisition, global monkeypatch, qualification or performance claim"
+  ],
+  "validation": {
+    "cpu": "9 tests passed: tensor-free dry-run/refusal gates, output protection, exact context validation, real tiny BF16 original target at positions 0/1/2, frozen-prefix bitwise parity, flag/module preservation and failing recorded probability evidence",
+    "metal": "not executed by this worker; parent owns GPU execution",
+    "diagnostic_pass_criterion": "Recorded actual probability matches serving reference, recorded expected matches whole-prompt reference, same-frozen-prefix row-exact logits and reached-row serving logits match bitwise, configuration restored, source unchanged. Independent failure evidence remains visible."
+  },
+  "qualified": false,
+  "performance_claim": false
+}

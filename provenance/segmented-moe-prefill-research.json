@@ -1,0 +1,204 @@
+{
+  "name": "segmented-moe-prefill-research",
+  "schema": "mlx2.segmented-moe-prefill-research.v1",
+  "status": "implemented as an isolated research module: pure host admission/planner/route controls, retained oMLX kernel text, lazily built research-only native entry points behind research_opt_in; never built by MLX, never dispatched, never run on Metal in this scope; default-off, unqualified, unselected, observed-used false; no served route can select it",
+  "state": {
+    "default": "off",
+    "implemented": "research-candidate",
+    "qualified": false,
+    "selected": false,
+    "observed_used": false,
+    "route": null,
+    "native_qualification": "external, pending"
+  },
+  "license": "Metal kernel text and the header-flattening helper adapted from oMLX (Apache-2.0, the oMLX authors); the adapted portions carry that attribution in the module. All other code is original mlx2 code under the repository's Apache-2.0 LICENSE. No Apple copyright header is added to project code. No Apple-derived header is vendored: MLX's NAX tile primitives and elementwise functors are read at kernel-build time from the installed mlx package (MIT, Copyright Apple Inc.) and stay under that license.",
+  "destination_paths": [
+    "src/mlx2/adapters/segmented_moe_prefill_research.py",
+    "tests/test_segmented_moe_prefill_research.py",
+    "provenance/segmented-moe-prefill-research.json"
+  ],
+  "source": {
+    "repository": "https://github.com/jundot/omlx",
+    "local_mirror": "git@<private-git-host>:pierrelamy/omlx.git (read-only git show; no network for oMLX)",
+    "revision": "d6b2b92b11ebcbf4a4c1f002b0d590a3117212a8",
+    "revision_date": "2026-09-29T22:05:17+09:00",
+    "path": "omlx/patches/m5_gather_qmm_nax.py",
+    "blob": "48236b4d15155e51e9d235d45c86eb218d19b203",
+    "sha256": "9b16a7b325760f758b40151c21d0a603d59308777252e04698023710d321fb66",
+    "path_history": [
+      "b18cc5a13df977e909d9bd7cdb47dbef548ff353 perf(moe): SwiGLU in the epilogue of the NAX gate/up gather (#4022)",
+      "0c9de320a0b88cae6f4c1aea6a703f883380c240 perf(moe): gate/up gather reads token rows through the sorted row map (#4029)",
+      "195a69e554c5063f635cde830d192df6a4507457 fix(moe): follow up the MoE prefill stack (last change to the file before the pin)"
+    ],
+    "design_files": [
+      {
+        "path": "omlx/patches/moe_routes.py",
+        "blob": "80e8baa5f0c841c46438c608e768d7a7fc78e776",
+        "sha256": "64958f54f5eeb58cba4faf1af857f10db7bca9347c7f7ffe841fc0fd96d9db7c",
+        "used": "design only: row_map = order // k, inv_order = argsort(order) (mirrored by sort_routes_host)"
+      }
+    ],
+    "license_file": {
+      "path": "LICENSE",
+      "blob": "f9ad266467e436d44150cc53ec6d5ce0a24dc242",
+      "sha256": "de69b4352c9952cd5f0f4b8cb4584782a07f02c9ba82aeb5d496aa2b7fe5457d",
+      "spdx": "Apache-2.0"
+    },
+    "spdx_header": "SPDX-License-Identifier: Apache-2.0 (file header of the source)"
+  },
+  "corroborating_source": {
+    "repository": "https://github.com/ddalcu/mlx-serve",
+    "pull": 638,
+    "merge": "9a5c98126fb8054a630bea93fd789e7bbe3cf22d",
+    "merge_parent": "e7beaf81bce86b8104d6762fbd8fc4f3ceebb8a6",
+    "head": "57177fc74f5613bd4cbe39ac9be0b971ee43ab25",
+    "fetched": "read-only git fetch of both commits into a /tmp scratch bare repository, 2026-09-30",
+    "license": "mlx-serve LICENSE (MIT for its own code; blob fa6c781bf4ad462d965a429bd1c1c33475d3905a) and LICENSE-APACHE-2.0 (blob 261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64); its NOTICE (blob 01d226eb6b12999f8fed7c5c43543c2097046014) attributes the port to oMLX m5_gather_qmm_nax.py @ d6b2b92 and its gather_qmm_nax_header.metal to MLX steel/gemm/nax.h (Copyright (c) 2025 Apple Inc., MIT)",
+    "files": [
+      {
+        "path": "src/gather_qmm_nax.zig",
+        "blob": "6837124af588b4ec9acea00be9f283f958890944",
+        "sha256": "8c14b9192dee94f5236b1b9443aaaf2eebf9136dfd226d2016963b21faa0822f"
+      },
+      {
+        "path": "src/kernels/gather_qmm_nax_header.metal",
+        "blob": "b81dd84735b184cea5a944df466db0c4d40e4b16",
+        "sha256": "00b36bfe59d77b230e5e64765b64bd8521bb8087326484a798f92d3bb444a4cf"
+      },
+      {
+        "path": "src/kernels/gather_qmm_nax_mapped_header.metal",
+        "blob": "5598f8690ce2e417afdb3af4e6be88a2de4ea9c3",
+        "sha256": "ac3238032acadfa76f2b0888b22a1dce81c1dd55a6a7af7cef797f1efb27cd76"
+      }
+    ],
+    "used": "design only, no text copied: the MLX row-block admission (rows >= 16 and rows / experts >= 4, their reading of GatherQMM::eval_gpu) that keeps verify/decode on gather_qmv, and confirmation that the planner/scan were ported unchanged",
+    "not_used": [
+      "Zig error swallowing (canary(...) catch -> false) and first-use per-configuration canaries",
+      "separate gate and up weight arrays with a sigmoid-table epilogue (mlx2 keeps the fused [gate; up] table and oMLX's MLX-functor epilogue)",
+      "the vendored, Apple-derived gather_qmm_nax_header.metal (mlx2 reads the installed MLX headers instead)"
+    ]
+  },
+  "installed_mlx_headers": {
+    "package": "mlx 0.32.2.dev20260919+39400a0d4 (~/Desktop/mlx2/.venv; read as files, never imported here)",
+    "license": "MIT, Copyright (c) 2023 Apple Inc. (dist-info licenses/LICENSE sha256 ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01); header files carry 'Copyright (c) 2023-2025 Apple Inc.'",
+    "vendored": false,
+    "read_at": "kernel build time by read_mlx_headers(Path(mlx.__file__).parent / 'include', ...)",
+    "files": {
+      "mlx/include/mlx/backend/metal/kernels/steel/gemm/nax.h": "fb10bcae44095e9fed5c81213d03527dd5fe5ac11be11ec7784bd357c6f317ec",
+      "mlx/include/mlx/backend/metal/kernels/unary_ops.h": "0a5492b65ae39ecb6d8b04e64ea5007e0a4ff60d8d9428559bfbfd03387ece2a",
+      "mlx/include/mlx/backend/metal/kernels/binary_ops.h": "2dd13c2496f5d6f0856e4ca99db2ceb5c6d7dc0c344b9ba8e41ef3b7d7ed8a97",
+      "mlx/include/mlx/backend/metal/kernels/utils.h": "5e1568e9edde9d05dbf86f68fa0d6c6240f2c32b973c7c6a76166b9c0d91543d"
+    },
+    "not_assumed": "Other MLX builds may change nax.h; the native qualification must rebind to the headers actually installed."
+  },
+  "retained_kernel_text": {
+    "_SCAN_HEADER": {
+      "upstream_sha256": "7172a1dba247f74442d93b3e21b6f410b9e26092b30cf45f5b8c1c36f3613ee2",
+      "retained_sha256": "7172a1dba247f74442d93b3e21b6f410b9e26092b30cf45f5b8c1c36f3613ee2",
+      "verbatim": true
+    },
+    "_SCAN_SOURCE": {
+      "upstream_sha256": "fe151d26fe150ef3cda883cd5c59fedc44ee72516995945dcf824bf4026f8f71",
+      "retained_sha256": "fe151d26fe150ef3cda883cd5c59fedc44ee72516995945dcf824bf4026f8f71",
+      "verbatim": true
+    },
+    "_MM_HEADER": {
+      "upstream_sha256": "957aa78aa6ba22b088dee8ff2828419695bddfbfed419fec99512433054e4e92",
+      "retained_sha256": "30f920c97ecb1f18a94ad03a5e3f13f60dbc5bec9ed513fee2b51096e3b192de",
+      "verbatim": false
+    },
+    "_AFFINE_SOURCE": {
+      "upstream_sha256": "d04720b0a67ca5a80be662993b0a3b6a36c6669c9e7b22780f573ef0387b9624",
+      "retained_sha256": "d04720b0a67ca5a80be662993b0a3b6a36c6669c9e7b22780f573ef0387b9624",
+      "verbatim": true
+    },
+    "_ACT_HEADER": {
+      "upstream_sha256": "44147093bffb366e7fba71c48d177c0ca006d1a679eedd45842e9b9ec690ff57",
+      "retained_sha256": "8c0ed285c23d9f8caff2ceda799c8f62f897f8dbbcdc3cde8692cbac9a479677",
+      "verbatim": false
+    },
+    "_AFFINE_ACT_MAP_SOURCE": {
+      "upstream_sha256": "5643c8109f5ce90bde80399b5af2a054488abd375cfb08ed7607297912cbfff9",
+      "retained_sha256": "5643c8109f5ce90bde80399b5af2a054488abd375cfb08ed7607297912cbfff9",
+      "verbatim": true
+    }
+  },
+  "copied_vs_rewritten": {
+    "adapted_source_text": "oMLX Metal string literals, byte-identical except where listed: tile pre-pass (_SCAN_HEADER, _SCAN_SOURCE), matmul header (_MM_HEADER: Geo, AffineQ, pair_row, TileLoader, sub_step, load_a_map, sub_step_map, map_rows, gather_seg, gather_db, tile_of), affine plain source (_MM_SOURCE_TMPL formatted with AffineQ), activation epilogue (_ACT_HEADER) and the affine row-mapped activation source (_ACT_SOURCE_TMPL formatted affine/mapped); the header-flattening helper (_read_mlx_headers, now raising instead of returning None)",
+    "rewritten": "host admission, planner port without the environment override, db->seg fallback as a pure function, pinned-plan validation with a threadgroup-memory bound, host route/tile/restore mirrors, sealed admission/route objects, route decision, engagement counters, lazy MLX backend and the launch wrappers (grid/template/output plumbing follows oMLX _launch)",
+    "modifications": [
+      "_MM_HEADER: Mxfp4Q (MXFP4 loader, needs fp4.h/fp8.h) removed; fp4.h and fp8.h no longer read",
+      "_ACT_HEADER: the clamped GLM epilogue (EPI == 2) removed; act() static_asserts EPI == 1 and ignores limit (a zero lim buffer is still bound so the retained source text is unchanged)",
+      "kernel names prefixed mlx2_research_ (no collision with an oMLX build in the same process)",
+      "unmapped activation epilogue, MXFP4 sources, self-tests/canaries, enabled() env switch, plan env override and the None-returning decline path not retained",
+      "header read failures raise SegmentedMoEUnavailable instead of returning None"
+    ]
+  },
+  "retained_mechanisms": [
+    "single-expert tiles of at most BM rows per expert run (partial tiles only at a run's end), expert-major tile order, max_tiles = ceil(M / BM) + min(E, M)",
+    "seg (single-buffered BK 64/128) and db (double-buffered BK 64) schedules, tile-on-x (GX 32) or mlx (column, tile) grid, PAD threadgroup bytes",
+    "affine dequantization: fp32 scale * q + bias rounded once to bf16",
+    "16x32x16 NAX tensor ops in mlx's K order with fp32 accumulation; K tail only in valid 32-deep sub-steps (unused at admitted shapes)",
+    "fused [gate; up] table paired by pair_row so each lane holds gate and up of the same output element; both rounded to bf16, then Multiply()(Multiply()(g, Sigmoid()(g)), u) with MLX's functors (the compiled nn.silu(gate) * up op sequence)",
+    "row map: sorted row r reads token row rmap[r] in place (32-bit element offsets rmap * K + col), never materialising x[order // k]",
+    "32-bit row offsets (no >32768 padding needed; seam padding tolerated as a trailing repeat of the last row)"
+  ],
+  "admission": {
+    "contract": "affine 4-bit group 64, bfloat16 activations/scales/biases, uint32 packed weights, fused [gate; up] table [E, 2I, D/8], down [E, D, I/8], x_tokens [T, 1, D], hidden_sorted [M, 1, I]",
+    "dims": "hidden % 64 == 0, intermediate % 64 == 0, 1 <= top_k <= experts <= 2048",
+    "row_block": "rows = T * k >= 16 and rows // experts >= 4 (overrides oMLX M >= 8)",
+    "named_geometries": {
+      "default35b": "E256 k8 D2048 I512: first admitted T = 128",
+      "flash_next": "E512 k10 D2560 I640: first admitted T = 205"
+    },
+    "overflow": "rows + 63 <= INT32_MAX - 4096 (MAX_ROWS: scan loop g0 += 4 * 1024, shapes, params; entry-time rows incl. seam padding re-checked per projection); D, I <= INT32_MAX // 32 (MAX_DIM = 67108863; largest aligned accepted dim 67108800); per projection rows, K, N (incl. 2I), 4 * max_tiles and every dispatch-grid dimension <= INT32_MAX (grid computed on the host by dispatch_geometry, as oMLX _launch); signed_int_intermediates of the CHOSEN plan (planned or pinned) <= INT32_MAX: K * kBits, N + 63, NAX fragment offsets 24 * ld, seg (bm - 32) * K (unmapped) and (bm - 32) * ld_out, seg 16 * K, db 31 * K + 28 (unmapped); T * D < 2**32 (uint row-map element offsets); pinned gx only the upstream 0 or 32. These are generic host bounds, not a native qualification of general shapes",
+    "signed_bounds_note": "Root 2940/2942 proposed D, I <= INT32_MAX // 32, which covers K * kBits and the db 31 * K + col. The retained seg schedule also forms x + tm * K (unmapped down) and y + tm * N / tm * ldy with short tm up to bm - 32 = 96, so seg 96/128 plans need the per-plan check: for example, down K = I = 2**25 (below the floor) with 96 rows per expert plans seg 128 and 96 * K = 3,221,225,472 > INT32_MAX; it is refused. The corrected root examples T4/k4/E4/D2**29/I64 (mapped K * 4 = 2**31) and T16/k4/E4/D64/I2**28 (plain down db r * K) are refused. D = 2**28 alone in the mapped gate/up does not reach a plain down K (down K = I): the earlier opus example in radio 2943 was wrong.",
+    "values": "sorted expert ids in [0, E), each expert ONE contiguous run, row map in [0, T) with every token exactly top_k times, row_map == order // k and inv_order inverse of order when an order is supplied, sorted_experts == expert_ids[order] when router ids are supplied, padding rows repeat the last real row; the research entry requires routes sorted from router ids (expert_ids and order present)",
+    "gate_revalidation": "sealed objects are not trusted by identity alone: the gate re-runs admit(admission.request) and requires equality, and revalidates routes (bounds, runs, order, row map, router-id binding) and requires equality, so dataclasses.replace() copies that keep the seal cannot pass altered content",
+    "refused": [
+      "training",
+      "expert bias",
+      "folded shared expert",
+      "split gate/up layout",
+      "non-bf16",
+      "other quantization",
+      "unaligned dims",
+      "too-small (verify/decode) windows",
+      "overflow",
+      "split or out-of-range expert runs",
+      "bad row maps/orders/padding",
+      "unsealed admissions/routes",
+      "sealed but altered (dataclasses.replace) admissions/routes",
+      "routes without router ids/order at the research entry",
+      "invalid pinned plans",
+      "missing research_opt_in"
+    ]
+  },
+  "planner": "Port of oMLX _plan at d6b2b92 (thresholds measured upstream on M5 Ultra at Qwen3.8 / GLM-5.3 / MiMo-V2.6 expert shapes). NOT measured or tuned in mlx2; no environment override.",
+  "state_boundaries": [
+    "implemented: research candidate only; qualified false; selected false; observed_used false; route None",
+    "decide_route always returns ordinary-reference; supplied evidence (smoke, host report, receipt) never promotes",
+    "research_opt_in=True is an acknowledgement that an explicit call may build/dispatch Metal kernels; it is NOT GPU ownership (the caller must hold the GPU lease per lab protocol)",
+    "every refusal precedes the first MLX import and any kernel construction; capability and backend errors propagate unchanged; no fallback, no canary, no timers, syncs or readbacks",
+    "engagement counters: fixed keys, saturating at 2**63 - 1. {native,substituted}.successful_chains.{gate_up_mapped_swiglu,down_segmented} count lazy dispatch chains whose tile scan AND matmul both returned into the graph; they are not every issued scan (a scan issued before a raising matmul is not counted) and NOT GPU executions. backend_raised counts calls whose backend construction, capability check or dispatch raised (the exception propagates unchanged). The former native.scan/substituted.scan keys are retired. A future engagement gate needs a fresh successful chain AND an evaluated, checked output. No timers, syncs or readbacks.",
+    "native classification: native only when the entry constructed the backend itself via _native_backend AND type(backend) is the _MLXBackend class captured at import as a default argument; a supplied instance or subclass, a rebound module name _MLXBackend, or a substituted _native_backend factory (including one returning an _MLXBackend subclass) counts as substituted. Evidence-association hygiene, not protection against arbitrary code.",
+    "nothing in src imports the module; switch_layers, qwen3_next, qwen4_exp, scheduler and cache are untouched"
+  ],
+  "validation": [
+    "tests/test_segmented_moe_prefill_research.py: 117 passed (PYTHONPATH=src:. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest --noconftest -p no:cacheprovider -q; host only: an MLX meta-path blocker is installed BEFORE the candidate module is imported at collection and around every test (already-loaded MLX modules are hidden so a cached module cannot bypass it); fresh-interpreter subprocesses, plain and with mlx poisoned in sys.modules, confirm module import attempts no MLX import and builds no kernel). HOST TESTS DO NOT ESTABLISH METAL NUMERICAL IDENTITY.",
+    "host controls covered: named-geometry admission boundaries (T 127/128 default35b, 204/205 Flash-Next), decode/verify windows refused, rows >= 16 overriding oMLX M >= 8, training/bias/shared-fold/layout/dtype/quantization/shape/type/overflow refusals, planner port at every threshold incl. upstream test shapes, db->seg fallback, pinned-plan validation and threadgroup-memory bound, empty expert runs, repeated token maps, ragged runs (upstream canary profile + ragged tail) with tile coverage exactly once at BM 64/96/128, split runs left uncovered by the scan mirror and refused, descending single runs, seam padding (32776 -> 32832) with inverse restoration, invalid ids/maps/orders/padding, unsealed admissions/routes, routes/admission mismatch, array shape/dtype/quantization refusals before any backend, every refusal before the default backend's lazy MLX import, missing capability and backend errors propagated unchanged without counted dispatches, substituted backends never counted as native, saturating fixed-key counters, route decision never promoted by evidence, kernel text bound to these hashes, header flattening and missing-header errors",
+    "mutations (applied to a /tmp overlay copy of src; worktree untouched; runner sha256 ecc85d7593eb41d107d1a22ccac6f4aa628a320781d652c824579d912abffb43), 26/26 killed: allow_bias, backend_before_gate, drop_db_fallback, drop_expert_id_binding, drop_int32_grid_bounds, drop_pad_consistency, drop_readmission, drop_route_revalidation, drop_router_id_requirement, drop_row_map_bounds, drop_row_map_order_check, drop_rows_int32_check, drop_single_run_check, header_missing_returns_empty, kernel_text_rowmap_offset, native_by_isinstance, pinned_gx_unbounded, planner_36_to_32, planner_drop_short_k, route_promotes_on_evidence, row_block_ratio_4_to_2, row_floor_16_to_8, skip_capability, substituted_counts_native, swallow_backend_errors, truthy_opt_in. Earlier rounds left survivors that were test gaps (backend_before_gate, drop_row_map_order_check, drop_row_map_bounds; then drop_rows_int32_check after the grid bound made it redundant except in the 63-row seam-pad window), each closed by a targeted test",
+    "root review repairs (stage20 draft review, radio seq 2937): seal survived dataclasses.replace -> gate re-admission/revalidation plus router-id binding; unbounded 2I/K/N/grid/GX -> host dispatch_geometry with int32 bounds and gx in {0, 32}; a provided _MLXBackend subclass counted native -> only a self-constructed backend counts native. Each has a test and a killed mutation.",
+    "stage20 bounds repair (root 2940/2942, repair task 0bf6ad18): new CPU controls for the dim floor (largest aligned dim admitted, next aligned refused), both corrected root examples, seg per-plan row offsets below the floor (planned and pinned, plain and paired), named-geometry intermediates < 2**24, scan-loop/padded-row oversize (the scan bound alone and the 63-row seam-pad window alone), partial backend failure (scan issued, matmul raises: no successful chain, backend_raised 1), constructor substitution (rebound class, substituted factory returning a lookalike or an _MLXBackend subclass), counter key set. NEW mutations only (runner /tmp/mlx2-intake/stage19-draft/mutate20.py sha256 004543af3289cd1b55ae1a4b6c02e35b9812f1e129ed72b05fd65b7665cca343, /tmp overlay copy of src, worktree untouched): 16/16 killed: drop_dim_floor, dim_floor_int32_over_16, drop_signed_product_check, seg_tm_capped_at_31, drop_seg_x_product, drop_seg_out_product, drop_db_product, k_bits_without_bits, drop_projection_scan_bound, admission_rows_plain_int32 (first survived: the projection row bound refused the test case first; closed with a seam-pad-window case), count_chain_before_dispatch, drop_backend_raised, native_ignores_type, native_by_isinstance, uncaptured_native_class, module_level_mlx_import (fails at collection under the blocker). The 26 earlier mutations and the offline Metal check were NOT rerun: the retained kernel literals are byte-unchanged (test_kernel_text_bound_to_provenance passes on the same retained sha256 values) and kernel arithmetic was not touched.",
+    "compile status: py_compile of module and tests OK. Offline CPU-side syntax/type check only: xcrun -sdk macosx metal -std=metal4.0 -Wall (Apple metal 32023.883) of the retained kernel text inside a hand-written stand-in for MLX's generated kernel signature, with the installed MLX headers flattened by read_mlx_headers and utils.h included: scan 3 instantiations (BM 64/96/128) exit 0; affine plain/down 15 instantiations exit 0; mapped gate/up SwiGLU 9 instantiations exit 0 (AIR sha256 scan 9fd81496..., down 80ded790..., gate_up e3362119...); only warning: unused 'inf' in installed MLX unary_ops.h:14. Negative control (EPI == 2) fails on the retained static_assert. Stand-in generator sha256 2a775af621ca14261292e8cd5706ec8c2e8d9934ee1388d23c0459ced6eb9ca4. NOT MLX's JIT, not a runtime pipeline, no device, no numerical evidence.",
+    "not done in this scope (by instruction): no MLX import, device query, Metal JIT/instantiation/dispatch, weight loading, native harness or timing; no gains or native pass are claimed"
+  ],
+  "pending_native_and_model_gates": [
+    "MLX runtime compile (mx.fast.metal_kernel JIT) of scan, plain and mapped-activation kernels on an M5-class device under an owned GPU lease",
+    "bit identity vs the ordinary reference at both named geometries: mapped gate/up+SwiGLU vs gate_up_proj(x[order // k]) + split + swiglu; segmented down vs down_proj(sorted_indices=True), including empty experts, ragged runs and seam padding",
+    "engagement: nonzero fresh native dispatch counts paired with evaluated, checked outputs",
+    "separately scoped paired timing and memory (the removed x[order // k] copy) under controlled conditions; upstream +10.5% Flash-Next prefill is NOT claimed here",
+    "model-level teacher-forced fidelity and any integration seam would need its own review; no served route until qualified and selected"
+  ],
+  "qualification": "none: research only, default-off, unqualified, unselected"
+}

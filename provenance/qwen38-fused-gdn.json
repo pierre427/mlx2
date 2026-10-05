@@ -1,0 +1,30 @@
+{
+  "source_repository": "mlx2 (local shared runtime)",
+  "source_revision": "531a876d202dcc42bdf6b6d91f5ed91105879943",
+  "source_paths": [
+    "src/mlx2/runtime/models/qwen36_35b.py",
+    "src/mlx2/runtime/models/qwen3_5.py",
+    "src/mlx2/runtime/models/qwen4_fused_gdn.py"
+  ],
+  "license": "MIT",
+  "upstream_provenance": [
+    "provenance/qwen38-27b.json",
+    "provenance/flashnext.json",
+    "provenance/qwen36-35b.json"
+  ],
+  "destination": "src/mlx2/runtime/models/qwen38_fused_gdn.py",
+  "modifications": [
+    "Original default-off 27B subclass and existing adapter execution-policy switch",
+    "Reuse unchanged shared decode kernel source with Qwen3.5 numerical template branch at strict 16/48 geometry",
+    "Keep incompatible verify/rollback and prefill on reference paths with counted refusals"
+  ],
+  "validation": {
+    "cpu_tests": "Blocked before collection by MLX import: no Metal device in sandbox",
+    "syntax": "py_compile passed",
+    "metal": "Not executed; guarded script provided",
+    "qualified": false,
+    "selected": false,
+    "host_tests": "3 structural tests passed; baseline rejects 27B at B=1/2/4/8/16 (5 subtest failures); Flash-Next admission and Metal source text unchanged; 9 policy checks passed"
+  },
+  "report": "docs/audits/qwen38-27b-fused-gdn/REPORT.md"
+}

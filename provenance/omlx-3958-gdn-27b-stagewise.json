@@ -1,0 +1,21 @@
+{
+  "component": "Research-only Qwen3.8-27B GDN stagewise Metal comparator",
+  "status": "synthetic S=3/S=8 GPU parity passed; direct recurrence speed gate closed; unselected",
+  "source_repository": "https://github.com/jundot/omlx",
+  "source_pr": "jundot/omlx#3958",
+  "source_revision": "3e9703518984c294c2ed989cf968727d0e0ffa56",
+  "source_path": "omlx/patches/qwen35_gdn_verify_fused.py",
+  "source_sha256": "84acb74207bc945c6452030c455fdfbb3284087845064fc7edd6a29fee7a9e15",
+  "source_license": "Apache-2.0; the recurrence thread layout credits mlx-vlm's MIT kernel",
+  "local_path": "scripts/research/gdn3958_stagewise_gpu.py",
+  "timing_path": "scripts/research/bench_gdn3958_stagewise_gpu.py",
+  "modifications": "Adapted the pinned recurrence prologue and main body to receive mlx2's precomputed FP32 decay and beta, write a full final FP32 state for the local ArraysCache rollback transaction, and exclude oMLX's lazy pending replay/monkeypatch. The ordinary mlx2 path provides prework, precise SiLU norm, out projection, and accepted-prefix replay. There is no serving hook.",
+  "admission": "Pin local GDN source and model config/index hashes. Synthetic BF16 activations at Qwen3.8-27B recurrent geometry, B=1, S in {2,3,4,8,17}; mask-free eval only. Compare every stage and every accepted prefix exactly; stop on first mismatch before timing.",
+  "validation": {
+    "cpu_command": "PYTHONPATH=src ~/Desktop/mlx2/.venv/bin/python -m pytest -q tests/test_gdn3958_stagewise_cpu.py tests/test_omlx3958_gdn_reference_cpu.py",
+    "cpu_result": "8 passed; cold and warm CPU harness checks every accepted prefix, second verify, and next token",
+    "gpu_result": "B1 BF16 S=3 cold and warm exact stage/cache parity: 164 comparisons each across all accepted prefixes, second verify, and next token. S=8 warm parity also passed within the source-bound timing runner. All root-owned cpg_job runs completed, restored the pinned :8282 model, and released the GPU lease and host lock. Synthetic 32-wide projections, no checkpoint or serving result.",
+    "timing_result": "Direct one-layer recurrence plus local FP32 decay/beta, 4 warmups and 16 alternating samples per arm: S=3 warm ordinary/candidate medians 237.1045/238.521 us (ratio 0.9941); S=8 warm 170.333/178.1045 us (ratio 0.9564). Candidate has no direct speed gain in these runs. Excludes projections, conv, norm, out projection, cache trim, drafts, and HTTP; cross-width timings are not comparable as a scaling claim.",
+    "limitations": "Synthetic 32-wide projections with real 27B GDN recurrent dimensions; no checkpoint weights, GPU parity, cycle timing, route selection, or serving claim. The first Metal comparison is source-bound research only."
+  }
+}

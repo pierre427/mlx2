@@ -1,0 +1,38 @@
+{
+  "implementation_kind": "original mlx2 receipt lifecycle correction",
+  "source_repository": "mlx2",
+  "source_revision": "b3ae55114414f6f4833339659d794905dda470a9",
+  "source_paths": [
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/runtime/proposal_pool.py"
+  ],
+  "license": "MIT; original project code, no external implementation copied",
+  "modifications": [
+    "Snapshot the pool's last committed ranking receipt when constructing continuation metadata, including a transient ordinary terminal token that has no pool feedback outbox entry",
+    "Keep whole-cohort postcommit ranking refresh unchanged; the receipt query is lock-protected and mutates no source labels, revisions, tickets, replay guard or ranking retention state",
+    "Optional diagnostic query failure yields ranking_error instead of aborting inference; absence of valid ranking evidence still fails the existing HTTP validation assertion"
+  ],
+  "observed_defect": {
+    "metal_receipt": "qualification/runs/parallel-draft-thorough-20261001/m3/http-pool-row-exact-short.json",
+    "warm_terminal": "current_execution ordinary_target, external_rounds1, round_proposed0; no ranking despite43 committed pool rounds/645 semantic sequences across the server run",
+    "cpu_reproduction": "Actual tiny XPress pool commits15 complete paths at depth2, emits3 tokens and learns global/model/session labels; budget4's ordinary terminal receipt then loses ranking with KeyError before the correction"
+  },
+  "validation": {
+    "focused_cpu_tests": 2,
+    "combined_cpu_tests": 26,
+    "coverage": "Terminal ordinary receipt retains actual unchanged committed three-tier counts/revisions; repeated diagnostic reads mutate no registry state; injected receipt query failure does not abort the terminal token; shared run includes11 dedup mapping/gate/cost/rollback tests and13 complete-path executor tests",
+    "gpu_execution_by_author": false,
+    "corrected_metal_http_execution": "not executed by this agent; parent-owned rerun pending",
+    "qualification": "No performance claim; original HTTP failure remains preserved",
+    "metal_http": {
+      "receipt": "qualification/runs/parallel-draft-thorough-20261001/m3/http-adaptive-prefix-final.json",
+      "source_commit": "77758e62",
+      "result": "PASS: warm response ends on ordinary_target and retains real committed global/model/session counts; all HTTP parity/cache/mixed/cancellation checks pass.",
+      "qualified": false
+    }
+  },
+  "implemented": true,
+  "qualified": false,
+  "selected": "continuation_pool routes only",
+  "performance_claim": false
+}

@@ -1,0 +1,14 @@
+{
+  "name": "paged request route coordinator",
+  "source_repository": "mlx2 (original project implementation)",
+  "source_revision": "aa87baa48610f9feea03c2237d8ca5fce6163a26",
+  "source_paths": [
+    "src/mlx2/runtime/paged_pack_scheduler.py",
+    "src/mlx2/runtime/paged_request_transaction.py",
+    "src/mlx2/runtime/paged_atomic_owner.py"
+  ],
+  "license": "Apache-2.0",
+  "copied_code": false,
+  "modifications": "New default-off host coordinator composes pack selection and atomic request publication without modifying production serving.",
+  "validation": "CPU-only tests/test_paged_request_route_cpu.py; no native or GPU qualification"
+}

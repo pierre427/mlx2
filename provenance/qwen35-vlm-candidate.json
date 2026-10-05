@@ -1,0 +1,30 @@
+{
+  "component": "qwen3.5 dense and MoE direct vision/MTP candidate",
+  "source_repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+  "source_revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "source_files": {
+    "mlx_vlm/models/qwen3_5/qwen3_5.py": "02bb994533e53589d9b1ee3623a79516e2e976bad34ebe533091c4c4af1c2ebd",
+    "mlx_vlm/models/qwen3_5_moe/qwen3_5_moe.py": "9a4ae1e1fc7b831e27288f9e3c19eb7a0dcd63d0411f95918cc52a847e5b3507",
+    "mlx_vlm/speculative/drafters/__init__.py": "a7c8c527fd2f42213ea6c109528c1cef8a3b4c21d6f4698dbe084c2d7bf99b22",
+    "mlx_vlm/generate/dispatch.py": "89d9b08ec8316a6eed881486cc5a5129afbde481d693293ec20964146ef50842",
+    "mlx_vlm/prompt_utils.py": "3880171f3ed450b62979c47ca7e14eaa0356cd54bfc44718c5d4a46561691a57"
+  },
+  "destination": "src/mlx2/adapters/qwen35_vlm_candidate.py",
+  "modifications": [
+    "Added local artifact and complete vision tower index gates for 4B, 9B, 27B dense and 35B MoE topologies",
+    "Added a direct image/video bridge through a pinned optional mlx-vlm runtime",
+    "Kept the ordinary mlx2 registry unchanged and made external extracted MTP draft selection explicit",
+    "Bound direct results to a local artifact fingerprint",
+    "Render image/video placeholders with the pinned chat template before direct generation"
+  ],
+  "validation": {
+    "CPU_static_inspection": "4B 297, 9B 333, 27B 333 vision tensors; 35B 333 vision and 42 MTP tensors",
+    "real_mlx_import_guard": "passed",
+    "model_load": "Qwen3.5-4B MLX 4bit strict load and 24-token image-conditioned direct smoke passed on M5; see qualification/runs/sept26-model-smokes/qwen35-4b-image-plain-prompt.json",
+    "vision_output_parity": "not run",
+    "mtp_acceptance": "not run",
+    "selection": "unqualified direct candidate only"
+  }
+}

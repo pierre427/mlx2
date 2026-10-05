@@ -1,0 +1,82 @@
+{
+  "name": "qwen38-tree-gdn-sparse-restart",
+  "status": "implemented (CPU host planner, CPU reference executors, isolated Metal kernel source definitions); unqualified, unselected, default-off, not wired into any scheduler, runtime route or model forward",
+  "design_sources": [
+    {
+      "source_repository": "https://github.com/ddalcu/mlx-serve",
+      "pull": 645,
+      "source_revision": "bf6caf5ddb54737909d4664018e8f2f8b3d34958",
+      "source_paths": [
+        "src/gdn_decode.zig:treeTable",
+        "src/gdn_decode.zig:K1TR_SOURCE",
+        "src/gdn_decode.zig:K1R_SOURCE"
+      ],
+      "source_file_blob": "63f99e9a474ac4b132918babafb53d9881b016b2",
+      "source_file_sha256": "15940fbf51d79753e07b992cd9bbdffd2520d3974d0080e28f7cd1cec2dfcdb0",
+      "license": "MIT (mlx-serve own code), Copyright (c) 2026 David Dalcu",
+      "license_blob": "fa6c781bf4ad462d965a429bd1c1c33475d3905a",
+      "notice_caveat": "The repository NOTICE says mlx-serve incorporates third-party software under its own licenses (Apache-2.0, e.g. MTPLX) at sites whose comments name the upstream. src/gdn_decode.zig carries no such site comment at bf6caf5d, so the parts read here are treated as mlx-serve's own MIT code. Read read-only via the GitHub API on 2026-09-30.",
+      "use": "Design input only; no source text copied. Taken ideas: rows walk parents first; a row restarts from its parent's state only when the parent is not row t-1; only rows some later child restarts from are retained; the commit replays the accepted path from the round's input state with retained per-row prework instead of exporting per-node states.",
+      "declared_storage_note": "Upstream K1TR stores only flagged parents but still declares kept[TL][4], i.e. full tree width. No register, occupancy, peak-memory or throughput saving is claimed for upstream or for this candidate."
+    },
+    {
+      "source_repository": "mlx2 (local, unmerged)",
+      "source_revision": "bc0bf63514e800244cb493dae8165e793155a9c3",
+      "source_paths": [
+        "src/mlx2/runtime/tree_gdn_recurrence_research.py:_SOURCE",
+        "provenance/tensorfold-tree-gdn-research.json"
+      ],
+      "source_file_sha256": "5f54de3c59a6f252bbbe73255411ca365e7b4cb5a6ae9a7c8c183b47d0ba2c63",
+      "license": "Apache-2.0 (mlx2 local LICENSE); the prototype's own design input was ashhart/TensorFold bb4b4a35 lane_tree (MIT, provenance/LICENSE.TensorFold-MIT; pinned TF 71377 lane_tree keeps states[MAXW] per node)",
+      "use": "Reuse of its ordinary fp32 scalar-gate M1 per-row arithmetic (decay, kv simd_sum, delta, update, readout) and launch geometry (grid (32, Dv, Hv), threadgroup (32, 4, 1)). Its full-state executor (nodes[MAXW][N] plus a state_out per node) is NOT duplicated. Read via git show; the prototype stays immutable and unmerged.",
+      "related_evidence": [
+        "ae1c1a26: historical 5-row full-model exactness record for the prototype",
+        "a4bbe193: 13-row limited diagnostic for the prototype"
+      ]
+    },
+    {
+      "source_repository": "mlx2 (local)",
+      "source_revision": "5ef6bda7f8129cc010ce180dd3a0d81cd0af955e",
+      "source_paths": [
+        "src/mlx2/runtime/models/gated_delta.py:_make_gated_delta_kernel"
+      ],
+      "source_file_sha256": "4cae724941e089efd56d1a2f19eb38f12847e8a55e58525fd3e230eb6c3ab79e",
+      "use": "The ordinary scalar-gate M1 step law the prototype mirrors; read only, not imported (its module builds Metal kernels at import).",
+      "license": "MIT (explicit SPDX-License-Identifier in gated_delta.py); adapted from mlx-lm-unified, source revision 1e2bc604f71d070bee970c3e7db8b60f7855599b in provenance/flashnext.json",
+      "source_license_notice": "provenance/LICENSE.unified-MIT",
+      "license_correction": "Stage11 mislabeled this source file under the enclosing Apache-2.0 project license. Its explicit MIT notice governs the adapted reference file; the original isolated candidate remains Apache-2.0."
+    }
+  ],
+  "destination_paths": [
+    "src/mlx2/adapters/qwen38_tree_gdn.py",
+    "tests/test_qwen38_tree_gdn.py"
+  ],
+  "modifications": [
+    "Compressed restart slots (local, deliberate): a host plan maps only parents referenced non-consecutively (p >= 0 and p != t - 1) to compact slots 0..K-1; the Metal source declares kept[KSLOTS][N] with KSLOTS = max(1, K), not tree width.",
+    "Forests: a -1 parent after row 0 restarts from the retained entry state (upstream K1TR assumes a single root at row 0).",
+    "Strict host plan: parents must be a list or tuple of plain int (bool, float, numpy scalars and strings refused, nothing truncated), row 0 is -1, every other parent is -1 or 0 <= p < row, width 1..32. Plans are frozen and re-derived from their parents and digest before any use; forged or replaced plans are refused.",
+    "Bounded geometry: B1, Dk = Dv = 128, scalar gates, q/k/v share bf16 or fp32, g/beta/state fp32 only (no per-token state cast), Hv % Hk == 0, 1 <= Hk <= Hv <= 128.",
+    "The forward returns readouts plus frozen host snapshots of entry state and per-row prework; it never exports per-node states. Accepted root-to-node paths (prefix or not) are replayed from the entry. CPU all-node states exist only in the diagnostic oracle.",
+    "Receipts separate host planning/reference execution from device engagement; nothing on the CPU path can report device engagement.",
+    "Metal dispatch entry points refuse unless explicitly opted in and on the default GPU device; CPU tests forbid every Metal construction, dispatch and capability query.",
+    "Root pre-review fixes (radio 2866-2868): launches are counted as issued only (lazy graph nodes); device engagement is counted solely by confirm_device_engagement reading a kernel-written uint32 flag back as 1 on the GPU, and only for flags from kernels built by this module's own builder cache (mocked or substituted kernels never count).",
+    "verified_plan is a pure re-derivation (_derive_plan) that touches no counters.",
+    "Host executors refuse unless mx.default_device() is the CPU, before any tensor capture.",
+    "Forward records are replayable only as the exact issued object (weak registry) whose plan digest/parents, geometry, dtype, schema and prework digest still match a process-keyed HMAC binding taken at issue; copies, dataclasses.replace retargeting, in-place forgery and missing bindings are refused.",
+    "The Metal forward/replay functions are low-level, unbound experiments: not bound to a forward record, cache revision or commit, and unable to qualify a cache commit.",
+    "Root repair-review (radio 2871-2872): pending engagement flags are held in a WeakValueDictionary, so telemetry never owns a launch's graph and a dropped flag leaves the table; the prework digest binds every part's dtype and shape as well as its bytes. Record guards protect against accidental retargeting, not an in-process adversary."
+  ],
+  "validation": [
+    "tests/test_qwen38_tree_gdn.py (CPU only, 98 tests): plan refusals, forged-plan refusal, geometry refusals, chain/branch/forest/fan/deep and seeded random trees (44 parity cases: sparse vs all-node oracle readouts and every accepted root-to-node path vs the all-node oracle and the ordinary per-path chain), arbitrary-prefix and non-ancestor path refusal, zero and many retained slots, input immutability, record retargeting/forgery refusal, pure plan verification under threads, GPU-default refusal before capture, lazy/mocked issuance never engaged, weak pending flags released after GC, same-bytes reshape of retained prework refused, no Metal calls at import or in tests",
+    "Mutation checks run by the builder: slot carry, slot off-by-one, forest carry, registry removal, binding removal, mock-kernel registration, strong pending-flag table and shape-free prework digest each fail tests",
+    "Root independently verified the frozen builder revision: 98 CPU tests passed; seven in-memory source mutations were rejected. Two additional CPU witnesses at the local Qwen3.8 artifact geometry Hk=16, Hv=48, Dk=Dv=128, width 7 matched all readouts and every accepted path in fp32/bf16. These witnesses share the host arithmetic and are not native/model qualification. Root corrected only the host-entry storage docstring, not arithmetic. Receipt: qualification/runs/mechanism-intake-20260930/sparse-tree-gdn-cpu-review.json"
+  ],
+  "pending_gates": [
+    "Metal D128 sparse forward vs prototype/ordinary: readout and replayed recurrent-state bit identity with nonzero device engagement",
+    "conv-state window replay (not covered: this candidate owns the recurrent state only)",
+    "real Qwen3.8 B1 source-bound teacher-forced, continuation and state gates",
+    "separately controlled latency and memory runs"
+  ],
+  "qualification": "unqualified, unselected; CPU host model only. The CPU reference fixes an ascending-butterfly reduction order and cannot qualify Metal simd_sum bits or served behaviour. No register, peak-memory or tokens/s gain is inferred.",
+  "destination_license": "Apache-2.0 (mlx2 local LICENSE); no Apple copyright header"
+}

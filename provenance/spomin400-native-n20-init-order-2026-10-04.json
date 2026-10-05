@@ -1,0 +1,27 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "source_repository": "mlx2",
+  "source_revision": "716014de49de7dd1749e0d0e6c8b95feac2faf68",
+  "source_paths": [
+    "scripts/research/spomin_400case_phased_http_bench.py",
+    "src/mlx2/runtime/models/import_env.py",
+    "scripts/research/varlen_hybrid_packed_prefill_n2_geometry_gate.py"
+  ],
+  "license": "MIT",
+  "modifications": [
+    "Pin complete source-bound N20 environment before model dependencies import, matching proven N2 gate order.",
+    "Poll worker error and ready flag with bounded50ms wake.",
+    "Owned failed initialization closes partial engine and restores hooks/allocator policy; unresolved roots remain retained."
+  ],
+  "validation": {
+    "cpu_checks_passed": 20,
+    "tests": [
+      "test_spomin400_init_order_cpu.py",
+      "test_spomin400_phased_cpu.py",
+      "test_packed_n20_phase_cpu.py"
+    ],
+    "mlx_native_runtime_imports": false,
+    "gpu_executed": false
+  },
+  "qualified": false
+}

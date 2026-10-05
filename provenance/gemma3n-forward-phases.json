@@ -18,7 +18,14 @@
   ],
   "validation": {
     "diagnosis": "At main a1214d87, pinned mlx-vlm and its language-model forward answered Paris; the outer-model forward and mlx2 served path answered incorrect cities on the same greedy prompt.",
-    "public_result": "benchmark_results/2026-09-29/gemma3n.md",
-    "post_fix": "served text and image regression checks passed on the M5 qualification host; the generic 20x20 gate remains open"
+    "receipt_paths": [
+      "qualification/runs/requal-20260928/m5-max-128gb/gemma3n/stock-reference.json",
+      "qualification/runs/requal-20260928/m5-max-128gb/gemma3n/language-forward-comparison.json"
+    ],
+    "post_fix": "At 015ee0ee, 35 focused API, stop and cache tests passed. The candidate ordinary served smoke passed arithmetic and answered Paris at declared default sampling. A served image regression on a two-shape PNG returned circle and square. These are smoke and regression checks, not route qualification.",
+    "post_fix_receipts": [
+      "qualification/runs/requal-20260928/m5-max-128gb/gemma3n/smoke.json",
+      "qualification/runs/requal-20260928/m5-max-128gb/gemma3n/image-regression.json"
+    ]
   }
 }

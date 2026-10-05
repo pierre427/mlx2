@@ -1,0 +1,20 @@
+{
+  "schema": "mlx2-provenance-v1",
+  "component": "qwen35-4b-adapter",
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+  "source_files": [
+    "mlx_lm/models/qwen3_5.py"
+  ],
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "modifications": [
+    "Reused mlx2's parameterized Qwen3.5 hybrid runtime and ordinary adapter at the 32-layer, 2560-width local 4B geometry",
+    "Added exact topology and indexed-shard inspection before any MLX import",
+    "Disabled model-specific 9B sampling defaults and excluded unimplemented MTP and vision capabilities"
+  ],
+  "validation": {
+    "scope": "CPU-only metadata inspection and registry tests",
+    "production_qualification": "pending"
+  }
+}

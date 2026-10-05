@@ -1,0 +1,42 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "name": "native-n20-weighted-ragged-gate",
+  "date": "2026-10-04",
+  "origin": "original mlx2 validation code over existing project mechanisms; no peer source copied",
+  "license": "Apache-2.0 project license",
+  "source_paths": [
+    "scripts/research/varlen_n20_model_ragged_gate.py",
+    "tests/test_varlen_n20_model_ragged_gate_cpu.py"
+  ],
+  "inputs": [
+    "frozen SPoMIN 400-case prepared input artifact",
+    "source-bound Qwen3.8 27B adapter artifact",
+    "source- and SHA-bound N20 native binary",
+    "existing stock merged ordinary target and native atomic publication mechanisms"
+  ],
+  "validation_law": [
+    "three distinct prompts from one frozen domain",
+    "controlled ordinary-oracle proposals force full, partial and zero acceptance",
+    "declared query lengths 3,3,3 execute as 3,2,1 with physical widths 3,2,1",
+    "every target logits row and published KV/GDN state must match stock merged ordinary execution at physical widths 3,2,1",
+    "all native owners, pages, epochs, leases and shared memory charge must retire"
+  ],
+  "cpu_validation": {
+    "tests": 9,
+    "ruff": "passed",
+    "python_compile": "passed",
+    "git_diff_check": "passed"
+  },
+  "status": {
+    "implemented": true,
+    "gpu_executed": true,
+    "latest_executed_source": "a766d53e95d18e3b2f349ec50e15e2a8d1c5c91b",
+    "latest_result": "passed exact full-vocabulary logits, emitted-token, 288 recurrent-leaf and 96 KV-plane parity with physical N3-to-N2-to-N1 engagement and complete cleanup",
+    "corrected_oracle_device_execution_pending": false,
+    "qualified": false,
+    "selected_by_default": false,
+    "route_observed_used": true,
+    "prompt_lookup_source_observed_used": false,
+    "performance_claim": false
+  }
+}

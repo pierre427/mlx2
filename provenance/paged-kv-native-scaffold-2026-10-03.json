@@ -1,0 +1,18 @@
+{
+  "name": "native paged KV arena and optional Python write binding",
+  "status": "implemented-unqualified-default-off",
+  "source_repository": "original mlx2 implementation using installed MLX 0.32.2.dev20260919+39400a0d4 and its source revision 39400a0d4cf1641bc6e543cb5e3585757f491854; nanobind v2.15.0 pinned to a47983000e9dda68177fc1fd426f7147d785c2c0",
+  "source_paths": [
+    "mlx/include/mlx/array.h",
+    "mlx/include/mlx/allocator.h",
+    "mlx/include/mlx/primitives.h",
+    "mlx/include/mlx/backend/metal/device.h",
+    "mlx/python/src/{array,stream}.cpp",
+    "mlx/CMakeLists.txt at 39400a0d4 (nanobind v2.15.0 pin)",
+    "nanobind/include/nanobind/nb_types.h at a47983000e9dda68177fc1fd426f7147d785c2c0"
+  ],
+  "license": "original mlx2 project code; MLX headers and nanobind API used without copied implementation; nanobind build dependency is BSD 3-Clause, copyright Wenzel Jakob",
+  "modifications": "opaque K/V arena owner; internal graph write primitive; nanobind v2.15.0 MLX-domain optional Python binding for actual MLX arrays and explicit Stream; declared byte count validation; default-off Python async submission backend and terminal event polling; opt-in bounded diagnostic K/V copy primitive that consumes the write dependency and binds arena planes as MLX inputs; one-shot guarded GPU probe script",
+  "validation": "CPU CMake configure, C++ compile/link, optional module import and actual MLX array/Stream conversion against pinned wheel; focused host-only tests and probe CLI refusal without --execute-gpu. Native diagnostic read and GPU write have not been executed.",
+  "limitations": "GPU write/read visibility, terminal callback and failure retirement, generation reuse on device, and memory lifetime remain unverified. The probe pre-dispatch rejection checks poisoning but is not a GPU command-failure test. No serving integration, qualification, selection, or observed use."
+}

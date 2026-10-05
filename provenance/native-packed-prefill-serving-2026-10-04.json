@@ -1,0 +1,9 @@
+{
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_revision": "98a4cff89e6ccc6f76401a3a1be3276ade82127d",
+  "source_paths": ["src/mlx2/runtime/hybrid_packed_prefill.py", "src/mlx2/serving.py", "src/mlx2/runtime/generate.py", "scripts/research/varlen_hybrid_http_gate.py"],
+  "license": "MIT",
+  "modifications": "Complete explicit default-off source-bound short cold packed-prefill serving admission, narrow adapter delegate/geometry guard, generic atomic-attachment receipt attribution, request/CLI profile selectors and bounded actual HTTP survivor/cancellation driver. No model math, native kernels, checkpoint widening or default promotion.",
+  "validation": "30 guarded focused CPU checks, syntax/dry/diff validation. No author GPU/MLX/native runtime import; root actual HTTP gates pending.",
+  "qualified": false
+}

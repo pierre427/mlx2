@@ -1,0 +1,50 @@
+{
+  "component": "Qwen4 (Flash-Next) batched one-token fused GDN decode step (GDN half of omlx #4106; supersedes #4048)",
+  "status": "implemented; Metal bit-exact (kernel rows == B=1 launches; layer == stock batched chain); default OFF behind FlashNextPolicy.fused_gdn_batch_decode (MLX_QWEN4_FUSED_GDN_BATCH_DECODE). Not qualified, not selected.",
+  "sources": [
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "0b4babcf54e6b6bbb4eaddeec0e73e9dc6063a35",
+      "source_pr": "jundot/omlx#4106 (perf(qwen4): batched one-token decode on the MoE row window and a batched GDN step), open when read 2026-09-30; the GDN change is its last commit 0b4babcf",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/qwen35_gdn_prework.py": "fcb8f4015c2741b73850dde5b46a91a59088614aca3306b7750a7c611a281559",
+        "tests/test_qwen35_gdn_prework.py": "4f19d6de277388d76a78e577751a2aa981448f573ba4cdd2a8ff2e498312cd24"
+      },
+      "source_regions": [
+        "qwen35_gdn_prework.py: _QWEN4_BATCH_DECODE_STEP_SOURCE and qwen4_batch_decode_step_fused (lines 1154-1224): the grid-z (row, value head) rebinding design",
+        "qwen35_gdn_prework.py: _qwen4_batch_decode_state_eligible, _qwen4_batch_decode (1767-1838): admission conditions and the <=3-row per-row projection / >=4-row multi-row projection split (read; not adopted, see modifications)",
+        "test_qwen35_gdn_prework.py: test_qwen4_batched_decode_rows_equal_their_one_row_decode, test_qwen4_batched_decode_step_equals_one_row_steps (1464-1532): test shape"
+      ]
+    },
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "f7e7debdfba6b2dfb03587304efdad7112f50503",
+      "source_pr": "jundot/omlx#4048 (opt-in single-launch GDN step for 2-3 row decode), open; superseded by #4106",
+      "license": "Apache-2.0",
+      "note": "PR body read for its 2-3 row design and admission list; no code taken."
+    }
+  ],
+  "notice": "provenance/omlx-4106-gdn-batch-decode.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_fused_gdn.py (_BATCH_ROW_PREFIX, _SOURCE_BATCH, _kernel_batch, qwen4_fused_gdn_batch_decode, admit_qwen4_fused_gdn_batch_decode, admit_batch_rollback_spans, _admit_decode_operands)",
+    "src/mlx2/runtime/models/qwen4_exp.py (GatedDeltaNet._try_fused_batch_decode, set_fused_gdn_batch_decode_mode, batch counters, qwen4_fused_gdn_stats batch_decode block)",
+    "src/mlx2/adapters/flash_next_policy.py (fused_gdn_batch_decode)",
+    "scripts/check_qwen4_gdn_batch_decode.py",
+    "scripts/bench_fn_routed_decode.py (--knob gdn_batch)",
+    "tests/test_qwen4_gdn_batch_decode.py"
+  ],
+  "modifications": [
+    "The per-row body is mlx2's existing one-row fused GDN decode source (qwen4_fused_gdn._SOURCE, provenance/flashnext.json), not omlx's decode-step source; only the rebinding idea is taken. The prefix is written for mlx2's buffer names (qkv, z, a, b, conv_state, recurrent_state, output, conv_state_out, recurrent_state_out) and uses the B=1 probe's threadgroup_y so each row runs the same thread geometry as its one-row launch.",
+    "Projections are left to the model's own path (the stock batched quantized matmuls, or the lane matmul when installed). omlx's <=3-row per-row projections and >=4-row multi-row projections are not ported: in mlx2 the stock batched chain already runs multi-row projections, so the omlx 'fast tier' is what mlx2 does today, and full-layer row-exactness is available through the separate lane matmul (exact mode), which the gate verifies composes bit-exactly with this kernel.",
+    "Admission is a reasoned refusal (training, sharding, speculating, row count 2..64, one-token slab, rollback spans describable and all-valid, no unexplained mask, B=1 kernel's gate/geometry/shape/dtype checks with the batch extent), re-run every step; refusals are counted per layer (fused_gdn_batch_decode_* counters) and surfaced in qwen4_fused_gdn_stats()['batch_decode'] only when selected. omlx requires cache.lengths is None; mlx2 also accepts per-row spans that are all equal to the width, the same rule as its B=1 kernel.",
+    "The fused_outproj epilogue is not batched: a batched step runs the plain kernel and the module's out_proj.",
+    "Default off (omlx defaults its switch on). The stock decode mode (MLX_QWEN4_FUSED_GDN_DECODE=0 / set_fused_gdn_decode_mode('stock')) remains the master kill switch."
+  ],
+  "validation": "CPU: tests/test_qwen4_gdn_batch_decode.py (15). Metal (M5 Max, mlx 0.32.2.dev20260919+39400a0d4, threadgroup_y 32; qualification/runs/omlx-4106-gdn-batch-20260930/metal-gate.json): real Flash-Next layers 0/1/2/44/46 from the artifact safetensors, ragged per-row histories (1..23 tokens), B = 2/3/4/8/16/32/64, 4 decode steps: batched kernel row r == B=1 launch on row r (output, conv state, recurrent state; mx.array_equal) at every B; full layer with the batched route == the stock batched chain (outputs and states) at every B and through a lane finish + lane join churn schedule; B=1 fused == stock B=1. With stock projections, the stock batched chain is NOT row-invariant vs solo decode (projections differ from B=2 on, max |d out| 2.4e-4..4.7e-2), so neither route is equal to solo decode; with lane-exact projections installed every comparison, including batched vs each row's B=1 fused trajectory and the churn schedule, is bit-identical. Full-model A/B (qualification/runs/omlx-4106-gdn-batch-20260930/full-model-ab-abba.json; bench_fn_routed_decode.py --knob gdn_batch, one process, AB/BA alternated, 6 reps, MTP off, 1024-token prompts, 128 tokens): median ms/step off -> row_exact: B2 23.78 -> 22.10 (-7.1%), B4 32.36 -> 31.15 (-3.7%), B8 48.88 -> 46.52 (-4.8%), B16 70.43 -> 68.44 (-2.8%); tok/s +7.6/+3.9/+5.1/+2.9%; every lane's tokens identical to the stock arm; 0 fallbacks; 4536-5544 batched launches per run. A second process (fixed arm order, 4 reps) gave -6.2/-4.5/-3.8/-2.5%. omlx's -27/-21/-14% (M5 Ultra) is against a different baseline and is not reproduced here.",
+  "notes": [
+    "Batched MoE (omlx #4106 MoE row window, wave 2 on lane L2's routed kernel) sits beside this step, not inside it: in one decoder layer the GDN mixer runs this launch on the (B,1,H) slab and the MoE block runs its own row-window launch on the same rows. Each has its own policy field, per-step admission, counters and kill switch; neither touches the other's cache state. Exactness composes per row: this step equals the stock batched GDN chain bit for bit, so turning it on never changes tokens; the MoE row window is row-exact against solo decode, which the stock batched gather is not, so its token-identity reference is solo decode rather than stock batched.",
+    "Tier (b) of the brief (multi-row projections, tolerance class) is not built: mlx2's stock batched chain already uses multi-row quantized matmuls for the projections, which is what omlx's >=4-row tier switches to. The kernel itself is row-exact at every width."
+  ],
+  "selection": "2026-09-30: selected as the Flash-Next default (fused_gdn_batch_decode='row_exact') on the omlx roadmap campaign branch at Pierre's request. Not qualified: the default policy receipt changed, so Flash-Next serves labelled unqualified until it is requalified. The status field above records the evidence as of implementation."
+}

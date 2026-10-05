@@ -1,0 +1,15 @@
+{
+  "component": "Research-only 36-row B1 dense-FC coarse-head capture",
+  "source_repository": "jundot/omlx (read-only research input)",
+  "source_revision": "3e9703518984c294c2ed989cf968727d0e0ffa56",
+  "source_paths": ["omlx/patches/mlx_lm_mtp/batch_generator.py:1654-1707", "omlx/patches/mlx_lm_mtp/batch_generator.py:1861-1915"],
+  "source_url": "https://github.com/jundot/omlx/pull/3958",
+  "license": "Apache-2.0",
+  "destination_paths": ["scripts/research/coarse_head_densefc_full_capture.py", "docs/plans/m5-coarse-head-densefc-full36.md"],
+  "modifications": [
+    "Retains the MTP FC in dense BF16 form, unlike the pinned upstream route, while using the pinned q3/group128 coarse copy and exact q4/group64 head row rescore.",
+    "CPU preflight checks full-vocab artifact geometry, source and model hashes, tokenized corpus length, 36-row strata, free disk and output freshness. Execution requires an unchanged preflight receipt and external GPU ownership.",
+    "Direct-model B1 capture uses committed checkpoint clones and identical teacher-forced target/full/coarse histories for four context lengths, three seeds and three draft positions. It makes no serving or throughput claim."
+  ],
+  "validation": ["CPU source/artifact/corpus/disk preflight admitted 36 planned rows with 68,547 corpus tokens; GPU execution and 36-row analyzer pending"]
+}

@@ -1,0 +1,35 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "source_repository": "mlx2",
+  "source_revision": "6f076bc64ff0b847209aa7f93bbfaf7ca1b89d60",
+  "dependencies": [
+    "5e4802fef6ab76b0bfd2eeabfa2e813c6e4a87b5",
+    "270d2b8f6a92aabac68fc1b06474db60e2b497da"
+  ],
+  "source_paths": [
+    "scripts/run_spomin_20x20.py",
+    "scripts/research/spomin_400case_native_suite.py",
+    "scripts/research/spomin_400case_phased_http_bench.py",
+    "src/mlx2/runtime/hybrid_packed_prefill_n.py",
+    "src/mlx2/serving.py"
+  ],
+  "license": "MIT",
+  "modifications": [
+    "Ordinary maintained400-case control uses20concurrent independent client requests without a declared atomic cohort; native alone requires closed20. Original body fields and vendor sampling unchanged.",
+    "Report actual execution widths from sample events, not client concurrency as physical width.",
+    "Strict native arena storage capability/maxMetal/exactbyte geometry check before shared admission charge and factory allocation, preserves full capacity/no padding.",
+    "Explicit source-bound fixed GDN evaluation wave CLI1/2/4, default1 unchanged, profile/env pinned before model imports."
+  ],
+  "validation": {
+    "cpu_checks_passed": 74,
+    "ordinary_actual_engine_publication": "20individual Jobs",
+    "native_actual_engine_publication": "1declared20cohort",
+    "first_domain_arena_capacity_pages": 36640,
+    "first_domain_plane_bytes": 4802478080,
+    "all_actual_domains_exact_bytes_checked": 20,
+    "runtime_imports": false,
+    "gpu_executed": false
+  },
+  "native_binary_requirement": "New arena_storage_capability ABI required; old2ddf intentionally refused for requested N admission",
+  "qualified": false
+}

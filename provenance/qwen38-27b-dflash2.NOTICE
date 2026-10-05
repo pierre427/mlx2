@@ -1,0 +1,22 @@
+Attribution for the Qwen3.8 27B DFlash2 external-draft route (mlx2)
+
+1. Draft checkpoint (runtime input, not redistributed by mlx2)
+   incoai/Qwen3.8-27B-DFlash2, Hugging Face revision
+   015e795645c74b1a0eeef3b570031fb62e769bc5, model card license: Apache-2.0.
+   Also mirrored as z-lab/Qwen3.8-27B-DFlash2.  The repository ships no
+   NOTICE file.
+
+2. Reference implementation (read for architecture comparison and design)
+   Splash, github.com/incoai/splash @ f786bed, Copyright Inco, licensed
+   under the Apache License, Version 2.0.  The repository ships LICENSE and
+   THIRD_PARTY_NOTICES (llama.cpp/ggml MIT material, none of which mlx2 uses)
+   and no NOTICE file.  No Splash source is copied into mlx2; the runtime
+   draft quantization option follows Splash's choice of which draft tensors
+   are Q4 (see provenance/qwen38-27b-dflash2.json).
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use these files except in compliance with the License.  You may obtain a copy
+of the License at http://www.apache.org/licenses/LICENSE-2.0.  Unless
+required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied.

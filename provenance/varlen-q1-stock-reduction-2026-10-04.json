@@ -1,0 +1,33 @@
+{
+  "mechanism": "default-off stock-style 32-stripe short Q1 paged attention reduction",
+  "source_repository": "ml-explore/mlx (read-only research input)",
+  "source_revision": "39400a0d4",
+  "source_paths": [
+    "mlx/backend/metal/kernels/sdpa_vector.h:18-180",
+    "mlx/backend/metal/scaled_dot_product_attention.cpp:426-513",
+    "native/paged_kv/arena.cpp:kAttentionReadQ1TileSource"
+  ],
+  "source_license": "MIT",
+  "implementation_license": "MIT",
+  "modifications": [
+    "Original project source variant uses 32 token SIMD stripes and streamed 32x32 threadgroup scratch rather than 32xD partial storage",
+    "Match installed MLX vector attention's pre-scaled FP32 query, fast exponential, and simd_max/simd_sum partial reduction order",
+    "Retain revision-bound paged reads, dependency, native terminal callback, and read lease lifecycle",
+    "Admit only unwindowed short B2 pairs whose virtual left padding agrees modulo32 with stock dense ragged layout",
+    "Select only by explicit MLX2_PAGED_Q1_STOCK_REDUCTION=1 and count actual encoded stock-style dispatches",
+    "Retain configured 4/8/16-stripe ordinary reader for a surviving singleton without changing process-wide flags; preflight its geometry while B2 is active"
+  ],
+  "validation": {
+    "cpu_source_contracts": "7 focused source and geometry tests passed; three optional native binding CPU tests passed",
+    "metal_compile": "four generated FP16/BF16 dynamic/inline variants compiled offline with Metal 3.2",
+    "native_cpp": "CMake compiled and linked against pinned MLX wheel; binary SHA256 32fbb5ed4354708e6495092f0e33a9c8d0689f61dd119d7f5dafa2954cbf29e3",
+    "gpu_executed": false,
+    "qualified": false,
+    "performance_claim": false
+  },
+  "limitations": [
+    "Arithmetic topology match is a hypothesis until an identical-QKV FA7 native versus stock oracle passes",
+    "No general windowed or arbitrary ragged left-padding parity claim",
+    "Original FP16/scalar/long-Q1 arms remain unchanged"
+  ]
+}

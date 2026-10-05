@@ -1,0 +1,59 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "notice": "provenance/qwen35-122b.NOTICE",
+  "source_files": {
+    "mlx_lm/models/qwen3_5_moe.py": {
+      "sha256": "8a4987f6053f44dda3c0f51e92f51a57e35b4eade8277799a1eb63c14480aee7"
+    },
+    "mlx_lm/models/qwen3_5.py": {
+      "sha256": "d2efbf2cf88a4ceb82050d8022c034d5a4bb2a96dc2b6d15401eb9815b1f9f2b"
+    },
+    "mlx_lm/models/qwen3_next.py": {
+      "sha256": "87b65ee661c478e06d398195646f621608e37a917bb67037ee3627be322f7646"
+    }
+  },
+  "destinations": [
+    "src/mlx2/runtime/models/qwen35_122b.py",
+    "src/mlx2/adapters/qwen35_122b.py",
+    "src/mlx2/adapters/qwen35_122b_vision.py"
+  ],
+  "vision_source": {
+    "repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+    "revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+    "license": "MIT",
+    "files": {
+      "mlx_vlm/models/qwen3_5_moe/qwen3_5_moe.py": "9a4ae1e1fc7b831e27288f9e3c19eb7a0dcd63d0411f95918cc52a847e5b3507",
+      "mlx_vlm/models/qwen3_5_moe/vision.py": "a1db23800b564caaedcc79d6a27d76e3186b9315cb68b612d61afbfa69487600",
+      "mlx_vlm/models/qwen3_5_moe/config.py": "feda126d7a83379ac8befd9fc5305a4c155c67a58eb25c40e26fa7e05c51abfa",
+      "mlx_vlm/generate/dispatch.py": "89d9b08ec8316a6eed881486cc5a5129afbde481d693293ec20964146ef50842",
+      "mlx_vlm/prompt_utils.py": "3880171f3ed450b62979c47ca7e14eaa0356cd54bfc44718c5d4a46561691a57"
+    }
+  },
+  "reused_mlx2_mechanisms": [
+    "runtime.models.qwen36_35b.Model",
+    "runtime.models.qwen3_5.GatedDeltaNet",
+    "runtime.models.qwen3_next.Qwen3NextSparseMoeBlock",
+    "runtime.models.cache.ArraysCache",
+    "runtime.models.cache.KVCache",
+    "runtime.apc_v2.APCv2"
+  ],
+  "modifications": [
+    "Pinned 48-layer/3072-width local tensor topology and alternating 36 GDN/12 full-attention layers",
+    "Kept the shared Qwen3.5 hybrid MoE tensor math and per-module quantization overrides",
+    "Preserved an ordinary text serving route and added a separate offline MTP model loader retaining the embedded head",
+    "Added a direct image/video candidate around the pinned local mlx-vlm vision source",
+    "Declared unique revision-bound APCv2 cache layout; embedded candidate capabilities remain unqualified and unselected"
+  ],
+  "validation": {
+    "status": "CPU-only metadata/index closure; model-load, output parity, and APCv2 route qualification pending",
+    "local_artifact": "Qwen3.5-122B-A10B-oQ4-mtp cached snapshot c1a3fcdec50cb1abb913106b8bb3c8e9e339a63d",
+    "shards": 14,
+    "embedded_mtp_tensors": 42,
+    "embedded_vision_tensors": 333,
+    "MTP_candidate_load": "not run",
+    "vision_candidate_generation": "not run"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "name": "Qwen3.8 27B DFlash2 external-draft route",
+  "date": "2026-09-25",
+  "sources": [
+    {
+      "source_repository": "huggingface.co/incoai/Qwen3.8-27B-DFlash2",
+      "source_revision": "015e795645c74b1a0eeef3b570031fb62e769bc5",
+      "license": "Apache-2.0 (model card)",
+      "used": "Runtime input only: draft checkpoint (model.safetensors 3,848,817,896 bytes, sha256 67fc76d68dc5a9415511a4f394ef744d67510cd20e93b37cc2cc7d28e4bab65c; config.json sha256 873e3556509b0da06e29654ba00d4944888d4b5e8a33afde25f7eb27d321e980). Not redistributed.",
+      "content_revision_pin": "db67011267787eaca91c74343beb62e4f9656eede2239daa378bbfe05fe9675d"
+    },
+    {
+      "source_repository": "github.com/incoai/splash",
+      "source_revision": "f786bed",
+      "license": "Apache-2.0",
+      "source_paths": [
+        "runtime/model/DFlashDraft.cpp, DFlashDraft.hpp",
+        "runtime/model/DraftCheckpoint.cpp",
+        "runtime/model/QwenTarget.cpp (hidden capture), Qwen3_8.hpp (capture layers)",
+        "runtime/model/Model.hpp (ExecutionLimits)",
+        "runtime/metal/kernels/decode/draft.metal (draft_conv_phase, draft attention window)",
+        "runtime/metal/kernels/decode/sampling.metal (draft_select_edges, draft_select_dflash)"
+      ],
+      "used": "Read for architecture comparison only; no code copied. Confirmed that mlx2's existing DFlash2 drafter (provenance/muse-dflash2.json) matches Splash on: capture = residual stream after decoder layers 5/19/33/47/61 (0-based, before the final norm); fc -> hidden_norm context projection; two-tap causal dynamic conv with dynamic layout [stage][tap][group] and base [stage][tap][hidden], tap 0 current row, tap 1 previous row, no tap across the anchor; draft attention over 2047 retained context tokens plus the non-causal block; selector = top-16 draft logits + predecessor/successor codebook edges through the rank-256 projection of the final-normed hidden, walked from the anchor. Design input: the optional draft_quantization policy key quantizes the same tensor set Splash stores as Q4 (every projection; norms, conv base kernels and codebooks stay bf16)."
+    }
+  ],
+  "mlx2_files": [
+    "src/mlx2/runtime/hybrid_verify_rows.py (original)",
+    "src/mlx2/runtime/external_speculative.py (original; transaction owner selected by cache topology, hybrid ordinary rounds, positionless recurrent planes on resume, speculative_args geometry)",
+    "src/mlx2/runtime/models/qwen38_27b.py (target taps: forward_with_taps, prefill_body, speculative_args)",
+    "src/mlx2/runtime/drafters/dflash2.py (validate_target_compatibility reads speculative_args)",
+    "src/mlx2/adapters/dflash2.py (content_revision, runtime draft_quantization)",
+    "src/mlx2/adapters/qwen38_27b.py (pinned external policy, route binding, profile qwen38-27b-apcv2-dflash2)",
+    "qualification/policies/qwen38-27b-dflash2.json"
+  ],
+  "differences_from_splash": [
+    "Splash always verifies 8 rows (anchor + 7); mlx2 takes num_draft 1..7 (block 2..8)",
+    "Splash runs Q4 (affine, group 64 layout) draft projections; mlx2 loads the bf16 checkpoint unless draft_quantization is set",
+    "Splash computes the conv in fp32 and rounds to bf16; mlx2 computes in the model dtype",
+    "Splash fuses q/k/v and gate/up; mlx2 keeps separate projections (same math)",
+    "Splash rolls back GDN state with its own verify kernels; mlx2 uses the record-and-replay rollback the self-MTP route already runs (ArraysCache.record_rollback/trim) and segmented batch views for B>1"
+  ],
+  "validation": "CPU: tests/test_qwen38_dflash2_cpu.py (taps, split-prefill taps, random-drafter greedy == ordinary at K=1/3/7, oracle drafter hitting every accept length at B1-B3 == ordinary, hybrid commit state == fresh forward, topology refusal, fail-closed rollback declaration, sampled determinism, batched pairwise B2) and tests/test_qwen38_dflash2_adapter.py (revision pins, schema, tensor mapping against the real 81-tensor header). GPU: qualification/runs/sp-dflash2-27b-20260925/. Unqualified."
+}

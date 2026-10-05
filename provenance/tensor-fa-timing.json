@@ -1,0 +1,76 @@
+{
+  "name": "tensor-fa-fair-timing",
+  "status": "implemented (original harness); CPU-tested with fake ops/clock/guard and fake numeric gate backends only; the native path has never run; no timing, gain or qualification has been observed; nothing is qualified or selected",
+  "license": "Apache-2.0 (mlx2 local LICENSE); original code, no mined arithmetic, no third-party text copied; no Apple copyright header",
+  "builder": {
+    "model": "claude-opus-5-5 (exact)",
+    "cpg": {
+      "session": "95fa840fc0094fd39e0def01573f0f13",
+      "agent": "opus-intake-stage18-attention-timing",
+      "workflow": "f23031dbfbb643999fd50fe7f7ee964b",
+      "worker": "64da63d778cd4272a2c8ad8bbee36bb1",
+      "task": "4c1c3e3f23fc455a984a32a8bbbba2a6"
+    },
+    "mode": "hard CPU-only: no MLX import, device query, Metal construction/JIT/run, model load, GPU lease/flock/waiter"
+  },
+  "base_commit": "5bff93dcb02d1e8159de6f81053c58064fd9f991",
+  "destination_paths": [
+    "scripts/benchmark_tensor_fa_research.py",
+    "tests/test_tensor_fa_research_timing.py",
+    "provenance/tensor-fa-timing.json"
+  ],
+  "file_sha256_at_handoff": {
+    "scripts/benchmark_tensor_fa_research.py": "f168eca5b2990e2e1ba1ee6b4c70accfa876ef153a2b233248968a24e8763416",
+    "tests/test_tensor_fa_research_timing.py": "547449ccb8ec30ba95d70226d166b09b2c0f26b4bb014b3b5e309c2c96b6e002",
+    "note": "uncommitted at handoff; the root reviews and commits. A native run additionally requires these three files committed at HEAD with identical working bytes (timing_admission)"
+  },
+  "bound_unchanged": {
+    "src/mlx2/adapters/tensor_fa_research.py": {"sha256": "8dd156126f207b0e7cf0c210369d4de91edb245e84bd7a619f80ceec7b9b2483", "committed_in": "f45a7ec820ea07e096d8ac2a60cb6fd18e806efb"},
+    "scripts/qualify_tensor_fa_research.py": {"sha256": "6283e466a95808e48a45b190ceacde02684b668131c43d2603a887a3cf5cc483", "committed_in": "70b91b74d9dbc0d5f06181603771e2ecd58f6125"},
+    "tests/test_tensor_fa_research_qualifier.py": {"sha256": "9b4df74a6b50009db7c5b7e95c88b85af9102025df40e8f5572c9d0a3913366f", "committed_in": "70b91b74d9dbc0d5f06181603771e2ecd58f6125"},
+    "tests/test_tensor_fa_research.py": {"sha256": "f1064c56ebfa57d147f8e2567e07aa928674560137829f6c1d66e7a7762cf9a2", "committed_in": "f45a7ec820ea07e096d8ac2a60cb6fd18e806efb"},
+    "provenance/tensor-fa-native-qualifier.json": {"sha256": "9e9aa64a6a241858d7e5b416e684ba017ced13e6327918efae2a911a4181a9eb", "committed_in": "70b91b74d9dbc0d5f06181603771e2ecd58f6125"},
+    "provenance/tensor-fa-research.json": {"sha256": "5ce80ecd9f55fb37ea048853c67b8559ba6da474b3d219cbf47fbff56f37038f", "committed_in": "f45a7ec820ea07e096d8ac2a60cb6fd18e806efb"},
+    "provenance/tensor-fa-research.NOTICE": {"sha256": "b88185cd88e0dee08dfc8db11f417d76790cd0f4c2242c1e4564b9694497d187", "committed_in": "f45a7ec820ea07e096d8ac2a60cb6fd18e806efb"},
+    "rule": "candidate math, numeric qualifier and their tests were not modified and their 69/80-test suites were not re-run here; the qualifier's --timing refusal is unchanged"
+  },
+  "reused_from_qualifier": [
+    "native_admission (HEAD, clean src/scripts/tests/provenance, qualifier files at HEAD, MLX core/libmlx/metallib hashes, --out exclusivity) before any MLX import",
+    "source_guard, same_snapshot, post_run_refusals, run_gate, NativeBackend, _LiveNativeRun/_WITNESS, native_verdict (the live full mandatory numeric gate)",
+    "host_inputs, input_hashes, precheck, host_reference (float64 visible-key softmax), _metrics, _within, _array_ok, TOLERANCE (host_f64 and native_f16, predeclared), BASELINE, _case"
+  ],
+  "design": {
+    "gate": "_run_numeric_gate mirrors q._run_native (q.NativeBackend + q.run_gate + q.post_run_refusals) but every numeric dispatch runs under the COMBINED qualifier+timing guard (root review 2928); a timing guard also runs before the gate backend imports MLX. q.native_verdict on that live run must pass the full mandatory catalogue before NativeTimingOps can be built; NativeTimingOps re-checks the live run type, witness and verdict itself. No external JSON, pass dict, report or identity is accepted; the CLI has no gate input",
+    "stamp": "timing_verdict(live) is the only place native_timing_execution can be true: it re-derives the numeric gate from the live gate run and the timing evaluation from the run's own report, and requires the module-private timing witness, real NativeTimingOps bound to that same gate run and clean post-run guards. evaluate_timing never sets it; a JSON round trip drops it",
+    "catalogue": "8 cells: B1, float16 Q, materialized float16 KV, Hq12/Hkv2 native GQA (KV un-tiled), D128/256 x L32/65 x N1024/8192, causal final window (q_start = N-L), seed from cell id via the qualifier's host_inputs law; full catalogue mandatory, no partial mode",
+    "baseline": "mx.fast.scaled_dot_product_attention(q, k, v, scale, mask='causal'): MLX documents lower-right alignment, i.e. the same final-window visible keys as the candidate's causal=True, q_start=N-L; every output of both arms is checked against the float64 visible-key reference, so a mismatch fails closed. Same pre-evaluated q/k/v objects for both arms; no float32-query arm; candidate.reference_attention/host_mirror never used",
+    "timed_region": "clock; fresh arm invocation; mx.eval(outputs [+ engagement flag]); mx.synchronize(); clock. Identical for both arms. This is attention-entry invocation + completion (host op construction, dispatch, GPU execution, synchronization), NOT pure GPU kernel duration. The candidate is instrumented: per-threadgroup atomic engagement counter, two small uniform arrays and host plan admission are inside its region",
+    "excluded": "input upload/eval, host reference, guards (git/hash), counter reads, engagement readback/confirm, host copies, hashing, fidelity, memory probes, logging; compilation happens during the numeric gate; each cell has 1 untimed witness per arm and 3 checked warm-up pairs not reported as samples",
+    "schedule": "24 pairs per cell after 3 warm-up pairs; pair i runs candidate first iff i even (exactly balanced); raw samples, per-pair candidate/baseline ratios, per-cell medians and order-split medians; no whole-model or end-to-end figure",
+    "per_output_binding": "every witness, warm-up and timed output of both arms is read back after its timer: dtype/shape/finite, full sha256, host float64 fidelity (host_f64 tolerance), fidelity to the cell's admitted witness (native_f16 tolerance) and, for the candidate, to the same pair's actual baseline output (native_f16); candidate witness bound to the baseline witness; candidate engagement confirmed with the planned threadgroup count and issued/confirmed counter deltas exactly 1; invocation serials strictly increasing. Any failure stops the run (fail-stop) and the evaluator re-checks every record",
+    "conversion": "separate experiment on the L32 cells after kernel timing and release: synthetic float32 KV holding the cell's float16-representable values -> astype(float16) (output must equal the cell's float16 KV bit-exactly), and token-major float16 [1,N,Hkv,D] -> transpose view -> mx.contiguous -> head-major (values bit-exact; layout not verifiable, MLX exposes no public strides); fresh conversion every repeat, alternating order, raw samples and bytes/dtypes/layout reported; materialization is explicitly 'deferred' if mx.contiguous is absent. Shared cost for both arms, never summed with kernel medians; no pipeline arm; never a quantized cache conversion, served route, QSA or end-to-end gain",
+    "memory": "one cell at a time; per-arm synchronized allocator peak around the untimed witness dispatch, and across untimed conversion warm-ups; 'omitted' scope if the MLX API is absent; device outputs dropped after each readback, only host copies of the current pair and witness retained",
+    "guards": "before every dispatch (gate, witness, warm-up, timed, conversion) and after every repeat, cell and run: admitted full HEAD, clean tracked+untracked src/scripts/tests/provenance, qualifier source hashes, timing file hashes, MLX build file hashes, qualifier/timing script paths, candidate module path and admitted mlx.core path. Cleanup (per-cell release and final release) in finally",
+    "receipt": "written only with --out (exclusive creation) after a completed native run; refusals print JSON and write nothing"
+  },
+  "validation": [
+    "tests/test_tensor_fa_research_timing.py: 80 passed on CPU with numpy 2.5.1 / pytest 9.1.1 / Python 3.12.13 (~/Desktop/mlx2/.venv/bin/python), run as PYTHONPATH=src:. python -m pytest --noconftest -p no:cacheprovider tests/test_tensor_fa_research_timing.py (the repository tests/conftest.py imports mlx.core, so it is bypassed); after the run sys.modules contained no mlx, mlx.* or candidate module",
+    "subprocess checks: import, --help, --catalogue and the no-flag refusal never import mlx or the candidate module",
+    "fake full run (8 cells, 432 timed/warm-up kernel dispatches, 4 conversion experiments) is timing_evidence_complete evidence only: native_timing_execution, qualified, selected and model_gain stay false, also after a JSON round trip with forged native producer/identity/flags",
+    "timer boundary: in every timed window only dispatch and complete occur; engagement, counters, host copy, guards and memory probes never fall inside; guard precedes every dispatch and the exact guard count includes the after-repeat guards",
+    "fail-stop controls: stable wrong candidate output (all, timed-only, single middle repeat), wrong baseline output, candidate disagreeing with the same pair's baseline or its witness disagreeing with the baseline witness while each stays inside host tolerance, zero/unconfirmed engagement, extra issued launch, wrong dtype/shape, NaN, reused serial, wrong conversion output; each stops further dispatches and still releases",
+    "evaluator tamper controls (29): dropped/duplicated/reordered cells, dropped/duplicated/swapped samples or warm-ups, zero/float ns, reused serial, forged metric, missing witness/pair metric, zero engagement, issued twice, wrong dtype, missing hash, non-finite, float32 query cell, tiled-KV baseline, float32 device KV, input hash, unbound witness, fairness text, conversion hash/missing repeat/scope claim/dropped/extra record",
+    "gate controls: a full passing fake numeric gate (evaluate -> numeric_evidence_pass) cannot build NativeTimingOps; forged dicts, look-alikes and JSON cannot either; _run_native_timing refuses with no timed dispatch when the live gate fails; it always runs the full mandatory catalogue; a timing-file change before the gate backend stops before MLX import, and a change after construction or between numeric cases stops the next numeric dispatch; typed forged ops with the timing witness still refuse on the live gate",
+    "source-mutation controls (/tmp/opus-stage18/mutate.py, in-place then restored and hash-verified): 22/22 killed — engagement readback moved inside the timer, no guard before dispatch, no after-repeat guard, no pair binding, no witness binding, no engagement check, no host check, no fairness check, no serial check (evaluator and inline), no timing-hash guard, gate guarded by the qualifier guard only, no pre-backend guard, no gate refusal, verdict ignoring the gate, verdict ignoring the witness, release outside finally, no conversion hash (inline and evaluator), partial catalogue accepted, NativeTimingOps accepting any gate, candidate witness unbound from the baseline witness",
+    "ruff 0.16.7: clean except EXE001 (shebang on a 0644 file), matching scripts/qualify_tensor_fa_research.py"
+  ],
+  "unresolved": [
+    "native: never run; requires these files committed, a clean tree, the user GPU hold released, and the parent wrapper /tmp/mlx2-intake/stage3_gpu.py (label tensor-fa-timing) owning the canonical CPG lease and both flocks; --i-own-the-gpu is only an acknowledgement",
+    "the live numeric gate itself has never passed natively; if it fails nothing is timed and timing can never repair it",
+    "NativeTimingOps code paths (mx.fast SDPA mask='causal' alignment, mx.contiguous, peak-memory APIs, readback) are untested on device; the per-output float64 binding is the fail-closed backstop for the mask alignment",
+    "perf: no samples exist; any future ratio is an instrumented attention-entry region on synthetic inputs, thermally uncontrolled, and is not a kernel-only, model, cache, continuation, acceptance, serving or end-to-end gain",
+    "guard cost: each guard hashes the MLX build files and runs git; it is outside timed windows but adds CPU work between samples (equal for both arms by alternation)",
+    "model qualification, compatible dense-model teacher-forced, cache/state/continuation gates and production remain separate stages; the candidate stays default-off, unqualified, unselected, never observed-used"
+  ],
+  "states": {"implemented": true, "qualified": false, "selected": false, "observed_used": false}
+}

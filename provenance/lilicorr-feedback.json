@@ -1,0 +1,42 @@
+{
+  "feature": "LiLiCoRR verified runtime feedback and isolated shadow training",
+  "implementation_origin": "Original mlx2 lifecycle and worker integration around the existing LiLiCoRR head and teacher buffer",
+  "base_provenance": "provenance/lilicorr.json",
+  "source_revision": "2a52715ef7ca533a0ce287e14dc1c0702bdc2e8d",
+  "source_paths": [
+    "vllm/model_executor/models/lilicorr.py"
+  ],
+  "license": "Apache-2.0 for the referenced vLLM head; lifecycle additions are original project code",
+  "local_paths": [
+    "src/mlx2/runtime/lilicorr_feedback.py",
+    "src/mlx2/runtime/lilicorr_feedback_worker.py",
+    "src/mlx2/runtime/drafters/lilicorr.py"
+  ],
+  "modifications": [
+    "Explicitly enabled bounded immutable host lattice capture",
+    "Only committed reached target prefixes supply censored training labels",
+    "Train a separate correlator clone in an owned CPU child process without changing the inference device",
+    "Hash-check teacher and initial-head files and export revision-bound head-only artifacts",
+    "Bound teacher examples, bytes, worker count, training steps, time and retained artifacts",
+    "Keep serving weights, active requests and APCv2 revision immutable",
+    "Authenticate issued capture tickets against immutable feature hashes and refuse stale/replayed captures",
+    "Use per-manager owned namespaces and bound artifacts after serialization/spawn/timeout/result failures",
+    "Check conservative training memory estimates in parent and worker before training allocation",
+    "Validate exact config-derived head tensor closure, dtype and payload ranges before worker construction"
+  ],
+  "validation": {
+    "command": "PYTHONPATH=src python -m pytest tests/test_lilicorr_feedback_cpu.py tests/test_lilicorr_cpu.py tests/test_lilicorr_training.py",
+    "result": "42 focused CPU head/trainer/feedback/worker tests passed on 2026-10-01, including actual isolated CPU loss reduction, source immutability, replay refusal, failure lifecycle bounds and config/schema refusal before allocation",
+    "metal_feedback_integration": "M3 hybrids-final runtime feedback cell passed with synthetic LiLiCoRR weights, verified labels, isolated CPU worker and unchanged live GPU head",
+    "trained_checkpoint_qualification": false,
+    "receipts": [
+      "qualification/runs/parallel-draft-thorough-20261001/m3/hybrids-final.json"
+    ]
+  },
+  "status": {
+    "implemented": true,
+    "qualified": false,
+    "selected_shadow": false,
+    "live_head_changed": false
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "source_repository": "https://github.com/ashhart/TensorFold (local pinned clone ~/Desktop/TensorFold)",
+  "source_revision": "bb4b4a35863af562fc4ccb2586300d8f94b5d6de",
+  "source_paths": [
+    "src/tensorfold/kernels/qwen/dense/v1/lane_qmm.py"
+  ],
+  "license": "MIT",
+  "notice": "provenance/LICENSE.TensorFold-MIT",
+  "destination_paths": [
+    "src/mlx2/runtime/lane/matmul.py",
+    "src/mlx2/runtime/lane/installer.py",
+    "src/mlx2/runtime/lane/__init__.py",
+    "scripts/lane_matmul_gate.py",
+    "tests/test_lane_matmul.py"
+  ],
+  "mined": [
+    "Row-invariant group formulation y = sum_g s*P + b*xs with P from MPP matmul2d over one weight group, fp32 group sums, K slices fixed by weight shape and reduced in slice order.",
+    "The 16-row fragment mapping (fm/fn lanes), interleaved (s, b) pair loads, and the 32-row block tiling (TMR)."
+  ],
+  "modifications": [
+    "Generalized from affine q4/group-64 to affine 2/3/4/5/6/8-bit at group sizes 32/64/128, and to unquantized bf16/fp16 weights (plain accumulation, no scale/bias).",
+    "8-bit and 16-bit weights feed MPP natively (uint8_t, bfloat/half); 2/3/5/6-bit weights are decoded per group from MLX's LSB-first bitstream into threadgroup uint8 with a generated, fully unrolled decode (original).",
+    "Per column tile weight views start at a 64-bit row offset so weights over 2 GB (a bf16 vocabulary head) index correctly (original fix).",
+    "Unpack staging shares threadgroup memory with the slice-reduction buffer; split-K caps the staging at 16 KB.",
+    "Keeps MLX's weight layout (no tiled regrouping); scale/bias pairs keep the scales' own dtype (bf16 or fp16) instead of casting to bf16.",
+    "Installation swaps nn.QuantizedLinear/nn.Linear instances to subclasses per module (no global monkeypatch), reports covered/refused formats, and falls back to stock for longer calls, unsupported formats and non-M5 devices; process-wide set_enabled switch for paired A/B only.",
+    "Group sums of x are computed inside the matmul kernel (four lanes per row, fixed (q0+q1)+(q2+q3) order) instead of a separate launch (original).",
+    "Same-format sibling projections that read one input (q/k/v, gate/up, GDN in_proj_*, generic names or adapter-declared) are stacked into one launch via zero-copy row views (original).",
+    "Row window: min_rows (default 4, stock below; 1 = exact) and max_rows (stock above); the law id reports the window and grouping."
+  ],
+  "validation": "CPU: tests/test_lane_matmul.py (36 tests): generated decode vs MLX dequantization for 2/3/5/6-bit x group 32/64/128, geometry, preparation, install/uninstall fallback, and grouping (column slicing, one launch per input, view-backed weights with unchanged stock output). M5 Max GPU: scripts/lane_matmul_gate.py 76/76 small cases (all widths x group sizes x bf16/fp16) and 28/28 model shapes incl. a 5120x248320 bf16 head; every row of 1..128-row calls bitwise equal to the row alone; error vs fp32 reference <= MLX's own. In-model A/B inside mlx2's Qwen3.8 (oQ4e, uniform 4-bit) and Muse-Glimmer models: 8-16 row forwards 29-49% cheaper than stock; one-row +28% (hence the default min_rows=4 crossover). Receipts: qualification/runs/lane-matmul-20260928/; write-up docs/experiments/LANE-MATMUL-2026-09-28.md."
+}

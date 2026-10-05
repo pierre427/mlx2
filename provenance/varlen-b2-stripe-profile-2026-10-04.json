@@ -1,0 +1,21 @@
+{
+  "feature": "source-bound B2 Q1 stripe geometry service and benchmark profile",
+  "source_repository": "mlx2 local ablation plus native geometry branches",
+  "source_revisions": [
+    "0ca6a61d5a64749cac6de866f9c86abce7dbcb77",
+    "35d82c84335c6ac72cb41d80adcf30477e27497f",
+    "56c5d12b2c71bb4992b011581c49cc5b0cf82b59"
+  ],
+  "source_paths": [
+    "native/paged_kv/q1_geometry.h",
+    "native/paged_kv/arena.cpp",
+    "src/mlx2/runtime/paged_b2_research_profile.py",
+    "src/mlx2/runtime/paged_native_graph_group.py",
+    "src/mlx2/serving.py",
+    "scripts/research/varlen_b2_http_gate.py",
+    "scripts/research/varlen_b2_http_performance.py"
+  ],
+  "license": "mlx2 original project code; no upstream code copied",
+  "modifications": "A v7 research profile binds the selected 4/8/16/32 Q1 SIMD stripe count and each independent optimization flag to exact environment values. The Qwen3 B2 serving route proves per-ready encoded native stripe count, grouped/tile/metadata dispatches, read terminals and eager/deferred submissions. The sustained profile admits prompts only to length 97 so all 31 ready steps remain within the 128-visible-token tile window. The benchmark records generator work through both first tokens separately from sustained decode and complete HTTP response timing.",
+  "validation": "Focused CPU tests, source geometry contracts, native compilation, and exact binding tests pass. Metal service parity and performance are pending. All candidate routes remain unqualified, price unusable, and default off."
+}

@@ -1,0 +1,11 @@
+{
+  "name": "default-off native Qwen3 HTTP functional control",
+  "source_repository": "original mlx2 implementation extending private codex/varlen-paged-attention 141ea03586977df517277109255ed14f63bd0a76",
+  "source_paths": [
+    "src/mlx2/server.py",
+    "src/mlx2/serving.py"
+  ],
+  "license": "original project code; no external implementation copied",
+  "modifications": "Expose the existing explicit native route through strict HTTP boolean validation, require APCv2 write suppression at the request boundary, and exclude route selection from host prompt-token cache identity.",
+  "validation": "Loopback HTTP transport, plus a CPU-backed live HTTP handler and serving-worker fixture covering APCv2 cold/write/warm policy, route/default receipts, cancellation, injected lane failure and worker survival. Existing native generator CPU tests cover owner retention. Native HTTP and physical GPU retirement remain pending; see docs/research/varlen-http-functional-gate-2026-10-03.md."
+}

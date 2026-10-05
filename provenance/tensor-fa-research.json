@@ -1,0 +1,83 @@
+{
+  "name": "tensor-fa-research",
+  "status": "implemented as an isolated research module (host admission, host diagnostic mirror, kernel source, gated native entry); never compiled by MLX, never dispatched, never run on Metal; APPROXIMATE (deliberately not bit-identical to exact attention); default-off, unqualified, unselected, observed-used false",
+  "license": "Kernel body adapted from MIT ggml source (notice retained in provenance/tensor-fa-research.NOTICE); all other code original mlx2 code under the repository's Apache-2.0 LICENSE; no Apple copyright header",
+  "destination_paths": [
+    "src/mlx2/adapters/tensor_fa_research.py",
+    "tests/test_tensor_fa_research.py",
+    "provenance/tensor-fa-research.json",
+    "provenance/tensor-fa-research.NOTICE"
+  ],
+  "source": {
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "pull": 29570,
+    "state": "open, unmerged (read-only GitHub API, 2026-10-01; PR updated 2026-09-30T02:20:21Z)",
+    "head": "7f0d4d5e0ae391e4ff75512402cb5dd141507244",
+    "base": "4364bf7232e65c34eca8d9500c5464389662de6b",
+    "license": {
+      "path": "LICENSE",
+      "blob": "e7dca554bcb802f98408383a864404e3aa4eacca",
+      "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+      "spdx": "MIT"
+    },
+    "files": [
+      {
+        "path": "ggml/src/ggml-metal/kernels/fa_f16.metal",
+        "blob": "2dfd3799d137fc32bd370e8e637163d8894125e7",
+        "sha256": "8452ab67dd80e73802227609daa2cb1a7743248a17adcd4cd6f317f4800ca6bb",
+        "used": "kernel_flash_attn_ext_tensor body (adapted source text)"
+      },
+      {
+        "path": "ggml/src/ggml-metal/ggml-metal-ops.cpp",
+        "blob": "db61506bdf2d7faa3bdb7d25041092dd769bce2f",
+        "sha256": "0ef2b18b5d3e20fe7f1b456d60fe3f38232e2207b11dddc39fa4dec11e81a0c1",
+        "used": "design only: tensor-path admission (DK/DV pairs, F16 KV, ne11 % 64 == 0), threadgroup-memory formula, dispatch geometry"
+      },
+      {
+        "path": "ggml/src/ggml-metal/ggml-metal-impl.h",
+        "blob": "a49f37369adadd4057b86374b96d6d168db1e984",
+        "sha256": "d1e82732eb6b616fd825d4a0981b80daec0527460e2aad51f034d7e92635cca9",
+        "used": "design only: OP_FLASH_ATTN_EXT_TENSOR_NQPSG 32, NCPSG 64, NSG 8"
+      }
+    ],
+    "not_assumed": "Newer PR heads and the installed MLX/Metal headers are not assumed identical to this revision."
+  },
+  "copied_vs_rewritten": {
+    "adapted_source_text": "Kernel body of kernel_flash_attn_ext_tensor: query load with folded scale rounded to half, matmul2d QK^T (multiply) and P*V (multiply_accumulate) descriptors with execution_simdgroups<8>, online softmax with lazy rescale (growth > 8), half P, fp32 S over the rounded P, threadgroup last-rescale flag with per-row scales, final 1/S scale, clipped cooperative store.",
+    "rewritten": "Python admission/plan, host diagnostic mirror, MLX metal_kernel wrapper and templates, causal mask and KV loop bound (upstream has no causal flag and relies on a mask tensor), engagement counter, fp32 output layout [1, Hq, L, D].",
+    "removed": "mask/blk tiles, sinks, ALiBi, logit softcap, bf16/f32 KV variants, DK != DV, D 64/192/512/576, batch/multi-sequence strides, upstream small-workload heuristic"
+  },
+  "deliberate_simplifications": [
+    "B1 only; q [1, Hq, L, D] float16 or float32; k and v [1, Hkv, N, D] float16 LOGICAL arrays. Row contiguity is NOT host-verified (row_contiguity_host_verified: false): the installed MLX exposes no public strides, so a sliced or transposed view is accepted as its logical dense value, and the native call passes ensure_row_contiguous=True, which may copy/materialize it. That conversion cost is outside kernel-only timing and must be measured separately. Explicit stride/offset/index/selection/ragged metadata keywords are refused.",
+    "D in {128, 256}; Hq % Hkv == 0; N % 64 == 0 (as upstream); N <= MAX_KV = 2147483584 so int32 uniforms and the causal round-up fit (MLX shapes are int32, so this is defence in depth); 1 <= L <= 4096; explicit Python float scale that stays finite, positive and normal after fp32 narrowing (the kernel, host mirror and reference all use the narrowed value); explicit bool causal; explicit int q_start with 0 <= q_start and q_start + L <= N",
+    "causal masked scores use the finite -FLT_MAX (MLX may compile with fast math, which assumes no infinities); every admitted query row sees at least key 0, so no admitted row is fully masked",
+    "fp32 output for numerical evidence; the returned dtype is always float32",
+    "no automatic dequantized full-KV path, no quantized tuples, no sparse/indexed selections, no masks/bias/softcap/sinks: all refused",
+    "key-set identity is a CALLER contract: shape and dtype cannot prove that k/v hold the complete dense logical keys; a pre-gathered sparse/indexed subset (e.g. Flash-Next QSA) must never be passed. No value validation: large or non-finite q/k/v and half-scaled query overflow need the native finite gate."
+  ],
+  "local_context": {
+    "flash_next_note": "Flash-Next (24 QH / 2 KVH / D256, config sha 2fe9ba742da993ffe27c68f56ddc30deff43ed5aeb07d25a82cc6381d9208d9b) only shares the dimension class: its attention uses sparse/indexed QSA. This dense all-KV kernel must never be substituted for its selected sparse set. A future model must have the identical logical key set and mask.",
+    "mpp_precedent": "src/mlx2/runtime/models/qwen4_qsa_nax.py and prefill_metal.py already call MetalPerformancePrimitives inside mx.fast.metal_kernel; their numerical routes and qualification do not transfer here."
+  },
+  "validation": [
+    "tests/test_tensor_fa_research.py: 80 passed on CPU (mx.cpu before tensors; mx.fast.metal_kernel, mx.metal.is_available, mx.device_info and the native kernel builder forbidden; one test substitutes a fake builder to check construction locking)",
+    "host diagnostic mirror vs mx.fast.scaled_dot_product_attention on CPU (same visible keys): relative max error ~1e-4..2e-3 across geometries and adversarial logits; never bit-identical. HOST DIAGNOSTIC ONLY: not a native fidelity acceptance threshold",
+    "launch registry: 100 simultaneous issued (mocked) flags then dropped -> 0 records and 0 id hints; claim consumed exactly once by 16 concurrent claimers; CPU refusal never consumes a record; aliased id hints refused by identity; 8-thread register/claim/death stress leaves the registry empty; mocked CPU paths never count native engagement",
+    "builder mutation checks each fail tests: shared-flag write, missing weakref cleanup, unconsumed claim, claim before CPU refusal, missing fp32-scale check, unlocked kernel construction, missing identity check; earlier: causal mask, lazy rescale, forged plan, KV-multiple, q_start, KV dtype and growth guards",
+    "offline syntax/type check of the final TENSOR_FA_HEADER + TENSOR_FA_SOURCE inside a hand-written stand-in for MLX's generated signature: xcrun metal -std=metal4.0 -Wall (toolchain 32023.883, macOS SDK 26.5) for T in {half, float} x D in {128, 256}: exit 0, no warnings (wrapper sha256 73a093c59a4d92b738c1d81c390a3f7f5f8766e2465116f8f6f826623929b5b7, AIR 9818e4b0f477e3401354de3269b27f45cd8a8aa3ad7311c8edbf4c2b912acd0a); a broken control (undeclared flag) failed with no AIR. CPU-side compiler only: not MLX's JIT, not a runtime pipeline, no GPU, and it does not validate native concurrency or the race repair at runtime."
+  ],
+  "pending_native_and_model_gates": [
+    "MLX runtime compile on an M5-class (tensor API) device under an owned GPU lease",
+    "engagement: confirmed threadgroup count read back equals the planned count",
+    "fidelity vs mx.fast.scaled_dot_product_attention (fp32 and the f16-KV composed path) with stated tolerances, finite-output checks, adversarial logits and forced mid-loop rescale",
+    "separately scoped kernel timing vs conversion/materialization overhead and memory, controlled",
+    "teacher-forced model fidelity, cache/state isolation and paired whole-model latency on a compatible DENSE model with identical logical key set and mask",
+    "any route integration would need an explicitly qualified approximate operation (AGENTS.md)"
+  ],
+  "qualification": "none: research only, approximate, default-off, unqualified, unselected",
+  "kernel_modifications_stage15": [
+    "Race repair: ggml's single threadgroup flag sf[0] is written by lane 0 of every simdgroup (concurrent writers of the same value). Replaced by sgf[NSG]: each simdgroup ORs its rows' rescale decisions in registers (uniform after simd_max) and lane 0 writes only its own slot once per key block after the row loop; all threads read the NSG slots after the barrier. Lazy per-row rescale semantics are unchanged (rows that did not rescale carry sr == 1). Flag storage grows from4 to32 raw bytes; aligned total grows by16 bytes (D128 20640 B, D256 28832 B). This removes the source-level race; it does not validate native concurrency.",
+    "Launch registry: token-keyed weak records (flag weakref, expected threadgroups, id hint) removed together by the weakref callback; id hints checked by identity; claim-once under an RLock; GPU readback after the lock; CPU/non-array refusal before the registry is touched; kernel construction under a lock. A substituted factory outside the module's cached-kernel identity does not register. CPU lifetime tests deliberately substitute the cached identity to register synthetic flags, but never confirm native engagement. This is instrumentation identity checking, not protection against arbitrary monkeypatching."
+  ],
+  "reference_note": "reference_attention (mx.fast.scaled_dot_product_attention on the same visible keys, KV expanded to Hq and converted to fp32) is a FIDELITY diagnostic only and never a fair performance baseline; a future paired benchmark must keep the ordinary served dtype/GQA route and account conversion/materialization separately."
+}

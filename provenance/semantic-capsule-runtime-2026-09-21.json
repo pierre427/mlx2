@@ -1,0 +1,49 @@
+{
+  "schema": "mlx2-provenance-v1",
+  "component": "qwen35-9b-persistent-semantic-capsule-and-adaptive-bundle-selector",
+  "source": {
+    "repository": "mlx2",
+    "revision": "152e258ce9b4a5e790edfb81054d3d68a7513585",
+    "paths": [
+      "src/mlx2/adapters/qwen35_9b.py",
+      "src/mlx2/runtime/classifier_bundle.py",
+      "src/mlx2/runtime/generate.py",
+      "src/mlx2/runtime/neural_concepts.py"
+    ],
+    "license": "MIT"
+  },
+  "design_references": [
+    {
+      "title": "ColBERT: Efficient and Effective Passage Search via Contextualized Late Interaction over BERT",
+      "url": "https://arxiv.org/abs/2004.12832",
+      "use": "motivated separating directory candidate generation from neural relevance scoring; no code copied"
+    },
+    {
+      "title": "ReFit: Relevance Feedback from Test-Time Inference for Improving Retrieval",
+      "url": "https://arxiv.org/abs/2305.11744",
+      "use": "motivated treating target-model feedback as a reranker signal; no code copied"
+    },
+    {
+      "title": "On Calibration of Modern Neural Networks",
+      "url": "https://arxiv.org/abs/1706.04599",
+      "use": "motivated explicit abstention thresholds and calibrated-state terminology; no code copied"
+    }
+  ],
+  "modifications": [
+    "Added request-private B=1 persistent decode inputs with strict no-merge scheduling",
+    "Added bounded token-position capsule projections and per-step strength schedules",
+    "Preserved ordinary decode and legacy one-shot behavior when an artifact has no capsule projections",
+    "Added proposal-count-adaptive semantic bundle selection combining answer-blind directory priors with target-model relevance logits",
+    "Added length, strength, decay, prompt-length, proposal-count, and 64K skillpack probes"
+  ],
+  "validation": {
+    "focused_tests": "29 passed on the M3 test host",
+    "held_out_capsule_receipt": "qualification/runs/qwen35-concept-capsule-v2-test-m3-20260921.json",
+    "tuning_receipts": [
+      "qualification/runs/qwen35-capsule-tuning-validation-m3-20260921.json",
+      "qualification/runs/qwen35-capsule-prompt-length-validation-m3-20260921.json",
+      "qualification/runs/qwen35-adaptive-bundle-count-validation-m3-20260921.json"
+    ],
+    "full_suite": "one introduced scheduler-test compatibility failure fixed; six pre-existing environment/timing failures remain"
+  }
+}

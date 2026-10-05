@@ -1,0 +1,26 @@
+{
+  "component": "Opt-in host-available floor for serving admission",
+  "kind": "behavioral-design-input",
+  "recorded_at": "2026-10-02",
+  "code_copied": false,
+  "status": "implemented, default off; not qualified, not selected, not observed-used in serving",
+  "source": {
+    "repository": "https://github.com/youssofal/MTPLX",
+    "revision": "5150038badb6307b83d4762a8f323539c54b020f",
+    "path": "docs/releases/v2.12.1.md",
+    "license": "Apache-2.0; repository NOTICE applies to copied MTPLX code",
+    "used": "The release's host-available memory guard and all-request pricing motivated an mlx2-specific optional floor. No MTPLX code was copied."
+  },
+  "destination_paths": [
+    "src/mlx2/memory.py",
+    "src/mlx2/serving.py",
+    "tests/test_host_memory_signals.py",
+    "docs/SERVING.md"
+  ],
+  "modifications": [
+    "Keep existing lane, warm-copy, prefill-transient, output-length, Metal-advisory and physical-footprint pricing.",
+    "Cap final measured headroom after service-reserve credit by host-available bytes minus the configured floor, at every request admission read.",
+    "Use the existing default-off Mach host-memory-signals policy and ordinary memory-admission deferral. Active lanes and between-chunk execution are unchanged."
+  ],
+  "validation": "Focused CPU tests in tests/test_host_memory_signals.py; no GPU or live-model qualification."
+}

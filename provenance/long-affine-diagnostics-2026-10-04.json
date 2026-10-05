@@ -1,0 +1,11 @@
+{
+  "feature": "exact long-profile closed-form diagnostic counters",
+  "source_repository": "mlx2",
+  "source_revision": "6865533baf6ecf6a92cc2e4680cb776ff137082c",
+  "source_paths": ["src/mlx2/runtime/paged_pack_diagnostics.py"],
+  "license": "project license",
+  "modifications": "Preserve all existing long-profile diagnostic values using arithmetic series and 64-token ceiling-prefix sums; unchanged scalar/short/sliding/Q1 traversal.",
+  "validation": "45 guarded CPU checks and 48 subtests passed; no runtime imports or GPU. Actual controlled root rerun pending; native binary unchanged.",
+  "qualified": false,
+  "default_changed": false
+}

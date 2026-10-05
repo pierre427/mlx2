@@ -1,0 +1,45 @@
+{
+  "component": "Default-off top-8/10 routed-decode candidate over split gate/up tables with MLX's down traversal (qmv_fast or qmv), mined from jundot/omlx#4113",
+  "status": "implemented, CPU-tested, default off, UNQUALIFIED. Selectable only by the Qwen3.6 execution policy moe_routed_candidate=true; ServingEngine accepts it only in qualification mode (adapter-declared qualification_mode_only_policy), and qualification.load_qualified_route refuses any route that selects it; the environment key is absent unless selected so stock receipts keep matching. Pending parent-owned Metal gate: scripts/check_fn_routed_decode.py --candidate at the Qwen3.6 geometry on the served build, then a paired teacher-forced/B1 model A/B.",
+  "sources": [
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_pr": "jundot/omlx#4113, open, read 2026-09-30",
+      "source_revision": "1335263e8503b3f632819b0d3985a5b7b45fe92c",
+      "revision_verified": "git fetch pull/4113/head -> FETCH_HEAD 1335263e8503b3f632819b0d3985a5b7b45fe92c (Sam Fenwick, 2026-09-30, 'fix(qwen): reject mismatched verify window dtypes'); LICENSE at that revision is Apache License 2.0",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/qwen35_moe_routed_decode.py": "cac0be6d852861394142b231dc02b095cdd7aaeacfa268c480a6c8479be28563",
+        "omlx/patches/qwen35_moe_router.py": "570889ad0f56c9f83272d61f276879a60206e66d5ef190b69fd02e0789dc7094"
+      },
+      "source_regions": [
+        "qwen35_moe_routed_decode.py: _ROWS qmv_rows (two pointer sets for gate and up rows; the FAST ? K : K - BLOCK_SIZE loop and !FAST guarded tail), _DOWN_TAIL (TOPK-generic lane j % 8 col_reduce_small fold), _build_plan top_k in (8, 10) and qmv_fast_layout-driven down format, grid (32, NSG*top_k*inter/rows) / (32, top_k*hidden/4) geometry",
+        "moe_verify_gather.py qmv_fast_layout (the rule as quoted in qwen35_moe_routed_decode.py's docstring; re-expressed, not copied)"
+      ],
+      "read_not_ported": {
+        "qwen35_moe_router.py": "Not ported. Its fused router renormalizes top-k scores in fp32 with one rounding, documented as differing from the composed chain by reduction-order ulp; its router_gemv/softmax_topk_row are separate launches. mlx2's candidate consumes mlx2's own stock routing, so the combine is compared with mlx2's composed tail.",
+        "qwen35_moe_routed_decode.py (rest)": "Not ported: shared-expert fold and precise-exp shared gate, verify-window kernels, one-expert buffer views, first-launch self-disable and fp16 admission."
+      }
+    }
+  ],
+  "notice": "provenance/omlx-4113-routed-candidate.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_routed_decode.py (candidate section: qmv_fast_layout, admit_routed_candidate, CANDIDATE_GATE_UP_SOURCE, CANDIDATE_DOWN_SOURCE, candidate_gate_up_swiglu, candidate_down_combine, candidate_runtime_refusal)",
+    "src/mlx2/runtime/models/qwen3_next.py (_enable_routed_candidate, _try_routed_candidate, routed_candidate_stats, FusedDownSwitchGLU hook, Qwen3NextSparseMoeBlock.set_moe_routed_candidate_mode and one-token score pass-through)",
+    "src/mlx2/adapters/qwen36_35b.py (moe_routed_candidate policy switch, explicit-only, load-time fail-closed admission, diagnostics)",
+    "src/mlx2/qualification.py (UNQUALIFIABLE_CANDIDATES, load_qualified_route refusal)",
+    "src/mlx2/serving.py (ServingEngine refuses adapter-declared qualification_mode_only_policy keys outside qualification mode)",
+    "scripts/check_fn_routed_decode.py (--candidate, geometry flags, strict refusal, --cpu-dry-run)",
+    "tests/test_routed_candidate_4113.py",
+    "tests/test_perf_defaults.py (switch-difference expectation)"
+  ],
+  "modifications": [
+    "Kernels are rewritten onto mlx2's existing #3912 QMV_HEADER (float input sums as the lab MLX fork does since 2d6705923), not omlx's header.",
+    "Gate+up reads gate and up rows from two separate expert tables (Qwen3.6 keeps fused gate/up pinned off); the slot is grid z as in mlx2's #3912 port instead of omlx's flattened block index. Arithmetic per row is unchanged.",
+    "Down/combine keeps mlx2's #3912 product form (T(result) * score in T) and generalises the fold to TOPK; for TOPK 10 and FAST 0 it is the GPU-qualified top-10 kernel's order.",
+    "Admission is stricter than omlx: bf16 only (no served-SiLU probe exists for fp16), q4/g64 only, exact QuantizedSwitchLinear class, matching gate/up/down tables, scores required. Runtime also requires the served SiLU probe to match the kernels' metal::exp sigmoid.",
+    "No self-disable: a decline is counted by reason (bounded to 16 reasons plus 'other') and runs the composed reference body; a kernel error propagates.",
+    "Default off; a selected fused expert kernel (scalar/tile4) and the candidate are mutually exclusive."
+  ],
+  "validation": "CPU only (conftest default device CPU): tests/test_routed_candidate_4113.py - admission accept/refuse matrix, qmv_fast vs qmv down dispatch, composed-reference equality for top-8/10 at both traversals, counters, bounded reasons, CPU decline bit-equality, served-SiLU refusal, block pass-through and decline, setter exclusion, Qwen3.6 explicit-only opt-in and load refusal, qualification refusal, serving refusal outside qualification mode (with and without a record), checker dry-run pass and four refusal falsifiers (unadmitted geometry, one-ulp drift, non-engagement, zero cases). A CPU-only reviewer pass found no kernel or engagement defects; its three findings (stock-receipt env drift, CPU-pinned Metal test, zero-case pass) are fixed. Metal numerics NOT run by this builder; the Metal-gated test and the checker are pending the parent's GPU ownership."
+}

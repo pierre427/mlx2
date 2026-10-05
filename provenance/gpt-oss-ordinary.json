@@ -1,0 +1,23 @@
+{
+  "component": "GPT-OSS 20B and GPT-OSS Puzzle 88B ordinary text models",
+  "source_repository": "local read-only mlx-lm-unified checkout",
+  "source_revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+  "source_paths": [
+    "mlx_lm/models/gpt_oss.py",
+    "mlx_lm/models/gpt_oss_puzzle.py"
+  ],
+  "license": "MIT",
+  "notice": "provenance/gpt-oss-ordinary.NOTICE",
+  "modifications": [
+    "copied model tensor math into mlx2.runtime.models and retained local shared model primitives",
+    "placed GPU-free exact topology and index closure inspection in mlx2.adapters.gpt_oss",
+    "kept GPT-OSS Puzzle per-layer expert counts and full/rotating KV cache windows",
+    "selected ordinary decode only with APCv2 layered cache layout and pending qualification",
+    "excluded MTP, tools, and reasoning routes pending implementation and qualification"
+  ],
+  "validation": [
+    "CPU-only inspection of the local GPT-OSS 20B and Puzzle 88B artifacts",
+    "tests/test_gpt_oss_ordinary_cpu.py",
+    "Python source compilation without model loads"
+  ]
+}

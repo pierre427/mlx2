@@ -1,0 +1,12 @@
+{
+  "name": "loaded-session complete continuation providers",
+  "license": "MIT",
+  "implementation": "original mlx2 orchestration calling existing tensor protocols",
+  "sources": [
+    {"repository": "mlx2", "revision": "6ae4e6ba65e2fdbb26533ff7f4363c306886e9e4", "paths": ["src/mlx2/runtime/drafters/xpress.py", "src/mlx2/runtime/drafters/lilicorr.py", "src/mlx2/runtime/hybrid_speculative.py"], "licenses": ["MIT"], "notices": ["provenance/xpress.json", "provenance/lilicorr.json", "provenance/flashnext.json"]}
+  ],
+  "modifications": ["Private loaded XPress refined-logit complete-path beam", "Private LiLiCoRR conditional correlation lattice complete-path beam", "Native MTP teacher-forced private cache beam with actual anchor and full vocabulary", "Host enumeration of exact committed-history copy continuations", "Revision-bound admitted provider inventory; top 15 complete sequences rather than 15 token nodes", "Request-bound pool selections alongside existing once-per-round external context advancement", "Explicit policy integration and final-binding LiLiCoRR feedback-manager lifecycle", "O(V) top-k partition with exact ascending-token-ID cutoff ties; reuse fixed unprocessed XPress final rows once per position"],
+  "validation": {"cpu": "19 focused provider cases and 63 combined provider/complete-verifier/pool cases passed on CPU, including 729-path exhaustive XPress oracle and 65536-vocabulary cutoff tie oracle, actual ServingEngine complete-pool cold/warm rotating-window APCv2 hits, constrained LiLi candidate-miss ordinary fallback without critic labels; shared adapter final-binding feedback lifecycle and header refusals; Ruff passed for new sources/tests and shared mixin", "gpu": "not run by this worker"},
+  "status": {"implemented": true, "qualified": false, "selected": "explicit continuation_pool policy only", "trained_hybrid_checkpoint": false},
+  "limitations": ["Private beam log scores are source ranking proxies and are never combined as a proposal q", "Providers recompute on private state and claim no compute saving", "No trained M-DFlash artifact is loaded, so DPara is unavailable as a pool provider", "DFlash2 continuation provider not implemented; incompatible stochastic context backends fail closed", "Native MTP branches recompute a bounded prefix and publish no persistent head state"]
+}

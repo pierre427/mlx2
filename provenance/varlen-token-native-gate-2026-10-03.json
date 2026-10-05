@@ -1,0 +1,16 @@
+{
+  "name": "bounded default-dry-run native 64-token paged KV gate",
+  "status": "implemented-cpu-fixture-and-source-bound-native-gate-passed",
+  "source_repository": "original mlx2 implementation based on private codex/varlen-paged-attention revision b23b8793b",
+  "source_paths": [
+    "src/mlx2/runtime/paged_kv_token.py",
+    "src/mlx2/runtime/paged_kv_write.py",
+    "scripts/research/varlen_multipage_gate.py",
+    "native/paged_kv/binding.cpp",
+    "docs/research/varlen-token-profile-native-2026-10-03.md"
+  ],
+  "license": "original mlx2 project code; no third-party implementation copied",
+  "modifications": "Added default-dry-run, CPU-fake, and opt-in native modes for a 2-head d128 fp16 63/64/65-token page boundary. Native mode checks both live gpuq owner receipts, pinned source/binary hashes and wheel version, uses a hard 300-second SIGALRM, and records a failure stage and hashes on exception. It uses one explicit GPU stream, exact per-head/page diagnostic reads, callback-gated publication and generation retirement.",
+  "validation": "CPU-only dry-run/fixture tests, fake byte-plane ownership checks, matching/mismatching lease and hash preflight, and failure receipt generation. The bounded native GPU 63/64/65-token write/readback gate passed on 2026-10-03 under the pinned source/binary/wheel and gpuq lease recorded in qualification/runs/varlen-token-native-20261003/receipt.json.",
+  "limitations": "This source-bound pass does not prove attention on the opaque arena, COW, failed GPU command-buffer retirement, cross-stream ordering, model parity, performance or serving."
+}

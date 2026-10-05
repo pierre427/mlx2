@@ -1,0 +1,50 @@
+{
+  "name": "Flash-Next raw-gate-plus-inject Metal candidate",
+  "upstream": {
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "pull_request": "https://github.com/ggml-org/llama.cpp/pull/29520",
+    "revision": "03a667aa304f2a8e02a9a02b2e3fb45d64bcae7f",
+    "paths": [
+      "ggml/src/ggml-vulkan/vulkan-shaders/dsv4_hc_post.comp",
+      "ggml/src/ggml-vulkan/ggml-vulkan.cpp"
+    ],
+    "license": "MIT"
+  },
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_gate_inject.py",
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "src/mlx2/adapters/flash_next.py",
+    "tests/test_qwen4_gate_inject.py",
+    "tests/test_qwen4_gate_inject_metal.py"
+  ],
+  "adaptation": [
+    "The upstream Vulkan fusion was used only as a design input; no GLSL or C++ implementation was copied.",
+    "The mlx2 candidate is an original MLX Metal kernel owned by the Qwen4 adapter and remains default-off.",
+    "It accepts the raw four-value projection and fuses divide-by-four, precise sigmoid, multiply-by-two, stream broadcast, branch multiply, and residual add.",
+    "Admission is locked to BF16 Flash-Next geometry and the ordinary MLX graph is retained as a fail-closed fallback.",
+    "Diagnostics distinguish calls and declines; implemented, qualified, selected, and observed-used remain separate states."
+  ],
+  "preimplementation_observation": {
+    "device": "Apple M5 Max",
+    "mlx_version": "0.32.2.dev20260919+39400a0d4",
+    "geometry": "batch=1,tokens=1,residual=10240,branch=2560,raw_gate=4,bfloat16",
+    "dispatch_threads": 5,
+    "dispatch_threadgroups": 0,
+    "method": "LLDB breakpoints on AGXG17XFamilyComputeContext dispatch selectors, after warm-up and around one isolated evaluation"
+  },
+  "validation": {
+    "status": "bounded_model_validation_passed",
+    "implemented": true,
+    "model_validation_passed": true,
+    "route_qualified": false,
+    "selected_by_default": false,
+    "physical_engagement_observed": true,
+    "evidence": [
+      "qualification/runs/qwen4-gate-inject-20260930/qualification-summary.json",
+      "qualification/runs/qwen4-gate-inject-20260930/model-validation.json",
+      "qualification/runs/qwen4-gate-inject-20260930/dispatch-count.json",
+      "qualification/runs/qwen4-gate-inject-20260930/candidate-dispatch-count.json"
+    ],
+    "claims": "The bounded kernel and model checks passed, and isolated physical engagement was observed. Full serving-route qualification, default selection, and stable performance claims remain explicitly out of scope."
+  }
+}

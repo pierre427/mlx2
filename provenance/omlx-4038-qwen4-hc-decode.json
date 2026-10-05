@@ -1,0 +1,91 @@
+{
+  "component": "Qwen4 (Flash-Next) two-launch hyper-connection decode (omlx #4038 port; #4024 assessed)",
+  "status": "implemented; Metal bit-identical to the composed path on real artifact HC weights for one row and for 2..8 folded rows (verify windows, multi-lane decode); default off (Flash-Next policy field hc_decode_kernels / MLX_QWEN4_HC_DECODE); not qualified, not selected",
+  "sources": [
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "2608f6785a78bca01967f22f72cf67c52e6d3973",
+      "source_pr": "jundot/omlx#4038 (perf(qwen4): two-launch hyper-connection decode kernels and decode host trim (bit-exact)), PR head read 2026-09-30",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/hc_fused.py": "c1569dedc9cf9417fa1c2ad9634ae186592d24fe0f5e0cd5a0bd9ee7b6e537b6",
+        "tests/test_qwen4_hc_fused.py": "f6550ea99ce86d26025e3ad28b805e48d366c7bbd994bc8b336cfab1cf7c5aca"
+      },
+      "source_regions": [
+        "hc_fused.py: _NDN_SOURCE_TEMPLATE / _U2_SOURCE (launch structure: stream norm + down/inject rows in launch 1, up rows + gate + stream mix in launch 2), _static_layout_compatible (identity-keyed layout cache), fused_forward (first-use evaluation per specialization, fail-closed fallback)",
+        "test_qwen4_hc_fused.py: read for the test matrix only"
+      ],
+      "copied": "No Metal source copied. The launch partition and the cache/validation ideas are adapted; every kernel body is rewritten against MLX's arithmetic (below), because omlx's two-launch kernels are bit-equal to omlx's older fused kernels (FP32 epilogues, K-slice partial sums), not to the composed MLX ops mlx2 serves."
+    },
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "8b57bb46bf090dc9f997734a5fa3ebecba92b8b7",
+      "source_pr": "jundot/omlx#4024 (deferred HC writes, fused prefill HC glue, one-row MoE combine), PR head read 2026-09-30",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/qwen35_moe_router.py": "f959609ca6247f082d4d35eb541de0a821ff6b2da2eabd4f2790c39102dd7a7b"
+      },
+      "copied": "Nothing. Assessed and skipped; reasons under skipped."
+    },
+    {
+      "source_repository": "lab MLX fork (ml-explore/mlx derivative), installed in the mlx2 venv",
+      "source_revision": "39400a0d4cf1641bc6e543cb5e3585757f491854",
+      "license": "MIT, Copyright (c) 2023-2026 Apple Inc.",
+      "source_files": {
+        "mlx/backend/metal/kernels/rms_norm.metal": "b2e04e377fdad1d645581f9beeaf9cbb06d1ad32926161e06cbc15240caf12bf",
+        "mlx/backend/metal/kernels/quantized.h": "9fcd19233783725178353cf492ca637586e9c906b8af132003183d8ca3a36e5e",
+        "mlx/backend/metal/kernels/unary_ops.h": "0a5492b65ae39ecb6d8b04e64ea5007e0a4ff60d8d9428559bfbfd03387ece2a",
+        "mlx/backend/metal/kernels/binary_ops.h": "2dd13c2496f5d6f0856e4ca99db2ceb5c6d7dc0c344b9ba8e41ef3b7d7ed8a97",
+        "mlx/backend/metal/kernels/reduction/reduce_col.h": "9bb7b8b15612230c5f91cea3220048d09219809dbbc1adab4b2dabfd44315810",
+        "mlx/backend/metal/kernels/bf16_math.h": "1f374f8380f756eb89acf6a847741cb8fecbe642945e159fb6208d804cc06496",
+        "mlx/backend/metal/quantized.cpp": "98b1a39dd821eb94104462eaa33f644e370278f2ea35cc0ec835cf292df0b179",
+        "mlx/backend/metal/kernels/gemv.h": "296ef622ea3c67d7485aa7cdf102bbfcb582e07bd3207793179a9d1e65ee5a65",
+        "mlx/backend/metal/matmul.cpp": "904d2173f5b915e8a502993978a44224202974f7efa85fd68a016bbaa15d371a"
+      },
+      "source_regions": [
+        "rms_norm.metal rms_single_row (lane mapping, simd_sum ladder, precise::rsqrt)",
+        "quantized.h load_vector / load_vector_safe / qdot / dequantize (4-bit), qmv_fast_impl, qmv_impl and qmv_wide_impl loop/tail/ladder order",
+        "unary_ops.h Sigmoid, binary_ops.h Divide/Multiply/Add, reduction ops Sum, reduce_col.h col_reduce_small add order",
+        "quantized.cpp dispatch_qmv / qmv (which kernel runs for each HC projection at one row)",
+        "quantized.h load_vector / load_vector_safe / qdot / qdot_safe / dequantize bits == 8 branches (2026-10-01, 8-bit HC projections)",
+        "quantized.cpp qmv_fast_k_alignment (256 at 8 bits) and dispatch_qmv / qmv_wide selection at 8 bits",
+        "gemv.h GEMVKernel::run (BM 1, BN 8, SM 1, SN 32, TM 4, TN 4: per-lane four-product accumulation, shuffle-down ladder, threadgroup sum of simdgroups in order) and GemvWide::run (k_lanes 32, unroll 8 float4 dot, strided tail, halving shuffles) for the dense bf16 inject (2026-10-01)",
+        "matmul.cpp Matmul::eval_gpu / gemv_axbpy / gemv_wide_config (which dense matvec runs for the inject at 1 and 2..8 rows)"
+      ],
+      "copied": "The 4-bit load_vector/qdot expressions and the Sigmoid expression are transcribed (as the existing qwen4_routed_decode.py QMV_HEADER does); the rest is re-implemented to the same operation order. No Apple copyright header is added to mlx2 files; MIT terms: provenance/LICENSE.unified-MIT. 2026-10-01: the 8-bit load_vector/qdot/dequantize expressions and the dense gemv/gemv_wide accumulation and reduction order are transcribed the same way (MIT, no Apple header)."
+    }
+  ],
+  "notice": "provenance/omlx-4038-qwen4-hc-decode.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_hc_decode.py",
+    "src/mlx2/runtime/models/qwen4_exp.py (GatedResidual.__call__ hook)",
+    "src/mlx2/adapters/flash_next_policy.py (hc_decode_kernels)",
+    "src/mlx2/adapters/flash_next.py (diagnostics hc_decode, only when enabled or used)",
+    "scripts/check_qwen4_hc_decode.py",
+    "scripts/bench_qwen4_hc_decode.py",
+    "tests/test_qwen4_hc_decode.py",
+    "scripts/bench_8bit_hc_fold.py (2026-10-01 8-bit A/B)"
+  ],
+  "modifications": [
+    "Target is bit-identity with mlx2's composed eager ops (fast rms_norm on float32 rows, weight multiply, bf16 round; qmv_fast down/inject; qmv up; prebuilt unary Sigmoid; JIT-compiled nn.silu; bf16 col_reduce_small sum; mean scale), not with omlx's previous kernels.",
+    "Launch 1 (norm_down): one threadgroup of hidden/4 threads normalises all four streams with rms_single_row's lane mapping and reduction (the eager path normalises each stream in its own 640-thread threadgroup), so every threadgroup holds the whole normed row; each simdgroup then runs whole qmv_fast down rows (no K slices: omlx's per-stream K slices change the add order), lane 0 applies /hc and the compiled SiLU in bf16; one extra threadgroup runs the four inject rows and 2*sigmoid(raw/hc).",
+    "Launch 2 (up_mix): one simdgroup per hidden column runs the four qmv up rows with qmv's full-block-plus-tail order and simd_sum, then lane 0 applies sigmoid, the bf16 stream product, the bf16 stream sum in col_reduce_small order (p0+0, then p_j + total) and the mean's *0.25 (omlx: coalesced chunk staging and a shuffle-down FP32 mix).",
+    "Two sigmoid variants: the prebuilt unary kernel is compiled -fno-fast-math, so its metal::exp is the precise one; the JIT-compiled nn.silu resolves metal::exp like any metal_kernel. Each variant equals its eager counterpart over all 65,536 bf16 inputs and the other one differs at one input (GPU table in the check script).",
+    "Rows follow MLX's matvec choice for the folded M: one row transcribes qmv_fast/qmv (law 0); 2..8 rows on Apple GPU family 15+ transcribe qmv_wide (law 1: k_lanes 8, per-group 8-value dequantised sub-chunks, shuffle-down ladder 4/2/1), so a verify window equals its own composed call, not one-row decode, as in the composed path. Other row counts (qmv_nax from 12 rows on M5, qmm, unknown GPU family, MLX_QMV_LIMIT set) are declined and counted. omlx instead serves 1..6 rows bit-equal to its own one-row kernels.",
+    "The pending residual write (#4024 deferred write, omlx's _NDNW load) is not folded in: _apply_inject stays composed (PENDING_WRITE_SEAM documents the meeting point with the separate raw-gate+inject work).",
+    "Both launches run as one mx.compile function per launch geometry with the weights as inputs (2.3 us of host per call vs 5.7 us for two metal_kernel calls).",
+    "Admission is structural and refuses with a counted reason: rows != 1, non-bf16 input, training, non-eager norm (fused group norm on, fast RMS norm off/width), compiled glue on, layout (hc 4, hidden % 128 == 0 and <= 4096, width % 512 == 0, lowrank not a multiple of 512 and not 64/128, exact nn.QuantizedLinear 4-bit gs64 affine with bf16 scales/biases, not lane-owned), no Metal. The layout verdict and launch plan are cached per module keyed on the identity of every child, child class and child array.",
+    "First call per specialization is evaluated inside a try; a failure demotes the path for the process (counted).",
+    "2026-10-01 (lane W3, mixed-precision artifacts): every projection may be 4- or 8-bit affine group 64 independently (down DB, up UB, quantized inject IB template constants). 8-bit rows transcribe MLX's bits == 8 arithmetic: qmv_fast with 8 values per lane per 256-value block (down, inject), plain qmv with 4 values per lane per 128-value block and the guarded tail (up rows, lowrank 320 is not a whole 8-bit block), qmv_wide's 8-value sub-chunk dequantize s * q + b. Admission follows MLX's per-format choice (qmv_fast_k_alignment 512 / 256). The 4-bit arithmetic is unchanged.",
+    "2026-10-01: a dense bf16 block_inject_weight (nn.Linear, no bias; the uncensored artifact keeps it unquantized) runs in norm_down's inject threadgroup (INJ = 2): at one row MLX's GEMVKernel tiling for this shape (8 simdgroups over K, lane l of simdgroup g owns 4 columns per 1024-column block, rows accumulate inter * v in order, shuffle ladder 16..1, simdgroups 1..7 added onto simdgroup 0 in order), at 2..8 rows GemvWide (one inject row per simdgroup, 8 float4 dot per lane per 256-float4 step, halving shuffles). Admitted when the width is whole 1024-column blocks and >= 16 * hc. Row-exact windows run the one-row gemv per row. Mixed formats in one module (8-bit down/up with a dense or 4-bit inject, 4-bit down/up with an 8-bit inject) are admitted; any other format declines with a counted reason (bits / inject: ...).",
+    "2026-10-01: status gains calls_by_format (e.g. 'down b8 up b8 inject dense')."
+  ],
+  "skipped": {
+    "4024 deferred HC write": "Overlaps the concurrent raw-gate+inject fusion around _apply_inject (codex-qwen4-gate-inject-20260930) and needs the decoder loop to carry pending writes; the seam is documented (PENDING_WRITE_SEAM) so it can fold into norm_down's load later.",
+    "4024 fused prefill HC glue": "Prefill path; this lane is decode. Not measured here.",
+    "4024 one-row MoE combine": "mlx2 already has the equivalent compiled span (moe_combine glue, MLX_QWEN4_COMPILE_GLUE, off), and omlx's summation-order matching targets the stock (routed*scores).sum tail that the Flash-Next profile replaces with the tile4 fused down; MoE belongs to another lane.",
+    "4038 DeltaNet/MoE decode plans, eager-dispatch commit cadence, __getattr__ trims": "Host-side omlx glue around mlx-vlm modules; mlx2's modules and eager dispatch differ. Not ported."
+  },
+  "validation": "GPU, M5 Max, mlx 39400a0d4, 2026-09-30 (qualification/runs/omlx-4038-hc-decode-20260930): scripts/check_qwen4_hc_decode.py on 16 real artifact HC modules x 48 inputs at 1/2/3/4/5/6/8 rows: mixed, inject, normed row and SiLU activations bit-identical in 768/768 cases; 65,536-entry bf16 epilogue table 0 mismatches; launches per call 17 (13 mixer) -> 2. Full-model in-process ABBA A/B (scripts/bench_qwen4_hc_decode.py, 2048 context, 256 greedy tokens, 6 reps x 3 prompts): MTP off 46.3 -> 52.8 tok/s (+14.0%), MTP on 62.1 -> 67.0 tok/s (+8.0%), greedy tokens identical in every pair. CPU: tests/test_qwen4_hc_decode.py (19 pass, 1 Metal-gated skip on CPU; the Metal-gated test passed under MLX2_METAL_TESTS=1 at 1cd20c32). 2026-10-01 (lane W3, qualification/runs/omlx-w3-8bit-20261001): uncensored artifact (8-bit down/up, dense bf16 inject) 768/768 cases at 1-8 rows and 1120/1120 row-exact window rows bit-identical, 2 launches per call (composed 19), chain microbench 69.2 -> 41.9 us per call; 4-bit artifact re-check 768/768 + 1120/1120 (unchanged). Full-model per-call hunt on the uncensored artifact: 91,373 HC calls at 1-4 rows served, 0 mismatches. In-process ABBA A/B vs main's defaults (uncensored): B1 MTP off +13.5% / +20.3% (two runs, 6/6 pairs faster each), tokens identical; with multi-row on for 8-bit layouts 4 lanes lost 5.2%, so 2..8-row calls are served only for all-4-bit layouts (hc_decode_multi_row auto), after which 4 lanes +0.5% and MTP on +1.4% (uncensored), and the 4-bit artifact runs main's path unchanged (switching multi-row off there cost 4 lanes -5.8%, MTP on -6.8%).",
+  "selection": "2026-09-30: selected as the Flash-Next default (hc_decode_kernels=True) on the omlx roadmap campaign branch at Pierre's request. Not qualified: the default policy receipt changed, so Flash-Next serves labelled unqualified until it is requalified. The status field above records the evidence as of implementation."
+}

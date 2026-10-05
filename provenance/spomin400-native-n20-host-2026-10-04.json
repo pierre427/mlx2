@@ -1,0 +1,10 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "license": "MIT",
+  "source_repository": "private mlx2",
+  "source_revision": "4622bb06d088f1cfdda42b3cfb977c27789f24d9",
+  "source_paths": ["src/mlx2/runtime/hybrid_packed_prefill.py", "src/mlx2/adapters/qwen35_paged_candidate.py", "src/mlx2/runtime/paged_native_graph_group.py", "src/mlx2/runtime/generate.py", "scripts/run_spomin_20x20.py"],
+  "dependency_revisions": ["ba4760b1", "b77e4318a68f30a7000c62946d3bd0c1f013c56b", "595f85a7437044a48f039fe2b12f0038ece95cfa", "3eb5c4fd9930396b15986412f4da8e0149d4b7ca", "f570d1c376063ea36d30f8aaa3bc88ba0b1e049e"],
+  "modifications": ["distinct explicit corpus-bound N1..20 profile/factory and adapter Q1 math", "atomic all-N private checkpoint attachment and dynamic active-width serving transaction", "B1 scalar physical proof and zero split scratch", "all logits/recurrent/KV finite predicates before publication", "source-bound actual400-case input and firstN2 numeric gate", "fresh dual-lease terminal-proved phase command protocol and ordinary actual sampled ID control"],
+  "validation": {"new_guarded_cpu_checks": 18, "existing_orchestrator_checks": 38, "existing_lifetime_checks": 8, "gpu_executed_by_worker": false, "whole_model_exactness": "pending root", "suite400_execution": "not executed", "qualified": false, "default_off": true}
+}

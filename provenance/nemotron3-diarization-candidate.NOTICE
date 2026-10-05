@@ -1,0 +1,6 @@
+Nemotron 3 Diarization candidate adapter was ported from local mlx2 branch
+codex/nemotron3-diarization at 9aace813f310acf1cf5391d9cd65178e84a8e491.
+The source branch's provenance/nemotron3-diarization.json identifies the
+NVIDIA model revision and the upstream Apache-2.0 reference implementation.
+The model weights are not redistributed. Historical qualification receipts
+do not qualify this new branch/source revision.

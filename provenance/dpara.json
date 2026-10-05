@@ -1,0 +1,70 @@
+{
+  "implementation_kind": "original mlx2 implementation of a paper algorithm",
+  "source_repository": "https://arxiv.org/html/2609.27396v1",
+  "source_revision": "arXiv:2609.27396v1 (2026-09-23)",
+  "source_paths": [
+    "Section 3.1 Backbone requirement of DPara",
+    "Section 3.2 Finetuning DFlash to M-DFlash",
+    "Algorithm 1",
+    "Figure 6",
+    "Appendix D"
+  ],
+  "license": "Paper: CC BY 4.0; original mlx2 implementation: Apache-2.0",
+  "source_code_copied": false,
+  "local_dependencies": {
+    "repository": "mlx2",
+    "revision": "2207af9a980f7def6173a3a057221267de634f9a",
+    "paths": [
+      "src/mlx2/runtime/drafters/dflash_base.py:DFlashAttention,Qwen3MLP",
+      "src/mlx2/runtime/drafters/base_config.py:DFlashConfig",
+      "src/mlx2/runtime/speculative_sampling.py:RequestRNG,probability,softmax"
+    ],
+    "existing_mined_dependency_provenance": "provenance/muse-dflash2.json",
+    "existing_mined_dependency_notice": "provenance/muse-dflash2.NOTICE"
+  },
+  "modifications": [
+    "Implement shared causal featureless spine and all acceptance-boundary bidirectional branches with one real MLX backbone forward",
+    "Assign nonmonotonic repeated absolute RoPE positions through batched per-token offsets",
+    "Retain immutable per-layer KV projected from committed target features; publish only previous anchor plus accepted draft positions",
+    "Separate bonus-independent backbone outputs from previous-token low-rank Markov head finalization",
+    "Export the exact transformed sequential proposal laws to the ordinary rejection verifier",
+    "Bind branch handles and context to request, target revision, draft revision and generation; consume or discard exactly once",
+    "Reject public handles with unrelated context, spine or branch binding; optionally pin caller-expected target and draft revisions before model allocation",
+    "Provide explicit executor scheduling with cancellation and failed-verification cleanup",
+    "Refuse ordinary DFlash/DSpark checkpoint metadata; require multiple-anchor featureless marker and a pinned converted artifact manifest",
+    "Keep this single-request full-attention candidate outside selected serving and APCv2 publication",
+    "Handle empty committed context without launching normalization or RoPE on null Metal buffers"
+  ],
+  "validation": {
+    "command": "PYTHONPATH=src ~/Desktop/mlx2/.venv/bin/python -m pytest tests/test_dpara_cpu.py tests/test_dpara_lifetime.py",
+    "result": "46 passed in 0.44s (2026-10-01); ruff check and format passed for all five Python files",
+    "evidence": [
+      "Every tree branch matches an independent separate-prefix attention/RoPE oracle, including empty context",
+      "Rejected spine suffix cannot influence the selected branch",
+      "All acceptance boundaries and several actual bonus tokens match independent Markov-head greedy results",
+      "Conditional proposal laws match independent host softmax and target rejection-sampling distribution",
+      "Only accepted target-feature KV is appended; previous context remains unchanged",
+      "Stale request/revision/generation and repeated resolve fail closed",
+      "CPU event barriers demonstrate independent scheduling, including cancellation during precompute and finalization",
+      "Synthetic converted artifact roundtrip and manifest tampering rejection",
+      "Empty-context M3 Metal tree and independent-prefix oracle passed for draft lengths2/3; regression test forbids empty normalization"
+    ],
+    "device": "CPU",
+    "trained_model_loaded": false,
+    "gpu_execution": false,
+    "hardware_overlap_observed": false
+  },
+  "status": {
+    "implemented": true,
+    "qualified": false,
+    "selected": false,
+    "observed_used": false
+  },
+  "limitations": [
+    "No compatible trained M-DFlash artifact was acquired; synthetic tensors do not establish acceptance quality or model qualification",
+    "This does not register a serving route or publish approximate/branch state through APCv2",
+    "Single request, full attention, default split-half RoPE; no sliding windows, tree batching or distributed transport",
+    "Logical executor concurrency is not evidence of Apple GPU concurrency or speedup",
+    "Checkpoint marker is a compatibility declaration, not proof of training or qualification"
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "component": "CPU-only offline coarse-head candidate and sampler preflight",
+  "source_repository": "jundot/omlx (read-only research input)",
+  "source_revision": "3e9703518984c294c2ed989cf968727d0e0ffa56 (merged PR #3958)",
+  "source_paths": ["omlx/patches/mlx_lm_mtp/batch_generator.py"],
+  "source_url": "https://github.com/jundot/omlx/pull/3958",
+  "license": "Apache-2.0",
+  "mlx2_reference_revision": "7b74470204220fbc99c7038c5dd1eb15e8e14b12",
+  "mlx2_reference_paths": [
+    "src/mlx2/runtime/sample_utils.py",
+    "src/mlx2/runtime/hybrid_speculative.py"
+  ],
+  "destination_paths": [
+    "scripts/research/offline_coarse_head_preflight.py",
+    "tests/test_offline_coarse_head_preflight.py",
+    "docs/plans/m5-coarse-head-pr3958-capture.md"
+  ],
+  "modifications": [
+    "Original NumPy-only analyzer for aligned original dense-FC proposal logits, exact full-head logits after upstream's 4-bit MTP-FC conversion, matched coarse top-64 IDs, and target logits; no upstream Metal code or model route is copied.",
+    "Reconstructs mlx2's top-p then top-k then temperature distribution and the PR's candidate-normalized exact rescoring and top-k/top-p/temperature path; reports support, TV, and expected one-step acceptance.",
+    "Requires a v2 capture manifest, Git source revision, hashes of the three mlx2 MTP contract files, capture code hash, artifact hashes, canonical per-row token histories with four independently recorded arm digests, and per-arm/restore mechanism counts equal to captured rows.",
+    "Rejects nonfinite logits, unmatched arm histories, malformed checkpoint offsets, and exact candidate rescoring that differs from the full q4FC head by more than 0.125 logit; reports conservative support, TV and one-step acceptance thresholds for GPU A/B admission."
+  ],
+  "validation": ["Eight CPU synthetic/import-guard tests under schema v2, including source hash, arm alignment, rescore, support-loss, and separate denseFC/q4FC effects; no real model capture or GPU result"]
+}

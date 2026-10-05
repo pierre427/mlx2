@@ -1,0 +1,14 @@
+{
+  "feature": "default-off staged B2 Q1 deferred MLX evaluation research arm",
+  "source_repository": "mlx2 local direct grouped fence branch",
+  "source_revision": "b190655ced22be5d40893e671ee37c4a7c62f520",
+  "source_paths": [
+    "src/mlx2/runtime/paged_kv_write.py",
+    "src/mlx2/runtime/paged_attention_native.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "src/mlx2/adapters/qwen3_paged_candidate.py"
+  ],
+  "license": "mlx2 original project code; no upstream code copied",
+  "modifications": "An explicit B2 Q1 candidate flag retains each grouped-write dependency and staged-read output as MLX roots, deferring their eager async_eval calls until the final logits eval. Submitted native leases remain pinned until terminal proof. A failed graph build aborts prepared reads, flushes constructed roots, drains exact write/read callbacks, and poisons the backend; ambiguous failures retain roots and orphaned read leases for late proof. Ordinary and other candidate paths keep eager submissions.",
+  "validation": "CPU tests cover explicit scope, eager versus deferred grouped submission, prepared-read abort, ambiguous read evaluation after all write epochs complete, and root retention through late read terminal. Focused CPU checks passed. Metal functional parity, terminal lifecycle, and performance remain unverified; this arm is unqualified and default off."
+}

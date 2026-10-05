@@ -1,0 +1,39 @@
+{
+  "schema": "mlx2-source-provenance-v1",
+  "base_revision": "c9667cfe803b7381fdcf7a46c63391052d608403",
+  "component_revisions": [
+    "f7164f7c1ff88d70a82ec40da32f6e0d6ac0dc44",
+    "7127b88f"
+  ],
+  "license": "component MIT/original project provenance retained",
+  "modifications": [
+    "Explicit optional exactboolean prefill_nax_exact, environment selectors0/1, rawNAX capability/head/devicearchitecture checks beforeallocation; oldtwo-pass zero-scratch arm retained.",
+    "Precharge declared per-read NAX scratch totalrows*24*129*4 before arenaallocation, includein bootstrap reservation and retainthrough resource retirement. Layer terminaldrains boundone scratchpair at a time.",
+    "Require exact physicalthree-stage counters perFAlayer and terminal/row proofs before gen0jointowner handoff; generic actualpacked attribution preserves stagecounts and charge.",
+    "Integrate frozen samegeometry ordinary mixed-model reference NEWdriver; fullvocab/allGDN/alllogicalKV exact gate against stockshared projections/segmentedattention, actualsameinputB2 continuation; serialB1difference separatelyreported.",
+    "Pre-candidate unattachedarena close failure now keeps admissioncharge through retried resource retirement; no ambiguousclose charge drop."
+  ],
+  "native_binary_path": "/tmp/mlx2-prefill-nax-combined-build-1004/_paged_kv_native.cpython-312-darwin.so",
+  "native_binary_sha256": "7dcbefd3ad0b4aa91d8abea5435217d2af4b33fa26d4481cbc19eea5924962b9",
+  "root_prior_native_oracle": {
+    "receipt": "/tmp/mlx2-prefill-nax-f716/receipt.json",
+    "source": "f7164f7c1ff88d70a82ec40da32f6e0d6ac0dc44",
+    "all_three_raw_bit_exact": true,
+    "stage_deltas": [
+      1,
+      1,
+      1
+    ],
+    "max_abs_error": 0,
+    "note": "Root executed standalone reader only; not combinedmodel qualification."
+  },
+  "validation": {
+    "native_build": "passed without runtime import",
+    "cpu": "25 direct MLX/native-guarded orchestration checks,3 geometry-control checks and7 layout checks passed; final scoped native/source suite recorded separately. Broader collection of two CPU-labelled tests was rejected by runtime import guard before MLX import; those tests were not run.",
+    "combined_model_gpu_executed": false,
+    "qualified": false,
+    "price_usable": false,
+    "selected_default": false,
+    "native_source_cpu": "57 passed,1 runtime-only stride test deselected,10 subtests passed under MLX/native import guard."
+  }
+}

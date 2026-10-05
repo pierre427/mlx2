@@ -1,0 +1,15 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+  "source_paths": ["mlx_lm/models/agnes.py", "mlx_lm/models/qwen3_next.py"],
+  "license": "MIT",
+  "notice": "provenance/agnes-hy-v3.NOTICE",
+  "destination_paths": ["src/mlx2/runtime/models/agnes.py", "src/mlx2/adapters/agnes_3_flash.py"],
+  "modifications": [
+    "Removed the optional fused Metal GDN decode path; ordinary composed GDN remains the reference.",
+    "Included the exact gated Qwen3Next attention in the model-owned module.",
+    "Added CPU-only exact topology and indexed-shard inspection, text-only loading, route metadata, and APCv2 layout.",
+    "Corrected the model-owned attention constructor annotation to TextModelArgs so the module imports before weight loading."
+  ],
+  "validation": "CPU-only artifact inspection and static tests; a tiny CPU MLX model import and cache-construction regression passed. No model weights loaded, GPU execution, or serving qualification in this change."
+}

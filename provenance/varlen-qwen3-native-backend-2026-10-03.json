@@ -1,0 +1,15 @@
+{
+  "name": "default-off dense Qwen3 native paged backend",
+  "status": "implemented-cpu-protocol-tested-gpu-probe-prepared",
+  "source_repository": "original mlx2 implementation at codex/varlen-paged-attention e9ef286c76ba97723b03432cc32ac351c68eb52b",
+  "source_paths": [
+    "src/mlx2/adapters/qwen3_paged_candidate.py",
+    "src/mlx2/runtime/paged_kv_token.py",
+    "src/mlx2/runtime/paged_attention_native.py",
+    "scripts/research/varlen_native_attention_gpu_probe.py"
+  ],
+  "license": "original mlx2 project code under Apache-2.0; no third-party code copied",
+  "modifications": "Added an explicit native backend that packs projected fp16 MLX K/V into head-major uint8 token spans, waits for per-owner terminal write publication, retains the final same-stream write dependency, and closes a packed reader lease only after the matching native callback. Added CPU protocol tests and a default-dry-run synthetic two-layer Qwen3 GPU probe.",
+  "validation": "32 focused CPU tests passed. New CPU fake backend tests cover byte layout for 65/63 ragged lanes, explicit writer-stream packing, shared-tail COW write dependency, two-layer candidate publication/read closure, failed writes, bfloat16 refusal, and missing read callback pin retention. The probe was run in dry-run mode only.",
+  "limitations": "Native synthetic Qwen3 model GPU execution, actual model parity, performance, serving qualification and route selection have not been run or claimed. Caller must serialize all writer/pool access and coordinate an exclusive GPU lease before executing the probe. Submitted operations that time out retain their leases until a terminal callback or arena teardown proof."
+}

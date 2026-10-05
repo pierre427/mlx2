@@ -1,0 +1,71 @@
+{
+  "component": "memory-budgeted disk weight streaming: early-load MoE expert paging (load before materialization) and dense quantized MLP projection paging",
+  "source_repository": "design inputs only; no peer code copied",
+  "sources": [
+    {
+      "repository": "https://github.com/JustVugg/colibri",
+      "revision": "ce370e87d7b623d7759b52ec2007d75fc5b0e87e",
+      "license": "Apache-2.0",
+      "paths": [
+        "c/colibri.c",
+        "README.md"
+      ],
+      "used": "idea only: exact expert bytes, explicit resident/streamed memory tiers and a boot budget. Its CPU mmap trunk and router truncation were NOT adopted."
+    },
+    {
+      "repository": "https://github.com/jundot/omlx",
+      "revision": "87460f4d50de79aef9b67e99e215c31f0a89b445",
+      "license": "Apache-2.0",
+      "paths": [
+        "omlx/engine/batched.py",
+        "omlx/patches/moe_expert_offload.py",
+        "omlx/model_settings.py"
+      ],
+      "used": "idea only: replace expert modules before model materialization; loader-thread ownership; settings refuse unsupported speculative combinations."
+    },
+    {
+      "repository": "https://github.com/srcterm/streamlx",
+      "revision": "146507b59293058b3a1cecc43f47947b25012297",
+      "license": "MIT",
+      "paths": [
+        "streamlx/integrate.py",
+        "streamlx/pool.py",
+        "streamlx/reader.py",
+        "streamlx/stindex.py"
+      ],
+      "used": "idea only: lazy load, wrap selected layers, then evaluate only the resident trunk; byte-based budget partitioning. Prefetch, pinning and resident-layer policies were NOT adopted."
+    }
+  ],
+  "file_hashes": "docs/research/disk-streaming-20261001/ecosystem-sources.json",
+  "destination_paths": [
+    "src/mlx2/runtime/weight_stream.py",
+    "src/mlx2/runtime/streamed_load.py",
+    "src/mlx2/runtime/models/qwen3_next.py",
+    "src/mlx2/runtime/memory_policy.py",
+    "src/mlx2/runtime/apc_v2.py",
+    "src/mlx2/serving.py",
+    "src/mlx2/qualification.py",
+    "src/mlx2/prometheus.py",
+    "src/mlx2/adapters/qwen36_35b.py",
+    "src/mlx2/adapters/qwen35_122b.py",
+    "src/mlx2/adapters/qwen38_27b.py",
+    "scripts/qualify_serving.py",
+    "docs/SERVING.md",
+    "docs/METRICS.md",
+    "tests/test_disk_weight_streaming.py"
+  ],
+  "modifications": [
+    "All code is original to mlx2 and extends its own runtime/weight_stream.py (2026-09 expert streaming).",
+    "Source addressing is proven by raw-array object identity through sanitize, or by an explicitly ledgered output-axis concatenation; any other transform is refused.",
+    "Shard descriptors and safetensors headers are bound at construction from the adapter's indexed weight map and identity records; reads re-check an fstat tuple (a mutation detector, not a content hash).",
+    "Cache entries are concrete; host staging is bounded by materializing as reads complete; a worst-case per-layer gather transient is reserved beside the steady cache.",
+    "Dense paging replaces trunk MLP QuantizedLinear modules with plain modules that run the stock quantized_matmul and evaluate the output before releasing the projection."
+  ],
+  "validation": [
+    "CPU: tests/test_disk_weight_streaming.py and tests/test_moe_expert_streaming.py (synthetic checkpoints; lazy-load seams through each adapter's weight loader; APCv2 cold/warm continuations with page-in counters).",
+    "Independent focused CPU validation:631passed; final disk-streaming/overflow regression validation76passed. Host-only DSpark209passed and GDN92passed in isolated processes. Broader suite findings and baseline comparison are recorded in qualification/runs/disk-streaming-20261001.",
+    "M3Pro36GiB ordinary singlelane capacity smoke at459bbfe4: cryptographically verified67.9GiB Qwen3.5-122B-A10B-oQ4-mtp checkpoint,6GiB expertcache. Cold/warm/restart token IDs and logprobs match; live and persistent APCv2 reuse4tokens; SSEmatches; serving page-ins observed.",
+    "Peak sampled RSS12.35GiB, observed Metalpeak11.65GiB, no change in preexisting swap. Source was read-only SSD backing on another host via ThunderboltNFS. Capacity evidence only; full route qualification and performance testing remain false. Dense real-hardware capacity is untested."
+  ],
+  "validation_evidence": "qualification/runs/disk-streaming-20261001/summary.json"
+}

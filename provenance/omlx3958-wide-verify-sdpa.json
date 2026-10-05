@@ -1,0 +1,15 @@
+{
+  "component": "isolated dense-cache M4-8 verify SDPA comparator",
+  "source_repository": "jundot/omlx (read-only research input)",
+  "source_revision": "3e9703518984c294c2ed989cf968727d0e0ffa56",
+  "source_paths": ["omlx/patches/qwen35_verify_sdpa_split.py"],
+  "source_url": "https://github.com/jundot/omlx/blob/3e9703518984c294c2ed989cf968727d0e0ffa56/omlx/patches/qwen35_verify_sdpa_split.py",
+  "license": "Apache-2.0 (upstream file SPDX header); the selected wide simdgroup-matrix arm has no Splash tensor-ops code",
+  "destination_paths": ["scripts/research/omlx3958_wide_sdpa.py", "scripts/research/bench_omlx3958_wide_sdpa.py", "tests/test_omlx3958_wide_sdpa.py"],
+  "modifications": [
+    "Extract only _WIDE_PARTIAL, _WIDE_COMBINE and their launch geometry; rename research kernels and lazy-load MLX so CPU admission can be tested without GPU.",
+    "Restrict to the current Qwen3.8-27B B1 dense plain-KV cache geometry, M4-8, 24 query/4 KV heads, D256, half precision, bottom-right causal mask, and valid non-padded cache prefix.",
+    "Keep the comparator and its benchmark outside runtime code; do not import or dispatch the Metal 4 MPP tensor_ops arm or oMLX global patch wrapper."
+  ],
+  "validation": ["CPU-only admission, causal-mask, rollback, provenance and dry-run tests; GPU compilation, parity, hardware attribution and timing pending serialized lease"]
+}

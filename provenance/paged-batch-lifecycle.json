@@ -1,0 +1,14 @@
+{
+  "name": "paged BatchGenerator host lifecycle probe",
+  "source_repository": "mlx2 (original project implementation)",
+  "source_revision": "c3c96fed",
+  "source_paths": [
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/runtime/paged_request_route.py",
+    "src/mlx2/runtime/paged_atomic_owner.py"
+  ],
+  "license": "Apache-2.0",
+  "copied_code": false,
+  "modifications": "New default-off host probe binds a live queued UID, context, cancellation, and removal to the existing request coordinator. It cannot select or observe a serving route.",
+  "validation": "CPU-only tests/test_paged_request_route_cpu.py; no native or GPU qualification"
+}

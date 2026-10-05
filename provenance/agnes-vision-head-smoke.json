@@ -1,0 +1,26 @@
+{
+  "component": "Agnes 3.0 direct vision smoke harness",
+  "source_repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+  "source_revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+  "source_paths": [
+    "mlx_vlm/models/agnes/agnes.py",
+    "mlx_vlm/models/agnes/processing_agnes.py",
+    "mlx_vlm/models/agnes/vision.py"
+  ],
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "destination_paths": ["scripts/smoke_agnes_vision_head.py"],
+  "modifications": [
+    "Original bounded runner uses the existing mlx2 AgnesVisionCandidateAdapter, without copying fork model code",
+    "Checks the fork revision, resolved import source, local indexed artifact and source hashes before weight loading",
+    "Uses the checkpoint template's enable_thinking=false direct-answer mode after the initial xhigh 24-token run exhausted its cap inside thinking",
+    "Exercises one image-conditioned prefill and up to 32 greedy decode tokens; requires a visible blue-square answer",
+    "Keeps a CPU-only preflight mode and writes source-bound JSON receipts"
+  ],
+  "validation": {
+    "cpu_preflight": "Passed against the local 6-bit artifact with 3058 indexed tensors and fork revision 8a5e704e; no model weights loaded",
+    "cpu_import": "Pinned fork Agnes model and mlx2 vision adapter import with mlx.core default device set to CPU",
+    "gpu_smoke": "Initial root-run 24-token image prefill and decode reached 72 cache layers but exhausted its cap inside default thinking; direct-answer retry not yet run",
+    "qualification": "Candidate only; image, video, state replay and APCv2 gates remain pending"
+  }
+}

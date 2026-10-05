@@ -1,0 +1,33 @@
+{
+  "component": "Research-only Qwen3.8-27B fused GDN verify CPU reference gate",
+  "status": "reference-verified; fused candidate absent; GPU untested; unselected",
+  "source_repository": "https://github.com/jundot/omlx",
+  "source_pr": "jundot/omlx#3958",
+  "source_revision": "3e9703518984c294c2ed989cf968727d0e0ffa56",
+  "source_license": "Apache-2.0; recurrence thread layout credits mlx-vlm MIT",
+  "source_paths_sha256": {
+    "omlx/patches/qwen35_gdn_verify_fused.py": "84acb74207bc945c6452030c455fdfbb3284087845064fc7edd6a29fee7a9e15",
+    "omlx/patches/qwen35_gdn_prework.py": "c09b4bd4816cb4cc57c751696d6731241c60de26cf0d0b0633ec46636356b9a2"
+  },
+  "mlx2_checkout_revision": "f6cbad9f96b586a16c63b398bb8ba6510b7b702a",
+  "mlx2_origin_main_at_gate": "fffa5139ef29a8a21d1d7304ced59f5b9da0e78c",
+  "mlx2_reference_paths_sha256": {
+    "src/mlx2/runtime/models/qwen3_5.py": "162dbd56ea0f84d60e9927986f99be6c3eba724b3e4e29626028d11bd0fd84d5",
+    "src/mlx2/runtime/models/gated_delta.py": "be53b54a250e13bfcd2ef077519b9d662923feace21daa365a6d15cc72c8edda",
+    "src/mlx2/runtime/models/qwen3_next.py": "ea7f724719ea923f5c869c8d61d2a30a4f3b40fc7e19d18aafbdd1f9668b67a8",
+    "src/mlx2/runtime/models/cache.py": "bf205274f2ec49a148e4bdb229e769d0057af16fe8b0fd39714e2dd009902e2e",
+    "src/mlx2/runtime/hybrid_speculative.py": "306acd85a59ee6685257637132d00997704c0ab07d6d4ca6aa3606d8f06e6533"
+  },
+  "artifact": {
+    "path": "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+    "config_sha256": "7a063b70e128d238784dce2c594cb7e0f714f44c4387975c99acc8fcf6511eb5",
+    "index_sha256": "7f3e6f1baba9bec91b20f25a9a505a6e268377012d038f36febc3af6c478f625",
+    "geometry": {"Hk": 16, "Hv": 48, "Dk": 128, "Dv": 128, "conv_width": 4, "dtype": "bfloat16"}
+  },
+  "modifications": "No upstream code copied. Added research-only CPU tests for local ordinary reference at real recurrent geometry, every accepted prefix of a three-row verify, second partial verify, next-token continuation, and numeric discriminators for BF16 beta and SiLU output gate.",
+  "validation": {
+    "command": "PYTHONPATH=src ~/Desktop/mlx2/.venv/bin/python -m pytest -q tests/test_omlx3958_gdn_reference_cpu.py",
+    "result": "5 passed on CPU",
+    "limitations": "Synthetic hidden_size=32 projections with real 27B GDN recurrent dimensions; no checkpoint weights, Metal candidate, GPU parity, serving route, or speed measurement. Upstream decay and prework boundaries still require a staged Metal comparison."
+  }
+}

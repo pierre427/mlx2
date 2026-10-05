@@ -1,0 +1,12 @@
+DPara algorithm attribution
+
+Fuliang Liu, Xue Li, Kun Qian, Zhibin Wang, Wanchun Dou, Wenyuan Yu,
+and Chen Tian. When Parallel Drafter Meets Parallel Speculative Decoding.
+arXiv:2609.27396v1, 23 September 2026.
+https://arxiv.org/html/2609.27396v1
+Paper license: Creative Commons Attribution 4.0 International (CC BY 4.0).
+
+The DPara candidate is original mlx2 code implementing the described algorithm.
+No upstream DPara source code or paper figures were copied. The implementation
+reuses local DFlash projection and MLP classes covered by
+provenance/muse-dflash2.json and provenance/muse-dflash2.NOTICE.

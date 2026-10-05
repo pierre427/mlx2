@@ -1,0 +1,28 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "default-off hybrid long Q1 stock partial/reduce host integration",
+  "source_repository": "lab-owned mlx2",
+  "source_revision": "1db48ed667e2b44302aa2d513cfeed826f2ab6c4",
+  "source_paths": [
+    "native/paged_kv",
+    "src/mlx2/adapters/qwen35_paged_candidate.py",
+    "scripts/research/varlen_hybrid_q1_gate.py"
+  ],
+  "licenses": "Existing project terms; existing model math MIT and segmented cache Apache-2.0 provenance are retained",
+  "modifications": [
+    "Explicit stock_long constructor and diagnostic CLI selectors, default false; serving admission refuses the long flag",
+    "Prewrite B2 Q1, GQA above four, architecture s, unwindowed and 1025..8192 visible-token capability guards",
+    "Dedicated actual partial/reduce counter deltas exactly once per full-attention layer, old split counters zero",
+    "Charge all-layer FP32 scratch for 128 residues; native partial numerators round through arena BF16 or FP16 storage",
+    "Clean source HEAD and exact loaded native SHA256 required for explicit long diagnostic launch; retain existing 100-second deadline and failure teardown",
+    "Optional stock counter telemetry reports zero for raw ABI absent on older default-off native binaries; closed arenas still refuse, and explicit stock admission/driver requires raw counter ABI"
+  ],
+  "native_binary_sha256": "7092b8a9649cea11edbb71c84438465a8500257c4327a65d8d901f76dbfa6d48",
+  "validation": {
+    "cpu": "35 helper math/source/failure contracts, 32 serving lifecycle/source contracts and 2 launch/counter contracts; no MLX/native imports",
+    "gpu": "not executed by implementation worker",
+    "qualified": false,
+    "performance": "unmeasured",
+    "compatibility_cpu": "4 direct launch/counter contracts include legacy raw ABI absence, actual profiling snapshot, closed arena refusal, and explicit stock capability refusal; 32 lifecycle contracts pass"
+  }
+}

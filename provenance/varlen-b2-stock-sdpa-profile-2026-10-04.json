@@ -1,0 +1,16 @@
+{
+  "feature": "default-off source-bound B2 owned gather plus stock SDPA diagnostic route",
+  "source_repository": "mlx2 local stock SDPA diagnostic branch",
+  "source_revision": "4340ae47f76db774251af10c6f426342e7ea9fdc",
+  "source_paths": [
+    "native/paged_kv/arena.cpp",
+    "src/mlx2/runtime/paged_attention_native.py",
+    "src/mlx2/runtime/paged_kv_write.py",
+    "src/mlx2/runtime/paged_b2_research_profile.py",
+    "src/mlx2/runtime/paged_native_graph_group.py",
+    "src/mlx2/serving.py"
+  ],
+  "license": "mlx2 original project code; no upstream code copied",
+  "modifications": "An explicit v7 `stock_sdpa` option binds the owned paged Q1 gather plus MLX stock SDPA graph to a source-bound environment flag. Route and benchmark receipts require one encoded native gather and one stock SDPA graph call per layer, with no custom Q1 tile/metadata/stripe dispatch; grouped write, two-span read terminal and owner retirement proofs remain mandatory. The matching custom Q1 stripe-8 arm uses identical other options, model, wheel and native binary.",
+  "validation": "Source-only stock SDPA contracts, focused profile/lifecycle CPU tests and native compilation pass. Real Metal numeric parity, terminal closure and service timing remain pending. This is unqualified, price unusable, default off and diagnostic-only."
+}

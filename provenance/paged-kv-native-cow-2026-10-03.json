@@ -1,0 +1,17 @@
+{
+  "name": "default-off native paged KV partial-page copy and terminal pinning",
+  "status": "implemented-unqualified-default-off",
+  "source_repository": "original mlx2 implementation, extending codex/varlen-paged-attention b23b8793; MLX wheel 0.32.2.dev20260919+39400a0d4, MLX source 39400a0d4cf1641bc6e543cb5e3585757f491854; nanobind a47983000e9dda68177fc1fd426f7147d785c2c0",
+  "source_paths": [
+    "native/paged_kv/arena.h",
+    "native/paged_kv/arena.cpp",
+    "native/paged_kv/binding.cpp",
+    "src/mlx2/runtime/paged_kv_write.py",
+    "mlx/include/mlx/primitives.h",
+    "mlx/include/mlx/backend/metal/device.h"
+  ],
+  "license": "original mlx2 project code; MLX and nanobind APIs used without copied implementation",
+  "modifications": "bounded in-arena K/V partial-page copy primitive, explicit native binding, source and destination generation leases, terminal completion and failure poisoning through the existing host ledger, opt-in one-cell GPU probe",
+  "validation": "CMake compile/link and import against the pinned wheel; host fake-backend tests for cancellation, failure, stale generation, ambiguous submission, and retirement. A bounded native 17-byte copy/readback and generation-retirement probe passed on M5 Max under gpuq; exact source and binary hashes and raw receipt are in qualification/runs/varlen-native-cow-20261003/.",
+  "limitations": "A real failed Metal command-buffer callback, end-to-end shared-tail publication, cross-stream ordering, attention reader integration, and model-serving parity remain unverified. No route selects this candidate."
+}

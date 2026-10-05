@@ -1,0 +1,19 @@
+{
+  "name": "bounded Q1 B2 immutable inline native attention metadata",
+  "status": "implemented-unqualified-default-off",
+  "source_repository": "original mlx2 implementation",
+  "source_revision": "b190655ced22be5d40893e671ee37c4a7c62f520",
+  "source_paths": ["native/paged_kv/arena.cpp", "native/paged_kv/arena.h", "native/paged_kv/binding.cpp"],
+  "api_dependency": "MLX wheel 0.32.2.dev20260919+39400a0d4; mlx/include/mlx/backend/metal/device.h set_bytes; nanobind a47983000e9dda68177fc1fd426f7147d785c2c0",
+  "license": "original mlx2 project code; dependency APIs used without copied implementation",
+  "modifications": "After unchanged complete geometry/capacity/span validation, opt-in B2 Q1 reads with visible lengths 32 through 128 and at most six page IDs retain eight immutable uint32 metadata vectors in the primitive. Binding uses set_bytes at original slots 4 through 11. Query and write dependency remain graph inputs. Only uint pointer address-space declarations change in separate uniquely named Metal libraries. Ordinary and SIMD tile arithmetic, strides, read completion, and generation ownership remain unchanged. Dynamic general metadata path remains available.",
+  "enablement": "MLX2_PAGED_Q1_INLINE_METADATA=1; any other value or unsupported geometry uses existing array metadata",
+  "counter": "q1_metadata_dispatch_count(arena), incremented once after a physical inline read dispatch has been encoded; it does not prove terminal success",
+  "validation": "35 pure CPU checks passed: actual C++ selector and source adapter execution, base kernel SHA256 identity, failure on unexpected metadata ABI, graph dependency and counter placement contracts, existing Q1 tile numeric oracle. Pinned-wheel CMake native C++ build and link passed with -Wall -Wextra -Werror. Both inline ordinary and tile shaders compiled offline through xcrun metal. No MLX imports, native extension imports, MLX runtime evaluation, or GPU execution occurred.",
+  "build_caveat": "Linker warned macOS target 26.0 versus libmlx built for 26.7 and redundant -U with dynamic_lookup; build completed.",
+  "limitations": "No route qualification, runtime correctness, shader engagement, terminal success, generation stress, or performance evidence. Static and offline shader compilation are not GPU execution evidence.",
+  "kernel_sha256": {
+    "ordinary": "892ae8e2dec62a613005a4ef476d2d3f3b40a28fc5a4c6d3f888f17c6c620b17",
+    "q1_tile": "71b80b5d43992f5eee7031cfbd4ed964c004268e13f2e6bfdf61bb2e3147897d"
+  }
+}

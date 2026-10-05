@@ -1,0 +1,27 @@
+{
+  "mechanism": "bounded ranked complete continuation verification and physical adaptive shape admission",
+  "implementation": "original mlx2 host and lifecycle code",
+  "paths": ["src/mlx2/runtime/continuation_verification.py", "src/mlx2/runtime/external_speculative.py", "src/mlx2/runtime/acceptance_estimator.py", "src/mlx2/serving.py"],
+  "source_repository": "local mlx2",
+  "source_revision": "6ae4e6ba65e2fdbb26533ff7f4363c306886e9e4",
+  "license": "project license",
+  "modifications": [
+    "Verify up to 15 complete token continuation sequences in one request-private target forward; sample the processed target once at each reached prefix, then retain matching ranked branches.",
+    "Clone revision-bound target cache descriptors into independent private branch epochs and publish only one selected reached prefix. Unselected hybrid epochs close at their minimum anchor and are discarded.",
+    "Use actual target draws for source ranking and bounded LiLiCoRR shadow-training feedback only after every lane in an outer round commits; failed rounds discard all pending selection tickets.",
+    "Hash tenant, explicit session identifier and route revision for session ranking; anonymous requests use generator UUID plus uid to prevent unintended sharing across batch instances.",
+    "Expanded path verification costs are explicitly keyed by physical path width and proposal depth plus bonus. Lagged reached-prefix conditional Beta coverage chooses width/depth before target sampling. Unknown bindings, cold evidence and periodic exploration retain full physical shape. Chain cohort costs are never reinterpreted as expanded path costs.",
+    "Reserve conservative memory for private path branches and preserve ordinary decode, paired APCv2 sidecars and per-request RNG rollback."
+  ],
+  "validation": {
+    "cpu_evidence": [
+      "Actual tiny standard Qwen3, GDN, pooled QSA and Mamba2+KV private branch prefix commit matches independent ordinary replay.",
+      "Greedy complete-path output matches ordinary tokens; mixed-temperature sampled laws match ordinary at each reached actual prefix and advance RNG once per delivered token.",
+      "Actual 15x3 verification forward, natural final-budget ragged paths, stop grammar reached-row censoring, paired APCv2 cold/warm resume and later-request atomic rollback.",
+      "Separate synthetic CPU cost tables demonstrate physical 15x3 to 1x2 adaptive trimming; these unit costs are mechanism evidence, not measured performance."
+    ],
+    "metal_qualified": false,
+    "performance_claim": false,
+    "default_selected": false
+  }
+}

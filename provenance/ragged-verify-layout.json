@@ -1,0 +1,79 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "authoritative ragged speculative-verification layout",
+  "date": "2026-10-04",
+  "sources": [
+    {
+      "repository": "https://github.com/vllm-project/vllm",
+      "license": "Apache-2.0",
+      "revision": "7f7a32cfec0f1bc5b73c37200b86631523a1ea8f",
+      "pull_request": "https://github.com/vllm-project/vllm/pull/47808",
+      "paths_read": [
+        "vllm/v1/worker/gpu/spec_decode/adaptive_verification.py",
+        "vllm/v1/attention/backend.py",
+        "tests/v1/spec_decode/test_adaptive_verification.py"
+      ]
+    },
+    {
+      "repository": "https://github.com/vllm-project/vllm",
+      "license": "Apache-2.0",
+      "revision": "25efcfa7887c4a9541b6328af69dbd5fee4e8173",
+      "pull_request": "https://github.com/vllm-project/vllm/pull/52724",
+      "paths_read": [
+        "vllm/models/deepseek_v4/nvidia/flashinfer_sparse.py"
+      ]
+    },
+    {
+      "repository": "https://github.com/sgl-project/sglang",
+      "license": "Apache-2.0",
+      "revision": "6cc9352dfe6c5c013750e72b39c127870ef5b54f",
+      "pull_request": "https://github.com/sgl-project/sglang/pull/30261",
+      "paths_read": [
+        "python/sglang/srt/speculative/ragged_verify.py",
+        "python/sglang/srt/speculative/ragged_verify_kernels.py",
+        "python/sglang/srt/layers/attention/base_attn_backend.py",
+        "test/registered/spec/dspark/test_ragged_verify.py",
+        "test/registered/spec/dspark/test_ragged_verify_backend_capability.py"
+      ]
+    },
+    {
+      "repository": "https://github.com/sgl-project/sglang",
+      "license": "Apache-2.0",
+      "revision": "3e5e18ec15dd1e0708d1e8503f8efc053d59cdf1",
+      "pull_request": "https://github.com/sgl-project/sglang/pull/34031",
+      "status_when_read": "open",
+      "paths_read": [
+        "python/sglang/srt/model_executor/forward_batch_info.py",
+        "python/sglang/srt/speculative/ragged_verify.py"
+      ]
+    },
+    {
+      "repository": "https://github.com/flashinfer-ai/flashinfer",
+      "license": "Apache-2.0",
+      "revision": "ac30bfabfc40cca1971bea7a41ac10e6960d6bfd",
+      "paths_read": [
+        "tests/attention/test_xqa_batch_decode.py"
+      ]
+    }
+  ],
+  "copied_code": false,
+  "modifications": [
+    "Added an original tensor-runtime-independent RaggedVerifyLayout contract for lane IDs, per-lane draft and query lengths, cumulative offsets, padding, token ownership, backend limits, acceptance validation, and receipts.",
+    "Routed current mlx2 K=0 and positive-depth self-MTP through the same layout and bound segmented multi-plane publication to that exact object.",
+    "Added opt-in diagnostic stage observation; evaluation fences exist only when MLX2_RAGGED_VERIFY_TIMING=1 and receipts explicitly prohibit performance interpretation."
+  ],
+  "state": {
+    "implemented": true,
+    "qualified": false,
+    "selected": false,
+    "observed_used": false,
+    "default": false
+  },
+  "validation": [
+    "tests/test_ragged_verify_layout_cpu.py",
+    "tests/test_segmented_mtp.py",
+    "tests/test_qwen38_27b_native_cpu.py",
+    "tests/test_qwen38_fused_gdn.py",
+    "tests/test_qwen38_fused_gdn_host.py"
+  ]
+}

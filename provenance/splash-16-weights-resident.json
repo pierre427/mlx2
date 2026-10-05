@@ -1,0 +1,23 @@
+{
+  "component": "process-lifetime weight residency for the serving worker (MLX wired limit raised once after the adapter loads, on every route)",
+  "source_repository": "Inco Splash (Apache-2.0), design input only",
+  "source_revision": "f786bed",
+  "source_paths": [
+    "PR #148 'Keep model weights resident while serving' (merge 514e584): runtime/metal/Residency.hpp, runtime/model/WeightStore.cpp"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/runtime/weight_residency.py",
+    "src/mlx2/serving.py",
+    "scripts/measure_weight_residency.py",
+    "tests/test_prefill_step_and_import_guard.py"
+  ],
+  "modifications": [
+    "No Splash code used. MLX 0.32.2.dev20260919+39400a0d4 (mlx/backend/metal/resident.cpp, allocator.cpp) already keeps allocations in size-capped MTLResidencySets with a standing requestResidency(), admitted up to mx.set_wired_limit (0 by default); mlx2 only has to raise the limit.",
+    "mlx2 raised it inside BatchGenerator only (ordinary and native-MTP routes); the prompt-lookup and external-draft generators never did. The serving worker now calls mx.set_wired_limit(max_recommended_working_set_size) once, right after the adapter loads and before any cache exists, and reports the receipt as weight_residency in /v1/status."
+  ],
+  "validation": [
+    "tests/test_prefill_step_and_import_guard.py (engine wires once and reports it; helper sets the working-set limit and declines without Metal).",
+    "GPU, M5 Max: qualification/runs/sp-weights-resident-20260925/ (before/after: host wired pages and MLX residency-set log per route; idle under a 24 GiB anonymous-memory load)."
+  ]
+}

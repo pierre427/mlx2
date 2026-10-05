@@ -1,0 +1,27 @@
+{
+  "kind": "offline paired request price preparation",
+  "source_repository": "mlx2 private canonical varlen",
+  "source_revision": "b30471841d3841a595bcf2f9540254c8ea0efc4e",
+  "source_paths": [
+    "scripts/research/varlen_pack_price_bench.py",
+    "scripts/research/varlen_qwen3_06b_artifact_gate.py",
+    "src/mlx2/adapters/qwen3_paged_candidate.py",
+    "src/mlx2/runtime/paged_native_atomic_owner.py",
+    "src/mlx2/runtime/paged_request_transaction.py"
+  ],
+  "external_model_source": {
+    "repository": "mlx-lm-unified",
+    "reviewed_revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+    "reviewed_path": "mlx_lm/models/qwen3.py",
+    "license": "Apache-2.0; runtime imports, no copied model source",
+    "runtime_gate": "exact revision, clean tracked source and Qwen3 source SHA-256"
+  },
+  "modifications": [
+    "added default-off paired offline request cell with 180-second and 24-GiB caps",
+    "added Qwen3 driver with ordinary KV cache and native paged atomic transactions",
+    "kept offline_request_probe distinct from complete_request serving prices"
+  ],
+  "validation": "CPU dry run, preflight refusal and unit gates only; GPU not executed",
+  "qualified": false,
+  "selected": false
+}

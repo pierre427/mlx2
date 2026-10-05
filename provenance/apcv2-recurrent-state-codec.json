@@ -1,0 +1,33 @@
+{
+  "component": "APCv2 storage-only int8 codec for recurrent (GDN/SSM) state in stored entries (approximate, default off, unqualified)",
+  "source_repository": "original mlx2 implementation; prior art read only",
+  "source_revision": null,
+  "source_references": [
+    "jundot/omlx PR #2644 (merged 2026-08-15, Apache-2.0): omlx/cache/boundary_snapshot_store.py and tests/test_gdn_sidecar_quantization.py, storage-only fp32/bf16/int8/rht_int8/rht_int16 codecs for persisted GDN sidecars. Read via gh api; NOTHING MINED. The shared design choice (one symmetric scale per row of the last axis, live state stays fp32, codec-specific namespaces) was re-derived from mlx2's own measurements in docs/research/GDN-STATE-QUANT-2026-10-01.md (int8_row once-arm at the drift floor).",
+    "arXiv 2608.27513 (DAMP) and arXiv 2609.39185 (Weyl dither): research context only; neither the fp16 channel split nor the dither is used by this codec."
+  ],
+  "license": "MIT (original mlx2 code); no third-party code copied",
+  "destination_paths": [
+    "src/mlx2/runtime/recurrent_state_codec.py",
+    "src/mlx2/runtime/apc_v2.py",
+    "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/serving.py",
+    "src/mlx2/server.py",
+    "src/mlx2/qualification.py",
+    "tests/test_recurrent_state_codec.py",
+    "qualification/runs/recon-20261001/l6-gdn-stateq/apc_codec_e2e.py"
+  ],
+  "modifications": [
+    "Codec int8-row-v1: rank-4 float32 ArraysCache slots (and their recorded prefill checkpoints) stored as int8 + one float32 scale per row of the last axis, RTN, qmax 127; nonfinite rows decode to NaN; self-describing record (uint8 codec tag) that rides COW cloning and save/load_prompt_cache.",
+    "Selected by cache capability (ArraysCache slot dtype/rank), never by model name.",
+    "APCv2 encodes a store-private copy (live caches and rollback records untouched), decodes request-private restores in _copy_prompt_cache_for_restore, validates every disk restore (codec match, structure, finite positive scales, payload in [-127,127]) and fails closed.",
+    "Namespace law recurrent-state-codec-v1 wraps the APCv2 semantic namespace (outermost; identity when off); APCv2 refuses store/lookup whose key layer does not match its own codec.",
+    "Serving: --recurrent-state-codec / recurrent_state_codec policy, restricted to qualification mode unless a qualification record carries evidence; status block, route receipt (mlx2.approximate-recurrent-state.v1, qualified false, candidate_validation), profile suffix, route fidelity approximate."
+  ],
+  "validation": [
+    "tests/test_recurrent_state_codec.py: 26 passed (CPU); a mutation disabling disk validation fails 8 of them",
+    "93 related APCv2/cache/serving/server/qualification test files (~1.77K tests) pass unchanged",
+    "GPU two-turn restore-from-compressed-checkpoint (idle-disk tier, 1536 teacher-forced tokens): Qwen3.6-35B-A3B p1 1.03x / p2 0.98x and Qwen3.8-27B p1 1.15x / p2 1.03x of the in-run eps floor (bar <= 1.5x, int4 control 2.7-5.9x); entry 244.2->110.6 MiB (35B) and 632.4->311.8 MiB (27B), recurrent bytes -74.2%; raw under qualification/runs/recon-20261001/l6-gdn-stateq/raw/e2e/",
+    "Not qualified: no served HTTP A/B, task-accuracy check or persistent-tier-at-scale run yet"
+  ]
+}

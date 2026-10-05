@@ -1,0 +1,32 @@
+{
+  "mechanism": "default-off owned paged Q1 gather plus stock MLX SDPA diagnostic",
+  "source_repository": "mlx2",
+  "source_revision": "56c5d12b2c71bb4992b011581c49cc5b0cf82b59",
+  "source_paths": [
+    "native/paged_kv/arena.cpp:AttentionReadPrimitive",
+    "native/paged_kv/arena.cpp:Arena::attention_read_fp16",
+    "src/mlx2/runtime/paged_attention_native.py"
+  ],
+  "license": "MIT",
+  "modifications": [
+    "New bounded two-row fp16 paged gather into independently owned K/V buffers",
+    "Same page table/span/capacity checks and native read epoch/callback retained",
+    "Stock MLX scaled_dot_product_attention over per-lane boolean visible masks, constructed before lease submission",
+    "Actual native gather dispatch and separately labelled stock graph construction counters",
+    "Existing four-stripe/scalar reader, deferred-root retirement and publication gates preserved"
+  ],
+  "validation": {
+    "source_fault_tests": "8 direct source contracts passed, MLX import blocked",
+    "metal": "gather kernel compiled offline",
+    "native_cpp": "syntax-only compile against pinned wheel headers passed with warnings as errors",
+    "gpu_executed": false,
+    "qualified": false,
+    "performance_claim": false
+  },
+  "constraints": [
+    "Diagnostic flag is not an admitted serving profile by itself",
+    "Integration must bind source/flag/profile and replace tile proof with gather proof explicitly",
+    "Only two one-row lanes with32\u2013128 visible tokens, fp16 D128/D256, kvheads<=32, <=6 page table entries",
+    "Complete logits evaluation and exact terminal drain must succeed before any publication"
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+  "source_revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "notice": "provenance/pinned-vlm-candidates.NOTICE",
+  "source_files": {
+    "mlx_vlm/models/agnes/agnes.py": "cde627bf9efac30bc91cb59ae4b0f42a61948cf4475673206c65b308dffb155e",
+    "mlx_vlm/models/agnes/vision.py": "a57e59061661ecf4ba3d51f5220208c8cadc7392562b3718ec716cd0f82470c1",
+    "mlx_vlm/models/agnes/processing_agnes.py": "1d0ad52f15ecce8632a189991d561a441963d74514a0eaa70c55a1c401f3be8e",
+    "mlx_vlm/models/smolvlm/smolvlm.py": "c7cd0581e2a466bed43cac384c4cb8876ebc2e031c18aaee24de1be9e12edea1",
+    "mlx_vlm/models/smolvlm/processing_smolvlm.py": "46d7d25035d6a8bea0823d32dbdb6eec1eb90285bba8d575a4c058fe14180ddf",
+    "mlx_vlm/models/qwen2_5_vl/qwen2_5_vl.py": "5f0c0f5928e248cb14746b59f961bb9b51181536130007db9065da065b331e13",
+    "mlx_vlm/models/qwen2_5_vl/vision.py": "ba936643eb9c468a25afb56eedf5c624d86c9065e43d68fcfa3fa7a790ded83f",
+    "mlx_vlm/models/qwen2_5_vl/processing_qwen2_5_vl.py": "b7d6a1956972f338839328403d7608d310edb37be614e715523e3aa27a88c101"
+  },
+  "destination": [
+    "src/mlx2/adapters/pinned_vlm_candidate.py",
+    "src/mlx2/adapters/agnes_vision.py",
+    "src/mlx2/adapters/smolvlm2.py",
+    "src/mlx2/adapters/qwen25_vl.py"
+  ],
+  "modifications": [
+    "Retained vision towers and processors in the pinned optional mlx-vlm runtime",
+    "Added local checkpoint topology and shard gates, media identity, and prepared image/video prefill boundaries",
+    "Kept image and video routes candidate-only, without APCv2/prefix-reuse capability, pending processor, model-state, output, and replay parity"
+  ],
+  "validation": "CPU-only metadata and static tests; no model weight load, real MLX import, GPU, or vision output parity"
+}

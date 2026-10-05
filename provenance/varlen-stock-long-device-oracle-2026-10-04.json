@@ -1,0 +1,22 @@
+{
+  "mechanism": "dry-by-default same-BF16-QKV stock-long device oracle",
+  "source_repository": "mlx2",
+  "source_revision": "e60badb4217d3cde9fa8a6773d126caacf3dc0c8",
+  "source_paths": [
+    "scripts/research/varlen_bf16_splitkv_device_oracle.py",
+    "tests/test_bf16_splitkv_device_oracle_preflight_cpu.py"
+  ],
+  "license": "MIT",
+  "modifications": [
+    "Pin integrated stock-long native binary SHA and exact source commit at execution",
+    "Replace independent unpadded B1 references with one dense left-padded, boolean-masked stock B2 SDPA over identical BF16 Q/K/V",
+    "Check stock-long physical partial/reduce counters, old-split non-engagement, raw arena BF16 bytes, exact fraction, max error, terminal proof and owner retirement",
+    "Bound execution to three long cases, 60 seconds and 4 GiB RSS"
+  ],
+  "validation": {
+    "cpu_preflight_tests": "five tests passed; dry receipt written without MLX import",
+    "gpu_executed": false,
+    "qualified": false,
+    "performance_claim": false
+  }
+}

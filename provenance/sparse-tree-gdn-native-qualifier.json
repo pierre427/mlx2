@@ -1,0 +1,68 @@
+{
+  "name": "sparse-tree-gdn-native-qualifier",
+  "status": "implemented (original harness); CPU-tested with mocked backends only; never run on Metal; the candidate stays unqualified and unselected",
+  "license": "Apache-2.0 (mlx2 local LICENSE); original code, no third-party text copied; no Apple copyright header",
+  "destination_paths": [
+    "scripts/qualify_sparse_tree_gdn.py",
+    "tests/test_sparse_tree_gdn_qualifier.py"
+  ],
+  "subject": {
+    "path": "src/mlx2/adapters/qwen38_tree_gdn.py",
+    "committed_in": "81bf357ee9353451d1c59ab8fd610a91f8817d2e",
+    "provenance": "provenance/qwen38-tree-gdn-sparse-restart.json",
+    "used": [
+      "metal_sparse_tree_forward",
+      "metal_replay_accepted_path",
+      "confirm_device_engagement",
+      "plan_tree_restarts",
+      "accepted_path_rows",
+      "status"
+    ],
+    "note": "Read and called only; not modified."
+  },
+  "ordinary_reference": {
+    "path": "src/mlx2/runtime/models/gated_delta.py",
+    "symbol": "_gated_delta_kernel_impl(..., allow_packed=False)",
+    "why": "Forces the unpacked generic M1 kernel (_gated_delta_kernel, simd_sum, one SIMD group per value row) so MLX_GDN_PACKED cannot swap the reference; MLX_GDN_CORE only affects gated_delta_update, which is not used. Both variables are recorded.",
+    "import_rule": "Imported lazily only after the native run is admitted (the module builds Metal kernels at import). One token per call along each accepted root-to-node path, carrying the fp32 state.",
+    "license": "MIT (SPDX header in gated_delta.py; adapted from mlx-lm-unified, see provenance/flashnext.json)",
+    "provenance": "provenance/flashnext.json"
+  },
+  "design_sources_refreshed": {
+    "source_repository": "https://github.com/ddalcu/mlx-serve",
+    "pull": 645,
+    "state": "open (not merged) at refresh",
+    "head": "eea96c8738b953dcfdfeea5072e84993e93b3fbc",
+    "base": "a453794f9e95b8588b9338464ca13599d28caf33",
+    "updated_at": "2026-10-01T00:53:40Z",
+    "file": "src/gdn_decode.zig",
+    "file_blob": "74283c10085d02f28bbcc85773fd8991075c04f5",
+    "file_sha256": "f416de892210819fc0d6f6e0def1d7b6f00d55aa4614e703c5fd49d7f70a5815",
+    "license": "MIT (mlx-serve own code)",
+    "license_blob": "fa6c781bf4ad462d965a429bd1c1c33475d3905a",
+    "previous_head_reviewed": "bf6caf5ddb54737909d4664018e8f2f8b3d34958",
+    "changes_vs_previous": [
+      "K1P conv input now loops `for (int r = t; r < 3; r += TL)`, writing conv-state rows that were left unwritten at TL 1 and 2",
+      "seqNt is 1024 only on NAX devices, else 256",
+      "K1TR still declares kept[TL][4]"
+    ],
+    "effect_on_this_work": "None on the recurrent-only module. The conv fix is recorded as a FUTURE conv-window gate that must include singleton (TL 1) and width-2 (TL 2) trees. Unrelated runtime-yield, attention and projection changes in the PR are not ported.",
+    "verified": "read-only GitHub API, 2026-10-01"
+  },
+  "gate_design": [
+    "Native-only, synthetic, recurrent-state scope: conv window, cache commit, real model, serving and performance remain pending; no cache operation is performed.",
+    "Admission fails closed without --i-own-the-gpu, an explicit MLX2_INTAKE_SOURCE_COMMIT, the default GPU device, Metal availability, device and build identity, and identical source hashes before and after the run. The flag is an operator acknowledgement only; lease and lock ownership come from the reviewed /tmp/mlx2-intake/stage3_gpu.py wrapper's receipt, not from this script.",
+    "Cases: singleton, width 2, chain, branch, forest, short-after-wide (width 32 immediately followed by width 2) and a fixed width-32 tree; bf16 and fp32 activations; head geometries Hk16/Hv48 (Qwen3.8-27B GDN), Hk2/Hv4 and Hk1/Hv2; B1, D128; run one case at a time.",
+    "Per case: one sparse forward launch and one replay launch per row (every root-to-node accepted path). The ordinary reference runs one token per call along each path.",
+    "Comparisons are full raw storage bits (bf16 as uint16, fp32 as uint32) with dtype and shape: every forward readout row against the ordinary readout at the end of that row's path, and every replayed state against the ordinary state. No allclose, and no shared host step.",
+    "Refusals: missing, partial or duplicate cases, rows or paths; dtype or shape mismatch; any non-finite value; unconfirmed engagement on any launch; confirmed-launch count different from expected; missing identity or ownership acknowledgement; source hash change. Bit differences, signed zero included, are counterexamples.",
+    "Root guidance 2877/2879: candidate and reference are compared on their returned dtypes and full storage bits with no normalization; matching non-finite values and an all-zero (vacuous) reference refuse; case, row and path identities are derived from the case matrix and checked for missing and duplicates.",
+    "The receipt records the explicit MLX2_INTAKE_SOURCE_COMMIT label separately from a verified git revision (source_commit_status) and binds runner, candidate, reference and provenance file hashes before and after. It must be paired with the parent wrapper's ownership receipt; --i-own-the-gpu is not lock or CPG proof.",
+    "Root pre-review 2882: every required hash (sources before, after import, after the run; metallib) must be 64 lowercase hex; scripts/paired_direct_ab.py (build-identity helper) is hashed; candidate, reference and identity-helper module files must resolve to this checkout; sources and git are captured before the native backend imports anything and re-hashed right after import, and identity problems refuse before any case runs.",
+    "Root follow-up 2885: every non-dict case or row entry refuses; row ids, paths, parents, Hk/Hv and confirmed-launch counts must be plain int (bool, float and numpy scalars refuse, never coerced). main refuses missing or invalid source hashes, a git HEAD that differs from MLX2_INTAKE_SOURCE_COMMIT, unavailable git status and dirty bound files BEFORE the native backend factory runs; a git status failure is recorded as unknown, never as clean. A frozen export without git remains an explicit unverified label, with hashes and module bindings mandatory."
+  ],
+  "validation": [
+    "tests/test_sparse_tree_gdn_qualifier.py (CPU only, 85 tests, every Metal call forbidden): case catalogue, admission refusals before any MLX import, the evaluator over mocked evidence (missing evidence, bit drift, matching and mismatching NaN/Inf, signed zero, vacuous all-zero references, zero engagement, launch-count mismatch, row/path omissions and duplicates, bad geometry, source change, identity and source-label gaps, non-hex hashes, sister-checkout module paths, import-time source change and missing identity refused before any case; non-dict cases/rows, bool/float/numpy row ids and typed geometry/path/launch fields; pre-admission source refusals before the backend factory; git status failure never clean), and one-case-at-a-time orchestration with a mocked backend; builder mutation checks (non-finite, float compare, launch count, row consistency, engagement, preflight, hash format, module binding, non-dict case check, plain-int comparisons, layered row-id typing, pre-admission refusal, status-failure handling) each fail tests"
+  ],
+  "qualification": "harness only; nothing qualified. The native gate is queued for the root under the reviewed wrapper."
+}

@@ -1,0 +1,27 @@
+{
+  "schema": "mlx2.bug-sweep-provenance.v1",
+  "source_repository": "mlx2 original project code; no external implementation mined",
+  "source_revision": "9ef2d9582dfa7f9be1bd92e5c283d544e04dd17f",
+  "license": "Apache-2.0",
+  "source_paths": [
+    "src/mlx2/runtime/lilicorr_training.py",
+    "src/mlx2/adapters/external_draft_policy.py"
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/lilicorr_training.py",
+    "src/mlx2/adapters/external_draft_policy.py",
+    "tests/test_lilicorr_training.py",
+    "tests/test_external_feedback_close_cpu.py"
+  ],
+  "modifications": [
+    "Reject finite teacher source arrays that overflow in the stored float32 dtype before FIFO eviction, byte accounting or buffer mutation.",
+    "Always close the parent adapter when external feedback shutdown raises, while preserving the shutdown diagnostic."
+  ],
+  "validation": [
+    "Finite float64 values +/-1e300 admitted as infinite stored float32 values before fix; all four floating teacher fields covered by refusal regressions with existing buffer preserved.",
+    "Throwing feedback manager skipped parent close before fix; throwing, successful and absent-manager cases now assert exactly one parent close.",
+    "Focused training/feedback/worker suite: 39 passed. Focused adapter close/serving/feedback suite: 23 passed. CPU only."
+  ],
+  "evidence_directory": "qualification/runs/bug-sweep-20261002",
+  "status": "implemented correctness fixes; no route qualification or performance claim; selection defaults unchanged"
+}

@@ -1,0 +1,24 @@
+Scoped notice for the verify-block attention design adapted from Splash.
+See provenance/splash-verify-attention.json for paths and modifications.
+
+Splash — Apache License 2.0
+Source: https://github.com/incoai/splash, revision f786bed (read-only clone).
+Files read: runtime/metal/kernels/decode/attention_q8.metal,
+runtime/metal/kernels/common/paged_attention_tile.h,
+runtime/metal/kernels/common/q8_paging.h; context from PR #91 (a85b086,
+optional BF16 target KV with shared attention kernels) and PR #141
+(151432a, fp32 logits).
+Splash ships no NOTICE file; its LICENSE is the unmodified Apache-2.0 text
+(copyright line left as the "[yyyy] [name of copyright owner]" template) and
+its THIRD_PARTY_NOTICES concern llama.cpp/ggml material that mlx2 does not
+use. The full Apache-2.0 text is this repository's LICENSE.
+
+What mlx2 took: the structure of Splash's verify tile (one threadgroup per
+KV head and history split covering every query head of the GQA group and
+every verify row as one fused M = rows x heads matrix, so int8 K/V is read
+once per step; per-row causal limits inside each split; fp32 split partials
+(o, max, sum) merged in fixed split order). No Splash source is copied: the
+Metal code in src/mlx2/runtime/models/qsdpa_verify_metal.py is written for
+mlx2's affine-quantized cache (packed uint32 codes, scale and bias per 64
+channels, strided views) with simdgroup_matrix products in place of Splash's
+Metal 4 tensor ops.

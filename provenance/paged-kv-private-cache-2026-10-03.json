@@ -1,0 +1,16 @@
+{
+  "name": "default-off private paged KV cache leaf",
+  "status": "implemented-unqualified-default-off-host-contract",
+  "source_repository": "original mlx2 implementation based on local codex/varlen-paged-attention revision 42783178c",
+  "source_paths": [
+    "src/mlx2/runtime/paged_attention_plan.py",
+    "src/mlx2/runtime/paged_kv_pool.py",
+    "src/mlx2/runtime/paged_kv_native.py",
+    "src/mlx2/runtime/paged_kv_write.py",
+    "docs/research/varlen-paged-attention-build-plan-2026-10-03.md"
+  ],
+  "license": "original mlx2 project code; no third-party implementation copied",
+  "modifications": "Added a private, token-major host byte cache with explicit append, generation-pinned attention plan, and exact logical export; refuses segmented composition until an explicit paged consumer exists. Ordinary KVCache.update_and_fetch is unchanged.",
+  "validation": "CPU-only fake-backend tests for default-off refusal, capacity and payload preflight, 63/64 page boundary writes, completion-gated publication, generation lease lifetime, failed writes, and segmented refusal.",
+  "limitations": "Host byte payloads are a CPU contract and are not an MLX native write integration. AttentionUse needs an external terminal proof; there is no model adapter, read/write ordering proof, APCv2 handoff, serving route, GPU qualification, or observed use."
+}

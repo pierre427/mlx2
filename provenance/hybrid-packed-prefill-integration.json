@@ -1,0 +1,13 @@
+{
+  "schema": "mlx2-source-provenance-v1",
+  "implementation": "complete isolated cold packed hybrid prefill composition",
+  "base_revision": "1e79c1a5f",
+  "component_revisions": ["95b24273", "27ce7f05", "bc215646", "d8ca0ea6", "5f2f3453", "29bc4aee"],
+  "modifications": ["Preserve both adjacent native includes", "Require repaired reader v2/query bounds/arithmetic before allocation", "Pin root runner fresh combined binary/hash; profiles bind final clean source"],
+  "license": "component licenses and provenance retained unchanged",
+  "binary_path": "/tmp/mlx2-packed-prefill-integrated-build-1004/_paged_kv_native.cpython-312-darwin.so",
+  "binary_sha256": "74008ef34e8c433c7a336e8995c8efcf388a015684515807a63240d8402ed6f8",
+  "validation": {"guarded_cpu_source_checks": 18, "orchestration_cpu_checks": 18, "layout_cpu_checks": 7, "native_compile_link": "passed", "gpu_executed_by_integrator": false, "model_numeric_parity": "not_tested", "controlled_performance": "not_tested"},
+  "qualified": false,
+  "default_enabled": false
+}

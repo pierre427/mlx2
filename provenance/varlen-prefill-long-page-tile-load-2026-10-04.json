@@ -1,0 +1,14 @@
+{
+  "feature": "default-off fused paged long NAX tile-local page loads",
+  "source_repository": "https://github.com/ml-explore/mlx",
+  "source_revision": "39400a0d4cf1641bc6e543cb5e3585757f491854",
+  "source_path": "mlx/backend/metal/kernels/steel/attn/nax.h",
+  "source_sha256": "fb10bcae44095e9fed5c81213d03527dd5fe5ac11be11ec7784bd357c6f317ec",
+  "license": "MIT",
+  "local_paths": [
+    "native/paged_kv/prefill_long_nax.h",
+    "tests/test_varlen_prefill_long_nax_source_cpu.py"
+  ],
+  "modifications": "For validated origin-zero page64/BK32 long reads, bind one page-local tile base and use the existing stock NAXTile load/load_rows methods for K and V. Arithmetic, masking, dispatch count, terminal callback and selector remain unchanged. Tail loads explicitly zero invalid rows.",
+  "validation": "Source CPU tests and offline Metal 4.0 compiler pass. GPU bit identity and speed are pending; no qualification or default change."
+}

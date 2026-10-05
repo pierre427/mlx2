@@ -1,0 +1,15 @@
+{
+  "feature": "default-off source-bound B2 combined optimization ablation",
+  "source_repository": "mlx2 local integrated performance branch",
+  "source_revision": "f053367a5f1689345caee346259e99645c962f48",
+  "source_paths": [
+    "src/mlx2/runtime/paged_b2_research_profile.py",
+    "src/mlx2/serving.py",
+    "src/mlx2/runtime/paged_native_graph_group.py",
+    "scripts/research/varlen_b2_http_gate.py",
+    "scripts/research/varlen_b2_http_performance.py"
+  ],
+  "license": "mlx2 original project code; no upstream code copied",
+  "modifications": "The v7 research profile now binds each of three optimization flags to one explicit boolean option, permitting strict metadata-plus-sampler and deferred-only ablations. Per-step route receipts independently prove eager/deferred write and read submissions, inline metadata dispatches, and grouped sampler use. Legacy profiles still reject all new flags.",
+  "validation": "CPU profile and lifecycle tests pass. Metal ablation parity and performance are pending. All routes remain unqualified, price unusable, and default off."
+}

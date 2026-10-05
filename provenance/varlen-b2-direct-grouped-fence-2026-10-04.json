@@ -1,0 +1,14 @@
+{
+  "feature": "default-off B2 direct grouped write dependency research arm",
+  "source_repository": "mlx2 local vector RoPE evidence branch",
+  "source_revision": "a80eba7a6dc4554f13fa7abd9bf3fbd57eda970d",
+  "source_paths": [
+    "native/paged_kv/arena.cpp",
+    "src/mlx2/runtime/paged_kv_write.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "src/mlx2/runtime/paged_native_graph_group.py"
+  ],
+  "license": "mlx2 original project code; no upstream code copied",
+  "modifications": "The existing grouped Q1 Metal write emits a one-byte dependency value. A separate v6 research admission sends that exact write output to the staged attention read rather than building a new ones/depends/contiguous chain in every layer. An explicit grouped ticket marker and exact uint8 singleton check prevent the direct path from accepting unrelated or malformed tickets. All write/read terminal leases and branch publication rules remain in force. V4/v5 and ordinary routes use the previous join path.",
+  "validation": "119 scoped CPU tests passed, including exact dependency object identity on a genuine two-owner grouped ticket, successful terminal retirement, malformed dependency fail-closed behavior with unpublished owner state, strict v6 profile scope, and per-layer serving counter proof. Source b190655c functional HTTP gate passed exact 32-token ordinary/native parity, 868 direct fences, 868 grouped/tile dispatches, 896 native reads/terminals, and full retirement (receipt SHA256 346425e5125457e46acbd1bb5e2ee85d7d1c4be819607e20bc6f9a05ed671d8e). Same-source O-G-G-O-O-G performance passed exactness but warm grouped decode was 134.67/137.87 versus ordinary 576.76/600.60 aggregate tokens/s (receipt SHA256 280bd07f72042facdbb6339b3e324f55c5cd41283f051005a3eb3294732f8d10). No speed win, qualification, price, or default promotion."
+}

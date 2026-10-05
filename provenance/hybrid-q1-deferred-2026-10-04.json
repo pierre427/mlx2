@@ -1,0 +1,28 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "default-off hybrid B2 grouped Q1 deferred graph evaluation",
+  "source_repository": "lab-owned mlx2",
+  "source_revision": "0876889ea6d2dad711b73c971b8fa43e8a3ddf54",
+  "source_paths": [
+    "src/mlx2/runtime/paged_kv_write.py",
+    "src/mlx2/runtime/paged_attention_native.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "src/mlx2/adapters/qwen3_paged_candidate.py",
+    "src/mlx2/adapters/qwen35_paged_candidate.py",
+    "scripts/research/varlen_hybrid_q1_gate.py"
+  ],
+  "license": "project license; no external implementation copied",
+  "modifications": [
+    "Add explicit default-off q1_deferred hybrid candidate and source-bound diagnostic CLI flag; B1 survivor remains eager",
+    "Reuse the existing deferred grouped-write/read roots, final-eval and failure-flush lifecycle without changing native Metal math or default serving selection",
+    "Evaluate logits, private recurrent leaves, representability checks, and all deferred native roots before requiring every staged write/read terminal",
+    "Require exact per-layer submission and retained-root counter deltas before staging GDN successors",
+    "On construction/evaluation failure flush deferred roots if possible, poison writer/backend, retain ambiguous submitted reads and graph roots until failed-arena teardown"
+  ],
+  "validation": {
+    "cpu": "55 import-safe direct candidate source contracts, 8 diagnostic launch contracts, 6 actual-method deferred lifecycle source contracts, 2 oracle source contracts; injected final-eval and ambiguous-flush failures",
+    "gpu": "not executed",
+    "qualified": false,
+    "performance": "unmeasured"
+  }
+}

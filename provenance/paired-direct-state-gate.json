@@ -1,0 +1,51 @@
+{
+  "name": "paired-direct-state-gate",
+  "status": "implemented (original harness option, default off); CPU-tested over host-substituted records only; never run on a model, never run natively; nothing is qualified, selected or observed-used",
+  "license": "Apache-2.0 (mlx2 LICENSE); original local harness code, no third-party code or text copied; no Apple copyright header",
+  "origin": "original mlx2 mechanism: an opt-in strict snapshot gate on the existing paired direct-model harness; not mined from mlx-lm-unified or any other repository",
+  "destination_paths": [
+    "scripts/paired_direct_ab.py",
+    "tests/test_paired_direct_state_gate_cpu.py",
+    "provenance/paired-direct-state-gate.json"
+  ],
+  "baseline": {
+    "revision": "491516451d3d46e9c0da2d66ac72dfc0828c3970",
+    "path": "scripts/paired_direct_ab.py",
+    "blob": "777dbb3690d9f86d9b3564746a573fc30bc0e2be",
+    "sha256": "cfe9c1a45610df16cfee32c2098dfaba4f4dfe191409bff3ba4a41a7d062e4ed",
+    "behaviour_kept": "run_cohort lets matching incomplete snapshots pass on token parity and labels them state_only/unavailable; that diagnostic default is unchanged (root host-substituted control /tmp/mlx2-intake/stage27-strict-state-baseline-control.log)"
+  },
+  "modifications": [
+    "--require-complete-state CLI flag (store_true, default False); run_cohort reads it with getattr(..., False)",
+    "REQUIRED_STATE per mechanism: qsdpa-tiling final_target_state only (the ordinary route has no draft sidecar; it may be unavailable or absent); external-reclaim final_target_state and final_draft_sidecar; external-prefill-reclaim both plus prompt_boundary.target and prompt_boundary.sidecar",
+    "snapshot_refusal: a pure host check of one state_digest record: a dict with status exactly 'complete', exactly the fields status/sha256/reason (so state_only_sha256 is never a complete substitute), a lowercase 64-hex sha256 and reason None",
+    "strict_state_refusals: absent required fields refuse instead of raising; a duplicate final_*_sha256 field that contradicts its digest refuses (required or not); a required prompt boundary must have exactly covered_tokens/tokens_sha256/target/sidecar, a positive int covered_tokens equal to len(prompt) - 1 and tokens_sha256 equal to the hash of prompt[:-1] (a fresh external run commits every prompt token except the last, which becomes the decode anchor: external_speculative.py _prefill and Lane construction), and is refused when no pinned prompt is supplied",
+    "strict_state_gate: runs over the measured runs only, after engagement refusals and before the existing state comparison; no measured runs adds an explicit strict refusal; receipt section strict_state (requested, required_snapshots, not_required, measured_runs_checked, complete_runs, warmups not checked, refusals, bounded scope). Without the flag strict_state is {requested: false} and the verdict, refusals, mismatches and state_comparison are computed exactly as before",
+    "strict mode only: the comparison skips a final snapshot it cannot read (not a dict with a string status) and reads prompt_boundary with .get; required unreadable snapshots are already refused, non-required ones are labelled. state_comparison under strict mode says 'compared' only when every run's required digest passes snapshot_refusal, otherwise 'refused by the strict state gate (incomplete or malformed)'; non-required keys are prefixed 'not required; '",
+    "module docstring paragraph describing the flag; state_digest, run_arm, engagement_refusal, _comparison_label, defaults and the reference path are unchanged"
+  ],
+  "verdict_semantics": {
+    "complete_and_equal": "pass (when engaged and tokens/logprob rows match)",
+    "complete_and_different": "counterexample, unchanged",
+    "incomplete_or_malformed_required_snapshot": "refused under --require-complete-state even when tokens match; diagnostic mismatches are still recorded",
+    "token_logprob_engagement_lane": "unchanged; the gate only adds refusals and never removes a mismatch or engagement/lane refusal"
+  },
+  "validation": [
+    "PYTHONPATH=src PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ~/Desktop/mlx2/.venv/bin/python -m pytest --noconftest -p no:cacheprovider -o addopts= -q tests/test_paired_direct_state_gate_cpu.py: 115 passed on CPU. mlx and mlx_lm imports are blocked before the harness loads and checked absent around every test; no model, --tiny model, weight, Metal kernel or GPU is used",
+    "run_cohort tests are HOST-SUBSTITUTED: Cohort, run_arm, mlx_identity and source_identity are replaced with host fakes and mlx2.runtime.generate is stubbed only for ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL = 256; the real run_cohort orchestration, engagement_refusal, strict gate, comparison and verdict code run. The unavailable fixture is the real state_digest(None) output; the complete and metadata_unavailable shapes are pinned against the state_digest source text",
+    "covered: all three mechanisms; absent, malformed, unavailable and metadata_unavailable snapshots; one arm and both arms incomplete; invalid status, sha256 and reason; contradicting duplicate hashes; prompt boundary absent, wrong shape, invalid fields, wrong prefix length (including the anchor, or shorter), wrong prefix hash, no pinned prompt, incomplete boundary digests; identical wrong boundaries refused; boundary target/sidecar differences across arms stay counterexamples; complete matching pass; complete mismatch counterexample; ordinary unavailable or absent sidecar passes; default diagnostic verdict preserved; CLI default off and on; token, logprob, engagement and lane failures not erased; warmups not checked; no measured runs refused in both modes",
+    "mutation controls: 20 single-line mutations of the new gate code (status, sha256 case, reason, extra fields, required and non-required duplicates, mechanism requirements, refusals dropped, comparison skipping, no-runs refusal, label, flag default, missing-prompt acceptance, strict boundary indexing, gate without prompt, boundary shape skip, strict always on, prefix-only boundary binding), each applied and reversed with apply_patch; every one fails at least one targeted test; source hash restored after each",
+    "a fresh process with mlx/mlx_lm blocked runs scripts/paired_direct_ab.py --help (flag listed) and loads no mlx module",
+    "ruff: the harness reports the same three findings as the baseline file (EXE001 and two I001 in tiny model imports, plus B905 under --select B on the existing zip line); the new test file is clean"
+  ],
+  "limitations": [
+    "host dictionaries only: no actual run_arm, state_digest over a real cache, generator, adapter or model has executed with the flag; native, model, state, transaction and serving qualification are not claimed",
+    "the prompt boundary binding (covered_tokens == len(prompt) - 1) follows the current ExternalDraftBatchGenerator fresh-lane behaviour read from source; a route whose boundary covers a different prefix would be refused under the flag, not accepted",
+    "digests describe final and prompt-boundary cache snapshots only, not RNG, scheduler or full transaction state; the final draft anchor token is outside the boundary",
+    "warmups are discarded diagnostic work and are not checked"
+  ],
+  "pending": [
+    "a paired qualification run with --require-complete-state on each mechanism under the GPU owner's lease (all GPU gates currently blocked by a foreign owner/waiter/jobs)",
+    "independent root review of the three files before commit"
+  ]
+}

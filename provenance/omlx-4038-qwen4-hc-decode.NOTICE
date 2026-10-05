@@ -1,0 +1,26 @@
+Scoped notices for the two-launch Flash-Next hyper-connection decode
+(src/mlx2/runtime/models/qwen4_hc_decode.py). See
+provenance/omlx-4038-qwen4-hc-decode.json for revisions, hashes and
+modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx, PR #4038 head
+   2608f6785a78bca01967f22f72cf67c52e6d3973:
+   omlx/patches/mlx_vlm_qwen4_exp_compat/vendor/mlx_vlm/models/qwen4_exp/hc_fused.py.
+   The two-launch partition of the hyper-connection decode, the
+   identity-keyed layout cache and the first-use validation are adapted from
+   that file. No Metal source is copied. The full Apache-2.0 text is this
+   repository's LICENSE.
+
+2. MLX — MIT License (scoped to the 4-bit and 8-bit load_vector /
+   load_vector_safe / qdot / dequantize expressions, the qmv_wide reduction
+   ladder and the Sigmoid expression in the HEADER of
+   src/mlx2/runtime/models/qwen4_hc_decode.py, and to the dense gemv /
+   gemv_wide accumulation and reduction order in its NORM_DOWN_SOURCE)
+
+   Copyright © 2023-2026 Apple Inc.
+
+   Transcribed from mlx/backend/metal/kernels/quantized.h, gemv.h and unary_ops.h of
+   the lab MLX fork installed in the mlx2 venv (39400a0d4). The MIT text is
+   provenance/LICENSE.unified-MIT (same terms). No Apple copyright header is
+   added to mlx2 source files.

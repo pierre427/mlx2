@@ -1,0 +1,31 @@
+{
+  "implementation": "Original mlx2 implementation of an idea from omlx #4138; no omlx code copied",
+  "date": "2026-10-01",
+  "author": "claude-opus-5-5 (lane l1-toolschema, campaign recon-20261001)",
+  "files": [
+    "src/mlx2/server.py",
+    "tests/test_tool_schema_order.py",
+    "qualification/runs/recon-20261001/l1-toolschema/"
+  ],
+  "source_repository": "jundot/omlx",
+  "source_pr": 4138,
+  "source_pr_author": "junmooo",
+  "source_pr_state": "open (unmerged) at read time, 2026-10-01",
+  "source_revision": "945c7e95524f0849753f5ef59d001277a79e110c (PR head); base 87460f4d50de79aef9b67e99e215c31f0a89b445",
+  "source_license": "Apache-2.0 (repository license via gh api; LICENSE blob f9ad266467e436d44150cc53ec6d5ce0a24dc242)",
+  "source_paths": [
+    "omlx/api/tool_calling.py:_copy_schema_with_template_defaults (blob b0957a5315387d9d85c3d63b1f62213769a73591)"
+  ],
+  "read_method": "gh api / gh pr diff, read-only",
+  "idea_taken": "Recursively order JSON object members of the template-bound tool copy so equivalent client schemas render the same prompt prefix; keep array order.",
+  "modifications": [
+    "Applied once in validate_request, so the rendered prompt and the strict-tool grammar (resolve_local_refs + compile_constraint) see the same object; omlx orders only its template copy.",
+    "A properties map lists its sibling required names first, then optional names, each group sorted. Plain alphabetical order (omlx) can put an optional property before a required one, and the mlx2 constrained-output compiler rejects that ordering.",
+    "Tool and function wrappers keep the conventional type,function / name,description,parameters lead; other members are sorted.",
+    "Every object member is sorted, including non-schema values (default, examples, vendor extensions). omlx also fills a description on every schema node; mlx2 does not (only the existing function-level description default)."
+  ],
+  "validation": {
+    "cpu": "tests/test_tool_schema_order.py: 13/13 fail on main a3f07334, 13/13 pass on the branch; template-level prompt token-id equality through the Flash-Next, Qwen3.6-35B-A3B and North-Mini-Code tokenizers/templates via adapter.prompt_tokens",
+    "gpu": "qualification/runs/recon-20261001/l1-toolschema/e2e_{main,branch}.json: Qwen3.6-35B-A3B-4bit-uniform ordinary route, turn-2 request with reordered tool members cached 0/2266 prompt tokens on main a3f07334 vs 2243/2268 on the branch; same-order control 2242/2267 vs 2243/2268; swapouts_delta 0"
+  }
+}

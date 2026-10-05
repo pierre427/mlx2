@@ -1,0 +1,23 @@
+{
+  "component": "LLaDA 8B exact bidirectional denoising model and direct adapter",
+  "source_repository": "local read-only mlx-lm-unified checkout",
+  "source_revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+  "source_paths": ["mlx_lm/models/llada.py"],
+  "license": "MIT",
+  "notice": "provenance/llada-denoising.NOTICE",
+  "modifications": [
+    "copied the source model and fixed-schedule denoising sampler into mlx2.runtime.models",
+    "placed strict GPU-free artifact inspection and direct generation in mlx2.adapters.llada",
+    "selected full bidirectional forwards with every approximate KV and parallel path disabled",
+    "kept LLaDA out of ordinary autoregressive registry dispatch and APCv2 publication",
+    "exposed no streaming, tools, speculative, or qualified serving capability",
+    "normalized Transformers BatchEncoding chat-template output to token IDs before the direct sampler",
+    "trimmed client-visible denoising text at the first end-turn or EOS token while preserving the full canvas IDs for diagnostics"
+  ],
+  "validation": [
+    "CPU-only inspection of all three local LLaDA 8B artifacts",
+    "tests/test_llada_denoising_cpu.py",
+    "Python source compilation without MLX imports or model loads",
+    "16 CPU tests passed after BatchEncoding and terminal-output fixes; bounded direct GPU smokes of 4-bit, 6-bit, and BF16 artifacts each generated clean Hello with 32 exact forwards under CPG lease and host lock"
+  ]
+}

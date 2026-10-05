@@ -1,0 +1,33 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+  "source_revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "source_files": {
+    "mlx_vlm/models/idefics3/idefics3.py": "6441d479c5da66667fc450478e66e5198a0bb9d493ee1880768bee73a332c573",
+    "mlx_vlm/models/idefics3/language.py": "302781014ffa9d8f11657cce938642e6d95f959c9418e298a64a4f5fff5666c3",
+    "mlx_vlm/models/idefics3/vision.py": "be112637a63db72e36859b43d6587c962f46490e4e2230541f5623c479c481ef",
+    "mlx_vlm/models/smolvlm/smolvlm.py": "c7cd0581e2a466bed43cac384c4cb8876ebc2e031c18aaee24de1be9e12edea1",
+    "mlx_vlm/models/smolvlm/processing_smolvlm.py": "46d7d25035d6a8bea0823d32dbdb6eec1eb90285bba8d575a4c058fe14180ddf",
+    "mlx_vlm/models/base.py": "64067fa94380c262133c7cce3ed9145519eafd06c03e3d6a74664018c9fa6dc8"
+  },
+  "destination": [
+    "src/mlx2/adapters/smolvlm2.py",
+    "tests/test_smolvlm2_apcv2_cpu.py",
+    "scripts/qualify_media_serving.py",
+    "src/mlx2/media_qualification.py",
+    "tests/test_media_qualification.py",
+    "tests/test_qualify_media_serving_cpu.py"
+  ],
+  "modifications": [
+    "Use the pinned Idefics3 embedding, vision tower, transformer layers, and output head with an adapter-owned forward bridge",
+    "Construct mlx2 KVCache objects per text layer and pass the first cache to create_attention_mask so batched rows retain their padding and offsets",
+    "Permit pixel_values=None on text-only decode and resume only beyond the prepared media token boundary; reject a final-token media placeholder because generation reserves that token",
+    "Declare APCv2 and prefix reuse as candidate capabilities while retaining pending qualification",
+    "Offer a default-off indexed image feature scatter using CPU processor token positions and MLX put_along_axis; a serving handoff must certify the exact cold CPU token span before engagement, otherwise the source scatter runs. Static shape mismatch also falls back. The selected mode is part of execution-policy route identity, with integer engagement and refusal counters",
+    "Do not compact vision patches: the pinned vision encoder ignores patch_attention_mask in attention, so removing padded patches would change outputs",
+    "Preserve typed image and ordered video frame parts for the checkpoint chat template instead of flattening media to plain text",
+    "Render text-only user content as typed text parts for the pinned Smol chat template; bind short and near-context HTTP token outputs to source and adapter logit traces, including a changed-tail control and 64-token minimum-length stop masking"
+  ],
+  "validation": "Import-guarded CPU fake cache clone/trim/replay, batch-mask, ordered scatter, mixed still-image/video frame order, template framing, and refusal tests. M3 image and two-frame video source logit parity, APCv2 cold/warm/branch replay and persistence observations are in docs/experiments/MULTIMODAL-M3-CANDIDATE-SMOKE-2026-09-26.md and docs/experiments/MULTIMODAL-M3-EXTENDED-2026-09-26.md. At source 09670417d5a906b9211d768887ebc838af15904603ad42e5117afd1e46966c72 the SHA-pinned live media producer ff1714119b544ced3f774b4c2e1ebef7c87e0314e3bacc231f3512ce0b41ca68 passed all eight recomputed checks: exact image/video prefill and four decode logit vectors, APCv2 replay, two 16-token text prompts, and two 64-token near-context prompts with full source/adapter logit parity and divergent altered-tail tokens. Short and near-context candidate HTTP traces matched pinned source token IDs, including warm APCv2 reuse. See docs/experiments/SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json and docs/experiments/SMOLVLM2-M3-SOURCE-NEAR-CONTEXT-HTTP-2026-09-26.json. Normal route still requires a complete generic qualification receipt for the same runtime, artifact, and settings."
+}

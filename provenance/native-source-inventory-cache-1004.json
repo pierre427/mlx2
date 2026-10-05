@@ -1,0 +1,26 @@
+{
+  "implementation": "revision-bound verified source inventory for native admission identity reuse",
+  "source_repository": "mlx2 private project",
+  "source_revision": "f570d1c376063ea36d30f8aaa3bc88ba0b1e049e",
+  "source_paths": [
+    "src/mlx2/runtime/paged_price_identity.py"
+  ],
+  "license": "original project validation/cache code; no upstream implementation copied",
+  "modifications": [
+    "seed inventory before full hashes and verify after",
+    "all tracked lstat/mode/target checks and poison-on-drift",
+    "directory/Git/ref/index/config/ignore/environment inventory",
+    "actual Git cleanliness and tracked-name reconciliation on changes",
+    "race-safe metadata refresh; unsupported gitlinks/linked directories fail closed",
+    "artifact signatures also bind mode/link/target",
+    "CPU tests use explicit fake runtime modules",
+    "bind current symbolic ref chain instead of unrelated shared refs"
+  ],
+  "validation": "23 real temporary Git CPU tests and 4 guarded byte-binding checks passed on main port; no real runtime import",
+  "observed_motivation": "/tmp/mlx2-phase4a41/receipt.json: reached cached identity 108.8-120.1ms, partial diagnostic only",
+  "qualified": false,
+  "performance_gain": "candidate-only short32/96 B2 caps2/4 warmup + three alternating HTTP pairs: median paired throughput ratio1.44741; not main performance or maintained-suite qualification",
+  "defaults_changed": false,
+  "evidence": "qualification/runs/packed-short-refscope-f570-20261004/manifest.json",
+  "port_scope": "standalone identity utility and tests only; no new serving caller or default"
+}

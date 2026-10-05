@@ -1,0 +1,83 @@
+{
+  "kind": "behavioral-design-inputs",
+  "recorded_at": "2026-09-25",
+  "code_copied": false,
+  "sources": [
+    {
+      "repository": "ddalcu/mlx-serve",
+      "license": "MIT (c) 2026 David Dalcu",
+      "pull_requests": {
+        "523": {
+          "state": "merged",
+          "head": "a78e7466753fbe3ce70c5b7ec98f7cadb491e0f3",
+          "paths": [
+            "src/mtp_lookup.zig",
+            "src/generate.zig",
+            "src/round_cost.zig"
+          ]
+        },
+        "533": {
+          "state": "merged",
+          "head": "282c6593ddba10f57becd13d50622fc30dd31e47",
+          "paths": [
+            "src/generate.zig"
+          ]
+        },
+        "539": {
+          "state": "open",
+          "head": "e050e89319c253e9282094746bc0e172a420a958",
+          "paths": [
+            "src/ple_gpu.zig",
+            "src/kernels/ple_gather.metal",
+            "src/transformer.zig"
+          ]
+        },
+        "517": {
+          "state": "merged",
+          "head": "716c0cd1a7a775043c96221e8ca3a353329e4728",
+          "paths": [
+            "src/gdn_decode.zig",
+            "src/transformer.zig"
+          ]
+        },
+        "534": {
+          "state": "merged",
+          "head": "86ab414e720b280b074598504470ed42c413d7ca",
+          "paths": [
+            "src/transformer.zig"
+          ]
+        },
+        "519": {
+          "state": "merged",
+          "head": "3680c72a6657a9b96a43e27331ac4f5ab181f1e8",
+          "paths": [
+            "src/transformer.zig",
+            "src/ane.zig"
+          ]
+        }
+      },
+      "lesson": "#523/#533: prompt lookup inside the MTP round is taken only when the matched site agrees with the live context for >= 8 tokens (MIN_SUFFIX), drafts up to 7 (keeps verify inside the fused S<=8 paths) or 14 when the agreement runs back >= 32, and starts wide (lookup EMA prior = 7)."
+    }
+  ],
+  "mapping": {
+    "523/533 prompt lookup in MTP": "already implemented as self_mtp_copy_draft (runtime/copy_draft.py, rm01 2026-09-19); ported the match-strength admission as opt-in policy keys",
+    "539 PLE gather on the GPU": "not ported; see docs/PROVENANCE.md entry for the bound and the residency cost",
+    "517 GDN prework+recurrence one dispatch": "already equivalent: qwen4_fused_gdn decode and verify kernels fuse conv, q/k norm, gating, recurrence and norm-gate in one dispatch",
+    "534 dual-die fused verify gate": "not applicable: host GPU is applegpu_g17s (single die) and mlx2 has no die-gated verify kernels",
+    "519 MoE verify rows arm on Ultra": "not applicable on M5 Max (the PR's own M5 Max cells are inside noise); the same idea was probed as omlx#3797 moe_verify_gather (probes-20260924: ~2% at 3 rows, slower >= 12 rows, not bit-exact)"
+  },
+  "mlx2_changes": [
+    {
+      "path": "src/mlx2/runtime/copy_draft.py",
+      "change": "CopyDraftPolicy gains min_match, strong_match, strong_max_span and initial_span (defaults preserve the historical lookup and stay out of as_dict/receipts). Lookup measures how far the source agrees with the live context (cap 64) and, when min_match is set, takes the most recent of up to 8 sources per suffix length that clears it; a strong match raises the span cap; the sizer's ceiling becomes max(max_span, strong_max_span). Unlike mlx-serve the gate stays mlx2's windowed ratio-of-sums, not a measured round-cost table."
+    }
+  ],
+  "validation": "tests/test_copy_draft_self_mtp.py (11 new CPU tests), tests/test_perf_defaults.py (Flash-Next default). GPU in-process A/B, qualification/runs/fn-mlxserve-ab-20260925/: mlx-serve-policy copy drafts 1.56x/1.57x (greedy) and 1.52x (T=0.7) on copy-heavy B1, prose B1 1.00x, B4 0.98-1.00x; greedy output identical through end-of-turn except teacher-forced near-ties. PLE-stub bound for #539: -2.1/-2.3% ms per round at B1.",
+  "verdicts": {
+    "523/533": "default-on for Flash-Next native MTP (policy max_span 7, min_match 8, strong 32->14, initial_span 7); strong span raised to 16 with the fused verify bound 17 (ab-vcap-*.json)",
+    "539": "closed: <=2.3% per-round bound vs 32 GB residency",
+    "517": "already equivalent",
+    "534": "not applicable (single-die g17s)",
+    "519": "not applicable (M5 Max; probed as omlx#3797)"
+  }
+}

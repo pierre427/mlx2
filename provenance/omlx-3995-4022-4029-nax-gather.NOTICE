@@ -1,0 +1,22 @@
+Scoped notice for the NAX sorted MoE gather (segmented tile scheduling, the
+SwiGLU epilogue and the sorted row map) adapted from jundot/omlx PRs #3995
+(8bb1fb9c), #4022 (b18cc5a1), #4029 (0c9de320) and the follow-up 195a69e5,
+read at origin/main d6b2b92b11ebcbf4a4c1f002b0d590a3117212a8 on 2026-10-02.
+See provenance/omlx-3995-4022-4029-nax-gather.json for paths and
+modifications.
+
+omlx — Apache License 2.0
+Source: https://github.com/jundot/omlx, omlx/patches/m5_gather_qmm_nax.py
+(the Metal sources, plan table, canaries and Python launch code, adopted
+nearly verbatim into src/mlx2/runtime/models/moe_nax_gather.py) and
+omlx/patches/moe_routes.py (sort_routes, re-expressed as
+switch_layers._sort_routes). The admission, policy, counters and wiring are
+mlx2's own. The full Apache-2.0 text is this repository's LICENSE.
+
+The Metal sources are compiled against MLX's own steel/gemm/nax.h,
+unary_ops.h and binary_ops.h, read at run time from the installed MLX
+package (MIT, Apple); no MLX text is copied into this repository.
+
+ddalcu/mlx-serve#638 (MIT, Copyright (c) 2026 David Dalcu), a Zig port of
+the same three oMLX PRs, motivated the port and its acceptance numbers;
+nothing was copied from it.

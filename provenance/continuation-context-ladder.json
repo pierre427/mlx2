@@ -1,0 +1,105 @@
+{
+  "implementation_kind": "original mlx2 bounded continuation validation harness extension",
+  "source_repository": "mlx2",
+  "source_revision": "6f8fa6777ccfb55875c5ada02324b275aedae87b",
+  "source_paths": [
+    "scripts/validate_continuation_pool_metal.py",
+    "scripts/validate_xpress_metal_matrix.py",
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/runtime/segmented_rotating_kv.py",
+    "src/mlx2/runtime/continuation_verification.py"
+  ],
+  "license": "Apache-2.0; original project validation code, no new external implementation copied",
+  "modifications": [
+    "Admit exact token contexts16..4096 with independent prefill-step16..512(default128) and explicit request batch-size1/2/4(default2); preserve the legacy32-repeat token prefix and default128 generation behavior",
+    "Extend a bounded prompt corpus until requested tokenlength exists; report actual lengths and token-ID SHA256; fail closed on invalid or insufficient tokenizer output",
+    "Read config and safetensors headers before model construction; estimate actual BF16/F16/F32 artifact parameter bytes and conservative per-plane element widths, or fullF32 diagnostic widths",
+    "Reserve full15 continuation paths for every cohort request, four authoritative request caches and cohort rollback versions; include256-token cache capacity, two forward-output sets, bounded rawF32/lawF64 host captures and4GiB transient allowance",
+    "Compare maximum phase reservation with available memory and Metal recommended working set; refused geometry remains unexecuted/incomplete and exports no adaptive policy; never remove a full-width cost table as a memory workaround",
+    "Original ordinary oracle and external prefill share prompt[:-1] chunking with independent prefill-step and S1 final anchor/emitted history; all reached target-law diagnostics and exact greedy gates remain unchanged",
+    "Probe lane/snapshots/transient arrays are function-local and batches close before generation; each generation check releases response caches and callback closures; target hooks and adapter close in finally across failures",
+    "Bound retained callback diagnostics to four times max_tokens rows; overflow fails before another tensor copy and never silently omits callbacks",
+    "Retain complete source-bound cost-table evidence independently from generation_completed and campaign passed; a later deadline cannot falsely pass the campaign"
+  ],
+  "memory_boundary": {
+    "authority": "conservative metadata forecast, not measured MLX peak or a proof of device memory behavior",
+    "actual_executor": "request15-path forwards currently serialized; reservation does not rely on donation or immediate lazy graph release",
+    "full_backstop_retained": true,
+    "estimates_for_pinned_local_bf16_artifacts": [
+      {
+        "context_tokens": 128,
+        "batch_size": 2,
+        "max_tokens": 17,
+        "required_bytes": 15395397120,
+        "required_gib": 14.338,
+        "observed_peak": false
+      },
+      {
+        "context_tokens": 1024,
+        "batch_size": 1,
+        "max_tokens": 17,
+        "required_bytes": 17737612800,
+        "required_gib": 16.519,
+        "observed_peak": false
+      },
+      {
+        "context_tokens": 1024,
+        "batch_size": 2,
+        "max_tokens": 17,
+        "required_bytes": 20915658240,
+        "required_gib": 19.479,
+        "observed_peak": false
+      },
+      {
+        "context_tokens": 1024,
+        "batch_size": 4,
+        "max_tokens": 17,
+        "required_bytes": 27271749120,
+        "required_gib": 25.399,
+        "observed_peak": false
+      },
+      {
+        "context_tokens": 4096,
+        "batch_size": 1,
+        "max_tokens": 17,
+        "required_bytes": 27050638848,
+        "required_gib": 25.193,
+        "observed_peak": false
+      },
+      {
+        "context_tokens": 4096,
+        "batch_size": 2,
+        "max_tokens": 17,
+        "required_bytes": 37476441600,
+        "required_gib": 34.903,
+        "observed_peak": false
+      },
+      {
+        "context_tokens": 4096,
+        "batch_size": 4,
+        "max_tokens": 17,
+        "required_bytes": 58328047104,
+        "required_gib": 54.322,
+        "observed_peak": false
+      }
+    ]
+  },
+  "validation": {
+    "focused_cpu_cli_cases": 64,
+    "combined_cpu_cases": 116,
+    "raw_log": "qualification/runs/parallel-draft-postmerge-20261002/cpu-context-ladder-harness.txt",
+    "raw_log_sha256": "f1a57aea08d1b783e514a43829807fd1aaa16c5b85fe855869f4f7f9404322a3",
+    "ruff": "check passed for owned script and tests",
+    "coverage": "exact1K/4K prompt lengths/default-prefix preservation, tensor/artifact-free dryrun, perplane source dtype headers, request-cohort branch reservation and exact memory admission boundary, preconstructor refusal/no-policy export, bounded callback capture, matched128-chunk oracle offsets, late probe cleanup and adapter/hook restoration after audit failure, existing complete-path sampling and prefix dedup rollback",
+    "gpu_execution_by_implementation_agent": false,
+    "metal_status": "M3 source-bound context ladder completed: exact1K B1/B2/B4 and4K B1 passed;4K B2/B4 refused before construction; no performance qualification",
+    "metal_summary": "qualification/runs/parallel-draft-postmerge-20261002/summary.json",
+    "metal_source_revision": "c702940b240f562fd25935faec585d6edf23325c",
+    "runtime_source_revision": "6f8fa6777ccfb55875c5ada02324b275aedae87b"
+  },
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "observed_used": true,
+  "performance_claim": false
+}

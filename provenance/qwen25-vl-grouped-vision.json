@@ -1,0 +1,20 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+  "source_revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "source_files": {
+    "mlx_vlm/models/qwen2_5_vl/vision.py": "ba936643eb9c468a25afb56eedf5c624d86c9065e43d68fcfa3fa7a790ded83f"
+  },
+  "destination": [
+    "src/mlx2/adapters/qwen25_vision_grouped.py",
+    "src/mlx2/adapters/qwen25_vl.py"
+  ],
+  "modifications": [
+    "Added an explicit opt-in install hook that preserves the pinned attention modules and default source call",
+    "Reuses exact per-forward boundary tensor objects across vision blocks and batches only adjacent equal-length windows into the SDPA batch axis",
+    "Bounds group size, removes only repeated boundaries representing zero-length padded windows, keeps source fallback for ineligible geometries, and counts candidate engagement without device synchronization",
+    "Wired the candidate through a default-off strict environment flag and adapter diagnostics without changing the normal route"
+  ],
+  "validation": "CPU planner/fake-source tests and one bounded M3 two-image model-path run: source vs grouped logits max absolute difference 0.0, 4 grouped calls over 8 windows; one-token post-media APC replay matched logits exactly. No timing or broader qualification; candidate disabled by default. See docs/experiments/MULTIMODAL-M3-CANDIDATE-SMOKE-2026-09-26.md Extended M3 checks: two-image grouped path completed cold, three warm APCv2 reuses, changed-tail and returned-original serving with 4 grouped calls/8 windows. A two-frame video had zero grouped calls and 32 source fallbacks; a separate pinned-source geometry probe found 16 nonempty 64-token windows and nine zero-length intervals caused by repeated boundaries. Video grouped equivalence and timing remain open. See docs/experiments/MULTIMODAL-M3-EXTENDED-2026-09-26.md. After rejecting duplicate video window boundaries, a CPU-guarded planner change removed only zero-length intervals. A bounded M3 source/candidate two-frame video run engaged 28 grouped calls/448 windows with four full-attention fallbacks; prefill and eight teacher-forced decode steps had max absolute logits difference 0.0. A candidate serving cold/three-warm/changed-tail/return sequence retained identical original outputs and five APCv2 hits. Timing and broader qualification remain open. See docs/experiments/QWEN25-M3-VIDEO-GROUPED-PARITY-2026-09-26.json and docs/experiments/MULTIMODAL-M3-EXTENDED-2026-09-26.md."
+}

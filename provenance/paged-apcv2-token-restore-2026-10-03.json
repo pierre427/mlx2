@@ -1,0 +1,13 @@
+{
+  "source_repository": "mlx2 (original project implementation)",
+  "source_revision": "b1123ee1",
+  "source_paths": [
+    "src/mlx2/runtime/paged_apc_bridge.py",
+    "src/mlx2/runtime/paged_apc_index.py",
+    "src/mlx2/runtime/paged_kv_token.py"
+  ],
+  "source_license": "MIT (repository LICENSE)",
+  "copied_code": false,
+  "modifications": "Default-off exact logical-byte restore into fresh token-profile native pages. Repackages token-major K/V bytes by planned head-local spans, preserves APCKey revision and token identity, and leaves publication pending until successful terminal writes. No physical page references are persisted or restored.",
+  "validation": "CPU fake-backend tests in tests/test_paged_apc_token_restore_cpu.py plus bridge, index, and token-owner suites; no GPU or native qualification."
+}

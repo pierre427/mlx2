@@ -1,0 +1,14 @@
+{
+  "schema": "mlx2-source-provenance-v1",
+  "implementation": "host-only cold hybrid packed-prefill addressing helper",
+  "source_repository": "mlx2 private Forgejo",
+  "source_revision": "682fef0633b371afa542e8f424cd5bf929d5eaae",
+  "source_paths": ["src/mlx2/runtime/models/qwen3_5.py:GatedDeltaNet.mixed", "src/mlx2/runtime/paged_attention_pack.py", "src/mlx2/runtime/paged_native_atomic_owner.py", "wiki/docs/plans/varlen-paged-attention.md"],
+  "license": "original project helper; no external code copied",
+  "modifications": ["Explicit one/two cold real-row segment plan, final-logit addressing and segment-local causal coordinate oracle; no tensor/runtime integration"],
+  "validation": ["python3 tests/test_hybrid_packed_prefill_layout_cpu.py: 7 passed", "source/AST inspection only; no GPU or MLX/native runtime imports"],
+  "implemented_scope": "CPU addressing helper only",
+  "qualified": false,
+  "runtime_selected": false,
+  "observed_device_use": false
+}

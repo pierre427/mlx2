@@ -1,0 +1,58 @@
+{
+  "schema": "mlx2.stock32-singleton-source.v1",
+  "date": "2026-10-04",
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_commit": "6d5cd8ce",
+  "source_paths": [
+    "native/paged_kv/arena.cpp",
+    "native/paged_kv/arena.h",
+    "native/paged_kv/binding.cpp",
+    "native/paged_kv/q1_stock_reduction.h",
+    "src/mlx2/adapters/qwen35_paged_candidate.py",
+    "src/mlx2/runtime/paged_hybrid_research_profile.py"
+  ],
+  "license": "Apache-2.0",
+  "modifications": "Default-off explicit stock32 short singleton selector reusing existing source/primitive, row-safe checked geometry, dedicated postdispatch counter ABI and candidate prewrite proof, optional source-bound profile/environment and actual continuation receipt. Existing B2/flag-off/long scalar paths retained; no dtype casts or tolerance changes.",
+  "native_binary": {
+    "path": "/tmp/mlx2-q1-stock32-singleton-build-1004/_paged_kv_native.cpython-312-darwin.so",
+    "sha256": "97052617daaf7e374bcd5eafbc652b13ccf14f030f9203f5f887e48c4d8c4fce",
+    "source_hashes": {
+      "native/paged_kv/arena.cpp": "b900f62c93e56a00b632f08101be0c7c7b5643a80d797d8dfa1e7edfa89e8557",
+      "native/paged_kv/arena.h": "79c4a370bc44e852bca3fa83c9ec206533663bda23d5ce3bd11bd40b581487f7",
+      "native/paged_kv/binding.cpp": "21a74b62d16f5699f5a07c1346a3f0b0cde8175c8d9198bc54bafd5c70d800a0",
+      "native/paged_kv/q1_stock_reduction.h": "9b92009298b5fd2acb0b7f07a616e33a9f4d9fc2322dac9c5a2e17158c2e0989"
+    }
+  },
+  "validation": {
+    "CPU_source_tests": 77,
+    "CPU_status": "passed",
+    "offline_Metal_variants": 4,
+    "native_CMake_build": "passed",
+    "GPU_executed": false,
+    "MLX_native_runtime_imports": false,
+    "device_numeric_parity": "not_tested",
+    "performance_qualified": false,
+    "qualified": false,
+    "serving_default": false
+  },
+  "root_observed_cause": {
+    "receipt": "/tmp/mlx2-hybrid-b1-fa-probe-6d5cd8ce.json",
+    "bootstrap": "exact",
+    "B2": "exact",
+    "B1_FA3_same_QKV_native_stock_output_max_abs": 1.49e-08,
+    "B1_FA55_same_QKV_native_stock_output_max_abs": 0.0009765625,
+    "stock_replay_vs_actual_stock": "exact"
+  },
+  "selector": {
+    "flag": "MLX2_PAGED_Q1_STOCK_SINGLETON",
+    "default": "0",
+    "requires_stock_reduction": "1",
+    "visible_tokens": [
+      32,
+      128
+    ],
+    "unwindowed": true,
+    "retained_start": 0,
+    "pair_alignment_not_applied_to_B1": true
+  }
+}

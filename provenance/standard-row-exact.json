@@ -1,0 +1,59 @@
+{
+  "implementation": "original mlx2 candidate based on source-bound local numerical diagnosis",
+  "license": "MIT",
+  "source_repository": "mlx2",
+  "source_revision": "add6aacd07111bb2f2c3e9d365d268d7ad5ee9c9",
+  "source_paths": [
+    "scripts/diagnose_standard_bf16_metal.py",
+    "src/mlx2/runtime/models/standard_decoder.py",
+    "provenance/standard-decoder.json"
+  ],
+  "policy": "target_verify_row_exact",
+  "algorithm": "dense-qwen3-native-b1s1-causal-prefix-v1",
+  "modifications": [
+    "Opt-in native B1/S1 input rank for dense attention, MLP and tied or untied vocabulary projections without replacing modules or weights",
+    "One KV append per layer followed by native S1 attention over each valid causal prefix",
+    "Apply only to forward_with_taps verification; ordinary Model.__call__ and body-only prefill retain original arithmetic",
+    "Before any append admit only exact original plain KV owners, prepared segmented plain facades or canonical views from one live plain-KV transaction",
+    "Reject MoE, quantized or unknown projectors, nonstandard masks, rotating or compressed caches and MLX2_FP_DECODE_KERNEL",
+    "Pin one homogeneous floating target-backbone dtype at configuration; require cache K/V to match and reject subsequent backbone casts before appends. Untied output-head dtype is independent of KV state.",
+    "Strict CPU-safe adapter policy preflight and execution identity pin before proposal source, session, teacher and APC bindings",
+    "Preserve target artifact identity separately; include algorithm, effective refinement passes and draft attention windows in candidate execution pin",
+    "Receipt reports implemented, unqualified and selected separately, with explicitly model-lifetime completed-forward observation counters"
+  ],
+  "validation": {
+    "cpu": "tests/test_standard_row_exact_cpu.py: 41 passed, including BF16 B15 ragged original-S1 bitwise taps/logits/cache/next-logits, late-layer abort and retry, causal future independence, projector rank, prewrite refusals, ordinary/prefill regression, APC binding, malformed K/V storage across all admitted facades, wrong-target dtype, cast-after-configuration, homogeneous reconfiguration and independent output-head dtype",
+    "diagnostic_metal_evidence": "qualification/runs/parallel-draft-thorough-20261001/m3/bf16-shape-diagnostic-v3.json",
+    "diagnostic_scope": "Original pinned BF16 checkpoint, B1 chain: verification-only temporary diagnostic math matched original 17 IDs, 11 committed-cache frames, reached raw logits and post-finish next logits bitwise. This precedes production implementation and does not qualify it.",
+    "production_metal_validation": {
+      "matrix": "qualification/runs/parallel-draft-thorough-20261001/m3/matrix-row-exact.json",
+      "matrix_source": "First arithmetic implementation archived and hash-bound beside receipt; final storage admission is commit 278f82c0",
+      "matrix_result": "14/14 cells pass, including prior BF16 failures; every committed next-logit max absolute error is zero",
+      "final_guard_adaptive": "qualification/runs/parallel-draft-thorough-20261001/m3/adaptive-row-exact.json",
+      "adaptive_result": "6/6 greedy cohorts match original ordinary decode. Sampled-law oracle used whole-prompt prefill and failed; corrected matched-serving oracle rerun pending.",
+      "reference_diagnostic": "qualification/runs/parallel-draft-thorough-20261001/m3/adaptive-reference-diagnostic-summary.json",
+      "reference_result": "All four examined failures across four requests: recorded actual probability matches original serving prefix-plus-anchor convention, recorded expected matches whole-prompt convention; row-exact frozen-prefix and reached raw logits match original S1 bitwise. Source and flags restore.",
+      "http": "qualification/runs/parallel-draft-thorough-20261001/m3/http-pool-row-exact.json",
+      "http_result": "Initial 48-token 15-sequence request exceeds 240-second timeout; no production performance or complete HTTP integration pass claimed.",
+      "corrected_adaptive": "qualification/runs/parallel-draft-thorough-20261001/m3/adaptive-row-exact-serving-reference.json",
+      "corrected_adaptive_result": "PASS: all six greedy cohorts plus every reached sampled law at four requests \u00d7 32 tokens, maximum probability delta 5.4224692902504756e-8; physical adaptive trimming and mixed depths observed; all three cold/exploration/unknown-cohort backstops pass.",
+      "complete_pool": "qualification/runs/parallel-draft-thorough-20261001/m3/continuation-row-exact-reached-laws.json",
+      "complete_pool_result": "PASS: fixed/adaptive greedy and mixed sampling, 12 physical frames per check including 15-path forwards; all 34 reached sampled prefixes have exact numeric raw logits after F32 host conversion and zero processed-law L1/maxabs. This bounded repeated-prompt run does not establish acceptance quality or performance.",
+      "native_projection_groups": "qualification/runs/parallel-draft-thorough-20261001/m3/native-projection-groups.json",
+      "native_projection_groups_result": "No larger exact group: groups2/4 fail250/253 projectors, group8 fails252/253, group16 fails253/253 in sequence layout; batch layout also lacks any all-projector exact group. Group1 B15S4 frozen-cache logits and K/V match native bytes.",
+      "final_http": "qualification/runs/parallel-draft-thorough-20261001/m3/http-adaptive-prefix-final.json",
+      "final_http_result": "PASS bounded17-token fixed/adaptive HTTP pipeline with all greedy references equal ordinary server, mixed sampling, APCv2 resumes,cancellation and committed three-tier source ranking. Previous fixed48-token timeout remains preserved; no production performance qualification.",
+      "reference_diagnostic_raw": "qualification/runs/parallel-draft-thorough-20261001/m3/adaptive-reference-diagnostic.json.gz"
+    },
+    "limitations": [
+      "Checkpoint matrix, corrected adaptive cohorts, bounded full15 pool laws and adaptive17-token HTTP integration pass. Fixed48-token HTTP timeout remains a performance boundary; no production route qualification.",
+      "Tiny FP32 CPU B15 exhibited nonlinear query-geometry differences below 4.8e-7; universal bitwise equality across dtypes is not claimed",
+      "Body-only prefill arithmetic remains original; current external executor prefills each lane B1",
+      "Model-lifetime observation counters include successfully executed verification attempts whose outer request transaction may later abort; they are not per-request committed-use counters"
+    ]
+  },
+  "implemented": true,
+  "qualified": false,
+  "default_selected": false,
+  "performance_claim": false
+}

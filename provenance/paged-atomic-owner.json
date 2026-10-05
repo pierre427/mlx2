@@ -1,0 +1,13 @@
+{
+  "name": "paged atomic request owner",
+  "source_repository": "mlx2 (original project implementation)",
+  "source_revision": "53c8cc2499b4d7597eb1f34fee4fdf903de6c44d",
+  "source_paths": [
+    "src/mlx2/runtime/paged_request_transaction.py",
+    "src/mlx2/runtime/cache_branch_transaction.py"
+  ],
+  "license": "Apache-2.0",
+  "copied_code": false,
+  "modifications": "New default-off host owner stages requested planes privately and publishes one revision-bound snapshot pointer; no existing production route is modified.",
+  "validation": "CPU-only tests/test_paged_atomic_owner_cpu.py and tests/test_paged_request_transaction_cpu.py; no native or GPU qualification"
+}

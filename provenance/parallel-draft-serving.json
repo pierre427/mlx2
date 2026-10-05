@@ -1,0 +1,38 @@
+{
+  "implementation_kind": "original mlx2 adapter and serving integration",
+  "local_repository_revision": "2207af9a980f7def6173a3a057221267de634f9a",
+  "local_source_paths": [
+    "src/mlx2/adapters/standard_decoder.py",
+    "src/mlx2/runtime/models/standard_decoder.py",
+    "src/mlx2/adapters/external_draft_policy.py",
+    "src/mlx2/adapters/qwen38_27b.py"
+  ],
+  "license": "Apache-2.0",
+  "source_code_copied": false,
+  "dependencies": [
+    "provenance/xpress.json",
+    "provenance/lilicorr.json",
+    "provenance/adaptive-verification.json",
+    "provenance/standard-decoder.json"
+  ],
+  "modifications": [
+    "Capture declared post-layer hidden taps in the ordinary standard decoder while preserving the ordinary logits path",
+    "Dispatch supported companion architectures within the Qwen3 model adapter, outside scheduler/cache/request lifecycle",
+    "Perform strict companion metadata, optional revision pin, policy and unsupported-numerics validation before target tensor allocation",
+    "Bind target/draft identities and execution settings to paired cache layout and serving receipt",
+    "Expose default-off adaptive policy on shared external adapters and revision-pinned Qwen3.8 DFlash2",
+    "Prepare pinned serving policies and bounded hash-verified XPress acquisition without tensor imports"
+  ],
+  "status": {
+    "implemented": true,
+    "qualified": false,
+    "selected": false,
+    "observed_used": true
+  },
+  "validation": "624 CPU tests and 9 subtests pass across new candidates and existing adapter, batching, APCv2, QSA and recurrent-state regressions. Bounded real Qwen3-4B plus XPress M3 Pro Metal smoke passes B1 greedy, mixed B2 sampled-law and paired APCv2-resume parity with zero fallback. No qualification or controlled performance result. LiLiCorr, adaptive depth changes and hybrid target protocols have CPU evidence only.",
+  "validation_paths": [
+    "qualification/runs/parallel-draft-20261001/m3/xpress-m3-smoke.json",
+    "qualification/runs/parallel-draft-20261001/m3/gpu-ownership.json"
+  ],
+  "observed_use_scope": "Explicit XPress candidate on M3 Pro only; other candidate routes are not observed used on Metal"
+}

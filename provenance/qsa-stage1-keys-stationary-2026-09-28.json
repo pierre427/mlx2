@@ -29,7 +29,7 @@
   ],
   "validation": [
     "A Python harness set mx.set_default_device(mx.cpu) before invoking the focused candidate tests (9 passed).",
-    "python -m ruff check --no-cache tests/test_qwen4_qsa_stage1_candidate.py src/mlx2/runtime/models/qwen4_qsa_stage1.py (passed).",
+    "~/Desktop/mlx2/.venv/bin/ruff check --no-cache tests/test_qwen4_qsa_stage1_candidate.py src/mlx2/runtime/models/qwen4_qsa_stage1.py (passed).",
     "Fatal Python lint on all changed Python files, git diff --check, JSON parsing, and Python compileall passed.",
     "On Apple M5 Max with MLX 0.32.2.dev20260919+39400a0d4, the Metal qualification covered FP16 and BF16 scorer parity, distinct scores, ties, oversized threshold buckets, partial validity, padding, exact-band repair, and full-route parity.",
     "The final benchmark uses five warmups and fifty rotating interleaved repetitions at 65,024 tokens with 64 and 512 query rows and at 98,304 tokens with 64 query rows."
@@ -37,6 +37,6 @@
   "qualification": {
     "receipt": "qualification/runs/qsa-stage1-pr91-20260928/qualification.json",
     "keys_stationary": "exact but not qualified for benefit; median 2.23 percent scorer gain with a 1.62 to 5.15 percent range, below the 3 percent component gate; median full-route gain 0.70 percent with a -0.44 to +0.89 percent range, below the 3 percent route gate; unselected and not observed-used in production",
-    "onepass_topk": "exact but rejected; selector 3.61 to 4.76 times the radix cost and full route 2.03 to 2.77 times baseline; unselected and not observed-used in production"
+    "onepass_topk": "exact but rejected; selector 3.5 to 4.4 times the radix cost and full route 2.0 to 2.8 times baseline; unselected and not observed-used in production"
   }
 }

@@ -1,0 +1,40 @@
+{
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx-lm-unified.git",
+  "license": "MIT (source repository); original mlx2 assessment only, no source code copied",
+  "assessment_date": "2026-09-30",
+  "candidates": [
+    {
+      "name": "Agnes fused GDN projection loading",
+      "source_revision": "9c9731b66fdcb5a6e1d4b472981d7db6240995a5",
+      "source_paths": ["mlx_lm/utils.py", "tests/test_agnes_fusion_load.py"],
+      "destination_paths": ["src/mlx2/adapters/agnes_3_flash.py", "src/mlx2/runtime/models/qwen3_5.py"],
+      "status": "default-off candidate implemented in mlx2; not selected for serving",
+      "reason": "The old loader enables quantized Agnes projection fusion by default after loading. mlx2 retains a guarded installer and byte-parity probe, but its ordinary route remains the reference. Complete per-layer and Metal performance qualification is required before route selection."
+    },
+    {
+      "name": "Agnes PLD full-rewind rollback correction",
+      "source_revision": "8e59b701ef0ea31a72aebd9813045060ff6d6368",
+      "source_paths": ["mlx_lm/models/cache.py", "tests/test_prompt_lookup.py"],
+      "destination_paths": ["src/mlx2/runtime/models/cache.py", "tests/test_arrays_cache_full_rewind.py"],
+      "status": "implemented in mlx2",
+      "evidence": "ArraysCache._collapse_empty_rollback_positions is called after trim and ragged trim, restoring the lazy position form after full rewind."
+    },
+    {
+      "name": "shared-QSA stock fallback parity",
+      "source_revision": "078fa6162cccfee9408bef5c8c9cf5496bf0387c",
+      "source_paths": ["mlx_lm/models/qwen4_exp.py", "mlx_lm/segmented_batch_cache.py", "tests/test_qsa_shared_suffix.py"],
+      "destination_paths": ["src/mlx2/runtime/models/qwen4_exp.py", "src/mlx2/runtime/segmented_batch_cache.py", "tests/test_qsa_shared_suffix.py"],
+      "status": "implemented in mlx2",
+      "evidence": "Attention accepts paired _selection/_fetched_kv; shared suffix fallback performs one authoritative append then re-enters stock Attention dispatch. The indexed-dispatch regression is present."
+    },
+    {
+      "name": "compact self-MTP draft head",
+      "source_revision": "ab577afc520f17af7d7d4296e58ff069d5969116",
+      "source_paths": ["mlx_lm/compact_draft_head.py", "mlx_lm/hybrid_speculative.py", "mlx_lm/server.py", "tests/test_compact_draft_head.py"],
+      "destination_paths": ["src/mlx2/runtime/mtp_draft_vocab.py", "tests/test_mtp_draft_vocab_cpu.py"],
+      "status": "request-scoped, default-off candidate implemented in mlx2; not selected for serving",
+      "reason": "mlx2's artifact-hash-bound ReducedMTPHead selects proposal rows while leaving target verification full-vocabulary. The new request object avoids the old shared mutable drafting flag and rejects sampling. A real-head CPU functional probe passed; serving integration, acceptance and performance qualification remain."
+    }
+  ],
+  "validation": "PYTHONPATH=src ~/Desktop/mlx2/.venv/bin/python -m pytest -q tests/test_arrays_cache_full_rewind.py tests/test_qsa_shared_suffix.py tests/test_prompt_lookup_core.py tests/test_arrays_cache_unpadded_mask.py (45 passed, CPU)"
+}

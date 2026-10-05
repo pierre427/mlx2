@@ -1,0 +1,38 @@
+{
+  "implementation_kind": "original mlx2 serving and APCv2 defect corrections",
+  "source_repository": "mlx2",
+  "source_revision": "9ef2d9582dfa7f9be1bd92e5c283d544e04dd17f",
+  "review_base_revision": "ff3877a33fa3e1dda19fbceb687cc325d377a423",
+  "license": "Apache-2.0; original project code, no external implementation copied",
+  "source_paths": [
+    "src/mlx2/serving.py",
+    "src/mlx2/runtime/apc_v2.py",
+    "src/mlx2/runtime/recurrent_state_codec.py"
+  ],
+  "modifications": [
+    "Preserve the shared or tenant/media base semantic namespace inside an explicitly tagged adapter numerical-law wrapper, so APCv2 can classify and admit its own persisted identities after restart; disabled adapter-law identities remain unchanged",
+    "Ignore nonfinite, overflowing, negative or native-size-exceeding MLX2_CACHE_LIMIT_GIB values before allocator configuration; retain finite valid byte semantics",
+    "Validate resident recurrent-state payloads against the selected codec policy before publication, matching the existing disk admission contract; refuse malformed or foreign encoded records and expose refusal counts",
+    "Reject unknown codec tags at direct decode rather than interpreting them as the current encoding",
+    "Carry actual decoded recurrent-leaf counts on the request-private restore and APCLookup, then accumulate admitted request restores locally; dense-only warm KV hits no longer claim recurrent-codec observed use and attribution never uses global counter deltas"
+  ],
+  "validation": {
+    "tests": [
+      "tests/test_bug_sweep_serving_state_cpu.py",
+      "tests/test_recurrent_state_codec.py"
+    ],
+    "focused_regression_cases": 25,
+    "broader_serving_state_cpu_cases_passed": 411,
+    "additional_monitoring_schema_thinking_cpu_cases_passed": 88,
+    "additional_skipped": 1,
+    "coverage": "Actual disk park/restart/resume/cache-state equality across shared/tenant and media scopes; identity refusal across different laws; startup environment bounds; malformed resident codec publication refusal; real cold/warm tiny dense and GDN ServingEngine restores with actual recurrent leaves; persistence, recovery, streaming, lifecycle and structured-output integration checks",
+    "gpu_execution": false,
+    "performance_claim": false,
+    "qualified": false,
+    "audit_receipt": "qualification/runs/bug-sweep-20261002/serving-state-audit.json",
+    "raw_log": "qualification/runs/bug-sweep-20261002/cpu-serving-state.txt",
+    "raw_log_sha256": "9688cbc21a2563162e6e8602b8656039cac692ad5ff9bb4054529e1518b8f109"
+  },
+  "implemented": true,
+  "scope": "Reproduced defects in the 48-hour source sweep; CPU integration validation does not qualify every audited route or device path"
+}

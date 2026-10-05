@@ -1,0 +1,13 @@
+{
+  "mechanism": "default-off one-kernel SIMD-group KV tile Q1 research arm",
+  "source_revision": "c46e881a51e2ed7169c11900c06cffaec8d0a0f1",
+  "source_paths": ["native/paged_kv/arena.cpp", "native/paged_kv/arena.h", "native/paged_kv/binding.cpp", "src/mlx2/runtime/paged_kv_write.py", "src/mlx2/runtime/qwen3_paged_native_backend.py", "src/mlx2/adapters/qwen3_paged_candidate.py", "scripts/research/varlen_staged_graph_request_driver.py"],
+  "license": "original mlx2 code",
+  "upstream_guidance": [
+    "https://github.com/sgl-project/sglang/issues/2273",
+    "https://github.com/vllm-project/vllm/issues/3130",
+    "https://github.com/flashinfer-ai/flashinfer/pull/4794"
+  ],
+  "modifications": "Original Metal research kernel assigns independent KV token stripes to four SIMD groups within one threadgroup and combines stable softmax partials in threadgroup memory. The arm is disabled unless explicitly selected and limited to short Q1 spans.",
+  "validation": "CPU numeric oracle over dim 128/256, visible 32/63/64/65/128, retained and windowed spans passed; focused CPU suite 43 passed. AppleClang native extension and offline Metal source compilation passed. One paired B2 first-use GPU gate passed exact token parity, 84 read terminals, zero retained pages, and 28 tile dispatches, but tile ready step was slower; see qualification/runs/varlen-q1-tile-50701aaf-b2-first-use. Controlled warm performance pending. Upstream items inform the workload split and occupancy question but no upstream kernel code is copied."
+}

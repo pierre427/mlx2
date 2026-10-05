@@ -1,0 +1,37 @@
+{
+  "source_repository": "original mlx2 code; no external source mined",
+  "source_revision": null,
+  "source_paths": [],
+  "license": "project license (original work)",
+  "informed_by": [
+    "provenance/lane-matmul.json (TensorFold bb4b4a35 lane_qmm, MIT): the lane matmul and its same-name sibling stacking, which this extends",
+    "provenance/tensorfold-prefill.json (TensorFold 71377a53 prefill_mm, MIT): the idea of grouping every projection that reads one prefill input"
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/lane/installer.py",
+    "src/mlx2/runtime/lane/policy.py",
+    "src/mlx2/runtime/lane/__init__.py",
+    "src/mlx2/runtime/models/muse_glimmer.py",
+    "src/mlx2/runtime/models/olmo_hils.py",
+    "src/mlx2/runtime/models/xing4_0.py",
+    "src/mlx2/adapters/muse_glimmer.py",
+    "src/mlx2/adapters/olmo_hils.py",
+    "src/mlx2/adapters/xing.py",
+    "src/mlx2/serving.py",
+    "src/mlx2/prometheus.py",
+    "tests/test_lane_projection_groups.py",
+    "scripts/qualify_lane_projection_groups.py",
+    "tests/test_qualify_lane_projection_groups.py"
+  ],
+  "modifications": [
+    "ProjectionGroup(name, parent class, member paths): adapter-declared stacking of projections that one __call__ feeds the same tensor object, including list-indexed members (lmk_q_proj.0). The scheduler and cache see only the adapter hook lane_projection_groups(); there is no model-name branch.",
+    "Declared groups form before the same-name defaults, only on modules of exactly the parent class, and only whole: every member covered, ungrouped and of one weight format. Otherwise nothing of the group is stacked and the default groups apply unchanged.",
+    "Selected by lane policy key declared_groups (default false). When any declared group forms the law id gains +declared[<names>@<sha256 of the formed specs>], because a wider stack changes split-K for every member. Off, law ids and groups are byte-identical to before.",
+    "Selected but undeliverable (adapter declares none, or none forms) uninstalls the lane and fails startup. declared_groups without grouping fails policy resolution.",
+    "Per-group counters declared_launches/declared_reuses/declared_partial (a launch that served only part of its group because members saw different tensor objects); /v1/status lane_matmul.declared_groups and mlx2_lane_matmul_declared_group_events_total.",
+    "Groups: muse-attn-qkv-gate (Muse Attention q/k/v + output gate), hils-attn-qkv-lmkq (HiLSAttention q/k/v + lmk_q_proj.0), xing-mla-qa-kva (Xing4_0Attention q_a_proj + kv_a_proj_with_mqa) and xing-mla-q-kva (q_proj variant for a config without a query LoRA; no shipped artifact).",
+    "2026-10-02 sweep: validate declaration type, unique names and grouping requirement before any projection mutation, preserving existing model topology on refusal."
+  ],
+  "validation": "CPU: tests/test_lane_projection_groups.py and tests/test_qualify_lane_projection_groups.py. The CPU harness substitutes a dequantize-and-matmul reference and covers the same-input AST proof plus falsifier; tiny real Muse, HiLS, and Xing models; launch/reuse/partial accounting; off-by-default law identity; mixed-format refusal; fail-closed selection; reinstall; status; and metrics. Metal: qualification/runs/tensorfold-coalescing-20260930/projection-groups-gpu.json exercised all seven exact shipped projection geometries with the real lane kernel. All passed allclose parity versus default grouping and stock MLX, fp32 accuracy, row invariance for rows 1-32, and exact engagement counters. Kernel speedups were Muse q4/q8/bf16 1.0169x/0.9924x/0.9479x, HiLS q6/bf16 1.1677x/0.9262x, and Xing q6/bf16 0.9863x/1.0184x. This is exact-shape kernel evidence only, not real-artifact or serving qualification. HiLS q6 is the sole material positive signal and remains default-off pending real-artifact serving A/B, output parity, memory, and route requalification. 2026-10-02 CPU sweep: 91 tests across test_lane_projection_groups.py, test_lane_stock_stacks.py, test_lane_matmul.py and test_lane_policy.py passed; six new refusal controls preserve stock and installed projection classes, prepared weights, groups and row windows.",
+  "status": "implemented, default-off, unqualified; not selected by any route"
+}

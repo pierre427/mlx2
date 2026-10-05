@@ -1,0 +1,34 @@
+{
+  "component": "request-scoped compact greedy self-MTP proposal candidate",
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx-lm-unified.git",
+  "source_revision": "ab577afc520f17af7d7d4296e58ff069d5969116",
+  "source_paths": ["mlx_lm/compact_draft_head.py", "mlx_lm/hybrid_speculative.py", "mlx_lm/server.py", "tests/test_compact_draft_head.py"],
+  "license": "MIT source repository; original mlx2 implementation without source copyright header",
+  "destination_paths": ["src/mlx2/runtime/mtp_draft_vocab.py", "tests/test_mtp_draft_vocab_cpu.py", "scripts/probe_compact_mtp_head_cpu.py"],
+  "modifications": [
+    "Reused mlx2's artifact-bound reduced proposal head instead of the old standalone row file.",
+    "Added compact logits and explicit per-request greedy proposal construction without model.logits monkey-patching or a shared mutable drafting flag.",
+    "Refuse sampled proposals; the target head remains full vocabulary and separate. No serving route selects this candidate."
+  ],
+  "qualification": {
+    "device": "CPU",
+    "artifact": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+    "config_sha256": "2fe9ba742da993ffe27c68f56ddc30deff43ed5aeb07d25a82cc6381d9208d9b",
+    "index_sha256": "f643b2bd4f768a6a68fcdec89870f080f71420e8adbd084801291835df0cca5c",
+    "head_shard_sha256": "a8e41183c37518f0be65cdbba6650fb4835bf063405ec2420184ab1755d954f3",
+    "manifest_sha256": "b96f3e6e1cd2260655a7b326de92d1667c975723861af8264c7dc5d32eb34d89",
+    "real_head_rows": 248320,
+    "proposal_rows": 65536,
+    "selected_row_max_abs_logit_difference": 0.0,
+    "sample_scope": "one seeded hidden row; functional correctness only, not acceptance or speed",
+    "selected_for_serving": false
+  },
+  "gpu_probe": {
+    "receipt": "qualification/runs/agnes-compact-head-gpu-20260930/results.json",
+    "lock_receipt": "qualification/runs/agnes-compact-head-gpu-20260930/lock-window-complete.json",
+    "selected_row_max_abs_logit_difference": 0.0,
+    "target_head_unchanged": true,
+    "selected_for_serving": false,
+    "limitations": "One pinned hidden-row projection probe only; no speculative acceptance or end-to-end serving qualification."
+  }
+}

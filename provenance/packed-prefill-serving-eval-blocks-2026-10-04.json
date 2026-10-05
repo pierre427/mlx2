@@ -1,0 +1,25 @@
+{
+  "mechanism": "explicit source-bound serving prefill evaluation block selector",
+  "source_repository": "mlx2 private Forgejo",
+  "source_revision": "2f5c96df2b07b54a24eadbd17a49a6fc090ddbe3",
+  "factory_revision": "01e79f9b510bad06734d21ad78eef303000e865b",
+  "license": "project license; original local integration",
+  "source_paths": [
+    "src/mlx2/runtime/hybrid_packed_prefill.py",
+    "src/mlx2/runtime/paged_packed_prefill_serving_profile.py",
+    "scripts/research/varlen_hybrid_packed_prefill_http_gate.py"
+  ],
+  "modifications": [
+    "optional strict 1/4/16 serving profile field with environment binding",
+    "HTTP CLI selection and actual receipt scratch proof",
+    "CPU rejection and parser tests"
+  ],
+  "validation": {
+    "cpu_checks": 49,
+    "gpu_executed": false,
+    "native_rebuilt": false,
+    "default_eval_block_size": 1,
+    "qualified": false,
+    "price_usable": false
+  }
+}

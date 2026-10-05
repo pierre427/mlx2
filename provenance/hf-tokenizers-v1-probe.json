@@ -1,0 +1,22 @@
+{
+  "mechanism": "isolated pinned tokenizers v1 CPU encode worker",
+  "decision": "probe",
+  "source_repository": "https://github.com/huggingface/tokenizers",
+  "source_revision": "7616272a1b0b580fb43e3a06701fd11db9a2706a",
+  "source_tag": "v1.0.0-rc.2",
+  "license": "Apache-2.0",
+  "source_paths": ["bindings/python/Cargo.toml", "bindings/python/src", "tokenizers/tk-serialize/src/from_json/pre_tokenizers.rs", "tokenizers/tk-encode/src/pre_tokenizers/split.rs"],
+  "modifications": "Recorded isolated serializer fallback patch; build with tk-serialize/fancy-regex. No upstream code copied into runtime; original stdlib worker and wrapper hook use an isolated pinned wheel.",
+  "patch_sha256": "02c031f6a9d3e2263abb3c3aac003ba023eefb35fb53d52f107bae5cbeed5ae6",
+  "published_wheel_sha256": "167d6893c8464cd1a912e6c388b95c70db913213001a7c5c031c7098e727a285",
+  "unmodified_feature_build_wheel_sha256": "c25b2c72b024f8f01ef8ab9bbd9dd64f0f632104214801923554cefdae5b22cc",
+  "patched_wheel_sha256": "bda9ee9a0369a63c28387a427ee621ad343e0bbcd4ac4c4233250799cf547fbe",
+  "patched_extension_sha256": "a2e96752c53b7e4cf720dc21c278cec18aa4a9ab87a78ec483606d5dc9a88f9f",
+  "cargo_lock_sha256": "0bfcd2f7c73a05b0bb07ea08473e1056a132b30be84780c41f48057b453b45a8",
+  "build": {"rustc": "1.95.0", "cargo": "1.95.0", "maturin": "1.15.0", "features": ["tk-serialize/fancy-regex"], "target": "aarch64-apple-darwin", "deployment_target": "11.0"},
+  "production_dependencies_changed": false,
+  "default_selected": false,
+  "validation": "qualification/runs/tokenizers-v1-intake-20261004; 162 exact CPU cases, 400 corpus IDs, 1200 final-hook encodes, standalone lifecycle CPU gate. No MLX import, model load or GPU. Serving integration wiring statically checked only.",
+  "qualification": "cpu_exact_encode_candidate",
+  "serving_qualified": false
+}

@@ -1,0 +1,7 @@
+DiffusionGemma candidate source reference
+
+Model-specific denoising and generation are delegated to the optional
+mlx-vlm runtime at revision 8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5.
+The source is MIT licensed; see its LICENSE. No upstream source files were
+copied into mlx2. The new mlx2 artifact gate and direct lifecycle remain
+unqualified until a separate execution evaluation.

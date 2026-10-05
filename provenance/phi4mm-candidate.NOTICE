@@ -1,0 +1,5 @@
+Phi-4 multimodal preflight is original mlx2 code informed by the local
+MIT-licensed mlx-vlm Phi-4 multimodal implementation at
+653f1f13e238abb313fd45071bbd04b3de414635. No source code or weights
+from the model artifact are redistributed. The direct candidate delegates to
+the pinned local source; no media route is registered in mlx2 serving.

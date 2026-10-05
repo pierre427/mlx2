@@ -1,0 +1,51 @@
+{
+  "name": "ragged-pld-evidence-guards",
+  "status": "implemented (diagnostic driver repair); CPU-tested over host-substituted records only; never run on a model, never run natively; nothing is qualified, selected or observed-used",
+  "license": "Apache-2.0 (mlx2 LICENSE); original local diagnostic repair, no third-party code or text copied; no Apple copyright header",
+  "origin": "original mlx2 repair of the existing ragged PLD qualification driver; not mined from mlx-lm-unified or any other repository; no external mining",
+  "destination_paths": [
+    "scripts/qualify_ragged_pld.py",
+    "tests/test_ragged_pld_evidence_cpu.py",
+    "tests/test_qualify_ragged_pld.py (one pure compare fixture only)",
+    "provenance/ragged-pld-evidence-guards.json"
+  ],
+  "baseline": {
+    "revision": "81391674ebe4579009e94d566784af6f357abcd1",
+    "branch": "codex/mechanism-intake-20260930",
+    "files": {
+      "scripts/qualify_ragged_pld.py": {"blob": "3098e9af0baa409936d97dde3ea1213796003fc3", "sha256": "e5df28ad33a7e19b4c58c3fdcbd5e1216e5dfb30738a723d317034f00772e31e"},
+      "tests/test_qualify_ragged_pld.py": {"blob": "e458e62bbe1bf3d611a48c587c63690fddf7c9d2", "sha256": "6d37fbd49dc142fe991806828511d6a50826908c91871abb604231a5771ea1a3"},
+      "scripts/paired_direct_ab.py (reused, unchanged)": {"blob": "9f244427f931809317414aaa90033102dabe4d06", "sha256": "aa7a9de7f9e4dae49aa107e5c9a0ab457d9731eb686630513550e7ff9d7f74e8"}
+    },
+    "defect": "root host audit (/tmp/mlx2-intake/stage34-ragged-evidence-counterexamples.py, actual compare under a native import blocker) found four bits_exact=true false passes: (1) a candidate with one of two reference logprob row hashes (min-common-prefix row count); (2) logprob_rows_status ['metadata_unavailable'] with equal hashes; (3) both continuations 'complete' with identical unavailable final_state dicts (dict equality); (4) both final_state {'status': 'complete', 'sha256': None, 'reason': None}. Driver metadata failures, not native numerical defects"
+  },
+  "modifications": [
+    "SCHEMA bumped to mlx2.direct-model.ragged-pld.v2; new per-lane evidence tag EVIDENCE = mlx2.ragged-pld.lane-evidence.v2. Records without it (every v1 receipt) are incomparable for bit parity: no retroactive upgrade from legacy logprob_rows hashes",
+    "Driver.run: one logprob row digest per delivered token up to --logprob-rows, the unchanged state_digest([row]) storage digest; a response without logprobs records state_digest(None) in its slot instead of shifting later rows. Lane records add evidence, logprob_rows_requested (protocol bound), logprob_rows_expected = min(requested, delivered tokens) and logprob_row_digests (the full digest records). logprob_rows / logprob_rows_status stay as readable duplicates derived from the digests",
+    "row_evidence_refusal (pure): compare needs the protocol bound from the caller (run_all passes args.logprob_rows); 0 is explicitly unavailable; the record must carry the evidence tag, the same requested bound, expected equal to min(bound, its own delivered tokens), exactly that many digests (truncated or extra refused), every digest passing the unchanged paired_direct_ab.snapshot_refusal, and duplicate hash/status fields consistent with the digests. Each arm is checked independently; equal-but-incomplete never passes; complete digests that differ are still bit differences",
+    "final and continuation state: both arms' digests go through snapshot_refusal before any equality test (missing/uppercase/malformed sha256, a reason, extra fields, unavailable or metadata_unavailable are incomparable even when the dicts are equal); covered_tokens must be a positive int on both arms; complete wrong hashes remain bit differences",
+    "Driver.continuation returns status unavailable with a refusal reason (tokens and final_state kept for diagnosis) when the continuation final state is not a complete digest; compare re-validates continuation records independently (status, non-empty int token list, snapshot_refusal on final_state)",
+    "removed lane stays prefix-only (no final/continuation state required) but an empty removed prefix is incomparable instead of vacuously equal; survivors keep every strict requirement",
+    "unchanged: tokens/math/coverage/verdict policy, the ordinary reference, state_digest, snapshot_refusal, paired_direct_ab.py, final-state digesting before the continuation reuses the cache, cache-only state scope (not RNG, scheduler or full transaction state)"
+  ],
+  "validation": [
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ~/Desktop/mlx2/.venv/bin/python -m pytest --noconftest -p no:cacheprovider -o addopts= -q tests/test_ragged_pld_evidence_cpu.py: 98 passed on CPU (builder run). A meta-path blocker for mlx/mlx_lm/mlx2 is installed before the driver and oracle import; every test asserts no native module is loaded before and after; state_digest is guarded so only state_digest(None) can run",
+    "tests/test_qualify_ragged_pld.py::test_different_covered_lengths_are_incomparable_not_equal (fixture changed to lowercase 64-hex digests, reason None and lane_row_evidence fields; compare gets logprob_rows=2) and ::test_missing_logprob_rows_are_incomparable (unchanged): 2 passed by exact node id under the same blocker, native modules loaded []. No tiny, native or older mutation test was run",
+    "EXECUTED over host records: compare (four root cases verbatim with and without a protocol bound; strict-record versions of the same; genuine complete positive; complete wrong row/final/continuation hashes as bit differences; token and continuation-token differences; covered-token mismatch and non-int covered; truncated on both arms, extra, lowered expected, lowered requested on record or caller, bool bound, disabled and missing rows, no delivered tokens, unavailable row slot, legacy and v1-tagged records, contradicting duplicate hash/status fields; 12 malformed digest shapes at row, final and continuation positions both equal and one-sided; incomplete continuation records; removed-lane prefix match/differ/longer/empty and strict survivors), lane_row_evidence, continuation_refusal, and Driver.continuation with a host substitute for run (complete, 12 incomplete final digests, no tokens, disabled, failed, no final cache)",
+    "SOURCE ORDER (AST), not executed: Driver.run row capture appends one slot per delivered token (no 'row is not None' skip) using state_digest(None if row is None else [row]); the lane record spreads lane_row_evidence(...) and sets no duplicate row keys itself; final_state is digested inside run before it returns; run_all calls driver.run before driver.continuation; all six compare calls pass logprob_rows=rows with rows = args.logprob_rows",
+    "root launcher /tmp/mlx2-intake/stage34-ragged-evidence-counterexamples.py (actual compare, native imports blocked): all four cases now bits_exact false; native_modules_loaded []",
+    "builder mutation controls on scripts/qualify_ragged_pld.py, each applied and reversed with apply_patch and the source sha256 confirmed restored: final-state snapshot check removed (14 failed), row count check removed (3), declared expected trusted (1), Driver.continuation refusal disabled (13), empty removed prefix accepted (1), missing-logprob rows skipped (1), continuation validation removed (19), duplicate status check removed (2), legacy records accepted (6); every mutation fails at least one new test",
+    "fresh process with mlx/mlx_lm/mlx2 blocked runs scripts/qualify_ragged_pld.py --help: exit 0, native modules []",
+    "py_compile and json.tool clean; ruff: driver and tests/test_qualify_ragged_pld.py report exactly their baseline findings (EXE001, I001, F841; PLW1510 x2); the new test file is clean"
+  ],
+  "limitations": [
+    "host dictionaries and host substitutes only; Driver.run row plumbing is checked by AST/source order, not executed; no generator, adapter, cache or model has run with this change",
+    "the requested bound is trusted from the run protocol (args.logprob_rows); a caller that rewrites both the protocol bound and every record consistently is not detectable by compare",
+    "identity pre/post build guard is incomplete (identity is recorded only after the model loads); native admission and source binding remain pending and are out of scope here",
+    "real lane-removal state, rollback exactness, engagement and native B2/B4 behaviour are not proved by host records"
+  ],
+  "pending": [
+    "native ragged PLD run under the GPU owner's lease (queued behind an unresolved foreign reservation)",
+    "independent root review, hash freeze and commit"
+  ]
+}

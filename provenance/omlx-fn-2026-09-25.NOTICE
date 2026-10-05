@@ -1,0 +1,30 @@
+Scoped notices for code adapted from jundot/omlx pull requests #3912 and
+#3935 (open, read 2026-09-25). See provenance/omlx-fn-2026-09-25.json for
+paths, revisions and modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx
+   - PR #3912 head e3d4a213743041ce884861f93c87dbdabe4c3a6e:
+     omlx/patches/qwen35_moe_routed_decode.py (the gate+up/SwiGLU and
+     down/weighted-sum Metal kernels and admission idea) and the _HEADER of
+     omlx/patches/moe_verify_gather.py, carried in
+     src/mlx2/runtime/models/qwen4_routed_decode.py.
+   - PR #3935 head 5c5517558d3e3621fdc9911a0ae9a4190b8cf4ff:
+     the "keep an embedded MTP head resident under expert offload" idea and
+     the `"mtp" in path.split(".")` predicate from
+     omlx/patches/moe_expert_offload.py, re-expressed in
+     src/mlx2/runtime/weight_stream.py (is_mtp_path, mtp_resident).
+   The full Apache-2.0 text is this repository's LICENSE.
+
+2. MLX — MIT License (scoped to the quantized dot-product helpers
+   load_vector, load_vector_safe and qdot_n in the QMV_HEADER of
+   src/mlx2/runtime/models/qwen4_routed_decode.py)
+
+   Copyright © 2023-2026 Apple Inc.
+
+   omlx transcribed these from MLX 0.32.2
+   mlx/backend/metal/kernels/quantized.h; mlx2 adapts the input sums to the
+   float accumulation of the lab MLX fork in the mlx2 venv (commit
+   2d6705923, in 39400a0d4). The MIT
+   text is provenance/LICENSE.unified-MIT (same terms). No Apple copyright
+   header is added to mlx2 source files.

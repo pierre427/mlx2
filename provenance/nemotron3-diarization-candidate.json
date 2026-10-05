@@ -1,0 +1,18 @@
+{
+  "feature": "Nemotron 3 Diarization standalone audio-frame candidate",
+  "source": {
+    "repository": "local mlx2 git repository",
+    "revision": "9aace813f310acf1cf5391d9cd65178e84a8e491",
+    "path": "src/mlx2/adapters/nemotron3_diarization.py",
+    "license": "project code; see original provenance/nemotron3-diarization.json at source revision"
+  },
+  "model": {
+    "repository": "nvidia/Nemotron-3-Diarization",
+    "revision": "f667ed73aee57d40cc39428eb768b4fd87a0a29e",
+    "license": "OpenMDW-1.1",
+    "weights_redistributed": false
+  },
+  "modifications": "Copied the standalone adapter from the local dedicated diarization branch. No scheduler or text route integration. This branch's source hash differs from historical qualification receipts, so the candidate remains unselected and pending fresh qualification.",
+  "validation": "Static local artifact and frontend checks with real MLX imports blocked; no model load, GPU execution, or new parity result.",
+  "capability_state": "implemented candidate; audio frame classification only; serving route absent"
+}

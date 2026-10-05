@@ -1,0 +1,28 @@
+{
+  "feature": "Nemotron 3 diarization CLI qualification harness",
+  "source_references": [
+    {
+      "repository": "https://github.com/NVIDIA-NeMo/Speech",
+      "revision": "cf724ac337d1ebc7d0dda1e23fb80916f52927a5",
+      "paths": [
+        "scripts/speaker_tasks/score_diarization.py",
+        "nemo/collections/asr/metrics/der.py"
+      ],
+      "license": "Apache-2.0",
+      "usage": "Source of truth for final DER, false alarm, miss, confusion, and speaker-count scoring. Original mlx2 preflight scorer is cross-checked against these scores; no NeMo code copied."
+    },
+    {
+      "repository": "https://huggingface.co/nvidia/Nemotron-3-Diarization",
+      "revision": "f667ed73aee57d40cc39428eb768b4fd87a0a29e",
+      "paths": [
+        "diarization_evaluation.md",
+        "README.md"
+      ],
+      "license": "OpenMDW-1.1",
+      "usage": "Evaluation protocol: zero-second collar, overlap included, manifest-linked RTTM labels and per-profile streaming settings."
+    }
+  ],
+  "modifications": "Selective port of the original corpus preflight scorer, pinned Transformers MPS candidate harness, independent NeMo scoring finalizer with explicit hypothesis manifests, source-bound per-profile CLI receipt gate, request-isolation probe, and focused runbook. The v3 plan calibrates separate per-recording bounds for the model's eight-speaker capacity stratum. The existing adapter is unchanged.",
+  "validation": "Historical branch: 248-recording CPU preflight, lifecycle probe, full 248-recording v3 offline GPU candidate, pinned independent NeMo score on both corpora, observed qualified CLI on AMI, and changed-threshold/unqualified-profile negative controls. Current-main port: exact adapter and weight SHA-256 verification, actual offline receipt admission plus negative settings/source controls, focused CPU tests, and lint. Full low/very_low/ultra_low corpus runs are separate and not yet qualified.",
+  "capability_state": "offline F32/flash WAV CLI qualified by historical source-bound evidence and historically observed-used with approximate speaker-cache operation; streaming profiles remain candidate only; HTTP/live microphone not admitted"
+}

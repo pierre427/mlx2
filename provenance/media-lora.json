@@ -1,0 +1,158 @@
+{
+  "sources": [
+    {
+      "repository": "https://github.com/mflux-community/mflux",
+      "revision": "adcbe85975760d545ca142069713781929898be0",
+      "license": "MIT",
+      "paths": [
+        "src/mflux/models/qwen21/weights/qwen21_lora_mapping.py",
+        "tests/lora/test_qwen21_lora_mapping.py",
+        "src/mflux/models/common/lora/mapping/lora_loader.py"
+      ],
+      "adaptation": "Independent strict target mapping and preflight validation; no upstream source copied."
+    },
+    {
+      "repository": "https://github.com/dgrauet/ltx-2-mlx",
+      "revision": "fbc4b0524dd1e01da2d07a44e14dd9dfe0a74d5e",
+      "license": "MIT",
+      "paths": [
+        "packages/ltx-core-mlx/src/ltx_core_mlx/loader/sd_ops.py",
+        "packages/ltx-core-mlx/src/ltx_core_mlx/loader/fuse_loras.py",
+        "packages/ltx-trainer/src/ltx_trainer_mlx/trainer.py",
+        "packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/cli.py",
+        "packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/_base.py",
+        "packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/utils/_orchestration.py",
+        "packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/distilled.py"
+      ],
+      "adaptation": "Strict canonical block key conversion, native subprocess CLI integration; bake alpha/rank into B because native fusion applies strength only."
+    },
+    {
+      "repository": "local mlx-uag",
+      "revision": "36cddae1146af463cace351af4a1404042ce3268",
+      "license": "Apache-2.0 (source SPDX headers)",
+      "paths": [
+        "minimax_music3_mlx/__init__.py",
+        "minimax_music3_mlx/backbone.py",
+        "minimax_music3_mlx/caption_rewriter.py",
+        "minimax_music3_mlx/chunking.py",
+        "minimax_music3_mlx/condition_encoder.py",
+        "minimax_music3_mlx/constants.py",
+        "minimax_music3_mlx/depth_decoder.py",
+        "minimax_music3_mlx/dit.py",
+        "minimax_music3_mlx/duration.py",
+        "minimax_music3_mlx/generation.py",
+        "minimax_music3_mlx/pipeline.py",
+        "minimax_music3_mlx/prompt.py",
+        "minimax_music3_mlx/sampler.py",
+        "minimax_music3_mlx/vocoder.py"
+      ],
+      "root_relative": "minimax-music3-mlx",
+      "source_sha256": {
+        "minimax_music3_mlx/__init__.py": "798cc8b9cc68b32611d39da763482cb6deb5f4b187874b239fcc59a5cff13bec",
+        "minimax_music3_mlx/backbone.py": "4c69e779e4f3260d45eb57f6ea2b3605545e7d28f308c6ec90840392bd0c695b",
+        "minimax_music3_mlx/caption_rewriter.py": "d8515f4cf25ff137c0ebcaaeeacf3c2a69e392fbb271b82d183498b26174c800",
+        "minimax_music3_mlx/chunking.py": "dc7e0dd6935b0f01a03b0fcb9a6faad33fc9acdce7a75d1f0344c8dffecb6cae",
+        "minimax_music3_mlx/condition_encoder.py": "589a258a7822dc79fcf31fda08834935293cbae64a2f55d27275fa312208a04f",
+        "minimax_music3_mlx/constants.py": "66d857343a28e6c16b5eb416849a28d34339c5dce4a3cd840d716aa6d79975ec",
+        "minimax_music3_mlx/depth_decoder.py": "b72c3d5763ff824af304c6c760b3309ac0c850b800a40611ae70ccee09481f19",
+        "minimax_music3_mlx/dit.py": "3ad0f0a27843bb1d9b0f6d26c2fc2ee08b64019e7b0bc48142f47c6775070f45",
+        "minimax_music3_mlx/duration.py": "af5c2f345f25f1270954403253c9390612e20a161c3fee51bbc53fca53255773",
+        "minimax_music3_mlx/generation.py": "dd1b51a28385b91c26cf04e4fd7c484126dc9bb80e59e1e3644a575b44e8c890",
+        "minimax_music3_mlx/pipeline.py": "33fd5745bde9c662a5a23e8637d7dcec7f4d3832908e77f8147cf6f9ff3692f4",
+        "minimax_music3_mlx/prompt.py": "bff36c88f789707833ef951a1bcacc81f186e234bfff9ef4e1dd1633936c4638",
+        "minimax_music3_mlx/sampler.py": "eb24e2908f042d6f3444e300b4c9c7df48babcbf37ae5a7aaea55e8ea79e79b6",
+        "minimax_music3_mlx/vocoder.py": "3e06f54537a962a479b5cbb596d0dc46e783e42cdc7ac8c37d8ad1cbc5ee7a7c"
+      },
+      "adaptation": "External source-bound MiniMax Music3 bridge; acoustic DiT block targets only; no code copied."
+    },
+    {
+      "repository": "https://github.com/Blaizzy/mlx-vlm",
+      "revision": "67599f2e8ec31bf35cbb7b02794114f20844f0bb",
+      "license": "MIT",
+      "paths": [
+        "mlx_vlm/models/qwen_image/transformer.py",
+        "mlx_vlm/models/qwen_image/pipeline.py"
+      ],
+      "adaptation": "Wrap pipeline.transformer targets for both generation/edit."
+    },
+    {
+      "repository": "local mlx-lm-unified",
+      "revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+      "license": "MIT",
+      "paths": [
+        "mlx_lm/models/qwen3.py",
+        "mlx_lm/models/base.py",
+        "mlx_lm/models/rope_utils.py",
+        "mlx_lm/models/cache.py",
+        "mlx_lm/models/activations.py"
+      ],
+      "source_sha256": {
+        "mlx_lm/models/qwen3.py": "9facb9e667b7372771d4c68a54213eaa0b47fe0d0443c4f73328520300d3b66d",
+        "mlx_lm/models/base.py": "9b362a5e650cc7ab63b9b1dce3446805702eeab108594676707c78bea81f8fd0",
+        "mlx_lm/models/rope_utils.py": "7c6347d5bdce72ea26c48e24c720ff470a7a11d60ebc373fd7c3cd5c99d5a23f",
+        "mlx_lm/models/cache.py": "fd7f25548166e60c46fae24f1f16f962111eef1d0ceaeba8071f9fb09a0ccc4b",
+        "mlx_lm/models/activations.py": "dbca5bae41ba0a8380a53903c3e98da37c1e15b46383bc2edb5806ba94fafe72"
+      },
+      "adaptation": "Read-only dependency import; pin entire Python package including initialization and transitive imports, and require import origins within the verified tree.",
+      "python_package_tree_sha256": "2df3cedc24b99639e0567c02a8aad52428d3836bab32045ff0dda69be8530a45",
+      "python_package_tree_hash_method": "SHA256 over sorted repository-relative *.py paths under mlx_lm, each UTF-8 path plus NUL plus raw SHA256 digest of file bytes; 276 files at pinned revision."
+    },
+    {
+      "repository": "https://huggingface.co/MiniMaxAI/MiniMax-Music3",
+      "revision": "fbdf52fbaaca799592917417eb05f1899f1255ec",
+      "license": "MiniMax-Music3 Community License",
+      "paths": [
+        "LICENSE",
+        "flowmatching_vae.pth",
+        "dav.pth",
+        "qwen_7B/"
+      ],
+      "adaptation": "External source checkpoint identity only; no weights copied or committed."
+    }
+  ],
+  "research_fixes": [
+    {
+      "url": "https://github.com/Blaizzy/mlx-vlm/pull/2181",
+      "revision": "ce29faa01cd0824e113205fa936efdf98c2bd8da",
+      "lesson": "Freeze base on resumed training; assert exact trainable tensor coverage."
+    },
+    {
+      "url": "https://github.com/vllm-project/vllm/pull/58658",
+      "revision": "517e1acd0de245d728f0438704a48f09df01f140",
+      "lesson": "Explicit modality mappings and zero/nonzero adapter effect checks; peer author claims are not mlx2 qualification."
+    }
+  ],
+  "validation": {
+    "unit_tests": "74 passed: test_media_lora_cpu, test_generative_media_cpu, test_media_decode_bounds, test_multi_lora; Apple MLX CPU only",
+    "lint": "ruff passes on changed/new Python files",
+    "real_backend_receipts": [
+      "qualification/runs/media-lora-20260930/qwen-cpu.json",
+      "qualification/runs/media-lora-20260930/ltx-cpu.json",
+      "qualification/runs/media-lora-20260930/music-cpu.json"
+    ],
+    "boundary": "Tiny random-weight actual transformer implementations with synthetic pre-encoded latents. Zero parity, nonzero effect, bounded three-step training, held-out velocity loss, exact export/reload and base restoration. No production LoRA trained/qualified/selected/observed-used; no GPU work. Local Music3 snapshot has partial downloads; full pipeline not loaded.",
+    "native_ltx_fusion": "Actual pinned fuse_pending_loras reads/remaps native export and matches reversible wrapper: zero exact; nonzero max absolute difference 1.1920928955078125e-07.",
+    "music_runtime": "Pinned Music3 source files and local unified dependency files/import origins verified without loading production weights."
+  },
+  "review_followup": {
+    "scope": "Opus 5.5 findings and iterative provenance/lifecycle repairs",
+    "implementation": "Original project integrity checks; no external source copied. Exact Python source-loader origins and SHA256-verified compilation buffers; revision-bound model input identities and inventory.",
+    "files": [
+      "src/mlx2/adapters/pinned_imports.py",
+      "src/mlx2/adapters/generative_media.py",
+      "src/mlx2/adapters/music3.py",
+      "src/mlx2/runtime/media_lora.py"
+    ],
+    "validation": "138 focused CPU tests and repeated tiny Qwen/Music3/LTX transformer/fusion/training/reload/restoration smokes. Full suite has baseline failures. GPU/media quality remain unqualified."
+  },
+  "bug_sweep_20261002": {
+    "implementation": "Original mlx2 integrity repair: cached modules must carry a PinnedSourceLoader and a compiled-buffer SHA256 matching the current source pin. Foreign or stale same-origin modules fail closed without clearing unrelated sys.modules; identical previously verified modules remain reusable.",
+    "source_revision": "Reviewed local base ff3877a33fa3e1dda19fbceb687cc325d377a423 through 9ef2d9582dfa7f9be1bd92e5c283d544e04dd17f; no external source copied.",
+    "tests": [
+      "tests/test_pinned_import_execution_cpu.py",
+      "tests/test_media_lora_cpu.py"
+    ],
+    "reproduction": "Previously an ordinary cached VALUE=1 module passed validate_loaded after the same path was rewritten and pinned to VALUE=2. Fixed gate rejects both unpinned cached execution and a different previously pinned revision.",
+    "boundary": "Host execution/source-integrity evidence only; no weights, GPU, production media generation, or qualification claim."
+  }
+}

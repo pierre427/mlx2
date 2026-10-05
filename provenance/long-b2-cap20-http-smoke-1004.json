@@ -1,0 +1,30 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "implementation": "explicit long cap20 and persistent HTTP controlled series",
+  "source_repository": "mlx2 private Forgejo",
+  "license": "MIT",
+  "source_revisions": {
+    "base": "4622bb06d088f1cfdda42b3cfb977c27789f24d9",
+    "identity": "8e223d70b2ce892897d170c3a5da4ab34a246caf",
+    "corrected_oracle": "d6c87f2802e0a5491ccd0b403771ad522827acba"
+  },
+  "source_paths": [
+    "scripts/research/varlen_hybrid_packed_prefill_long_http_gate.py",
+    "scripts/research/varlen_packed_long_contract.py",
+    "src/mlx2/runtime/paged_packed_prefill_serving_profile.py",
+    "src/mlx2/runtime/hybrid_packed_prefill.py"
+  ],
+  "modifications": [
+    "Separate explicit long cap20 research profile and matching request opt-in; legacycap4 preserved",
+    "One persistent loaded service, authenticated local root-driven fresh-lease commands",
+    "Ten cold measured B2 cohorts perarm plus one warmup; sampled-event timing and exact control outputs",
+    "100s/48GiB per-command watchdog, terminal/queue/charge proofs before idle"
+  ],
+  "native_sha256": "d619ff84878e199e08fb5740184719c9bd9c79c43804064dd143bd9954df31ed",
+  "validation": {
+    "cpu_tests": 67,
+    "gpu_executed": false,
+    "qualified": false,
+    "price_usable": false
+  }
+}

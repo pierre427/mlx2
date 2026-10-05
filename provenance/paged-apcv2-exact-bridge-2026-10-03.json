@@ -1,0 +1,13 @@
+{
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_revision": "04ab0b218f87af42fe59b66b75ff3b4e95e25ad9",
+  "source_paths": [
+    "src/mlx2/runtime/apc_v2.py",
+    "src/mlx2/runtime/paged_kv_cache.py",
+    "src/mlx2/runtime/paged_kv_pool.py",
+    "src/mlx2/runtime/paged_kv_write.py"
+  ],
+  "source_license": "MIT (repository LICENSE)",
+  "modifications": "Local bridge binds exact logical K/V bytes to an APCKey with a required model revision and exact token IDs, stores digest-checked payloads without process-local page references, and restores into freshly reserved pages. The private cache gains frozen prefix page ownership and a bounded staging reservation. Shared-partial-tail append fails closed until a staged native COW transaction exists. No upstream or external code was copied.",
+  "validation": "CPU fake-backend tests in tests/test_paged_kv_cache_cpu.py and tests/test_paged_apc_bridge_cpu.py; no GPU or native qualification."
+}

@@ -1,0 +1,32 @@
+{
+  "component": "Masked Mamba2 SSM fallback state preservation",
+  "implementation_kind": "original mlx2 correction to an existing mined recurrence",
+  "source_repository": "mlx-lm-unified (read-only source checkout)",
+  "source_revision": "e555a7f94012708a6d7cd7f7ba38336004672f32",
+  "source_paths": ["mlx_lm/models/ssm.py"],
+  "source_files": {"mlx_lm/models/ssm.py": "62b8e5759a1d16351ac87c0dad1ab8221acdcf5fa7ffd4a9b83bb72068d5bf93"},
+  "license": "MIT",
+  "notice": "provenance/nemotron3-super-5bit.NOTICE",
+  "base_provenance": "provenance/nemotron3-super-5bit.json",
+  "modifications": [
+    "Align ssm_attn masked fallback with the existing ssd_prefill neutral-step algebra: zero masked dtA and dtx, then allow state to carry through padding",
+    "Preserve mask=None arithmetic and ordinary unmasked model execution",
+    "Preserve all prior writes and initial state when the final query is padding rather than masking away the final recurrence reduction",
+    "Use where to prevent masked input values from contributing to state",
+    "Require the fixed 32-lane Metal step/short-scan kernels' Ds>=32 and Ds%32=0 reduction geometry, integral head/group mapping, matching state/projection geometry and floating tensor dtypes before dispatch",
+    "Keep masked or length-owned one-token updates on the exact fallback; preserve the original supported unmasked Metal kernel dispatch",
+    "Add independent NumPy no-op recurrence oracles for trailing, leading, internal and all-false masks with initialized and empty state",
+    "Add actual Mamba2 B2 ragged full-short-row acceptance, descriptor recovery and retry oracles for convolution, recurrent state, KV and next logits"
+  ],
+  "validation": {
+    "device": "CPU",
+    "command": "PYTHONPATH=src ~/Desktop/mlx2/.venv/bin/python -m pytest -q tests/test_nemotron_masked_full_accept_cpu.py",
+    "result": "26 focused CPU recurrence/model/dispatcher tests pass; 65 pass with existing Nemotron taps, external adaptive hybrid and Qwen3.8 draft tests (2026-10-01, 4.05s). The Metal harness's 34 nontraining cells pass under a CPU-only orchestration control after this correction; that is not Metal evidence. Ruff check passes for SSM and new tests.",
+    "gpu_execution": false,
+    "trained_checkpoint_qualification": false
+  },
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "observed_used": false
+}

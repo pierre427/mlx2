@@ -1,0 +1,15 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+  "source_paths": ["mlx_lm/models/hy_v3.py"],
+  "license": "MIT",
+  "notice": "provenance/agnes-hy-v3.NOTICE",
+  "destination_paths": ["src/mlx2/runtime/models/hy_v3.py", "src/mlx2/adapters/hy_v3.py", "src/mlx2/adapters/hy_v3_mtp.py"],
+  "modifications": [
+    "Restricted ordinary model construction and weight sanitization to the trunk; MTP is not declared as a serving capability.",
+    "Added an explicit identity-bound, strict-loading depth-1 MTP candidate for offline parity work; normal serving does not call it.",
+    "Added a full-KV APCv2 cache layout and explicit cache factory.",
+    "Added CPU-only exact full and REAP50 topology checks, including the 96-expert trunk and 192-expert sidecar distinction."
+  ],
+  "validation": "CPU-only full and REAP artifact inspection and static tests; no model weights loaded, MLX import, GPU execution, or serving qualification."
+}

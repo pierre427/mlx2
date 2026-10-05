@@ -1,0 +1,27 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "default-off hybrid B2 grouped-Q1 write-only deferred evaluation",
+  "source_repository": "lab-owned mlx2",
+  "source_revision": "682fef0633b371afa542e8f424cd5bf929d5eaae",
+  "source_paths": [
+    "src/mlx2/runtime/paged_kv_write.py",
+    "src/mlx2/runtime/paged_attention_native.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "src/mlx2/adapters/qwen35_paged_candidate.py",
+    "scripts/research/varlen_hybrid_q1_gate.py"
+  ],
+  "license": "project license; no external implementation copied",
+  "modifications": [
+    "Expose mutually exclusive default-off write-only and full-deferred hybrid Q1 selectors; retain eager B1 and ordinary reference",
+    "Use existing deferred grouped-write roots with eager native read submission, retaining read roots for ambiguous enqueue/failure flush",
+    "Evaluate private GDN leaves and all native roots, drain exact terminals, and prove zero write async, one read async, one write/read root per full-attention layer plus one final evaluation before recurrent boundary staging",
+    "Measure final hybrid graph-eval wall and process CPU time without treating either as GPU kernel timing",
+    "Preserve existing charged scratch and failed-arena teardown retention"
+  ],
+  "validation": {
+    "cpu": "import-safe direct NumPy/source fault and launch contracts; no GPU",
+    "gpu": "not executed",
+    "qualified": false,
+    "performance": "unmeasured"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "Gated delta fixed-warp geometry admission correction",
+  "state": "implemented_cpu_verified",
+  "source_repository": "mlx-lm-unified",
+  "source_revision": "1e2bc604f71d070bee970c3e7db8b60f7855599b",
+  "source_paths": ["mlx_lm/models/gated_delta.py"],
+  "license": "MIT",
+  "existing_provenance": "provenance/flashnext.json:models/gated_delta.py",
+  "implementation_paths": ["src/mlx2/runtime/models/gated_delta.py"],
+  "modifications": [
+    "Original dispatcher guard: use the existing mathematically exact ops recurrence when key width is below 32 or not divisible by 32.",
+    "The generic Metal kernel uses Dk/32 registers per lane; smaller widths fail compilation and partial strips omit key elements. Complete strips retain the existing generic and packed admission."
+  ],
+  "validation": {
+    "tests": ["tests/test_gated_delta_kernel_geometry_cpu.py", "tests/test_gated_delta_masked_readout_cpu.py"],
+    "result": "18 CPU tests passed",
+    "device": "CPU only",
+    "evidence": "Independent NumPy scalar/vector masked recurrence for incomplete key strips, forbidden mock native kernels, unchanged supported generic dispatch and actual update-to-fallback admission.",
+    "metal_execution": false,
+    "performance_qualified": false
+  }
+}

@@ -1666,8 +1666,9 @@
     "lines": 454,
     "source_revision": "1e2bc604f71d070bee970c3e7db8b60f7855599b",
     "license": "MIT",
-    "modifications": "Removed generic loading/tool-inference entry points; clone detokenizer dictionaries without triggering inherited slot/property conflict.",
-    "license_basis": "Source repository LICENSE (MIT)"
+    "modifications": "Removed generic loading/tool-inference entry points; clone detokenizer dictionaries without triggering inherited slot/property conflict. Added finalize_complete to the BPE and SPM detokenizers: drops a trailing incomplete UTF-8 character at stream end instead of U+FFFD (vLLM #59133); BPE finalize decodes a pending added-token character instead of raising KeyError.",
+    "license_basis": "Source repository LICENSE (MIT)",
+    "validation": "tests/test_tokenizer_utils_sparse.py stream-cut, added-token and served length-stop cases (CPU)."
   },
   "ubc_evict.py": {
     "source": "mlx_lm/ubc_evict.py",

@@ -1,0 +1,28 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "mechanism": "default-off stock-long inline metadata host binding and BF16 device oracle",
+  "source_repository": "lab-owned mlx2",
+  "source_revision": "c929ee2fb1a28aebd50da58e4b33e6199ac79124",
+  "source_paths": [
+    "native/paged_kv/arena.cpp",
+    "native/paged_kv/q1_stock_long_metadata.h",
+    "src/mlx2/adapters/qwen35_paged_candidate.py",
+    "src/mlx2/runtime/paged_kv_write.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "scripts/research/varlen_hybrid_q1_gate.py",
+    "scripts/research/varlen_stock_long_device_oracle.py"
+  ],
+  "license": "project license; copied oracle is lab-owned source",
+  "modifications": [
+    "Bind explicit stock-long inline selector to strict 0/1 environment and raw native ABI before any staged write",
+    "Require the actual per-layer inline metadata dispatch delta before recurrent state staging and report the physical count",
+    "Preserve optional zero-valued counter snapshots on older binaries while refusing explicit selection when raw ABI is absent",
+    "Create a frozen BF16 device oracle with dense left-padded B2 stock reference, raw payload/output equality, terminal and retirement proof"
+  ],
+  "validation": {
+    "cpu": "focused import-safe NumPy and launch/oracle contracts; no GPU",
+    "native_binary_sha256": "0fdc02a2fca880a2b52cbcecce32532c8cd94edd5acf131c583bdcd29694a26a",
+    "qualified": false,
+    "performance": "unmeasured"
+  }
+}

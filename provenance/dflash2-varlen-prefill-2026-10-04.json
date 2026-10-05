@@ -1,0 +1,79 @@
+{
+  "component": "default-off DFlash2 external target-prefill batching through adapter-owned varlen row geometry",
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_revision": "e0e79725560704a1ade3b4d70669abf897e6a160",
+  "implementation_revisions": [
+    "33738775f5b88ad2b124952122c63c74447bb82f",
+    "06b1c40aa835153b1dc9c7a0c7265804f4bf97dd",
+    "12da37eef8d8c3abcc856ffa7d4bf29d2292aad5",
+    "42b83e3542766c178a4ac5e1928c98c27657dd1f",
+    "78bc78f1c56dccd47a92d6a5bb87b70189d60477",
+    "f0f90882dd62834e78ea261781be0207a339eaf9",
+    "8b56d4a1d93fd7471eea922060750a3dae5c0042",
+    "e0e79725560704a1ade3b4d70669abf897e6a160"
+  ],
+  "license": "Apache-2.0",
+  "source_paths": [
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/runtime/models/varlen_dense_mlp.py",
+    "src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/serving.py"
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/serving.py",
+    "qualification/runs/sp-dflash2-27b-20260925/policy-k4-varlen.json",
+    "qualification/runs/sp-dflash2-27b-20260925/policy-k7-varlen.json",
+    "qualification/policies/qwen38-27b-dflash2-k4-varlen-ingress.json",
+    "qualification/policies/qwen38-27b-dflash2-k7-varlen-ingress.json",
+    "scripts/ab_qwen38_dflash2.py",
+    "scripts/summarize_qwen38_dflash2.py",
+    "tests/test_external_dflash2_cpu.py",
+    "tests/test_qwen38_dflash2_adapter.py",
+    "tests/test_ab_qwen38_dflash2.py",
+    "qualification/runs/dflash-varlen-compose-20261004"
+  ],
+  "origin": "Original mlx2 implementation. No external implementation source was copied. It reuses mlx2's ordinary batched-prefill cache and adapter-owned row-geometry contracts.",
+  "modifications": [
+    "Batch several external DFlash request lanes into one right-padded target-prefill slab while retaining request-private draft caches and target cache extraction.",
+    "Enter the target model's adapter-owned prefill row context for the slab so selected dense varlen MLP compaction can omit padded rows.",
+    "Keep serial external prefill as the default and reference path; reject composition unless the target varlen policy is also selected.",
+    "Emit distinct implemented, selected, qualified and observed-used fields plus physical slab, lane and padding-row counters.",
+    "Select the composition only in explicit k4-varlen and k7-varlen research policies.",
+    "Add a bounded policy-owned initial prefill coalescing window that collects eligible long pristine lanes toward available capacity, never blocks active decode and expires to the serial reference path.",
+    "Move Qwen DFlash cohort formation from the executor to a generic serving ingress boundary after tokenization and before the first physical step; the adapter declares geometry and the executor-local timer is no longer selected.",
+    "Emit request receipts and service counters for selected, observed-used, width, target, wait and expiry without changing default routes.",
+    "Price skewed prefill admission by each lane's actual append and one serially live target-layer MLP scratch allocation, allowing the formed B4 to reach a physical B4 slab without weakening decode verification admission.",
+    "Fail closed on APCv2 request-prefix lookups, checkpoint publication and persisted-state prefetch restores while external packed prefill is selected because admission does not yet know the physical B1/B2/B4 geometry and serial-versus-packed output invariance is not established; session metadata, park and deletion controls remain available.",
+    "Give the Qwen3.8 A/B runner dedicated k4/k7 packed-varlen policies with a 250 ms ingress collection cutoff; bind it to paired four-prompt B1/B4 cells with APCv2 and host prompt reuse disabled, exact warm-up geometry, strict per-cell pairwise/varlen counters and physical ingress receipts; make its greedy summary compare every non-ordinary arm, including ordinary-varlen, against an unambiguous ordinary reference."
+  ],
+  "validation": {
+    "stage": "CPU contracts plus source-bound real-artifact device evidence",
+    "command": "PYTHONPATH=src ~/Desktop/mlx2/.venv/bin/python -m pytest -q tests/test_external_dflash2_cpu.py tests/test_qwen38_dflash2_adapter.py tests/test_varlen_dense_mlp.py -k 'not real_dflash2_header_schema_reconciles_without_payload_load'",
+    "result": "All selected tests passed. The exactness test co-batched uneven 3+1-token DFlash prefill rows, observed two padding rows, matched serial DFlash greedy output and validated final sidecars. Coalescing contracts cover deferral, immediate cohort release and expiry to serial. The excluded pre-existing real-artifact header test cannot run because its target checkpoint directory is absent on this host.",
+    "coverage": [
+      "default-off construction and adapter geometry gate",
+      "uneven multirow external prefill",
+      "serial-versus-composed greedy token parity",
+      "paired target and draft sidecar validity",
+      "policy type and dependency validation",
+      "adapter forwarding and route receipts",
+      "bounded initial cohort formation and serial expiry",
+      "staggered post-tokenization B4 formation at the real worker boundary"
+    ]
+  },
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "default": "off",
+  "observed_used": "Real Qwen3.8/DFlash2 artifact: the final opposite-order high-skew gate formed ingress and physical B4 in every arm, matched 8 of 8 greedy responses, skipped about 443k per-layer MLP padding rows per candidate arm and reduced combined wall time by 12.93 percent (1.1485x control over candidate)",
+  "evidence_boundary": "The final real-artifact gate is bound to source e0e79725560704a1ade3b4d70669abf897e6a160. It is historical observed-use and workload evidence, not qualification of later source revisions or proof that current source preserves the result.",
+  "outstanding": [
+    "broader deterministic multi-user and multi-turn traffic qualification of the ingress fix",
+    "qualification decision for the observed serial-B1 versus packed-B4 numerical boundary",
+    "broader output and state parity beyond the matched packed-geometry controls",
+    "restore APCv2 reuse only after packed geometries establish state/output invariance or gain a geometry-safe publication contract"
+  ]
+}

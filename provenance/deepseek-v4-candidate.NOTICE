@@ -1,0 +1,7 @@
+Original mlx2 candidate code delegates to the lab-owned MIT-licensed local
+MLX-VLM source at 8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5. No source
+code or model weights are redistributed. The checkpoint contains image and
+MTP tensors, but the pinned target model does not execute those components.
+The CPU image layout and structural MLX ViT/aligner files are original code
+adapted from official MIT-licensed inference/{image_processor,vision,model}.py
+at DeepSeek revision 86f746b36186f0e567729a5c06a8c918caba82a9.

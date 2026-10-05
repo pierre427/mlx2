@@ -1,0 +1,49 @@
+Scoped notices for code adapted from jundot/omlx PR #3903 (merged as
+3e2bdb1fea5571c7e85f160a9c3df9ad76516be9). See
+provenance/omlx-3903-qwen4-prefill.json for paths and modifications.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx, revision 3e2bdb1f.
+   The Python admission/dispatch glue in
+   src/mlx2/runtime/models/qwen4_fused_gdn_prefill.py and the weighted-sum
+   routing idea in src/mlx2/runtime/models/qwen4_moe_weighted_sum.py are
+   adapted from omlx/patches/qwen35_gdn_prework.py and
+   omlx/patches/qwen35_moe_weighted_sum.py. The full Apache-2.0 text is
+   this repository's LICENSE.
+
+2. mlx-serve — MIT License (scoped to the GDN prework and norm-gate Metal
+   kernel sources in src/mlx2/runtime/models/qwen4_fused_gdn_prefill.py)
+
+Copyright (c) 2026 David Dalcu
+
+Source: ddalcu/mlx-serve src/transformer.zig, tag v26.8.11-pre-release.1
+(commit 09970f9b), as carried by omlx 3e2bdb1f.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+3. mlx-serve — MIT License (scoped to the reduction order of the MoE
+   weighted-sum kernel in src/mlx2/runtime/models/qwen4_moe_weighted_sum.py
+   and the shapes/falsifier of tests/test_qwen4_moe_weighted_sum_metal.py)
+
+Copyright (c) 2026 David Dalcu
+
+Source: ddalcu/mlx-serve PR #653, merge commit a453794f
+(src/transformer.zig, VERIFY_EXPERT_REDUCE_SOURCE and its bit-identity test).
+See provenance/mlx-serve-653-moe-prefill-reduce.json. The MIT permission
+notice and warranty disclaimer are as in section 2 above.

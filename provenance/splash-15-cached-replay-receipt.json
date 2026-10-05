@@ -1,0 +1,20 @@
+{
+  "component": "25K/32K cached-prompt replay receipt driver (cold, exact replay, multi-turn follow-up, shared-prefix-only) over the real HTTP server",
+  "source_repository": "Inco Splash (Apache-2.0), design input only",
+  "source_revision": "f786bed",
+  "source_paths": [
+    "README.md (TTFT for a replayed 25,812-token prompt: 275 ms on M3 Max, 129.7 s cold; 282 ms at 32K on M5 Pro, 363 tok/s prefill)"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "scripts/measure_cached_replay.py",
+    "qualification/runs/sp-replay-27b-20260925/"
+  ],
+  "modifications": [
+    "No Splash code used; only the benchmark shape (prompt size, replay TTFT) is taken as a comparison point.",
+    "Adds follow-up and shared-prefix-only requests, APCv2 receipt roles and interior-checkpoint counter deltas per request, and a vm_stat swap watchdog."
+  ],
+  "validation": [
+    "GPU, M5 Max 128 GB: run2 default server replay 0.109-0.188 s, follow-up 0.316-0.504 s, cold prefill 625-671 tok/s; shared-prefix hits 1/4 at the default 16 GiB APCv2 budget and 4/4 at 48 GiB (run3)."
+  ]
+}

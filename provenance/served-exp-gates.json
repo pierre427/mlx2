@@ -1,0 +1,29 @@
+{
+  "component": "served-graph exp gates for the routed-decode, HC-decode and QSA output-gate sigmoid copies",
+  "source_repository": "original mlx2 implementation; idea from jundot/omlx PR #4122",
+  "source_revision": null,
+  "source_references": [
+    "jundot/omlx#4122 merged e37e07f591810129e3c0cde85a2ac4c6d4296b82, omlx/patches/qwen35_gdn_verify_fused.py (Apache-2.0). The idea is already recorded for qwen4_fused_gdn.served_silu_refusal (docs/PROVENANCE.md, 2026-09-30).",
+    "MLX #4461 (365bd0fba, v0.32.3) moves the unary Sigmoid source to metal::precise::exp (cited, not copied)."
+  ],
+  "license": "MIT (original mlx2 code); no omlx code copied",
+  "code_copied": false,
+  "destination_paths": [
+    "src/mlx2/runtime/models/served_exp.py",
+    "src/mlx2/runtime/models/qwen4_routed_decode.py",
+    "src/mlx2/runtime/models/qwen3_next.py",
+    "src/mlx2/runtime/models/qwen4_hc_decode.py",
+    "src/mlx2/runtime/models/qwen4_qsa_indexed_merge.py",
+    "src/mlx2/runtime/models/qwen4_qsa_indexed.py"
+  ],
+  "modifications": [
+    "Generalised the GDN served-SiLU probe. Each gate compiles the kernel's own sigmoid expression, taken from the kernel source text, in both exp spellings. It compares each result bit for bit with the served op over every 16-bit encoding. For float32 it uses every bf16 value widened to float32 plus 2**20 fixed-seed random bit patterns.",
+    "Gates and the served op each copies: the routed SwiGLU epilogues (gate_up, split, shared fold, window rows, #4113 candidate) copy compiled swiglu. The shared-fold gate (precise exp) copies eager mx.sigmoid. The HC SiLU copies compiled nn.silu. The HC sigmoid (precise exp) copies eager mx.sigmoid. The QSA output-gate epilogue (fast exp plus one patched bf16 edge) copies eager mx.sigmoid, checked per output dtype.",
+    "A refusal is a counted fallback to the composed path. The kernels are never rewritten to the other spelling."
+  ],
+  "validation": [
+    "tests/test_served_exp_gates.py (CPU): gate logic, the spelling contract with the kernel sources, and call-site fallbacks that happen before any kernel runs.",
+    "GPU, 2026-10-01, gpuq, MLX 0.32.2.dev20260919+39400a0d4: all five bf16 gates and the QSA fp16 gate accept the kernel spelling; the GDN probe still selects metal::exp.",
+    "GPU finding: in float32 the QSA epilogue's metal::exp form differs from eager mx.sigmoid on 10,703 of 1,114,112 probed inputs. 628 of the mismatches are widened bf16 values; the largest error is 59 ULP. The metal::precise::exp form matches every input. float32 QSA therefore now takes the composed gate. qualification/runs/recon-20261001/l8-hygiene/qsa_gate_fp32.json"
+  ]
+}

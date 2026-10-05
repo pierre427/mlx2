@@ -1,0 +1,20 @@
+{
+  "schema": "mlx2.source-provenance.v1",
+  "mechanism": "exact-byte multidimensional paged KV arena storage",
+  "source_repository": "mlx2",
+  "source_revision": "6f076bc64ff0b847209aa7f93bbfaf7ca1b89d60",
+  "source_paths": [
+    "native/paged_kv/arena.cpp",
+    "native/paged_kv/arena.h",
+    "native/paged_kv/binding.cpp"
+  ],
+  "license": "Apache-2.0",
+  "modifications": "Original project change: preserve the flat uint8 byte-addressed GPU ABI while representing planes larger than INT32_MAX as exact-byte [rows,4096] MLX arrays. Retain 1D layout for small planes; bound to Metal maxBufferLength and 12 GiB; expose strict capability and actual storage shape. No tensor math, dispatch geometry, page numbering, terminal callbacks, or serving defaults changed.",
+  "validation": [
+    "pure C++ shape/bounds CPU test for 4,802,478,080-byte plane and refusals",
+    "native CMake compile and link against pinned MLX wheel",
+    "source-bound full 16-layer B20 first/last-page GPU oracle prepared; device result pending"
+  ],
+  "qualified": false,
+  "default_enabled": false
+}

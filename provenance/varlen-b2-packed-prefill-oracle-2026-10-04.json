@@ -1,0 +1,13 @@
+{
+  "feature": "default-off packed two-prompt native Qwen3 research oracle",
+  "source_repository": "mlx2 local varlen B2 staged graph branch",
+  "source_revision": "3b6ea0742",
+  "source_paths": [
+    "src/mlx2/adapters/qwen3_paged_candidate.py",
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "src/mlx2/runtime/paged_native_atomic_owner.py"
+  ],
+  "license": "mlx2 original project code; no upstream code copied",
+  "modifications": "A separate direct real-model research oracle compares two serial native one-lane prompt forwards with one existing two-lane staged prompt forward at 32/127 rows, then runs the same two-lane Q1 continuation. It checks first and second greedy IDs, bitwise last-row logits, native read and terminal counts, one two-span read per packed layer, exact owner offsets, and full terminal retirement. It records factory, prompt, ready, and host timing spans. It does not change serving selection or a default.",
+  "validation": "The existing CPU staged graph branch test now exercises 32/127 rows, both native branch proofs, one two-span read per layer, publication offsets, and full retirement. Real-model GPU oracle is pending; no speed or route parity is claimed. The first frozen b5c76046 GPUQ oracle stopped before packed prefill: the driver passed a list of ready branches to forward_staged, which requires a tuple. Raw failed receipt SHA-256 b5c121f955f84f207bc4068c2e6da430317d1aa7049680dedeabb730f82fdbe9 is preserved at qualification/runs/varlen-b2-prefill-b5c76046-failed. It provides no numeric or speed evidence. The corrected driver converts after safely collecting branches and CPU tests assert list refusal. Corrected source e8ef9507 passed direct real-model 32/127 oracle under GPUQ rc0, swapouts0, locks restored: four last-row logit comparisons bitwise equal, first IDs [14582,14582], second [198,14582], 28 packed two-span reads/terminals vs56 serial, both ready steps 28 grouped/28 tile/0 direct, zero pending/retained after retirement. Raw receipt SHA-256 8db773d5d557384246d911f65c9363c60504fae010622c66063375e6bc7c61bc in qualification/runs/varlen-b2-prefill-e8ef9507-passed. Isolated serial-then-packed prefill wall 115.17 vs38.06ms is order-confounded and not an HTTP speed claim."
+}

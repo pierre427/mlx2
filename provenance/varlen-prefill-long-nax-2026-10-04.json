@@ -1,0 +1,23 @@
+{
+  "feature": "default-off fused paged long NAX attention read",
+  "source_repository": "https://github.com/ml-explore/mlx",
+  "source_revision": "39400a0d4cf1641bc6e543cb5e3585757f491854",
+  "license": "MIT",
+  "source_paths": {
+    "mlx/backend/metal/scaled_dot_product_attention.cpp": "575e29a36b2d0c653f17b4f55062b644243d2e3dbc362f6725686bef959dd9dd",
+    "mlx/backend/metal/kernels/steel/attn/kernels/steel_attention_nax.h": "dba29e9167611d30a13fda3f336c30a5db70bc2a6e8bea78dd639f4b9547c793",
+    "mlx/backend/metal/kernels/steel/attn/params.h": "f03c6ed73d7298fa69b75a49e7eec54954b6fafd59530a1f175934215412ed80",
+    "mlx/backend/metal/kernels/steel/attn/nax.h": "fb10bcae44095e9fed5c81213d03527dd5fe5ac11be11ec7784bd357c6f317ec",
+    "mlx/backend/metal/kernels/steel/attn/kernels/steel_attention.metal": "6e488dc1ad2914fc73354f1b7cf9d63f9474004ec8814ed6851b4da0e31afc7b"
+  },
+  "local_sources": [
+    "native/paged_kv/vendor/stock_nax_source.h",
+    "native/paged_kv/prefill_long_nax.h",
+    "native/paged_kv/prefill_matrix.h",
+    "native/paged_kv/arena.cpp",
+    "native/paged_kv/arena.h",
+    "native/paged_kv/binding.cpp"
+  ],
+  "modifications": "Adapted the installed 64x32 split-D BF16 NAX online reduction to validated two-span page tables. Cold-origin BK32 fragments use one page lookup per KV tile. The default-off selector has one read dispatch and no global scores/probabilities; existing short ABI and math remain unchanged.",
+  "validation": "Host plan and source CPU tests pass; native extension and Metal source compile offline. Device numerical, terminal and performance gates remain pending; not qualified or selected."
+}

@@ -1,0 +1,24 @@
+{
+  "component": "isolated M5 batched 4-bit affine dequantization reuse comparator",
+  "source_repository": "ml-explore/mlx-lm (read-only research input)",
+  "source_revision": "187370a64fa11264880024b1dc227a7a767b5ba3 (PR #1922, open on 2026-09-26)",
+  "source_paths": [
+    "mlx_lm/models/qgemm.py"
+  ],
+  "source_url": "https://github.com/ml-explore/mlx-lm/pull/1922",
+  "license": "MIT; upstream LICENSE at the pinned revision, Copyright 2023 Apple Inc. The PR source additionally bears Copyright 2025 Apple Inc.",
+  "upstream_copyright_notice": "Copyright 2023 Apple Inc. (repository LICENSE); Copyright 2025 Apple Inc. (PR qgemm.py)",
+  "destination_paths": [
+    "scripts/research/bench_q4_reuse_pr1922.py",
+    "tests/test_q4_reuse_pr1922.py"
+  ],
+  "modifications": [
+    "Uses the pinned PR Metal _SOURCE body verbatim for a fair kernel comparator; does not copy mlx-lm model class replacement, change serving integration, or alter default dispatch.",
+    "Adds strict local shape/dtype/layout admission, synthetic packed-weight input, paired stock/sp_qmm/reuse arms, and source-bound JSONL receipts.",
+    "Adds CPU-only scalar verification of the 4-bit packed indexing and one-dequantization-per-weight mathematical result."
+  ],
+  "validation": [
+    "tests/test_q4_reuse_pr1922.py and script --dry-run: CPU/static only; no M5 numerical or timing claim until GPU gate runs"
+  ],
+  "upstream_mit_notice": "Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the Software), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions: The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software. THE SOFTWARE IS PROVIDED AS IS, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
+}

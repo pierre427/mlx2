@@ -1,0 +1,11 @@
+{
+  "implementation": "explicit_n20_stagewise_packed_prefill_lifetime",
+  "source_repository": "private mlx2",
+  "source_revision": "4622bb06d088f1cfdda42b3cfb977c27789f24d9",
+  "source_paths": ["src/mlx2/runtime/hybrid_packed_prefill.py", "src/mlx2/runtime/qwen35_paged_graph_factory.py", "src/mlx2/runtime/models/qwen3_5.py", "src/mlx2/runtime/models/qwen3_next.py"],
+  "license": "project Apache-2.0; existing model mechanism provenance retained",
+  "modifications": ["explicit full-row GDN and MLP materialization methods", "source-derived per-stage admission ledger", "N20 native host dispatch integration with separate physical counters", "evaluated terminal-safe per-layer hooks and exact failure-root retention"],
+  "validation": {"cpu_checks": 73, "ast_parse": true, "diff_check": true, "gpu_executed": false, "native_runtime_imported": false, "device_numeric_parity": "pending root-owned N2 gate"},
+  "states": {"implemented": true, "qualified": false, "selected_by_default": false, "observed_device_used": false},
+  "scope": "math/lifetime only; native ABI and generic factory/serving admission are separate coordinated slices"
+}

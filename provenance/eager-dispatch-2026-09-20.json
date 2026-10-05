@@ -1,0 +1,35 @@
+{
+  "component": "Qwen4 eager layer dispatch policy and observability",
+  "source_repository": "lab-owned mlx-lm-unified",
+  "source_revision": "5d13ab8f3ffe083605011e108d56d93c0daa8f1b",
+  "source_paths": [
+    "mlx_lm/models/qwen4_exp.py",
+    "tests/test_round_levers.py:TestEagerDispatchToggle"
+  ],
+  "license": "MIT",
+  "license_basis": "Source repository LICENSE; Qwen4 model architecture notes its Apache-2.0 Transformers origin",
+  "destination_paths": [
+    "src/mlx2/adapters/flash_next_policy.py",
+    "src/mlx2/adapters/flash_next.py",
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "src/mlx2/runtime/round_levers.py",
+    "src/mlx2/prometheus.py",
+    "scripts/qualify_eager_dispatch.py",
+    "tests/test_eager_dispatch.py",
+    "tests/test_execution_policy.py"
+  ],
+  "modifications": [
+    "Retained the existing Qwen4 per-layer mx.async_eval mechanism and made enablement, maximum forward rows, and layer stride explicit FlashNextPolicy fields instead of a hard-coded adapter environment choice.",
+    "Added bounded engaged-forward and oversized-forward-decline counters, an adapter diagnostic status object, and Prometheus event export.",
+    "Added bit-identity, dispatch-stride, row-bound decline, environment mapping, and fail-closed policy validation tests.",
+    "Selected stride 2 after two interleaved real-model GPU sweeps found it consistently faster than strides 1 and 4 while remaining bit exact; final current-source qualification is recorded separately.",
+    "Did not add or modify any prefix-cache engine; APCv2 remains the only serving prefix-cache path."
+  ],
+  "validation": [
+    "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/Desktop/mlx2/.venv/bin/python -m pytest -p no:cacheprovider tests/test_eager_dispatch.py tests/test_execution_policy.py tests/test_prometheus.py tests/test_qualification.py -q (88 passed on host Metal, 2026-09-20)",
+    "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/Desktop/mlx2/.venv/bin/python -m pytest -p no:cacheprovider -q (full suite passed on host Metal, 2026-09-20)",
+    "~/Desktop/mlx2/.venv/bin/ruff check --no-cache --select E9,F63,F7,F82 on changed Python files (passed, 2026-09-20)",
+    "qualification/runs/eager-dispatch-20260920/qualification-final.json: committed-source Qwen3.8 Flash-Next Metal run passed all exactness, row-bound and observed-use gates; stride-2 median 15.741 ms versus eager-off 20.118 ms over 24 interleaved direct decode forwards"
+  ],
+  "qualification": "qualified exact and observed-used for the bound Qwen3.8 Flash-Next source/runtime/artifact; direct-forward timing only, not broad serving throughput qualification"
+}

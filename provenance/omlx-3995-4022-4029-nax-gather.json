@@ -1,0 +1,50 @@
+{
+  "component": "NAX (M5 tensor-unit) segmented sorted MoE gather_qmm, with the SwiGLU epilogue on the fused [gate; up] projection and the sorted row map (no x[order // k] copy)",
+  "status": "implemented; bit-identical to the stock path on Metal (kernel and full model, see validation); default OFF behind MLX2_MOE_NAX_GATHER (off|gather|fused; moe_nax_gather.set_mode for in-process A/B). Not qualified, not selected.",
+  "sources": [
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "d6b2b92b11ebcbf4a4c1f002b0d590a3117212a8 (origin/main, 2026-09-29); last change to the mined files 195a69e554c5063f635cde830d192df6a4507457",
+      "source_pr": "jundot/omlx#3995 (perf(m5): NAX sorted gather_qmm with segmented tile scheduling on stock MLX, 8bb1fb9c), #4022 (SwiGLU in the epilogue of the NAX gate/up gather, b18cc5a1), #4029 (row map, 0c9de320), follow-up 195a69e5; all merged",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/m5_gather_qmm_nax.py": "9b16a7b325760f758b40151c21d0a603d59308777252e04698023710d321fb66",
+        "omlx/patches/moe_routes.py": "64958f54f5eeb58cba4faf1af857f10db7bca9347c7f7ffe841fc0fd96d9db7c",
+        "omlx/patches/m5_gather_qmm.py": "9915cc6639fcaffa3cda650b519be73ffc2cd7a2c344099caaf88ea5b41ca4b0",
+        "omlx/patches/qwen35_moe_weighted_sum.py": "f19c77b09e72b9affd09a7068778306055846eca288f2ecc9415dce845115ce5"
+      },
+      "source_regions": [
+        "m5_gather_qmm_nax.py (whole file): tile pre-pass, seg/db matmul schedules, row-mapped loads, SwiGLU epilogue, _plan, supports, _launch, canaries -- adopted nearly verbatim",
+        "moe_routes.py sort_routes: re-expressed as switch_layers._sort_routes (with mlx2's >32768-row tail pad applied to the index and the map)",
+        "m5_gather_qmm.py _nax_rows_ok and fused_gate_up_activation: read for the admission rule (MLX's own rhs gate: rows >= 16, rows / experts >= 4) and the row-map fallback order; the reroute wrapper around mx.gather_qmm is not carried",
+        "qwen35_moe_weighted_sum.py: read for where the row map enters the Qwen prefill; mlx2's FusedGateUpSwitchGLU is wired instead"
+      ]
+    },
+    {
+      "source_repository": "https://github.com/ddalcu/mlx-serve",
+      "source_pr": "ddalcu/mlx-serve#638 (perf(moe): oMLX's segmented tensor-unit sorted gather_qmm, row map and fused SwiGLU), merged",
+      "license": "MIT, Copyright (c) 2026 David Dalcu",
+      "note": "PR body read for the claim (+10.5% Flash-Next prefill, +2.6% gather alone) and the admission rule; no source read or copied (its Zig/Metal kernels pair separate gate and up arrays; mlx2 already holds one concatenated [gate; up] table)."
+    }
+  ],
+  "notice": "provenance/omlx-3995-4022-4029-nax-gather.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/models/moe_nax_gather.py",
+    "src/mlx2/runtime/models/switch_layers.py (QuantizedSwitchLinear hook, _sort_routes)",
+    "src/mlx2/runtime/models/qwen3_next.py (FusedGateUpSwitchGLU fused route, _nax_swiglu_candidate)",
+    "src/mlx2/adapters/flash_next.py (diagnostics moe_nax_gather, absent while off)",
+    "scripts/bench_moe_nax_gather.py",
+    "scripts/ab_moe_nax_gather.py",
+    "tests/test_moe_nax_gather.py",
+    "qualification/runs/port-nax-gather-20261002/"
+  ],
+  "modifications": [
+    "Host gate: Metal available and an M5 device name (as qwen4_qsa_nax), plus the default device must be the GPU; every instantiation still proves nonzero numerics bitwise against mx.gather_qmm on a canary before use (oMLX's canaries, unchanged).",
+    "Policy: MLX2_MOE_NAX_GATHER (default off) replaces OMLX_M5_GATHER_QMM_NAX (default on); MLX2_MOE_NAX_GATHER_PLAN replaces OMLX_M5_GATHER_QMM_NAX_PLAN. The mx.gather_qmm monkeypatch is replaced by explicit calls from QuantizedSwitchLinear (plain gather, after mlx2's rhs pad) and FusedGateUpSwitchGLU (SwiGLU epilogue + row map).",
+    "Split-table pairing (mlx2): Flash-Next serves separate gate/up tables (MLX_QWEN4_MOE_FUSED_GATE_UP=0), so the paired TileLoader takes a gate and an up base pointer/quantization (oMLX's pair_row mapping, generalized), with its own canary against two stock sorted gathers + mlx2's compiled swiglu; sorted_gather_qmm_swiglu_split / try_swiglu_split, wired into FusedDownSwitchGLU. mlx-serve #638 also pairs separate arrays; its code was not read.",
+    "Admission counters (calls per route, fallbacks by reason, not-candidates) and status(); Flash-Next diagnostics carry them only when the mode is not off.",
+    "The GLM-5.3 clamped SwiGLU epilogue stays in the kernel template but is not wired; only exact mlx2 SwiGLU activations and exact QuantizedSwitchLinear tables (not the disk-streamed subclass) are admitted.",
+    "_sort_routes keeps mlx2's _gather_sort tail pad (n > 32768, n % 64) on the index and the row map, so x_tok[row_map] equals _gather_sort's rows exactly."
+  ],
+  "validation": "GPU, M5 Max, mlx 0.32.2.dev20260919+39400a0d4, MLX_ENABLE_TF32=0, qualification/runs/port-nax-gather-20261002. (1) kernel.json: Flash-Next shapes (512 experts top-10, 2560->1280/2x640 and 640->2560), 4- and 8-bit g64, 512/2048/8192-token chunks: raw output bits identical to stock mx.gather_qmm(sorted) for gate_up, down, the concat and split SwiGLU epilogues with and without the row map; one-nibble falsifier differs; MoE layer 1.27-1.63x (gather) and 1.33-1.67x (fused) faster. (2) ab-served.json / ab-all4bit.json: 8192-token prompt, chunks 512/2048/8192, arms off/gather/fused: trunk hidden of all positions and last logits bit-identical on both artifacts; counters nonzero (fused: 48 gather + 48 split-map calls per 8192 chunk), 0 fallbacks. Prefill fused/off 1.204/1.089/1.063 (served) and 1.200/1.143/1.060 (all-4-bit), every on rep faster than every off rep. (3) 48 greedy tokens after a 923-token chat prompt identical across arms, last decode logits bit-identical, 0 NAX calls during decode. CPU: tests/test_moe_nax_gather.py 30 passed."
+}

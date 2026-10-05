@@ -1,0 +1,49 @@
+{
+  "schema": "mlx2.provenance.lfm25-dspark-eval-contract.v1",
+  "kind": "original-local evaluation-interface addition",
+  "local_base_revision": "87c1ecfb7a195fdf8bd00c4cf79800dc94ee2c86",
+  "local_paths": {
+    "src/mlx2/adapters/lfm25_vl.py": "generate_candidate_dspark only",
+    "tests/test_lfm25_dspark_eval_contract_cpu.py": "new host-fake controls"
+  },
+  "mined_code": false,
+  "change": [
+    "keyword-only verification_width: int = 10; type(width) is int and 2 <= width <= 10, checked before image lookup, artifact inspection, source import, load, template or generate",
+    "explicit draft_block_size=verification_width and temperature=0.0 forwarded to pinned mlx_vlm.generate (previously draft_block_size=10 and the pinned sampler default)",
+    "result gains evaluation_contract: source_revision, requested_verification_width, maximum_proposals_per_round (width - 1), temperature, max_tokens; text, finish_reason, target/draft fingerprints and qualified=false/selected=false retained"
+  ],
+  "unchanged": [
+    "default verification width 10 (nine proposals plus anchor), max_tokens 1..512, nonempty prompt gate",
+    "inspect_dspark_artifact trained proposal_length 9 / verification_width 10",
+    "load_candidate_dspark, serving route, diagnostics, ordinary decode, cache and tensor math"
+  ],
+  "requested_not_observed": "evaluation_contract records REQUESTED configuration only. It is not the observed effective width, proposal acceptance or engagement, confidence-head use, state parity or performance. The final round may verify fewer tokens than requested when the max_tokens budget runs out.",
+  "dependency_semantics": {
+    "repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+    "revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+    "license": "MIT (see provenance/lfm25-vl.json)",
+    "read_only_grounds": [
+      "mlx_vlm/generate/common.py DEFAULT_TEMPERATURE = 0.0; explicit 0.0 guards against default drift",
+      "mlx_vlm/speculative/common.py::_dflash_block_total (lines 258-266, sha256 6acfafa426fe0b6e3be215a2e6aac121b20a77457041f294395dde842a1b1b39) owns the explicit-size override: a non-None draft_block_size is returned as-is, else configured block_size capped by runtime_block_size",
+      "mlx_vlm/generate/ar.py documents and forwards draft_block_size as that override",
+      "DSpark draft_block emits width - 1 proposals (per qualification/runs/mechanism-intake-20260930/lfm-dspark-applicability-20261001.json)"
+    ],
+    "source_copied": false
+  },
+  "model_license": {
+    "artifact": "LiquidAI/LFM2.5-VL-3B-DSpark",
+    "license": "LFM Open License v1.0",
+    "note": "custom model licence; disposition kept separate from the MIT dependency licence and from technical qualification"
+  },
+  "grounds": "qualification/runs/mechanism-intake-20260930/lfm-dspark-applicability-20261001.json",
+  "validation": {
+    "status": "builder host-fake tests passed; independently reviewed and host-verified by root; native qualification pending",
+    "host_fake_tests": "2026-10-01 builder claude-opus-5-5: PYTHONDONTWRITEBYTECODE=1 <CPG-Radio venv python 3.11.15, pytest 9.0.3, no mlx/mlx_lm/mlx_vlm/mlx2 installed> -m pytest --noconftest -p no:cacheprovider tests/test_lfm25_dspark_eval_contract_cpu.py -> 79 passed on first run; ruff check passed",
+    "falsifier": "temporary mutation (width check moved after image lookup, draft_block_size=10, temperature dropped) -> 29 failed / 50 passed; function restored byte-identical and 79 passed again",
+    "old_tests_rerun": false,
+    "independent_root": "2026-10-01: full patch/366-line NEW tests/provenance reviewed after stable3036 handoff, confirmed owner task release/worker closure and terminal0. Root blocked-host launcher independently passed79 NEW tests in0.08s (runner0.11s), zero retained native packages; AST preservation passed28 top-level nodes outside the single offline function against87c1ecfb. New-test ruff and diff checks passed. No old tests or builder mutations repeated.",
+    "native_qualification": "none; host fakes do not qualify native DSpark, state or performance"
+  },
+  "qualified": false,
+  "selected": false
+}

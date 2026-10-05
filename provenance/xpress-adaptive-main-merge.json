@@ -1,0 +1,35 @@
+{
+  "implementation": "mlx2 speculative integration main merge",
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_revisions": [
+    "5bf46f1319a4fbff2bfacb0eb6ef549adc7a9ce3",
+    "05f306c7a0f6e166493e383492cad8903442c4d5"
+  ],
+  "license": "project and retained third party notices",
+  "conflicts": {
+    "NOTICE": "retain both main TensorFold Apache notice and feature XPress/LiLiCorr notices",
+    "src/mlx2/serving.py": "retain composed main APCv2 semantic numerical keys and explicit external proposal session scope"
+  },
+  "auto_merge_review": [
+    "src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/runtime/models/gated_delta.py",
+    "src/mlx2/runtime/models/qwen4_exp.py"
+  ],
+  "modifications": [
+    "Preserve latest main fused GDN/QSA defaults and per-instance Qwen4 row-exact implementation.",
+    "Bind final serving numerical laws into external learning route/source/session identities before APC/batch construction.",
+    "Refuse incompatible native row-exact lane/LoRA projection mutation before writes; preserve harmless/default noops."
+  ],
+  "validation": {
+    "broad_cpu": "1734 passed and13 subtests",
+    "final_targeted_cpu": "153 passed",
+    "independent_review_cpu": "186 model/adapter;143 serving/APC;69 dense/dedup; overlap not summed",
+    "m3_hybrid": "48/48 synthetic protocol cells; retained exact pre-final archive",
+    "m3_final_http": "PASS pinned Qwen3-4B BF16/XPress pool and ordinary reference; max17; reused fixed128 cost estimate; no performance claim",
+    "evidence_directory": "qualification/runs/parallel-draft-merge-20261002",
+    "qualified": false,
+    "performance_claim": false,
+    "metal": "qualification/runs/parallel-draft-merge-20261002/m3-http17.json"
+  },
+  "publication": "normal non-force private origin main push; preserve feature branch"
+}

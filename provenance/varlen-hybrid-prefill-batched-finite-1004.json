@@ -1,0 +1,14 @@
+{
+  "implementation": "batch mandatory cold hybrid output finiteness predicates",
+  "source_repository": "mlx2 private project",
+  "source_revision": "7b7d2d39aaaf05a869d2db3a5289fbde5aa362af",
+  "source_paths": ["src/mlx2/runtime/hybrid_packed_prefill.py"],
+  "license": "original project validation scheduling; no upstream code copied",
+  "modifications": ["same complete finite predicates with one stacked evaluation and one host extraction", "receipt policy/predicate count", "CPU nonfinite/failure/publication-order and sync-count proofs"],
+  "validation": "31 orchestrator, 4 finite gate, 5 controlled runner CPU checks; root repeats unchanged controlled runner against new clean source",
+  "observed_prior_evidence": "/tmp/mlx2-short-prefill-controlled-7b7d/receipt.json",
+  "gpu_executed_by_worker": false,
+  "qualified": false,
+  "default_off": true,
+  "price_usable": false
+}

@@ -1,0 +1,21 @@
+{
+  "name": "default-off Qwen3 native terminal read handoff",
+  "status": "implemented-cpu-protocol-tested-unqualified",
+  "source_repository": "original mlx2 project code",
+  "source_revision": "b1123ee11c857db75c69be4551b30409e52dac81",
+  "source_paths": [
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "src/mlx2/adapters/qwen3_paged_candidate.py",
+    "src/mlx2/runtime/paged_native_atomic_owner.py"
+  ],
+  "license": "original mlx2 project code under Apache-2.0; no third-party code copied",
+  "destinations": [
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "src/mlx2/adapters/qwen3_paged_candidate.py",
+    "tests/test_qwen3_paged_native_backend_cpu.py",
+    "docs/PAGED_NATIVE_ATOMIC_OWNER.md"
+  ],
+  "modifications": "Added an explicit one-lane atomic branch entry point. The native backend hands each matching terminal event to the branch, which validates layer and private table coverage, success, and submitted state before completing the read lease once. The existing candidate path retains backend-owned completion.",
+  "validation": "CPU-only focused tests cover successful two-layer handoff, wrong layer refusal before writes, failed terminal callback, closed-without-proof refusal, and existing candidate and owner behavior.",
+  "limitations": "No serving route, native GPU run, model parity, APCv2 integration, approximate publication, or performance qualification. Only complete accepted prefixes can be published. Missing callbacks retain submitted leases pending terminal or arena teardown proof."
+}

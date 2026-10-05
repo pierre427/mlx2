@@ -1,0 +1,17 @@
+{
+  "feature": "default-off native paged attention evaluated-query strides",
+  "source_repository": "mlx2 isolated integrity branch",
+  "source_revision": "12fad06ac3ed718d02e907336b3bd19d5304a9b9",
+  "source_paths": [
+    "native/paged_kv/arena.cpp",
+    "tests/test_paged_attention_read_cpu.py"
+  ],
+  "license": "original mlx2 project code; MLX API used without copying MLX implementation",
+  "modifications": [
+    "Read evaluated query element strides inside the native Metal primitive and bind them to the shader",
+    "Validate positive evaluated strides, byte offset and maximal addressed element against actual buffer bounds",
+    "Index query by evaluated row/head/channel strides while retaining row-major output and native terminal events"
+  ],
+  "validation": "The isolated 12fad06a source passed a bounded M5 Max context 64/65/129 paired Qwen3-0.6B K/V, attended-output and token screen; raw immutable receipt SHA-256 5a62e86c060ff4dfb3d1ef0b907a2da600c9529b489d378ddb8c020f36209a99 is on evidence branch codex/varlen-cb5-stride-evidence-1003. Canonical integration requires its own build and CPU checks; that prior GPU receipt does not bind this new source identity.",
+  "limitations": "Native route remains default-off and unqualified; serving HTTP parity and complete-request price are unmeasured for this integrated source. Actual failed Metal command-buffer retirement remains unproven."
+}

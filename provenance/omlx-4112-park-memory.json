@@ -1,0 +1,42 @@
+{
+  "component": "Measured, adaptive MTP->ordinary park with memory that outlives a cohort (omlx #4112 port)",
+  "status": "implemented, default OFF (mtp_ordinary_handoff.adaptive_park; kill switch MLX2_MTP_ADAPTIVE_PARK=0); unqualified. Static max_mtp_width stays the default for every adapter.",
+  "sources": [
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_revision": "276097ab3402928a741678bfb29f2d97ffd15d1f",
+      "source_pr": "jundot/omlx#4112 (perf(mtp): stop shared MTP from slowing down busy batches), open at read time",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/mlx_lm_mtp/batch_policy.py": "bd93ae1f6f4319922ad4f911154f28ecac341f4bcf57e1b792243871944ad64d",
+        "omlx/patches/mlx_lm_mtp/batch_generator.py": "54a359cc2a0ed165e2440af4fcc016a8dd845df150ac8e580aea0a2dcb1a9ad1"
+      },
+      "source_regions": [
+        "batch_policy.py: _CLEAR_LOSS, BatchPolicy.observe losing/clear_losing streaks, should_park, park, start_parked, held_up, ParkMemory (seed/parked/retired)",
+        "batch_generator.py: _BATCH_PARK_MEMORY/_batch_park_memory (per-model weakref memory), _batch_policy_for_next seed/retire hooks"
+      ],
+      "not_ported": "prompt_priming.py batched priming folds (draft-head history fold batching): mlx2's self-MTP lanes have no per-step priming fold on the ordinary path."
+    }
+  ],
+  "notice": "provenance/omlx-4112-park-memory.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/mtp_park_memory.py",
+    "src/mlx2/runtime/adaptive_policy.py (MTPOrdinaryHandoffPolicy.adaptive_park)",
+    "src/mlx2/runtime/generate.py (MTPGenerationBatch park_memory decision/peek; BatchGenerator _build_mtp_park_memory, _observe_park_round, adaptive latch release)",
+    "src/mlx2/prometheus.py (mtp_adaptive_park_* and new handoff reason counters)",
+    "scripts/bench_mtp_park.py",
+    "tests/test_mtp_park_memory.py"
+  ],
+  "modifications": [
+    "omlx parks within a cohort (ordinary decode inside the shared-MTP batch, re-measured after a cooldown); mlx2's handoff is one-way per lane (the cohort migrates to the ordinary batcher). A 'park' here is that handoff; re-measurement happens on a later cohort after the verdict's cooldown expires.",
+    "omlx scores expected tokens per ms per draft depth from modelled acceptance and per-depth call costs; mlx2 measures realised tokens per wall interval between two consecutive pure decode rounds of the same kind and width (MTP rounds that completed a proposal; ordinary-only rounds), with no prompt work queued, so MTP and ordinary share one timing domain. Mixed rounds are skipped and counted.",
+    "Verdict keyed by cohort width (omlx: row count of the uid cohort); a verdict at k parks cohorts of width >= k; a cohort ahead for 32 decisions clears verdicts at <= its width (same rule).",
+    "Clear loss < 0.9x for 4 decisions and sustained loss <= 1.03x for 16 decisions kept from omlx; decisions count only fresh MTP samples, not every boundary.",
+    "Cooldown counted in ordinary decode steps (128 doubling to 4096, as omlx); on expiry the MTP rate at and above that width is dropped so the next cohort re-measures from scratch.",
+    "New: where ordinary decode was never measured at a width, the rate measured at the nearest wider width bounds it from below (step time is non-decreasing in width); with no ordinary evidence at all, the static max_mtp_width decides (cold start).",
+    "New: the ordinary-handoff latch releases when one more arrival would not be parked (static: plain width < max_mtp_width).",
+    "Memory registry keyed by (model object via weakref, route config hash, static width, settings), so it outlives BatchGenerator rebuilds as well as cohorts.",
+    "Default off, kill switch, bounded counters, receipt evidence (reason, rule, rates, ratio, verdict width) per handed-off lane."
+  ],
+  "validation": "CPU: tests/test_mtp_park_memory.py, 25 tests (settings/refusals, clear and sustained loss, bound, verdict outlives cohort and parks wider widths only, hold clears, cooldown expiry and doubling, registry, BatchGenerator integration on a tiny Qwen4 incl. exact handoff vs ordinary greedy, kill switch). GPU A/B (M5 Max, 2026-10-02): Flash-Next 2/3/4/8/16 lanes vs static width 3, 4 alternated reps: parked cohorts match static and are token-identical; each probe cohort costs 5-8% at 8/16 lanes; no width found where MTP beats the static boundary. Details: qualification/runs/port-park-memory-20261002/README.md."
+}

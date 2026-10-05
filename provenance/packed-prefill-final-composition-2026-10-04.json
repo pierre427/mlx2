@@ -1,0 +1,8 @@
+{
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_revisions": ["56cf8bda8dff6e9cc1cb9b86dddf0c41d32d0ec7", "01e79f9b510bad06734d21ad78eef303000e865b", "4f35d1e5"],
+  "license": "Existing component MIT/Apache-2.0 provenance retained",
+  "modifications": "Isolated composition only. Retains both server startup validators and provenance tails. Serving evaluation block1 remains default and optionalblock16 is not selected. Native sources and binary unchanged.",
+  "validation": "125 focused guarded CPU checks, syntax/dry/diff and unchanged native SHA validation; no author GPU or MLX/native runtime import. Fresh composed-source HTTP gate pending.",
+  "qualified": false
+}

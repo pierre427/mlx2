@@ -1,0 +1,45 @@
+{
+  "schema": "mlx2.hybrid-serving-smoke-source.v1",
+  "date": "2026-10-04",
+  "source_repository": "ssh://git@<private-git-host>/pierrelamy/mlx2.git",
+  "source_commit": "8b4aa286",
+  "source_paths": [
+    "src/mlx2/serving.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/runtime/qwen35_paged_graph_factory.py",
+    "src/mlx2/runtime/paged_hybrid_research_profile.py",
+    "src/mlx2/runtime/paged_price_identity.py",
+    "scripts/research/varlen_b2_http_gate.py"
+  ],
+  "license": "Apache-2.0",
+  "implementation": "Original research runner using real Job/BatchGenerator/source-bound hybrid installer/runtime greedy sampler. No core edits; no model cast or sampled-token replacement. Stdlib supervisor enforces whole worker100s and48GiB. Actualcaps2/4 with alternativecaps4/4 cancellationafter2.",
+  "stock32_candidate": {
+    "path": "/tmp/mlx2-q1-stock-reduction-build-1004/_paged_kv_native.cpython-312-darwin.so",
+    "sha256": "32fbb5ed4354708e6495092f0e33a9c8d0689f61dd119d7f5dafa2954cbf29e3",
+    "explicit_profile": true,
+    "profile_generated_after_final_clean_source": true
+  },
+  "validation": {
+    "CPU_preflight_tests": 5,
+    "CPU_preflight_status": "passed",
+    "MLX_native_runtime_imports": "forbidden during CPU verification",
+    "GPU_executed": false,
+    "numeric_parity": "not_tested",
+    "qualified": false,
+    "performance_qualified": false
+  },
+  "gate": [
+    "actualservingatomicattachment",
+    "actualgreedysamplercounts2/4",
+    "selectedandobservednativehybridreceipts",
+    "B2followedbyB1survivor",
+    "per-layercallbackandatomicKV/GDNpublicationproof",
+    "zeroepochs/pages/ledgerandclosedresources/globalcharge restoration"
+  ],
+  "limits": [
+    "notanHTTPservergate",
+    "notamodelnumericparitygate",
+    "between-roundcancellationonly",
+    "profile/corelifecyclefixesmustbeintegratedbeforeexecution"
+  ]
+}

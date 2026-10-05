@@ -1,0 +1,18 @@
+{
+  "feature": "bounded actual-native Qwen3 loopback HTTP functional gate",
+  "source_repository": "mlx2",
+  "source_revision": "6696c546b8bcdc579c12f5ab4ecb080dd9e33479",
+  "source_paths": [
+    "src/mlx2/serving.py",
+    "src/mlx2/server.py",
+    "scripts/research/varlen_live_request_price.py",
+    "scripts/research/varlen_selected_qwen3_route_spot.py"
+  ],
+  "license": "project code",
+  "modifications": [
+    "Add a source-bound real HTTP gate runner using an in-process loopback server and actual BatchGenerator native backend",
+    "Observe sampled token IDs at the generator seam, inspect the HTTP route receipt and physical native owner retirement, and require APCv2 no-write and fail-closed policy",
+    "Keep the native route explicit, cold-only, default-off and unqualified"
+  ],
+  "validation": "28 focused CPU tests passed; actual native loopback HTTP gate passed on source 2902042f with matching ordinary/native token IDs, 56 terminal native reads, zero retained owner state, APCv2 no-write and warm/write refusals. See qualification/runs/varlen-native-http-gate-20261003. Route remains unqualified."
+}

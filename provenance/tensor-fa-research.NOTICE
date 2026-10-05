@@ -1,0 +1,46 @@
+Adapted source notice: approximate tensor-API dense attention research kernel
+
+src/mlx2/adapters/tensor_fa_research.py contains a Metal kernel body
+(TENSOR_FA_SOURCE) adapted from ggml's tensor-API flash attention kernel:
+
+  repository: https://github.com/ggml-org/llama.cpp
+  pull request: 29570 (open, unmerged when read on 2026-10-01)
+  revision: 7f0d4d5e0ae391e4ff75512402cb5dd141507244
+  file: ggml/src/ggml-metal/kernels/fa_f16.metal (blob 2dfd3799d137fc32bd370e8e637163d8894125e7)
+  function: kernel_flash_attn_ext_tensor
+
+Adapted parts: the Q/C/NSG tiling, the tensor_ops matmul2d QK^T and P*V
+descriptors, half-rounded scaled queries, half probabilities with the fp32
+row sum taken over the same rounded values, the lazy running-max rescale
+(only on growth > 8) with a per-row scale and a threadgroup "last rescale"
+flag, and the clipped cooperative-tensor store. mlx2 modifications: MLX
+mx.fast.metal_kernel wrapping, B1 [1, H, L, D] contiguous layout, in-kernel
+causal masking from an explicit absolute query start (finite -FLT_MAX), a
+causal KV loop bound, fp32 output, and a race-free atomic threadgroup
+engagement counter. Masks, sinks, ALiBi and softcap paths were removed.
+Independent review additionally replaced the upstream shared last-rescale
+flag with one single-writer flag per SIMD group, reduced after a barrier.
+
+The original copyright and permission notice follow.
+
+MIT License
+
+Copyright (c) 2023-2026 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

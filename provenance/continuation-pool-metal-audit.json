@@ -1,0 +1,31 @@
+{
+  "implementation_kind": "original mlx2 validation harness extension",
+  "source_repository": "mlx2",
+  "source_revision": "6ae4e6ba65e2fdbb26533ff7f4363c306886e9e4",
+  "source_paths": [
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/runtime/continuation_verification.py",
+    "src/mlx2/runtime/generate.py",
+    "scripts/validate_continuation_pool_metal.py"
+  ],
+  "license": "MIT; original project validation code, no external implementation copied",
+  "modifications": [
+    "Audit every sampled target-law callback whose full input history equals a prefix actually reached by the emitted token walk; report ignored future branch callbacks, duplicate attempts and missing reached callbacks explicitly",
+    "Independent original Model.__call__ oracle prefills only prompt[:-1] in matching bounded chunks, consumes the reserved final prompt anchor S1 and advances each emitted token S1; generated history is never re-prefilled as a block",
+    "Preserve the existing first-law diagnostic and add per-prefix raw-logit max error/RMSE/argmax, processed-law L1/max error, finiteness, emitted token/history and ordinary reference cache offsets",
+    "Every reached processed-law comparison must be present, finite and satisfy both L1 <= 0.01 and max absolute error <= 1e-4; raw-logit exact numeric value equality is reported independently after float32 host conversion and does not assert artifact-byte or bitwise equality",
+    "An explicit float32 diagnostic cast reconfigures the row-exact backbone dtype pin before fresh caches are allocated; original artifact mode is unchanged"
+  ],
+  "validation": {
+    "cpu_cli_tests": 22,
+    "combined_cpu_tests": 76,
+    "coverage": "Existing import-guarded dry-run/admission/proposal rollback plus exact prompt-prefix/S1 call geometry, ignored unreached callbacks, missing callback/history mismatch rejection, late drift detection despite an exact first law, and all actually reached sampled draws through the real tiny XPress complete-path executor against original prefix/S1 logits",
+    "metal_execution": "Parent-owned future validation; no GPU executed by this implementation agent",
+    "cache_boundary": "Reference offsets are recorded; this extension does not independently compare every K/V tensor"
+  },
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "observed_used": false,
+  "performance_claim": false
+}

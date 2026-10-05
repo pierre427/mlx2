@@ -14,8 +14,14 @@
   ],
   "modifications": [
     "Generalized the source's group-32 row matvec to the artifact's 4-bit group-64 dense projections while preserving row-independent arithmetic.",
+    "Added a separate byte-wide q8/group-64 Metal kernel for the Qwen4 artifact; q4 nibble scaling remains isolated to the original q4 path.",
+    "Added an explicit per-arm enable bit so one loaded model can compare ordinary and TensorFold row laws without reinstalling weights.",
     "Restricted installation to eligible dense projections; streamed PLE and routed expert weights remain owned by mlx2.",
     "Use one numerical law at both one-row decode and multi-row verification, bind the policy and counters to route receipts, and leave the ordinary route available as reference."
   ],
-  "qualification": "candidate; synthetic numerical, model output, memory, and thermal performance gates pending"
+  "validation": [
+    "scripts/benchmark_flash_tensorfold_qmv.py",
+    "qualification/runs/tensorfold-coalescing-20260930/flash-tensorfold-qmv-gpu.json"
+  ],
+  "qualification": "The q4 candidate is implemented, row-invariant, performance no-go, default-off, unqualified and unselected; its prior M5 exact-shape sweep was slower in 11 of 12 cells. The new q8 law is implemented and CPU-checked but unqualified and unselected. A bounded q8 Metal oracle compiled at row widths 1, 3 and 16 with maximum BF16 differences of 0.0078125, 0.0078125 and 0.015625 versus stock QMM, so full-model token identity and performance must be established independently."
 }

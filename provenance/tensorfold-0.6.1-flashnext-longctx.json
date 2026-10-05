@@ -1,0 +1,66 @@
+{
+  "component": "Flash-Next long-context decode: TensorFold 0.6.1 intake (exact fused QSA block scores; PLE early dispatch)",
+  "status": "Both mechanisms implemented, default off, unqualified, not selected. qsa_fused_scores: Metal bit-identical (scores bytes, argpartition ids, real-layer attention output and K/V) and full-model tokens identical; decode faster at >= 32K on every route measured (MTP on +1.6..+2.2%, MTP off +2.6..+9.0%, 4 lanes +2.7%), neutral within noise at 16K; default-on candidate pending qualification. ple_early_dispatch: tokens identical, no measurable gain.",
+  "sources": [
+    {
+      "source_repository": "https://github.com/ashhart/TensorFold",
+      "source_revision": "17c73e189f5e6a5304cda7ea37f086f9c49b4788",
+      "source_release": "0.6.1 (CHANGELOG: 'Flash Next on Macs at long context'), mechanisms in commit b8027439a3affb73afaf217383e837c461183adf",
+      "license": "Apache-2.0 (LICENSE at the revision; NOTICE and THIRD_PARTY_NOTICES.md honoured, see notice)",
+      "source_files": {
+        "src/tensorfold/kernels/qwen/flash_next/v1/attention.py": "b81ddcd0093a2e7308d0b5b87b0760c2711a676665ab8c02f857da99928280ee",
+        "src/tensorfold/kernels/qwen/flash_next/v1/base.py": "81807c7a4d799565c63a3191f3fd26bd9abf267b3d6b7c5b777f20e47e790fce",
+        "src/tensorfold/families/qwen4_exp/runtime.py": "3a7366b1dd5b9c2b8eb0e0fac642b073d1f7e01c82c12de8e37a2731bdd8487c",
+        "src/tensorfold/families/qwen4_exp/decode.py": "5bb4bfc342adc321b0c8de8993bff33b52ce4270364d4ebb9ddcc3f8663cf975",
+        "src/tensorfold/families/qwen4_exp/mtp_cache.py": "b488ae77cb8a7f85894852df19608284fd3baec2d299c25d6a81e475b6f88dff",
+        "src/tensorfold/engine/lane_engine.py": "07b18373e1eef56776d7220528d138c5702f861707a79eca514cd926377fef9c",
+        "tests/test_flash_next_index_scores.py": "df98bd285c44aa577c3e3bf365aa0e0c13d9c789010b381e7caf16be96487d41",
+        "tests/test_flash_next_chain_side.py": "3b1575a50cf11ecea8bb46ec3cf61111c25f8fddf6dfcecdf6be90981c155df8",
+        "tests/test_lane_stream_context.py": "d8a4847bc0f8dbb41241e6f3624cbe418b36c7e449f653b61f25d6d7d030d94e"
+      },
+      "source_regions": [
+        "attention.py: _IDX_SCORES (lines 95-122), SCORE_ROWS/score_blocks (123-131), index_scores (324-336): keys-stationary block scores -- idea only (one read of a pooled block serves every row); TensorFold's per-lane fma + simd_sum arithmetic is NOT used",
+        "runtime.py: FlashNext.hidden (176-194): a window's ids stay an mx.array, async_eval'd, read on the host at the n-gram layer -- idea only",
+        "runtime.py _warm_sparse (70-84) + attention.py warm_decode (529-546): kernels built at load -- read, not ported",
+        "mtp_cache.py MTPCache.chaining/side + attention.py _split_source/attention_rows_split (377-418) + _IDX_POOL_REL: chained draft rows beside the head's cache -- read, not ported (mlx2's chain does not copy the head's KV, measured)",
+        "lane_engine.py LaneStream.context (185-197): context list grown in place -- read, not ported (mlx2 has no per-round host rebuild of the context)"
+      ]
+    },
+    {
+      "source_repository": "https://github.com/ml-explore/mlx (as installed: 0.32.2.dev20260919+39400a0d4, local source checkout ~/Desktop/mlx-core-qmm-4392 at that commit)",
+      "license": "MIT",
+      "source_regions": [
+        "mlx/backend/metal/matmul.cpp: Matmul::eval_gpu / steel_matmul_axpby routing at 39400a0d4 (fp32 with TF32 off -> non-NAX steel GEMM, no split-K for K=128 < N, gemv_wide only for half types)",
+        "mlx/backend/metal/kernels/steel/gemm/mma.h: BlockMMA::mma / tile_matmad (per-element simdgroup_multiply_accumulate chain over K in steps of 8), BaseMMAFrag::get_coord (fragment layout)",
+        "mlx/backend/metal/kernels/binary_ops.h: Maximum (NaN-propagating), Divide",
+        "mlx/backend/common/metal_kernel.h: CompileOptions default MathMode::Safe for custom kernels"
+      ],
+      "note": "Arithmetic transcribed as behaviour (no file copied); no Apple header added."
+    }
+  ],
+  "notice": "NOTICE (section 'TensorFold 0.6.1')",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_qsa_scores.py",
+    "src/mlx2/runtime/models/qwen4_exp.py (QSAIndexer.__call__ scores wiring; NGramEmbedding.reads_host_ids; Qwen4ExpTextModel.__call__ PLE early dispatch; set_ple_early_dispatch; qwen4_eager_dispatch_status)",
+    "src/mlx2/adapters/flash_next_policy.py (qsa_fused_scores, ple_early_dispatch)",
+    "src/mlx2/adapters/flash_next.py (tensorfold_longctx_diagnostics)",
+    "scripts/check_qwen4_qsa_scores.py",
+    "scripts/check_tf_longctx_layers.py",
+    "scripts/bench_tf_longctx.py",
+    "tests/test_tensorfold_longctx.py",
+    "qualification/runs/tf-longctx-20261001/"
+  ],
+  "modifications": [
+    "Scores: TensorFold's kernel computes each block score with per-lane fp32 fma and simd_sum (its own reference bits). mlx2 must reproduce its stock MLX chain (einsum of fp32 casts -> maximum -> sum over heads -> / sqrt(128) -> where), so qwen4_qsa_scores.block_scores runs MLX's non-NAX steel-GEMM element chain (simdgroup_multiply_accumulate over K in steps of 8 from a zero accumulator, BaseMMAFrag layout) on bf16 keys converted exactly in registers, then MLX's Maximum, the in-order head sum from the reduction identity, the fp32 scalar division and the select. Keys-stationary: a simdgroup holds all L*H query rows (<= 4 fragments) and reads each 8-block key fragment once for them; 64 blocks per 128-thread threadgroup. argpartition stays MLX (TensorFold has its own radix select; not ported).",
+    "Scores admission: Metal, MLX_ENABLE_TF32 off (TF32 routes the stock GEMM to NAX), head_dim 128, L*H <= 32, N > 128 blocks, batch <= 64 with an int or per-row integer offset array (the batched cache's left-pad path), bf16/fp16/fp32 operands; refusals counted by reason, the MLX chain runs. Prefill chunks (> 8 rows) are refused as 'rows'.",
+    "Window ids: mlx2 already keeps a decode/verify window's ids on the device and reads them at the PLE layer (verify-sync site qwen4.ple.ids_eval); the port adds only the async_eval of the hidden state before a PLE layer whose route reads host ids (NGramEmbedding.reads_host_ids mirrors __call__), within the eager-dispatch row bound.",
+    "Both behind FlashNextPolicy fields (default off, absent from env/receipts when off), kill switches qwen4_qsa_scores.set_enabled(False) / qwen4_exp.set_ple_early_dispatch(False), counters in diagnostics key tensorfold_longctx only when selected."
+  ],
+  "validation": [
+    "CPU: tests/test_tensorfold_longctx.py (12 tests: policy opt-in/receipt-neutral/strict, diagnostics key, scores admission + counted fallback with the stock selection kept, stock chain vs numpy, PLE dispatch order + identical outputs, row-bound decline, reads_host_ids vs the route actually taken).",
+    "Metal kernel: scripts/check_qwen4_qsa_scores.py -- 96/96 cases (rows 1/2/3/4/8 x contexts 8.2K..128K x 3 seeds incl. duplicated-block ties) and, after forcing the loops unrolled (the L >= 3 build was 3-15x slow without it), 36/36, plus batched 4-row array-offset cases at 16K/32K/64K: scores bytes and argpartition ids identical.",
+    "Metal real layers: scripts/check_tf_longctx_layers.py on Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP -- trunk layers 3/23/47 + MTP head, 16K/32K/64K, widths 1/2/3, plain / batched / left-padded two-row caches: 108/108 cases with selected ids, attention output and K/V byte-identical, fused scores engaged on all 432 compared calls (qualification/runs/tf-longctx-20261001/layers2.json).",
+    "Full model (scripts/bench_tf_longctx.py, in-process rotated arms, 256 greedy tokens, real docs+code prompts): greedy tokens identical to base in every run. qsa_fused_scores paired median [range]: B1 MTP on 16K +0.5% [-2.5,+2.9], 32K +1.6% [+0.8,+2.9], 64K +2.2% [-0.3,+3.2] (8 reps); B1 MTP off 16K -2.1% [-3.8,+4.0], 32K +2.6% [+1.5,+3.4], 64K +9.0% [+3.4,+14.8]; 4 lanes 32K MTP off (scores+ple) +2.7% [+1.4,+3.7], MTP on +1.0% [-0.8,+4.3]. ple_early_dispatch: -3.3%..+1.5% paired medians, no reliable gain (qualification/runs/tf-longctx-20261001/README.md)."
+  ],
+  "selection": "2026-10-01: qsa_fused_scores selected as the Flash-Next default by Pierre (exact; B1 MTP on +1.6% at 32K, +2.2% at 64K; MTP off +2.6% at 32K; 4 lanes +2.7%). ple_early_dispatch stays opt-in (no reliable gain). Not qualified until the next requalification."
+}

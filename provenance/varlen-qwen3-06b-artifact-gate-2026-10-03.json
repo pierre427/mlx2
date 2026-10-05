@@ -1,0 +1,15 @@
+{
+  "name": "offline Qwen3-0.6B ordinary versus paged artifact gate",
+  "status": "dry-run-source-and-artifact-verified-gpu-deferred",
+  "source_repository": "mlx2 original gate at e9ef286c76ba97723b03432cc32ac351c68eb52b; local mlx-lm-unified source revision 1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+  "source_paths": [
+    "src/mlx2/runtime/qwen3_paged_native_backend.py",
+    "src/mlx2/adapters/qwen3_paged_candidate.py",
+    "~/Desktop/mlx-uag/mlx-lm-unified/mlx_lm/models/qwen3.py",
+    "~/Desktop/mlx-uag/mlx-lm-unified/mlx_lm/utils.py"
+  ],
+  "license": "original mlx2 gate code under Apache-2.0; local mlx_lm source is imported at execution and no implementation is copied",
+  "modifications": "Added default-dry-run full checkpoint hash/config/tensor metadata/source verification and a bounded opt-in GPU gate using one in-memory FP16 cast model for both ordinary and paged arms. The paged wrapper follows the local Qwen3 source's q/k RMSNorm, RoPE, projection, residual, MLP, and tied output head; native backend packing is explicitly scheduled on its writer stream.",
+  "validation": "Dry-run verified complete 1,503,300,328-byte weight SHA256, config SHA256, 311 BF16 tensor descriptors, and clean local mlx_lm revision/Qwen3 source hash. Focused backend CPU tests passed. No GPU model load or execution occurred.",
+  "limitations": "The local mlx_lm source is not installed in the mlx2 environment and is imported from an explicit verified path only for the deferred GPU gate. Model parity, continuation accuracy, page-boundary behavior on GPU, serving qualification, and performance remain unobserved."
+}

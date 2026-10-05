@@ -1,0 +1,47 @@
+{
+  "implementation_kind": "original mlx2 host-only code",
+  "source_repository": "mlx2",
+  "source_revision": "2207af9a980f7def6173a3a057221267de634f9a",
+  "license": "project license; no upstream implementation copied",
+  "source_paths": [
+    "src/mlx2/runtime/proposal_pool.py",
+    "scripts/validate_continuation_pool_metal.py"
+  ],
+  "conceptual_references": [
+    {
+      "url": "https://arxiv.org/abs/2608.20530",
+      "implementation": "LiLiCoRR paper lattice is separately adapted in lilicorr.py; this empirical source-selection critic is an original extension, not the published trained lattice"
+    },
+    {
+      "path": "src/mlx2/runtime/dflash_tree.py",
+      "implementation": "Existing tree mechanism reviewed for optional parent-prefix closure; pool budget is 15 complete sequences, which can require 225 token nodes"
+    }
+  ],
+  "modifications": [
+    "Revision-bound loaded-source admission and immutable complete causal token paths; no unavailable checkpoint/provider fabrication",
+    "Deduplicate identical full sequences while retaining all provider source/revision/candidate provenance; preserve all full paths in optional parent-prefix closure",
+    "Rank up to 15 complete sequences by a product-of-conditional-reliability proxy for accepted-token count, optionally divided by explicit same-unit declared or previously observed cost",
+    "Within-source beam scores provide transparent ordinals only; cold equal predictions interleave source ordinals without comparing uncalibrated logits between sources",
+    "Original LiLiCoRR-inspired source-selection critic: bounded global mechanism priors, target/tokenizer/vocabulary and source-revision-bound model residuals, opaque hashed session residuals; neutral priors and explicit hierarchical shrinkage with same-source confidence bins",
+    "Separate selection tickets, discard, and whole-outer-round committed target-prefix feedback; matching prefixes positive, first delivered mismatch negative, later suffixes censored; same-source prefix events and same-artifact aliases deduplicated",
+    "Shared registry explicit opt-in with lock, bounded model/session/source LRU retention and revision/sample-count/eviction receipts; raw tenant or session names not accepted",
+    "Exact execution requires drawing from processed target law then following candidate-prefix matches; no mixed/refined joint q distribution exported",
+    "Source-model residual identity additionally includes deterministic full route/settings revision, avoiding window/pass/beam/computation-precision policy bleed; pool-local feedback revision and shared ranking revision appear separately in immutable tickets and receipts",
+    "Original bounded M3 harness measures resident B1 full-provider proposal cost at one fixed committed context instead of declaring zero; warmup discarded, target depth0..15 and widths1/5/15 measured separately, timed proposal probes discard authenticated pending tickets and restore both cache/RNG/history boundaries without publishing labels or costs to the critic",
+    "Harness computation precision creates separate deterministic route/source session pins and fresh isolated critic namespace before generation; FP32 diagnostic source artifacts remain unchanged and memory guard precedes payload allocation"
+  ],
+  "boundaries": {
+    "ranking_score": "empirical proxy, not a calibrated joint continuation probability, throughput result, pretrained source critic, or exact acceptance forecast",
+    "source_admission": "provider asserts actually loaded compatible tensor source; host pool independently validates record pins and geometry only",
+    "teacher_authority": "caller must supply actually delivered target prefix only after every physical group commits; host registry does not independently attest teacher execution",
+    "global_sharing": "global priors intentionally aggregate only mechanism-position reliability; model/session residuals remain source/model-revision and opaque session-hash bound",
+    "sampling": "pool path ranking affects candidate reuse only; processed target law defines each delivered token",
+    "gpu": "no GPU executed for host pool tests"
+  },
+  "validation": "36 host-only tests: source/target/tokenizer/session and path closure admission, top15 full sequences plus225-node parent closure, dedup provenance, uncalibrated cold confidence and ordinal coverage, committed ranking updates, censoring/common-prefix labels, authentic immutable tickets/replay/pending/discard guards, explicit cost evidence, global/model/session shrinkage, revision rebound, anonymous scope separation, bounded LRU retention and same-artifact alias dedup. Strict public-registry validation, feature calibration after committed observations only, route/settings-revision residual separation, and64 concurrent host commits verify counts. Joint focused pool/provider/branch-executor CPU suite:63 passed; no GPU or performance run. Harness:16 CPU/CLI tests cover hard tensor-import guarded dry runs, explicit GPU ownership, bounded geometry/deadline/repetitions, FP32/artifact source-pin and critic isolation, pending-binding rejection, fake partial-provider fault cleanup and actual tiny XPress resident proposal rollback without feedback. Latest joint pool/provider/branch-executor/harness CPU suite:92 passed. Harness mixed sampling compares first canonical processed branch law with ordinary S1 before RNG draws (L1 limit0.01); actual M3 execution remains parent-owned, no Metal execution by the harness author.",
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "observed_used": false,
+  "performance_claim": false
+}

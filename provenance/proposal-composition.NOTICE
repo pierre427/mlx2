@@ -1,0 +1,4 @@
+Original mlx2 proposal arbitration and adapter integration. Existing prompt
+lookup and self-MTP mechanisms are MIT implementations with upstream notices
+and pinned revisions recorded in provenance/flashnext.json. No upstream tensor
+implementation or model checkpoint is copied by this integration.

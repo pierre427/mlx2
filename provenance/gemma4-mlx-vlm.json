@@ -1,0 +1,47 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+  "source_revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+  "source_paths": [
+    "mlx_vlm/models/gemma4/gemma4.py",
+    "mlx_vlm/models/gemma4/language.py",
+    "mlx_vlm/models/gemma4/config.py",
+    "mlx_vlm/models/cache.py"
+  ],
+  "license": "MIT",
+  "destination_paths": [
+    "src/mlx2/adapters/gemma4.py",
+    "src/mlx2/adapters/mlx_vlm.py",
+    "src/mlx2/adapters/registry.py"
+  ],
+  "model_sources": {
+    "google/gemma-4-26B-A4B": "24548b62aa021d562695c04aaf7758a1ea47990b",
+    "google/gemma-4-31B": "5bbc2fb1c1b2c611d06e3d9f23c170ba21659d89"
+  },
+  "modifications": [
+    "Declare separate sparse-MoE and dense Gemma 4 adapter identities and reject topology mismatches before loading",
+    "Use mlx2-owned full and rotating KV cache types for ordinary decode, APCv2 and continuous batching",
+    "Bind image and video projected-feature reuse to model and media fingerprints",
+    "Keep multimodal processor payloads adapter-owned with isolated first prefill and no audio capability on these checkpoints",
+    "Keep speculative routes unselected and preserve ordinary decode as the reference",
+    "Prepend <bos> to text prompts: the base checkpoints ship no chat template and the served text path encodes without special tokens, so text requests reached the model without <bos> and the 26B-A4B degenerated"
+  ],
+  "validation": {
+    "cpu": "Focused adapter, registry, sampling, stop and output tests passed; one pre-existing assertion about the concurrent nemotron_h registry entry remains outside this change",
+    "gpu": "Both 8-bit variants passed direct text/image/video prefill and decode; projected-image feature reuse hit on repeated input. Both passed mlx2 candidate ordinary serving with text and media requests, 263-token image APCv2 reuse, and observed two-lane batching. Both BF16 originals passed direct text prefill and decode.",
+    "receipts": [
+      "qualification/runs/gemma4-20260924/26b-a4b-q8-direct.json",
+      "qualification/runs/gemma4-20260924/26b-a4b-q8-serving.json",
+      "qualification/runs/gemma4-20260924/31b-q8-direct.json",
+      "qualification/runs/gemma4-20260924/31b-q8-serving.json",
+      "qualification/runs/gemma4-20260924/26b-a4b-bf16-direct.json",
+      "qualification/runs/gemma4-20260924/31b-bf16-direct.json",
+      "qualification/runs/gemma4-defaults-20260925/results/smoke-26b-q8.json",
+      "qualification/runs/gemma4-defaults-20260925/results/smoke-31b-q8.json",
+      "qualification/runs/gemma4-defaults-20260925/results/smoke-26b-bf16.json",
+      "qualification/runs/gemma4-defaults-20260925/results/smoke-31b-bf16.json",
+      "qualification/runs/gemma4-defaults-20260925/results/smoke-26b-q8-prefix-nobos.json"
+    ],
+    "qualification": "Candidate smoke only; the full approved serving qualification harness has not run, so no production route is selected",
+    "gpu_upstream_mlx_vlm_67599f2e": "2026-09-25 HTTP smoke through python -m mlx2.server at shipped defaults (unqualified) on pinned upstream mlx-vlm 67599f2e: all four local artifacts (26B-A4B and 31B, 8-bit and bf16) loaded with strict weights and no load failures; text chat streaming and non-streaming (identical), completions, image, video, exact image/video APCv2 reuse (273/274 and 601/602 tokens), two concurrent lanes at width 2 matching solo output, stop string and max_tokens passed; tools and reasoning requests refused 400 (undeclared). Smoke, not qualification."
+  }
+}

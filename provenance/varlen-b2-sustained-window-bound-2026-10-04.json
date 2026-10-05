@@ -1,0 +1,13 @@
+{
+  "feature": "pre-allocation sustained B2 short-Q1 context bound",
+  "source_repository": "mlx2 local combined B2 branch",
+  "source_revision": "f053367a5f1689345caee346259e99645c962f48",
+  "source_paths": [
+    "src/mlx2/runtime/paged_b2_research_profile.py",
+    "src/mlx2/serving.py",
+    "native/paged_kv/arena.cpp"
+  ],
+  "license": "mlx2 original project code; no upstream code copied",
+  "modifications": "A 32-token sustained B2 prompt is admitted only through length 97, since its 31 later one-token ready steps reach at most 128 visible KV tokens. Length 98 would reach 129 and leave the mandatory short-Q1 tile path. Two-token v2/v3 profiles retain their previous 32–127 bound. The profile validator rejects overlong sustained cohorts before shared native arena allocation.",
+  "validation": "CPU boundary checks admit 97, reject 98, and prove shared-arena factory is not called for a rejected cohort. Native GPU work is not needed for this admission-only change."
+}

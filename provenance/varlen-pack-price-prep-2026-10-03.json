@@ -1,0 +1,14 @@
+{
+  "name": "default-off varlen complete-forward benchmark plan and complete-request price loader",
+  "status": "implemented-host-only-unqualified",
+  "source_repository": "original mlx2 implementation based on private canonical varlen revision b641dc68a73b109bcfde7fb315964cee6c98ea3e",
+  "source_paths": [
+    "src/mlx2/runtime/paged_pack_scheduler.py",
+    "scripts/research/varlen_native_attention_gpu_probe.py",
+    "docs/research/varlen-paged-attention-build-plan-2026-10-03.md"
+  ],
+  "license": "original mlx2 project code; no third-party implementation copied",
+  "modifications": "Added a CPU-dry, bounded future M5 complete-model-forward timing harness with exact-shape raw observations and engagement contract. Added a loader that refuses kernel-only and forward-only receipts as serving prices, requiring a complete-request scope, evidence digest, live identity and context match.",
+  "validation": "CPU dry-run and focused loader tests only; no GPU execution or performance result.",
+  "limitations": "The native complete-forward driver and complete-request price campaign do not yet exist. The script's memory bound depends on a truthful driver-reported peak; the hard time cap is SIGALRM. No route selection, qualification, or performance claim."
+}

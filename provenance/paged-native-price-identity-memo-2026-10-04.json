@@ -1,0 +1,19 @@
+{
+  "feature": "default-off native paged price identity attestation memo",
+  "source_repository": "mlx2 isolated varlen canonical branch",
+  "source_revision": "0ba66d545824872a65f0b698fd6a58c038930de5",
+  "source_paths": [
+    "src/mlx2/runtime/paged_price_identity.py",
+    "src/mlx2/serving.py",
+    "tests/test_paged_price_identity_cpu.py",
+    "tests/test_paged_native_serving_attach_cpu.py"
+  ],
+  "license": "original mlx2 project code; no external implementation copied",
+  "modifications": [
+    "Fully verify model, source, wheel and loaded native bytes once before an explicitly configured native HTTP service becomes ready",
+    "At every explicit native admission, compare Git HEAD and cleanliness plus device, inode, size, mtime and ctime for the model manifest, every listed model file, wheel, loaded MLX binaries and native extension",
+    "Refuse any detected drift without silently reattesting until a fresh process and validate the price receipt on every request"
+  ],
+  "validation": "CPU source timing on clean 0ba66d54 measured two full identities at 1363.715 and 1351.163 ms; tests cover memo hit, caller mutation isolation, mutable model drift, source drift and explicit startup preverification. A new source-bound cold/warm GPU gate is required before any performance or route claim.",
+  "limitations": "File metadata and Git cleanliness guard ordinary mutable-file drift, but an adversary who can forge ctime and inode could defeat this process-local shortcut; such a hostile filesystem is outside this route's trust boundary. Native remains default-off and unqualified. Earlier 0ba66d54 calibration and HTTP receipts are stale after this source change."
+}

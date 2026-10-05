@@ -1,0 +1,32 @@
+{
+  "source_repository": "https://github.com/ashhart/TensorFold.git",
+  "source_revision": "71377a5373ed7b394f1b480ba2a6a3986b03af1c",
+  "source_paths": [
+    "src/tensorfold/kernels/qwen/flash_next/v1/prefill_mm.py"
+  ],
+  "license": "MIT",
+  "notice": "provenance/LICENSE.TensorFold-MIT",
+  "destination_paths": [
+    "src/mlx2/runtime/models/tensorfold_prefill.py",
+    "src/mlx2/runtime/models/prefill_metal.py",
+    "src/mlx2/runtime/models/gated_delta.py",
+    "src/mlx2/runtime/prefill_plan.py"
+  ],
+  "modifications": [
+    "Original mlx2 implementations inspired by TensorFold prefill grouping and its native-MLX M5 path. No MLX upstream kernel source is copied, fetched or inlined.",
+    "Native backend packs qkv/z and dense gate/up weights once; the reference modules retain views of those arrays. Small GDN b/a projections retain reference reductions after full-model testing rejected four-way packing.",
+    "Generalized only the native grouped-QMM backend from affine q4/group-64 to validated affine q4 or q8/group-64 geometry. The custom M5 tiled Metal backend remains q4-only.",
+    "Permit Qwen4 shared-expert dense gate/up grouping while routed switch-expert tables remain excluded and adapter-owned varlen compaction retains the sparse-MoE boundary.",
+    "Original M5 Metal Performance Primitives 32x64x64 tiled q4/group-64 matrix kernel: threadgroup dequantization, masked row/output tails, fused optional biases. Separate fused gate/up/SwiGLU kernel writes only the final activation.",
+    "Bounded-segment orchestration of installed mx.fast.gated_delta_update, chunk-8/chunk-16 policy, nonzero state carry, and balanced tails. The dependency supplies the scan primitive.",
+    "Decode and speculative verification keep reference arithmetic. Each opt-in candidate has a stable qualification and APCv2 cache identity; default settings and receipts remain unchanged."
+  ],
+  "validation": [
+    "tests/test_tensorfold_prefill.py",
+    "tests/test_prefill_step_and_import_guard.py",
+    "scripts/check_tensorfold_prefill.py",
+    "scripts/check_prefill_model.py",
+    "qualification/runs/tensorfold-prefill-20260930/"
+  ],
+  "status": "implemented experimental candidates; no production selection or performance qualification"
+}

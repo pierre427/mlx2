@@ -1,0 +1,16 @@
+{
+  "feature": "default-off B2 Q1 vector-offset RoPE research arm",
+  "source_repository": "mlx2 local sustained B2 serving branch",
+  "source_revision": "c20cc2bf683181d209b8d14415531c9556941a42",
+  "source_paths": [
+    "src/mlx2/runtime/models/standard_decoder.py",
+    "src/mlx2/adapters/qwen3_paged_candidate.py",
+    "src/mlx2/runtime/paged_b2_research_profile.py",
+    "src/mlx2/runtime/paged_native_graph_group.py",
+    "scripts/research/varlen_b2_http_gate.py",
+    "scripts/research/varlen_b2_http_performance.py"
+  ],
+  "license": "mlx2 original project code; no upstream code copied",
+  "modifications": "For the explicitly admitted two-lane Q1 graph, use the installed MLX RoPE vector batch-offset interface to rotate Q and K together across both rows. This replaces four lane-local RoPE calls and two concatenations per layer with two vector calls and no concatenation. A separate v5 source-bound profile requires the new vector flag and keeps the v4 32-token profile available as the same-source control. Route receipts count vector Q1 calls per proven ready layer. Ordinary decode and other paged graph shapes retain their existing math.",
+  "validation": "CPU bitwise Q/K/V comparisons against the old lane-local path passed at dim 128/256 and offsets 32/96, 63/127, 63/65, 64/128; vector call-count proof is two versus four per layer, and invalid ragged/offset inputs fail closed. 103 focused serving and staged-graph CPU tests passed. Source 46cc1645 v5 HTTP functional gate passed exact ordinary/native 32-token parity, 868 vector calls, 868 grouped/tile dispatches, 896 successful native reads/terminals, and full retirement (receipt SHA256 739b41fa65ac2a64af98fa949fdc4de52d8b83bc930955d64142aa07d48861e3). Same-source O-G-G-O-O-G HTTP performance passed parity but warm grouped decode was 138-140 versus ordinary 545-598 aggregate tokens/s (receipt SHA256 48921c7769a7c4acc93198dd2d55879f0bf2ae757fd22601edcfdbf3456613b9). A same-source v4-versus-v5 screen is still needed to isolate the vector contribution; no speed claim or default promotion."
+}

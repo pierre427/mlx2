@@ -1,0 +1,86 @@
+{
+  "component": "Flash-Next one-token routed MoE decode on the served split gate/up tables: two-table gate+up/SwiGLU kernel (omlx #4113), a tile4-arithmetic down kernel with two rows per threadgroup (omlx #4055 idea), one-expert weight views and the shared-expert fold (omlx #4039)",
+  "status": "implemented; Metal bit-identical to the served block on real Flash-Next layers; opt-in via FlashNextPolicy.moe_routed_decode (gate_up | gate_up_down | gate_up_down_shared), default off; not qualified (no qualification receipt). See validation for the full-model A/B.",
+  "sources": [
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_pr": "jundot/omlx#4113 (perf(qwen): enable fused MoE decode for FP16 and top-8 routing), open, read 2026-09-30",
+      "source_revision": "1335263e8503b3f632819b0d3985a5b7b45fe92c",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/qwen35_moe_routed_decode.py": "cac0be6d852861394142b231dc02b095cdd7aaeacfa268c480a6c8479be28563"
+      },
+      "source_regions": [
+        "qwen35_moe_routed_decode.py: _ROWS qmv_rows with two pointer sets (gate rows from one table, up rows from another), as already re-expressed by mlx2's unmerged top-8 candidate (branch codex/mechanism-intake-20260930, commit 38c8d502, CANDIDATE_GATE_UP_SOURCE); SPLIT_GATE_UP_SOURCE here is that candidate kernel with top-k fixed at 10 and grid z generalised to token * TOPK + slot"
+      ]
+    },
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_pr": "jundot/omlx#4039 (perf(qwen4): fused 5-bit MoE, DeltaNet and attention one-token decode), merged as f5bf6f7bfd90f566b4573ed5b958dddb171039d2",
+      "source_revision": "3d433694214f5082aabd754d27cb3ee57f9889f1",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/qwen35_moe_routed_decode.py": "ff6258273e939aa644a9df98848f5cc7ae5f904d0985efbf8bc403640e979b75",
+        "omlx/patches/qwen35_moe_router.py": "a7026def8e8371a05568657365d431d1b8f08cd328d297681a36c543a2e05215"
+      },
+      "source_regions": [
+        "qwen35_moe_routed_decode.py: module docstring (MLX command-buffer MB cap counts each bound input whole), _address and _expert_view (bind a[:1] only when it aliases a at the same address and both are C-contiguous) -- re-expressed as expert_operands/_expert_view with a per-module cache",
+        "qwen35_moe_routed_decode.py: _ROWS (per-format namespaced qmv_rows), _COMMON swiglu_store, _GATE_UP_SHARED (shared rows; its shared-gate row is not carried), _DOWN_SHARED_ROWS and _DOWN_TAIL's precise-exp sigmoid and gated-shared combine -- carried into SHARED_GATE_UP_SOURCE / SHARED_DOWN_SOURCE with the routed down replaced by tile4 arithmetic and the combine matched to mlx2's eager y + sigmoid(g) * s",
+        "qwen35_moe_router.py router_gemv and softmax_topk_row: read, not ported (see read_not_ported)"
+      ]
+    },
+    {
+      "source_repository": "https://github.com/jundot/omlx",
+      "source_pr": "jundot/omlx#4055 (perf(qwen4): MoE down launch on two rows per simdgroup for one-token decode), open, read 2026-09-30",
+      "source_revision": "e6108149a4b4feb707d54c0ab33f8e02a6a8652a",
+      "license": "Apache-2.0",
+      "source_files": {
+        "omlx/patches/qwen35_moe_routed_decode.py": "84ff7671fe8b1cb5daad4018376babdea0daaa92bdb636e733883d5299183ba5"
+      },
+      "source_regions": [
+        "qwen35_moe_routed_decode.py: _down_rows (2 rows for one-token decode, 4 otherwise; OMLX_QWEN35_MOE_DOWN_ROWS) -- idea only; applied to mlx2's own tile4 arithmetic, not to omlx's qmv down"
+      ]
+    },
+    {
+      "source_repository": "mlx2 (this repository)",
+      "source_revision": "01ee4f7d",
+      "license": "MIT (qwen4_fused_moe.py is adapted from mlx-lm-unified; see provenance/flashnext.json)",
+      "source_files": {
+        "src/mlx2/runtime/models/qwen4_fused_moe.py": "89ebc0ddcd0fae0d766530d5bea25a2346e0de82e0a17fc718331a3ad08e5759"
+      },
+      "source_regions": [
+        "_DOWN_REDUCE_TILE4_SOURCE: SERVED_DOWN_SOURCE keeps its per-(slot, row) arithmetic line for line and parameterises the rows per threadgroup (RPS)"
+      ]
+    }
+  ],
+  "read_not_ported": {
+    "#4039 router gemv + softmax/top-k fold": "Skipped. omlx's router_gemv reproduces MLX's bf16 gemv (unquantized nn.Linear). The Flash-Next router gate is 8-bit gs64 (MLX qmv_fast 8-bit), so the gemv transcription does not apply; an adapted version would be a wider 8-bit qmv_fast. mlx2 already has an opt-in softmax/top-k router kernel (moe_router_kernel).",
+    "#4039 5-bit / other formats": "Not applicable: the served experts are 4-bit gs64.",
+    "#4055 verify-window rows": "Not applicable: only one-token decode is admitted."
+  },
+  "notice": "provenance/omlx-routed-split-flash-next.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_routed_decode.py (admit_split_routed_decode, expert_operands/_expert_view/expert_view_count, SPLIT_GATE_UP_SOURCE, SERVED_DOWN_SOURCE, split_gate_up_swiglu, served_down, QMV_ROWS/_format_header, SHARED_*_SOURCE, admit_shared_fold, shared_fold_decode, views/rows switches; views also applied to the #3912 kernels)",
+    "src/mlx2/runtime/models/qwen3_next.py (_try_routed_decode for fused and split tables, _served_down_refusal, _shared_fold_refusal/_try_shared_fold, routed_down_* and shared_fold_* counters, FusedDownSwitchGLU hook, block no longer forces routed decode off on split tables)",
+    "src/mlx2/adapters/flash_next_policy.py (moe_routed_decode gains gate_up_down)",
+    "src/mlx2/adapters/flash_next.py (routed_decode diagnostics: down counters, views, rows)",
+    "scripts/check_fn_split_routed_decode.py",
+    "scripts/bench_fn_routed_decode.py (arm suffixes, down counters, policy num_draft, swap guard)",
+    "tests/test_omlx_fn_ports.py (split-table cases)",
+    "src/mlx2/runtime/models/qwen4_moe_window.py (per-format shared kernels, 2026-10-01)",
+    "scripts/check_fn_moe_window.py (--model, 2026-10-01)",
+    "scripts/bench_8bit_hc_fold.py (2026-10-01)"
+  ],
+  "modifications": [
+    "Split gate+up: the candidate's two-table kernel with TOPK fixed at 10 and x/y rows addressed by grid z = token * TOPK + slot (only one token admitted). Admission requires exactly QuantizedSwitchLinear (resident) tables, bf16, q4/g64, hidden % 512 == 0, intermediate % 512 != 0 and % 64 == 0.",
+    "Served down: omlx's down/combine reproduces MLX's stock gather_qmm + weighted sum; the Flash-Next profile runs mlx2's tile4 fused down instead (fp32 slot sum), so the #4055 idea (fewer rows per threadgroup, more threadgroups) is applied to a copy of tile4's arithmetic. It runs only where the block would dispatch tile4 at width 1 and tile4's own admission accepts; otherwise the down half declines (counted, routed_down_fallbacks) and the block's down runs.",
+    "Views: omlx builds them once per plan; mlx2 caches them on the QuantizedSwitchLinear (holding the originals so ids cannot be reused) and rebuilds when an array is replaced. They are applied to every routed kernel, including the #3912 fused-table kernels. The tile4 kernel in qwen4_fused_moe is unchanged (still binds whole tables).",
+    "No first-launch self-disable (a kernel error propagates), matching the existing #3912 port.",
+    "Live switches for A/Bs: set_expert_views (MLX_QWEN4_MOE_ROUTED_VIEWS, default on) and set_served_down_rows (MLX_QWEN4_MOE_ROUTED_DOWN_ROWS, 2 or 4, default 2). Both are grid/binding-only; the serving kill switch is the policy mode.",
+    "Shared fold (mode gate_up_down_shared): gate+up grid z 0 = the shared expert's gate/up rows (qmv_fast 4-bit + SwiGLU), z 1..10 = routed slots; the down launch adds a sixth simdgroup with the shared expert's qmv down rows and ends with mlx2's eager combine: T(tile4 routed) + T(T(sigmoid(g)) * T(shared)), sigmoid with metal::precise::exp as the -fno-fast-math metallib computes it. Unlike omlx, the shared-expert gate logit g is NOT folded: it stays the block's own shared_expert_gate(x) launch and enters the down launch as an input, because an in-kernel 8-bit qmv row differed from MLX by one bf16 ulp on 1 of 36960 full-model calls. Runs at block level only when the block would run tile4, compiled glue is off, the switch holds split resident tables and the shared MLP is plain 4-bit gs64 QuantizedLinear with no lane or tensorfold-prefill hook; otherwise it declines with a counted reason (shared_fold_fallbacks) and the routed half runs as gate_up_down.",
+    "2026-10-01 (lane W3, mixed-precision artifacts): the shared fold admits a 4- or 8-bit shared expert (gate/up one width, down its own) with the routed experts still 4-bit. The shared rows read their own namespaced copy of the QMV header at their width (q8f: MLX qmv_fast 8-bit, 8 values per lane per 256-value block, for gate/up at hidden 2560; q8s: plain qmv 8-bit, 4 values per lane per 128-value block plus the guarded tail, for down at inter 640). 4/4 keeps the original kernel source and name byte for byte; other formats get a suffixed kernel (_s88). Admission also requires MLX's own kernel choice (qmv_fast for gate/up, plain qmv for down: not a whole qmv_fast block, not a qmv_quad width). The shared gate logit stays the block's own launch whatever its format (the uncensored artifact's is a dense bf16 [1, 2560] Linear). The MoE row window (qwen4_moe_window.shared_rows) uses the same per-format kernels.",
+    "2026-10-01: MoE row windows admit a dense bf16 shared_expert_gate (nn.Linear, no bias): its logit is computed one one-token-shaped call per row (a multi-row dense matmul is not the one-token gemv), recorded as projections:dense_per_row in row-exact windows."
+  ],
+  "validation": "CPU: tests/test_omlx_fn_ports.py (kernels replaced by composed references: split admission incl. subclass and mismatched tables, split gate_up/two_launch/gate_up_down wiring and counters, down-half decline off tile4, served-layout block honours the mode, policy value, view aliasing/rebuild/non-contiguous refusal, env parsing). Metal (M5 Max, mlx 0.32.2.dev20260919+39400a0d4): scripts/check_fn_split_routed_decode.py on real artifact layers 0/23/47 and mtp.0, 16 natural + 16 skewed synthetic routings per layer: every arm (gate_up; gate_up_down with rows 2/4 and views on/off; gate_up_down_shared with rows 2/4 and views on/off) bit-identical (uint16) to the served block or switch, hidden and served_down bit-identical to swiglu(gather_qmm) and tile4, 0 max_abs_diff (qualification/runs/omlx-l2-routed-reach-20260930/split-routed-exact.json). Full-model A/B: see qualification/runs/omlx-l2-routed-reach-20260930/README.md. Shared fold: an in-kernel 8-bit shared-gate row diverged once in 36960 full-model calls (fold-hunt-gate-row-in-kernel.json); with the gate logit as an input, a per-call full-model hunt over 6 prompts x 384 tokens found 0 mismatches in 110880 calls for both gate_up_down and gate_up_down_shared (percall-hunt-full-model.json). 2026-10-01 (lane W3, qualification/runs/omlx-w3-8bit-20261001): 8-bit shared expert (uncensored artifact; dense bf16 shared gate) check_fn_split_routed_decode pass on layers 0/23/47/mtp.0 (every arm 64/64, pieces 128/128), 4-bit re-check pass; check_fn_moe_window (serving caps lifted) pass on both artifacts, 8752 cases each; full-model per-call hunt 37,170 one-token MoE calls served by the fold, 0 mismatches; B1 MTP-off gain shared with the HC change in the A/B above (tokens identical).",
+  "selection": "2026-09-30: selected as the Flash-Next default (moe_routed_decode='gate_up_down_shared') on the omlx roadmap campaign branch at Pierre's request. Not qualified: the default policy receipt changed, so Flash-Next serves labelled unqualified until it is requalified. The status field above records the evidence as of implementation."
+}

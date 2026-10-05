@@ -1,0 +1,17 @@
+{
+  "component": "Research-only matched B1 Qwen3.8-27B coarse-head pilot",
+  "source_repository": "jundot/omlx (read-only research input)",
+  "source_revision": "3e9703518984c294c2ed989cf968727d0e0ffa56",
+  "source_paths": ["omlx/patches/mlx_lm_mtp/batch_generator.py:1654-1707", "omlx/patches/mlx_lm_mtp/batch_generator.py:1861-1915", "omlx/patches/mlx_lm_mtp/batch_generator.py:2962-3057"],
+  "source_url": "https://github.com/jundot/omlx/pull/3958",
+  "license": "Apache-2.0",
+  "mlx2_reference_revision": "7b74470204220fbc99c7038c5dd1eb15e8e14b12",
+  "mlx2_reference_paths": ["src/mlx2/runtime/models/qwen38_27b.py", "src/mlx2/runtime/hybrid_speculative.py", "src/mlx2/runtime/sample_utils.py"],
+  "destination_paths": ["scripts/research/coarse_head_b1_pilot.py", "tests/test_coarse_head_b1_pilot.py"],
+  "modifications": [
+    "Original throwaway runner uses mlx2 mtp_step and committed checkpoint APIs, with teacher-forced identical tokens across dense FC, q4 FC and target branches.",
+    "Creates a q3/group128 copy of the exact affine head; selects 64 candidates then rescores the original q4/group64 head rows and checks gather parity.",
+    "Captures three B1 rows and source, artifact, capture-code, parameter, and per-row history hashes. This pilot is deliberately outside the 36-row admission schema and changes no production route."
+  ],
+  "validation": ["Tiny MLX CPU end-to-end capture, source/row-digest and exact-rescore checks, two focused CPU tests passing; real 27B GPU pilot pending"]
+}

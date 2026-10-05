@@ -1,0 +1,46 @@
+{
+  "name": "ragged-pld-survivor-continuation",
+  "status": "implemented (diagnostic driver orchestration repair); CPU-tested over a host Driver substitute only; never run on a model, never run natively; nothing is qualified, selected or observed-used",
+  "license": "Apache-2.0 (mlx2 LICENSE); original local diagnostic repair, no third-party code or text copied; no Apple copyright header",
+  "origin": "original mlx2 repair of the existing ragged PLD qualification driver; not mined from mlx-lm-unified or any other repository; no external mining",
+  "task": "CPG task 919550a053e140c2880c919be177f332 (session 62e71a29dca64f57aebeac7b6e167f1a), builder claude-opus-5-5",
+  "destination_paths": [
+    "scripts/qualify_ragged_pld.py (run_all orchestration only)",
+    "tests/test_ragged_pld_survivor_continuation_cpu.py (new)",
+    "provenance/ragged-pld-survivor-continuation.json (new)"
+  ],
+  "baseline": {
+    "repository": "local mlx2 worktree ~/.codex/worktrees/mechanism-intake/mlx2",
+    "revision": "ff7495c9eeb25da7b7f5ae41032d35cfdaf838ca",
+    "branch": "codex/mechanism-intake-20260930",
+    "files": {
+      "scripts/qualify_ragged_pld.py": {"blob": "47234bf79e23203631fca7dbb8c85e743d092c55", "sha256": "c15495ca664b6a061698ec6c4bd713bf140447c46f6a01d9124e5f2469bc0e3a"},
+      "scripts/paired_direct_ab.py (reused, unchanged)": {"blob": "9f244427f931809317414aaa90033102dabe4d06", "sha256": "aa7a9de7f9e4dae49aa107e5c9a0ab457d9731eb686630513550e7ff9d7f74e8"}
+    },
+    "defect": "source gap in run_all at the baseline: every pld_removal lane record had _final popped without Driver.continuation, and the removal comparison called compare(..., prefix_only=(removed lane,), continuation=False). Surviving lanes of the removal arm were therefore never continued from their final cache, and a survivor whose cache was wrong only in a way a continuation exposes could not be refused by the removal comparison. Orchestration gap, not a native numerical finding"
+  },
+  "modifications": [
+    "run_all only (two statements): after each arm, the lane skipped for continuation is the lane the pld_removal arm ACTUALLY removed (removed['lane'] returned by Driver.run), never args.remove_lane; that lane's _final is popped and Driver.continuation is never called on it, so its dead cache is never resumed or materialised. Every other lane of pld_removal (the survivors) gets the unchanged Driver.continuation immediately after the arm, exactly like the other four arms, so its final response and cache are released before the next arm (or post-run identity) as before",
+    "when no removal actually happened (removed is None) no lane is skipped: all pld_removal lanes are continued and compared in full, and the existing coverage item closed_boundary_removal=False still refuses (coverage_refused); an innocent lane is not discarded",
+    "the removal comparison now calls the unchanged compare(..., prefix_only=(removed lane,) if removed else ()) with its default continuation=True instead of continuation=False: surviving lanes need the same strict continuation evidence (continuation_refusal on both arms, token and final-state digest equality) as every other PLD comparison; the removed lane keeps the existing non-empty prefix-only scope (compare's prefix_only branch continues before any row/state/continuation check)",
+    "unchanged: Driver.run, Driver.continuation (and its _final pop/lifetime), compare, continuation_refusal, row_evidence_refusal, snapshot_refusal, lane_row_evidence, coverage, the engagement loop, verdict order, identity helpers and gates, ordinary-decode reference math, arms, schema/evidence tags and the default CLI protocol (logprob_rows 16, continuation_tokens 4, remove_lane 0, remove_after 4). --continuation-tokens 0 still yields Driver.continuation's existing 'unavailable: disabled' record, which compare refuses (now also for removal survivors)"
+  ],
+  "validation": [
+    "NEW tests/test_ragged_pld_survivor_continuation_cpu.py, command: PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ~/Desktop/mlx2/.venv/bin/python -m pytest --noconftest -p no:cacheprovider -o addopts= -q tests/test_ragged_pld_survivor_continuation_cpu.py",
+    "run once BEFORE the driver change against the unmodified baseline ff7495c9 driver: 42 failed, 8 passed (expected red: survivors never continued, removal compared with continuation=False). After the run_all change: 50 passed in 0.10s, no other test run",
+    "native imports (mlx, mlx_lm, mlx2) blocked at builtins.__import__ AND on sys.meta_path before the driver/oracle import and during every test; every test asserts no native module loaded before and after; state_digest guarded so only state_digest(None) can run",
+    "EXECUTED: the real run_all over a host Driver subclass that keeps the real Driver.continuation and check_geometry and replaces only __init__ and run (strict v2 records with complete digests); preflight and checked_post_run_identity are host substitutes; arguments come from the real build_parser/resolve_args. Scenarios at width 2 (remove lane 0) and width 4 (remove lane 2): a clean positive control reaches verdict pass; continuation callbacks and cache resumes are requested for every unremoved lane of every arm and never for the removed lane; exact event order (each arm's continuations immediately after that arm, before the next arm) and no held _final at any arm change or at post-run identity; missing actual removal discards no lane, keeps coverage_refused and still compares the requested lane strictly; the removed lane follows run's report, not --remove-lane; removed-lane prefix differing is a counterexample, empty prefix incomparable, unavailable removed final/rows ignored as before; survivor (pld_removal) and reference (ordinary_b1) continuation token mismatch, state-bit mismatch, incomplete final digest, raising resume, run failures, no tokens, and an absent record all refuse (exact removal-comparison entry asserted; survivor-only defects leave every other comparison exact); --continuation-tokens 0 records 'unavailable: disabled' for survivors with no resume and refuses via the existing oracle; an unrelated KeyError/TypeError from continuation and a ValueError from the removal arm propagate out of run_all with no receipt assembled",
+    "ruff check on the new test file: clean. ruff on scripts/qualify_ragged_pld.py reports exactly the baseline ff7495c9 findings (EXE001, I001, F841), no new finding, no broad cleanup. ast parse of both Python files, json.tool on this file and git diff --check: clean",
+    "NOT run (by scope): old test files (tests/test_qualify_ragged_pld.py, tests/test_ragged_pld_evidence_cpu.py, tests/test_ragged_pld_identity_cpu.py, tests/test_ragged_pld_north_identity_cpu.py), tiny or native runs, mutation controls. By reading only: the old AST checks (six compare calls with logprob_rows=rows, driver.run before driver.continuation, one try around Driver construction) still match the source; the tiny native test that asserts pld_removal tokens_exact now also compares survivor continuations and was not rerun"
+  ],
+  "limitations": [
+    "host substitutes only: Driver.run is replaced by a host fake in the new tests (the real Driver.continuation runs on top of it); no generator, adapter, cache, tensor or model has run with this change",
+    "the earlier North B2 numerical counterexample stands as a historical limitation; it was not rerun, explained or fixed here and nothing in this change bears on it",
+    "real lane-removal state, rollback exactness, engagement and native B2/B4 survivor behaviour are not proved by host records; this is diagnostic preparation, not native batching, rollback or performance qualification",
+    "--i-own-the-gpu remains a caller assertion; nothing here acquires or verifies GPU ownership"
+  ],
+  "pending": [
+    "independent root source/test review, hash freeze and local commit (root-owned)",
+    "native ragged PLD removal run under a GPU owner's lease (queued; out of scope)"
+  ]
+}

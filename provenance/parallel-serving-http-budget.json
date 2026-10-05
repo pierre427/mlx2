@@ -1,0 +1,26 @@
+{
+  "implementation_kind": "original mlx2 validation harness extension",
+  "source_repository": "mlx2",
+  "source_revision": "240aba65",
+  "source_paths": ["scripts/validate_parallel_serving_metal.py"],
+  "license": "MIT; original project code, no external implementation copied",
+  "modifications": [
+    "Add --max-tokens default48 bounded17..64 and --request-timeout-seconds default240 bounded1..900 to the existing HTTP integration harness",
+    "Default48 preserves all existing network payload budgets exactly: main/reference48, mixed16/32/48/64, cancellation128; dry-run receipts explicitly call this legacy_default_payloads rather than implying a48 hard cap",
+    "Nondefault budgets use the same configured cap for cold/warm/stream/ordinary reference and cancellation, and differing mixed lane budgets cap-3 throughcap; all overridden request payloads are within the cap",
+    "Thread the configured request timeout through every normal HTTP request and streaming call; startup health probes preserve their independent3-second timeout",
+    "Cancellation still opens a real streaming HTTP request and closes the response after two observed nonterminal SSE events; completed or prematurely ended streams cannot be labelled active cancellations"
+  ],
+  "validation": {
+    "cpu_cli_payload_tests": 13,
+    "coverage": "Hard tensor-import and subprocess-launch guarded dry run, explicit GPU ownership refusal, exact default request payloads, bounded short/reference/mixed payload plans, stable pool session identifiers, invalid budget/timeouts, actual response context closure and timeout forwarding with host SSE fixtures, terminal stream cancellation refusal",
+    "gpu_execution": false,
+    "http_inference_executed_by_author": false,
+    "performance": "Shortened integration budgets do not qualify throughput or erase the previously observed48-token HTTP timeout240 failure"
+  },
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "observed_used": false,
+  "performance_claim": false
+}

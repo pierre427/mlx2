@@ -1,0 +1,14 @@
+{
+  "implementation":"source_bound_controlled_B20_attention_primitive_oracle",
+  "source_repository":"private mlx2",
+  "source_revision":"a4915becd3b0ccf300db105ff3b47324c0bb8443",
+  "source_paths":["scripts/research/varlen_packed_n20_device_oracle.py","src/mlx2/runtime/qwen3_paged_native_backend.py","src/mlx2/runtime/paged_kv_token.py","src/mlx2/runtime/paged_kv_write.py"],
+  "license":"project Apache-2.0; existing native/model provenance retained",
+  "modifications":["actual frozen400-case domain20 geometry binding","source/wheel/core/dylib/native/input identity gates","warm1+three alternating matched pairs","chunked rawBF16 oracle and physical terminal/retirement proof everypair","separate nativehostplan/bind/eval/drain and stockbind/eval scope","100s/12GiB RSS+MLXactive guard and bounded cache telemetry"],
+  "native_sha256":"2ddf5b91a88bbf8f451c1eaaae9919bdff1e6effd161262b7df61c4e5d2cf350",
+  "mlx_wheel_sha256":"9cf6fc8312845b233a10092c35d6575870d2fabedaa9bc04f38f8c41394eee48",
+  "prepared_inputs_raw_sha256":"d5271584b7e215b71eae4c56950d35e0f3c8b197b1cb6a9f325dacc31ee96d0a",
+  "validation":{"cpu_checks":8,"gpu_executed":false,"runtime_imported":false,"device_numerical_parity":"pending root gate","performance":"unmeasured"},
+  "scope":"attention-only syntheticBF16 operands at actual ragged prompt geometry; no model/token/s or serving claim",
+  "qualified":false,"selected_by_default":false
+}

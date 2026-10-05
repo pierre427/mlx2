@@ -1,0 +1,51 @@
+{
+  "component": "Local conflict resolution of the mechanism-intake branch into main (routed decode, routed candidate, provenance log, omlx FN port tests)",
+  "status": "Resolution complete and independently root-reviewed for main publication. CPU-only verification is recorded in qualification/runs/mechanism-intake-20260930/main-merge-cpu-review.json. NOT natively requalified; existing receipts remain parent-revision-bound.",
+  "merge": {
+    "main_parent": "709bedf8dabf671b6d60a326bae26fe49b92ae7c",
+    "intake_parent": "b6d54c2e19b6ce4b6012f05332749d39bd9e7192",
+    "merge_base": "d5886a98925dc9e731dcef3f45552d60e8c88612",
+    "branch": "codex/merge-mechanism-intake-20261001",
+    "resolved_by": "claude-opus-5-5 (single agent, no subagents), 2026-10-01",
+    "license": "Apache-2.0 (mlx2 repository license); no external source refreshed or newly mined. The mined code involved keeps its existing records: provenance/omlx-4113-routed-candidate.json (intake candidate, jundot/omlx#4113 @1335263e, Apache-2.0) and provenance/omlx-routed-split-flash-next.json (main split routed / served down / shared fold)."
+  },
+  "parent_blobs": {
+    "src/mlx2/runtime/models/qwen3_next.py": {"main": "ae8d11e92dce3ab2504d12814a7ded3fa2d44d0b", "intake": "6c503fffe4c6a76d56225b3f8877a3b9bcbff28e"},
+    "src/mlx2/runtime/models/qwen4_routed_decode.py": {"main": "3fce4e58cf85f5a027fe1af331c569add5e4fb08", "intake": "a8a1929fd24f9a1a3761665992c898e38ea4ae0b"},
+    "tests/test_omlx_fn_ports.py": {"main": "cf0f8df2a1bb133303f8659093e163373f902efe", "intake": "0ba9ceab660fd45f7170dc2974758458ff32766e"},
+    "docs/PROVENANCE.md": {"main": "59b90c79b6a962b63a4cedcaba5c29b9d180cd64", "intake": "c3b585ee64bf1bb60609f97f19a3897d673c835a"},
+    "src/mlx2/adapters/flash_next.py": {"main": "72884fddf08cd5fae0e12356cd788d7d82ab1c39", "intake": "818d1ebe1391315c3cabc7e4ffdfd261ce4bc6fa"}
+  },
+  "resolved_sha256": {
+    "docs/PROVENANCE.md": "c3016848e2e586436415c70335ac95afdcca962d7a7d3f5cfa7d164e18a7dc56",
+    "src/mlx2/runtime/models/qwen3_next.py": "b9ad63e72fdf5e69cc6a49cf76aef50481a8c692e2f34ec2a9b8b8d71e5d8e32",
+    "src/mlx2/runtime/models/qwen4_routed_decode.py": "a2ac40282463ef0fc24c1c75a38aa5944b27a2f14c11b3e91c8cdd9b0c619014",
+    "tests/test_omlx_fn_ports.py": "8c69a04836827ad51c68dba13fcf76b99ef7984c788df3959297bbbdb65bab9d",
+    "tests/test_mechanism_intake_merge_cpu.py": "4a108b35ffd01b5435d893f6ad5b4a99815d59d20fbcb501b636c4c4abe24ac4",
+    "src/mlx2/adapters/flash_next.py": "0fbf6dc2796056e7f0703996659f0a94c5fd663e750dab74a29ffb2c054a646c"
+    ,"tests/test_lfm25_dspark_eval_contract_cpu.py": "ff40345e95823d96fc621112c3a054de2aadff7dbf09dd9a2c4cfa99531b6b16"
+  },
+  "resolutions": {
+    "docs/PROVENANCE.md": "Append/append conflict. Result is main's file byte-for-byte followed by intake's appended lines byte-for-byte (one blank separator, markers removed). No entry edited, no qualification state upgraded.",
+    "src/mlx2/runtime/models/qwen4_routed_decode.py": "Intake only appended the #4113 candidate block after base line 521; main edited and appended elsewhere. Result is main's file byte-for-byte followed by intake's appended block byte-for-byte. Every shared symbol the candidate reads (QMV_HEADER, SIGMOID, _header, _quantized_ok, RoutedDecodeAdmission, runtime_supported, BITS, GROUP_SIZE, GATE_UP_ROWS, GATE_UP_SIMDGROUPS, DOWN_ROWS, imports) is AST-identical in base, main, intake and merge, so no candidate header/helper isolation was needed; main-modified symbols (MODES, _kernels, gate_up_swiglu, down_combine) are not read by the candidate. qwen4_fused_gdn.served_silu_refusal (candidate runtime gate, auto-merged) equals intake's.",
+    "src/mlx2/runtime/models/qwen3_next.py": "Main's split routed decode, served down (_served_down_refusal), shared fold, MoE row windows, top-k launch/fold, setters and defaults kept verbatim; intake's candidate APIs (_CANDIDATE_REASON_SLOTS, _enable_routed_candidate, _try_routed_candidate, routed_candidate_stats, set_moe_routed_candidate_mode, set_fused_expert_kernel_mode exclusion) kept verbatim. Hand-merged: FusedDownSwitchGLU.__call__ tries the candidate first only when variant == 'stock' (local renamed to 'candidate'), then main's _try_routed_decode path including the gate_up-only hidden and variant pass-through. _try_routed_decode computes degraded after main's gate_up_down_shared -> gate_up_down mapping as mode in (two_launch, gate_up_down) with no scores. Both down counters (main routed_down_calls, intake routed_decode_down_calls) are incremented together at every actual routed-down site: served_down, down_combine, _try_shared_fold, _try_topk_fold_decode. Both setters set_moe_topk_mode and set_moe_routed_candidate_mode return their mode. Block __init__/__call__ were auto-merged by git (intake's split-table candidate attach and stock-path score plumbing alongside main's changes).",
+    "tests/test_omlx_fn_ports.py": "Kept intake's _block helper and its two block regression tests, and main's renamed policy test test_flash_next_policy_switch_defaults_to_the_fold_and_off_is_receipt_neutral with its gate_up_down_shared default assertions. Intake's old-name test_flash_next_policy_switch_is_opt_in_and_receipt_neutral was dropped as superseded by main's rename (main's body was already the merged body).",
+    "src/mlx2/adapters/flash_next.py": "Final independent-review repair. git's clean auto-merge left two literal 'down_calls' keys in FlashNextAdapter.diagnostics moe['routed_decode']: intake's earlier sum(s.routed_decode_down_calls ...) and main's later sum(getattr(s, 'routed_down_calls', 0) ...); Python kept the later one silently. Removed the earlier intake expression only. Main's down_calls expression, intake's degraded key and all other diagnostics are kept; with degraded removed, diagnostics is AST-identical to main's. Receipt values are unchanged from the auto-merge (the later key already won and the counters move in lockstep)."
+  },
+  "boundaries": {
+    "math": "No kernel source, header, routing or arithmetic changed in either parent's code; candidate sources/dependencies equal intake, main helpers equal main (AST/text checked).",
+    "defaults": "No default changed. Main's routed-decode default/policy (gate_up_down_shared via FlashNextPolicy) untouched; intake candidate stays default off, requires the stock expert kernel and split tables, and is refused by set_fused_expert_kernel_mode exclusion.",
+    "counters": "routed_decode_degraded now also counts gate_up_down/gate_up_down_shared calls that lacked scores (previously only two_launch existed in intake). routed_decode_down_calls == routed_down_calls by construction."
+  },
+  "validation": {
+    "command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 ~/Desktop/CPG-Radio/.venv/bin/python -m pytest --noconftest -p no:cacheprovider tests/test_mechanism_intake_merge_cpu.py",
+    "result": "32 passed in 0.78s after the final review repair (30 earlier plus 2 Flash-Next diagnostics tests: no duplicate literal dict keys in diagnostics; down_calls equals main's expression, degraded equals intake's, the rest equals main's). Host CPU only; mlx/mlx_lm/mlx_vlm/mlx2 imports poisoned; no kernel constructed, no Metal, no model weights. Falsifier: the duplicate-key check, run in memory on the pre-repair source, reports ['down_calls'].",
+    "root_verification": "32 independent host merge checks, 209 independent LFM host checks, and 467 guarded CPU integration checks passed. Three Metal tests skipped, 15 eager-Metal-import tests explicitly deselected, and four broader test modules could not collect under the Metal-construction guard. See main-merge-cpu-review.json for scope and initial refused attempts. No native or GPU qualification.",
+    "native_receipts": "Existing native/GPU receipts for main's routed modes and intake's candidate remain bound to their own parent revisions; they are not evidence for this merge."
+  },
+  "open_concerns": [],
+  "resolved_review_findings": [
+    "Duplicate 'down_calls' key in FlashNextAdapter.diagnostics (found by the root's independent review): repaired as above, keeping main's expression.",
+    "Stale LFM signature assertion (found by the root's verification run of the LFM host-only suites; pre-existing on the intake parent, not a merge regression). tests/test_lfm25_dspark_eval_contract_cpu.py::test_signature_adds_keyword_only_width_default_ten expected six parameters, but later intake commit b6d54c2e (opt-in DSpark request counter diagnostics, provenance/lfm25-dspark-stats.json) added keyword-only collect_speculative_stats: bool = False to src/mlx2/adapters/lfm25_vl.py generate_candidate_dspark. Test-only repair: the expected parameter list now ends with collect_speculative_stats, and the test asserts it is KEYWORD_ONLY with default False; every existing width/max_tokens/image assertion is kept. Source unchanged: src/mlx2/adapters/lfm25_vl.py and tests/test_lfm25_dspark_stats_cpu.py equal intake b6d54c2e (git diff --quiet), lfm25_vl.py sha256 1a1173c11ce54bd652179056f548db601971afe72b2dc464447ab3ca25261904, test_lfm25_dspark_stats_cpu.py sha256 2b0c772f924773e71c1613b51dc9351dc694f8c2ca863ffed16eb76c58e2762b; eval-contract test intake blob c1420963485827ab77622ab891544c3dec716dbf -> sha256 ff40345e95823d96fc621112c3a054de2aadff7dbf09dd9a2c4cfa99531b6b16. Validation: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 ~/Desktop/CPG-Radio/.venv/bin/python -m pytest --noconftest -p no:cacheprovider -o addopts='' tests/test_lfm25_dspark_eval_contract_cpu.py tests/test_lfm25_dspark_stats_cpu.py -> 209 passed in 0.21s (host CPU only). No native, model or qualification claim; the LFM DSpark candidate's qualification state is unchanged."
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "destination": "src/mlx2/runtime/models/xing4_0_mla_metal.py",
+  "source_repository": "https://github.com/vllm-project/vllm-metal",
+  "source_revision": "87998b11fb8c355f59b298d3434bf2aa13dd0516",
+  "source_paths": [
+    "vllm_metal/metal/kernels_v2/mla.metal",
+    "vllm_metal/attention/impls/mla.py"
+  ],
+  "license": "Apache-2.0",
+  "relationship": "Read-only design reference; no source code copied",
+  "modifications": [
+    "Original MLX metal_kernel implementation over mlx2 Xing latent and RoPE cache tensors, rather than vLLM's paged KV representation",
+    "Two-stage sequence partition and online-softmax merge for decode and short verification",
+    "Default-off, explicit Xing 512+64 and dtype/shape/device gate with engagement counter",
+    "Ordinary mlx2 absorbed MLA remains the reference path"
+  ],
+  "validation": "CPU static checks only at introduction; GPU numerical and throughput qualification pending"
+}

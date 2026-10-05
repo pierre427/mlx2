@@ -1,0 +1,60 @@
+{
+  "schema": "mlx2.provenance.lfm25-dspark-stats.v1",
+  "kind": "original-local per-request counter diagnostic",
+  "local_base_revision": "8e6b614884a882b6ca2d1658daaf81eab64ca6ef",
+  "local_paths": {
+    "src/mlx2/adapters/lfm25_vl.py": "generate_candidate_dspark only (nested host helper read_counters)",
+    "tests/test_lfm25_dspark_stats_cpu.py": "new host-fake controls"
+  },
+  "mined_code": false,
+  "change": [
+    "keyword-only collect_speculative_stats: bool = False; type(flag) is bool, checked after the Stage49 prompt/max_tokens/width gates and before image lookup, artifact inspection, source import, load, template or generate",
+    "False/omitted: no counter reads; result and evaluation_contract keys and generate arguments identical to Stage49",
+    "True: host getattr of speculative_total_rounds/accepted/drafted on the same freshly loaded private drafter immediately before generate and after a successful generate; no tensor sync, eval or timing; no drafter writes",
+    "True: result gains speculative_stats with scope, attribution, source_revision, unit, available, engaged, unavailable_reason, baseline_kind, rounds, accepted_proposals, drafted_proposals, qualified=false, selected=false"
+  ],
+  "validation_rules": {
+    "baseline": "all three absent: baseline_kind uninitialized (the pinned recorder starts absent counters at zero); partially absent: unavailable baseline_counters_missing; otherwise baseline_kind lifetime",
+    "post": "any absent: unavailable post_counters_missing (never fabricated as zero evidence)",
+    "types": "rounds and drafted exact builtin int >= 0; accepted exact builtin int >= 0 or builtin float that is finite, nonnegative, integral and below 2**53; bool, int/float subclasses, strings, fractional, NaN, Inf and unsafe floats refused; no rounding",
+    "per_snapshot": "accepted <= drafted",
+    "deltas": "each component monotonic; zero-round nonzero delta refused; delta accepted <= delta drafted; delta drafted <= delta rounds times (requested_width - 1)",
+    "read_errors": "Exception from an attribute read: unavailable <phase>_counter_read_error; BaseException and load/template/generate exceptions propagate",
+    "unavailable": "rounds, accepted_proposals and drafted_proposals None; engaged false; baseline_kind None",
+    "engaged": "available and delta rounds > 0 and delta drafted > 0; accepted may be 0. Zero deltas, including zero-proposal rounds, are available source observations, not engagement or qualification"
+  },
+  "not_claimed": [
+    "Counts are target-verified draft proposals recorded before EOS/output-budget handling and may exceed emitted output tokens; they are not generation_tokens",
+    "drafted - accepted is not a rollback count",
+    "Totals do not show effective-width distribution, confidence-head use, per-round accept/reject, rollback or exact state correctness, timing or speed",
+    "The diagnostic never affects decoding or selection; no output-token bound is applied because EOS can truncate emitted output differently"
+  ],
+  "dependency_semantics": {
+    "repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+    "revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+    "license": "MIT (see provenance/lfm25-vl.json)",
+    "read_only_grounds": [
+      "mlx_vlm/speculative/common.py lines 212-255, sha256 6acfafa426fe0b6e3be215a2e6aac121b20a77457041f294395dde842a1b1b39: _record_speculative_round increments lifetime speculative_total_rounds (int), speculative_total_accepted (float) and speculative_total_drafted (int) from getattr defaults 0, 0.0, 0; they survive reset() unlike accept_lens",
+      "same file: speculative_stats_since coerces accepted with int(round(...)); this diagnostic deliberately does not",
+      "mlx_vlm/speculative/dflash.py lines 398-447, sha256 f18499746eb796e0c47c57d2203e551ac6a46e3d0a727d2b4fe61c265fe9456d: a round is recorded with draft_count bs - 1 before emitted tokens are truncated by max_tokens",
+      "attribution is exact only for batch size 1; the helper loads a fresh private drafter per call"
+    ],
+    "source_copied": false
+  },
+  "validation": {
+    "status": "builder host-fake tests and independent root review passed; native qualification pending",
+    "runner": "PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1, CPG-Radio venv python 3.11.15 with no mlx/mlx_lm/mlx_vlm/mlx2 installed, pytest --noconftest -p no:cacheprovider tests/test_lfm25_dspark_stats_cpu.py",
+    "builder_runs": [
+      "run 1: 7 failed, 123 passed (6 test-local recorder bugs adding to malformed baselines; provenance file absent)",
+      "run 2 after the test fix: 1 failed, 129 passed (provenance file absent)",
+      "run 3 before a provenance retry: 1 failed, 129 passed (provenance file absent)",
+      "final: 130 passed in 0.09s; new test and adapter ruff, JSON and diff checks passed",
+      "temporary rounded-float/removed-width-ceiling mutation: 17 failed; function restored byte-identically"
+    ],
+    "independent_root": "2026-10-01: read full final patch, all 636 NEW test lines, provenance and terminal-0 exact claude-opus-5-5 handoff; owner released task generation2 and closed its worker. Root guarded runner independently passed 130 NEW tests in 0.10s, preserved 28 top-level AST nodes outside the helper against 8e6b6148, retained no native packages and confirmed all three file hashes stable. New-test lint and diff checks passed. No old tests or builder mutations repeated.",
+    "old_tests_rerun": false,
+    "native_qualification": "none; host fakes do not qualify native DSpark counters, acceptance, state or performance"
+  },
+  "qualified": false,
+  "selected": false
+}
