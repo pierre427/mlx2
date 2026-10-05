@@ -98,19 +98,19 @@ class ModelPreset:
 
 PRESETS = {
     "qwen38": ModelPreset(
-        "~/mlx-models/Qwen3.8-27B-oQ4e-mtp", 2
+        str(Path.home() / "mlx-models" / "Qwen3.8-27B-oQ4e-mtp"), 2
     ),
     "flash-next": ModelPreset(
-        "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+        str(Path.home() / "mlx-models" / "Qwen3.8-Flash-Next-MLX-4bit-MTP"),
         2,
         cache_gib=16,
     ),
     "xing": ModelPreset(
-        "~/mlx-models/Xing4.0-29B-A4B-mlx-6bit", 1
+        str(Path.home() / "mlx-models" / "Xing4.0-29B-A4B-mlx-6bit"), 1
     ),
     "qwen36": ModelPreset(
-        "~/mlx-models/"
-        "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+        str(Path.home() / "mlx-models"
+            / "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp"),
         2,
     ),
 }

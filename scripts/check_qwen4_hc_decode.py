@@ -34,7 +34,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-DEFAULT_MODEL = Path("~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP").expanduser()
+DEFAULT_MODEL = Path.home() / "mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"
 # (batch, seq) shapes: one-row decode (law 0), verify windows and multi-lane
 # decode (law 1, MLX qmv_wide).
 SHAPES = [(1, 1), (1, 1), (1, 3), (1, 2), (4, 1), (1, 5), (1, 8), (2, 3)]

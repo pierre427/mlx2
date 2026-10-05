@@ -278,7 +278,10 @@ def mirror_guard(inner):
     Returns a sha256 of each mirrored source so a report states which code it
     decomposed.
     """
-    from mlx2.runtime.models import qwen3_5, qwen3_next, qwen36_35b, qwen36_moe_decode, qwen38_27b
+    from mlx2.runtime.models import (
+        moe_nax_gather, qwen3_5, qwen3_next, qwen36_35b,
+        qwen36_moe_decode, qwen38_27b,
+    )
 
     allowed = {
         "decoder": {qwen38_27b.DecoderLayer.__call__, qwen36_35b.DecoderLayer.__call__},
@@ -288,10 +291,15 @@ def mirror_guard(inner):
         # verify; a prefill call (rows > 1, no window consumer) is the parent.
         "mlp": {qwen3_next.Qwen3NextMLP.__call__, qwen3_next.Qwen3NextSparseMoeBlock.__call__,
                 qwen36_moe_decode.Qwen36SparseMoeBlock.__call__},
-        "trunk": {qwen38_27b.Qwen3_5TextModel.__call__},
+        # Qwen36TextModel.__call__ only wraps the parent trunk in the NAX
+        # gather prefill scope (bit-identical kernels; a no-op while off).
+        "trunk": {qwen38_27b.Qwen3_5TextModel.__call__, qwen36_35b.Qwen36TextModel.__call__},
     }
     if type(inner).__call__ not in allowed["trunk"]:
         raise SystemExit(f"unmirrored trunk {type(inner).__name__}")
+    if (type(inner).__call__ is qwen36_35b.Qwen36TextModel.__call__
+            and moe_nax_gather.MODE != "off"):
+        raise SystemExit("NAX gather is selected; this seam profiler does not mirror its prefill scope")
     for layer in inner.pipeline_layers:
         if type(layer).__call__ not in allowed["decoder"]:
             raise SystemExit(f"unmirrored decoder layer {type(layer).__name__}")
@@ -309,6 +317,7 @@ def mirror_guard(inner):
         "qwen3_next.Qwen3NextSparseMoeBlock.__call__": qwen3_next.Qwen3NextSparseMoeBlock.__call__,
         "qwen3_next.Qwen3NextMLP.__call__": qwen3_next.Qwen3NextMLP.__call__,
         "qwen38_27b.Qwen3_5TextModel.__call__": qwen38_27b.Qwen3_5TextModel.__call__,
+        "qwen36_35b.Qwen36TextModel.__call__": qwen36_35b.Qwen36TextModel.__call__,
     }
     return {
         k: hashlib.sha256(inspect.getsource(f).encode()).hexdigest()[:16]

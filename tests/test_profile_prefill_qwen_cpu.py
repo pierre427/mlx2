@@ -15,10 +15,28 @@ spec.loader.exec_module(prof)
 
 @pytest.fixture(autouse=True)
 def _cpu():
+    from mlx2.runtime.models import moe_nax_gather
+
     previous = mx.default_device()
     mx.set_default_device(mx.cpu)
-    yield
-    mx.set_default_device(previous)
+    previous_nax = moe_nax_gather.set_mode("off")
+    try:
+        yield
+    finally:
+        moe_nax_gather.set_mode(previous_nax)
+        mx.set_default_device(previous)
+
+
+def test_mirror_guard_refuses_selected_nax_scope():
+    from mlx2.runtime.models import moe_nax_gather
+
+    model = prof.tiny_model("moe")
+    prior = moe_nax_gather.set_mode("fused")
+    try:
+        with pytest.raises(SystemExit, match="does not mirror its prefill scope"):
+            prof.mirror_guard(prof.inner_model(model))
+    finally:
+        moe_nax_gather.set_mode(prior)
 
 
 def _run(arch, tmp_path):

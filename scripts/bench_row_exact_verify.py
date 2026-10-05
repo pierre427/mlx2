@@ -143,7 +143,7 @@ def _decode(adapter, prompt_ids, *, arm, max_tokens, prefill_step, copy_policy):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", default=str(Path("~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP").expanduser()))
+    parser.add_argument("--model", default=str(Path.home() / "mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"))
     parser.add_argument("--prompts", default="prose,copy")
     parser.add_argument("--reps", type=int, default=4, help="measured reps (plus one warm-up)")
     parser.add_argument("--max-tokens", type=int, default=256)

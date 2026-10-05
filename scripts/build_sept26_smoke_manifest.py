@@ -13,11 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "docs/research/local-model-adapter-inventory-2026-09-26.md"
 OUTPUT = ROOT / "docs/research/sept26-smoke-manifest.json"
 ROOTS = {
-    "M": Path("~/mlx-models"),
+    "M": Path.home() / "mlx-models",
     "T": Path("/Volumes/T7/models"),
-    "U": Path("~/mlx-models"),
-    "H": Path("~/.cache/huggingface/hub"),
-    "A": Path("~/Library/Application Support/mlxuag-thinkingcap/models"),
+    "U": Path.home() / "mlx-models",
+    "H": Path.home() / ".cache/huggingface/hub",
+    "A": Path.home() / "Library/Application Support/mlxuag-thinkingcap/models",
 }
 WHOLE_FAMILIES = {
     "agnes", "deepseek_v4", "gpt_oss", "gpt_oss_puzzle", "granitemoe_swa",

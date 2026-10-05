@@ -19,7 +19,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 MODULE_PATH = HERE / "omlx3958_wide_sdpa.py"
-DEFAULT_CONFIG = Path("~/mlx-models/Qwen3.8-27B-oQ4e-mtp/config.json")
+DEFAULT_CONFIG = Path.home() / "mlx-models/Qwen3.8-27B-oQ4e-mtp/config.json"
 _SPEC = importlib.util.spec_from_file_location("omlx3958_wide_sdpa", MODULE_PATH)
 WIDE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(WIDE)

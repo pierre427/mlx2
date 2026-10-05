@@ -27,7 +27,7 @@ import json
 import struct
 from pathlib import Path
 
-DEFAULT_MODEL = Path("~/mlx-models/Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP").expanduser()
+DEFAULT_MODEL = Path.home() / "mlx-models/Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP"
 SCALES = (0.05, 1.0, 8.0, 40.0)
 
 

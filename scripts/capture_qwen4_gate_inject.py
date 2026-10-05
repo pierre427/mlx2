@@ -177,10 +177,7 @@ def main() -> int:
     parser.add_argument(
         "--model",
         type=Path,
-        default=Path(
-            "~/mlx-models/"
-            "Qwen3.8-Flash-Next-MLX-4bit-MTP"
-        ),
+        default=Path.home() / "mlx-models" / "Qwen3.8-Flash-Next-MLX-4bit-MTP",
     )
     parser.add_argument(
         "--kind",

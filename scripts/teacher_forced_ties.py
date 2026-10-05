@@ -27,7 +27,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("results", nargs="+")
     parser.add_argument("--out", required=True)
-    parser.add_argument("--model", default="~/mlx-models/Qwen3.8-27B-oQ4e-mtp")
+    parser.add_argument("--model", default=str(Path.home() / "mlx-models/Qwen3.8-27B-oQ4e-mtp"))
     parser.add_argument("--tie-logits", type=float, default=0.5)
     parser.add_argument("--nonce-salt", default="sp-dflash2")
     parser.add_argument("--i-own-the-gpu", action="store_true")

@@ -122,7 +122,7 @@ def admitted_final(qa: dict) -> bool:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP")
+    parser.add_argument("--model", default=str(Path.home() / "mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"))
     parser.add_argument("--context-tokens", type=int, default=16384)
     parser.add_argument("--score-tokens", type=int, default=128)
     parser.add_argument("--gen-cap", type=int, default=1536)

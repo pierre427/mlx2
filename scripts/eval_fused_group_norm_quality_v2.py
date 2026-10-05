@@ -244,7 +244,7 @@ def run_arm(mx, model, tok, case, ppl, lever, fgn, gen_cap):
 
 def main(argv=None):
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP")
+    p.add_argument("--model", default=str(Path.home() / "mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"))
     p.add_argument("--context-tokens", type=int, default=16384)
     p.add_argument("--score-tokens", type=int, default=128)
     p.add_argument("--gen-cap", type=int, default=768)

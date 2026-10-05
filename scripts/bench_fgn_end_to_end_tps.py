@@ -21,6 +21,7 @@ import argparse
 import json
 import statistics
 import time
+from pathlib import Path
 
 SCHEMA = "mlx2.fgn-end-to-end-ttft-ab.v1"
 
@@ -106,7 +107,7 @@ def run_arm(mx, model, prompt_ids, gen_tokens, lever, fgn, stop_ids):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model",
-                   default="~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP")
+                   default=str(Path.home() / "mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"))
     p.add_argument("--context-lengths", type=int, nargs="+",
                    default=[1024, 4096, 8192, 16384])
     p.add_argument("--gen-tokens", type=int, default=64)

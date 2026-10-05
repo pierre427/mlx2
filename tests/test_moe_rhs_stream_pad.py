@@ -230,3 +230,19 @@ def test_always_pads_every_sorted_gather_below_the_stream_floor(adaptive, monkey
     adaptive[("affine", 4, 64, E, N, D)] = (0.0, 0.001, 10.0, 0.0)  # ignored
     assert SL._adaptive_pad(20, up) == (4 * E - 20, "always_rhs")
     assert SL._adaptive_pad(4 * E, up) == (0, "mlx_streams")
+
+
+def test_set_pad_policy_switches_the_live_policy_and_validates(monkeypatch):
+    # Flash-Next owns its pad policy (FlashNextPolicy.moe_rhs_pad_policy) and
+    # applies it after load, as it does MLX2_MOE_NAX_GATHER: a value latched
+    # at import under another environment must not decide the route.
+    monkeypatch.setattr(SL, "_RHS_PAD_POLICY", "floor")
+    assert SL.set_pad_policy("adaptive") == "floor"
+    assert SL._RHS_PAD_POLICY == "adaptive"
+    assert SL.moe_pad_status()["policy"] == "adaptive"
+    assert SL.set_pad_policy("always") == "adaptive"
+    with pytest.raises(ValueError):
+        SL.set_pad_policy("sometimes")
+    assert SL._RHS_PAD_POLICY == "always"
+    SL.set_pad_policy("floor")
+    assert SL._RHS_PAD_POLICY == "floor"

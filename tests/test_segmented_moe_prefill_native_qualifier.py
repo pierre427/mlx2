@@ -771,6 +771,12 @@ def _head(repo):
 
 @pytest.fixture
 def tree(tmp_path, monkeypatch):
+    # Admission compares q.FROZEN against reviewed hashes; one of them is a
+    # private provenance record, so a fixture tree without it always refuses.
+    missing = [rel for rel in q.FROZEN if not (ROOT / rel).is_file()]
+    if missing:
+        pytest.skip(f"frozen candidate file absent: {missing[0]} (private provenance "
+                    "is not exported to the public mirror)")
     repo = (tmp_path / "mlx2").resolve()
     for rel in q.BOUND_FILES + ("src/mlx2/other.py",):
         dst = repo / rel
@@ -960,6 +966,8 @@ def test_candidate_identity_controls():
 
 
 def test_provenance_scopes_the_harness_and_keeps_states_false():
+    if not PROVENANCE.is_file():
+        pytest.skip(f"private provenance absent: {PROVENANCE.relative_to(ROOT)}")
     prov = json.loads(PROVENANCE.read_text())
     assert prov["destination_paths"] == list(q.HARNESS_FILES)
     assert prov["subject"]["sha256"] == q.FROZEN[q.CANDIDATE_FILE]

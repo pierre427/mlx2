@@ -16,6 +16,7 @@ from .cache_branch_transaction import (
     create_cache_delta_lineage,
 )
 from .cache_planes import CachePlaneKind
+from .ragged_verify_layout import RaggedVerifyLayout
 
 _ZERO = {
     "requests": 0,
@@ -675,10 +676,36 @@ class SegmentedLaneTransaction:
         proposed: int,
         accepted: int,
         zero_rollback_attested: bool = False,
+        verify_layout: RaggedVerifyLayout | None = None,
+        lane_index: int | None = None,
     ) -> "SegmentedLaneTransaction":
-        advance = int(advance)
-        if advance < 0:
-            raise ValueError("segmented transaction advance must be non-negative")
+        if any(
+            isinstance(value, bool) or not isinstance(value, Integral)
+            for value in (advance, proposed, accepted)
+        ):
+            raise ValueError("segmented transaction counts must be integers")
+        advance, proposed, accepted = int(advance), int(proposed), int(accepted)
+        if proposed < 0 or not 0 <= accepted <= proposed:
+            raise ValueError("segmented accepted prefix exceeds proposed rows")
+        if not 0 <= advance <= accepted + 1:
+            raise ValueError("segmented publication exceeds accepted rows plus bonus")
+        if verify_layout is not None:
+            if type(verify_layout) is not RaggedVerifyLayout:
+                raise TypeError("verify_layout must be a RaggedVerifyLayout")
+            if (
+                isinstance(lane_index, bool)
+                or not isinstance(lane_index, Integral)
+                or not 0 <= lane_index < verify_layout.lane_count
+            ):
+                raise ValueError("ragged publication needs its current lane index")
+            lane_index = int(lane_index)
+            if verify_layout.draft_depths[lane_index] != proposed:
+                raise ValueError("ragged publication proposed rows differ from layout")
+            accepted_vector = [0] * verify_layout.lane_count
+            accepted_vector[lane_index] = accepted
+            verify_layout.validate_acceptance(accepted_vector)
+        elif lane_index is not None:
+            raise ValueError("lane_index requires a ragged verify layout")
         start = branch.position
         stop = start + advance
         if advance == 0:
@@ -835,5 +862,4 @@ def require_qsa_private_delta_engagement(
         raise RuntimeError(
             f"QSA private-delta qualification saw {declined} declined calls"
         )
-
 

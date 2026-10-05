@@ -289,7 +289,7 @@ def profile_layer(mx, layer, kind, T, warmup, reps, args):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+    p.add_argument("--model", default=str(Path.home() / "mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"),
                    help="artifact to read config.json from (metadata only; weights are NOT loaded)")
     p.add_argument("--tokens", default="1024,4096,16384")
     p.add_argument("--rounds", type=int, default=3, help="repeated profiles; medians per round")

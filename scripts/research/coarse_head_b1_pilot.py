@@ -26,7 +26,7 @@ from offline_coarse_head_preflight import (  # noqa: E402
     teacher_forced_row_sha256,
 )
 
-MODEL = Path("~/mlx-models/Qwen3.8-27B-oQ4e-mtp")
+MODEL = Path.home() / "mlx-models/Qwen3.8-27B-oQ4e-mtp"
 SAMPLING = {"temperature": 0.8, "top_p": 0.95, "top_k": 20,
             "min_p": 0, "processors": [], "xtc_probability": 0,
             "accept_rule": "residual"}

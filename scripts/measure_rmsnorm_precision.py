@@ -51,7 +51,7 @@ SCHEMA = "mlx2.rmsnorm-precision.v1"
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model",
-                   default="~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+                   default=str(Path.home() / "mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"),
                    help="artifact to read config.json from (metadata only)")
     p.add_argument("--tokens", type=int, default=1024)
     p.add_argument("--scale", type=float, default=1.7,

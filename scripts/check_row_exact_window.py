@@ -31,7 +31,7 @@ import statistics
 import time
 from pathlib import Path
 
-DEFAULT_MODEL = Path("~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP").expanduser()
+DEFAULT_MODEL = Path.home() / "mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"
 
 
 def main():

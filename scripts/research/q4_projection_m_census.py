@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-ARTIFACT = Path("~/mlx-models/Qwen3.8-27B-oQ4e-mtp")
+ARTIFACT = Path.home() / "mlx-models/Qwen3.8-27B-oQ4e-mtp"
 SOURCE_PATHS = (
     "src/mlx2/runtime/models/qwen38_27b.py",
     "src/mlx2/runtime/models/qwen3_5.py",

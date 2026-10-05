@@ -30,10 +30,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mlx2.runtime.copy_draft import CopyDraftPolicy, CopyDraftState  # noqa: E402
 
-LAB = Path("~/Desktop/mlx-uag/results")
-TOKENIZER = Path(
-    "~/mlx-models/"
-    "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp"
+LAB = Path.home() / "Desktop/mlx-uag/results"
+TOKENIZER = (
+    Path.home() / "mlx-models"
+    / "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp"
 )
 
 

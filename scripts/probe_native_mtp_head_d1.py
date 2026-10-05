@@ -105,8 +105,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "mlx2.native-mtp-head-d1-probe.v1"
-DEFAULT_MODEL = ("~/mlx-models/"
-                 "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp")
+DEFAULT_MODEL = str(Path.home() / "mlx-models"
+                    / "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp")
 LANES = 1
 NUM_DRAFT = 1
 ARM_ORDER = ("ordinary", "native", "native", "ordinary")

@@ -33,7 +33,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-M27 = Path("~/mlx-models/Qwen3.8-27B-oQ4e-mtp")
+M27 = Path.home() / "mlx-models/Qwen3.8-27B-oQ4e-mtp"
 
 
 def main():

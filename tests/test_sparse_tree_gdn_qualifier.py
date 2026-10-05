@@ -99,12 +99,22 @@ class FakeBackend:
 SMALL = dict(dtypes=["float32", "bfloat16"], geometries=["ratio_1x2"])
 
 
+def _require_bound_sources():
+    """run_gate hashes Q.SOURCE_FILES, two of which are private provenance
+    records; without them every fake run is (correctly) refused."""
+    missing = [name for name in Q.SOURCE_FILES if not (Q.ROOT / name).is_file()]
+    if missing:
+        pytest.skip(f"bound source absent: {missing[0]} (private provenance is "
+                    "not exported to the public mirror)")
+
+
 def _args(**extra):
     return types.SimpleNamespace(i_own_the_gpu=True, seed=1, time_limit_s=600.0, **extra)
 
 
 @pytest.fixture(scope="module")
 def clean():
+    _require_bound_sources()
     cases = Q.catalogue(**SMALL)
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(Q, "git_identity", lambda: {"available": False})
@@ -188,6 +198,7 @@ def test_clean_fake_run_passes_one_case_at_a_time(clean):
 
 
 def test_backend_releases_each_case_before_the_next():
+    _require_bound_sources()
     backend = FakeBackend()
     cases = Q.catalogue(["singleton", "width2", "chain"], ["float32"], ["ratio_1x2"])
     Q.run_gate(_args(), backend, cases, commit=COMMIT)
@@ -201,6 +212,7 @@ def test_summary_is_json_safe_and_carries_no_raw_bits(clean):
 
 
 def test_geometry_27b_fixture_runs_on_the_fake():
+    _require_bound_sources()
     cases = Q.catalogue(["singleton", "width2"], ["bfloat16"], ["qwen38_27b"])
     report, verdict = Q.run_gate(_args(), FakeBackend(), cases, commit=COMMIT)
     assert verdict["verdict"] == "pass" and report["cases"][0]["hv"] == 48
@@ -417,6 +429,7 @@ def test_time_limit_leaves_missing_cases_refused():
 
 
 def test_zero_engagement_backend_refuses():
+    _require_bound_sources()
     class Unengaged(FakeBackend):
         def forward(self, a, parents):
             y, _ = super().forward(a, parents)
@@ -434,6 +447,7 @@ def test_zero_engagement_backend_refuses():
 
 @pytest.fixture(scope="module")
 def width2():
+    _require_bound_sources()
     cases = Q.catalogue(["width2"], ["float32"], ["ratio_1x2"])
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(Q, "git_identity", lambda: {"available": False})

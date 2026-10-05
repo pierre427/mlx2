@@ -28,6 +28,7 @@ from mlx2.runtime.segmented_self_mtp import (
     shared_qsa_suffix_admission,
 )
 from mlx2.runtime.models.qwen4_exp import QSAKVCache
+from mlx2.runtime.ragged_verify_layout import RaggedVerifyLayout
 from mlx2.runtime.qsa_shared_suffix import SharedSuffixQSAKVCache
 from mlx2.structured_output import StructuredOutputProcessor, compile_constraint
 
@@ -1574,6 +1575,27 @@ def test_mtp_plane_requires_physical_cache_plus_pending_sidecar_alignment():
     transaction.close()
 
 
+def test_segmented_publication_is_bound_to_ragged_layout_before_state_change():
+    item = _detached(0)
+    transaction = SegmentedLaneTransaction(item.caches, item.lane, 6)
+    branch = transaction.fork("ragged-layout-mismatch")
+    layout = RaggedVerifyLayout.from_draft_depths((item.lane.uid,), (2,))
+    with pytest.raises(ValueError, match="proposed rows differ"):
+        transaction.publish(
+            branch,
+            item.caches,
+            item.lane,
+            1,
+            proposed=1,
+            accepted=0,
+            verify_layout=layout,
+            lane_index=0,
+        )
+    assert transaction.position == 6
+    branch.close()
+    transaction.close()
+
+
 def test_commit_failure_restores_committed_rows_and_clears_open_ownership():
     state = attach_segmented_self_mtp_lanes(object(), None, [_detached(0)])
     with patch(
@@ -1648,6 +1670,12 @@ def test_tiny_qwen4_gdn_qsa_mtp_runs_real_independent_b1_cycle():
     ):
         proposal = propose_batched_self_mtp(model, state)
     assert proposal.accepted_lengths == (0, 1)
+    assert proposal.verify_layout["schema"] == "mlx2.ragged-verify-layout.v1"
+    assert proposal.verify_layout["lane_uids"] == [0, 1]
+    assert proposal.verify_layout["draft_depths"] == [2, 2]
+    assert proposal.verify_layout["query_lengths"] == [3, 3]
+    assert proposal.verify_layout["backend_mode"] == "padded"
+    assert proposal._verify_layout is not None
     commit_batched_self_mtp(
         state,
         proposal,

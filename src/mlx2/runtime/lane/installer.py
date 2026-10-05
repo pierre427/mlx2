@@ -411,7 +411,7 @@ def _group_siblings(model, groups) -> Counter:
     for _name, parent in model.named_modules():
         for names in groups:
             present = [getattr(parent, n, None) for n in names]
-            present = [m for m in present if m is not None and _prepared(m) is not None
+            present = [m for m in present if isinstance(m, nn.Module) and _prepared(m) is not None
                        and _group(m) is None]
             by_format: dict[tuple, list] = {}
             for m in present:

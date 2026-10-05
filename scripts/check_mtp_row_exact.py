@@ -561,7 +561,7 @@ def _device_info(mx):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", default=str(Path("~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP").expanduser()))
+    parser.add_argument("--model", default=str(Path.home() / "mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"))
     parser.add_argument("--arms", default="off,mtp,oracle")
     parser.add_argument("--prompts", default=",".join(PROMPTS))
     parser.add_argument("--max-tokens", type=int, default=256)

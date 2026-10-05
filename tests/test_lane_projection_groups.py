@@ -121,6 +121,22 @@ def test_adapters_offer_their_model_groups_without_loading():
 
 # -- tiny real models ---------------------------------------------------------
 
+
+def test_default_sibling_group_skips_array_attributes():
+    class MixedSiblings(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = nn.Linear(128, 64, bias=False)
+            self.up_proj = mx.array([1])
+
+    model = MixedSiblings()
+    array = model.up_proj
+    assert not hasattr(array, "__dict__")
+    receipt = installer.install(model, min_rows=1)
+    assert receipt["groups"] == {}
+    assert model.up_proj is array
+    installer.uninstall(model)
+
 def _muse(bits=4):
     args = muse_glimmer.ModelArgs(hidden_size=128, num_hidden_layers=2, intermediate_size=128,
                                   num_attention_heads=2, num_key_value_heads=1, head_dim=64,

@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 import moe_tile_bench as tile_probe
 
-MODEL_DEFAULT = Path("~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP")
+MODEL_DEFAULT = Path.home() / "mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"
 SOURCE = ROOT / "src/mlx2/runtime/models/qwen4_fused_moe.py"
 SOURCE_PATHS = {
     "fused_moe": SOURCE,

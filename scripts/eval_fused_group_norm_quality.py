@@ -264,7 +264,7 @@ def perplexity(mx, lp, targets):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model",
-                   default="~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP")
+                   default=str(Path.home() / "mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"))
     p.add_argument("--context-tokens", type=int, default=8192)
     p.add_argument("--gen-tokens", type=int, default=1024)
     p.add_argument("--score-tokens", type=int, default=256,
