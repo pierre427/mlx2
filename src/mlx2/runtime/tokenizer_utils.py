@@ -321,6 +321,11 @@ class TokenizerWrapper:
         tool_parser=None,
     ):
         self._tokenizer = tokenizer
+        self._v1_encode_worker = None
+        import os
+        manifest = os.environ.get("MLX2_TOKENIZERS_V1_MANIFEST")
+        if manifest:
+            self.enable_v1_encode(manifest)
         self._detokenizer_class = detokenizer_class
         self._eos_token_ids = (
             set(eos_token_ids)
@@ -350,15 +355,79 @@ class TokenizerWrapper:
                 tokenizer.encode(tool_call_end, add_special_tokens=False)
             )
 
+    def enable_v1_encode(self, manifest_path):
+        """Select a pinned CPU encode candidate explicitly; close a prior worker."""
+        import json
+        from tokenizers import Tokenizer
+        from .tokenizers_v1_worker import TokenizersV1Worker
+        worker = TokenizersV1Worker(manifest_path, model_path=self._tokenizer.name_or_path)
+        try:
+            reference = Tokenizer.from_file(worker.manifest["tokenizer"]["path"])
+            expected = json.loads(reference.to_str())
+            actual = json.loads(self._tokenizer.backend_tokenizer.to_str())
+            for field in ("model", "added_tokens", "normalizer", "pre_tokenizer", "post_processor", "padding", "truncation"):
+                if actual.get(field) != expected.get(field):
+                    raise ValueError(f"v1 worker loaded tokenizer {field} differs from pinned file")
+            worker.start()
+        except BaseException:
+            worker.close()
+            raise
+        previous = self.__dict__.get("_v1_encode_worker")
+        if previous is not None:
+            previous.close()
+        self._v1_encode_worker = worker
+
+    def encode(self, text, *args, **kwargs):
+        worker = self.__dict__.get("_v1_encode_worker")
+        if worker is not None and worker.eligible(text, args, kwargs):
+            return worker.encode(text, add_special_tokens=kwargs.get("add_special_tokens", True))
+        if worker is not None:
+            worker.record_ordinary()
+        return self._tokenizer.encode(text, *args, **kwargs)
+
+    def tokenizer_v1_status(self):
+        worker = self.__dict__.get("_v1_encode_worker")
+        return worker.status() if worker is not None else {
+            "implemented": True, "qualified": False, "selected": False,
+            "observed_used": False, "serving_qualified": False}
+
+    def tokenizer_v1_restart(self):
+        worker = self.__dict__.get("_v1_encode_worker")
+        if worker is None:
+            raise RuntimeError("v1 encode candidate is not selected")
+        worker.restart()
+
+    def tokenizer_v1_close(self):
+        self.close()
+
+    def close(self):
+        worker = self.__dict__.get("_v1_encode_worker")
+        if worker is not None:
+            worker.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def apply_chat_template(self, *args, tokenize=True, **kwargs):
         if "enable_thinking" not in kwargs:
             kwargs["enable_thinking"] = self.has_thinking
         if self._chat_template is not None:
             out = self._chat_template(*args, **kwargs)
             if tokenize:
-                out = self._tokenizer.encode(out, add_special_tokens=False)
+                out = self.encode(out, add_special_tokens=False)
             return out
         kwargs["return_dict"] = False
+        worker = self.__dict__.get("_v1_encode_worker")
+        conversation = args[0] if args else kwargs.get("conversation")
+        if worker is not None and tokenize and isinstance(conversation, list) and not any(
+            key in kwargs for key in ("return_tensors", "padding", "truncation",
+                                    "max_length", "return_assistant_tokens_mask", "tokenizer_kwargs")
+        ) and not (conversation and isinstance(conversation[0], list)):
+            rendered = self._tokenizer.apply_chat_template(*args, tokenize=False, **kwargs)
+            return self.encode(rendered, add_special_tokens=False)
         return self._tokenizer.apply_chat_template(*args, tokenize=tokenize, **kwargs)
 
     def add_eos_token(self, token: str):
