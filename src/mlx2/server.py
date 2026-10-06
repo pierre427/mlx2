@@ -5171,8 +5171,30 @@ def resolve_execution_policy_defaults(
             resolved["mtp_ordinary_handoff"] = handoff
     if adapter_resolution is not None:
         declared = adapter_resolution.default_execution_policy(route_selection.route)
+        external_route = route_selection.route == "external_draft"
+        tree_geometry_overridden = (
+            external_route
+            and "batch_size_route" in resolved
+            and resolved["batch_size_route"] != declared.get("batch_size_route")
+        )
+        explicit_varlen = resolved.get("varlen_dense_mlp", True)
+        varlen_disabled = external_route and (
+            resolved.get("external_varlen_prefill") is False
+            or explicit_varlen is False
+            or (
+                isinstance(explicit_varlen, dict)
+                and explicit_varlen.get("enabled") is False
+            )
+        )
         for key, value in declared.items():
             if key in resolved:
+                continue
+            if tree_geometry_overridden and key == "tree_node_budget_by_lanes":
+                continue
+            if varlen_disabled and key in {
+                "external_varlen_prefill",
+                "varlen_dense_mlp",
+            }:
                 continue
             if approximate_kv and key in STATE_CHECKPOINT_POLICY_KEYS:
                 continue

@@ -2092,8 +2092,11 @@ outside mutation is still caught before anything is published, and the
 `integrity_scans` counter on the row owner makes a round that never verified
 visible.
 
-Qwen3.8 27B, Qwen3.6 35B-A3B and Muse Glimmer/DFlash2 remain candidates without
-production GPU qualification or deployment. Their pre-GPU reports are required
+Qwen3.8 27B's external route now selects its measured TensorFold/varlen policy
+by default once the operator explicitly supplies and selects a revision-bound
+DFlash2 artifact; the route remains unqualified and is not the adapter's global
+default. Qwen3.6 35B-A3B and Muse Glimmer/DFlash2 remain unselected candidates
+without production GPU qualification or deployment. Their reports are required
 reading before that work: [Qwen3.8 27B](ports/QWEN38-27B.md),
 [Qwen3.6 35B-A3B](ports/QWEN36-35B-A3B.md),
 [Muse](ports/MUSE-GLIMMER.md), [DFlash2](ports/MUSE-DFLASH2.md).
@@ -2267,7 +2270,7 @@ and the North/Muse tool processors declare them; consumers read them with
 `getattr(p, ..., False)`.
 ### DFlash2 batched pairwise selection
 
-Default off. The Muse external-draft execution policy key
+Default off on Muse. The Muse external-draft execution policy key
 `pairwise_selection` accepts `"host"` (default, the sequential selector) or
 `"batched"`. Batched selection computes the DFlash2 candidates, unary scores
 and the full `[B, K, C, C]` predecessor/successor edge table in one pass, then
@@ -2281,6 +2284,16 @@ group that contains any processor row stays on it entirely. When selected,
 `settings.execution_policy.pairwise_selection` is `"batched"`, qualification
 requires `feature_external_pairwise_selection`, and the scheduler reports
 `external_pairwise_selection_groups`/`_lanes`.
+
+For Qwen3.8 27B only, an explicitly selected external-draft route defaults to
+batched pairwise selection, TensorFold tree verification, 15/7/4/3 proposal
+nodes at B1/B2/B3/B4, external varlen prefill, and dense-MLP compaction above
+25% padding. The exact A/B-B/A measured 51.441 versus 48.667 aggregate decode
+tokens/s (1.0570x) with zero output mismatches across 1,680 timed requests.
+The defaults do not select the route or weaken artifact revision checks, and
+they add no opportunistic prefill wait. Explicit `batch_size_route: null` and
+`external_varlen_prefill: false` disable the two default groups. The route
+remains labelled unqualified.
 ## Longer DFlash2 blocks
 
 ### DFlash2 block width (`num_draft`)

@@ -379,8 +379,10 @@ def _install_reference_cohort(batch, monkeypatch, seen):
             batch._reference_tree_forward(lane, row, parent_row)
             for lane, row, parent_row in zip(cohort, inputs, parents)
         ]
+        batch._record_tensorfold_dispatch(cohort)
+        batch.scheduler_stats["external_tensorfold_target_rounds"] += 1
+        batch.scheduler_stats["external_tensorfold_physical_target_forwards"] += 1
         if len(cohort) > 1:
-            batch.scheduler_stats["external_tensorfold_target_rounds"] += 1
             batch.scheduler_stats["external_tensorfold_cohort_rounds"] += 1
             batch.scheduler_stats["external_tensorfold_cohort_lanes"] += len(cohort)
             batch.scheduler_stats["external_tensorfold_cohort_max_width"] = max(
@@ -439,6 +441,10 @@ def test_tensorfold_tree_cohort_matches_single_lane_reference(monkeypatch):
     assert stats["external_tensorfold_cohort_lanes"] >= 2
     assert stats["external_tensorfold_cohort_max_width"] == 2
     assert stats["external_tensorfold_cohort_limit"] == 4
+    assert sum(
+        stats[f"external_tensorfold_target_width_{width}_rounds"]
+        for width in range(1, 5)
+    ) == stats["external_tensorfold_target_rounds"]
     assert all(receipt["target_width"] >= 2 for receipt in receipts.values())
     assert all(
         receipt["tensorfold_target"]["cohort_max_width"] == 2
@@ -665,6 +671,9 @@ def test_tensorfold_cohort_partial_commit_restores_every_lane(monkeypatch):
         while lane.anchor is None:
             batch._prefill(lane, step=3)
     before = [_lane_state(lane) for lane in lanes]
+    before_histogram = dict(
+        batch.scheduler_stats["external_tree_node_budget_histogram"]
+    )
     _install_reference_cohort(batch, monkeypatch, [])
 
     def fail_after_first_commit(
@@ -678,6 +687,13 @@ def test_tensorfold_cohort_partial_commit_restores_every_lane(monkeypatch):
         batch._tree_round(lanes)
     assert [_lane_state(lane) for lane in lanes] == before
     assert all(not lane.ready for lane in lanes)
+    assert all(not lane.tensorfold_target_width_hist for lane in lanes)
+    assert all(not lane.tensorfold_target_width_trace for lane in lanes)
+    assert batch.scheduler_stats["external_tensorfold_target_width_2_rounds"] == 0
+    assert (
+        batch.scheduler_stats["external_tree_node_budget_histogram"]
+        == before_histogram
+    )
     assert batch.scheduler_stats["recovery_checkpoint_restores"] == 2
 
 

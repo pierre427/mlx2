@@ -535,6 +535,21 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             "self_mtp_copy_draft": {"enabled": True},
             "decode_first": {"enabled": True, "shared_prefill_budget": False},
         },
+        # Selected 2026-10-05 after an exact 1,680-request A/B-B/A:
+        # 51.441 versus 48.667 aggregate decode tok/s (1.0570x), with zero
+        # pairwise output mismatches.  This does not supply a draft artifact
+        # or select the external route; both remain explicit and revision-bound.
+        "external_draft": {
+            "pairwise_selection": "batched",
+            "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
+            "tree_node_budget_by_lanes": {1: 15, 2: 7, 3: 4, 4: 3},
+            "external_varlen_prefill": True,
+            "varlen_dense_mlp": {
+                "enabled": True,
+                "minimum_padding_fraction": 0.25,
+                "minimum_padding_rows": 1,
+            },
+        },
     }
     """Dense text adapter using shared chat parsing and modern runtime state."""
 

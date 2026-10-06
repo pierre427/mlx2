@@ -61,9 +61,11 @@ class AdapterResolution:
         Read from the adapter class's *own* namespace, never inherited: these
         are evidence-backed per-model performance defaults, and a subclass
         (Nemotron and Qwen3.5 9B subclass Flash-Next / Qwen3.8) must not
-        acquire a measurement taken on its parent.  Only exact, server-owned
-        mechanisms may be declared, and only for the two routes an adapter
-        can default to; prompt-lookup and external-draft routes get nothing.
+        acquire a measurement taken on its parent.  Only evidence-selected,
+        server-owned mechanisms may be declared.  An adapter may also declare
+        defaults for an explicitly selected external-draft route; the artifact
+        binding and revision pins remain operator-owned and are never defaulted
+        here.
         """
         declared = vars(self.adapter_type).get("default_route_execution_policy")
         if declared is None:
@@ -72,12 +74,13 @@ class AdapterResolution:
         if not isinstance(declared, dict) or set(declared) - {
             "ordinary",
             "native_mtp",
+            "external_draft",
         }:
             raise ValueError(
                 f"{name} default_route_execution_policy must map 'ordinary' "
-                "or 'native_mtp' to a policy object"
+                "'native_mtp', or 'external_draft' to a policy object"
             )
-        if route not in {"ordinary", "native_mtp"}:
+        if route not in {"ordinary", "native_mtp", "external_draft"}:
             return {}
         if route == "native_mtp" and Capability.MTP not in self.descriptor.capabilities:
             return {}
@@ -106,6 +109,13 @@ ADAPTER_DEFAULT_POLICY_KEYS = frozenset(
         # Publication order only (decode tokens before the round's prefill
         # phase); device work and token math are unchanged.
         "decode_first",
+        # These are safe only inside an explicitly selected, revision-bound
+        # external route.  The adapter owns the measured row geometry.
+        "pairwise_selection",
+        "batch_size_route",
+        "tree_node_budget_by_lanes",
+        "external_varlen_prefill",
+        "varlen_dense_mlp",
     }
 )
 # The subset that snapshots hybrid state; the engine refuses these on

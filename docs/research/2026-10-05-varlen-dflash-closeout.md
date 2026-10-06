@@ -27,16 +27,18 @@ TensorFold-backed bounded tree verification, exact-law PLD-to-DFlash proposal
 composition, idle allocator reclamation, and an explicit lane-pressure tree
 budget policy.
 
-The measured configuration is still a candidate, not a qualified or automatic
-default. It explicitly selects DFlash2, varlen prefill, TensorFold tree
-verification, and a fixed 15-node tree budget at widths 1 through 4. The tested
-adaptive lane budgets regressed throughput and remain unselected.
+The final corrected configuration is selected by default within Qwen3.8's
+explicit external-DFlash route; the external route itself remains explicit and
+unqualified. It selects varlen prefill, TensorFold tree verification, a
+15/7/4/3 proposal-node budget at widths 1 through 4, and dense-MLP compaction
+only at or above 25% padding. Ordinary decode remains the reference path.
 
-The strongest conclusion is architectural rather than a universal speedup:
-varlen is observed to omit padded MLP rows on skewed cohorts, TensorFold and the
-tree verifier are observed-used, and the scheduler now preserves a declared
-cohort until every member reaches decode. The 20-by-20 mixed workload did not
-show a material end-to-end gain, so no 1.2x-1.3x general serving claim is made.
+The full corrected-geometry A/B-B/A ran 1,680 timed requests with zero
+control/control, candidate/candidate, or cross-arm output mismatches. Combined
+decode was 51.441 tokens/s candidate versus 48.667 control, or 1.05699x. Each
+candidate arm selected 21 of 105 varlen scopes and skipped 1,570,496 padded MLP
+rows. This supports the selected default but is not thermal qualification or a
+1.2x-1.3x general serving claim.
 
 ## Source state and validation boundary
 
@@ -80,11 +82,11 @@ show a material end-to-end gain, so no 1.2x-1.3x general serving claim is made.
   execution. It is not copied into mlx2.
 - `tree_node_budget_by_lanes` is validated by the adapter, applied to admission
   pricing and proposal generation, and emitted in route and scheduler receipts.
-- The experimental decreasing schedule was slower in spot checks. The selected
-  measured policy is therefore `{1: 15, 2: 15, 3: 15, 4: 15}`.
-- State: lane-budget mechanism implemented and CPU tested; adaptive schedule
-  unselected; fixed-15 schedule selected and observed-used in the measured
-  candidate.
+- The original fixed-15-per-lane policy expanded B4 verification to 64 target
+  rows. The selected mapping is `{1: 15, 2: 7, 3: 4, 4: 3}`, yielding
+  16/16/15/16 total target rows while retaining at least three proposals.
+- State: lane-budget mechanism implemented and CPU tested; the 15/7/4/3
+  schedule is selected and observed-used in the exact A/B-B/A.
 
 ### Speculative proposal composition
 
@@ -228,17 +230,17 @@ route-identity merge. The adaptive lane-budget policy is also not selected.
 
 ## Remaining gaps and recommended next run
 
-1. Run one short current-main source-bound smoke proving the route receipt,
-   TensorFold/tree counters, varlen row-skipping counters, and clean retirement.
-2. Run a controlled reverse-order A/B on deliberately skewed multi-user,
-   multi-turn traffic. Disable APC reuse for that comparison unless recurrent
-   state reuse invariance is separately proven.
+1. Run three thermally controlled repetitions of the selected 15/7/4/3 plus
+   25%-crossover policy and retain the default only if the exact gain persists.
+2. Repair or explicitly redefine TensorFold's ordinary-serial numerical
+   contract; accepted-prefix transaction bookkeeping is exact against its own
+   arithmetic, but an immediate ordinary-serial token comparison still drifts.
 3. Focus optimization on B4 decode: current mlx2 is close to direct TensorFold
    at B1 but only about half its B4 aggregate rate in the supplied packet.
    Instrument target MLP, stacking/scattering, proposal construction, and
    verification fences separately before adding another kernel.
-4. Retain fixed-15 tree depth until a lane-pressure schedule beats it on both
-   code and chat workloads. The current decreasing schedule did not.
+4. Sweep adjacent B2/B3/B4 budgets around 7/4/3 while retaining at least three
+   proposals and about 16 total physical target rows.
 5. Qualify exact-law PLD-to-DFlash composition with a larger deterministic
    corpus and non-greedy seeds before making it an automatic scheduler choice.
 

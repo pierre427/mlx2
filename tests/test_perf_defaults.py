@@ -19,6 +19,7 @@ from mlx2.server import RouteSelection, resolve_execution_policy_defaults
 
 MTP = RouteSelection("native_mtp", "adapter_default")
 ORDINARY = RouteSelection("ordinary", "explicit_flag")
+EXTERNAL = RouteSelection("external_draft", "explicit_flag")
 
 
 def _resolution(adapter_type, descriptor):
@@ -56,9 +57,49 @@ def test_interior_default_is_native_mtp_only_and_explicit_policy_wins(
             {"apc_interior_checkpoints": explicit}, MTP, resolution
         )
         assert policy["apc_interior_checkpoints"] == explicit
-    # Prompt lookup and external draft never receive adapter defaults.
-    for route in ("prompt_lookup", "external_draft"):
-        assert resolution.default_execution_policy(route) == {}
+    assert resolution.default_execution_policy("prompt_lookup") == {}
+    external = resolution.default_execution_policy("external_draft")
+    if adapter_type is Qwen3827BAdapter:
+        assert external["batch_size_route"] == "tree15_b1_b4_chain_b5plus_v1"
+    else:
+        assert external == {}
+
+
+def test_qwen38_external_draft_defaults_select_measured_varlen_tensorfold():
+    resolution = _resolution(Qwen3827BAdapter, QWEN38_27B)
+    policy = resolve_execution_policy_defaults(
+        {"draft_model": "/revision-bound/operator-path"},
+        EXTERNAL,
+        resolution,
+    )
+    assert policy["pairwise_selection"] == "batched"
+    assert policy["batch_size_route"] == "tree15_b1_b4_chain_b5plus_v1"
+    assert policy["tree_node_budget_by_lanes"] == {1: 15, 2: 7, 3: 4, 4: 3}
+    assert policy["external_varlen_prefill"] is True
+    assert policy["varlen_dense_mlp"] == {
+        "enabled": True,
+        "minimum_padding_fraction": 0.25,
+        "minimum_padding_rows": 1,
+    }
+    # Defaults do not invent or replace the artifact binding.
+    assert policy["draft_model"] == "/revision-bound/operator-path"
+
+
+def test_qwen38_external_draft_default_groups_have_explicit_kill_switches():
+    resolution = _resolution(Qwen3827BAdapter, QWEN38_27B)
+    policy = resolve_execution_policy_defaults(
+        {
+            "batch_size_route": None,
+            "external_varlen_prefill": False,
+            "draft_model": "/revision-bound/operator-path",
+        },
+        EXTERNAL,
+        resolution,
+    )
+    assert policy["batch_size_route"] is None
+    assert "tree_node_budget_by_lanes" not in policy
+    assert policy["external_varlen_prefill"] is False
+    assert "varlen_dense_mlp" not in policy
 
 
 @pytest.mark.parametrize(("adapter_type", "descriptor"), HYBRID_MTP)

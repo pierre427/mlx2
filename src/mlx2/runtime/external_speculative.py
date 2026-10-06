@@ -231,6 +231,12 @@ class Lane:
     # occurred in a full tree round; this receipt makes planted and live
     # partial-commit gates unambiguous without retaining per-round records.
     verify_accept_span_hist: dict = field(default_factory=dict)
+    # Committed TensorFold target geometry for this request.  The bounded
+    # trace makes allocator/formation-sensitive output drift diagnosable
+    # without retaining tokens, prompts, timestamps, or unbounded history.
+    tensorfold_target_width_hist: dict = field(default_factory=dict)
+    tensorfold_target_width_trace: list = field(default_factory=list)
+    tensorfold_target_width_trace_overflow: int = 0
 
 
 # History changes only by append inside a decode round.  Keep its committed
@@ -632,6 +638,7 @@ class ExternalDraftBatchGenerator:
                 external_tree_node_budget_histogram={},
             )
         if self.target_execution == "tensorfold":
+            self.tensorfold_target_selected = True
             self.tensorfold_cohort_limit = _tensorfold_cohort_limit(
                 self.target_execution, self.capacity,
                 default=self.dynamic_tree_max_width if dynamic_singleton_tree else 1,
@@ -647,7 +654,12 @@ class ExternalDraftBatchGenerator:
                 external_tensorfold_packed_target_lanes=0,
                 external_tensorfold_physical_target_forwards=0,
             )
+            for width in range(1, self.tensorfold_cohort_limit + 1):
+                self.scheduler_stats[
+                    f"external_tensorfold_target_width_{width}_rounds"
+                ] = 0
         else:
+            self.tensorfold_target_selected = False
             self.tensorfold_cohort_limit = _tensorfold_cohort_limit(
                 self.target_execution, self.capacity
             )
@@ -999,7 +1011,7 @@ class ExternalDraftBatchGenerator:
             result["fly_disabled"] = "logits_processors"
         return result
 
-    def _target_execution_receipt(self):
+    def _target_execution_receipt(self, lane=None):
         model_receipt = getattr(self.model, "external_execution_receipt", None)
         result = {"target_protocol": dict(model_receipt)} if model_receipt else {}
         if getattr(self, "external_varlen_prefill", False):
@@ -1075,8 +1087,19 @@ class ExternalDraftBatchGenerator:
                 ),
                 "qualified": False,
             }
-        if self.target_execution != "tensorfold":
+        tensorfold_selected = getattr(
+            self,
+            "tensorfold_target_selected",
+            self.target_execution == "tensorfold",
+        )
+        if not tensorfold_selected:
             return result
+        width_rounds = {
+            str(width): self.scheduler_stats.get(
+                f"external_tensorfold_target_width_{width}_rounds", 0
+            )
+            for width in range(1, self.tensorfold_cohort_limit + 1)
+        }
         result["tensorfold_target"] = {
             "cohort_limit": self.tensorfold_cohort_limit,
             "cohort_max_width": self.scheduler_stats[
@@ -1094,8 +1117,45 @@ class ExternalDraftBatchGenerator:
             "physical_target_forwards": self.scheduler_stats.get(
                 "external_tensorfold_physical_target_forwards", 0
             ),
+            "target_width_rounds": width_rounds,
         }
+        if lane is not None:
+            result["tensorfold_target"].update(
+                lane_width_histogram={
+                    str(width): int(rounds)
+                    for width, rounds in sorted(
+                        lane.tensorfold_target_width_hist.items()
+                    )
+                },
+                lane_width_trace=list(lane.tensorfold_target_width_trace),
+                lane_width_trace_overflow=(
+                    lane.tensorfold_target_width_trace_overflow
+                ),
+            )
         return result
+
+    def _record_tensorfold_dispatch(self, cohort):
+        """Record one successful physical TensorFold target dispatch.
+
+        Lane fields participate in the normal round snapshot and are restored
+        on abort.  Scheduler width counters are scalars, so the existing stats
+        snapshot also rolls them back; do not use a nested mutable histogram.
+        """
+        width = len(cohort)
+        key = f"external_tensorfold_target_width_{width}_rounds"
+        if key not in self.scheduler_stats:
+            raise RuntimeError(
+                f"TensorFold target width {width} exceeds configured receipt bounds"
+            )
+        _bump(self.scheduler_stats, key)
+        for lane in cohort:
+            lane.tensorfold_target_width_hist[width] = (
+                lane.tensorfold_target_width_hist.get(width, 0) + 1
+            )
+            if len(lane.tensorfold_target_width_trace) < 128:
+                lane.tensorfold_target_width_trace.append(width)
+            else:
+                lane.tensorfold_target_width_trace_overflow += 1
 
     def _propose_pairwise(self, lanes, arguments):
         """Batched DFlash2 selection: one pair-table walk, one host read.
@@ -1228,6 +1288,19 @@ class ExternalDraftBatchGenerator:
                 RoundSnapshot(slot, boundary, mode, tuple(lane.processors), lane.history)
             )
         return snapshots
+
+    def _snapshot_scheduler_stats(self):
+        """Copy mutable histogram values as well as scalar counters.
+
+        Round rollback previously used a shallow dictionary copy.  A failed
+        tree round could therefore leak an in-place node-budget histogram bump
+        even though every authoritative lane and scalar counter was restored.
+        """
+        snapshot = dict(self.scheduler_stats)
+        for key, value in self.scheduler_stats.items():
+            if isinstance(value, dict):
+                snapshot[key] = copy.deepcopy(value)
+        return snapshot
 
     def _restore_round(self, cohort, snapshots):
         for lane, snapshot in zip(cohort, snapshots):
@@ -1613,6 +1686,7 @@ class ExternalDraftBatchGenerator:
             os.environ["MLX2_TENSORFOLD_SOURCE"],
             cached=cached,
         )
+        self._record_tensorfold_dispatch([lane])
         _bump(self.scheduler_stats, "external_tensorfold_target_rounds")
         _bump(self.scheduler_stats, "external_tensorfold_physical_target_forwards")
         if cached:
@@ -1645,6 +1719,7 @@ class ExternalDraftBatchGenerator:
             os.environ["MLX2_TENSORFOLD_SOURCE"],
             cached=cached,
         )
+        self._record_tensorfold_dispatch(cohort)
         _bump(self.scheduler_stats, "external_tensorfold_target_rounds")
         _bump(self.scheduler_stats, "external_tensorfold_cohort_rounds")
         _bump(self.scheduler_stats, "external_tensorfold_cohort_lanes", len(cohort))
@@ -2164,7 +2239,7 @@ class ExternalDraftBatchGenerator:
                 if logp is not None and decision.response_logprobs:
                     if j < len(decision.response_logprobs) and decision.response_logprobs[j] is not None:
                         logp = decision.response_logprobs[j]
-                lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=(decision.continuation_outcome.physical_width if decision.continuation_outcome is not None else len(cohort)), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._target_execution_receipt(), **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt(), **self._proposal_composition_receipt(lane), **self._continuation_receipt(lane)}))
+                lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=(decision.continuation_outcome.physical_width if decision.continuation_outcome is not None else len(cohort)), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._target_execution_receipt(lane), **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt(), **self._proposal_composition_receipt(lane), **self._continuation_receipt(lane)}))
         if clock is not None:
             self._mark("emit", clock)
         self.scheduler_stats[
@@ -2353,7 +2428,7 @@ class ExternalDraftBatchGenerator:
         """
         recovery = self._snapshot_round(cohort)
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
-        stats_snapshot = dict(self.scheduler_stats)
+        stats_snapshot = self._snapshot_scheduler_stats()
         estimator_snapshot = copy.deepcopy(self.acceptance_estimator)
         self._open = True
         transaction = None
@@ -2582,7 +2657,7 @@ class ExternalDraftBatchGenerator:
         )
         recovery = self._snapshot_round(cohort)
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
-        stats_snapshot = dict(self.scheduler_stats)
+        stats_snapshot = self._snapshot_scheduler_stats()
         self._open = True
         transaction = None
         try:
@@ -2730,7 +2805,7 @@ class ExternalDraftBatchGenerator:
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
         if clock is not None:
             clock = self._mark("recovery_capture", clock)
-        stats_snapshot = dict(self.scheduler_stats)
+        stats_snapshot = self._snapshot_scheduler_stats()
         adaptive_snapshot = (
             copy.deepcopy(self.acceptance_estimator) if self.adaptive_policy is not None else None
         )
@@ -2833,7 +2908,7 @@ class ExternalDraftBatchGenerator:
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
         if phase is not None:
             phase("tree_recovery_capture")
-        stats_snapshot = dict(self.scheduler_stats)
+        stats_snapshot = self._snapshot_scheduler_stats()
         self._open = True
         transaction = None
         self._tree_clock = phase
@@ -2959,7 +3034,7 @@ class ExternalDraftBatchGenerator:
         again, so avoid draft append, target taps and speculative rollback.
         """
         snapshots = self._snapshot_round(cohort)
-        stats_snapshot = dict(self.scheduler_stats)
+        stats_snapshot = self._snapshot_scheduler_stats()
         self._open = True
         try:
             if self.adaptive_policy is not None:
@@ -3082,7 +3157,7 @@ class ExternalDraftBatchGenerator:
                             "target_width":lane.target_max_width,
                             "draft_width":lane.draft_max_width,
                             "qualification_authority":"serving_route",
-                            **self._target_execution_receipt(),
+                            **self._target_execution_receipt(lane),
                             **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt(),
                             **self._proposal_composition_receipt(lane, current_source="ordinary"),
                         },
