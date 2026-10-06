@@ -5,7 +5,7 @@ Preparation is CPU-only. Execution requires root GPUQ ownership and a separately
 capable ordinary/N20 service; a missing native route fails closed, not to B2.
 """
 from __future__ import annotations
-import argparse,hashlib,json,os,subprocess,sys,threading,time
+import argparse,hashlib,json,subprocess,sys,threading,time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor,as_completed
 from pathlib import Path

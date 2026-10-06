@@ -38,6 +38,7 @@ multimodal = [
 ]
 radio = ["mlx>=0.32", "numpy>=2", "pillow>=10"]
 image-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
+gguf-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
 
 [project.scripts]
 mlx2-serve = "mlx2.server:main"

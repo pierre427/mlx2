@@ -5,7 +5,7 @@ Dry/import-safe. Each init/warmup/cohort/shutdown command requires a fresh dual
 GPUQ lease. One model/service stays idle between commands; no batch20 claim.
 """
 from __future__ import annotations
-import argparse,gc,hashlib,json,os,secrets,signal,socket,stat,subprocess,sys,threading,time
+import argparse,gc,hashlib,json,os,secrets,socket,stat,subprocess,sys,threading,time
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 from varlen_hybrid_serving_smoke import MODEL,MANIFEST,WHEEL,save

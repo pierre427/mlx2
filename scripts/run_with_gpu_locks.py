@@ -149,6 +149,24 @@ def release(backups: list[tuple[Path, Path | None]]) -> list[dict]:
     return [{"path": str(path), **snapshot(path)} for path in LOCKS]
 
 
+def stop_child(child: subprocess.Popen | None, receipt: dict) -> None:
+    """Stop the whole child session before releasing shared GPU ownership."""
+    if child is None or child.poll() is not None:
+        return
+    receipt["child_terminated_by_wrapper"] = True
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        child.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait(timeout=30)
+        receipt["child_killed_by_wrapper"] = True
+    receipt["command_returncode"] = child.returncode
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", default=DEFAULT_SESSION)
@@ -199,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
             "label": args.label,
             "pid": os.getpid(),
             "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "cpg_used": False,
         }
         receipt["lock_state_before"], backups = acquire(owner)
         receipt["owner"] = owner
@@ -211,14 +230,19 @@ def main(argv: list[str] | None = None) -> int:
         rc = child.wait()
         receipt["command_returncode"] = rc
         receipt["status"] = "command_completed" if rc == 0 else "command_failed"
-    except BaseException as exc:  # noqa: BLE001 - also retire children on Ctrl-C
+    except KeyboardInterrupt:
+        rc = 130
+        receipt["status"] = "interrupted"
+        receipt["error"] = "KeyboardInterrupt"
+        stop_child(child, receipt)
+    except BaseException as exc:  # noqa: BLE001 - persist and retire every child
         receipt["status"] = "error"
         receipt["error"] = f"{type(exc).__name__}: {exc}"
         receipt["traceback"] = traceback.format_exc(limit=8)
-        if child is not None and child.poll() is None:
-            os.killpg(child.pid, signal.SIGTERM)
-            child.wait(timeout=30)
+        stop_child(child, receipt)
     finally:
+        # Ownership must never be released while a child can resume GPU work.
+        stop_child(child, receipt)
         waiter.unlink(missing_ok=True)
         try:
             receipt["lock_state_after"] = (
