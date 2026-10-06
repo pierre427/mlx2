@@ -44,6 +44,74 @@ def test_ordinary_prompt_checkpoint_reuses_exact_hybrid_state():
         apc.clear()
 
 
+def test_nemotron_b4_prompt_checkpoints_replay_exact_cold_tokens():
+    """Four exact recurrent/KV APCv2 restores preserve ordinary B4 output.
+
+    This covers the serving shape that a real Lightning q8 qualification
+    ladder exercises: one batched cold prefill publishes four request-private
+    prompt boundaries, then four warm hits are restored and merged into a new
+    physical B4 ordinary batch.
+    """
+    from test_nemotron_external_taps_cpu import tiny_model
+
+    mx.random.seed(74)
+    model = tiny_model()
+    apc = APCv2(layout_name="nemotron-h-tiny-hybrid-v1")
+    key = apc.key("tiny-nemotron", revision="test")
+    batch = BatchGenerator(
+        model,
+        completion_batch_size=4,
+        prefill_batch_size=4,
+        prefill_step_size=64,
+    )
+    prompts = [
+        [((i + 1) * (lane + 3)) % 13 + 1 for i in range(17 + lane)]
+        for lane in range(4)
+    ]
+
+    def drain(uids):
+        outputs = {uid: [] for uid in uids}
+        terminal = set()
+        for _ in range(128):
+            prompt_responses, responses = batch.next()
+            for response in prompt_responses:
+                if response.end_of_prompt:
+                    lane = uids.index(response.uid)
+                    boundary = batch.pop_prompt_boundary(response.uid)
+                    assert len(boundary["tokens"]) == len(prompts[lane]) - 1
+                    apc.store(
+                        key,
+                        boundary["tokens"],
+                        boundary["target_cache"],
+                        retention_role="committed_prompt_boundary",
+                    )
+            for response in responses:
+                outputs[response.uid].append(response.token)
+                if response.finish_reason:
+                    terminal.add(response.uid)
+            if terminal == set(uids):
+                return [outputs[uid] for uid in uids]
+        raise AssertionError("Nemotron B4 batch did not terminate")
+
+    try:
+        cold_uids = batch.insert(prompts, max_tokens=[12] * 4)
+        cold = drain(cold_uids)
+        hits = [apc.lookup(key, prompt) for prompt in prompts]
+        assert all(hit.hit for hit in hits)
+        assert [hit.cached_tokens for hit in hits] == [len(p) - 1 for p in prompts]
+        warm_uids = batch.insert(
+            [hit.remaining_tokens for hit in hits],
+            max_tokens=[12] * 4,
+            caches=[hit.cache for hit in hits],
+            all_tokens=[prompt[: hit.cached_tokens] for prompt, hit in zip(prompts, hits)],
+        )
+        warm = drain(warm_uids)
+        assert warm == cold
+    finally:
+        batch.close()
+        apc.clear()
+
+
 def _plain_greedy(model, prompt, count):
     from mlx2.runtime.models.cache import make_prompt_cache
 
