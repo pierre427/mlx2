@@ -287,6 +287,8 @@ class Model(nn.Module):
         pos_offset: int = 0,
         return_kv: bool = False,
         suffix_kv: Optional[list] = None,
+        logit_slice: Optional[tuple[int, int]] = None,
+        verify_logit_slice: bool = False,
     ):
         """Bidirectional forward. Returns logits ``[B, L, vocab]``.
 
@@ -297,6 +299,10 @@ class Model(nn.Module):
         together with ``prefix_kv``/``suffix_kv`` is a cached forward that also
         returns the active window's per-layer K/V (incremental-cache capture).
         """
+        if return_kv and logit_slice is not None:
+            raise ValueError("logit_slice is incompatible with return_kv")
+        if verify_logit_slice and logit_slice is None:
+            raise ValueError("verify_logit_slice requires logit_slice")
         if return_kv:
             out, kvs = self.model(
                 inputs, prefix_kv=prefix_kv, pos_offset=pos_offset,
@@ -306,6 +312,19 @@ class Model(nn.Module):
         out = self.model(
             inputs, prefix_kv=prefix_kv, pos_offset=pos_offset, suffix_kv=suffix_kv
         )
+        if logit_slice is not None:
+            start, end = logit_slice
+            if not 0 <= start < end <= out.shape[1]:
+                raise ValueError("logit_slice is outside the hidden-state rows")
+            candidate = self._head(out[:, start:end, :])
+            if verify_logit_slice:
+                reference = self._head(out)[:, start:end, :]
+                mx.eval(candidate, reference)
+                if not bool(mx.array_equal(candidate, reference).item()):
+                    raise AssertionError(
+                        "active-block LM-head logits differ from the ordinary head"
+                    )
+            return candidate
         return self._head(out)
 
     def sanitize(self, weights):
@@ -501,6 +520,9 @@ def generate(
     remask_rounds: int = 2,
     prefix_snapshot: Optional[dict] = None,
     return_prefix_snapshot: bool = False,
+    active_block_postprocess: bool = False,
+    active_block_head: bool = False,
+    verify_active_block_head: bool = False,
 ):
     """Diffusion (MDM) generation for LLaDA.
 
@@ -592,6 +614,17 @@ def generate(
             in a refinement round (only used when ``remask_refine=True``).
         remask_rounds: max number of refinement rounds per block (only used when
             ``remask_refine=True``).
+        active_block_postprocess: fixed-schedule, greedy-only exact candidate.
+            Run argmax, float32 softmax, confidence selection, and top-k only
+            over the current generation block. The transformer and LM head
+            remain the ordinary full-canvas reference. Default False preserves
+            the source sampler's full-row postprocessing.
+        active_block_head: additionally apply the LM head only to the current
+            generation block. Requires ``active_block_postprocess`` and keeps
+            the full transformer forward. Default False.
+        verify_active_block_head: compute the ordinary full-row head from the
+            same hidden states and require bitwise-equal active rows on every
+            denoising step. This is a parity gate, not a performance mode.
 
     Returns:
         Generated ids ``[1, gen_length]``; a trailing decoded ``text`` if a
@@ -634,6 +667,24 @@ def generate(
         raise ValueError(
             "incremental_cache=True requires kv_cache=True and dual_cache=True."
         )
+    if active_block_postprocess and parallel_threshold is not None:
+        raise ValueError(
+            "active_block_postprocess currently supports only the fixed schedule"
+        )
+    if active_block_postprocess and temperature != 0.0:
+        raise ValueError(
+            "active_block_postprocess exact mode requires temperature == 0"
+        )
+    if active_block_postprocess and remasking != "low_confidence":
+        raise ValueError(
+            "active_block_postprocess exact mode requires low_confidence remasking"
+        )
+    if active_block_head and not active_block_postprocess:
+        raise ValueError("active_block_head requires active_block_postprocess")
+    if verify_active_block_head and not active_block_head:
+        raise ValueError("verify_active_block_head requires active_block_head")
+    if active_block_head and (kv_cache or cfg_scale > 0.0):
+        raise ValueError("active_block_head does not support cache or CFG routes")
 
     neg_inf = mx.array(-float("inf"), dtype=mx.float32)
     col_index = mx.arange(total_len).reshape(1, total_len)
@@ -641,7 +692,9 @@ def generate(
     # Count of full forwards actually run (the win metric — ~98% of step cost).
     forwards = 0
 
-    def _forward_logits(x_cur: mx.array) -> mx.array:
+    def _forward_logits(
+        x_cur: mx.array, logit_slice: Optional[tuple[int, int]] = None
+    ) -> mx.array:
         """One full forward (with optional CFG). Increments the forward count."""
         nonlocal forwards
         forwards += 1
@@ -651,7 +704,16 @@ def generate(
             logits = model(x_)
             cond_logits, uncond_logits = logits[:1], logits[1:]
             return uncond_logits + (cfg_scale + 1.0) * (cond_logits - uncond_logits)
-        return model(x_cur)
+        # Preserve the source sampler's ordinary callable contract.  The
+        # slicing keywords belong only to the explicit active-head route;
+        # lightweight reference callables may accept just ``model(x)``.
+        if logit_slice is None:
+            return model(x_cur)
+        return model(
+            x_cur,
+            logit_slice=logit_slice,
+            verify_logit_slice=verify_active_block_head,
+        )
 
     # ------------------------------------------------------------------
     # Fast-dLLM block-KV cache (only used when kv_cache=True).
@@ -937,7 +999,49 @@ def generate(
                         else _forward_logits_cached(x)
                     )
                 else:
-                    logits = _forward_logits(x)
+                    logits = _forward_logits(
+                        x,
+                        (block_start, block_end) if active_block_head else None,
+                    )
+
+                if active_block_postprocess:
+                    # No row outside the current block can be revealed here.
+                    # Keep the ordinary full-canvas transformer/head forward,
+                    # but avoid argmax and the much larger float32 softmax over
+                    # prompt, finalized, and future rows.
+                    block_logits = (
+                        logits
+                        if active_block_head
+                        else logits[:, block_start:block_end, :]
+                    )
+                    block_x0 = mx.argmax(block_logits, axis=-1)
+                    if remasking == "low_confidence":
+                        block_p = mx.softmax(
+                            block_logits.astype(mx.float32), axis=-1
+                        )
+                        block_x0_p = mx.take_along_axis(
+                            block_p, block_x0[..., None], axis=-1
+                        ).squeeze(-1)
+                    elif remasking == "random":
+                        block_x0_p = mx.random.uniform(shape=block_x0.shape)
+                    else:
+                        raise ValueError(f"Unknown remasking strategy: {remasking}")
+
+                    block_mask = mask_index[:, block_start:block_end]
+                    block_x = x[:, block_start:block_end]
+                    block_x0 = mx.where(block_mask, block_x0, block_x)
+                    block_confidence = mx.where(
+                        block_mask, block_x0_p.astype(mx.float32), neg_inf
+                    )
+                    block_transfer = _select_topk(
+                        block_confidence, num_transfer_tokens[:, i : i + 1]
+                    )
+                    next_block = mx.where(block_transfer, block_x0, block_x)
+                    x = mx.concatenate(
+                        [x[:, :block_start], next_block, x[:, block_end:]], axis=1
+                    )
+                    mx.eval(x)
+                    continue
 
                 noised = add_gumbel_noise(logits, temperature)
                 x0 = mx.argmax(noised, axis=-1)  # [1, total_len]
@@ -1147,6 +1251,17 @@ def generate(
             "forwards": forwards,
             "tokens_per_step_mean": (revealed / forwards) if forwards else 0.0,
             "steps": forwards,
+            "active_block_postprocess": bool(active_block_postprocess),
+            "postprocess_rows_per_forward": (
+                int(block_length) if active_block_postprocess else int(total_len)
+            ),
+            "active_block_head": bool(active_block_head),
+            "lm_head_rows_per_forward": (
+                int(block_length) if active_block_head else int(total_len)
+            ),
+            "active_block_head_parity_checks": (
+                int(forwards) if verify_active_block_head else 0
+            ),
         }
         ret = ret + (stats,)
     return ret[0] if len(ret) == 1 else ret

@@ -11,9 +11,9 @@ import struct
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from ..process_env import PROCESS_NUMERICS, require_process_numerics
 from ..sampling_defaults import SamplingDefaults, VendorSampling
 from .external_draft_policy import ExternalDraftAdapterMixin
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
 CACHE_LAYOUT = "north-mini-code-layer-segments-v1"
 _SAFETENSORS_HEADER_LIMIT = 64 << 20
@@ -499,11 +499,57 @@ NORTH_MINI_CODE_SAMPLING = VendorSampling.single(
 )
 
 
+def _split_north_execution_policy(execution_policy):
+    policy = dict(execution_policy or {})
+    expert_sort = policy.pop("expert_gather_sort", "auto")
+    batch_row_exact = policy.pop("batch_row_exact_q4", False)
+    if not isinstance(expert_sort, str) or expert_sort not in {
+        "auto",
+        "unsorted_decode",
+    }:
+        raise ValueError("North expert_gather_sort must be auto or unsorted_decode")
+    if type(batch_row_exact) is not bool:
+        raise ValueError("North batch_row_exact_q4 must be a boolean")
+    return expert_sort, batch_row_exact, policy
+
+
 class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
     default_route = "ordinary"
     descriptor = NORTH_MINI_CODE
     sampling_defaults = NORTH_MINI_CODE_SAMPLING
     reasoning_effort_semantics = "thinking_toggle"
+
+    def prefill_step_default(self):
+        """Retain the source-matched North chunk instead of generic scaling.
+
+        North's full-attention B=1 mask path has been reproduced at 2,048-row
+        prefills.  Larger generic rungs have no family-bound exactness evidence,
+        so the adapter owns this value until a new qualification says otherwise.
+        """
+        return 2048
+
+    @staticmethod
+    def prefix_cascade_policy():
+        """Expose the transferable planner while refusing unproven execution."""
+        return {
+            "algorithm": "longest-first-exact-prefix-cascade-v1",
+            "planner_implemented": True,
+            "serving_implemented": False,
+            "qualified": False,
+            "selected": False,
+            "observed_used": False,
+            "execution_enabled": False,
+            "longest_first": True,
+            "prune_impossible_siblings": True,
+            "reuse_exact_shared_prefix": True,
+            "cache_layout": CACHE_LAYOUT,
+            "sliding_window": 4096,
+            "blockers": (
+                "ordinary_b1_full_attention_mask_parity",
+                "rotating_cache_commit_equivalence",
+                "ordinary_decode_continuation_parity",
+            ),
+        }
 
     @staticmethod
     def spomin_backend(model, prompt_cache):
@@ -709,15 +755,51 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
     EXTERNAL_PROFILE = "north-mini-code-apcv2-cohere-eagle"
 
     def execution_config(self, *, max_lanes, prefill_step):
+        if getattr(self, "batch_row_exact_q4", False) and max_lanes > 32:
+            raise ValueError("North batch_row_exact_q4 supports at most 32 lanes")
         if getattr(self, "draft_model", None) is not None:
             return self._external_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
-        return {
+        config = {
             "persistent": True,
             "num_draft": 0,
             "rate_gate": False,
             "prefill_step_size": prefill_step,
             "segment_aware_live_tip": False,
             "segment_aware_cohort_size": max_lanes,
+        }
+        if getattr(self, "batch_row_exact_q4", False):
+            from ..runtime.models.cohere2_moe import NORTH_BATCH_ROW_EXACT_Q4_VERSION
+
+            config["batch_row_exact_q4"] = {
+                "algorithm": NORTH_BATCH_ROW_EXACT_Q4_VERSION,
+                "scope": "multi-lane one-token decode only",
+                "max_rows": 32,
+            }
+        return config
+
+    def execution_numerics_contract(self):
+        """Bind APCv2 to the selected North target arithmetic."""
+        if not getattr(self, "batch_row_exact_q4", False):
+            return None
+        status = self.model.batch_row_exact_q4_status
+        expected = {
+            "dense_q4_linears": 199,
+            "tied_q4_heads": 1,
+            "ordinary_q8_routers": 48,
+            "ordinary_q4_expert_tables": 144,
+        }
+        if not status["selected"] or status["geometry_audit"] != expected:
+            raise ValueError(
+                "selected North batch_row_exact_q4 disagrees with live model geometry"
+            )
+        return {
+            "north_batch_row_exact_q4": {
+                "algorithm": status["algorithm"],
+                "scope": status["scope"],
+                "max_rows": status["max_rows"],
+                "geometry": status["geometry"],
+                "geometry_audit": dict(status["geometry_audit"]),
+            }
         }
 
     def cache_budget(self, *, mtp):
@@ -748,7 +830,27 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
         )
 
     def _init_north(self, model_path: str, *, execution_policy=None):
-        external = self._parse_external_policy(execution_policy, family="North")
+        expert_sort, batch_row_exact, policy = _split_north_execution_policy(
+            execution_policy
+        )
+        external = self._parse_external_policy(policy, family="North")
+        if external and expert_sort != "auto":
+            raise ValueError(
+                "North expert_gather_sort is an ordinary-route candidate and "
+                "cannot be combined with external drafting"
+            )
+        if external and batch_row_exact:
+            raise ValueError(
+                "North batch_row_exact_q4 is an ordinary-route candidate and "
+                "cannot be combined with external drafting"
+            )
+        if batch_row_exact and expert_sort != "auto":
+            raise ValueError(
+                "North batch_row_exact_q4 cannot yet be combined with "
+                "expert_gather_sort"
+            )
+        self.expert_gather_sort = expert_sort
+        self.batch_row_exact_q4 = batch_row_exact
         artifact = inspect_artifact(model_path)
         draft_record = None
         if external:
@@ -801,6 +903,20 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
             )
         self.model.load_weights(list(weights.items()), strict=True)
         self.model.eval()
+        self.model.configure_batch_row_exact_q4(self.batch_row_exact_q4)
+        if self.batch_row_exact_q4:
+            from ..runtime.models.cohere2_moe import NORTH_BATCH_ROW_EXACT_Q4_VERSION
+
+            self.layout += ":" + NORTH_BATCH_ROW_EXACT_Q4_VERSION
+        self._north_expert_gathers = [
+            layer.mlp.switch_mlp
+            for layer in self.model.model.layers
+            if hasattr(layer.mlp, "switch_mlp")
+        ]
+        if self.expert_gather_sort != "auto":
+            for switch in self._north_expert_gathers:
+                switch.set_sort_policy(self.expert_gather_sort)
+            self.layout += ":expert-gather-unsorted-decode-v1"
         mx.eval(self.model.parameters())
         weights.clear()
         mx.clear_cache()
@@ -890,12 +1006,37 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
         )
 
     def diagnostics(self):
+        gather_counts = {}
+        for switch in getattr(self, "_north_expert_gathers", ()):
+            for name, count in switch.sort_status()["counts"].items():
+                gather_counts[name] = gather_counts.get(name, 0) + int(count)
         return {
             "architecture": "cohere2_moe",
             "cache_layout": self.layout,
             "sliding_layers": 36,
             "global_layers": 13,
             "sliding_window": 4096,
+            "expert_gather_sort": {
+                "schema": "mlx2.north-expert-gather-sort.v1",
+                "implemented": True,
+                "qualified": False,
+                "selected": self.expert_gather_sort != "auto",
+                "observed_used": gather_counts.get("unsorted_decode", 0) > 0,
+                "policy": self.expert_gather_sort,
+                "modules": len(getattr(self, "_north_expert_gathers", ())),
+                "counts": gather_counts,
+            },
+            "batch_row_exact_q4": (
+                self.model.batch_row_exact_q4_status
+                if getattr(self, "model", None) is not None
+                else {
+                    "schema": "mlx2.north-batch-row-exact-q4.v1",
+                    "implemented": True,
+                    "qualified": False,
+                    "selected": getattr(self, "batch_row_exact_q4", False),
+                    "observed_used": False,
+                }
+            ),
             "speculation": (
                 "external-cohere-eagle-implemented-unqualified"
                 if getattr(self, "draft_model", None) is not None

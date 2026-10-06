@@ -11,13 +11,14 @@ import os
 import struct
 from pathlib import Path
 
-from .artifact_paths import shard_within_artifact
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
-from .flash_next import FlashNextAdapter
 from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
+from .artifact_paths import shard_within_artifact
+from .flash_next import FlashNextAdapter
 
 CACHE_LAYOUT = "nemotron3-super-hybrid-mamba-kv-v1"
+EXACT_PREFIX_SOURCE_REVISION = "f6415871606005626a2ac36c0c5630d5b5a8568e"
 SAMPLING = VendorSampling.single(
     SamplingDefaults(temperature=1.0, top_p=0.95, source=GENERATION_CONFIG),
     model="NVIDIA-Nemotron-3-Super-120B-A12B-5bit-MTP",
@@ -166,6 +167,9 @@ class Nemotron3SuperAdapter(FlashNextAdapter):
     # than ordinary decode at the tested 8K and 32K contexts; batched MTP,
     # cached-prefix parity, and longer contexts still need qualification.
     default_route = "ordinary"
+    # Preserve the source-bound Nemotron serving profile.  The generic
+    # prompt-length schedule is used only by adapters that return ``None``.
+    default_prefill_step = 2048
     # The template renders a turn as ``<think>\n...\n</think>\n`` + content
     # (content trimmed), and the model writes ``</think>\n\n`` before its
     # answer.  Those newlines are template structure, not the answer.
@@ -243,6 +247,86 @@ class Nemotron3SuperAdapter(FlashNextAdapter):
             f"nemotron3-super-5bit-apcv2-mtp{self._num_draft}"
             if mtp else "nemotron3-super-5bit-apcv2-ordinary"
         )
+
+    def prefill_step_default(self):
+        """Family-owned conservative chunk; an explicit operator value wins."""
+
+        return int(type(self).default_prefill_step)
+
+    def exact_prefix_cascade_contract(self):
+        """Declare the narrow exact-state boundary for Nemotron-H cascades."""
+
+        return {
+            "schema": "mlx2.exact-prefix-cascade-contract.v1",
+            "verification_order": "longest_first",
+            "invalid_sibling_pruning": True,
+            "accepted_prefix_state": "b1_tokenwise_hybrid_transaction",
+            "shared_prefix_reuse": "committed_target_cache_clone",
+            "common_tokens_recomputed": False,
+            "request_private_only": True,
+            "apcv2_publication": False,
+            "mtp_cache_reuse": False,
+            "twotower_reuse": False,
+            "implemented": True,
+            "implementation_scope": "planner_and_adapter_state_primitive",
+            "serving_route_implemented": False,
+            "http_request_selection_implemented": False,
+            "state_binding": (
+                "artifact_source_layout_request_owner_checkpoint_planes_b1"
+            ),
+            "target_observation": (
+                "unimplemented_sampler_processors_rng_history"
+            ),
+            "qualified": False,
+            "selected": False,
+            "observed_used": False,
+        }
+
+    def plan_exact_prefix_cascade(self, paths, accepted_prefix=(), *, attempted=()):
+        from ..runtime.exact_prefix_cascade import next_cascade_stage
+
+        return next_cascade_stage(paths, accepted_prefix, attempted=attempted)
+
+    def verify_exact_prefix_path(self, cache, tokens, *, capture_layers=()):
+        """Run the adapter-owned B1 primitive for a direct or serving caller."""
+
+        from ..runtime.nemotron_prefix_reuse import verify_longest_prefix
+
+        return verify_longest_prefix(
+            self.model, cache, tokens, capture_layers=capture_layers
+        )
+
+    def exact_prefix_reuse_geometry(self, cache, *, state_binding, request_id):
+        """Validate authoritative ownership and live exact B1 geometry."""
+
+        from ..runtime.exact_prefix_state_binding import (
+            validate_exact_prefix_state_binding,
+        )
+        from ..runtime.nemotron_prefix_reuse import exact_prefix_reuse_geometry
+
+        expected_fingerprint = getattr(self, "identity", {}).get("fingerprint")
+        expected_planes = frozenset({"attention_kv", "recurrent"})
+        common = {
+            "expected_artifact_fingerprint": expected_fingerprint,
+            "expected_source_revision": EXACT_PREFIX_SOURCE_REVISION,
+            "expected_cache_layout": self.layout,
+            "expected_request_id": request_id,
+            "expected_state_planes": expected_planes,
+            "expected_execution_domain": "ordinary_target_b1",
+        }
+        validate_exact_prefix_state_binding(state_binding, **common)
+        geometry = exact_prefix_reuse_geometry(
+            self.model,
+            cache,
+            state_revision=state_binding["artifact_fingerprint"],
+            cache_layout=state_binding["cache_layout"],
+        )
+        validate_exact_prefix_state_binding(
+            state_binding,
+            live_checkpoint_position=geometry.receipt()["position"],
+            **common,
+        )
+        return geometry
 
     def execution_config(self, *, max_lanes, prefill_step):
         return {"persistent": True, "num_draft": self._num_draft, "rate_gate": False,

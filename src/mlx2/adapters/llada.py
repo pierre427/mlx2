@@ -166,7 +166,11 @@ class LLaDADenoisingAdapter:
 
     def generate(self, *, prompt: str | None = None, messages: list[dict] | None = None,
                  gen_length: int = 128, block_length: int = 128,
-                 steps: int = 128, temperature: float = 0.0) -> dict:
+                 steps: int = 128, temperature: float = 0.0,
+                 active_block_postprocess: bool = False,
+                 active_block_head: bool = False,
+                 verify_active_block_head: bool = False,
+                 require_visible_output: bool = True) -> dict:
         """Generate one response with the source model's exact denoising loop."""
         if (prompt is None) == (messages is None):
             raise ValueError("supply exactly one of prompt or messages")
@@ -196,6 +200,9 @@ class LLaDADenoisingAdapter:
             mask_id=int(self.config["mask_token_id"]), tokenizer=self.tokenizer,
             return_stats=True, kv_cache=False, dual_cache=False,
             incremental_cache=False, parallel_threshold=None,
+            active_block_postprocess=active_block_postprocess,
+            active_block_head=active_block_head,
+            verify_active_block_head=verify_active_block_head,
         )
         canvas_ids = [int(token) for token in output[0].tolist()]
         terminal_ids = {int(self.config["eos_token_id"])}
@@ -206,12 +213,21 @@ class LLaDADenoisingAdapter:
                            if token in terminal_ids), len(canvas_ids))
         visible_ids = canvas_ids[:stop_index]
         text = self.tokenizer.decode(visible_ids, skip_special_tokens=True)
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str):
+            raise TypeError("LLaDA tokenizer decode did not return text")
+        if require_visible_output and not text.strip():
             raise ValueError("LLaDA denoising produced no client-visible text")
         return {
             "text": text, "token_ids": visible_ids, "canvas_token_ids": canvas_ids,
             "stop_index": stop_index, "stats": stats,
-            "route": "denoising-exact", "artifact_fingerprint": self.identity["fingerprint"],
+            "route": (
+                "denoising-exact-active-head"
+                if active_block_head
+                else "denoising-exact-active-block"
+                if active_block_postprocess
+                else "denoising-exact"
+            ),
+            "artifact_fingerprint": self.identity["fingerprint"],
         }
 
     def close(self):

@@ -64,11 +64,11 @@ from scripts import qualify_ragged_pld as Q
 COMMIT = "a" * 40
 BASELINE = "649a1ce21f8a61ef319300067872d1218c04fa63"
 NORTH_SOURCE = "src/mlx2/adapters/north_mini_code.py"
-# Re-pinned 2026-10-01 after 637ff770 (process-wide TF32 constant, one import)
-# changed the file but none of REFERENCE_FUNCTIONS / REFERENCE_CONSTANTS
-# (AST-compared byte-identical).  The recorded North evidence in
-# qualification/runs/mechanism-intake-20260930 was taken at 7b6cecf3....
-NORTH_SHA256 = "5b99e4448ffa9b930bdac243ccbfbd1fdcc172430b3fbd9c051e30c3e18b598f"
+# Re-pinned 2026-10-06 after the adapter gained process-owned MoE policy,
+# row-exact q4 support, prefill-step ownership, and a disabled prefix-cascade
+# planner.  The exact REFERENCE_FUNCTIONS/constants AST allowlist is unchanged
+# from the prior pin.
+NORTH_SHA256 = "fbc4c264382ae2b087650152a478faa091069aadefb93b296630c25a7f132ee8"
 REFERENCE_FUNCTIONS = ("_load_json", "_safe_index", "_quantized_shapes", "_expected_weight_headers",
                        "_validate_weight_headers", "_unique_pairs", "inspect_artifact")
 REFERENCE_CONSTANTS = ("_SAFETENSORS_HEADER_LIMIT", "_DTYPE_BYTES")
@@ -258,7 +258,8 @@ def test_north_family_files_are_the_route_sources():
                    "runtime.ubc_evict import load_shards_evicting", "runtime.tokenizer_integrity",
                    'self.identity = artifact["identity"]'):
         assert needle in adapter
-    assert "from .switch_layers import SwitchGLU" in (ROOT / "src/mlx2/runtime/models/cohere2_moe.py").read_text()
+    model_source = (ROOT / "src/mlx2/runtime/models/cohere2_moe.py").read_text()
+    assert "from .switch_layers import QuantizedSwitchLinear, SwitchGLU" in model_source
     registry = (ROOT / "src/mlx2/adapters/registry.py").read_text()
     assert '"cohere2_moe": _north_mini_code' in registry and "module.inspect_artifact(path)" in registry
 

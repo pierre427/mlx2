@@ -109,6 +109,94 @@ def test_direct_route_wires_exact_sampler(monkeypatch):
     assert kwargs["incremental_cache"] is False
     assert kwargs["parallel_threshold"] is None
     assert kwargs["cfg_scale"] == 0.0
+    assert kwargs["active_block_postprocess"] is False
+    assert kwargs["active_block_head"] is False
+    assert kwargs["verify_active_block_head"] is False
+
+
+def test_direct_route_can_select_active_block_candidate(monkeypatch):
+    class FakeArray(list):
+        def tolist(self):
+            return list(self)
+
+    calls = []
+    fake_mlx = types.ModuleType("mlx")
+    fake_core = types.ModuleType("mlx.core")
+    fake_core.array = lambda value: value
+    fake_model = types.ModuleType("mlx2.runtime.models.llada")
+
+    def fake_generate(model, prompt, **kwargs):
+        calls.append(kwargs)
+        return [FakeArray([11])], "done", {
+            "forwards": 1,
+            "active_block_postprocess": kwargs["active_block_postprocess"],
+        }
+
+    fake_model.generate = fake_generate
+    monkeypatch.setitem(sys.modules, "mlx", fake_mlx)
+    monkeypatch.setitem(sys.modules, "mlx.core", fake_core)
+    monkeypatch.setitem(sys.modules, "mlx2.runtime.models.llada", fake_model)
+    adapter = object.__new__(LLaDADenoisingAdapter)
+    adapter.model = object()
+    adapter.tokenizer = types.SimpleNamespace(
+        encode=lambda text, **kwargs: [1, 2],
+        convert_tokens_to_ids=lambda value: 126348,
+        decode=lambda values, **kwargs: "done",
+    )
+    adapter.config = {"mask_token_id": 126336, "eos_token_id": 126081}
+    adapter.identity = {"fingerprint": "test-fingerprint"}
+
+    result = adapter.generate(
+        prompt="hi", gen_length=8, block_length=8, steps=8,
+        active_block_postprocess=True,
+    )
+
+    assert calls[0]["active_block_postprocess"] is True
+    assert result["route"] == "denoising-exact-active-block"
+
+
+def test_direct_route_can_select_verified_active_head_candidate(monkeypatch):
+    class FakeArray(list):
+        def tolist(self):
+            return list(self)
+
+    calls = []
+    fake_mlx = types.ModuleType("mlx")
+    fake_core = types.ModuleType("mlx.core")
+    fake_core.array = lambda value: value
+    fake_model = types.ModuleType("mlx2.runtime.models.llada")
+
+    def fake_generate(model, prompt, **kwargs):
+        calls.append(kwargs)
+        return [FakeArray([11])], "done", {"forwards": 1}
+
+    fake_model.generate = fake_generate
+    monkeypatch.setitem(sys.modules, "mlx", fake_mlx)
+    monkeypatch.setitem(sys.modules, "mlx.core", fake_core)
+    monkeypatch.setitem(sys.modules, "mlx2.runtime.models.llada", fake_model)
+    adapter = object.__new__(LLaDADenoisingAdapter)
+    adapter.model = object()
+    adapter.tokenizer = types.SimpleNamespace(
+        encode=lambda text, **kwargs: [1, 2],
+        convert_tokens_to_ids=lambda value: 126348,
+        decode=lambda values, **kwargs: "done",
+    )
+    adapter.config = {"mask_token_id": 126336, "eos_token_id": 126081}
+    adapter.identity = {"fingerprint": "test-fingerprint"}
+
+    result = adapter.generate(
+        prompt="hi",
+        gen_length=8,
+        block_length=8,
+        steps=8,
+        active_block_postprocess=True,
+        active_block_head=True,
+        verify_active_block_head=True,
+    )
+
+    assert calls[0]["active_block_head"] is True
+    assert calls[0]["verify_active_block_head"] is True
+    assert result["route"] == "denoising-exact-active-head"
 
 
 def test_chat_template_batch_encoding_is_unwrapped(monkeypatch):
@@ -175,6 +263,41 @@ def test_direct_route_stops_client_output_before_canvas_fill(monkeypatch):
     assert result["token_ids"] == [14455]
     assert result["canvas_token_ids"] == [14455, 126348, 126081, 126081]
     assert result["stop_index"] == 1
+
+
+def test_parity_probe_can_retain_an_empty_canvas_without_weakening_default(monkeypatch):
+    class FakeArray(list):
+        def tolist(self):
+            return list(self)
+
+    fake_mlx = types.ModuleType("mlx")
+    fake_core = types.ModuleType("mlx.core")
+    fake_core.array = lambda value: value
+    fake_model = types.ModuleType("mlx2.runtime.models.llada")
+    fake_model.generate = lambda model, prompt, **kwargs: (
+        [FakeArray([126081] * 8)], "", {"forwards": 8}
+    )
+    monkeypatch.setitem(sys.modules, "mlx", fake_mlx)
+    monkeypatch.setitem(sys.modules, "mlx.core", fake_core)
+    monkeypatch.setitem(sys.modules, "mlx2.runtime.models.llada", fake_model)
+    adapter = object.__new__(LLaDADenoisingAdapter)
+    adapter.model = object()
+    adapter.tokenizer = types.SimpleNamespace(
+        encode=lambda text, **kwargs: [1, 2],
+        convert_tokens_to_ids=lambda value: 126348,
+        decode=lambda values, **kwargs: "",
+    )
+    adapter.config = {"mask_token_id": 126336, "eos_token_id": 126081}
+    adapter.identity = {"fingerprint": "test-fingerprint"}
+
+    with pytest.raises(ValueError, match="no client-visible text"):
+        adapter.generate(prompt="hi", gen_length=8, block_length=8, steps=8)
+    result = adapter.generate(
+        prompt="hi", gen_length=8, block_length=8, steps=8,
+        require_visible_output=False,
+    )
+    assert result["text"] == ""
+    assert result["canvas_token_ids"] == [126081] * 8
 
 
 def test_bad_topology_rejected_before_tensor_load(tmp_path):

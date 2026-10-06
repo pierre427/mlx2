@@ -673,6 +673,11 @@ class Model(nn.Module):
     # External hybrid verification uses existing ArraysCache record/replay.
     # Tiny CPU protocol evidence: provenance/nemotron-external-taps.json.
     supports_speculative_rollback = True
+    # A B1 path evaluated through ``forward_with_taps`` is decomposed into
+    # ordinary one-token target updates while recurrent rollback is active.
+    # ``runtime.nemotron_prefix_reuse`` requires this declaration before it
+    # may commit and clone an exact accepted-prefix boundary.
+    supports_exact_prefix_cascade = True
     mtp_align_full_final_chunk = True
     # ``mtp_verify_backbone`` verifies a B1 row one token at a time for exact
     # parity with ordinary decode. A true-batched segmented cohort prepares
