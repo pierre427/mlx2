@@ -9,44 +9,57 @@ import mlx.core as mx
 
 # Kernel source comments belong to the decoder version hash and must change only with the arithmetic.
 _NORM_XS = r"""
-  // one threadgroup of K / 16 threads per row: thread t holds elements [16 t, 16 t + 16) in registers.
-  // The row's sum of squares is each thread's sequential fma over its 16, then simd_sum, then the
-  // simdgroups' sums in order; a 64-group's input sum (for the next lane matmul) is ((g0 + g1) + (g2 + g3))
-  // over its 4 threads' sequential sums.
+  // Match MLX rms_looped for K > 4096 and rms_single_row otherwise: four
+  // consecutive reads per thread, the same simd_sum hierarchy, and precise
+  // rsqrt. The second pass keeps the BF16 normalization boundary before the
+  // BF16 gain multiply. XS is derived after XO and cannot alter RMSNorm.
   const uint t = thread_position_in_threadgroup.x;
   const uint m = threadgroup_position_in_grid.y;
   const int M = dims[0], MP = dims[1];
-  constexpr int E = 16;
-  constexpr int TPG = K / E;
-  threadgroup float red[TPG / 32];
+  constexpr int E = 4;
+  constexpr int TPG = K > 4096 ? 1024 : 32 * ((K + 127) / 128);
+  threadgroup float red[32];
   if (int(m) >= M) {
-    if ((t & 3) == 0) XS[(t >> 2) * MP + m] = 0.0f;
+    if (t < K / 64) XS[t * MP + m] = 0.0f;
     return;
   }
-  const int base = int(m) * K + int(t) * E;
-  float hv[E];
   float ss = 0.0f;
-  for (int i = 0; i < E; i++) {
-    bfloat h = H[base + i];
-    RESIDUAL_ADD
-    hv[i] = float(h);
-    ss = fma(hv[i], hv[i], ss);
+  for (int r = 0; r < K; r += TPG * E) {
+    const int base = int(m) * K + r + int(t) * E;
+    for (int i = 0; i < E; i++) if (r + int(t) * E + i < K) {
+      bfloat h = H[base + i];
+      RESIDUAL_ADD
+      const float hf = float(h);
+      ss += hf * hf;
+    }
   }
   ss = simd_sum(ss);
+  if (simdgroup_index_in_threadgroup == 0) red[thread_index_in_simdgroup] = 0.0f;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
   if (thread_index_in_simdgroup == 0) red[simdgroup_index_in_threadgroup] = ss;
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  float total = 0.0f;
-  for (int i = 0; i < TPG / 32; i++) total += red[i];
-  const float inv = metal::rsqrt(total / float(K) + eps[0]);
-  float gs = 0.0f;
-  for (int i = 0; i < E; i++) {
-    const bfloat x = bfloat(float(Wt[int(t) * E + i]) * (hv[i] * inv));
-    XO[base + i] = x;
-    gs += float(x);
+  if (simdgroup_index_in_threadgroup == 0) {
+    ss = simd_sum(red[thread_index_in_simdgroup]);
+    if (thread_index_in_simdgroup == 0)
+      red[0] = metal::precise::rsqrt(ss / float(K) + eps[0]);
   }
-  gs += simd_shuffle_xor(gs, 1);
-  gs += simd_shuffle_xor(gs, 2);
-  if ((t & 3) == 0) XS[(t >> 2) * MP + m] = gs;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const float inv = red[0];
+  for (int r = 0; r < K; r += TPG * E) {
+    const int base = int(m) * K + r + int(t) * E;
+    for (int i = 0; i < E; i++) if (r + int(t) * E + i < K) {
+      bfloat h = H[base + i];
+      RESIDUAL_RELOAD
+      const bfloat normalized = bfloat(float(h) * inv);
+      XO[base + i] = bfloat(Wt[r + int(t) * E + i] * normalized);
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t < K / 64) {
+    float gs = 0.0f;
+    for (int i = 0; i < 64; i++) gs += float(XO[int(m) * K + int(t) * 64 + i]);
+    XS[t * MP + m] = gs;
+  }
 """
 
 _GDN_PRE = r"""
@@ -179,8 +192,13 @@ _MLP_ACT = r"""
     return;
   }
   const int e = int(m) * N + int(g) * 64 + int(t);
-  const float gf = float(GATE[e]);
-  const bfloat h = bfloat(gf / (1.0f + metal::exp(-gf)) * float(UP[e]));
+  const bfloat gf = GATE[e];
+  const bfloat mlp_sigmoid_exp = bfloat(metal::exp(metal::abs(gf)));
+  const bfloat mlp_sigmoid_low = bfloat(bfloat(1.0f) / bfloat(bfloat(1.0f) + mlp_sigmoid_exp));
+  const bfloat mlp_sigmoid = gf < bfloat(0.0f)
+      ? mlp_sigmoid_low : bfloat(bfloat(1.0f) - mlp_sigmoid_low);
+  const bfloat activated = bfloat(gf * mlp_sigmoid);
+  const bfloat h = bfloat(activated * UP[e]);
   HOUT[e] = h;
   hb[t] = h;
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -201,9 +219,11 @@ def _named(base: str, source: str) -> str:
 def _kernel(name: str) -> Any:
     if name not in _kernels:
         spec = {
-            "norm": (_NORM_XS.replace("RESIDUAL_ADD", "h = bfloat(float(h) + float(R[base + i]));\n    HO[base + i] = h;"),
+            "norm": (_NORM_XS.replace("RESIDUAL_ADD", "h = bfloat(float(h) + float(R[base + i]));\n      HO[base + i] = h;")
+                     .replace("RESIDUAL_RELOAD", "h = HO[base + i];"),
                      ["H", "R", "Wt", "eps", "dims"], ["HO", "XO", "XS"]),
-            "norm_nores": (_NORM_XS.replace("RESIDUAL_ADD", ""), ["H", "Wt", "eps", "dims"], ["XO", "XS"]),
+            "norm_nores": (_NORM_XS.replace("RESIDUAL_ADD", "").replace("RESIDUAL_RELOAD", ""),
+                           ["H", "Wt", "eps", "dims"], ["XO", "XS"]),
 
             "gdn_pre": (_GDN_PRE, ["QKV", "CS", "CW", "windows", "Ain", "Bin", "ALOG", "DT"], ["Q", "Kout", "Vout", "G", "BETA"]),
             "gdn_post": (_GDN_POST, ["Y", "Z", "NW", "eps", "dims"], ["OUT", "XS"]),
@@ -256,8 +276,8 @@ def norm_xs(hidden: mx.array, residual: mx.array | None, weight: mx.array, eps: 
     MP = 16 * ((M + 15) // 16)
     if K % 512 or K > 16384:
         raise ValueError(f"norm_xs: the hidden size must be a multiple of 512 up to 16384, got {K}")
-    tpg = K // 16                       # 16 elements a thread
-    common = dict(grid=(tpg, MP, 1), threadgroup=(tpg, 1, 1))
+    tpg = 1024 if K > 4096 else 32 * ((K + 127) // 128)
+    common = {"grid": (tpg, MP, 1), "threadgroup": (tpg, 1, 1)}
     if residual is None:
         x, xs = _kernel("norm_nores")(
             inputs=[hidden.reshape(M, K), weight, _eps(eps), _dims(M)],

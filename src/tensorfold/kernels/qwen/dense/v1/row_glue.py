@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Callable, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import mlx.core as mx
 
@@ -14,29 +15,43 @@ from tensorfold.kernels.qwen.dense.v1.row_matmul import WINDOW_ROWS
 # lane_glue's arithmetic without the M5 matmul's group sums and row padding, reading stacked rows in place
 
 _NORM = r"""
-  // residual add + RMSNorm of row m: one threadgroup of K / 16 threads, thread t holds [16 t, 16 t + 16); the
-  // row's sum of squares is each thread's sequential fma over its 16, then simd_sum, then the simdgroups in order
+  // Residual add followed by MLX's RMSNorm reduction and storage law.
   const uint t = thread_position_in_threadgroup.x;
   const uint m = threadgroup_position_in_grid.y;
-  constexpr int E = 16;
-  constexpr int TPG = K / E;
-  threadgroup float red[TPG / 32];
-  const int base = int(m) * K + int(t) * E;
-  float hv[E];
+  constexpr int E = 4;
+  constexpr int TPG = K > 4096 ? 1024 : 32 * ((K + 127) / 128);
+  threadgroup float red[32];
   float ss = 0.0f;
-  for (int i = 0; i < E; i++) {
-    bfloat h = H[base + i];
-    RESIDUAL_ADD
-    hv[i] = float(h);
-    ss = fma(hv[i], hv[i], ss);
+  for (int r = 0; r < K; r += TPG * E) {
+    const int base = int(m) * K + r + int(t) * E;
+    for (int i = 0; i < E; i++) if (r + int(t) * E + i < K) {
+      bfloat h = H[base + i];
+      RESIDUAL_ADD
+      const float hf = float(h);
+      ss += hf * hf;
+    }
   }
   ss = simd_sum(ss);
+  if (simdgroup_index_in_threadgroup == 0) red[thread_index_in_simdgroup] = 0.0f;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
   if (thread_index_in_simdgroup == 0) red[simdgroup_index_in_threadgroup] = ss;
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  float total = 0.0f;
-  for (int i = 0; i < TPG / 32; i++) total += red[i];
-  const float inv = metal::rsqrt(total / float(K) + eps[0]);
-  for (int i = 0; i < E; i++) XO[base + i] = bfloat(float(Wt[int(t) * E + i]) * (hv[i] * inv));
+  if (simdgroup_index_in_threadgroup == 0) {
+    ss = simd_sum(red[thread_index_in_simdgroup]);
+    if (thread_index_in_simdgroup == 0)
+      red[0] = metal::precise::rsqrt(ss / float(K) + eps[0]);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const float inv = red[0];
+  for (int r = 0; r < K; r += TPG * E) {
+    const int base = int(m) * K + r + int(t) * E;
+    for (int i = 0; i < E; i++) if (r + int(t) * E + i < K) {
+      bfloat h = H[base + i];
+      RESIDUAL_RELOAD
+      const bfloat normalized = bfloat(float(h) * inv);
+      XO[base + i] = bfloat(Wt[r + int(t) * E + i] * normalized);
+    }
+  }
 """
 
 _GDN_POST = r"""
@@ -74,8 +89,13 @@ _MLP_ACT = r"""
   const uint i = thread_position_in_grid.x;
   const uint m = thread_position_in_grid.y;
   if (i >= uint(N)) return;
-  const float gf = float(GU[m * 2 * N + i]);
-  HOUT[m * N + i] = bfloat(gf / (1.0f + metal::exp(-gf)) * float(GU[m * 2 * N + N + i]));
+  const bfloat gf = GU[m * 2 * N + i];
+  const bfloat mlp_sigmoid_exp = bfloat(metal::exp(metal::abs(gf)));
+  const bfloat mlp_sigmoid_low = bfloat(bfloat(1.0f) / bfloat(bfloat(1.0f) + mlp_sigmoid_exp));
+  const bfloat mlp_sigmoid = gf < bfloat(0.0f)
+      ? mlp_sigmoid_low : bfloat(bfloat(1.0f) - mlp_sigmoid_low);
+  const bfloat activated = bfloat(gf * mlp_sigmoid);
+  HOUT[m * N + i] = bfloat(activated * GU[m * 2 * N + N + i]);
 """
 
 def _gdn_pre_source() -> str:
@@ -168,9 +188,11 @@ _CHAIN = r"""
 
 
 _SPECS: dict[str, tuple[str, str, list[str], list[str]]] = {
-    "norm": (_NORM.replace("RESIDUAL_ADD", "h = bfloat(float(h) + float(R[base + i]));\n    HO[base + i] = h;"), "",
+    "norm": (_NORM.replace("RESIDUAL_ADD", "h = bfloat(float(h) + float(R[base + i]));\n      HO[base + i] = h;")
+             .replace("RESIDUAL_RELOAD", "h = HO[base + i];"), "",
              ["H", "R", "Wt", "eps"], ["HO", "XO"]),
-    "norm_nores": (_NORM.replace("RESIDUAL_ADD", ""), "", ["H", "Wt", "eps"], ["XO"]),
+    "norm_nores": (_NORM.replace("RESIDUAL_ADD", "").replace("RESIDUAL_RELOAD", ""), "",
+                   ["H", "Wt", "eps"], ["XO"]),
     "gdn_post": (_GDN_POST, "", ["Y", "Z", "NW", "eps"], ["OUT"]),
     "mlp_act": (_MLP_ACT, "", ["GU"], ["HOUT"]),
     "gdn_pre": (_gdn_pre_source(), "", ["QKV", "CS", "CW", "windows", "Ain", "Bin", "ALOG", "DT", "nodes"],
@@ -188,13 +210,14 @@ def sources() -> dict[str, str]:
 
 
 def _kernel(name: str, K: int = 0) -> Any:
-    """The kernel; a norm's is per hidden size K, which it keeps in its source to reserve its K / 16 threads."""
+    """The kernel; a norm is specialized to MLX's thread geometry for K."""
 
     hit = _kernels.get((name, K))
     if hit is None:
         source, header, inputs, outputs = _SPECS[name]
         if K:
-            source, header = f"  constexpr int K = {K};\n" + source, header + threads.reserve(K // 16)
+            tpg = 1024 if K > 4096 else 32 * ((K + 127) // 128)
+            source, header = f"  constexpr int K = {K};\n" + source, header + threads.reserve(tpg)
         digest = hashlib.sha256((header + source).encode()).hexdigest()[:16]
         kernel = mx.fast.metal_kernel(name=f"row_forward_{name}_{digest}", input_names=inputs, output_names=outputs,
                                       source=source, header=header)
@@ -226,7 +249,8 @@ def add_norm(hidden: mx.array, residual: mx.array | None, weight: mx.array, eps:
     M = hidden.size // K
     if K % 512 or K > 16384:
         raise ValueError(f"norm: the hidden size must be a multiple of 512 up to 16384, got {K}")
-    common = dict(grid=(K // 16, M, 1), threadgroup=(K // 16, 1, 1))
+    tpg = 1024 if K > 4096 else 32 * ((K + 127) // 128)
+    common = {"grid": (tpg, M, 1), "threadgroup": (tpg, 1, 1)}
     if residual is None:
         x = _kernel("norm_nores", K)(inputs=[hidden.reshape(M, K), weight, _eps(eps)], output_shapes=[(M, K)],
                                      output_dtypes=[mx.bfloat16], **common)[0]
