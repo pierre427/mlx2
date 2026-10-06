@@ -128,12 +128,12 @@ def admit_qwen4_fused_gdn_verify(
         )
         if refusal is not None:
             return refusal
-    if architecture not in ("qwen4", "qwen35"):
+    if architecture not in ("qwen4", "qwen35", "qwen38"):
         return FusedGdnAdmission(False, f"unsupported architecture {architecture!r}")
     NUM_VALUE_HEADS = 32 if architecture == "qwen35" else 48
     VALUE_DIM = NUM_VALUE_HEADS * VALUE_HEAD_DIM
     CONV_DIM = 2 * NUM_KEY_HEADS * KEY_HEAD_DIM + VALUE_DIM
-    if gate_activation != ("swish" if architecture == "qwen35" else "sigmoid"):
+    if gate_activation != ("swish" if architecture in ("qwen35", "qwen38") else "sigmoid"):
         return FusedGdnAdmission(False, f"output gate {gate_activation!r}")
     geometry = (
         num_key_heads,
@@ -206,7 +206,7 @@ def admit_qwen4_fused_gdn_verify(
 _SOURCE = "\n  const uint hv = threadgroup_position_in_grid.z;\n  const uint hk = hv / RATIO;\n  const uint lane = thread_position_in_threadgroup.x;\n  const uint ty = thread_position_in_threadgroup.y;\n  const uint tid = thread_index_in_threadgroup;\n\n  constexpr int NT = 32 * TY;\n  constexpr int NDK = DK / 32;\n  constexpr int NDV = DV / TY;\n  constexpr uint KD = (uint)(HK * DK);\n  constexpr uint VD = (uint)(HV * DV);\n  constexpr uint CD = 2u * KD + VD;\n  constexpr uint KEEP = (uint)K - 1u;\n  constexpr uint SNAPS = (uint)S - 1u;\n\n  threadgroup float sq[DK];\n  threadgroup float sk[DK];\n  threadgroup T sq_squared[DK];\n  threadgroup T sk_squared[DK];\n  threadgroup float sv[DV];\n  threadgroup float sy[DV];\n  threadgroup float shr[4];\n\n  device const float* si = recurrent_state + (size_t)hv * DV * DK;\n  device float* so = recurrent_state_out + (size_t)hv * DV * DK;\n  float st[NDV][NDK];\n  for (int j = 0; j < NDV; ++j) {\n    uint dv = ty + (uint)TY * (uint)j;\n    for (int i = 0; i < NDK; ++i)\n      st[j][i] = si[(size_t)dv * DK + NDK * lane + i];\n  }\n\n  const bool owns_shared = (hv % RATIO) == 0u;\n\n  // Convolution window bookkeeping is token independent: publish the final\n  // window (the next conv cache) and every intermediate window the layer\n  // records as a restore point.\n  for (uint idx = tid; idx < (uint)(2 * DK + DV); idx += NT) {\n    uint part = idx / (uint)DK;\n    uint d = idx - part * (uint)DK;\n    uint c = part == 0u ? hk * DK + d\n           : (part == 1u ? KD + hk * DK + d : 2u * KD + hv * DV + d);\n    if (part == 2u || owns_shared) {\n      for (uint tap = 0; tap < KEEP; ++tap) {\n        uint row = (uint)S + tap;\n        conv_state_out[(size_t)tap * CD + c] =\n            row < KEEP ? conv_state[(size_t)row * CD + c]\n                       : qkv[(size_t)(row - KEEP) * CD + c];\n      }\n      for (uint p = 1; p <= SNAPS; ++p) {\n        for (uint tap = 0; tap < KEEP; ++tap) {\n          uint row = p + tap;\n          conv_snapshots[((size_t)(p - 1u) * KEEP + tap) * CD + c] =\n              row < KEEP ? conv_state[(size_t)row * CD + c]\n                         : qkv[(size_t)(row - KEEP) * CD + c];\n        }\n      }\n    }\n  }\n\n  for (uint t = 0; t < (uint)S; ++t) {\n    for (uint idx = tid; idx < (uint)(2 * DK + DV); idx += NT) {\n      uint part = idx / (uint)DK;\n      uint d = idx - part * (uint)DK;\n      uint c = part == 0u ? hk * DK + d\n             : (part == 1u ? KD + hk * DK + d : 2u * KD + hv * DV + d);\n      device const T* wc = conv_weight + (size_t)c * K;\n      float acc = 0.0f;\n      for (uint tap = 0; tap < (uint)K; ++tap) {\n        uint row = t + tap;\n        T xv = row < KEEP ? conv_state[(size_t)row * CD + c]\n                          : qkv[(size_t)(row - KEEP) * CD + c];\n        acc += float(xv) * float(wc[tap]);\n      }\n      T xb = static_cast<T>(acc);\n      // nn.silu is reproduced by the fast sigmoid form on every finite bf16.\n      T sl = xb * mlx_sigmoid_fast(xb);\n      if (part == 0u) sq[d] = float(sl);\n      else if (part == 1u) sk[d] = float(sl);\n      else sv[d] = float(sl);\n    }\n\n    if (tid == 0u) {\n      T av = a[t * HV + hv] + dt_bias[hv];\n      T sp = mlx_softplus_fast(av);\n      shr[2] = metal::precise::exp(\n          -metal::precise::exp(float(A_log[hv])) * float(sp));\n      // mx.sigmoid on bf16 is the precise form on every finite bf16 input;\n      // the fast form differs on one (x ~ -6.85), which real activations reach.\n      shr[3] = float(mlx_sigmoid_precise(b[t * HV + hv]));\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    for (uint d = tid; d < (uint)DK; d += NT) {\n      T qv = static_cast<T>(sq[d]);\n      T kv = static_cast<T>(sk[d]);\n      sq_squared[d] = static_cast<T>(qv * qv);\n      sk_squared[d] = static_cast<T>(kv * kv);\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    if (simdgroup_index_in_threadgroup == 0u) {\n      T pq = static_cast<T>(0), pk = static_cast<T>(0);\n      uint base = 4u * lane;\n      for (int i = 0; i < 4; ++i) {\n        pq = static_cast<T>(sq_squared[base + i] + pq);\n        pk = static_cast<T>(sk_squared[base + i] + pk);\n      }\n      pq = static_cast<T>(simd_sum(float(pq)));\n      pk = static_cast<T>(simd_sum(float(pk)));\n      if (lane == 0u) {\n        T eps = static_cast<T>(1.0e-6f);\n        T qdenom = pq + eps;\n        T kdenom = pk + eps;\n        shr[0] = float(static_cast<T>(metal::precise::rsqrt(qdenom)));\n        shr[1] = float(static_cast<T>(metal::precise::rsqrt(kdenom)));\n      }\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    T qscale = static_cast<T>(0.08838834764831845f);\n    for (uint d = tid; d < (uint)DK; d += NT) {\n      T q_normalized = static_cast<T>(static_cast<T>(sq[d]) * static_cast<T>(shr[0]));\n      T k_normalized = static_cast<T>(static_cast<T>(sk[d]) * static_cast<T>(shr[1]));\n      sq[d] = float(static_cast<T>(q_normalized * qscale));\n      sk[d] = float(k_normalized);\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    device float* state_dst =\n        t < SNAPS ? state_snapshots + ((size_t)t * HV + hv) * DV * DK : so;\n    for (int j = 0; j < NDV; ++j) {\n      uint dv = ty + (uint)TY * (uint)j;\n      float kv = 0.0f;\n      for (int i = 0; i < NDK; ++i) {\n        uint s = NDK * lane + i;\n        st[j][i] = st[j][i] * shr[2];\n        kv += st[j][i] * sk[s];\n      }\n      kv = simd_sum(kv);\n      float delta = (sv[dv] - kv) * shr[3];\n      float out = 0.0f;\n      for (int i = 0; i < NDK; ++i) {\n        uint s = NDK * lane + i;\n        st[j][i] = st[j][i] + sk[s] * delta;\n        out += st[j][i] * sq[s];\n      }\n      out = simd_sum(out);\n      if (thread_index_in_simdgroup == 0u)\n        sy[dv] = float(static_cast<T>(out));\n      for (int i = 0; i < NDK; ++i)\n        state_dst[(size_t)dv * DK + NDK * lane + i] = st[j][i];\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    if (simdgroup_index_in_threadgroup == 0u) {\n      float po = 0.0f;\n      uint base = 4u * lane;\n      for (int i = 0; i < 4; ++i) po += sy[base + i] * sy[base + i];\n      po = simd_sum(po);\n      if (lane == 0u)\n        shr[0] = metal::precise::rsqrt(po / (float)DV + norm_eps);\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    for (uint d = tid; d < (uint)DV; d += NT) {\n      T normalized = static_cast<T>(sy[d] * shr[0]);\n      normalized = norm_weight[d] * normalized;\n      // float32 sigmoid of a bf16-valued gate: the precise form matches\n      // mx.sigmoid on every finite bf16 input; the fast form differs on ~1%.\n      float x = float(normalized) *\n                mlx_sigmoid_precise<float>(float(z[t * VD + hv * DV + d]));\n      output[t * VD + hv * DV + d] = static_cast<T>(x);\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n  }\n"
 
 
-def _derive_catchup_source() -> str:
+def _derive_catchup_source(source: str = _SOURCE) -> str:
     """Remove rollback-only stores from the exact verify kernel body.
 
     Catch-up always commits the full token block, so it needs the output and
@@ -214,7 +214,6 @@ def _derive_catchup_source() -> str:
     this as a checked derivation of ``_SOURCE`` so the arithmetic and rounding
     sequence cannot drift from the already-proven kernel accidentally.
     """
-    source = _SOURCE
     conv_snapshot_loop = "      for (uint p = 1; p <= SNAPS; ++p) {\n        for (uint tap = 0; tap < KEEP; ++tap) {\n          uint row = p + tap;\n          conv_snapshots[((size_t)(p - 1u) * KEEP + tap) * CD + c] =\n              row < KEEP ? conv_state[(size_t)row * CD + c]\n                         : qkv[(size_t)(row - KEEP) * CD + c];\n        }\n      }\n"
     state_destination = "    device float* state_dst =\n        t < SNAPS ? state_snapshots + ((size_t)t * HV + hv) * DV * DK : so;\n"
     state_store = "      for (int i = 0; i < NDK; ++i)\n        state_dst[(size_t)dv * DK + NDK * lane + i] = st[j][i];\n"
@@ -419,6 +418,10 @@ _QWEN35_SOURCE = _qwen35_verify_source(_SOURCE)
 _QWEN35_SOURCE_ST16 = st16_source(
     _QWEN35_SOURCE, what="qwen35_fused_gdn_verify", state_dst=1
 )
+_QWEN35_CATCHUP_SOURCE = _derive_catchup_source(_QWEN35_SOURCE)
+_QWEN35_CATCHUP_SOURCE_ST16 = st16_source(
+    _QWEN35_CATCHUP_SOURCE, what="qwen35_fused_gdn_catchup"
+)
 
 
 @lru_cache(maxsize=None)
@@ -448,16 +451,16 @@ def _kernel(st16: bool = False, architecture: str = "qwen4"):
         header=_HEADER,
         source=(
             (_QWEN35_SOURCE_ST16 if st16 else _QWEN35_SOURCE)
-            if architecture == "qwen35" else (_SOURCE_ST16 if st16 else _SOURCE)
+            if architecture in ("qwen35", "qwen38") else (_SOURCE_ST16 if st16 else _SOURCE)
         ),
         ensure_row_contiguous=True,
     )
 
 
 @lru_cache(maxsize=None)
-def _catchup_kernel(st16: bool = False):
+def _catchup_kernel(st16: bool = False, architecture: str = "qwen4"):
     return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_catchup" + ("_st16" if st16 else ""),
+        name=f"{architecture}_fused_gdn_catchup" + ("_st16" if st16 else ""),
         input_names=[
             "qkv",
             "z",
@@ -473,7 +476,11 @@ def _catchup_kernel(st16: bool = False):
         ],
         output_names=["output", "conv_state_out", "recurrent_state_out"],
         header=_HEADER,
-        source=_CATCHUP_SOURCE_ST16 if st16 else _CATCHUP_SOURCE,
+        source=(
+            (_QWEN35_CATCHUP_SOURCE_ST16 if st16 else _QWEN35_CATCHUP_SOURCE)
+            if architecture in ("qwen35", "qwen38")
+            else (_CATCHUP_SOURCE_ST16 if st16 else _CATCHUP_SOURCE)
+        ),
         ensure_row_contiguous=True,
     )
 
@@ -568,7 +575,9 @@ def qwen4_fused_gdn_verify(
     are the recurrent state and convolution window after ``p + 1`` tokens for
     ``p`` in ``range(S - 1)``.
     """
-    if (architecture, num_value_heads) not in (("qwen4", 48), ("qwen35", 32)):
+    if (architecture, num_value_heads) not in (
+        ("qwen4", 48), ("qwen35", 32), ("qwen38", 48)
+    ):
         raise ValueError("unsupported verify architecture/head geometry")
     NUM_VALUE_HEADS = num_value_heads
     VALUE_DIM = NUM_VALUE_HEADS * VALUE_HEAD_DIM
@@ -608,7 +617,7 @@ def qwen4_fused_gdn_verify(
             ("S", steps),
             ("TY", threadgroup_y),
             ("RATIO", NUM_VALUE_HEADS // NUM_KEY_HEADS),
-        ] + ([("AGNES_NUMERICS", 1)] if architecture == "qwen35" else []),
+        ] + ([("AGNES_NUMERICS", 1)] if architecture in ("qwen35", "qwen38") else []),
         grid=(32, threadgroup_y, NUM_VALUE_HEADS),
         threadgroup=(32, threadgroup_y, 1),
         output_shapes=[
@@ -781,6 +790,8 @@ def qwen4_fused_gdn_catchup(
     norm_eps: float,
     *,
     threadgroup_y: int,
+    architecture: str = "qwen4",
+    num_value_heads: int = NUM_VALUE_HEADS,
 ):
     """Build the no-rollback catch-up graph for an always-committed block."""
     if threadgroup_y not in _THREADGROUP_Y_CANDIDATES:
@@ -792,8 +803,14 @@ def qwen4_fused_gdn_catchup(
         raise ValueError(
             f"unsupported catch-up width {steps}; expected 2..{MAX_VERIFY_WIDTH_PROVEN}"
         )
+    if (architecture, num_value_heads) not in (
+        ("qwen4", 48), ("qwen35", 32), ("qwen38", 48)
+    ):
+        raise ValueError("unsupported catch-up architecture/head geometry")
+    value_dim = num_value_heads * VALUE_HEAD_DIM
+    conv_dim = 2 * NUM_KEY_HEADS * KEY_HEAD_DIM + value_dim
     st16 = _st16(recurrent_state, "fused_catchup")
-    outputs = _catchup_kernel(st16)(
+    outputs = _catchup_kernel(st16, architecture)(
         inputs=[
             qkv,
             z,
@@ -810,20 +827,20 @@ def qwen4_fused_gdn_catchup(
         template=[
             ("T", qkv.dtype),
             ("HK", NUM_KEY_HEADS),
-            ("HV", NUM_VALUE_HEADS),
+            ("HV", num_value_heads),
             ("DK", KEY_HEAD_DIM),
             ("DV", VALUE_HEAD_DIM),
             ("K", CONV_KERNEL),
             ("S", steps),
             ("TY", threadgroup_y),
-            ("RATIO", NUM_VALUE_HEADS // NUM_KEY_HEADS),
-        ],
-        grid=(32, threadgroup_y, NUM_VALUE_HEADS),
+            ("RATIO", num_value_heads // NUM_KEY_HEADS),
+        ] + ([("AGNES_NUMERICS", 1)] if architecture in ("qwen35", "qwen38") else []),
+        grid=(32, threadgroup_y, num_value_heads),
         threadgroup=(32, threadgroup_y, 1),
         output_shapes=[
-            (1, steps, VALUE_DIM),
-            (1, CONV_KERNEL - 1, CONV_DIM),
-            (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+            (1, steps, value_dim),
+            (1, CONV_KERNEL - 1, conv_dim),
+            (1, num_value_heads, VALUE_HEAD_DIM, KEY_HEAD_DIM),
         ],
         output_dtypes=[qkv.dtype, qkv.dtype, recurrent_state.dtype],
     )
@@ -883,8 +900,8 @@ def _reconstruct_dynamic(
     )[0]
 
 
-_PROBED_STEPS: dict[int, Optional[int]] = {}
-_PROBED_CATCHUP_STEPS: dict[int, Optional[int]] = {}
+_PROBED_STEPS: dict[object, Optional[int]] = {}
+_PROBED_CATCHUP_STEPS: dict[object, Optional[int]] = {}
 _PROBED_REPLAY_STEPS: dict[int, Optional[int]] = {}
 _PROBED_DYNAMIC_REPLAY_STEPS: dict[int, Optional[int]] = {}
 _PROBE_LOCK = Lock()
@@ -987,7 +1004,12 @@ def probe_qwen4_fused_gdn_replay_verify(
 
 
 def probe_qwen4_fused_gdn_verify(
-    dtype, steps: int, *, state_dtype=None
+    dtype,
+    steps: int,
+    *,
+    state_dtype=None,
+    architecture: str = "qwen4",
+    num_value_heads: int = NUM_VALUE_HEADS,
 ) -> Optional[int]:
     """Compile-and-run one verify specialization once per width.
 
@@ -996,7 +1018,7 @@ def probe_qwen4_fused_gdn_verify(
     all fail stays on the stock path. Cached widths are read lock-free.
     """
     steps = int(steps)
-    key = _probe_key(steps, state_dtype)
+    key = (_probe_key(steps, state_dtype), architecture, int(num_value_heads))
     if key in _PROBED_STEPS:
         return _PROBED_STEPS[key]
     with _PROBE_LOCK:
@@ -1012,17 +1034,19 @@ def probe_qwen4_fused_gdn_verify(
         if start is None:
             _PROBED_STEPS[key] = None
             return None
-        qkv = mx.zeros((1, steps, CONV_DIM), dtype=dtype)
-        z = mx.zeros((1, steps, VALUE_DIM), dtype=dtype)
-        gates = mx.zeros((1, steps, NUM_VALUE_HEADS), dtype=dtype)
-        conv_state = mx.zeros((1, CONV_KERNEL - 1, CONV_DIM), dtype=dtype)
-        conv_weight = mx.zeros((CONV_DIM, CONV_KERNEL, 1), dtype=dtype)
+        value_dim = num_value_heads * VALUE_HEAD_DIM
+        conv_dim = 2 * NUM_KEY_HEADS * KEY_HEAD_DIM + value_dim
+        qkv = mx.zeros((1, steps, conv_dim), dtype=dtype)
+        z = mx.zeros((1, steps, value_dim), dtype=dtype)
+        gates = mx.zeros((1, steps, num_value_heads), dtype=dtype)
+        conv_state = mx.zeros((1, CONV_KERNEL - 1, conv_dim), dtype=dtype)
+        conv_weight = mx.zeros((conv_dim, CONV_KERNEL, 1), dtype=dtype)
         recurrent_state = mx.zeros(
-            (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+            (1, num_value_heads, VALUE_HEAD_DIM, KEY_HEAD_DIM),
             dtype=state_dtype or mx.float32,
         )
-        vector = mx.zeros((NUM_VALUE_HEADS,), dtype=dtype)
-        A_log = mx.zeros((NUM_VALUE_HEADS,), dtype=mx.float32)
+        vector = mx.zeros((num_value_heads,), dtype=dtype)
+        A_log = mx.zeros((num_value_heads,), dtype=mx.float32)
         norm_weight = mx.ones((VALUE_HEAD_DIM,), dtype=dtype)
         result: Optional[int] = None
         for threadgroup_y in [c for c in _THREADGROUP_Y_CANDIDATES if c <= start]:
@@ -1040,6 +1064,8 @@ def probe_qwen4_fused_gdn_verify(
                     norm_weight,
                     1e-06,
                     threadgroup_y=threadgroup_y,
+                    architecture=architecture,
+                    num_value_heads=num_value_heads,
                 )
                 mx.eval(*outputs)
                 result = threadgroup_y
@@ -1062,11 +1088,16 @@ def probe_qwen4_fused_gdn_verify(
 
 
 def probe_qwen4_fused_gdn_catchup(
-    dtype, steps: int, *, state_dtype=None
+    dtype,
+    steps: int,
+    *,
+    state_dtype=None,
+    architecture: str = "qwen4",
+    num_value_heads: int = NUM_VALUE_HEADS,
 ) -> Optional[int]:
     """Compile-and-run the no-snapshot catch-up specialization once."""
     steps = int(steps)
-    key = _probe_key(steps, state_dtype)
+    key = (_probe_key(steps, state_dtype), architecture, int(num_value_heads))
     if key in _PROBED_CATCHUP_STEPS:
         return _PROBED_CATCHUP_STEPS[key]
     with _PROBE_LOCK:
@@ -1082,17 +1113,19 @@ def probe_qwen4_fused_gdn_catchup(
         if start is None:
             _PROBED_CATCHUP_STEPS[key] = None
             return None
-        qkv = mx.zeros((1, steps, CONV_DIM), dtype=dtype)
-        z = mx.zeros((1, steps, VALUE_DIM), dtype=dtype)
-        gates = mx.zeros((1, steps, NUM_VALUE_HEADS), dtype=dtype)
-        conv_state = mx.zeros((1, CONV_KERNEL - 1, CONV_DIM), dtype=dtype)
-        conv_weight = mx.zeros((CONV_DIM, CONV_KERNEL, 1), dtype=dtype)
+        value_dim = num_value_heads * VALUE_HEAD_DIM
+        conv_dim = 2 * NUM_KEY_HEADS * KEY_HEAD_DIM + value_dim
+        qkv = mx.zeros((1, steps, conv_dim), dtype=dtype)
+        z = mx.zeros((1, steps, value_dim), dtype=dtype)
+        gates = mx.zeros((1, steps, num_value_heads), dtype=dtype)
+        conv_state = mx.zeros((1, CONV_KERNEL - 1, conv_dim), dtype=dtype)
+        conv_weight = mx.zeros((conv_dim, CONV_KERNEL, 1), dtype=dtype)
         recurrent_state = mx.zeros(
-            (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+            (1, num_value_heads, VALUE_HEAD_DIM, KEY_HEAD_DIM),
             dtype=state_dtype or mx.float32,
         )
-        vector = mx.zeros((NUM_VALUE_HEADS,), dtype=dtype)
-        A_log = mx.zeros((NUM_VALUE_HEADS,), dtype=mx.float32)
+        vector = mx.zeros((num_value_heads,), dtype=dtype)
+        A_log = mx.zeros((num_value_heads,), dtype=mx.float32)
         norm_weight = mx.ones((VALUE_HEAD_DIM,), dtype=dtype)
         result: Optional[int] = None
         for threadgroup_y in [c for c in _THREADGROUP_Y_CANDIDATES if c <= start]:
@@ -1110,6 +1143,8 @@ def probe_qwen4_fused_gdn_catchup(
                     norm_weight,
                     1e-06,
                     threadgroup_y=threadgroup_y,
+                    architecture=architecture,
+                    num_value_heads=num_value_heads,
                 )
                 mx.eval(*outputs)
                 result = threadgroup_y

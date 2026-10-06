@@ -1,0 +1,39 @@
+{
+  "component": "Qwen3.8 mlx2 fused GDN bounded multi-token verify and prefill",
+  "date": "2026-10-06",
+  "status": "implemented_validation_pending_unqualified_unselected",
+  "source_repository": "archived corrected TensorFold source (not publicly available)",
+  "source_revision": "1a5f38e12afbb560d8fc61c88ccb5900f7d5d170",
+  "source_tree": "d9d141b99525a8866f48475858d7011fb192c11b",
+  "upstream_repository": "https://github.com/ashhart/TensorFold.git",
+  "upstream_base_revision": "71377a5373ed7b394f1b480ba2a6a3986b03af1c",
+  "license": "MIT",
+  "source_paths": [
+    "src/tensorfold/kernels/qwen/dense/v1/stream_gdn.py",
+    "src/tensorfold/kernels/qwen/dense/v1/lane_fuse.py",
+    "src/tensorfold/kernels/qwen/dense/v1/lane_multi.py"
+  ],
+  "upstream_provenance": [
+    "provenance/qwen38-fused-gdn.json",
+    "provenance/flashnext.json"
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_fused_gdn_verify.py",
+    "src/mlx2/runtime/models/qwen38_fused_gdn.py"
+  ],
+  "modifications": [
+    "No TensorFold source was copied; the corrected TensorFold result established the Qwen3.8 arithmetic law and motivated enabling mlx2's existing Qwen3.5-derived exact source at the 48-value-head Qwen3.8 geometry",
+    "Admit architecture qwen38 with swish output gating and 16 key heads by 48 value heads by 128 dimensions",
+    "Reuse the one-token AGNES_NUMERICS source derivation for every token in snapshot verify and no-snapshot committed catch-up kernels",
+    "Record exact convolution and recurrent-state snapshots for speculative rollback",
+    "Keep batches, masked slabs, uninitialized caches, widths outside the selected 2..17 bound, and other unsupported shapes on the ordinary reference path"
+  ],
+  "validation": {
+    "host": "pending",
+    "metal_component_parity": "pending",
+    "route_smoke": "pending",
+    "qualified": false,
+    "selected": false
+  },
+  "boundaries": "Implementation does not qualify, select, or default the multi-token fused path. Full-length prefill remains reference unless serving supplies an admitted bounded committed slab. Ordinary decode remains available for every refusal."
+}

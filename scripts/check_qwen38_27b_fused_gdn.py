@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Real-weight per-layer 27B decode gate; verify checks the counted reference fallback.
+"""Real-weight per-layer 27B decode and bounded B1 verify parity gate.
 
 This never selects or qualifies a serving route. No MLX import, model load,
 or Metal work occurs before --i-own-the-gpu and the TF32 guard are checked.
@@ -35,7 +35,8 @@ def main():
     sys.path.insert(0, str(ROOT / 'src'))
     import mlx.core as mx
     import mlx.nn as nn
-    from mlx2.runtime.models.qwen38_fused_gdn import GatedDeltaNet, VERIFY_REFUSAL
+    from mlx2.runtime.models.qwen38_fused_gdn import GatedDeltaNet
+    from mlx2.runtime.models.qwen4_fused_gdn_verify import set_verify_max_steps
     from mlx2.runtime.models.qwen3_5 import TextModelArgs
     from mlx2.runtime.models.cache import ArraysCache
     from mlx2.runtime.models.qwen4_fused_gdn import fused_gdn_runtime_supported
@@ -43,6 +44,7 @@ def main():
     mx.set_default_device(mx.gpu)
     if not fused_gdn_runtime_supported():
         raise RuntimeError('Metal runtime unavailable')
+    set_verify_max_steps(17)
     model_path = Path(args.model).expanduser().resolve()
     config_bytes = (model_path / 'config.json').read_bytes()
     index_bytes = (model_path / 'model.safetensors.index.json').read_bytes()
@@ -64,9 +66,10 @@ def main():
               'source_sha256': {}, 'seed': args.seed, 'steps': args.steps,
               'all_layers_covered': indices == expected_layers,
               'qualified': False, 'route_selected': False,
-              'verify_fused_implemented': False, 'verify_refusal': VERIFY_REFUSAL,
+              'verify_fused_implemented': True,
               'passed': False, 'layers': {}}
-    for name in ('qwen38_fused_gdn.py', 'qwen4_fused_gdn.py', 'qwen3_5.py', 'gated_delta.py'):
+    for name in ('qwen38_fused_gdn.py', 'qwen4_fused_gdn.py',
+                 'qwen4_fused_gdn_verify.py', 'qwen3_5.py', 'gated_delta.py'):
         report['source_sha256'][name] = hashlib.sha256(
             (ROOT / 'src/mlx2/runtime/models' / name).read_bytes()).hexdigest()
     mx.random.seed(args.seed)
@@ -140,8 +143,9 @@ def main():
     try:
         for i in indices:
             obj, shards = load_layer(i)
-            entry = {'safetensors': shards, 'decode': {}, 'verify_reference_fallback': {}}
+            entry = {'safetensors': shards, 'decode': {}, 'verify': {}}
             report['layers'][str(i)] = entry
+            verify_start = None
             for rows in (1, 2, 4, 8, 16):
                 obj.set_fused_gdn_enabled(False)
                 c = fresh()
@@ -149,6 +153,8 @@ def main():
                 y = obj(warm, cache=c)
                 mx.eval(y, c[0], c[1])
                 start = (c[0], c[1])
+                if rows == 1:
+                    verify_start = start
                 x = mx.random.normal((args.steps, rows, 1, text.hidden_size)).astype(mx.bfloat16)
                 ref = decode(obj, x, start, False)
                 counter = 'decode_calls' if rows == 1 else 'batch_decode_calls'
@@ -158,22 +164,27 @@ def main():
                 check['fused_calls'] = obj.fused_gdn_counters[counter] - before
                 check['passed'] = all(check[k] for k in ('output', 'conv_state', 'recurrent_state')) and check['fused_calls'] == args.steps
                 entry['decode'][str(rows)] = check
-                for width in (3, 9, 17):
-                    x = mx.random.normal((rows, width, text.hidden_size)).astype(mx.bfloat16)
-                    checks = []
-                    for accepted in sorted({0, 1, width // 2, width - 1, width}):
-                        ref = verify(obj, x, start, False, accepted)
-                        before = obj.fused_gdn_counters['reasons'].get(VERIFY_REFUSAL, 0)
-                        candidate = verify(obj, x, start, True, accepted)
-                        check = compare(ref, candidate)
-                        check.update(accepted=accepted, counted_reference_fallback=
-                                     obj.fused_gdn_counters['reasons'].get(VERIFY_REFUSAL, 0) == before + 1)
-                        check['passed'] = all(check[k] for k in ('output', 'conv_state', 'recurrent_state', 'counted_reference_fallback'))
-                        checks.append(check)
-                    entry['verify_reference_fallback'][f'{rows}x{width}'] = checks
+            for width in (3, 9, 17):
+                x = mx.random.normal((1, width, text.hidden_size)).astype(mx.bfloat16)
+                checks = []
+                for accepted in sorted({0, 1, width // 2, width - 1, width}):
+                    ref = verify(obj, x, verify_start, False, accepted)
+                    before = obj.fused_gdn_counters['verify_calls']
+                    candidate = verify(obj, x, verify_start, True, accepted)
+                    check = compare(ref, candidate)
+                    check.update(
+                        accepted=accepted,
+                        fused_calls=obj.fused_gdn_counters['verify_calls'] - before,
+                    )
+                    check['passed'] = (
+                        all(check[k] for k in ('output', 'conv_state', 'recurrent_state'))
+                        and check['fused_calls'] == 1
+                    )
+                    checks.append(check)
+                entry['verify'][f'1x{width}'] = checks
             entry['counters'] = dict(obj.fused_gdn_counters)
             entry['passed'] = all(c['passed'] for c in entry['decode'].values()) and all(
-                c['passed'] for checks in entry['verify_reference_fallback'].values() for c in checks)
+                c['passed'] for checks in entry['verify'].values() for c in checks)
             print(json.dumps({'layer': i, 'passed': entry['passed']}), flush=True)
             del obj
             mx.clear_cache()

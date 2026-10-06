@@ -16,7 +16,7 @@
   "modifications": [
     "Original default-off 27B subclass and existing adapter execution-policy switch",
     "Reuse unchanged shared decode kernel source with Qwen3.5 numerical template branch at strict 16/48 geometry",
-    "Keep incompatible verify/rollback and prefill on reference paths with counted refusals"
+    "Initial delivery kept verify/rollback and prefill on reference paths; provenance/qwen38-fused-gdn-multitoken.json records the later corrected bounded multi-token port"
   ],
   "validation": {
     "cpu_tests": "Blocked before collection by MLX import: no Metal device in sandbox",

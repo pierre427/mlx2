@@ -98,12 +98,15 @@ def test_27b_fused_gdn_is_required_when_selected(qualify):
                 "max_context": 131072, "max_lanes": 4}
     assert "feature_qwen38_fused_gdn" in required_feature_checks(settings)
     final = {"execution": {"fused_gdn": {"enabled": True, "decode_calls": 500,
-                                         "batch_decode_calls": 3, "fallbacks": 0}}}
+                                         "batch_decode_calls": 3, "verify_calls": 5,
+                                         "prefill_calls": 2, "fallbacks": 0}}}
     initial = {"execution": {"fused_gdn": {"enabled": True, "decode_calls": 0,
-                                           "batch_decode_calls": 0}}}
-    assert qualify.feature_observations(final, initial=initial)["qwen38_fused_gdn"] == 503
+                                           "batch_decode_calls": 0, "verify_calls": 0,
+                                           "prefill_calls": 0}}}
+    assert qualify.feature_observations(final, initial=initial)["qwen38_fused_gdn"] == 510
     stale = {"execution": {"fused_gdn": {"enabled": True, "decode_calls": 500,
-                                         "batch_decode_calls": 3}}}
+                                         "batch_decode_calls": 3, "verify_calls": 5,
+                                         "prefill_calls": 2}}}
     assert qualify.feature_observations(final, initial=stale)["qwen38_fused_gdn"] == 0
 
 

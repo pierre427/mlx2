@@ -90,14 +90,73 @@ def test_cpu_admission_reaches_runtime_and_counts(rows):
     assert all(a is b for a, b in zip(c.cache, old))
 
 
-@pytest.mark.parametrize('width', [3, 9, 17])
-def test_verify_arithmetic_refusal_preserves_rollback_cache(width):
+def test_verify_corrected_path_reaches_runtime_without_mutating_cache(monkeypatch):
+    from mlx2.runtime.models import qwen38_fused_gdn as route
     obj = layer()
     obj.set_fused_gdn_enabled(True)
     c = cache(obj)
     c.start_speculation()
-    assert obj._try_fused_decode(*operands(obj, width=width), None, c) is None
-    assert 'verify arithmetic incompatible' in obj.fused_gdn_counters['last_fallback']
+    old = list(c.cache)
+    monkeypatch.setattr(route.kernels, 'fused_gdn_runtime_supported', lambda: False)
+    assert obj._try_fused_decode(*operands(obj, width=3), None, c) is None
+    assert obj.fused_gdn_counters['last_fallback'] == 'Metal runtime unavailable'
+    assert all(a is b for a, b in zip(c.cache, old))
+
+
+def test_successful_verify_records_exact_rollback_and_commits_once(monkeypatch):
+    from mlx2.runtime.models import qwen38_fused_gdn as route
+    obj = layer()
+    obj.set_fused_gdn_enabled(True)
+    c = cache(obj)
+    c.start_speculation()
+    qkv, z, b, a = operands(obj, width=3)
+    conv, state = c[0] + 1, c[1] + 1
+    state_snaps = mx.stack([c[1] + 2, c[1] + 3], axis=1)
+    conv_snaps = mx.stack([c[0] + 2, c[0] + 3], axis=1)
+    recorded = []
+
+    monkeypatch.setattr(route.kernels, 'fused_gdn_runtime_supported', lambda: True)
+    monkeypatch.setattr(route.kernels, 'served_silu_refusal', lambda: None)
+    monkeypatch.setattr(route.verify_kernels, 'probe_qwen4_fused_gdn_verify',
+                        lambda *a, **kw: 32)
+    monkeypatch.setattr(route.verify_kernels, 'qwen4_fused_gdn_verify',
+                        lambda *a, **kw: (z, conv, state, state_snaps, conv_snaps))
+    monkeypatch.setattr(c, 'record_rollback',
+                        lambda steps, fn, snapshot: recorded.append((steps, fn, snapshot)))
+    output = obj._try_fused_decode(qkv, z, b, a, None, c)
+    assert output.shape == (1, 3, 16)
+    assert c[0] is conv and c[1] is state and recorded[0][0] == 3
+    restored = recorded[0][1](2)
+    assert mx.array_equal(restored[0], conv_snaps[:, 1]).item()
+    assert mx.array_equal(restored[1], state_snaps[:, 1]).item()
+    assert obj.fused_gdn_counters['verify_calls'] == 1
+    assert obj.fused_gdn_counters['verify_tokens'] == 3
+    assert obj.fused_gdn_counters['verify_rollbacks'] == 1
+
+
+def test_successful_bounded_prefill_uses_corrected_catchup(monkeypatch):
+    from mlx2.runtime.models import qwen38_fused_gdn as route
+    obj = layer()
+    obj.set_fused_gdn_enabled(True)
+    c = cache(obj)
+    qkv, z, b, a = operands(obj, width=3)
+    conv, state = c[0] + 1, c[1] + 1
+    monkeypatch.setattr(route.kernels, 'fused_gdn_runtime_supported', lambda: True)
+    monkeypatch.setattr(route.kernels, 'served_silu_refusal', lambda: None)
+    monkeypatch.setattr(route.verify_kernels, 'probe_qwen4_fused_gdn_catchup',
+                        lambda *a, **kw: 32)
+
+    def build(*args, **kwargs):
+        assert kwargs['architecture'] == 'qwen38'
+        assert kwargs['num_value_heads'] == 48
+        return z, conv, state
+
+    monkeypatch.setattr(route.verify_kernels, 'qwen4_fused_gdn_catchup', build)
+    output = obj._try_fused_decode(qkv, z, b, a, None, c)
+    assert output.shape == (1, 3, 16)
+    assert c[0] is conv and c[1] is state
+    assert obj.fused_gdn_counters['prefill_calls'] == 1
+    assert obj.fused_gdn_counters['prefill_tokens'] == 3
 
 
 def test_strict_policy_default_and_type():
@@ -182,12 +241,11 @@ def test_off_forward_is_bit_identical_and_is_the_kill_switch():
 
 
 def test_prefill_and_one_token_speculation_are_counted_reference_fallbacks():
-    from mlx2.runtime.models.qwen38_fused_gdn import PREFILL_REFUSAL
     obj = layer()
     obj.set_fused_gdn_enabled(True)
     c = cache(obj)
     assert obj._try_fused_decode(*operands(obj, width=32), None, c) is None
-    assert obj.fused_gdn_counters['last_fallback'] == PREFILL_REFUSAL
+    assert 'verify width 32 above' in obj.fused_gdn_counters['last_fallback']
     c.start_speculation()
     assert obj._try_fused_decode(*operands(obj), None, c) is None
     assert obj.fused_gdn_counters['last_fallback'] == 'speculative rollback'

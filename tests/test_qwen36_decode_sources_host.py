@@ -112,7 +112,9 @@ def verify_admit(rows, hv=32, architecture="qwen35", **overrides):
         key_head_dim=128,
         value_head_dim=128,
         conv_kernel=4,
-        gate_activation="swish" if architecture == "qwen35" else "sigmoid",
+        gate_activation=(
+            "swish" if architecture in ("qwen35", "qwen38") else "sigmoid"
+        ),
         architecture=architecture,
     )
     kw.update(overrides)
@@ -126,6 +128,10 @@ class Sources(unittest.TestCase):
         for rows in [1, 4, 16]:
             self.assertTrue(verify_admit(rows).accepted)
 
+    def test_qwen38_verify_admission(self):
+        for rows in [1]:
+            self.assertTrue(verify_admit(rows, 48, "qwen38").accepted)
+
     def test_flash_verify_admission_unchanged(self):
         for rows in [1, 4, 16]:
             self.assertTrue(verify_admit(rows, 48, "qwen4").accepted)
@@ -133,6 +139,7 @@ class Sources(unittest.TestCase):
     def test_geometry_cannot_switch_without_numerics(self):
         self.assertIn("geometry", verify_admit(4, 32, "qwen4").reason)
         self.assertIn("geometry", verify_admit(1, 48, "qwen35").reason)
+        self.assertIn("geometry", verify_admit(1, 32, "qwen38").reason)
         self.assertIn("output gate", verify_admit(4, gate_activation="sigmoid").reason)
 
     def test_mask_refusal(self):

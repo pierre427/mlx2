@@ -788,6 +788,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     # Fused GDN decode (qwen38_fused_gdn) on every route since 2026-10-02
     # (Pierre): bit-identical everywhere (264/264 lanes), ordinary B1-B16
     # +1.5..+3.2%, MTP neutral (qualification/runs/options-sweep-27b-20261002).
+    # The 2026-10-06 corrected bounded B1 multi-token port is independently
+    # validation-gated; unsupported shapes retain the reference path.
     # {"fused_gdn": false} in the execution policy is the kill switch.  Read
     # from this class's own __dict__: the Qwen3.5 9B and Qwen3.6 subclasses
     # carry no measurement and keep it off.
@@ -1465,9 +1467,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         contract = self._external_execution_numerics()
         if enabled:
             contract["fused_gdn"] = {
-                "algorithm": "qwen35-served-silu-decode-v1",
-                "scope": "initialized-nonspeculating-single-token",
-                "verify_prefill": "reference",
+                "algorithm": "qwen38-corrected-served-silu-v2",
+                "scope": "initialized-single-token-or-b1-unmasked-width-2-to-17",
+                "verify_prefill": "fused-when-admitted-reference-otherwise",
+                "speculative_rollback": "exact-snapshots",
             }
         state_receipt = getattr(self, "gdn_state", None)
         state_layers = [module for _, module in modules if is_gdn_layer(module)]

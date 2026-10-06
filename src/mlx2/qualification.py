@@ -63,8 +63,6 @@ APPROVED_QUALIFICATION_HARNESS = {
     # deliberately poison sys.modules/sys.meta_path now run in fresh import-
     # guard interpreters instead of contaminating later collection. Receipts
     # from f20fe750... must be regenerated.
-    # Re-pinned 2026-10-06 (Qwen3.8 corrected fused GDN): observations include
-    # admitted verify/prefill calls alongside one-token decode engagements.
     # Re-pinned 2026-10-05 (external-prefill identity): feature observations
     # now require paired run-local counter deltas for dense/sparse live-row
     # compaction and Qwen external packed prefill, plus target-width ingress
@@ -92,7 +90,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # (8a2ced1d..., NAX gather default) must be regenerated.
     # Re-pinned 2026-10-02 (flip integrate): benchmark_adaptive_mtp.py model
     # defaults now use Path.home(), so APPROVED_ADAPTIVE_BENCHMARK_SHA256 moved.
-    "sha256": "3e5d898a72cd957e6f841a50673cc5d331582fb6d9a090b500a0a36ba6aaf733",
+    "sha256": "5e31876aedc2c6632ab097ead5defde6b0a48c321c4ca2c502aae7d96d8b51d5",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A

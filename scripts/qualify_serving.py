@@ -1882,10 +1882,13 @@ def default_on_observations(final, initial=None):
             if scores.get("enabled") is True
             else 0
         ),
-        # Qwen3.8-27B spells its fused GDN counters decode_calls /
-        # batch_decode_calls (runtime/models/qwen38_fused_gdn.py).
+        # Qwen3.8-27B reports every admitted fused GDN form. A route passes
+        # this feature only from calls observed after the initial snapshot.
         "qwen38_fused_gdn": (
-            delta("fused_gdn", "decode_calls") + delta("fused_gdn", "batch_decode_calls")
+            delta("fused_gdn", "decode_calls")
+            + delta("fused_gdn", "batch_decode_calls")
+            + delta("fused_gdn", "verify_calls")
+            + delta("fused_gdn", "prefill_calls")
             if qwen38.get("enabled") is True
             else 0
         ),
