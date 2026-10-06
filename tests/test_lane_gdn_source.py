@@ -50,20 +50,22 @@ def _output_dtypes(filename: str, function: str) -> list[str]:
 
 
 def test_lane_gdn_kernels_keep_beta_in_fp32():
-    assignments = {
-        "lane_glue.py": (
-            "BETA[w * NV + hv] = 1.0f / "
-            "(1.0f + metal::exp(-float(Bin[w * NV + hv])));"
-        ),
-        "stream_gdn.py": (
-            "BETA[w * NV + hv] = 1.0f / "
-            "(1.0f + metal::exp(-float(Bin[w * ZS + BO + hv])));"
-        ),
+    inputs = {
+        "lane_glue.py": "float(Bin[w * NV + hv])",
+        "stream_gdn.py": "float(Bin[w * ZS + BO + hv])",
     }
-    for filename, assignment in assignments.items():
+    for filename, beta_input in inputs.items():
         source = (KERNELS / filename).read_text()
-        assert source.count(assignment) == 1
+        assert source.count(f"const float beta_x = {beta_input};") == 1
+        assert source.count(
+            "const float beta_y = 1.0f / "
+            "(1.0f + metal::precise::exp(metal::abs(beta_x)));"
+        ) == 1
+        assert source.count(
+            "BETA[w * NV + hv] = beta_x < 0.0f ? beta_y : 1.0f - beta_y;"
+        ) == 1
         assert "BETA[w * NV + hv] = bfloat(" not in source
+        assert "metal::exp(-float(Bin[" not in source
 
     assert _output_dtypes("lane_glue.py", "gdn_pre") == [
         "[qkv.dtype, qkv.dtype, qkv.dtype, mx.float32, mx.float32]"

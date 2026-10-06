@@ -94,7 +94,9 @@ _GDN_PRE = r"""
       const float s = float(bfloat(float(Ain[w * NV + hv]) + float(DT[hv])));
       const float sp = float(bfloat(metal::max(s, 0.0f) + metal::log(1.0f + metal::exp(-metal::abs(s)))));
       G[w * NV + hv] = metal::exp(-metal::exp(float(ALOG[hv])) * sp);
-      BETA[w * NV + hv] = 1.0f / (1.0f + metal::exp(-float(Bin[w * NV + hv])));
+      const float beta_x = float(Bin[w * NV + hv]);
+      const float beta_y = 1.0f / (1.0f + metal::precise::exp(metal::abs(beta_x)));
+      BETA[w * NV + hv] = beta_x < 0.0f ? beta_y : 1.0f - beta_y;
     }
   }
 """
