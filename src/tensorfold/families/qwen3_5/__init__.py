@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Any
 
 MODEL_TYPES = ("qwen3_5",)
@@ -200,9 +200,9 @@ def load_drafter(model: Any, drafter: str, drafter_bits: int = 4) -> Any:
 
 
 def install_lane_kernels(model: Any) -> None:
-    """Install lane matmul, fused projections and lane attention, compiling every variant before requests arrive."""
+    """Install lane matmul and fused projections while retaining ordinary attention."""
 
-    from tensorfold.kernels.qwen.dense.v1 import exact_attention, lane_attention, lane_fuse, lane_qmm
+    from tensorfold.kernels.qwen.dense.v1 import exact_attention, lane_fuse, lane_qmm
 
     exact_attention.install()      # verify windows attend query by query, as one-row steps do
     # TF_LANE_TILE=0 keeps MLX's weight layout without changing results.
@@ -212,8 +212,6 @@ def install_lane_kernels(model: Any) -> None:
     fused = lane_fuse.build(model)          # stacks share the weights' memory: no second copy
     lane_fuse.warm(model)
     exact_attention.EXACT_MAX_QUERIES = lane_qmm.MAX_ROWS
-    lane_attention.install()
-    lane_attention.warm(max_queries=lane_attention.MAX_QUERIES)
     print(f"[tensorfold] lane kernels on: {warmed} matmul shapes warmed, fused projections {fused}", flush=True)
 
 
@@ -237,8 +235,15 @@ def kernel_version(model: Any) -> str:
         parts = [row_matmul.BACKEND.name, f"row_attention={row_forward.ROW_ATTENTION}",
                  *(path.read_text() for path in sorted(folder.glob("*.py")))]
         return "row-forward-" + hashlib.sha256("\n".join(parts).encode()).hexdigest()[:12]
-    from tensorfold.kernels.qwen.dense.v1 import (lane_attention, lane_fuse, lane_glue, lane_qmm, lane_widen,
-                                                  stream_attention, stream_gdn)
+    from tensorfold.kernels.qwen.dense.v1 import (
+        lane_attention,
+        lane_fuse,
+        lane_glue,
+        lane_qmm,
+        lane_widen,
+        stream_attention,
+        stream_gdn,
+    )
 
     sources = [lane_qmm._MAIN, lane_qmm._MAIN_TILED, *lane_widen.sources().values(), lane_qmm._XSUM,
                lane_attention._PARTIAL, *stream_attention.sources().values(), lane_attention._MERGE,

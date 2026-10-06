@@ -2,9 +2,34 @@
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import mlx.core as mx
+
+
+def _ordinary_qkv_rows(
+    attn: Any,
+    queries: mx.array,
+    keys: mx.array,
+    values: mx.array,
+    positions: Sequence[int],
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Normalize and rotate each row through the ordinary one-token geometry."""
+
+    B, L, _, D = (int(value) for value in queries.shape)
+    nkv = int(attn.num_key_value_heads)
+    if B != 1 or len(positions) != L:
+        raise ValueError("lane_multi: ordinary attention positions do not match rows")
+    q_rows, k_rows, v_rows = [], [], []
+    for row, position in enumerate(positions):
+        q = attn.q_norm(queries[:, row:row + 1]).transpose(0, 2, 1, 3)
+        k = attn.k_norm(keys[:, row:row + 1].reshape(B, 1, nkv, D)).transpose(0, 2, 1, 3)
+        v = values[:, row:row + 1].reshape(B, 1, nkv, D).transpose(0, 2, 1, 3)
+        q_rows.append(attn.rope(q, offset=int(position)))
+        k_rows.append(attn.rope(k, offset=int(position)))
+        v_rows.append(v)
+    return tuple(mx.concatenate(rows, axis=2) for rows in (q_rows, k_rows, v_rows))
 
 
 def _attention(attn: Any, x: mx.array, caches: Sequence[Any], positions: list[int], offsets: Sequence[int],
@@ -21,32 +46,21 @@ def _attention(attn: Any, x: mx.array, caches: Sequence[Any], positions: list[in
     kv = lane_fuse.attn_kv(attn, x)
     if kv is None:
         keys, values = attn.k_proj(x), attn.v_proj(x)
-        queries = attn.q_norm(queries)
-        keys = attn.k_norm(keys.reshape(B, L, nkv, -1))
-        values = values.reshape(B, L, nkv, -1)
     else:
-        D = int(queries.shape[-1])
-        queries = attn.q_norm(q_proj_output.reshape(B, L, 2 * H, D))[:, :, 0::2]
         kv = kv.reshape(B, L, 2 * nkv, -1)
-        keys = attn.k_norm(kv)[:, :, :nkv]
-        values = kv[:, :, nkv:]
-    queries = queries.transpose(0, 2, 1, 3)
-    keys = keys.transpose(0, 2, 1, 3)
-    values = values.transpose(0, 2, 1, 3)
-    pos = mx.array(positions, dtype=mx.int32)
-    queries = attn.rope(queries.transpose(2, 1, 0, 3), offset=pos).transpose(2, 1, 0, 3)
-    keys = attn.rope(keys.transpose(2, 1, 0, 3), offset=pos).transpose(2, 1, 0, 3)
+        keys, values = kv[:, :, :nkv], kv[:, :, nkv:]
+    queries, keys, values = _ordinary_qkv_rows(attn, queries, keys, values, positions)
     kv = []
     for s, cache in enumerate(caches):
         a, w = int(offsets[s]), int(widths[s])
         k_s, v_s = keys[:, :, a:a + w], values[:, :, a:a + w]
         records[s].append(("kv", k_s, v_s))
-        cache.update_and_fetch(k_s, v_s)
-        kv.append((cache.keys, cache.values))
+        kv.append(cache.update_and_fetch(k_s, v_s))
     outs = []
     for first, plan in plans:
         span = queries if len(plans) == 1 else queries[:, :, offsets[first]:offsets[first] + plan.rows]
-        outs.append(stream_attention.tree_sdpa(span, kv[first:first + plan.streams], attn.scale, plan))
+        outs.append(stream_attention.ordinary_tree_sdpa(
+            span, kv[first:first + plan.streams], attn.scale, plan))
     output = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
     output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
     return attn.o_proj(output * mx.sigmoid(gate))
@@ -62,7 +76,7 @@ def _gdn(gdn: Any, x: mx.array, caches: Sequence[Any], parents: Sequence[Sequenc
     qkv = gdn.in_proj_qkv(x)
     zba = lane_fuse.gdn_in(gdn, x)
     n_keep = gdn.conv_kernel_size - 1
-    heads = dict(nk=gdn.num_k_heads, nv=gdn.num_v_heads, dk=gdn.head_k_dim, dv=gdn.head_v_dim)
+    heads = {"nk": gdn.num_k_heads, "nv": gdn.num_v_heads, "dk": gdn.head_k_dim, "dv": gdn.head_v_dim}
     states = [cache[0] if cache[0] is not None else mx.zeros((B, n_keep, gdn.conv_dim), dtype=x.dtype)
               for cache in caches]
     if zba is None:

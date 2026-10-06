@@ -67,3 +67,25 @@ def test_norm_launch_geometry_matches_embedded_mlx_geometry():
     assert lane.count(spelling) == 1
     assert row.count(spelling) == 2
     assert "threadgroup=(K // 16, 1, 1)" not in row
+
+
+def test_tree_attention_uses_the_actual_ordinary_sdpa_law():
+    stream = (KERNELS / "stream_attention.py").read_text()
+    multi = (KERNELS / "lane_multi.py").read_text()
+    family = (
+        Path(__file__).resolve().parents[1]
+        / "src/tensorfold/families/qwen3_5/__init__.py"
+    ).read_text()
+
+    assert "def ordinary_tree_sdpa(" in stream
+    assert "mx.fast.scaled_dot_product_attention(" in stream
+    assert "node_keys, node_values = keys[:, :, :stop], values[:, :, :stop]" in stream
+    assert "mx.take(keys, indices, axis=2)" in stream
+    assert "stream_attention.ordinary_tree_sdpa(" in multi
+    assert "kv.append(cache.update_and_fetch(k_s, v_s))" in multi
+    assert "def _ordinary_qkv_rows(" in multi
+    assert "attn.q_norm(queries[:, row:row + 1])" in multi
+    assert "attn.k_norm(keys[:, row:row + 1]" in multi
+    assert "attn.rope(q, offset=int(position))" in multi
+    assert "offset=pos" not in multi
+    assert "lane_attention.install()" not in family

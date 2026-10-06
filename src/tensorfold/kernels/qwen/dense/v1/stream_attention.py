@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import mlx.core as mx
 
@@ -324,6 +325,8 @@ class Plan:
             raise ValueError(f"stream_attention: 1 to {MAX_STREAMS} streams, one start each")
         G = heads // kv_heads
         self.G, self.heads, self.kv_heads, self.streams = G, heads, kv_heads, len(parents)
+        self.parents = tuple(tuple(int(parent) for parent in row) for row in parents)
+        self.starts = tuple(int(start) for start in starts)
         base = [0] * (MG + MAX_STREAMS * MS)
         tile_stream: list[int] = []
         rows: list[int] = []
@@ -374,6 +377,55 @@ class Plan:
         return self._spare
 
 
+def ordinary_tree_sdpa(
+    queries: mx.array,
+    kv: Sequence[tuple[mx.array, mx.array]],
+    scale: float,
+    plan: Plan,
+) -> mx.array:
+    """Apply the ordinary one-query SDPA law independently to every tree node.
+
+    The optimized stream kernel is exact relative to ``lane_attention``, but a
+    caller can retain a different ordinary attention implementation. A tree
+    must compare against that actual ordinary reference, not against an
+    internally patched reference. Each node therefore sees the committed
+    prefix followed by only its ancestor path, exactly as serial decoding
+    presents those keys and values to ``mx.fast`` SDPA.
+    """
+
+    from tensorfold.kernels.qwen.dense.v1.lane_tree import tree_paths
+
+    _, H, R, D = (int(value) for value in queries.shape)
+    if D != 256 or H != plan.heads or R != plan.rows or len(kv) != plan.streams:
+        raise ValueError(
+            f"stream_attention: unsupported ordinary tree shape q={queries.shape} for {len(kv)} streams"
+        )
+    outputs = []
+    first = 0
+    for parents, start, (keys, values) in zip(plan.parents, plan.starts, kv):
+        _, paths = tree_paths(parents)
+        needed = start + len(parents)
+        if int(keys.shape[2]) < needed or int(values.shape[2]) < needed:
+            raise ValueError("stream_attention: ordinary tree cache does not contain every staged row")
+        for node, path in enumerate(paths):
+            query = queries[:, :, first + node:first + node + 1]
+            if path == list(range(len(path))):
+                stop = start + len(path)
+                node_keys, node_values = keys[:, :, :stop], values[:, :, :stop]
+            else:
+                path_rows = mx.array([start + row for row in path], dtype=mx.int32)
+                indices = mx.concatenate([mx.arange(start, dtype=mx.int32), path_rows])
+                node_keys = mx.take(keys, indices, axis=2)
+                node_values = mx.take(values, indices, axis=2)
+            outputs.append(
+                mx.fast.scaled_dot_product_attention(
+                    query, node_keys, node_values, scale=scale, mask=None
+                )
+            )
+        first += len(parents)
+    return outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=2)
+
+
 def tree_sdpa(queries: mx.array, kv: Sequence[tuple[mx.array, mx.array]], scale: float, plan: Plan) -> mx.array:
     """Attend grouped queries [1, H, R, D] over each stream's whole KV buffers [1, HKV, capacity, D], with window rows last."""
 
@@ -418,4 +470,4 @@ def tree_sdpa(queries: mx.array, kv: Sequence[tuple[mx.array, mx.array]], scale:
         output_shapes=[(1, H, NT, D)], output_dtypes=[mx.bfloat16])[0]
 
 
-__all__ = ["MAX_STREAMS", "Plan", "sources", "tree_sdpa"]
+__all__ = ["MAX_STREAMS", "Plan", "ordinary_tree_sdpa", "sources", "tree_sdpa"]
