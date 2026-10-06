@@ -62,7 +62,7 @@ _PRE = r"""
       const float s = float(bfloat(float(Ain[w * ZS + AO + hv]) + float(DT[hv])));
       const float sp = float(bfloat(metal::max(s, 0.0f) + metal::log(1.0f + metal::exp(-metal::abs(s)))));
       G[w * NV + hv] = metal::exp(-metal::exp(float(ALOG[hv])) * sp);
-      BETA[w * NV + hv] = bfloat(1.0f / (1.0f + metal::exp(-float(Bin[w * ZS + BO + hv]))));
+      BETA[w * NV + hv] = 1.0f / (1.0f + metal::exp(-float(Bin[w * ZS + BO + hv])));
     }
   }
 """
@@ -106,7 +106,7 @@ class ConvPlan:
 
 def gdn_pre(qkv: mx.array, states: Sequence[mx.array], conv_weight: mx.array, plan: ConvPlan, zba: mx.array,
             a_log: mx.array, dt_bias: mx.array, *, nk: int, nv: int, dk: int, dv: int) -> tuple[mx.array, ...]:
-    """Return q/k [1, R, nk, dk], v [1, R, nv, dv], g [1, R, nv] fp32, beta [1, R, nv] from grouped projections and per-stream conv states."""
+    """Return q/k [1, R, nk, dk], v [1, R, nv, dv], and fp32 g/beta [1, R, nv] from grouped projections and per-stream conv states."""
 
     R = int(qkv.shape[-2])
     C = int(qkv.shape[-1])
@@ -124,7 +124,7 @@ def gdn_pre(qkv: mx.array, states: Sequence[mx.array], conv_weight: mx.array, pl
                   ("ZS", zs), ("AO", nv * dv + nv), ("BO", nv * dv)],
         grid=(32, 2 * nk + nv, R), threadgroup=(32, 1, 1),
         output_shapes=[(1, R, nk, dk), (1, R, nk, dk), (1, R, nv, dv), (1, R, nv), (1, R, nv)],
-        output_dtypes=[qkv.dtype, qkv.dtype, qkv.dtype, mx.float32, qkv.dtype]))
+        output_dtypes=[qkv.dtype, qkv.dtype, qkv.dtype, mx.float32, mx.float32]))
 
 
 # Walk nodes parents-first from each stream's committed state using mlx_lm gated_delta_step arithmetic.

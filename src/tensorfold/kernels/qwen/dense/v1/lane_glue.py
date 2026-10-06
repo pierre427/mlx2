@@ -94,7 +94,7 @@ _GDN_PRE = r"""
       const float s = float(bfloat(float(Ain[w * NV + hv]) + float(DT[hv])));
       const float sp = float(bfloat(metal::max(s, 0.0f) + metal::log(1.0f + metal::exp(-metal::abs(s)))));
       G[w * NV + hv] = metal::exp(-metal::exp(float(ALOG[hv])) * sp);
-      BETA[w * NV + hv] = bfloat(1.0f / (1.0f + metal::exp(-float(Bin[w * NV + hv]))));
+      BETA[w * NV + hv] = 1.0f / (1.0f + metal::exp(-float(Bin[w * NV + hv])));
     }
   }
 """
@@ -247,7 +247,7 @@ def norm_xs(hidden: mx.array, residual: mx.array | None, weight: mx.array, eps: 
 def gdn_pre(qkv: mx.array, conv_state: mx.array, conv_weight: mx.array, windows: mx.array, a: mx.array,
             b: mx.array, a_log: mx.array, dt_bias: mx.array, *, nk: int, nv: int, dk: int, dv: int
             ) -> tuple[mx.array, ...]:
-    """Return q/k [1, W, nk, dk], v [1, W, nv, dv], g/beta [1, W, nv] with g in fp32; windows [W, taps] indexes [conv_state; qkv] rows."""
+    """Return q/k [1, W, nk, dk], v [1, W, nv, dv], and fp32 g/beta [1, W, nv]; windows index [conv_state; qkv] rows."""
 
     W = int(qkv.shape[-2])
     C = int(qkv.shape[-1])
@@ -260,7 +260,7 @@ def gdn_pre(qkv: mx.array, conv_state: mx.array, conv_weight: mx.array, windows:
         template=[("NK", nk), ("NV", nv), ("DK", dk), ("DV", dv), ("TAPS", taps)],
         grid=(32, 2 * nk + nv, W), threadgroup=(32, 1, 1),
         output_shapes=[(1, W, nk, dk), (1, W, nk, dk), (1, W, nv, dv), (1, W, nv), (1, W, nv)],
-        output_dtypes=[qkv.dtype, qkv.dtype, qkv.dtype, mx.float32, qkv.dtype])
+        output_dtypes=[qkv.dtype, qkv.dtype, qkv.dtype, mx.float32, mx.float32])
     return q, k, v, g, beta
 
 

@@ -251,7 +251,7 @@ def mlp_act(gu: mx.array) -> mx.array:
 
 def gdn_pre(y: mx.array, conv_state: mx.array, conv_weight: mx.array, windows: mx.array, a_log: mx.array,
             dt_bias: mx.array, *, nk: int, nv: int, dk: int, dv: int) -> tuple[mx.array, ...]:
-    """Return q/k [1, W, nk, dk], v [1, W, nv, dv], g [1, W, nv] fp32, beta [1, W, nv], and conv tails [W, taps - 1, C] from stacked rows."""
+    """Return q/k [1, W, nk, dk], v [1, W, nv, dv], fp32 g/beta [1, W, nv], and conv tails [W, taps - 1, C] from stacked rows."""
 
     zs = int(y.shape[-1])
     W = y.size // zs
@@ -269,7 +269,7 @@ def gdn_pre(y: mx.array, conv_state: mx.array, conv_weight: mx.array, windows: m
                   ("AO", C + nv * dv + nv), ("BO", C + nv * dv)],
         grid=(32, 2 * nk + nv, W), threadgroup=(32, 1, 1),
         output_shapes=[(1, W, nk, dk), (1, W, nk, dk), (1, W, nv, dv), (1, W, nv), (1, W, nv), (W, taps - 1, C)],
-        output_dtypes=[y.dtype, y.dtype, y.dtype, mx.float32, y.dtype, y.dtype]))
+        output_dtypes=[y.dtype, y.dtype, y.dtype, mx.float32, mx.float32, y.dtype]))
 
 
 def gated_delta(q: mx.array, k: mx.array, v: mx.array, g: mx.array, beta: mx.array, state: mx.array,

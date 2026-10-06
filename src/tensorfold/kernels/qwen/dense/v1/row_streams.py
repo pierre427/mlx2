@@ -117,7 +117,7 @@ def recur(gdn: Any, y: mx.array, caches: Sequence[Any], parents: Sequence[tuple[
                   ("AO", C + nv * dv + nv), ("BO", C + nv * dv)],
         grid=(32, 2 * nk + nv, R), threadgroup=(32, 1, 1),
         output_shapes=[(1, R, nk, dk), (1, R, nk, dk), (1, R, nv, dv), (1, R, nv), (1, R, nv), (R, taps - 1, C)],
-        output_dtypes=[y.dtype, y.dtype, y.dtype, mx.float32, y.dtype, y.dtype])
+        output_dtypes=[y.dtype, y.dtype, y.dtype, mx.float32, mx.float32, y.dtype])
     from tensorfold.kernels.qwen.dense.v1 import lane_tree
 
     most = max(len(p) for p in parents)
