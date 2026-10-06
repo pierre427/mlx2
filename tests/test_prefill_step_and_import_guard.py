@@ -30,8 +30,10 @@ def _engine_settings(monkeypatch, adapter_step, *, prefill_identity=None, expect
     class Batch:
         scheduler_stats = {}
 
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, *_a, **kw):
+            seen["batch_prefill_step_autoscale"] = kw.get(
+                "prefill_step_autoscale"
+            )
 
         def next(self):
             return [], []
@@ -89,15 +91,19 @@ def _engine_settings(monkeypatch, adapter_step, *, prefill_identity=None, expect
     return settings, seen, engine
 
 
-@pytest.mark.parametrize("adapter_step,overrides,step,source", [
-    (None, {}, 2048, "default"),
-    (8192, {}, 8192, "adapter"),
-    (8192, {"prefill_step": 512}, 512, "engine_argument"),
+@pytest.mark.parametrize("adapter_step,overrides,step,source,autoscale", [
+    (None, {}, 8192, "prompt_length_autoscale", True),
+    (8192, {}, 8192, "adapter", False),
+    (8192, {"prefill_step": 512}, 512, "engine_argument", False),
 ])
-def test_prefill_step_prefers_operator_then_adapter(monkeypatch, adapter_step, overrides, step, source):
+def test_prefill_step_prefers_operator_then_adapter_then_autoscale(
+    monkeypatch, adapter_step, overrides, step, source, autoscale
+):
     settings, seen, engine = _engine_settings(monkeypatch, adapter_step, **overrides)
     assert engine.prefill_step == step and seen["prefill_step"] == step
     assert settings["prefill_step"] == step and settings["prefill_step_source"] == source
+    assert settings["prefill_step_autoscale"] is autoscale
+    assert seen["batch_prefill_step_autoscale"] is autoscale
 
 
 def test_flash_next_policy_owns_the_prefill_step():
@@ -159,10 +165,72 @@ def test_flash_next_subclasses_without_a_policy_defer_to_the_engine(monkeypatch)
     assert Subclass().prefill_step_default() is None
 
 
-def test_engine_keeps_its_default_when_the_adapter_declines(monkeypatch):
+def test_engine_autoscales_when_the_adapter_declines(monkeypatch):
     settings, seen, engine = _engine_settings(monkeypatch, "decline")
-    assert engine.prefill_step == 2048 and seen["prefill_step"] == 2048
-    assert settings["prefill_step_source"] == "default"
+    assert engine.prefill_step == 8192 and seen["prefill_step"] == 8192
+    assert settings["prefill_step_source"] == "prompt_length_autoscale"
+    assert settings["prefill_step_autoscale"] is True
+
+
+def test_prompt_length_prefill_autoscale_schedule():
+    from mlx2.runtime.prefill_plan import (
+        prefill_fits_one_chunk,
+        prompt_length_prefill_step,
+        shared_prefill_budget_width,
+        single_round_prefill_rows,
+    )
+
+    assert [
+        prompt_length_prefill_step(tokens)
+        for tokens in (2048, 32768, 32769, 65536, 65537, 131072, 262144)
+    ] == [512, 512, 2048, 2048, 8192, 8192, 8192]
+    assert prompt_length_prefill_step(131072, maximum=2048) == 2048
+
+    # Overflow admission and execution must agree on the effective slice.
+    assert prefill_fits_one_chunk(
+        1000, 1000, 8192, autoscale=False, maximum=8192
+    )
+    assert not prefill_fits_one_chunk(
+        1000, 1000, 8192, autoscale=True, maximum=8192
+    )
+    assert prefill_fits_one_chunk(
+        512, 1000, 8192, autoscale=True, maximum=8192
+    )
+    assert prefill_fits_one_chunk(
+        512, 513, 8192, autoscale=True, maximum=8192
+    )
+    assert prefill_fits_one_chunk(
+        1000, 40000, 8192, autoscale=True, maximum=8192
+    )
+    assert not prefill_fits_one_chunk(
+        300, 40000, 256, autoscale=True, maximum=8192
+    )
+    assert single_round_prefill_rows((512, 1)) == 512
+    assert single_round_prefill_rows((1,)) == 0
+    assert single_round_prefill_rows((128, 128, 1)) is None
+    assert shared_prefill_budget_width(
+        8192, 3, enabled=True, token_budget=512
+    ) == 170
+    assert shared_prefill_budget_width(
+        8192, 3, enabled=False, token_budget=512
+    ) == 8192
+
+
+def test_qwen35_9b_declines_inherited_27b_prefill_override():
+    from mlx2.adapters.qwen35_9b import Qwen359BAdapter
+
+    assert object.__new__(Qwen359BAdapter).prefill_step_default() is None
+
+
+def test_standard_qwen3_family_owns_conservative_prefill_step():
+    from mlx2.adapters.standard_decoder import StandardDecoderAdapter
+
+    for family in ("qwen3", "qwen3_moe"):
+        adapter = object.__new__(StandardDecoderAdapter)
+        adapter.config = {"model_type": family}
+        assert adapter.prefill_step_default() == 512
+    adapter.config = {"model_type": "qwen2"}
+    assert adapter.prefill_step_default() is None
 def test_serving_wires_weights_once_for_every_route(monkeypatch):
     """The wired limit is raised after the adapter loads, not by one generator."""
     from mlx2.runtime import weight_residency

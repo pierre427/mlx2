@@ -33,6 +33,7 @@ from .generate import (
     _merge_caches,
     _right_pad_prompts,
 )
+from .prefill_plan import prompt_length_prefill_step
 from .speculative_sampling import (
     FLyVerificationPolicy,
     RequestRNG,
@@ -325,6 +326,8 @@ class RoundDecision:
     commit_rows: object = None
     continuation_outcome: object = None
     continuation_semantic_index: int | None = None
+    commit_count: int | None = None
+    committed_inputs: object = None
 
 
 def _block_row(block, vocab):
@@ -382,11 +385,13 @@ class ExternalDraftBatchGenerator:
     adaptive_policy = None
 
     def __init__(self, model, *, draft_model, binding, completion_batch_size=4,
-                 prefill_step_size=2048, num_draft=4, stop_tokens=(), memory_headroom=None,
+                 prefill_step_size=2048, prefill_step_autoscale=False,
+                 num_draft=4, stop_tokens=(), memory_headroom=None,
                  reclaim_memory=None, evict_checkpoint=None, fly_verification=None,
                  pairwise_selection="host", ready_drain="one",
                  prefill_allocator_reclaim=False, adaptive_verification=None,
-                 continuation_pool=None, dynamic_singleton_tree=False,
+                 continuation_pool=None, continuation_verification_strategy=None,
+                 dynamic_singleton_tree=False,
                  dynamic_tree_max_width=1, external_varlen_prefill=False,
                  tree_node_budget_by_lanes=None,
                  tensorfold_cohort_limit=None,
@@ -413,8 +418,32 @@ class ExternalDraftBatchGenerator:
                 raise ValueError("continuation_pool requires the matching bound proposal provider")
         elif hasattr(draft_model, "last_continuation_selections"):
             self.continuation_policy = draft_model.policy
+        from .continuation_strategy import ContinuationStrategy
+
+        self.continuation_strategy = ContinuationStrategy.from_value(
+            continuation_verification_strategy
+        )
+        if (
+            self.continuation_strategy.algorithm
+            != "parallel_complete_paths_v1"
+            and self.continuation_policy is None
+        ):
+            raise ValueError(
+                "continuation verification strategy requires a bound continuation pool"
+            )
+        if (
+            self.continuation_strategy.cache_layout is not None
+            and getattr(model, "apc_v2_layout", None)
+            != self.continuation_strategy.cache_layout
+        ):
+            raise ValueError("continuation strategy cache layout mismatch")
         self.fly_verification = FLyVerificationPolicy.from_value(fly_verification)
         self.prefill_step = prefill_step_size; self.num_draft = int(num_draft)
+        if not 1 <= self.num_draft < draft_model.config.block_size:
+            raise ValueError("External draft count must fit trained block")
+        if type(prefill_step_autoscale) is not bool:
+            raise ValueError("prefill_step_autoscale must be boolean")
+        self.prefill_step_autoscale = prefill_step_autoscale
         if minimum_draft_proposals is None:
             declared_floor = getattr(
                 draft_model, "minimum_proposal_length", 1
@@ -432,6 +461,9 @@ class ExternalDraftBatchGenerator:
                 "minimum_draft_proposals must be an integer from 1 to num_draft"
             )
         self.minimum_draft_proposals = minimum_draft_proposals
+        if type(prefill_step_autoscale) is not bool:
+            raise ValueError("prefill_step_autoscale must be boolean")
+        self.prefill_step_autoscale = prefill_step_autoscale
         if type(external_varlen_prefill) is not bool:
             raise ValueError("external_varlen_prefill must be boolean")
         if external_varlen_prefill and not callable(
@@ -568,8 +600,6 @@ class ExternalDraftBatchGenerator:
         if ready_drain not in ("one", "all"):
             raise ValueError("ready_drain must be 'one' or 'all'")
         self.ready_drain = ready_drain
-        if not 1 <= self.num_draft < draft_model.config.block_size:
-            raise ValueError("External draft count must fit trained block")
         if any(len(t) != 1 for t in stop_tokens):
             raise ValueError("External executor currently requires single-token stops")
         self.stops = {int(t[0]) for t in stop_tokens}
@@ -841,6 +871,13 @@ class ExternalDraftBatchGenerator:
         state = ExternalDraftState((draft_cache, tail), len(lane.history), self.mx.array(list(json.dumps(lane.rng.snapshot(), sort_keys=True).encode()), dtype=self.mx.uint8), lane.rng.draws, binding=self.binding)
         state.validate(self.binding, len(lane.history)); return state
 
+    def _prefill_limit(self, lane):
+        if not self.prefill_step_autoscale:
+            return self.prefill_step
+        return prompt_length_prefill_step(
+            len(lane.history) + len(lane.remaining), maximum=self.prefill_step
+        )
+
     def _prefill_response(self, lane, *, external_prefill_width=1):
         """Publish progress and the paired committed boundary after a chunk."""
         done = len(lane.remaining) == 1
@@ -863,7 +900,10 @@ class ExternalDraftBatchGenerator:
 
     def _prefill(self, lane, *, step=None):
         if len(lane.remaining) > 1:
-            n = min(self.prefill_step if step is None else step, len(lane.remaining)-1)
+            n = min(
+                self._prefill_limit(lane) if step is None else step,
+                len(lane.remaining) - 1,
+            )
             if lane.tail.shape[1]:
                 self._append_context(lane, lane.remaining[0])
             inputs = [lane.remaining.popleft() for _ in range(n)]
@@ -888,7 +928,10 @@ class ExternalDraftBatchGenerator:
         if len(lanes) < 2:
             return [self._prefill(lane, step=step) for lane in lanes]
         lengths = [
-            min(self.prefill_step if step is None else step, len(lane.remaining) - 1)
+            min(
+                self._prefill_limit(lane) if step is None else step,
+                len(lane.remaining) - 1,
+            )
             for lane in lanes
         ]
         width = max(lengths)
@@ -1457,6 +1500,12 @@ class ExternalDraftBatchGenerator:
                     self.pairwise_selection == "batched"
                     and pairwise_processors
                     and not self.pair_context_tokens
+                    # Request-bound histories/contexts are part of proposal
+                    # production, not merely processor metadata.  Bypassing
+                    # their wrapper through the backend's compact block API
+                    # would skip source arbitration and leave its row receipts
+                    # empty or stale.
+                    and not extra
                 ):
                     # Stateless forbidden-token processors can mask the pair
                     # table without a per-position host read. Other processor
@@ -2121,9 +2170,16 @@ class ExternalDraftBatchGenerator:
 
     def _commit(self, cohort, decisions, features, *, blocks, transaction):
         """Commit accepted prefixes, then publish responses for every row."""
-        proposal_counts = [0 if block is None else int(block.lengths[0]) for block in blocks]
+        proposal_counts = [
+            0 if block is None else int(block.lengths[0]) for block in blocks
+        ]
         consumed = [
-            min(decision.accepted+1, len(decision.emitted)) for decision in decisions
+            (
+                int(decision.commit_count)
+                if decision.commit_count is not None
+                else min(decision.accepted + 1, len(decision.emitted))
+            )
+            for decision in decisions
         ]
         clock = time.perf_counter() if self.round_timing else None
         paths = [
@@ -2155,8 +2211,15 @@ class ExternalDraftBatchGenerator:
             count = proposal_counts[row]
             emitted = decision.emitted
             drafts, _laws = _block_row(blocks[row], None)
-            inputs = [lane.anchor] + drafts
-            committed_inputs = [inputs[index] for index in paths[row]]
+            if decision.committed_inputs is None:
+                inputs = [lane.anchor] + drafts
+                committed_inputs = [inputs[index] for index in paths[row]]
+            else:
+                committed_inputs = list(decision.committed_inputs)
+                if len(committed_inputs) != consumed[row]:
+                    raise RuntimeError(
+                        "continuation committed-input count differs from transaction"
+                    )
             lane.cache = rows[row]
             if decision.commit_rows is None:
                 lane.tail = features[row:row+1,:consumed[row]]
@@ -2211,6 +2274,19 @@ class ExternalDraftBatchGenerator:
                 lane.continuation_rounds = getattr(lane, "continuation_rounds", 0) + 1
                 lane.continuation_physical_width = outcome.physical_width
                 lane.continuation_physical_span = outcome.physical_span
+                lane.continuation_strategy = outcome.algorithm
+                lane.continuation_strategy_launches = (
+                    getattr(lane, "continuation_strategy_launches", 0)
+                    + outcome.launches
+                )
+                lane.continuation_pruned_siblings = (
+                    getattr(lane, "continuation_pruned_siblings", 0)
+                    + outcome.pruned_siblings
+                )
+                lane.continuation_shared_prefix_reused_tokens = (
+                    getattr(lane, "continuation_shared_prefix_reused_tokens", 0)
+                    + outcome.shared_prefix_reused_tokens
+                )
                 semantic_index = (outcome.selected_index if decision.continuation_semantic_index is None
                                   else decision.continuation_semantic_index)
                 lane.continuation_selected_path = semantic_index
@@ -2218,7 +2294,10 @@ class ExternalDraftBatchGenerator:
                 chosen = blocks[row].continuation_selection.paths[semantic_index]
                 lane.continuation_selected_sources = tuple((path.source_id, path.source_revision)
                     for path in chosen.contributors)
-                lane.continuation_target_rows = getattr(lane, "continuation_target_rows", 0) + outcome.physical_width * outcome.physical_span
+                lane.continuation_target_rows = (
+                    getattr(lane, "continuation_target_rows", 0)
+                    + outcome.executed_target_rows
+                )
                 lane.target_max_width = max(lane.target_max_width, outcome.physical_width)
             if self._feedback_outbox is not None:
                 payload = getattr(blocks[row], "feedback_payload", None)
@@ -2258,20 +2337,85 @@ class ExternalDraftBatchGenerator:
             ranking = {"ranking": copy.deepcopy(self.draft.proposal_pool.receipt(lane.session_scope_hash))}
         except Exception as error:  # noqa: BLE001 - optional diagnostics cannot invalidate committed inference
             ranking = {"ranking_error": str(error)}
+        configured_algorithm = self.continuation_policy.verification_algorithm
+        verification_algorithm = getattr(
+            lane, "continuation_verification_algorithm", "not_executed"
+        )
+        strategy_algorithm = getattr(lane, "continuation_strategy", "not_executed")
+        strategy_value = strategy_algorithm
+        if self.continuation_strategy.routed_experts_per_token is not None:
+            attempts = getattr(lane, "continuation_strategy_launches", 0)
+            target_rows = getattr(lane, "continuation_target_rows", 0)
+            strategy_value = {
+                "algorithm": strategy_algorithm,
+                "mode": "longest_first_exact_prefix",
+                "cache_layout": self.continuation_strategy.cache_layout,
+                "proposal_state": self.continuation_strategy.proposal_state,
+                "target_state": self.continuation_strategy.target_state,
+                "implemented": True,
+                "qualified": self.continuation_strategy.qualified,
+                "selected": (
+                    self.continuation_strategy.algorithm
+                    == "longest_first_exact_prefix_v1"
+                ),
+                "observed_used": attempts > 0,
+                "attempts": attempts,
+                "sibling_proposals_pruned": getattr(
+                    lane, "continuation_pruned_siblings", 0
+                ),
+                "shared_prefix_tokens_reused": getattr(
+                    lane, "continuation_shared_prefix_reused_tokens", 0
+                ),
+                "target_rows": target_rows,
+                "routed_expert_rows": (
+                    target_rows
+                    * self.continuation_strategy.routed_experts_per_token
+                    * self.continuation_strategy.routed_moe_layers
+                ),
+                "routed_experts_per_token": (
+                    self.continuation_strategy.routed_experts_per_token
+                ),
+                "routed_moe_layers": self.continuation_strategy.routed_moe_layers,
+                "proposal_state_authoritative": False,
+                "apcv2_publication": False,
+            }
         return {"verification": "processed_target_draw_then_matching_continuation_prefix",
                 "continuation_pool": {"implemented": True, "selected": True, "qualified": False,
                     **ranking,
-                    "verification_algorithm": self.continuation_policy.verification_algorithm,
+                    "verification_algorithm": verification_algorithm,
+                    "configured_verification_algorithm": configured_algorithm,
                     "observed_used": getattr(lane, "continuation_rounds", 0) > 0,
                     "unit": "complete_continuation_sequences", "limit": self.continuation_policy.limit,
                     "committed_rounds": getattr(lane, "continuation_rounds", 0),
                     "physical_width": getattr(lane, "continuation_physical_width", 0),
                     "physical_span": getattr(lane, "continuation_physical_span", 0),
+                    "strategy": strategy_value,
+                    "strategy_algorithm": strategy_algorithm,
+                    "strategy_qualified": self.continuation_strategy.qualified,
+                    "strategy_selected": (
+                        self.continuation_strategy.algorithm
+                        == "longest_first_exact_prefix_v1"
+                    ),
+                    "strategy_observed_used": getattr(
+                        lane, "continuation_rounds", 0
+                    ) > 0,
+                    "strategy_launches": getattr(lane, "continuation_strategy_launches", 0),
+                    "shared_prefix_reused_tokens": getattr(
+                        lane, "continuation_shared_prefix_reused_tokens", 0
+                    ),
                     "ranked_complete_sequences": getattr(lane, "continuation_semantic_selected", 0),
                     "admitted_complete_sequences": getattr(lane, "continuation_semantic_admitted", 0),
                     "prefix_dedup_enabled": getattr(lane, "continuation_prefix_dedup_enabled", False),
                     "prefix_dedup_observed_used": getattr(lane, "continuation_deduplicated_sequences", 0) > 0,
                     "deduplicated_sequences": getattr(lane, "continuation_deduplicated_sequences", 0),
+                    "cascade_attempts": getattr(lane, "continuation_cascade_attempts", 0),
+                    "pruned_siblings": getattr(lane, "continuation_pruned_siblings", 0),
+                    "shared_prefix_tokens_reused": getattr(
+                        lane, "continuation_shared_prefix_tokens_reused", 0
+                    ),
+                    "shared_prefix_reuse_observed_used": getattr(
+                        lane, "continuation_shared_prefix_tokens_reused", 0
+                    ) > 0,
                     "physical_to_semantic": list(getattr(lane, "continuation_physical_to_semantic", ())),
                     "semantic_to_physical": list(getattr(lane, "continuation_semantic_to_physical", ())),
                     "target_rows": getattr(lane, "continuation_target_rows", 0),
@@ -2654,7 +2798,9 @@ class ExternalDraftBatchGenerator:
             SelectedContinuationTransaction,
             prepare_continuations,
             sample_continuations,
+            verify_longest_first_continuations,
         )
+        from .proposal_providers import LONGEST_FIRST_EXACT_PREFIX
         recovery = self._snapshot_round(cohort)
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
         stats_snapshot = self._snapshot_scheduler_stats()
@@ -2685,21 +2831,23 @@ class ExternalDraftBatchGenerator:
                         getattr(lane, "continuation_rounds", 0), [len(path.tokens) for path in selection.paths],
                         physical_widths=physical_widths)
                 semantic_paths = tuple(path.tokens[:depth] for path in selection.paths[:width])
+                semantic_order = tuple(range(len(semantic_paths)))
+                if (
+                    self.continuation_strategy.algorithm
+                    == "longest_first_exact_prefix_v1"
+                ):
+                    semantic_order = tuple(
+                        index
+                        for index, _path in sorted(
+                            enumerate(semantic_paths),
+                            key=lambda item: (-len(item[1]), item[0]),
+                        )
+                    )
+                    semantic_paths = tuple(
+                        semantic_paths[index] for index in semantic_order
+                    )
                 paths, representatives, semantic_to_physical = self._unique_continuation_paths(
                     semantic_paths, enabled=dedup_enabled)
-                inputs = [[lane.anchor, *path] for path in paths]
-                counts = [len(path) for path in paths]
-                taps, steer, commits = self._verify_steer([lane] * len(paths), inputs, counts)
-                if steer is not None:
-                    taps.steer = steer
-                try:
-                    paths, logits, hidden, transaction = prepare_continuations(
-                        self.model, self.mx, lane.cache, lane.anchor, paths, self.layers,
-                        self._target_owner, max_sequences=self.continuation_policy.limit,
-                        max_depth=self.num_draft)
-                finally:
-                    if steer is not None:
-                        taps.steer = None
                 laws = []
                 response_rows = [] if lane.sampling.get("emit_logprobs", True) else None
                 window = VerifyWindow(lane.processors)
@@ -2711,11 +2859,144 @@ class ExternalDraftBatchGenerator:
                     _window.mark()
                     _laws.append(law)
                     return _lane.rng.sample(law)
+                strategy_longest_first = (
+                    self.continuation_strategy.algorithm
+                    == LONGEST_FIRST_EXACT_PREFIX
+                )
+                policy_longest_first = (
+                    self.continuation_policy.verification_algorithm
+                    == LONGEST_FIRST_EXACT_PREFIX
+                )
+                if (strategy_longest_first or policy_longest_first) and not dedup_enabled:
+                    raise RuntimeError(
+                        "longest-first exact-prefix verification requires "
+                        "adapter-attested contextual prefix equivalence"
+                    )
 
-                outcome = sample_continuations(paths, logits, sample_row,
-                    maximum=lane.maximum - lane.generated, stop_tokens=self.stops)
+                if strategy_longest_first:
+                    inputs = [[lane.anchor, *path] for path in paths]
+                    counts = [len(path) for path in paths]
+                    taps, steer, commits = self._verify_steer(
+                        [lane] * len(paths), inputs, counts
+                    )
+                    if steer is not None or commits:
+                        raise ValueError(
+                            "longest-first continuation reuse is unavailable "
+                            "with residual steering"
+                        )
+                    from .continuation_verification import (
+                        prepare_longest_first_continuations,
+                    )
+
+                    outcome, hidden, transaction = prepare_longest_first_continuations(
+                        self.model,
+                        self.mx,
+                        lane.cache,
+                        lane.anchor,
+                        paths,
+                        self.layers,
+                        self._target_owner,
+                        sample_row,
+                        maximum=lane.maximum - lane.generated,
+                        stop_tokens=self.stops,
+                        max_sequences=self.continuation_policy.limit,
+                        max_depth=self.num_draft,
+                    )
+                    commit_features = hidden
+                    continuation_transaction = transaction
+                    commits = ()
+                    lane.continuation_verification_algorithm = LONGEST_FIRST_EXACT_PREFIX
+                    lane.continuation_cascade_attempts = getattr(
+                        lane, "continuation_cascade_attempts", 0
+                    ) + outcome.launches
+                    lane.continuation_shared_prefix_tokens_reused = getattr(
+                        lane, "continuation_shared_prefix_tokens_reused", 0
+                    ) + outcome.shared_prefix_reused_tokens
+                elif policy_longest_first:
+                    def prepare_attempt(cache, anchor, suffix, *, _lane=lane):
+                        inputs = [[anchor, *suffix]]
+                        taps, steer, steer_commits = self._verify_steer(
+                            [_lane], inputs, [len(suffix)]
+                        )
+                        if steer is not None:
+                            taps.steer = steer
+                        try:
+                            _paths, logits, hidden, attempt = prepare_continuations(
+                                self.model,
+                                self.mx,
+                                cache,
+                                anchor,
+                                (suffix,),
+                                self.layers,
+                                self._target_owner,
+                                max_sequences=1,
+                                max_depth=self.num_draft,
+                            )
+                        finally:
+                            if steer is not None:
+                                taps.steer = None
+                        settle = steer_commits[0] if steer_commits else None
+                        return logits, hidden, attempt, settle
+
+                    outcome, hidden_slices, transaction = (
+                        verify_longest_first_continuations(
+                            paths,
+                            lane.cache,
+                            lane.anchor,
+                            prepare_attempt,
+                            sample_row,
+                            maximum=lane.maximum - lane.generated,
+                            stop_tokens=self.stops,
+                        )
+                    )
+                    hidden = self.mx.concatenate(hidden_slices, axis=1)
+                    commit_features = hidden
+                    commits = ()
+                    continuation_transaction = transaction
+                    lane.continuation_verification_algorithm = LONGEST_FIRST_EXACT_PREFIX
+                    lane.continuation_cascade_attempts = getattr(
+                        lane, "continuation_cascade_attempts", 0
+                    ) + len(outcome.attempted_indices)
+                    lane.continuation_shared_prefix_tokens_reused = getattr(
+                        lane, "continuation_shared_prefix_tokens_reused", 0
+                    ) + outcome.shared_prefix_tokens_reused
+                else:
+                    inputs = [[lane.anchor, *path] for path in paths]
+                    counts = [len(path) for path in paths]
+                    taps, steer, commits = self._verify_steer(
+                        [lane] * len(paths), inputs, counts
+                    )
+                    if steer is not None:
+                        taps.steer = steer
+                    try:
+                        paths, logits, hidden, transaction = prepare_continuations(
+                            self.model, self.mx, lane.cache, lane.anchor, paths, self.layers,
+                            self._target_owner, max_sequences=self.continuation_policy.limit,
+                            max_depth=self.num_draft)
+                    finally:
+                        if steer is not None:
+                            taps.steer = None
+                    outcome = sample_continuations(paths, logits, sample_row,
+                        maximum=lane.maximum - lane.generated, stop_tokens=self.stops)
+                    commit_features = hidden[
+                        outcome.selected_index : outcome.selected_index + 1
+                    ]
+                    continuation_transaction = SelectedContinuationTransaction(
+                        transaction, outcome.selected_index, len(paths)
+                    )
+                    lane.continuation_verification_algorithm = (
+                        self.continuation_policy.verification_algorithm
+                    )
                 physical_index = outcome.selected_index
-                semantic_index = representatives[physical_index]
+                semantic_index = semantic_order[representatives[physical_index]]
+                physical_to_semantic = tuple(
+                    semantic_order[index] for index in representatives
+                )
+                semantic_to_physical_original = [None] * len(semantic_order)
+                for reordered_index, physical in enumerate(semantic_to_physical):
+                    semantic_to_physical_original[
+                        semantic_order[reordered_index]
+                    ] = physical
                 chosen = selection.paths[semantic_index]
                 source = chosen.representative.source_id
                 selected = HostDraftRow(list(paths[outcome.selected_index]), [], original_block.width,
@@ -2723,15 +3004,28 @@ class ExternalDraftBatchGenerator:
                     continuation_selection=selection, feedback_payload=original_block.feedback_payload)
                 decision = RoundDecision(outcome.accepted, list(outcome.emitted), laws,
                     response_logprobs=response_rows, verify_window=window, continuation_outcome=outcome,
-                    continuation_semantic_index=semantic_index)
+                    continuation_semantic_index=semantic_index,
+                    **(
+                        {
+                            "commit_count": len(outcome.emitted),
+                            "committed_inputs": [lane.anchor, *outcome.emitted[:-1]],
+                        }
+                        if outcome.algorithm == "longest_first_exact_prefix_v1"
+                        else {}
+                    ))
                 lane.continuation_semantic_selected = maximum_width
                 lane.continuation_semantic_admitted = width
-                lane.continuation_physical_to_semantic = representatives
-                lane.continuation_semantic_to_physical = semantic_to_physical
+                lane.continuation_physical_to_semantic = physical_to_semantic
+                lane.continuation_semantic_to_physical = tuple(
+                    semantic_to_physical_original
+                )
                 lane.continuation_prefix_dedup_enabled = dedup_enabled
                 lane.continuation_deduplicated_sequences = getattr(lane, "continuation_deduplicated_sequences", 0) + width - len(paths)
                 if self.adaptive_policy is not None:
-                    saved = maximum_width * (maximum_depth + 1) - outcome.physical_width * outcome.physical_span
+                    saved = (
+                        maximum_width * (maximum_depth + 1)
+                        - outcome.executed_target_rows
+                    )
                     lane.adaptive_round_policy = ("continuation_lagged_coverage_cost_model" if saved
                         else "continuation_fixed_depth_cost_backstop")
                     lane.adaptive_feature_source = "pool_lagged_source_labels"
@@ -2740,20 +3034,43 @@ class ExternalDraftBatchGenerator:
                     _bump(self.scheduler_stats, "external_adaptive_trimmed_target_rows", saved)
                     if saved:
                         lane.adaptive_trimmed_rounds = getattr(lane, "adaptive_trimmed_rounds", 0) + 1
-                    _bump(self.scheduler_stats, "external_adaptive_target_rows", outcome.physical_width * outcome.physical_span)
+                    _bump(
+                        self.scheduler_stats,
+                        "external_adaptive_target_rows",
+                        outcome.executed_target_rows,
+                    )
                     _bump(self.scheduler_stats, "external_adaptive_verification_groups")
                     self.scheduler_stats["external_adaptive_round_depth"] = outcome.physical_span - 1
                     self.scheduler_stats["external_adaptive_verify_width"] = outcome.physical_span
-                self._commit([lane], [decision], hidden[physical_index:physical_index + 1],
-                    blocks=[selected], transaction=SelectedContinuationTransaction(transaction, physical_index, len(paths)))
+                self._commit([lane], [decision], commit_features,
+                    blocks=[selected], transaction=continuation_transaction)
                 if commits:
                     commits[physical_index](min(outcome.accepted + 1, len(outcome.emitted)))
                 _bump(self.scheduler_stats, "external_continuation_rounds")
-                _bump(self.scheduler_stats, "external_continuation_sequences", outcome.physical_width)
+                _bump(
+                    self.scheduler_stats,
+                    "external_continuation_sequences",
+                    outcome.launches,
+                )
                 _bump(self.scheduler_stats, "external_continuation_ranked_complete_sequences", maximum_width)
                 _bump(self.scheduler_stats, "external_continuation_admitted_complete_sequences", width)
                 _bump(self.scheduler_stats, "external_continuation_deduplicated_sequences", width - len(paths))
-                _bump(self.scheduler_stats, "external_continuation_target_rows", outcome.physical_width * outcome.physical_span)
+                _bump(
+                    self.scheduler_stats,
+                    "external_continuation_target_rows",
+                    outcome.executed_target_rows,
+                )
+                if outcome.algorithm == "longest_first_exact_prefix_v1":
+                    _bump(
+                        self.scheduler_stats,
+                        "external_continuation_longest_first_attempts",
+                        outcome.launches,
+                    )
+                    _bump(
+                        self.scheduler_stats,
+                        "external_continuation_prefix_pruned",
+                        outcome.pruned_siblings,
+                    )
                 self.scheduler_stats["target_max_width"] = max(self.scheduler_stats["target_max_width"], outcome.physical_width)
         except BaseException:
             if transaction is not None and not transaction.closed:
@@ -3160,6 +3477,7 @@ class ExternalDraftBatchGenerator:
                             **self._target_execution_receipt(lane),
                             **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt(),
                             **self._proposal_composition_receipt(lane, current_source="ordinary"),
+                            **self._continuation_receipt(lane),
                         },
                     )
                 )
@@ -3360,7 +3678,7 @@ class ExternalDraftBatchGenerator:
                     )
             append = max(
                 (
-                    min(self.prefill_step, len(lane.remaining) - 1)
+                    min(self._prefill_limit(lane), len(lane.remaining) - 1)
                     for lane in candidates
                 ),
                 default=0,
@@ -3376,7 +3694,7 @@ class ExternalDraftBatchGenerator:
         for lane in (() if prompts or defer_serial_prefill else ordered):
             if lane.anchor is not None or active_count >= self.capacity:
                 continue
-            append = min(self.prefill_step, max(1, len(lane.remaining)-1))
+            append = min(self._prefill_limit(lane), max(1, len(lane.remaining)-1))
             admitted = self._admit([lane], append, prefill=True)
             while not admitted and self._reclaim_for_admission():
                 admitted = self._admit([lane], append, prefill=True)

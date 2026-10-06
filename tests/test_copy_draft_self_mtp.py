@@ -799,6 +799,39 @@ def test_serving_propagates_copy_policy_and_refuses_non_mtp_routes(monkeypatch):
         default.close()
 
 
+def test_serving_clamps_copy_width_to_smaller_exact_rollback_cap(monkeypatch):
+    from mlx2.serving import ServingEngine
+
+    captured = {}
+    adapter = _fake_serving(monkeypatch, captured)
+    adapter.max_exact_self_mtp_verification_rows = 16
+    adapter.max_exact_self_mtp_rollback_rows = 8
+    engine = ServingEngine(
+        "fake",
+        adapter_factory=adapter,
+        qualification_mode=True,
+        mtp=True,
+        max_lanes=2,
+        max_inflight=4,
+        execution_policy={"self_mtp_copy_draft": {"enabled": True, "max_span": 12}},
+    )
+    try:
+        assert engine.ready.wait(5)
+        assert engine.error is None
+        assert captured["copy_draft"].max_span == 7
+        settings = engine.snapshot["settings"]
+        assert settings["self_mtp_copy_draft"]["max_span"] == 7
+        receipt = settings["exact_self_mtp_rows"]
+        assert receipt["max_exact_self_mtp_verification_rows"] == 16
+        assert receipt["max_exact_self_mtp_rollback_rows"] == 8
+        assert receipt["effective_max_self_mtp_proposer_depth"] == 7
+        assert receipt["requested_self_mtp_copy_max_span"] == 12
+        assert receipt["effective_self_mtp_copy_max_span"] == 7
+        assert receipt["clamped"] is True
+    finally:
+        engine.close()
+
+
 def test_serving_refuses_int8_prefill_when_a_copy_verify_reaches_its_threshold(
     monkeypatch,
 ):

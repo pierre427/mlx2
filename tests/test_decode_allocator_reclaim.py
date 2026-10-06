@@ -196,7 +196,10 @@ def test_external_draft_next_reclaims_when_a_poll_crosses_256(monkeypatch, start
     assert polls[0] == (start, start + 2)
     crossings = [p for p in polls if p[1] // 256 > p[0] // 256]
     assert crossings == [polls[0]]
-    assert clears == reclaims == 1
+    # One boundary reclaim plus the final idle-pool reclaim; only the former
+    # is attributed to the emitted-token mechanism counter.
+    assert clears == 2
+    assert reclaims == 1
 
 
 def test_external_draft_reclaim_does_not_change_tokens(monkeypatch):

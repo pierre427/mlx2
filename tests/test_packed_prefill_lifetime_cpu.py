@@ -13,6 +13,8 @@ spec=importlib.util.spec_from_file_location('lifetime',ROOT/'src/mlx2/runtime/pa
 L=importlib.util.module_from_spec(spec);spec.loader.exec_module(L)
 
 def method(path,klass,name,namespace):
+    namespace.setdefault('__name__', 'mlx2.runtime.models._source_contract')
+    namespace.setdefault('__package__', 'mlx2.runtime.models')
     tree=ast.parse((ROOT/path).read_text())
     cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name==klass)
     node=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name==name)
@@ -82,7 +84,11 @@ class Tests(unittest.TestCase):
             'swiglu':swiglu,'mx':NS(array=np.ndarray),'current_observer':lambda:None})
         selected=method(methodpath,'Qwen3NextMLP','materialized',{'swiglu':swiglu})
         x=np.arange(30,dtype=np.float32).reshape(1,10,3)/20
-        expected=ordinary(c,x);actual=selected(c,x,materialize=lambda s,*v:stages.append(s))
+        dense=ModuleType('mlx2.runtime.models.varlen_dense_mlp')
+        dense.compact_rows=lambda value:None
+        with patch.dict(sys.modules,{'mlx2.runtime.models.varlen_dense_mlp':dense}):
+            expected=ordinary(c,x)
+        actual=selected(c,x,materialize=lambda s,*v:stages.append(s))
         np.testing.assert_array_equal(expected,actual);self.assertEqual(shapes,[(1,10,3)]*6)
         self.assertEqual(stages,['mlp_projections','mlp_product','mlp_output'])
         c._prefill_counts=(5,5)

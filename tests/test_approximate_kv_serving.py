@@ -593,6 +593,7 @@ def test_structurally_approximate_cache_is_never_stored_even_if_unflagged():
     from collections import Counter
 
     engine.counts = Counter()
+    engine.apc_reuse_disabled_reason = None
     value = mx.zeros((1, 1, 4, 32))
     cache = KVCache()
     cache.update_and_fetch(value, value)

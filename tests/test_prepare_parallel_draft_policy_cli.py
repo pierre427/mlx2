@@ -150,8 +150,14 @@ def test_unsupported_selected_topology_rejected_tensor_free(
     )
     output = tmp_path / "rejected.json"
     result = invoke(target, draft, output, "--target-verify-row-exact")
+    if "num_experts" in change:
+        expected = "does not support expert layers"
+    elif any(key in change for key in ("sliding_window", "use_sliding_window", "layer_types")):
+        expected = "requires full attention"
+    else:
+        expected = "unquantized dense full-attention"
     assert (
-        result.returncode != 0 and "unquantized dense full-attention" in result.stderr
+        result.returncode != 0 and expected in result.stderr
     )
     assert "forbidden" not in result.stderr and not output.exists()
 

@@ -60,12 +60,13 @@ def test_interior_default_is_native_mtp_only_and_explicit_policy_wins(
     assert resolution.default_execution_policy("prompt_lookup") == {}
     external = resolution.default_execution_policy("external_draft")
     if adapter_type is Qwen3827BAdapter:
-        assert external["batch_size_route"] == "tree15_b1_b4_chain_b5plus_v1"
+        assert "batch_size_route" not in external
+        assert "tree_node_budget_by_lanes" not in external
     else:
         assert external == {}
 
 
-def test_qwen38_external_draft_defaults_select_measured_varlen_tensorfold():
+def test_qwen38_external_draft_defaults_keep_varlen_without_tensorfold():
     resolution = _resolution(Qwen3827BAdapter, QWEN38_27B)
     policy = resolve_execution_policy_defaults(
         {"draft_model": "/revision-bound/operator-path"},
@@ -73,8 +74,8 @@ def test_qwen38_external_draft_defaults_select_measured_varlen_tensorfold():
         resolution,
     )
     assert policy["pairwise_selection"] == "batched"
-    assert policy["batch_size_route"] == "tree15_b1_b4_chain_b5plus_v1"
-    assert policy["tree_node_budget_by_lanes"] == {1: 15, 2: 7, 3: 4, 4: 3}
+    assert "batch_size_route" not in policy
+    assert "tree_node_budget_by_lanes" not in policy
     assert policy["external_varlen_prefill"] is True
     assert policy["varlen_dense_mlp"] == {
         "enabled": True,
@@ -85,21 +86,35 @@ def test_qwen38_external_draft_defaults_select_measured_varlen_tensorfold():
     assert policy["draft_model"] == "/revision-bound/operator-path"
 
 
-def test_qwen38_external_draft_default_groups_have_explicit_kill_switches():
+def test_qwen38_external_draft_varlen_default_has_explicit_kill_switch():
     resolution = _resolution(Qwen3827BAdapter, QWEN38_27B)
     policy = resolve_execution_policy_defaults(
         {
-            "batch_size_route": None,
             "external_varlen_prefill": False,
             "draft_model": "/revision-bound/operator-path",
         },
         EXTERNAL,
         resolution,
     )
-    assert policy["batch_size_route"] is None
     assert "tree_node_budget_by_lanes" not in policy
     assert policy["external_varlen_prefill"] is False
     assert "varlen_dense_mlp" not in policy
+
+
+def test_qwen38_external_draft_explicit_tensorfold_geometry_survives_defaults():
+    resolution = _resolution(Qwen3827BAdapter, QWEN38_27B)
+    budgets = {1: 15, 2: 7, 3: 4, 4: 3}
+    policy = resolve_execution_policy_defaults(
+        {
+            "draft_model": "/revision-bound/operator-path",
+            "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
+            "tree_node_budget_by_lanes": budgets,
+        },
+        EXTERNAL,
+        resolution,
+    )
+    assert policy["batch_size_route"] == "tree15_b1_b4_chain_b5plus_v1"
+    assert policy["tree_node_budget_by_lanes"] == budgets
 
 
 @pytest.mark.parametrize(("adapter_type", "descriptor"), HYBRID_MTP)

@@ -9,7 +9,7 @@ class Guard(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0,Guard());sys.path.insert(0,str(ROOT/'src'));sys.path.insert(0,str(ROOT/'scripts/research'))
 from mlx2.runtime import hybrid_packed_prefill as S,hybrid_packed_prefill_long as L,paged_packed_prefill_serving_profile as P,qwen35_paged_graph_factory as R
 from mlx2.runtime.paged_pack_price import IDENTITY_FIELDS
-from varlen_packed_long_contract import PROMPT_RECEIPT,prompt_ids,physical_prefill,validate_q1
+from varlen_packed_long_contract import prompt_ids,physical_prefill,validate_q1
 from varlen_hybrid_packed_prefill_long_http_gate import validate_evaluation_proof,summarize_http
 I={k:'a'*64 for k in IDENTITY_FIELDS};I.update(host='cpu',hardware='cpu',source_commit='b'*40,mlx_wheel_version='pinned')
 class Tests(unittest.TestCase):
@@ -62,8 +62,7 @@ class Tests(unittest.TestCase):
         cap['scratch_bytes']=1
         with self.assertRaises(ValueError):L.require_long_capabilities(raw,backend,L.COUNTS)
     def test_whole_projection_charge_is_not_hidden_in_short_budget(self):
-        config=dict(hidden_size=5120,intermediate_size=17408,num_attention_heads=24,num_key_value_heads=4,
-            linear_num_key_heads=16,linear_num_value_heads=48,linear_key_head_dim=128,linear_value_head_dim=128)
+        config=json.loads(Path('~/mlx-models/Qwen3.8-27B-MLX-4bit/config.json').read_text())['text_config']
         candidate=NS(args=NS(**config),native_layer_count=16,bootstrap_staging_bytes=lambda n:0)
         charge=S.scratch_bound(candidate,L.COUNTS,long_fused=True)
         self.assertGreater(charge,24<<30);self.assertLess(charge,40<<30)
@@ -99,8 +98,7 @@ class Tests(unittest.TestCase):
             with self.assertRaises(ValueError):PagedAttentionPlan(**bad,profile='prefill_long_nax_v1',max_work_items=2*8192*24,max_scratch_bytes=0)
 
     def test_pinned_whole_prompts_and_zero_score_scratch_proof(self):
-        if PROMPT_RECEIPT.is_file():
-            self.assertEqual(tuple(map(len,prompt_ids())),L.COUNTS)
+        self.assertEqual(tuple(map(len,prompt_ids())),L.COUNTS)
         self.assertEqual(physical_prefill()['grouped_multirow_row_count'],222064)
         proof={'prefill_eval_block_size':1,'native_reader_scratch_bytes':0,'native_reader_simultaneous_scratch_bytes':0,
             'bootstrap_charge_components':{'native_reader_bytes':0}}

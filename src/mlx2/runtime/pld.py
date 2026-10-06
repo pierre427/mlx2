@@ -31,6 +31,7 @@ from .generate import (
 )
 from .models import cache as cache_module
 from .models.cache import ArraysCache, CacheList, KVCache, RotatingKVCache
+from .prefill_plan import prompt_length_prefill_step
 from .prompt_lookup import (
     AdaptiveLookback,
     CostAwarePLDLatch,
@@ -438,6 +439,7 @@ class PromptLookupBatchGenerator:
         *,
         completion_batch_size=4,
         prefill_step_size=2048,
+        prefill_step_autoscale=False,
         stop_tokens=(),
         prompt_lookup=None,
         **_kwargs,
@@ -448,6 +450,9 @@ class PromptLookupBatchGenerator:
         )
         self.capacity = int(completion_batch_size)
         self.prefill_step = int(prefill_step_size)
+        if type(prefill_step_autoscale) is not bool:
+            raise ValueError("prefill_step_autoscale must be boolean")
+        self.prefill_step_autoscale = prefill_step_autoscale
         self.config = self.validate_policy(prompt_lookup or {})
         self.num_draft = self.config.get("num_draft", 8)
         # Default-off and generator-scoped: a per-request override never selects
@@ -643,7 +648,13 @@ class PromptLookupBatchGenerator:
 
     def _prefill(self, lane):
         if len(lane.remaining) > 1:
-            count = min(self.prefill_step, len(lane.remaining) - 1)
+            total = len(lane.history) + len(lane.remaining)
+            step = (
+                prompt_length_prefill_step(total, maximum=self.prefill_step)
+                if self.prefill_step_autoscale
+                else self.prefill_step
+            )
+            count = min(step, len(lane.remaining) - 1)
             inputs = [lane.remaining.popleft() for _ in range(count)]
             with mx.stream(generation_stream):
                 self.model(mx.array([inputs], dtype=mx.uint32), cache=lane.cache)
@@ -786,8 +797,13 @@ class PromptLookupBatchGenerator:
         # unsteered; it is the last-resort path after a failed transaction.
         steer_from = len(tokens) - len(committed_inputs)
         with mx.stream(generation_stream):
-            for start in range(0, len(tokens), self.prefill_step):
-                chunk = tokens[start : start + self.prefill_step]
+            step = (
+                prompt_length_prefill_step(len(tokens), maximum=self.prefill_step)
+                if self.prefill_step_autoscale
+                else self.prefill_step
+            )
+            for start in range(0, len(tokens), step):
+                chunk = tokens[start : start + step]
                 chunk_steer = _steer_slice(
                     steer, start - steer_from, start + len(chunk) - steer_from
                 )

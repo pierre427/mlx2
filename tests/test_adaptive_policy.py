@@ -387,6 +387,7 @@ def test_batch_scheduler_turns_defer_prefill_until_decode_repays_debt(monkeypatc
     scheduler.completion_batch_size = 4
     scheduler.prefill_batch_size = 1
     scheduler.prefill_step_size = 64
+    scheduler.prefill_step_autoscale = False
     scheduler.decode_priority_cadence = 1
     scheduler.adaptive_prefill = False
     scheduler.adaptive_prefill_target_itl_ms = 1500.0

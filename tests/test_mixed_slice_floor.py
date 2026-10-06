@@ -23,6 +23,7 @@ class _Scheduler(generate.BatchGenerator):
 def _mixed_slice(slice_floor, *, enabled=True, decode_lanes=2):
     scheduler = _Scheduler.__new__(_Scheduler)
     scheduler.prefill_step_size = 8192
+    scheduler.prefill_step_autoscale = False
     scheduler.scheduler_stats = defaultdict(int)
     scheduler.decode_time_fairness = DecodeTimeFairness(
         enabled=enabled, slice_floor=slice_floor

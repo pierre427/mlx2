@@ -91,17 +91,37 @@ def test_ordinary_short_request_with_two_long_prefills_in_flight():
     assert short < long_, "short request waited for a long prefill slot"
 
 
-def _overflow_host(queue, *, budget_ok=True):
+def _overflow_host(queue, *, budget_ok=True, step=STEP, autoscale=False):
     from collections import deque
-    from types import SimpleNamespace
+    from types import MethodType, SimpleNamespace
 
     host = SimpleNamespace(
         prefill_batch_size=2,
         completion_batch_size=8,
-        prefill_step_size=STEP,
+        prefill_step_size=step,
+        prefill_step_autoscale=autoscale,
         adaptive_prefill=False,
         _generation_batch=[],
-        _currently_processing=[[[list(range(10 * STEP))]], [[list(range(9 * STEP))]]],
+        _currently_processing=[
+            [
+                [list(range(10 * step - 1)), [10 * step - 1]],
+                0,
+                10 * step,
+                True,
+                0,
+                0.0,
+                None,
+            ],
+            [
+                [list(range(9 * step - 1)), [9 * step - 1]],
+                0,
+                9 * step,
+                True,
+                0,
+                0.0,
+                None,
+            ],
+        ],
         _unprocessed_sequences=deque(queue),
         state_budget=None if budget_ok is None else object(),
         made=[],
@@ -112,7 +132,19 @@ def _overflow_host(queue, *, budget_ok=True):
             host.made.append(rows)
 
     host._prompt_batch = Prompt([0, 0])
+    host._prompt_batch.uids = [1, 2]
     host._fairness = lambda: SimpleNamespace(enabled=False)
+    host._decode_first_round_mode = "off"
+    host._decode_first_mode = MethodType(BatchGenerator._decode_first_mode, host)
+    host._shared_prefill_width = MethodType(
+        BatchGenerator._shared_prefill_width, host
+    )
+    host._peek_interior_checkpoint = MethodType(
+        BatchGenerator._peek_interior_checkpoint, host
+    )
+    host.prefill_depth_budget = None
+    host.PREFILL_DEPTH_FLOOR = 128
+    host._interior_checkpoint_positions = {}
     host._sync_budget_mutation = lambda: None
     host._candidate_admission_state = lambda seq: seq[0]
     host._admit_states = lambda states: 1 if budget_ok else 0
@@ -121,17 +153,61 @@ def _overflow_host(queue, *, budget_ok=True):
 
 
 def test_overflow_admits_the_exact_short_row_not_a_media_or_head_row():
-    long_seq = (1, [list(range(5 * STEP))], 8, [], [], None, [], None, 0.0, None)
-    media = (2, [list(range(4))], 8, [], [], None, [], None, 0.0, {"pixels": 1})
-    short = (3, [list(range(4))], 8, [], [], None, [], None, 0.0, None)
+    long_seq = (
+        1,
+        [list(range(5 * STEP)), [5 * STEP]],
+        8,
+        [],
+        [],
+        None,
+        [],
+        None,
+        0.0,
+        None,
+    )
+    media = (
+        2,
+        [list(range(4)), [4]],
+        8,
+        [],
+        [],
+        None,
+        [],
+        None,
+        0.0,
+        {"pixels": 1},
+    )
+    short = (3, [list(range(4)), [4]], 8, [], [], None, [], None, 0.0, None)
     host = _overflow_host([long_seq, media, short])
     assert BatchGenerator._admit_one_chunk_overflow(host, STEP)
     assert host.made == [("rows", 1, [2])]
 
 
 def test_overflow_budgets_the_selected_row():
-    long_seq = (1, [list(range(5 * STEP))], 8, [], [], None, [], None, 0.0, None)
-    short = (3, [list(range(4))], 8, [], [], None, [], None, 0.0, None)
+    long_seq = (
+        1,
+        [list(range(5 * STEP)), [5 * STEP]],
+        8,
+        [],
+        [],
+        None,
+        [],
+        None,
+        0.0,
+        None,
+    )
+    short = (3, [list(range(4)), [4]], 8, [], [], None, [], None, 0.0, None)
     host = _overflow_host([long_seq, short], budget_ok=False)
     assert not BatchGenerator._admit_one_chunk_overflow(host, STEP)
     assert host.made == []
+
+
+def test_overflow_uses_the_same_prompt_autoscale_as_execution():
+    prompt = (3, [list(range(999)), [999]], 8, [], [], None, [], None, 0.0, None)
+    host = _overflow_host([prompt], budget_ok=None, step=8192, autoscale=True)
+    assert not BatchGenerator._admit_one_chunk_overflow(host, 8192)
+    assert host.made == []
+
+    host = _overflow_host([prompt], budget_ok=None, step=8192, autoscale=False)
+    assert BatchGenerator._admit_one_chunk_overflow(host, 8192)
+    assert host.made == [("rows", 1, [0])]

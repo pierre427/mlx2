@@ -151,7 +151,7 @@ def test_deterministic_law_contract_rejected_without_current_proxy_and_restored(
         state_equal(lane.draft_cache, saved["draft_cache"])
 
 
-def composed_engine(monkeypatch, *, sampled=False):
+def composed_engine(monkeypatch, *, sampled=False, pairwise_selection="host"):
     from mlx2.runtime.proposal_composition import ComposedDraftModel
 
     target, backend = tiny()
@@ -182,6 +182,7 @@ def composed_engine(monkeypatch, *, sampled=False):
             num_draft=2,
             prefill_step_size=8,
             adaptive_verification=policy,
+            pairwise_selection=pairwise_selection,
         )
         e.insert(
             prompts,
@@ -209,6 +210,37 @@ def composed_engine(monkeypatch, *, sampled=False):
     e.lanes[0].adaptive_feature_means = qmeans
     e.lanes[0].adaptive_feature_counts = qcounts
     return target, wrapper, e, prompts
+
+
+def test_batched_pairwise_setting_preserves_mixed_row_source_arbitration(monkeypatch):
+    target, wrapper, e, prompts = composed_engine(
+        monkeypatch, pairwise_selection="batched"
+    )
+    lanes = list(e.lanes.values())
+    # Reproduce a fresh served warmup.  The old dispatch used the backend's
+    # compact API and then rejected this empty request-bound source vector.
+    wrapper.last_proposal_sources = ()
+    assert not wrapper.last_proposal_sources
+
+    # The compact backend path is deliberately not used: it cannot perform
+    # the wrapper's request-bound PLD/external row arbitration.
+    pairwise_calls = e.scheduler_stats["external_pairwise_selection_groups"]
+    attempts = dict(wrapper.composition_stats)
+    e._round(lanes)
+    assert e.scheduler_stats["external_pairwise_selection_groups"] == pairwise_calls
+    assert wrapper.last_proposal_sources == ("prompt_lookup", "external")
+    assert wrapper.composition_stats == {
+        "prompt_lookup": attempts["prompt_lookup"] + 1,
+        "native_mtp": attempts["native_mtp"],
+        "external": attempts["external"] + 1,
+    }
+    assert [lane.proposal_composition_current_source for lane in lanes] == [
+        "prompt_lookup",
+        "external",
+    ]
+    for lane, prompt in zip(lanes, prompts):
+        ready = [result.token for result in lane.ready]
+        assert ready == reference(target, prompt, len(ready))
 
 
 @pytest.mark.parametrize("sampled", [False, True])

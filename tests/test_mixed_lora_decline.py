@@ -82,6 +82,7 @@ def test_declined_mixed_round_binds_the_prompt_lora_rows():
     bg._prompt_batch = _Prompt()
     bg._currently_processing = [[[list(range(256))], 0, 257, None, 0]]
     bg.prefill_step_size = 256
+    bg.prefill_step_autoscale = False
     bg.prefill_depth_budget = None
     bg.scheduler_stats = {"prefill_rounds": 0}
     bg._prompt_tokens_counter = bg._gen_tokens_counter = bg._steps_counter = 0

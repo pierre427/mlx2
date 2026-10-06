@@ -50,6 +50,7 @@ def test_parallel_submission_reserves_the_whole_cohort():
     engine.jobs = {}
     engine.qualification_mode = True
     engine.route_capabilities = frozenset()
+    engine.apc_reuse_disabled_reason = None
     engine.batch_metrics = SimpleNamespace(
         rejected=lambda *_: None, admitted=lambda *_: None
     )

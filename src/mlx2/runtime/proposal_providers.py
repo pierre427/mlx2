@@ -7,9 +7,11 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-import numpy as np
-
 CONTINUATION_VERIFICATION_ALGORITHM = "stable-truncated-prefix-dedup-v2"
+LONGEST_FIRST_EXACT_PREFIX = "longest-first-exact-prefix-v1"
+CONTINUATION_VERIFICATION_ALGORITHMS = frozenset(
+    {CONTINUATION_VERIFICATION_ALGORITHM, LONGEST_FIRST_EXACT_PREFIX}
+)
 
 
 def continuation_context_revision(binding, history, anchor):
@@ -33,7 +35,7 @@ class ContinuationPoolPolicy:
     def __post_init__(self):
         if (
             type(self.verification_algorithm) is not str
-            or self.verification_algorithm != CONTINUATION_VERIFICATION_ALGORITHM
+            or self.verification_algorithm not in CONTINUATION_VERIFICATION_ALGORITHMS
         ):
             raise ValueError("unsupported continuation_pool verification_algorithm")
 
@@ -139,9 +141,10 @@ class ContinuationDraftModel:
         if (
             getattr(backend, "proposal_distribution", None)
             != self.proposal_distribution
+            and not callable(getattr(backend, "propose_tree", None))
         ):
             raise ValueError(
-                "continuation pool requires deterministic external context backbone"
+                "continuation pool requires deterministic or bound tree proposal backbone"
             )
         if set(providers) != set(self.policy.sources) or set(source_records) != set(
             providers
@@ -207,6 +210,8 @@ class ContinuationDraftModel:
         logits_processors=None,
         **kwargs,
     ):
+        import numpy as np
+
         from .proposal_pool import PoolRound, ProposalPath
 
         if (

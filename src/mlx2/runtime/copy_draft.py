@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 COPY_DRAFT_RECEIPT_SCHEMA = "mlx2.self-mtp-copy-draft.v1"
@@ -155,6 +155,37 @@ class CopyDraftPolicy:
     def span_ceiling(self) -> int:
         """Widest span any single-lane round may copy."""
         return max(self.max_span, self.strong_max_span)
+
+    def clamped_to_self_mtp_proposer_depth(self, maximum: int) -> "CopyDraftPolicy":
+        """Return this policy bounded by an adapter's native self-MTP contract.
+
+        ``maximum`` is proposal depth, not verify rows.  Only unsafe widths are
+        reduced; a policy already inside the adapter contract is returned
+        unchanged so existing defaults and qualification identities stay put.
+        """
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+            raise ValueError("copy-draft proposer-depth cap must be an integer >= 1")
+        batched = self.batched_max_span
+        batched_safe = batched is None or batched <= maximum
+        if self.span_ceiling <= maximum and batched_safe:
+            return self
+        max_span = min(self.max_span, maximum)
+        strong_max_span = (
+            min(self.strong_max_span, maximum) if self.strong_max_span else 0
+        )
+        ceiling = max(max_span, strong_max_span)
+        return replace(
+            self,
+            max_span=max_span,
+            strong_max_span=strong_max_span,
+            probe_span=min(self.probe_span, max_span),
+            initial_span=(
+                None if self.initial_span is None else min(self.initial_span, ceiling)
+            ),
+            batched_max_span=(
+                None if batched is None else min(batched, maximum)
+            ),
+        )
 
     def head_cost(self, depth: int) -> float:
         return 1.0 + (self.draft_step_cost + self.verify_row_cost) * max(int(depth), 0)
