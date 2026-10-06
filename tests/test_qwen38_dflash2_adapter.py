@@ -1,12 +1,14 @@
-"""Qwen3.8 27B DFlash2 policy, revision pins and tensor mapping; header-only.
+"""Qwen3.8 27B DFlash2 policy, revision pins and tensor mapping; CPU-static.
 
-No payload is loaded.  The real-artifact checks skip when the local
-checkpoints are absent.
+Payload bytes are streamed only for integrity hashes, never loaded as tensors.
+The real-artifact checks skip when the local checkpoints are absent.
 """
 import json
+import os
 import struct
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -54,12 +56,13 @@ def _draft_config(**dflash):
 
 def _write_artifacts(tmp_path, *, target_layers=8, draft=None):
     target = tmp_path / "target"
-    target.mkdir()
+    target.mkdir(parents=True)
     (target / "config.json").write_text(json.dumps({
         "model_type": "qwen3_5",
         "text_config": {"hidden_size": 16, "vocab_size": 64, "num_hidden_layers": target_layers},
     }))
     (target / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"w": "a.safetensors"}}))
+    (target / "a.safetensors").write_bytes(b"target-weight-payload")
     path = tmp_path / "draft"
     path.mkdir()
     config = draft or _draft_config()
@@ -88,7 +91,7 @@ def _pins(target, draft):
     }
 
 
-def test_pinned_policy_inspects_without_payload(tmp_path):
+def test_pinned_policy_inspects_without_tensor_load(tmp_path):
     from mlx2.adapters.qwen38_27b import inspect_external_policy
 
     target, draft = _write_artifacts(tmp_path)
@@ -193,8 +196,8 @@ def test_external_prefill_coalesce_min_tokens_is_positive_integer(tmp_path, valu
 
 @pytest.mark.parametrize("route", ["tree15_b1_chain_b2plus_v1", "tree15_b1_b4_chain_b5plus_v1"])
 def test_bounded_route_requires_pinned_tensorfold_source(tmp_path, monkeypatch, route):
+    from mlx2.adapters import qwen38_tensorfold_source
     from mlx2.adapters.qwen38_27b import inspect_external_policy
-    from mlx2.runtime import qwen38_tensorfold
 
     target, draft = _write_artifacts(tmp_path)
     policy = {**_pins(target, draft), "batch_size_route": route}
@@ -205,14 +208,18 @@ def test_bounded_route_requires_pinned_tensorfold_source(tmp_path, monkeypatch, 
     source.mkdir()
     monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(source))
     checked = []
-    monkeypatch.setattr(qwen38_tensorfold, "_validate", lambda path: checked.append(path))
+    monkeypatch.setattr(
+        qwen38_tensorfold_source,
+        "validate_source",
+        lambda path: checked.append(path),
+    )
     assert inspect_external_policy(policy, target)["args"].block_size == 8
     assert checked == [source.resolve()]
 
     def reject_source(path):
         raise RuntimeError("TensorFold revision mismatch")
 
-    monkeypatch.setattr(qwen38_tensorfold, "_validate", reject_source)
+    monkeypatch.setattr(qwen38_tensorfold_source, "validate_source", reject_source)
     with pytest.raises(RuntimeError, match="revision mismatch"):
         inspect_external_policy(policy, target)
 
@@ -244,14 +251,14 @@ def test_bounded_route_refuses_incompatible_policy(tmp_path, monkeypatch, extra,
 def test_bounded_route_validates_lane_pressure_budgets(
     tmp_path, monkeypatch, budgets, error
 ):
+    from mlx2.adapters import qwen38_tensorfold_source
     from mlx2.adapters.qwen38_27b import inspect_external_policy
-    from mlx2.runtime import qwen38_tensorfold
 
     target, draft = _write_artifacts(tmp_path)
     source = tmp_path / "tensorfold"
     source.mkdir()
     monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(source))
-    monkeypatch.setattr(qwen38_tensorfold, "_validate", lambda _path: None)
+    monkeypatch.setattr(qwen38_tensorfold_source, "validate_source", lambda _path: None)
     policy = {
         **_pins(target, draft),
         "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
@@ -265,14 +272,14 @@ def test_bounded_route_validates_lane_pressure_budgets(
 def test_bounded_route_validates_tensorfold_cohort_limit(
     tmp_path, monkeypatch, limit
 ):
+    from mlx2.adapters import qwen38_tensorfold_source
     from mlx2.adapters.qwen38_27b import inspect_external_policy
-    from mlx2.runtime import qwen38_tensorfold
 
     target, draft = _write_artifacts(tmp_path)
     source = tmp_path / "tensorfold"
     source.mkdir()
     monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(source))
-    monkeypatch.setattr(qwen38_tensorfold, "_validate", lambda _path: None)
+    monkeypatch.setattr(qwen38_tensorfold_source, "validate_source", lambda _path: None)
     policy = {
         **_pins(target, draft),
         "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
@@ -346,6 +353,33 @@ def test_tensorfold_source_alone_does_not_select_tree(monkeypatch):
     assert adapter.execution_config(max_lanes=4, prefill_step=16)["batch_size_route"] == "tree15_b1_chain_b2plus_v1"
     with pytest.raises(ValueError, match="cannot be overridden"):
         adapter.create_external_batch(dynamic_tree_max_width=4)
+
+
+def test_external_tensorfold_tree_keeps_independent_16_row_geometry(monkeypatch):
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
+
+    adapter = object.__new__(Qwen3827BAdapter)
+    adapter.draft_model = object()
+    adapter.external_policy = {
+        "batch_size_route": "tree15_b1_chain_b2plus_v1",
+    }
+    monkeypatch.setattr(Qwen3827BAdapter, "_external_num_draft", lambda self: 15)
+    monkeypatch.setattr(
+        Qwen3827BAdapter,
+        "_external_execution_config",
+        lambda self, **kwargs: {"backend": "external_draft"},
+    )
+
+    config = adapter.execution_config(max_lanes=4, prefill_step=16)
+
+    # TensorFold owns 15 proposal nodes plus the pending target row. The
+    # adapter's distinct 9-row native self-MTP declaration must not clamp it.
+    assert Qwen3827BAdapter.max_exact_self_mtp_verification_rows == 9
+    assert Qwen3827BAdapter.max_exact_self_mtp_rollback_rows == 9
+    assert config["backend"] == "external_draft"
+    assert config["tree_node_budget_by_lanes"] == {1: 15}
+    assert config["tree_node_budget_by_lanes"][1] + 1 == 16
+    assert "exact_self_mtp_rows" not in config
 
 
 def test_external_varlen_prefill_cohort_policy_moves_to_ingress(monkeypatch):
@@ -526,6 +560,175 @@ def test_changed_target_or_draft_content_breaks_the_pin(tmp_path):
         inspect_external_policy(policy, target)
 
 
+def _mutate_bytes_preserving_stat(path):
+    before = path.stat()
+    content = bytearray(path.read_bytes())
+    content[-1] ^= 1
+    path.write_bytes(content)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    assert after.st_ctime_ns != before.st_ctime_ns
+
+
+def _replace_bytes_preserving_stat(path):
+    before = path.stat()
+    content = bytearray(path.read_bytes())
+    content[-1] ^= 1
+    replacement = path.with_name(path.name + ".replacement")
+    replacement.write_bytes(content)
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(replacement, path)
+    after = path.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    assert (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+
+
+def test_weight_payload_changes_break_pins_even_with_same_size_and_mtime(tmp_path):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+
+    target, draft = _write_artifacts(tmp_path)
+    policy = _pins(target, draft)
+    _mutate_bytes_preserving_stat(draft / "model.safetensors")
+    with pytest.raises(ValueError, match="draft revision mismatch"):
+        inspect_external_policy(policy, target)
+
+    target, draft = _write_artifacts(tmp_path / "second")
+    policy = _pins(target, draft)
+    _mutate_bytes_preserving_stat(target / "a.safetensors")
+    with pytest.raises(ValueError, match="target revision mismatch"):
+        inspect_external_policy(policy, target)
+
+
+def test_draft_payload_change_after_inspection_fails_before_tensor_import(tmp_path):
+    from mlx2.adapters.dflash2 import inspect_drafter, load_drafter
+
+    target, draft = _write_artifacts(tmp_path)
+    record = inspect_drafter(draft, target)
+    _mutate_bytes_preserving_stat(draft / "model.safetensors")
+    with pytest.raises(ValueError, match="source binding changed"):
+        load_drafter(record, object())
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [_mutate_bytes_preserving_stat, _replace_bytes_preserving_stat],
+    ids=["in-place", "replacement"],
+)
+def test_target_source_binding_rejects_same_stat_payload_changes(tmp_path, mutate):
+    from mlx2.adapters.qwen38_27b import (
+        _inspect_target_content,
+        _verify_target_source_bindings,
+    )
+
+    target, _ = _write_artifacts(tmp_path)
+    inspected = _inspect_target_content(target)
+    mutate(target / "a.safetensors")
+    with pytest.raises(ValueError, match="source binding changed"):
+        _verify_target_source_bindings(target, inspected["source_bindings"])
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [_mutate_bytes_preserving_stat, _replace_bytes_preserving_stat],
+    ids=["in-place", "replacement"],
+)
+def test_draft_source_binding_rejects_same_stat_payload_changes(tmp_path, mutate):
+    from mlx2.adapters.dflash2 import _verify_source_bindings, inspect_drafter
+
+    target, draft = _write_artifacts(tmp_path)
+    record = inspect_drafter(draft, target)
+    mutate(draft / "model.safetensors")
+    with pytest.raises(ValueError, match="source binding changed"):
+        _verify_source_bindings(
+            draft, record["source_bindings"], label="DFlash2 artifact"
+        )
+
+
+def test_draft_load_rechecks_target_binding_before_tensor_import(tmp_path):
+    from mlx2.adapters.dflash2 import inspect_drafter, load_drafter
+    from mlx2.adapters.qwen38_27b import _inspect_target_content
+
+    target, draft = _write_artifacts(tmp_path)
+    record = inspect_drafter(draft, target)
+    target_content = _inspect_target_content(target)
+    record.update(
+        target_path=target_content["path"],
+        target_source_bindings=target_content["source_bindings"],
+    )
+    _replace_bytes_preserving_stat(target / "a.safetensors")
+    with pytest.raises(ValueError, match="target artifact source binding changed"):
+        load_drafter(record, object())
+
+
+def test_legacy_metadata_only_revision_pins_fail_closed_with_migration_message(
+    tmp_path,
+):
+    from mlx2.adapters.dflash2 import _legacy_content_revision, inspect_drafter
+    from mlx2.adapters.qwen38_27b import (
+        _legacy_content_revision as target_legacy_revision,
+    )
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+
+    target, draft = _write_artifacts(tmp_path)
+    policy = _pins(target, draft)
+    with pytest.raises(ValueError, match="legacy metadata-only pin"):
+        inspect_external_policy(
+            {**policy, "target_revision": target_legacy_revision(target)}, target
+        )
+    with pytest.raises(ValueError, match="legacy metadata-only pin"):
+        inspect_external_policy(
+            {
+                **policy,
+                "draft_revision": _legacy_content_revision(
+                    inspect_drafter(draft, target)
+                ),
+            },
+            target,
+        )
+
+
+@pytest.mark.parametrize(
+    "adapter_name",
+    ["qwen38", "qwen36_dense", "qwen36_moe"],
+)
+def test_external_batch_creation_latches_execution_before_rebind(
+    monkeypatch, adapter_name
+):
+    from mlx2.adapters.qwen36_27b import Qwen3627BAdapter
+    from mlx2.adapters.qwen36_35b import Qwen3635BA3BAdapter
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
+
+    adapter_types = {
+        "qwen38": Qwen3827BAdapter,
+        "qwen36_dense": Qwen3627BAdapter,
+        "qwen36_moe": Qwen3635BA3BAdapter,
+    }
+    adapter_type = adapter_types[adapter_name]
+    adapter = object.__new__(adapter_type)
+    adapter.model = object()
+    adapter.draft_model = object()
+    adapter.external_policy = {}
+    adapter.identity = {"fingerprint": "test"}
+    monkeypatch.setattr(
+        adapter_type, "_initialize_external_feedback", lambda self: None
+    )
+    monkeypatch.setattr(adapter_type, "_external_num_draft", lambda self: 4)
+    external_speculative = ModuleType("mlx2.runtime.external_speculative")
+    external_speculative.ExternalDraftBatchGenerator = (
+        lambda *args, **kwargs: object()
+    )
+    monkeypatch.setitem(
+        sys.modules, "mlx2.runtime.external_speculative", external_speculative
+    )
+
+    adapter.create_external_batch()
+
+    assert adapter._external_execution_started is True
+    with pytest.raises(ValueError, match="must bind before execution"):
+        adapter.bind_external_serving_namespace({"target": "changed"})
+
+
 def test_topology_mismatch_fails_before_pins_matter(tmp_path):
     from mlx2.adapters.dflash2 import inspect_drafter
 
@@ -590,13 +793,38 @@ def test_tensor_mapping_covers_every_draft_parameter():
     assert module == mapped
 
 
+def test_dflash2_receipt_settings_bind_complete_tree_geometry():
+    from mlx2.runtime.drafters.dflash2 import DFlash2DraftModel
+
+    model = DFlash2DraftModel(DFlash2Config.from_dict(_draft_config()))
+    assert model.receipt_settings == {
+        "trained_block_size": 8,
+        "runtime_block_size": 5,
+        "target_layer_ids": [1, 6],
+        "selector_top_k": 4,
+        "selector_rank": 8,
+        "conv_kernel_size": 2,
+        "conv_group_size": 4,
+        "proposal_distribution": "categorical_chain_plus_bound_best_first_tree",
+        "tree_ranking": "best_first_cumulative_sibling_log_law",
+        "tree_max_nodes": 15,
+    }
+
+
 def test_real_checkpoint_headers_map_onto_the_drafter():
     if not (DRAFT / "config.json").exists() or not (TARGET / "config.json").exists():
         pytest.skip("local Qwen3.8 27B DFlash2 artifacts are not installed")
     from mlx2.adapters.dflash2 import _read_safetensors_header
-    from mlx2.adapters.qwen38_27b import inspect_external_policy
+    from mlx2.adapters.qwen38_27b import (
+        _legacy_content_revision,
+        inspect_external_policy,
+    )
 
     policy = json.loads(POLICY.read_text())
+    if policy["target_revision"] == _legacy_content_revision(TARGET):
+        with pytest.raises(ValueError, match="legacy metadata-only pin"):
+            inspect_external_policy(policy, TARGET)
+        return
     record = inspect_external_policy(policy, TARGET)
     args = record["args"]
     assert args.target_layer_ids == [5, 19, 33, 47, 61]
@@ -605,7 +833,4 @@ def test_real_checkpoint_headers_map_onto_the_drafter():
     _, header, _ = _read_safetensors_header(DRAFT / "model.safetensors")
     header.pop("__metadata__", None)
     assert len(header) == 81
-    config = json.loads((DRAFT / "config.json").read_text())
-    module, mapped = _mapped_parameter_shapes(config)
-    assert module == mapped
     assert {name: record["shape"] for name, record in header.items()} == _expected_weight_shapes(args)

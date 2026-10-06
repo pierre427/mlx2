@@ -20,6 +20,17 @@ from mlx2.runtime.tensorfold_owned_worker import (
 )
 
 
+TENSORFOLD_SOURCE_ENV = "MLX2_TEST_TENSORFOLD_OWNED_SOURCE"
+MLX_LM_SOURCE_ENV = "MLX2_TEST_TENSORFOLD_OWNED_MLX_LM_SOURCE"
+
+
+def _external_source(name: str) -> Path:
+    value = os.environ.get(name)
+    if value is None:
+        pytest.skip(f"explicit external source {name} is unavailable")
+    return Path(value).expanduser().resolve()
+
+
 def _artifact(root: Path, *, indexed: bool):
     root.mkdir()
     (root / "config.json").write_text('{"model_type":"qwen3_5"}')
@@ -145,10 +156,7 @@ def test_live_round_policy_discards_uncommitted_tree_drafts_on_width_change():
 
 
 def test_pinned_native_lane_engine_has_shared_round_and_cache_commit_contract():
-    source_path = os.environ.get("MLX2_TENSORFOLD_SOURCE")
-    if not source_path:
-        pytest.skip("pinned TensorFold source unavailable")
-    root = Path(source_path).expanduser()
+    root = _external_source(TENSORFOLD_SOURCE_ENV)
     source_identity(root)
     engine = (root / "src/tensorfold/engine/lane_family.py").read_text()
     shared = (root / "src/tensorfold/engine/family_shared.py").read_text()
@@ -195,26 +203,17 @@ def test_live_serial_reference_uses_same_full_prompt_engine_prefill():
 
 
 def test_real_pinned_tensorfold_source_is_clean_and_bound():
-    source_path = os.environ.get("MLX2_TENSORFOLD_SOURCE")
-    mlx_lm_path = os.environ.get("MLX2_MLX_LM_SOURCE")
-    if not source_path or not mlx_lm_path:
-        pytest.skip("pinned source checkout unavailable")
-    root = Path(source_path).expanduser()
-    mlx_lm = Path(mlx_lm_path).expanduser()
+    root = _external_source(TENSORFOLD_SOURCE_ENV)
     identity = source_identity(root)
     assert identity["revision"] == "71377a5373ed7b394f1b480ba2a6a3986b03af1c"
     assert len(identity["source_digest"]) == 64
-    mlx_lm_receipt = mlx_lm_identity(mlx_lm)
-    assert mlx_lm_receipt["revision"] == "1104ced19ed98800bdaf4ebcdca14bbdeb597c23"
+    mlx_lm = mlx_lm_identity(_external_source(MLX_LM_SOURCE_ENV))
+    assert mlx_lm["revision"] == "1104ced19ed98800bdaf4ebcdca14bbdeb597c23"
 
 
 def test_exact_worker_subprocess_imports_pinned_full_loader_path():
-    source_path = os.environ.get("MLX2_TENSORFOLD_SOURCE")
-    mlx_lm_path = os.environ.get("MLX2_MLX_LM_SOURCE")
-    if not source_path or not mlx_lm_path:
-        pytest.skip("pinned native sources unavailable")
-    source = Path(source_path).expanduser()
-    mlx_lm = Path(mlx_lm_path).expanduser()
+    source = _external_source(TENSORFOLD_SOURCE_ENV)
+    mlx_lm = _external_source(MLX_LM_SOURCE_ENV)
     repo = Path(__file__).resolve().parents[1]
     command = [sys.executable, "-m", "mlx2.runtime.tensorfold_owned_worker",
                "--import-smoke", "--source", str(source), "--mlx-lm-source", str(mlx_lm)]

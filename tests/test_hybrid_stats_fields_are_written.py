@@ -21,7 +21,7 @@ def _written_names():
         text = path.read_text()
         # ``x.name =``, ``x.name +=``, ``name=`` in a constructor/replace call,
         # and ``setattr(x, "name"`` all count as writes.
-        for m in re.finditer(r"\.(\w+)\s*(?:=|\+=|-=)(?!=)", text):
+        for m in re.finditer(r"\.(\w+)\s*(?:=|\+=|-=|\|=|&=)(?!=)", text):
             names.add(m.group(1))
         for m in re.finditer(r"[(,]\s*(\w+)\s*=(?!=)", text):
             names.add(m.group(1))

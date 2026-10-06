@@ -16,7 +16,7 @@ import sys
 import time
 
 ROOT=Path(__file__).resolve().parents[2]
-MODEL=str(Path.home()/'mlx-models/Qwen3.8-27B-MLX-4bit')
+MODEL=str(Path.home()/'mlx-models'/'Qwen3.8-27B-MLX-4bit')
 MANIFEST='/tmp/mlx2-hybrid27b-artifact-1004.json'
 WHEEL=str(Path.home()/'.cache/uv/sdists-v9/path/6b22317da775785a/d5Co9cAdGp8_XULv/mlx-0.32.2.dev20260919+39400a0d4-cp312-cp312-macosx_26_0_arm64.whl')
 NATIVE='/tmp/mlx2-native-bf16-storage-build-1004/_paged_kv_native.cpython-312-darwin.so'

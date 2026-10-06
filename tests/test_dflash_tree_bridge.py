@@ -229,20 +229,27 @@ def commit_streams(caches, records, paths, widths, starts):
     monkeypatch.setattr(qwen38_tensorfold, "_EXECUTORS", {})
     calls = []
 
-    def check_output(command, cwd, text):
-        calls.append(cwd)
-        return getattr(check_output, "revision", qwen38_tensorfold.EXPECTED_REVISION) + "\n"
+    def validate_source(root):
+        calls.append(root)
+        revision = getattr(
+            validate_source, "revision", qwen38_tensorfold.EXPECTED_REVISION
+        )
+        if revision != qwen38_tensorfold.EXPECTED_REVISION:
+            raise RuntimeError(
+                f"TensorFold source revision mismatch: {revision}, "
+                f"expected {qwen38_tensorfold.EXPECTED_REVISION}"
+            )
 
-    monkeypatch.setattr(qwen38_tensorfold.subprocess, "check_output", check_output)
-    yield roots, calls, check_output
+    monkeypatch.setattr(qwen38_tensorfold, "validate_source", validate_source)
+    yield roots, calls, validate_source
     for key in [k for k in sys.modules if k == "tensorfold" or k.startswith("tensorfold.")]:
         del sys.modules[key]
 
 
 @pytest.mark.parametrize("cached", [False, True])
 def test_executor_rejects_wrong_revision(fake_tensorfold, cached):
-    roots, calls, check_output = fake_tensorfold
-    check_output.revision = "0" * 40
+    roots, _calls, validate_source = fake_tensorfold
+    validate_source.revision = "0" * 40
     with pytest.raises(RuntimeError, match="revision mismatch"):
         qwen38_tensorfold._modules(roots[0], cached=cached)
     assert not qwen38_tensorfold._EXECUTORS

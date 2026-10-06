@@ -86,6 +86,59 @@ def _read_safetensors_header(path):
     return raw_header, header, size - 8 - length
 
 
+def _source_binding(path):
+    stat = path.stat()
+    return (
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
+
+
+def _read_bytes_with_binding(path):
+    before = _source_binding(path)
+    content = path.read_bytes()
+    after = _source_binding(path)
+    if before != after:
+        raise ValueError(f"DFlash2 source changed while inspecting: {path.name}")
+    return content, before
+
+
+def _file_sha256_with_binding(path, expected_binding=None):
+    before = _source_binding(path)
+    if expected_binding is not None and before != expected_binding:
+        raise ValueError(f"DFlash2 source changed while inspecting: {path.name}")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 << 20), b""):
+            digest.update(chunk)
+    after = _source_binding(path)
+    if before != after:
+        raise ValueError(f"DFlash2 source changed while hashing: {path.name}")
+    return digest.hexdigest(), before
+
+
+def _verify_source_bindings(root, records, *, label):
+    if not isinstance(records, list) or not records:
+        raise ValueError(f"{label} has no inspected source bindings")
+    for record in records:
+        if (
+            not isinstance(record, (list, tuple))
+            or len(record) != 6
+            or not isinstance(record[0], str)
+        ):
+            raise ValueError(f"{label} has an invalid source binding")
+        path = root / record[0]
+        try:
+            current = _source_binding(path)
+        except OSError as exc:
+            raise ValueError(f"{label} source is unavailable: {record[0]}") from exc
+        if current != tuple(record[1:]):
+            raise ValueError(f"{label} source binding changed: {record[0]}")
+
+
 def _validate_weight_headers(files, mapping, args, configured_dtype):
     expected = _expected_weight_shapes(args)
     observed = {}
@@ -150,7 +203,8 @@ def _validate_weight_headers(files, mapping, args, configured_dtype):
 
 def inspect_drafter(path, target):
     path = Path(path).expanduser().resolve()
-    config = _decode_unique_json((path/'config.json').read_bytes(), 'draft config.json')
+    config_raw, config_binding = _read_bytes_with_binding(path/'config.json')
+    config = _decode_unique_json(config_raw, 'draft config.json')
     if config.get('architectures') != ['DFlash2DraftModel']:
         raise ValueError('Expected DFlash2DraftModel artifact')
     args = DFlash2Config.from_dict(config)
@@ -160,18 +214,22 @@ def inspect_drafter(path, target):
         if text[name] != getattr(args,name): raise ValueError(f'DFlash2 target {name} mismatch')
     if text['num_hidden_layers'] != args.num_target_layers:
         raise ValueError('DFlash2 target layer count mismatch')
-    digest=hashlib.sha256(); digest.update((path/'config.json').read_bytes())
+    digest=hashlib.sha256(); digest.update(config_raw)
     index=path/'model.safetensors.index.json'
+    source_bindings = [('config.json', *config_binding)]
     if index.exists():
-        content=index.read_bytes();digest.update(content);mapping=_decode_unique_json(content, 'draft weight index').get('weight_map')
+        content,index_binding=_read_bytes_with_binding(index);digest.update(content);mapping=_decode_unique_json(content, 'draft weight index').get('weight_map')
+        source_bindings.append((index.name, *index_binding))
+        index_sha256 = hashlib.sha256(content).hexdigest()
         if not isinstance(mapping,dict) or not mapping: raise ValueError('Invalid draft weight index')
         if any(not isinstance(name, str) for name in mapping.values()):
             raise ValueError('Invalid draft shard path')
         names=sorted(set(mapping.values()))
     else:
-        mapping=None;names=['model.safetensors']
+        mapping=None;names=['model.safetensors'];index_sha256=None
     files=[]
     paths=[]
+    weight_bindings=[]
     for name in names:
         # HF snapshots use local shard names symlinked into a sibling blob
         # directory. Keep the lexical name for index/header reconciliation,
@@ -182,23 +240,58 @@ def inspect_drafter(path, target):
         ):
             raise ValueError('Invalid draft shard path')
         file = path / name
-        stat=file.stat();record=(name,stat.st_size,stat.st_mtime_ns);files.append(record);paths.append(file);digest.update(json.dumps(record).encode())
+        binding=_source_binding(file);record=(name,binding[2],binding[3]);files.append(record);paths.append(file);digest.update(json.dumps(record).encode())
+        weight_bindings.append((name, *binding))
     header_digests = _validate_weight_headers(paths, mapping, args, config.get('dtype'))
     digest.update(json.dumps(header_digests).encode())
-    return {'path':str(path),'fingerprint':digest.hexdigest(),'files':files,'header_sha256':header_digests,'config':config,'args':args}
+    weight_digests = [
+        _file_sha256_with_binding(file, tuple(binding[1:]))[0]
+        for file, binding in zip(paths, weight_bindings)
+    ]
+    digest.update(json.dumps(weight_digests).encode())
+    source_bindings.extend(weight_bindings)
+    _verify_source_bindings(path, source_bindings, label='DFlash2 artifact')
+    return {
+        'path': str(path), 'fingerprint': digest.hexdigest(), 'files': files,
+        'header_sha256': header_digests, 'weight_sha256': weight_digests,
+        'config_sha256': hashlib.sha256(config_raw).hexdigest(),
+        'index_sha256': index_sha256, 'source_bindings': source_bindings,
+        'config': config, 'args': args,
+    }
 
 
-def content_revision(record):
-    """Content pin of a DFlash2 artifact: config bytes plus shard headers.
-
-    Unlike ``fingerprint`` (which also binds file size and mtime for the
-    cache identity), this survives a re-download of the same revision and
-    changes with any config or tensor-layout change (mlx2).
-    """
+def _legacy_content_revision(record):
+    """The former metadata-only pin, retained only to diagnose stale policy."""
     digest = hashlib.sha256()
     digest.update(json.dumps(record['config'], sort_keys=True).encode())
     digest.update(json.dumps(record['header_sha256']).encode())
     return digest.hexdigest()
+
+
+def content_revision(record):
+    """Payload-bound DFlash2 content pin, stable across identical downloads."""
+    weights = record.get('weight_sha256')
+    if (
+        not isinstance(weights, list)
+        or len(weights) != len(record.get('files', ()))
+        or any(not isinstance(value, str) or len(value) != 64 for value in weights)
+    ):
+        raise ValueError(
+            'DFlash2 content revision requires full weight payload hashes; '
+            're-inspect legacy metadata-only records'
+        )
+    return hashlib.sha256(
+        json.dumps(
+            [
+                'mlx2.dflash2-content.v2',
+                record['config'],
+                record['header_sha256'],
+                weights,
+            ],
+            sort_keys=True,
+            separators=(',', ':'),
+        ).encode()
+    ).hexdigest()
 
 
 def validate_runtime_quantization(value):
@@ -214,6 +307,20 @@ def validate_runtime_quantization(value):
 
 def load_drafter(record,target_model,*,runtime_quantization=None):
     # Import/load only after both artifact roles and dimensions are checked.
+    root = Path(record['path'])
+
+    def verify_sources():
+        _verify_source_bindings(
+            root, record.get('source_bindings'), label='DFlash2 artifact'
+        )
+        if 'target_source_bindings' in record:
+            _verify_source_bindings(
+                Path(record['target_path']),
+                record['target_source_bindings'],
+                label='DFlash2 target artifact',
+            )
+
+    verify_sources()
     import mlx.core as mx
     import mlx.nn as nn
     from ..runtime.drafters.dflash2 import DFlash2DraftModel
@@ -221,7 +328,7 @@ def load_drafter(record,target_model,*,runtime_quantization=None):
     model=DFlash2DraftModel(record['args'])
     weights={}
     for name,_,_ in record['files']:
-        path = Path(record['path']) / name
+        path = root / name
         shard = model.sanitize(mx.load(str(path)))
         pending = []
         pending_bytes = 0
@@ -259,4 +366,6 @@ def load_drafter(record,target_model,*,runtime_quantization=None):
             class_predicate=lambda _name, module: isinstance(module, nn.Linear),
         )
     model.eval();mx.eval(model.parameters());weights.clear();mx.clear_cache()
-    return model.bind(target_model)
+    bound = model.bind(target_model)
+    verify_sources()
+    return bound

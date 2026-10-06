@@ -186,6 +186,9 @@ def test_aborted_qsa_forward_then_authoritative_recovery_restores_and_retries(
     _verify(attention, transaction, hidden, True)
     transaction.abort()
     assert transaction.closed
+    assert owner._active is None
+    assert transaction.owner is None
+    assert transaction.caches == []
     for row, oracle in zip(rows, oracles):
         _assert_qsa(row[-1], oracle)
         assert not row[0].speculating and not row[0]._rollbacks

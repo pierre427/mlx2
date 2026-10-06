@@ -23,6 +23,11 @@ PREFILL_ID_THRESHOLD = 512
 DECODE_WORKERS = 16
 PREFILL_WORKERS = 64
 PREFETCH_WORKERS = 16
+READ_POLICY_DEFAULT = "pooled"
+READ_POLICY_CHOICES = frozenset(("pooled", "serial", "adaptive"))
+READ_POLICY_CALIBRATION_ROWS = 128
+READ_POLICY_POOL_MARGIN_PERCENT = 20
+READ_POLICY_WARM_CHUNK_BYTES = 8 << 20
 _FORK_RESOURCE_LOCK = threading.RLock()
 
 
@@ -42,6 +47,43 @@ class LookupStats:
     cache_hits: int
     cache_misses: int
     cache_evictions: int
+
+
+def _strict_env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    if raw == "1":
+        return True
+    if raw == "0":
+        return False
+    raise ValueError(f"{name} must be 0 or 1")
+
+
+def prefer_pooled_read(serial_ns: int, pooled_ns: int) -> bool:
+    """Return whether the pool won by strictly more than twenty percent.
+
+    This is mlx-serve #687's overflow-safe admission rule.  A tie, the exact
+    boundary, or an unreadable timer retains the serial arm.
+    """
+    if serial_ns <= 0 or pooled_ns <= 0:
+        return False
+    return pooled_ns * 100 < serial_ns * (100 - READ_POLICY_POOL_MARGIN_PERCENT)
+
+
+def ple_table_diagnostics(table) -> dict:
+    """Stable table counters plus opt-in read-policy evidence.
+
+    The default pooled route keeps the historical receipt shape.  An explicit
+    serial/adaptive selection adds the exact arm, transition and counters.
+    """
+    from dataclasses import asdict
+
+    result = asdict(table.stats)
+    policy = table.read_policy_status
+    if policy["configured"] != READ_POLICY_DEFAULT:
+        result["read_policy"] = policy
+    return result
 
 
 def bf16_bits_to_f32(bits: np.ndarray) -> np.ndarray:
@@ -426,7 +468,62 @@ class FileBackedShardedEmbedding(nn.Module):
         self.prefill_workers = int(
             os.getenv("MLX_QWEN4_PLE_NVME_PREFILL_WORKERS", str(PREFILL_WORKERS))
         )
+        self.read_policy = (
+            os.getenv("MLX_QWEN4_PLE_NVME_READ_POLICY", READ_POLICY_DEFAULT)
+            .strip()
+            .lower()
+        )
+        if self.read_policy not in READ_POLICY_CHOICES:
+            choices = ", ".join(sorted(READ_POLICY_CHOICES))
+            raise ValueError(
+                f"MLX_QWEN4_PLE_NVME_READ_POLICY must be one of {choices}"
+            )
+        if self.decode_workers <= 0 or self.prefill_workers <= 0:
+            raise ValueError("PLE NVMe worker counts must be positive")
+        self._adaptive_warm_enabled = (
+            _strict_env_flag("MLX_QWEN4_PLE_NVME_ADAPTIVE_WARM", True)
+            if self.read_policy == "adaptive"
+            else False
+        )
+        if self.read_policy == "adaptive":
+            if self.vocab_size < 2 * READ_POLICY_CALIBRATION_ROWS:
+                raise ValueError(
+                    "adaptive PLE reads require at least "
+                    f"{2 * READ_POLICY_CALIBRATION_ROWS} rows"
+                )
+            expected_size = self.data_offset + self.vocab_size * self.row_bytes
+            actual_size = os.path.getsize(self.sidecar_path)
+            if actual_size < expected_size:
+                raise ValueError(
+                    f"adaptive PLE sidecar has {actual_size} bytes, needs {expected_size}"
+                )
         self._lifecycle_lock = threading.Lock()
+        self._read_policy_lock = threading.Lock()
+        self._warm_stop = threading.Event()
+        self._warm_thread = None
+        self._warm_state = (
+            "not_started" if self._adaptive_warm_enabled else "disabled"
+        )
+        self._warm_error = None
+        self._warm_refresh_pending = False
+        self._read_policy_effective = (
+            "serial" if self.read_policy == "serial" else "pooled"
+        )
+        self._read_policy_phase = "fixed"
+        self._read_policy_calibration = None
+        self._read_policy_failure = None
+        self._read_policy_counts = {
+            "load_calibrations": 0,
+            "warmed_calibrations": 0,
+            "warm_signals": 0,
+            "warm_refreshes": 0,
+            "warm_refresh_failures": 0,
+            "foreground_serial_calls": 0,
+            "foreground_pooled_calls": 0,
+            "foreground_serial_rows": 0,
+            "foreground_pooled_rows": 0,
+        }
+        self._read_policy_last_receipt = None
         self._closed = False
         self._stat_lookups = 0
         self._stat_rows = 0
@@ -438,6 +535,12 @@ class FileBackedShardedEmbedding(nn.Module):
         self._stat_cache_evictions = 0
         with _FORK_RESOURCE_LOCK:
             self._open_resources()
+        if self.read_policy == "adaptive":
+            try:
+                self._calibrate_read_policy("load")
+            except BaseException:
+                self.close()
+                raise
 
     def _open_resources(self):
         fd = os.open(self.sidecar_path, os.O_RDONLY)
@@ -480,10 +583,29 @@ class FileBackedShardedEmbedding(nn.Module):
                     self._lifecycle_lock = threading.Lock()
                     self._lru_lock = threading.Lock()
                     self._dq_lock = threading.Lock()
+                    self._read_policy_lock = threading.Lock()
+                    self._warm_stop = threading.Event()
+                    self._warm_thread = None
+                    self._warm_state = (
+                        "not_started" if self._adaptive_warm_enabled else "disabled"
+                    )
+                    self._warm_refresh_pending = False
                     self._lru = OrderedDict()
                     self._dq_cache = {}
                     self._fd = self._pool = self._prefetch_pool = None
                     try:
+                        if reopen and (not self._closed) and self.read_policy == "adaptive":
+                            # Executor threads do not survive fork, and neither
+                            # does the single-writer calibration/warm lifecycle.
+                            # Refuse rather than inherit the parent's measured
+                            # arm as if it were child-local evidence.
+                            self._closed = True
+                            self._owner_pid = os.getpid()
+                            self._warm_state = "fork_refused"
+                            self._read_policy_failure = (
+                                "adaptive PLE table crossed fork; reload it in the child"
+                            )
+                            raise RuntimeError(self._read_policy_failure)
                         if reopen and (not self._closed):
                             self._open_resources()
                         else:
@@ -525,6 +647,10 @@ class FileBackedShardedEmbedding(nn.Module):
                 return
             self._closed = True
             (fd, pool, prefetch_pool) = (self._fd, self._pool, self._prefetch_pool)
+        self._warm_stop.set()
+        warm_thread = self._warm_thread
+        if warm_thread is not None and warm_thread is not threading.current_thread():
+            warm_thread.join()
         pool.shutdown(wait=True)
         prefetch_pool.shutdown(wait=True)
         with _FORK_RESOURCE_LOCK:
@@ -542,12 +668,26 @@ class FileBackedShardedEmbedding(nn.Module):
             pass
 
     def _workers_for(self, num_ids: int) -> int:
+        proposed = (
+            self.prefill_workers
+            if num_ids >= PREFILL_ID_THRESHOLD
+            else self.decode_workers
+        )
+        if self.read_policy == "serial":
+            return 1
+        if self.read_policy != "adaptive":
+            return proposed
         if num_ids >= PREFILL_ID_THRESHOLD:
-            return self.prefill_workers
-        return self.decode_workers
+            self._refresh_read_policy_after_warm()
+        with self._read_policy_lock:
+            if self._read_policy_failure is not None:
+                raise RuntimeError(self._read_policy_failure)
+            return proposed if self._read_policy_effective == "pooled" else 1
 
-    def _pread_rows(self, row_ids: np.ndarray, workers: int) -> np.ndarray:
-        """Read ``row_ids`` from disk on the pool; no cache involved."""
+    def _pread_rows_fixed(
+        self, row_ids: np.ndarray, workers: int, *, inline: bool = False
+    ) -> np.ndarray:
+        """Read with an already selected arm; no policy or cache."""
         n = int(row_ids.size)
         out = np.empty((n, self.row_bytes), dtype=np.uint8)
         if n == 0:
@@ -562,12 +702,20 @@ class FileBackedShardedEmbedding(nn.Module):
                     offset = base + int(row_ids[i]) * row_bytes
                     data = os.pread(fd, row_bytes, offset)
                     if len(data) != row_bytes:
-                        raise IOError(
+                        raise OSError(
                             f"short pread of PLE row {int(row_ids[i])} ({len(data)}/{row_bytes} bytes)"
                         )
                     out[i] = np.frombuffer(data, dtype=np.uint8)
 
             return task
+
+        if inline:
+            self._check_owner()
+            with self._lifecycle_lock:
+                if self._closed:
+                    raise RuntimeError("FileBackedShardedEmbedding is closed")
+                read_span(0, n)(self._fd)
+            return out
 
         workers = max(1, min(workers, n))
         bounds = np.linspace(0, n, workers + 1, dtype=np.int64)
@@ -584,6 +732,210 @@ class FileBackedShardedEmbedding(nn.Module):
         for future in futures:
             future.result()
         return out
+
+    def _pread_rows(self, row_ids: np.ndarray, workers: int) -> np.ndarray:
+        """Read foreground rows and publish the arm that actually ran."""
+        if self.read_policy == READ_POLICY_DEFAULT:
+            # Preserve the historical hot path exactly while the candidate is
+            # not selected: no policy lock, receipt allocation or new counter.
+            return self._pread_rows_fixed(row_ids, workers)
+        n = int(row_ids.size)
+        actual_workers = max(1, min(int(workers), n)) if n else 1
+        with self._read_policy_lock:
+            inline = self.read_policy == "serial" or (
+                self.read_policy == "adaptive"
+                and self._read_policy_effective == "serial"
+            )
+        route = "serial" if inline else "pooled"
+        actual_workers = 1 if inline else actual_workers
+        rows = self._pread_rows_fixed(row_ids, actual_workers, inline=inline)
+        with self._read_policy_lock:
+            self._read_policy_counts[f"foreground_{route}_calls"] += int(n > 0)
+            self._read_policy_counts[f"foreground_{route}_rows"] += n
+            self._read_policy_last_receipt = {
+                "event": "foreground_read",
+                "configured": self.read_policy,
+                "selected_arm": self._read_policy_effective,
+                "actual_arm": route,
+                "workers": actual_workers,
+                "rows": n,
+                "phase": self._read_policy_phase,
+                "warm_refresh_pending": self._warm_refresh_pending,
+            }
+        return rows
+
+    def _calibration_row_ids(self, phase: str) -> tuple[np.ndarray, np.ndarray]:
+        if phase not in {"load", "warmed"}:
+            raise ValueError(f"unknown PLE read-policy calibration phase {phase!r}")
+        seed = 0x6870 if phase == "load" else 0x6871
+        rng = np.random.default_rng(seed)
+        half = self.vocab_size // 2
+        rows = READ_POLICY_CALIBRATION_ROWS
+        serial = rng.choice(half, size=rows, replace=False)
+        pooled = half + rng.choice(self.vocab_size - half, size=rows, replace=False)
+        return serial.astype(np.int64), pooled.astype(np.int64)
+
+    def _measure_read_arms(self, phase: str) -> tuple[int, int]:
+        serial_ids, pooled_ids = self._calibration_row_ids(phase)
+        started = time.perf_counter_ns()
+        self._pread_rows_fixed(serial_ids, 1, inline=True)
+        serial_ns = time.perf_counter_ns() - started
+        started = time.perf_counter_ns()
+        self._pread_rows_fixed(pooled_ids, self.prefill_workers)
+        pooled_ns = time.perf_counter_ns() - started
+        return (serial_ns, pooled_ns)
+
+    def _calibrate_read_policy_locked(self, phase: str) -> None:
+        serial_ns, pooled_ns = self._measure_read_arms(phase)
+        if serial_ns <= 0 or pooled_ns <= 0:
+            raise RuntimeError("adaptive PLE read calibration produced an invalid timer")
+        selected = "pooled" if prefer_pooled_read(serial_ns, pooled_ns) else "serial"
+        self._read_policy_effective = selected
+        self._read_policy_phase = phase
+        self._read_policy_counts[f"{phase}_calibrations"] += 1
+        self._read_policy_calibration = {
+            "phase": phase,
+            "rows_per_arm": READ_POLICY_CALIBRATION_ROWS,
+            "serial_ns": int(serial_ns),
+            "pooled_ns": int(pooled_ns),
+            "pooled_workers": min(self.prefill_workers, READ_POLICY_CALIBRATION_ROWS),
+            "margin_percent": READ_POLICY_POOL_MARGIN_PERCENT,
+            "selected": selected,
+        }
+        self._read_policy_last_receipt = {
+            "event": "calibration",
+            **self._read_policy_calibration,
+        }
+
+    def _calibrate_read_policy(self, phase: str) -> None:
+        with self._read_policy_lock:
+            self._calibrate_read_policy_locked(phase)
+
+    def _refresh_read_policy_after_warm(self) -> None:
+        """Consume a completed warm exactly once on a wide foreground lookup.
+
+        The warmer never borrows the foreground reader pool or mutates the
+        selected arm.  That prevents the #687 review bug: a cold load decision
+        cannot remain latched after a successful whole-table warm.
+        """
+        with self._read_policy_lock:
+            if not self._warm_refresh_pending:
+                return
+            self._warm_refresh_pending = False
+            try:
+                self._calibrate_read_policy_locked("warmed")
+            except Exception:
+                self._read_policy_counts["warm_refresh_failures"] += 1
+                self._warm_state = "refresh_failed"
+                self._read_policy_failure = (
+                    "adaptive PLE warm refresh failed; reload or force serial/pooled"
+                )
+                self._read_policy_last_receipt = {
+                    "event": "warm_refresh_failed",
+                    "configured": self.read_policy,
+                    "failure": self._read_policy_failure,
+                }
+                raise
+            self._read_policy_counts["warm_refreshes"] += 1
+
+    def notify_adaptive_warm_complete(self) -> bool:
+        """Publish warm completion; the next wide foreground lookup consumes it."""
+        if self.read_policy != "adaptive" or not self._adaptive_warm_enabled:
+            return False
+        with self._read_policy_lock:
+            if self._closed:
+                return False
+            self._warm_refresh_pending = True
+            self._read_policy_counts["warm_signals"] += 1
+        return True
+
+    def start_adaptive_warm(self) -> bool:
+        """Warm the sidecar on a private reader thread when adaptive is selected.
+
+        This is opt-in with ``MLX_QWEN4_PLE_NVME_READ_POLICY=adaptive``.
+        ``MLX_QWEN4_PLE_NVME_ADAPTIVE_WARM=0`` preserves the documented #687
+        limitation: demand reads never re-arm the load-time decision.
+        """
+        if self.read_policy != "adaptive" or not self._adaptive_warm_enabled:
+            return False
+        with self._read_policy_lock:
+            if self._warm_state != "not_started":
+                return False
+            self._warm_state = "running"
+
+        def warm() -> None:
+            fd = None
+            try:
+                fd = os.open(self.sidecar_path, os.O_RDONLY)
+                remaining = self.vocab_size * self.row_bytes
+                offset = self.data_offset
+                while remaining and not self._warm_stop.is_set():
+                    amount = min(READ_POLICY_WARM_CHUNK_BYTES, remaining)
+                    data = os.pread(fd, amount, offset)
+                    if len(data) != amount:
+                        raise OSError(
+                            f"short adaptive PLE warm read ({len(data)}/{amount} bytes)"
+                        )
+                    offset += amount
+                    remaining -= amount
+                with self._read_policy_lock:
+                    if self._warm_stop.is_set():
+                        self._warm_state = "stopped"
+                        return
+                    self._warm_state = "completed"
+                self.notify_adaptive_warm_complete()
+            except Exception as exc:  # surfaced in the exact policy receipt
+                with self._read_policy_lock:
+                    self._warm_state = "failed"
+                    self._warm_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                if fd is not None:
+                    os.close(fd)
+
+        self._warm_thread = threading.Thread(
+            target=warm,
+            name="ple-nvme-adaptive-warm",
+            daemon=True,
+        )
+        self._warm_thread.start()
+        return True
+
+    def wait_for_adaptive_warm(self, timeout: float | None = None) -> bool:
+        thread = self._warm_thread
+        if thread is None:
+            return self._warm_state == "completed"
+        thread.join(timeout)
+        return not thread.is_alive() and self._warm_state == "completed"
+
+    @property
+    def read_policy_status(self) -> dict:
+        with self._read_policy_lock:
+            return {
+                "schema": "mlx2.qwen4-ple-read-policy.v1",
+                "configured": self.read_policy,
+                "selected": self.read_policy != READ_POLICY_DEFAULT,
+                "qualified": False,
+                "effective": self._read_policy_effective,
+                "phase": self._read_policy_phase,
+                "failure": self._read_policy_failure,
+                "warming": {
+                    "enabled": self._adaptive_warm_enabled,
+                    "state": self._warm_state,
+                    "refresh_pending": self._warm_refresh_pending,
+                    "error": self._warm_error,
+                },
+                "calibration": (
+                    None
+                    if self._read_policy_calibration is None
+                    else dict(self._read_policy_calibration)
+                ),
+                "counts": dict(self._read_policy_counts),
+                "last_receipt": (
+                    None
+                    if self._read_policy_last_receipt is None
+                    else dict(self._read_policy_last_receipt)
+                ),
+            }
 
     def _cache_put(self, row_ids, rows: np.ndarray) -> None:
         """Insert packed rows; evict LRU entries over the byte budget."""
@@ -915,7 +1267,9 @@ class FileBackedShardedEmbedding(nn.Module):
         if not ordered:
             return 0
         id_array = np.asarray(ordered, dtype=np.int64)
-        rows = self._pread_rows(id_array, self.prefill_workers)
+        # Load-time preheat is not a request and must not consume a pending
+        # adaptive transition or inflate foreground-route counters.
+        rows = self._pread_rows_fixed(id_array, self.prefill_workers)
         self._cache_put(id_array[::-1], rows[::-1])
         return len(ordered)
 

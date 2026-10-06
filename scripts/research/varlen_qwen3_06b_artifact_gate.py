@@ -18,7 +18,10 @@ import time
 from collections import Counter
 from pathlib import Path
 
-SNAPSHOT = Path.home() / ".cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca"
+SNAPSHOT = (
+    Path.home()
+    / ".cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca"
+)
 MLX_LM_SOURCE = Path.home() / "Desktop/mlx-uag/mlx-lm-unified"
 CONFIG_SHA256 = "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd"
 WEIGHTS_SHA256 = "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b"

@@ -6,18 +6,62 @@ decode of the same target, with a real random drafter and with an oracle
 drafter that injects a wrong token at every position of the block in turn,
 so every accept length 0..K and every rollback depth is exercised.
 """
-import numpy as np
-import pytest
+import weakref
+from types import SimpleNamespace
 
 import mlx.core as mx
+import numpy as np
+import pytest
 
 mx.set_default_device(mx.cpu)
 
 from mlx2.runtime.drafters.dflash2 import DFlash2DraftModel
 from mlx2.runtime.drafters.dflash2_config import DFlash2Config
 from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+from mlx2.runtime.speculative_sampling import RequestRNG
 
 VOCAB = 128
+
+
+def test_qwen36_exposes_nested_text_geometry_for_dflash_binding():
+    from mlx2.runtime.models.qwen36_35b import Model as Qwen36Model
+
+    geometry = SimpleNamespace(hidden_size=32, vocab_size=VOCAB, num_hidden_layers=8)
+    target = Qwen36Model.__new__(Qwen36Model)
+    object.__setattr__(
+        target,
+        "args",
+        SimpleNamespace(hidden_size=-1, vocab_size=-1, num_hidden_layers=-1),
+    )
+    object.__setattr__(
+        target,
+        "language_model",
+        SimpleNamespace(
+            args=geometry,
+            forward_with_taps=lambda *args, **kwargs: (args, kwargs),
+            prefill_body=lambda *args: args,
+        ),
+    )
+    assert target.speculative_args is geometry
+    assert target.forward_with_taps("tokens", "cache", (1, 6), body_only=True) == (
+        ("tokens", "cache", (1, 6)),
+        {"body_only": True},
+    )
+    assert target.prefill_body("tokens", "cache", (1, 6)) == (
+        "tokens",
+        "cache",
+        (1, 6),
+    )
+    DFlash2DraftModel.validate_target_compatibility(
+        SimpleNamespace(
+            config=SimpleNamespace(
+                hidden_size=32,
+                vocab_size=VOCAB,
+                num_target_layers=8,
+            )
+        ),
+        target,
+    )
 
 
 def tiny_target(seed=7):
@@ -216,11 +260,17 @@ def test_hybrid_rows_leave_no_rollback_records_after_commit():
         cache = target.make_cache()
         target(mx.array([prompt]), cache=cache)
         rows.append(cache)
-    transaction = HybridVerifyRows(rows).begin([4, 2])
+    owner = HybridVerifyRows(rows)
+    transaction = owner.begin([4, 2])
+    owner_ref = weakref.ref(owner)
+    transaction_ref = weakref.ref(transaction)
     inputs = mx.array([[1, 2, 3, 4], [5, 6, 0, 0]])
     logits, _ = target.forward_with_taps(inputs, transaction.caches, [1, 6])
     mx.eval(logits)
     committed = transaction.commit([2, 1])
+    assert owner._active is None
+    assert transaction.owner is None
+    assert transaction.caches == []
     for row, prompt, kept in zip(committed, PROMPTS[:2], [2, 1]):
         for cache in row:
             if isinstance(cache, ArraysCache):
@@ -235,6 +285,9 @@ def test_hybrid_rows_leave_no_rollback_records_after_commit():
             if isinstance(mine, ArraysCache):
                 for a, b in zip(mine.cache, ref.cache):
                     np.testing.assert_allclose(np.asarray(a), np.asarray(b), atol=1e-5)
+    del owner, transaction
+    assert owner_ref() is None
+    assert transaction_ref() is None
 
 
 def test_hybrid_rows_refuse_unsupported_topologies():
@@ -280,6 +333,46 @@ def test_sampled_route_runs_and_is_seed_deterministic():
         got, _ = drain(batch)
         outputs.append(got[uid])
     assert outputs[0] == outputs[1] and len(outputs[0]) == 10
+
+
+def test_compact_and_sequential_external_sampling_are_exactly_coupled():
+    def propose(compact):
+        model, draft = tiny_pair()
+        anchors = [2, 6]
+        hidden = model.prefill_body(
+            mx.array([[1, 2], [4, 5]]), model.make_cache(), [0, 3]
+        )
+        cache = draft.batch_caches([draft.make_cache(), draft.make_cache()])
+        rngs = [RequestRNG(7), RequestRNG(11)]
+        temperatures = [0.8, 0.8]
+        if compact:
+            uniforms = [[rng.uniform() for _ in range(2)] for rng in rngs]
+            block = draft.propose_block(
+                anchors, hidden, cache, 2, uniforms, temperatures
+            )
+            return (
+                block.token_lists(),
+                block.dense_laws(VOCAB),
+                [rng.draws for rng in rngs],
+            )
+        tokens, laws = draft.draft_distributions(
+            anchors,
+            hidden,
+            cache,
+            2,
+            rngs,
+            temperatures,
+            processor_histories=[[1, 2, 3, 1], [4, 5]],
+        )
+        return tokens, laws, [rng.draws for rng in rngs]
+
+    sequential = propose(False)
+    compact = propose(True)
+    assert sequential[0] == compact[0]
+    assert sequential[2] == compact[2] == [2, 2]
+    for sequential_row, compact_row in zip(sequential[1], compact[1]):
+        for sequential_law, compact_law in zip(sequential_row, compact_row):
+            np.testing.assert_array_equal(sequential_law, compact_law)
 
 
 def test_batched_pairwise_greedy_equals_ordinary_b2():

@@ -175,6 +175,23 @@ class HybridVerifyTransaction:
             self._finalized = True
             _finalize_self_mtp_cache_group(self.caches)
 
+    def _close(self):
+        """Release the epoch lease and transaction-only cache references.
+
+        The owner points at its active transaction and the transaction points
+        back at the owner. Keeping that cycle after commit or abort retains
+        every closed request-private branch until cyclic GC runs, which is an
+        unbounded context-sized cost for staged continuation verification.
+        """
+
+        owner = self.owner
+        if owner is not None and owner._active is self:
+            owner._active = None
+        self.closed = True
+        self._kv_base = []
+        self.caches = []
+        self.owner = None
+
     def _trim(self, drops, *, validate):
         if not any(drops):
             return
@@ -214,9 +231,12 @@ class HybridVerifyTransaction:
         except BaseException:
             self.abort()
             raise
-        self.closed = True
-        self._stop()
-        return [list(row) for row in self.owner.rows]
+        rows = [list(row) for row in self.owner.rows]
+        try:
+            self._stop()
+        finally:
+            self._close()
+        return rows
 
     def abort(self):
         """Best-effort rewind to the pre-round boundary; recovery snapshots win."""
@@ -234,7 +254,10 @@ class HybridVerifyTransaction:
                         cache.trim(_kv_offset(cache) - base)
         except BaseException:  # noqa: BLE001, S110
             pass
-        self._stop()
+        try:
+            self._stop()
+        finally:
+            self._close()
 
 
 __all__ = [

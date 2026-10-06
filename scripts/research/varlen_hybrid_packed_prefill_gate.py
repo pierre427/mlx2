@@ -86,7 +86,6 @@ def execute(args,result):
     configure_environment()
     import mlx.core as mx
     from mlx2.runtime import qwen35_paged_graph_factory as resources_module
-    from mlx2.runtime.paged_request_transaction import CandidateRequest
     from varlen_hybrid_ordinary_b2_reference import OrdinaryHybridB2Reference
     adapter=candidate=None;owners=();branches=[];prepared=[]
     initial_charge=resources_module._CHARGED

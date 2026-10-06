@@ -28,7 +28,7 @@ def test_invalid_gqa_ratio_refused_before_gpu(monkeypatch):
         gate.validate_cases()
 
 
-def test_bf16_opaque_native_read_fails_closed_before_mlx_import(monkeypatch):
+def test_bf16_plan_refuses_fp16_arena_before_mlx_import(monkeypatch):
     import mlx2.runtime.paged_attention_native as native_read
     from mlx2.runtime.paged_attention_pack import PackedTokenRead
 
@@ -39,6 +39,6 @@ def test_bf16_opaque_native_read_fails_closed_before_mlx_import(monkeypatch):
     writer = SimpleNamespace(backend=backend, poisoned=False)
     packed = PackedTokenRead(writer, SimpleNamespace(dtype="bfloat16"), None, None)
     monkeypatch.setattr(native_read, "NativeWriteBackend", FakeBackend)
-    with pytest.raises(ValueError, match="fp16 only"):
+    with pytest.raises(ValueError, match="plan and arena storage dtype differ"):
         native_read.native_paged_attention_read_fp16(
             packed, backend, object(), object(), permit_candidate=True)

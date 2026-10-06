@@ -8,13 +8,15 @@ See ``provenance/tensorfold-qwen38-lever-probe.json``.
 from __future__ import annotations
 
 import importlib
-import subprocess
 import sys
 from pathlib import Path
 
 import mlx.core as mx
 
-EXPECTED_REVISION = "71377a5373ed7b394f1b480ba2a6a3986b03af1c"
+from ..adapters.qwen38_tensorfold_source import (
+    EXPECTED_REVISION,
+    validate_source,
+)
 
 # Every kernel module the tree forward and commit import, directly or lazily.
 # The cached executor imports them all at validation so a later lazy import
@@ -38,13 +40,7 @@ MAX_COHORT_LANES = 4
 
 
 def _validate(root):
-    revision = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=root, text=True
-    ).strip()
-    if revision != EXPECTED_REVISION:
-        raise RuntimeError(
-            f"TensorFold source revision mismatch: {revision}, expected {EXPECTED_REVISION}"
-        )
+    validate_source(root)
 
 
 def _import(root, names):

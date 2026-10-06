@@ -60,6 +60,11 @@ class Tests(unittest.TestCase):
         self.assertEqual(prefill["expected_draft_depths"], [0, 0, 0])
         self.assertEqual(prefill["prompt_lookup_depth"], 0)
         self.assertIsNone(prefill["prompt_lookup_ngram"])
+        continuation = G.plan("continuation-32", performance_measurement=True)
+        self.assertEqual(continuation["max_tokens_by_lane"], [32, 32, 32])
+        self.assertEqual(continuation["expected_draft_depths"], [2, 2, 2])
+        self.assertTrue(continuation["continuation_diagnostic"])
+        self.assertIn("continuation diagnostic", continuation["measurement_scope"])
         with self.assertRaises(ValueError):
             G.plan(ordinary_prefill_batch_size=1)
         with self.assertRaises(ValueError):
@@ -100,6 +105,9 @@ class Tests(unittest.TestCase):
         one = G.request_body(row, model="m", native=True,
                              inputs_sha256="a" * 64, cap=1)
         self.assertEqual(one["max_tokens"], 1)
+        long = G.request_body(row, model="m", native=True,
+                              inputs_sha256="a" * 64, cap=32)
+        self.assertEqual(long["max_tokens"], 32)
 
     def test_prefill_only_requires_packed_prefill_and_zero_drafts(self):
         row = {"case_id": "x", "prompt_tokens": 2048}
@@ -190,6 +198,62 @@ class Tests(unittest.TestCase):
         value = G.summarize(row, (200, body), events, native=False)
         self.assertEqual(value["route_receipt"], "unqualified")
 
+    def test_continuation_profile_requires_observed_flattened_prompt_lookup(self):
+        row = {"case_id": "x", "prompt_tokens": 2048}
+        common = {
+            "route": "native_hybrid_packed_n20_research",
+            "selected": True, "observed_used": True,
+            "qualified": False, "price_usable": False,
+            "prefill_cohort_width": 3,
+        }
+        ordinary = {**common, "native_n20_ragged_observed_used": False}
+        ragged = {
+            **common,
+            "native_n20_ragged_observed_used": True,
+            "draft_source": "prompt_lookup",
+            "draft_proposed": 2,
+            "draft_accepted": 2,
+            "state_publication": "atomic_selected_executed_prefix",
+            "ragged_verify_layout": {"backend_mode": "flattened"},
+        }
+        events = [
+            {"uid": 17, "token": 7, "from_draft": False,
+             "route_receipt": ordinary},
+            {"uid": 17, "token": 8, "from_draft": True,
+             "route_receipt": ragged},
+            {"uid": 17, "token": 9, "from_draft": True,
+             "route_receipt": ragged},
+            {"uid": 17, "token": 10, "from_draft": False,
+             "route_receipt": ragged},
+        ]
+        final = {**ragged, "output_token_ids": [7, 8, 9, 10]}
+        body = {
+            "choices": [{"finish_reason": "length",
+                         "message": {"content": "ok"}}],
+            "usage": {"completion_tokens": 4, "prompt_tokens": 2048,
+                      "prompt_tokens_details": {"cached_tokens": 0}},
+            "mlx2": {"qualification": "unqualified",
+                     "route_receipt": final},
+        }
+        value = G.summarize(
+            row, (200, body), events, native=True, cap=4,
+            continuation_diagnostic=True)
+        self.assertEqual(value["tokens"], [7, 8, 9, 10])
+
+        for mutation in ("no_draft", "padded"):
+            bad_events = json.loads(json.dumps(events))
+            if mutation == "no_draft":
+                for event in bad_events:
+                    event["from_draft"] = False
+            else:
+                for event in bad_events:
+                    event["route_receipt"].setdefault(
+                        "ragged_verify_layout", {})["backend_mode"] = "padded"
+            with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
+                G.summarize(
+                    row, (200, body), bad_events, native=True, cap=4,
+                    continuation_diagnostic=True)
+
     def test_mixed_caps_require_k2_k1_k0_and_n3_n2_n1(self):
         caps, drafts, queries, widths = G.cap_contract("shrinking-k2-k1-k0")
         self.assertEqual((caps, drafts, queries, widths),
@@ -234,6 +298,7 @@ class Tests(unittest.TestCase):
     def test_import_and_plan_do_not_import_device_runtime(self):
         self.assertEqual(G.COHORT_SIZE, 3)
         self.assertEqual(G.OUTPUT_CAP, 4)
+        self.assertEqual(G.MAX_OUTPUT_CAP, 32)
 
     def test_timing_summary_uses_synchronized_calls_and_client_wall(self):
         def event(uid, token, tick, call, start, draft=False):
@@ -266,6 +331,8 @@ class Tests(unittest.TestCase):
         self.assertEqual(value["generator_calls"], 2)
         self.assertEqual(value["generator_call_wall_seconds"], 3.4)
         self.assertEqual(value["accepted_draft_tokens"], 3)
+        self.assertEqual(value["flattened_verify_calls"], 0)
+        self.assertEqual(value["flattened_padding_rows"], 0)
         self.assertEqual(value["execution_widths"], [1])
 
     def test_stage_receipt_delta_is_per_call_and_nonnegative(self):

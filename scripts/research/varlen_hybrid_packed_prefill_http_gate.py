@@ -221,7 +221,6 @@ def execute(args,result):
         MLX2_NATIVE_PAGED_MANIFEST=args.artifact_manifest,MLX2_NATIVE_PAGED_MLX_WHEEL=args.mlx_wheel)
     from mlx2.adapters.qwen38_27b import Qwen3827BAdapter,configure_environment
     configure_environment()
-    import mlx.core as mx
     from mlx2 import serving
     from mlx2.server import handler_for
     from mlx2.runtime.generate import BatchGenerator

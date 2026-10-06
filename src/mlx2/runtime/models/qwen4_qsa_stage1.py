@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
-# Adapted from mlx-lm-unified and halo-box/strix-llama.cpp; see
-# docs/PROVENANCE.md and provenance/qsa-stage1-keys-stationary-2026-09-28.json.
+# Adapted from mlx-lm-unified, halo-box/strix-llama.cpp, and jundot/omlx; see
+# docs/PROVENANCE.md and the QSA stage-one provenance records.
 from __future__ import annotations
 
 import math
@@ -11,9 +11,9 @@ from functools import lru_cache
 
 import mlx.core as mx
 
-from .qwen4_qsa_nax import nax_kernel_available
-
 from .import_env import snapshot as _import_env_snapshot
+from .qwen4_qsa_nax import nax_kernel_available
+from .qwen4_qsa_selector import select_scores_direct4, select_scores_direct8
 
 _import_env_snapshot(__name__)
 
@@ -35,6 +35,19 @@ _ONEPASS_TOPK_MIN_BLOCKS = max(
     int(os.environ.get("MLX_QWEN4_QSA_STAGE1_ONEPASS_TOPK_MIN_BLOCKS", "2048")),
 )
 _ONEPASS_TOPK_MAX = 1024
+_DIRECT_SELECTOR_RAW = (
+    os.environ.get("MLX_QWEN4_QSA_STAGE1_DIRECT_SELECTOR", "off").strip().lower()
+)
+_DIRECT_SELECTOR = (
+    _DIRECT_SELECTOR_RAW
+    if _DIRECT_SELECTOR_RAW in {"off", "direct8", "direct4"}
+    else "off"
+)
+_DIRECT_SELECTOR_MIN_BLOCKS = max(
+    1,
+    int(os.environ.get("MLX_QWEN4_QSA_STAGE1_DIRECT_SELECTOR_MIN_BLOCKS", "1")),
+)
+_DIRECT_SELECTOR_MAX = 1024
 _CANDIDATE_STATS_LOCK = threading.Lock()
 _CANDIDATE_STATS = Counter()
 
@@ -51,8 +64,21 @@ def qsa_stage1_candidate_status(*, reset: bool = False) -> dict:
             "onepass_topk_min_blocks": int(_ONEPASS_TOPK_MIN_BLOCKS),
             "onepass_topk_qualification": "rejected_performance",
             "onepass_topk_selected": False,
+            "direct_selector_configured": _DIRECT_SELECTOR,
+            "direct_selector_min_blocks": int(_DIRECT_SELECTOR_MIN_BLOCKS),
+            "direct8_qualification": "qualified_default_off",
+            "direct4_qualification": "qualified_default_off",
+            "direct_selector_selected": False,
             "qualification_receipt": (
                 "qualification/runs/qsa-stage1-pr91-20260928/qualification.json"
+            ),
+            "direct_selector_qualification_receipt": (
+                "qualification/runs/qsa-stage1-direct-selector-20261004/"
+                "qualification-direct8-accepted-final.json"
+            ),
+            "direct_selector_model_receipt": (
+                "qualification/runs/qsa-stage1-direct-selector-20261004/"
+                "model-ab-65k-direct8.json"
             ),
             "default_producer": "mpp_exact_band",
             "default_selector": "radix_exact",
@@ -121,6 +147,12 @@ def qsa_stage1_score_producer(
 def qsa_stage1_selector_producer(*, blocks: int, block_topk: int) -> str:
     """Choose the exact selector without inspecting or evaluating arrays."""
     if (
+        _DIRECT_SELECTOR in {"direct8", "direct4"}
+        and int(blocks) >= _DIRECT_SELECTOR_MIN_BLOCKS
+        and 1 <= int(block_topk) <= min(int(blocks), _DIRECT_SELECTOR_MAX)
+    ):
+        return f"{_DIRECT_SELECTOR}_exact"
+    if (
         _ONEPASS_TOPK
         and int(blocks) >= _ONEPASS_TOPK_MIN_BLOCKS
         and 1 <= int(block_topk) <= min(int(blocks), _ONEPASS_TOPK_MAX)
@@ -133,14 +165,10 @@ def qsa_stage1_route(
     q: mx.array, pooled: mx.array, *, block_topk: int = 512
 ) -> dict[str, str | None]:
     """Describe the scorer and every selector used by a stage-one call."""
-    score_producer = qsa_stage1_score_producer(
-        q, pooled, block_topk=block_topk
-    )
+    score_producer = qsa_stage1_score_producer(q, pooled, block_topk=block_topk)
     uses_exact_band = score_producer.endswith("_exact_band")
     primary_topk = (
-        int(block_topk) + _EXACT_BAND_EXTRA
-        if uses_exact_band
-        else int(block_topk)
+        int(block_topk) + _EXACT_BAND_EXTRA if uses_exact_band else int(block_topk)
     )
     selector = qsa_stage1_selector_producer(
         blocks=int(pooled.shape[1]),
@@ -660,9 +688,24 @@ def _select_scores(
 ) -> mx.array:
     """Select score-column IDs with the configured exact selector."""
     (rows, blocks) = map(int, scores.shape)
-    if qsa_stage1_selector_producer(blocks=blocks, block_topk=topk) == (
-        "onepass_exact"
-    ):
+    producer = qsa_stage1_selector_producer(blocks=blocks, block_topk=topk)
+    if producer == "direct8_exact":
+        _record_candidate_dispatch("direct8_topk_dispatches")
+        return select_scores_direct8(
+            scores,
+            q_positions,
+            topk=topk,
+            compress_ratio=compress_ratio,
+        )
+    if producer == "direct4_exact":
+        _record_candidate_dispatch("direct4_topk_dispatches")
+        return select_scores_direct4(
+            scores,
+            q_positions,
+            topk=topk,
+            compress_ratio=compress_ratio,
+        )
+    if producer == "onepass_exact":
         return _select_scores_onepass(
             scores,
             q_positions,

@@ -28,9 +28,12 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[2]
-MODEL = Path.home() / "mlx-models/Qwen3.8-27B-MLX-4bit"
+MODEL = Path.home() / "mlx-models" / "Qwen3.8-27B-MLX-4bit"
 MANIFEST = Path("/tmp/mlx2-hybrid27b-artifact-1004.json")
-WHEEL = Path.home() / ".cache/uv/sdists-v9/path/6b22317da775785a/d5Co9cAdGp8_XULv/mlx-0.32.2.dev20260919+39400a0d4-cp312-cp312-macosx_26_0_arm64.whl"
+WHEEL = (
+    Path.home()
+    / ".cache/uv/sdists-v9/path/6b22317da775785a/d5Co9cAdGp8_XULv/mlx-0.32.2.dev20260919+39400a0d4-cp312-cp312-macosx_26_0_arm64.whl"
+)
 NATIVE = Path("/tmp/mlx2-n20-large-plane-build-1004/_paged_kv_native.cpython-312-darwin.so")
 NATIVE_SHA256 = "1f67961f3185196c963505568a2443afde289ecb1d4fe6933a20a1132b63396a"
 INPUTS = Path("/tmp/mlx2-spomin400-inputs-d2e10405e.json")
@@ -40,14 +43,19 @@ COHORT_SIZE = 3
 MLP_EXPERIMENTS = (
     "staged_qmm", "single_eval_qmm", "staged_bf16", "single_eval_bf16",
     "tiled_q4_swiglu", "packed_gate_up_qmm")
-# One bootstrap response precedes the K=2 verify, which then emits two
-# accepted draft tokens and one target bonus response.
-OUTPUT_CAP = 4
+# One bootstrap response precedes each K=2 verify, which may then emit two
+# accepted draft tokens and one target bonus response.  The 32-token profile
+# is a continuation diagnostic: it prices repeated online verification after
+# first-token delivery while the ordinary whole-request wall remains the
+# authoritative admission result.
 CAP_PROFILES = {
     "prefill-only": (1, 1, 1),
     "full-k2": (4, 4, 4),
     "shrinking-k2-k1-k0": (4, 3, 2),
+    "continuation-32": (32, 32, 32),
 }
+OUTPUT_CAP = 4
+MAX_OUTPUT_CAP = max(max(caps) for caps in CAP_PROFILES.values())
 FAILURE_ROOTS = []
 
 
@@ -150,11 +158,14 @@ def plan(cap_profile="full-k2", *, performance_measurement=False,
         "measurement_scope": (
             "diagnostic stage-attributed actual loopback HTTP; evaluation fences inserted"
             if diagnostic_stage_profile else
+            "paired actual loopback HTTP continuation diagnostic; cold whole-request wall retained"
+            if cap_profile == "continuation-32" else
             "paired actual loopback HTTP native N3 versus ordinary greedy host-wall performance"
             if performance_measurement else
             "actual loopback HTTP native N3 versus ordinary greedy correctness and lifecycle"),
         "cohort_size": COHORT_SIZE,
         "cap_profile": cap_profile,
+        "continuation_diagnostic": cap_profile == "continuation-32",
         "max_tokens": max(caps),
         "max_tokens_by_lane": list(caps),
         "expected_draft_depths": list(drafts),
@@ -178,8 +189,8 @@ def selected_rows(inputs):
 def request_body(row, *, model, native, inputs_sha256, cap=OUTPUT_CAP,
                  cohort_id="n20-prompt-lookup-http-n3",
                  declared_cohort=False):
-    if type(cap) is not int or not 1 <= cap <= OUTPUT_CAP:
-        raise ValueError("bounded HTTP cap1..4 required")
+    if type(cap) is not int or not 1 <= cap <= MAX_OUTPUT_CAP:
+        raise ValueError(f"bounded HTTP cap1..{MAX_OUTPUT_CAP} required")
     body = {
         **row["body"],
         "model": model,
@@ -280,6 +291,7 @@ def timing_summary(events_by_case, client_timing):
     first = [lane[0]["monotonic_ns"] for lane in events_by_case.values()]
     last = [lane[-1]["monotonic_ns"] for lane in events_by_case.values()]
     calls = {}
+    flattened_calls = {}
     for event in events:
         key = event["generator_call_id"]
         current = (event["generator_call_started_ns"],
@@ -287,6 +299,15 @@ def timing_summary(events_by_case, client_timing):
         if key in calls and calls[key] != current:
             raise RuntimeError("generator call timing attribution differs")
         calls[key] = current
+        receipt = event.get("route_receipt")
+        layout = (receipt.get("ragged_verify_layout", {})
+                  if isinstance(receipt, dict) else {})
+        if layout.get("backend_mode") == "flattened":
+            geometry = tuple(int(layout.get(name, 0)) for name in (
+                "logical_rows", "physical_rows", "padding_rows"))
+            if key in flattened_calls and flattened_calls[key] != geometry:
+                raise RuntimeError("one generator call reported conflicting ragged geometry")
+            flattened_calls[key] = geometry
     began = min(starts)
     ended = max(ends)
     first_any = min(first)
@@ -324,6 +345,10 @@ def timing_summary(events_by_case, client_timing):
             (end - start) / 1e9 for start, end in calls.values()),
         "accepted_draft_tokens": sum(bool(event.get("from_draft"))
                                      for event in events),
+        "flattened_verify_calls": len(flattened_calls),
+        "flattened_logical_rows": sum(value[0] for value in flattened_calls.values()),
+        "flattened_physical_rows": sum(value[1] for value in flattened_calls.values()),
+        "flattened_padding_rows": sum(value[2] for value in flattened_calls.values()),
         "execution_widths": sorted({
             int(event.get("execution_width", 1)) for event in events}),
     }
@@ -333,9 +358,10 @@ def safe_ratio(numerator, denominator):
     return numerator / denominator if denominator else None
 
 
-def summarize(row, response, events, *, native, cap=OUTPUT_CAP,
+def summarize(row, response, events, *, native, cap=4,
               expected_draft=2, expected_query_lengths=(3, 3, 3),
-              expected_round_widths=(3, 3, 3), prefill_only=False):
+              expected_round_widths=(3, 3, 3), prefill_only=False,
+              continuation_diagnostic=False):
     status, body = response
     choices = body.get("choices", [])
     usage = body.get("usage", {})
@@ -366,13 +392,14 @@ def summarize(row, response, events, *, native, cap=OUTPUT_CAP,
                 receipt.get("observed_used") is not True or
                 receipt.get("qualified") is not False or
                 receipt.get("price_usable") is not False or
-                (receipt.get("native_n20_ragged_observed_used", False) is not False
+                (False if continuation_diagnostic else
+                 receipt.get("native_n20_ragged_observed_used", False) is not False
                  if prefill_only else
                  receipt.get("native_n20_ragged_observed_used") is not
                  (expected_draft > 0)) or
                 receipt.get("output_token_ids") != tokens or
                 receipt.get("prefill_cohort_width") != COHORT_SIZE)
-        speculative_differs = not prefill_only and (
+        speculative_differs = not prefill_only and not continuation_diagnostic and (
                 receipt.get("draft_source") != "prompt_lookup" or
                 receipt.get("draft_proposed") != expected_draft or
                 receipt.get("draft_accepted") != expected_draft or
@@ -386,6 +413,31 @@ def summarize(row, response, events, *, native, cap=OUTPUT_CAP,
                 proof.get("physical_counters") != physical_counters(expected_round_widths) or
                 [event.get("from_draft") for event in events] !=
                 [False, *([True] * expected_draft), False])
+        continuation_differs = False
+        if continuation_diagnostic:
+            event_receipts = [event.get("route_receipt") for event in events]
+            structured = [value for value in event_receipts
+                          if isinstance(value, dict)]
+            ragged = [value for value in structured
+                      if value.get("native_n20_ragged_observed_used") is True]
+            accepted = sum(bool(event.get("from_draft")) for event in events)
+            continuation_differs = (
+                len(structured) != len(events) or
+                accepted < 1 or
+                not ragged or
+                any(value.get("route") != "native_hybrid_packed_n20_research"
+                    or value.get("selected") is not True
+                    or value.get("observed_used") is not True
+                    for value in structured) or
+                not any(value.get("draft_source") == "prompt_lookup"
+                        and int(value.get("draft_proposed", 0)) > 0
+                        and int(value.get("draft_accepted", 0)) > 0
+                        and value.get("state_publication") ==
+                            "atomic_selected_executed_prefix"
+                        and value.get("ragged_verify_layout", {}).get(
+                            "backend_mode") == "flattened"
+                        for value in ragged)
+            )
         prefill_only_differs = prefill_only and (
                 receipt.get("draft_proposed", 0) != 0 or
                 receipt.get("draft_accepted", 0) != 0 or
@@ -394,13 +446,17 @@ def summarize(row, response, events, *, native, cap=OUTPUT_CAP,
                 receipt.get("prefill_layout") != "real_rows" or
                 receipt.get("native_prefill_observed_used") is not True or
                 any(event.get("from_draft") for event in events))
-        if base_differs or speculative_differs or prefill_only_differs:
+        if (base_differs or speculative_differs or prefill_only_differs or
+                continuation_differs):
             observed = {key: receipt.get(key) for key in (
                 "route", "selected", "observed_used", "qualified",
                 "price_usable", "native_n20_ragged_observed_used",
                 "draft_proposed", "draft_accepted", "speculative_verification",
                 "prefill_mode", "prefill_layout", "native_prefill_observed_used",
                 "output_token_ids", "prefill_cohort_width")}
+            observed["continuation_diagnostic"] = continuation_diagnostic
+            observed["accepted_draft_events"] = sum(
+                bool(event.get("from_draft")) for event in events)
             raise RuntimeError(
                 "final HTTP native route receipt differs: " + repr(observed))
     elif ((isinstance(receipt, dict) and
@@ -703,7 +759,9 @@ def execute(args, result):
                     cap=cap, expected_draft=draft,
                     expected_query_lengths=queries,
                     expected_round_widths=widths,
-                    prefill_only=args.cap_profile == "prefill-only")
+                    prefill_only=args.cap_profile == "prefill-only",
+                    continuation_diagnostic=(
+                        args.cap_profile == "continuation-32"))
                     for row, response, cap, draft in zip(
                         rows, responses, caps, drafts))
                 retirement = retire_capture(

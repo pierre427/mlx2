@@ -19,6 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACT = Path("/tmp/mlx2-varlen-price-eaed9ea1/artifact.json")
 MODEL = Path("/tmp/mlx2-varlen-price-eaed9ea1/model")
+MLX_LM_SOURCE = Path.home() / "Desktop/mlx-uag/mlx-lm-unified"
 SOURCE = (
     "native/paged_kv/arena.cpp", "native/paged_kv/arena.h",
     "native/paged_kv/binding.cpp", "src/mlx2/runtime/paged_attention_native.py",
@@ -201,8 +202,11 @@ def gpu_run() -> dict:
     sys.path.insert(0, str(ROOT / "scripts/research"))
     from varlen_qwen3_06b_artifact_gate import gpu_gate, preflight as model_preflight
     from varlen_atomic_qwen3_m5_spot import cell as atomic_cell
-    mlx_lm = Path.home() / "Desktop/mlx-uag/mlx-lm-unified"
-    model = gpu_gate(MODEL, mlx_lm, model_preflight(MODEL, mlx_lm))
+    model = gpu_gate(
+        MODEL,
+        MLX_LM_SOURCE,
+        model_preflight(MODEL, MLX_LM_SOURCE),
+    )
     atomic = atomic_cell()
     return {"native_matrix": cells,
             "model_comparisons": model["comparisons"],

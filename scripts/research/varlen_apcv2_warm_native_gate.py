@@ -10,16 +10,17 @@ import platform
 import resource
 import signal
 import subprocess
-import sys
 import threading
-import time
 import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL = Path("/tmp/mlx2-varlen-price-eaed9ea1/model")
 ARTIFACT = Path("/tmp/mlx2-varlen-price-eaed9ea1/artifact.json")
-WHEEL = Path.home() / ".cache/uv/sdists-v9/path/6b22317da775785a/d5Co9cAdGp8_XULv/mlx-0.32.2.dev20260919+39400a0d4-cp312-cp312-macosx_26_0_arm64.whl"
+WHEEL = (
+    Path.home()
+    / ".cache/uv/sdists-v9/path/6b22317da775785a/d5Co9cAdGp8_XULv/mlx-0.32.2.dev20260919+39400a0d4-cp312-cp312-macosx_26_0_arm64.whl"
+)
 KERNEL = Path("/tmp/mlx2-paged-host-wait-6696c546-build/_paged_kv_native.cpython-312-darwin.so")
 
 

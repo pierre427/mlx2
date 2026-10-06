@@ -14,11 +14,6 @@ from mlx2.runtime.paged_request_transaction import CandidateRequest
 RAW = (Path(__file__).resolve().parents[1] /
        "qualification/runs/varlen-live-q1-20261003/attempt-3-calibration.json")
 
-pytestmark = pytest.mark.skipif(
-    not RAW.is_file(),
-    reason="private source-bound research calibration is not in the public export",
-)
-
 
 def _price():
     data = json.loads(RAW.read_text())

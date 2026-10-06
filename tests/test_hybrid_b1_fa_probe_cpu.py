@@ -27,6 +27,9 @@ class B1FAProbeCPU(unittest.TestCase):
         event['offsets']=(1,);probe.candidate_callback(event)
         with self.assertRaises(ValueError):probe.candidate_callback(event)
     def test_same_QKV_oracle_separates_attention_arithmetic(self):
+        mlx_modules_before = {
+            name for name in sys.modules if name == 'mlx' or name.startswith('mlx.')
+        }
         try:import numpy as np
         except ImportError:self.skipTest('CPU numpy absent')
         mx=SimpleNamespace(float32=np.float32,bool_=np.bool_,all=np.all,isfinite=np.isfinite,
@@ -51,7 +54,10 @@ class B1FAProbeCPU(unittest.TestCase):
             self.assertTrue(row['same_QKV_exact']);self.assertTrue(row['same_QKV_native_vs_stock_difference'])
             self.assertEqual(row['metrics']['native_vs_same_QKV_stock_replay']['max_abs'],.125)
             self.assertTrue(row['metrics']['stock_replay_vs_actual_ordinary_attention']['exact'])
-        self.assertFalse(any(name=='mlx' or name.startswith('mlx.') for name in sys.modules))
+        mlx_modules_after = {
+            name for name in sys.modules if name == 'mlx' or name.startswith('mlx.')
+        }
+        self.assertEqual(mlx_modules_after, mlx_modules_before)
     def test_runner_baseline_last_token_projection_and_optional_probe(self):
         source=(ROOT/'scripts/research/varlen_hybrid_b1_numeric_gate.py').read_text()
         self.assertIn('logits=model.logits(hidden[:,-1:,:])[:,-1,:]',source)

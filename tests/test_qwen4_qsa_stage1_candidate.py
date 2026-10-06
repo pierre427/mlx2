@@ -5,6 +5,7 @@ import struct
 from types import SimpleNamespace
 
 from mlx2.runtime.models import qwen4_exp
+from mlx2.runtime.models import qwen4_qsa_selector as direct_selector
 from mlx2.runtime.models import qwen4_qsa_stage1 as stage1
 
 
@@ -65,8 +66,7 @@ def test_keys_stationary_candidate_is_default_off_and_geometry_gated(monkeypatch
     monkeypatch.setattr(stage1, "_KEYS_STATIONARY", True)
     monkeypatch.setattr(stage1, "_KEYS_STATIONARY_MIN_QUERY", 64)
     assert (
-        stage1.qsa_stage1_score_producer(q, pooled)
-        == "mpp_keys_stationary_exact_band"
+        stage1.qsa_stage1_score_producer(q, pooled) == "mpp_keys_stationary_exact_band"
     )
 
     short_q = _tensor((1, 63, 4, 128), stage1.mx.bfloat16)
@@ -89,6 +89,7 @@ def test_keys_stationary_source_keeps_keys_outside_query_loop():
 
 
 def test_onepass_selector_is_default_off_and_size_gated(monkeypatch):
+    monkeypatch.setattr(stage1, "_DIRECT_SELECTOR", "off")
     monkeypatch.setattr(stage1, "_ONEPASS_TOPK", False)
     assert (
         stage1.qsa_stage1_selector_producer(blocks=65536, block_topk=544)
@@ -111,11 +112,46 @@ def test_onepass_selector_is_default_off_and_size_gated(monkeypatch):
     )
 
 
+def test_direct_selector_is_default_off_mode_gated_and_precedes_onepass(
+    monkeypatch,
+):
+    monkeypatch.setattr(stage1, "_DIRECT_SELECTOR", "off")
+    monkeypatch.setattr(stage1, "_ONEPASS_TOPK", False)
+    assert (
+        stage1.qsa_stage1_selector_producer(blocks=65536, block_topk=544)
+        == "radix_exact"
+    )
+
+    monkeypatch.setattr(stage1, "_DIRECT_SELECTOR", "direct8")
+    monkeypatch.setattr(stage1, "_DIRECT_SELECTOR_MIN_BLOCKS", 1)
+    assert (
+        stage1.qsa_stage1_selector_producer(blocks=544, block_topk=512)
+        == "direct8_exact"
+    )
+
+    monkeypatch.setattr(stage1, "_DIRECT_SELECTOR", "direct4")
+    monkeypatch.setattr(stage1, "_ONEPASS_TOPK", True)
+    assert (
+        stage1.qsa_stage1_selector_producer(blocks=65536, block_topk=544)
+        == "direct4_exact"
+    )
+
+    monkeypatch.setattr(stage1, "_DIRECT_SELECTOR_MIN_BLOCKS", 2048)
+    assert (
+        stage1.qsa_stage1_selector_producer(blocks=544, block_topk=512) == "radix_exact"
+    )
+    assert (
+        stage1.qsa_stage1_selector_producer(blocks=65536, block_topk=1025)
+        == "radix_exact"
+    )
+
+
 def test_stage1_route_reports_primary_and_exact_band_refinement(monkeypatch):
     q = _tensor((1, 64, 4, 128), stage1.mx.bfloat16)
     pooled = _tensor((1, 65536, 128), stage1.mx.bfloat16)
     monkeypatch.setattr(stage1, "nax_kernel_available", lambda: True)
     monkeypatch.setattr(stage1, "_KEYS_STATIONARY", True)
+    monkeypatch.setattr(stage1, "_DIRECT_SELECTOR", "off")
     monkeypatch.setattr(stage1, "_ONEPASS_TOPK", True)
     monkeypatch.setattr(stage1, "_ONEPASS_TOPK_MIN_BLOCKS", 2048)
 
@@ -135,6 +171,44 @@ def test_onepass_source_preserves_reference_tie_and_canonicalization_rules():
     assert "chunk_end > WIDTH ? chunk_end - WIDTH" in source
     assert "qsa_id_before" in source
     assert "Oversized buckets fail closed to row rescans" in source
+
+
+def test_direct_selector_source_preserves_reference_tie_and_output_rules():
+    direct8 = inspect.getsource(direct_selector._direct8_kernel)
+    direct4 = inspect.getsource(direct_selector._direct4_kernel)
+
+    assert "for (uint pass = 0u; pass < 8u" in direct8
+    assert "qsa_direct_composite_key" in direct8
+    assert "for (uint pass = 0u; pass < 4u" in direct4
+    assert "valid_count - 1u - reverse" in direct4
+    assert "metal::simd_prefix_exclusive_sum" in direct4
+    assert "larger block IDs win" in direct4
+    assert "qsa_direct_id_before" in direct_selector._SORT_AND_STORE
+
+
+def test_direct_selector_dispatch_is_reached_and_counted(monkeypatch):
+    scores = SimpleNamespace(shape=(3, 4096))
+    positions = object()
+    calls = []
+    sentinel = object()
+
+    def direct4(scores_arg, positions_arg, *, topk, compress_ratio):
+        calls.append((scores_arg, positions_arg, topk, compress_ratio))
+        return sentinel
+
+    monkeypatch.setattr(stage1, "_DIRECT_SELECTOR", "direct4")
+    monkeypatch.setattr(stage1, "_DIRECT_SELECTOR_MIN_BLOCKS", 1)
+    monkeypatch.setattr(stage1, "select_scores_direct4", direct4)
+    stage1.qsa_stage1_candidate_status(reset=True)
+
+    assert (
+        stage1._select_scores(scores, positions, topk=512, compress_ratio=128)
+        is sentinel
+    )
+    assert calls == [(scores, positions, 512, 128)]
+    assert stage1.qsa_stage1_candidate_status()["runtime_counts"] == {
+        "direct4_topk_dispatches": 1
+    }
 
 
 def test_onepass_algorithm_matches_composite_key_reference_with_overflow():
@@ -166,10 +240,14 @@ def test_candidate_dispatch_counts_are_bounded_and_resettable():
     stage1.qsa_stage1_candidate_status(reset=True)
     stage1._record_candidate_dispatch("keys_stationary_dispatches")
     stage1._record_candidate_dispatch("onepass_topk_dispatches")
+    stage1._record_candidate_dispatch("direct8_topk_dispatches")
+    stage1._record_candidate_dispatch("direct4_topk_dispatches")
 
     assert stage1.qsa_stage1_candidate_status()["runtime_counts"] == {
         "keys_stationary_dispatches": 1,
         "onepass_topk_dispatches": 1,
+        "direct8_topk_dispatches": 1,
+        "direct4_topk_dispatches": 1,
     }
     stage1.qsa_stage1_candidate_status(reset=True)
     assert stage1.qsa_stage1_candidate_status()["runtime_counts"] == {}
@@ -196,8 +274,21 @@ def test_stage1_status_reports_and_resets_bounded_receipts(monkeypatch):
         "onepass_topk_min_blocks": stage1._ONEPASS_TOPK_MIN_BLOCKS,
         "onepass_topk_qualification": "rejected_performance",
         "onepass_topk_selected": False,
+        "direct_selector_configured": stage1._DIRECT_SELECTOR,
+        "direct_selector_min_blocks": stage1._DIRECT_SELECTOR_MIN_BLOCKS,
+        "direct8_qualification": "qualified_default_off",
+        "direct4_qualification": "qualified_default_off",
+        "direct_selector_selected": False,
         "qualification_receipt": (
             "qualification/runs/qsa-stage1-pr91-20260928/qualification.json"
+        ),
+        "direct_selector_qualification_receipt": (
+            "qualification/runs/qsa-stage1-direct-selector-20261004/"
+            "qualification-direct8-accepted-final.json"
+        ),
+        "direct_selector_model_receipt": (
+            "qualification/runs/qsa-stage1-direct-selector-20261004/"
+            "model-ab-65k-direct8.json"
         ),
         "default_producer": "mpp_exact_band",
         "default_selector": "radix_exact",

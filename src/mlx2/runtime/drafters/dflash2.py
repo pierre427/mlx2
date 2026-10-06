@@ -152,6 +152,22 @@ class DFlash2DraftModel(DFlashDraftModel):
         super().__init__(config)
         self.candidate_selector = CandidateSelector(config)
 
+    @property
+    def receipt_settings(self):
+        """Effective proposal geometry bound into route and session identity."""
+        return {
+            "trained_block_size": self.config.block_size,
+            "runtime_block_size": self.config.runtime_block_size,
+            "target_layer_ids": list(self.config.target_layer_ids),
+            "selector_top_k": self.config.selector_top_k,
+            "selector_rank": self.config.selector_rank,
+            "conv_kernel_size": self.config.conv_kernel_size,
+            "conv_group_size": self.config.conv_group_size,
+            "proposal_distribution": "categorical_chain_plus_bound_best_first_tree",
+            "tree_ranking": "best_first_cumulative_sibling_log_law",
+            "tree_max_nodes": 15,
+        }
+
     def validate_target_compatibility(self, target_model) -> None:
         # Hybrid targets nest text geometry; they expose it here (mlx2).
         args = getattr(target_model, "speculative_args", target_model.args)
@@ -280,6 +296,42 @@ def _draft_distributions(
     count = min(selector.top_k, logits.shape[-1])
     candidates = mx.argpartition(logits, -count, axis=-1)[..., -count:]
     unary = mx.take_along_axis(logits, candidates, axis=-1)
+    if not any(logits_processors):
+        # Keep the request-bound wrapper path numerically coupled to the
+        # compact pairwise path.  Computing q again through NumPy's float64
+        # softmax changed the proposal CDF even on rows that composition left
+        # external, despite consuming the same uniforms.  Use the compact
+        # f32 walk here too; the dense laws below are only its exact host
+        # representation for the ordinary verifier.
+        scores = self.pairwise_score_table(anchors, features, candidates, unary)
+        uniforms = [
+            [rng.uniform() for _ in range(proposal_length)] for rng in rngs
+        ]
+        token_block, cand_q, invalid = pairwise_walk(
+            candidates, scores, uniforms, temperatures
+        )
+        mx.eval(token_block, candidates, cand_q, invalid)
+        if bool(invalid.any().item()):
+            raise ValueError("Invalid selector scores")
+        token_values = np.asarray(token_block)
+        candidate_values = np.asarray(candidates)
+        probability_values = np.asarray(cand_q.astype(mx.float32)).astype(
+            np.float64
+        )
+        tokens = [
+            [int(token) for token in token_values[row]] for row in range(batch)
+        ]
+        laws = []
+        for row in range(batch):
+            row_laws = []
+            for position in range(proposal_length):
+                law = np.zeros(self.config.vocab_size, dtype=np.float64)
+                law[candidate_values[row, position]] = probability_values[
+                    row, position
+                ]
+                row_laws.append(law)
+            laws.append(row_laws)
+        return tokens, laws
     projected = selector.hidden_projection(features)
     predecessor = anchors
     predecessor_values = list(anchor_values)

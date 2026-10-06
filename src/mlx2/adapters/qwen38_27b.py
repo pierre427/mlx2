@@ -168,19 +168,153 @@ def inspect_artifact(model_path: str | Path) -> dict:
     }
 
 
-def content_revision(model_path: str | Path) -> str:
-    """Content pin of the target: config plus weight index (mlx2).
+def _source_binding(path: Path) -> tuple[int, int, int, int, int]:
+    stat = path.stat()
+    return (
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
 
-    ``identity["fingerprint"]`` also binds shard sizes and mtimes; this pin
-    is what an external-draft policy names so a re-downloaded identical
-    revision still matches while any config or tensor-map change fails.
-    """
-    path = Path(model_path).expanduser().resolve()
+
+def _read_bytes_with_binding(path: Path):
+    before = _source_binding(path)
+    content = path.read_bytes()
+    after = _source_binding(path)
+    if before != after:
+        raise ValueError(f"target source changed while inspecting: {path.name}")
+    return content, before
+
+
+def _file_sha256_with_binding(path: Path):
+    before = _source_binding(path)
     digest = hashlib.sha256()
-    for name in ("config.json", "model.safetensors.index.json"):
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 << 20), b""):
+            digest.update(chunk)
+    after = _source_binding(path)
+    if before != after:
+        raise ValueError(f"target source changed while hashing: {path.name}")
+    return digest.hexdigest(), before
+
+
+def _verify_target_source_bindings(root: Path, records) -> None:
+    if not isinstance(records, list) or not records:
+        raise ValueError("DFlash2 target has no inspected source bindings")
+    for record in records:
+        if (
+            not isinstance(record, (list, tuple))
+            or len(record) != 6
+            or not isinstance(record[0], str)
+        ):
+            raise ValueError("DFlash2 target has an invalid source binding")
+        try:
+            current = _source_binding(root / record[0])
+        except OSError as exc:
+            raise ValueError(
+                f"DFlash2 target source is unavailable: {record[0]}"
+            ) from exc
+        if current != tuple(record[1:]):
+            raise ValueError(f"DFlash2 target source binding changed: {record[0]}")
+
+
+def _load_target_weights(files, *, external_draft: bool, sanitize):
+    """Materialize target shards, omitting an unreachable embedded MTP head.
+
+    External DFlash2 owns proposal generation and cannot execute the target's
+    embedded head. Prune those tensors while they are still lazy so expanded
+    GGUF conversions do not read or retain them. Artifact inspection and the
+    payload pin still cover every indexed shard before this optimization runs.
+    """
+    from ..runtime.ubc_evict import load_shards_evicting
+
+    options = {}
+    if external_draft:
+        options = {
+            "keep_lazy": lambda name: name.startswith(
+                ("language_model.mtp.", "model.language_model.mtp.", "mtp.")
+            ),
+            "prune_lazy": True,
+        }
+    return sanitize(load_shards_evicting(files, **options))
+
+
+def _target_revision_inputs(model_path: str | Path):
+    path = Path(model_path).expanduser().resolve()
+    config_raw, config_binding = _read_bytes_with_binding(path / "config.json")
+    index_raw, index_binding = _read_bytes_with_binding(
+        path / "model.safetensors.index.json"
+    )
+    try:
+        mapping = json.loads(index_raw)["weight_map"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise ValueError("invalid target weight index") from exc
+    if not isinstance(mapping, dict) or not mapping:
+        raise ValueError("target weight index must name at least one tensor")
+    values = list(mapping.values())
+    if any(not isinstance(name, str) for name in values):
+        raise ValueError("target weight index contains an invalid shard path")
+    names = sorted(set(values))
+    if any(
+        not name.endswith(".safetensors")
+        or Path(name).is_absolute()
+        or ".." in Path(name).parts
+        or not (path / name).is_file()
+        for name in names
+    ):
+        raise ValueError("target weight index contains an invalid shard path")
+    source_bindings = [
+        ("config.json", *config_binding),
+        ("model.safetensors.index.json", *index_binding),
+    ]
+    return path, config_raw, index_raw, names, source_bindings
+
+
+def _legacy_content_revision(model_path: str | Path) -> str:
+    """The former metadata-only pin, retained only to diagnose stale policy."""
+    _, config_raw, index_raw, _, _ = _target_revision_inputs(model_path)
+    digest = hashlib.sha256()
+    for name, raw in (
+        ("config.json", config_raw),
+        ("model.safetensors.index.json", index_raw),
+    ):
         digest.update(name.encode())
-        digest.update((path / name).read_bytes())
+        digest.update(raw)
     return digest.hexdigest()
+
+
+def _inspect_target_content(model_path: str | Path) -> dict:
+    path, config_raw, index_raw, names, source_bindings = _target_revision_inputs(
+        model_path
+    )
+    weights = []
+    for name in names:
+        digest, binding = _file_sha256_with_binding(path / name)
+        weights.append([name, binding[2], digest])
+        source_bindings.append((name, *binding))
+    _verify_target_source_bindings(path, source_bindings)
+    record = {
+        "schema": "mlx2.qwen38-target-content.v2",
+        "config_sha256": hashlib.sha256(config_raw).hexdigest(),
+        "index_sha256": hashlib.sha256(index_raw).hexdigest(),
+        "weights": weights,
+    }
+    revision = hashlib.sha256(
+        json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {
+        "path": str(path),
+        "revision": revision,
+        "source_bindings": source_bindings,
+        **record,
+    }
+
+
+def content_revision(model_path: str | Path) -> str:
+    """Payload-bound target pin, stable across byte-identical downloads."""
+    return _inspect_target_content(model_path)["revision"]
 
 
 # External DFlash2 policy keys.  The two revision pins are mandatory: the
@@ -194,6 +328,7 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "adaptive_verification",
         "proposal_composition",
         "continuation_pool",
+        "continuation_strategy",
         "lilicorr_feedback",
         "draft_revision",
         "target_revision",
@@ -257,8 +392,14 @@ def _tree_node_budgets(value, width):
     return normalized
 
 
-def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
-    """Header-only drafter inspection and revision check; no tensor loads."""
+def inspect_external_policy(
+    policy: dict,
+    model_path: str | Path,
+    *,
+    allow_continuation_strategy: bool = False,
+) -> dict:
+    """Static drafter inspection and payload-bound revision check; no tensor loads."""
+    from .dflash2 import _legacy_content_revision as draft_legacy_revision
     from .dflash2 import content_revision as draft_content_revision
     from .dflash2 import inspect_drafter, validate_runtime_quantization
 
@@ -286,6 +427,16 @@ def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
             raise ValueError(f"Qwen3.8 27B external draft policy must pin {key}")
     if policy.get("pairwise_selection", "host") not in ("host", "batched"):
         raise ValueError("pairwise_selection must be 'host' or 'batched'")
+    strategy = policy.get("continuation_strategy")
+    if strategy is not None:
+        if not allow_continuation_strategy:
+            raise ValueError(
+                "continuation_strategy requires an adapter-declared exact cache geometry"
+            )
+        if strategy != "longest_first_exact_prefix":
+            raise ValueError("unsupported continuation_strategy")
+        if "continuation_pool" not in policy:
+            raise ValueError("continuation_strategy requires continuation_pool")
     if "external_varlen_prefill" in policy and type(
         policy["external_varlen_prefill"]
     ) is not bool:
@@ -331,9 +482,9 @@ def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
         source = os.environ.get("MLX2_TENSORFOLD_SOURCE")
         if not source:
             raise ValueError("tree15 bounded route requires MLX2_TENSORFOLD_SOURCE")
-        from ..runtime.qwen38_tensorfold import _validate
+        from .qwen38_tensorfold_source import validate_source
 
-        _validate(Path(source).expanduser().resolve())
+        validate_source(Path(source).expanduser().resolve())
         _tree_node_budgets(
             policy.get("tree_node_budget_by_lanes"),
             _TREE_BATCH_ROUTES[batch_route],
@@ -351,7 +502,13 @@ def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
         raise ValueError("tree node budgets require a batch_size_route")
     elif "tensorfold_cohort_limit" in policy:
         raise ValueError("tensorfold_cohort_limit requires a batch_size_route")
-    target_revision = content_revision(model_path)
+    if policy["target_revision"] == _legacy_content_revision(model_path):
+        raise ValueError(
+            "DFlash2 target revision mismatch: policy uses a legacy "
+            "metadata-only pin; regenerate a payload-bound policy"
+        )
+    target_content = _inspect_target_content(model_path)
+    target_revision = target_content["revision"]
     if target_revision != policy["target_revision"]:
         raise ValueError(
             "DFlash2 target revision mismatch: policy pins "
@@ -360,6 +517,11 @@ def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
     record = inspect_drafter(policy["draft_model"], model_path)
     draft_revision = draft_content_revision(record)
     if draft_revision != policy["draft_revision"]:
+        if policy["draft_revision"] == draft_legacy_revision(record):
+            raise ValueError(
+                "DFlash2 draft revision mismatch: policy uses a legacy "
+                "metadata-only pin; regenerate a payload-bound policy"
+            )
         raise ValueError(
             "DFlash2 draft revision mismatch: policy pins "
             f"{policy['draft_revision'][:12]}, artifact is {draft_revision[:12]}"
@@ -390,6 +552,8 @@ def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
         **record,
         "draft_revision": draft_revision,
         "target_revision": target_revision,
+        "target_path": target_content["path"],
+        "target_source_bindings": target_content["source_bindings"],
         "runtime_quantization": quantization,
     }
 
@@ -502,6 +666,12 @@ def resolve_eos_token_ids(config: dict, tokenizer) -> list[int]:
 
 
 class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
+    # Adapter-owned rather than inherited: this family selects an eight-token
+    # copy ceiling, hence a nine-row target verify/rollback window.
+    # Native self-MTP only. The external TensorFold tree independently owns a
+    # 15-proposal/16-row target verification geometry.
+    max_exact_self_mtp_verification_rows = 9
+    max_exact_self_mtp_rollback_rows = 9
     default_route = "native_mtp"
     # Explicit because Qwen3.8 retains its independently measured threshold
     # instead of inheriting Flash-Next's width-three default.
@@ -535,14 +705,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             "self_mtp_copy_draft": {"enabled": True},
             "decode_first": {"enabled": True, "shared_prefill_budget": False},
         },
-        # Selected 2026-10-05 after an exact 1,680-request A/B-B/A:
-        # 51.441 versus 48.667 aggregate decode tok/s (1.0570x), with zero
-        # pairwise output mismatches.  This does not supply a draft artifact
-        # or select the external route; both remain explicit and revision-bound.
+        # Keep the TensorFold tree topology and its node budgets explicit.
+        # The historical A/B-B/A shared the pinned TensorFold numerical law,
+        # so it cannot select that target after its ordinary-equivalence
+        # evidence was invalidated.  Pairwise draft selection and standalone
+        # target varlen remain independent route-local defaults.
         "external_draft": {
             "pairwise_selection": "batched",
-            "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
-            "tree_node_budget_by_lanes": {1: 15, 2: 7, 3: 4, 4: 3},
             "external_varlen_prefill": True,
             "varlen_dense_mlp": {
                 "enabled": True,
@@ -613,12 +782,12 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     weight_streaming_modes = frozenset({"dense_mlp"})
 
     # Per-layer eager dispatch stays off on the dense 27B: bit-exact, but
-    # neutral end to end in the internal controlled decode comparison.
+    # neutral end to end (native MTP B1 1.001x, ordinary B1 0.996x, B4
+    # 0.995x; qualification/runs/recon-20261001/l7-decode-perf).
     default_eager_dispatch_stride = 0
     # Fused GDN decode (qwen38_fused_gdn) on every route since 2026-10-02
     # (Pierre): bit-identical everywhere (264/264 lanes), ordinary B1-B16
-    # improved ordinary B1-B16 while remaining neutral for MTP in the
-    # internal controlled options sweep.
+    # +1.5..+3.2%, MTP neutral (qualification/runs/options-sweep-27b-20261002).
     # {"fused_gdn": false} in the execution policy is the kill switch.  Read
     # from this class's own __dict__: the Qwen3.5 9B and Qwen3.6 subclasses
     # carry no measurement and keep it off.
@@ -762,7 +931,6 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         from transformers import AutoTokenizer
         from ..runtime.models.qwen38_27b import Model, ModelArgs
         from ..runtime.tokenizer_utils import TokenizerWrapper, BPEStreamingDetokenizer
-        from ..runtime.ubc_evict import load_shards_evicting
 
         # Conversion configs may advertise a head that was stripped from weights.
         config = dict(config)
@@ -792,13 +960,25 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 class_predicate=predicate,
             )
 
+        if draft_record is not None:
+            _verify_target_source_bindings(
+                path, draft_record["target_source_bindings"]
+            )
         if stream_request is None:
-            weights = self.model.sanitize(load_shards_evicting(files))
+            weights = _load_target_weights(
+                files,
+                external_draft=draft_record is not None,
+                sanitize=self.model.sanitize,
+            )
             self.norm_convention = getattr(
                 getattr(self.model, "language_model", None), "norm_convention", None
             )
             quantize(weights)
             self.model.load_weights(list(weights.items()), strict=True)
+            if draft_record is not None:
+                _verify_target_source_bindings(
+                    path, draft_record["target_source_bindings"]
+                )
         else:
             if self.environment.get("MLX_LM_COMPILED_DECODE", "0") != "0":
                 raise ValueError("weight streaming cannot run under compiled decode")
@@ -962,8 +1142,16 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
 
         self._initialize_external_feedback()
+        self._external_execution_started = True
         if hasattr(self.draft_model, "last_continuation_selections"):
             kwargs.setdefault("continuation_pool", self.draft_model.policy)
+            strategy = getattr(self, "continuation_verification_strategy", None)
+            if callable(strategy):
+                selected_strategy = strategy()
+                if selected_strategy is not None:
+                    kwargs.setdefault(
+                        "continuation_verification_strategy", selected_strategy
+                    )
 
         adaptive = self.external_policy.get("adaptive_verification")
         if adaptive is not None:
@@ -1075,6 +1263,15 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             )
             if adaptive is not None:
                 config["adaptive_verification"] = adaptive
+            strategy = getattr(self, "continuation_verification_strategy", None)
+            if callable(strategy):
+                selected_strategy = strategy()
+                if selected_strategy is not None:
+                    config["continuation_verification_strategy"] = (
+                        selected_strategy.as_dict()
+                        if hasattr(selected_strategy, "as_dict")
+                        else selected_strategy
+                    )
             if self.external_policy.get("batch_size_route"):
                 config["batch_size_route"] = self.external_policy["batch_size_route"]
                 config["tensorfold_cohort_limit"] = self.external_policy.get(

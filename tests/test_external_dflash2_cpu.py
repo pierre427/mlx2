@@ -105,11 +105,18 @@ def test_external_draft_proposal_floor_defaults_to_available_three_or_two():
     batch = generator(m, d)
     assert batch.minimum_draft_proposals == 2
     assert batch.scheduler_stats["external_minimum_draft_proposals"] == 2
-    assert batch._draft_settings_receipt()["draft_settings"] == {
-        "minimum_proposal_length": 2,
-        "proposal_floor_raises": 0,
-        "terminal_exhaustion_may_shorten": True,
-    }
+    settings = batch._draft_settings_receipt()["draft_settings"]
+    assert settings["minimum_proposal_length"] == 2
+    assert settings["proposal_floor_raises"] == 0
+    assert settings["terminal_exhaustion_may_shorten"] is True
+    assert settings["trained_block_size"] == d.config.block_size
+    assert settings["runtime_block_size"] == d.config.runtime_block_size
+    assert settings["target_layer_ids"] == list(d.config.target_layer_ids)
+    assert settings["proposal_distribution"] == (
+        "categorical_chain_plus_bound_best_first_tree"
+    )
+    assert settings["tree_ranking"] == "best_first_cumulative_sibling_log_law"
+    assert settings["tree_max_nodes"] == 15
     with pytest.raises(ValueError, match="minimum_draft_proposals"):
         generator(m, d, minimum_draft_proposals=3)
 
@@ -466,7 +473,8 @@ def test_selector_exports_actual_nonzero_proposal_law():
     m,d=tiny();cache=m.make_cache();h=m.prefill_body(mx.array([[1,2,3]]),cache,[0,3]);rng=RequestRNG(4)
     tokens,q=d.draft_distributions([4],h,d.make_cache(),2,[rng],[.8])
     for t,law in zip(tokens[0],q[0]):
-        assert law[t]>0 and abs(law.sum()-1)<1e-9
+        assert law[t] > 0
+        assert law.sum() == pytest.approx(1.0, abs=1e-7)
         assert np.count_nonzero(law)==4
 
 

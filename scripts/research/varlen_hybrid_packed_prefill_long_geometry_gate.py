@@ -17,7 +17,7 @@ import time
 import traceback
 from varlen_hybrid_http_gate import MODEL,MANIFEST,WHEEL
 from varlen_hybrid_serving_smoke import save
-from varlen_hybrid_b1_numeric_gate import tensor_metrics,compare_slots,validate_physical
+from varlen_hybrid_b1_numeric_gate import tensor_metrics,compare_slots
 ROOT=Path(__file__).resolve().parents[2]
 from varlen_packed_long_contract import COUNTS,exact_prompts,validate_q1
 DEFAULT_NATIVE='/tmp/mlx2-packed-long-q1-handoff-build-1004/_paged_kv_native.cpython-312-darwin.so'
@@ -98,7 +98,6 @@ def execute(args,result):
     configure_environment()
     import mlx.core as mx
     from mlx2.runtime import qwen35_paged_graph_factory as resources_module
-    from mlx2.runtime.paged_request_transaction import CandidateRequest
     from varlen_hybrid_ordinary_b2_reference import OrdinaryHybridB2Reference
     adapter=candidate=None;owners=();branches=[];prepared=[]
     initial_charge=resources_module._CHARGED

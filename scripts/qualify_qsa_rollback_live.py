@@ -26,10 +26,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LOCKS = tuple(
-    Path(value) for value in os.environ.get("MLX2_GPU_LOCK_PATHS", "").split(os.pathsep)
-    if value
-)
+LOCKS = (Path("/Users/Shared/mlxuag/gpu.lock"), Path("/tmp/gpu.lock"))
 SCHEMA = "mlx2.qsa-rollback-live-gate.v1"
 LONG_CONTEXT_WORDS = (
     "data the system value table record signal network window object format "
@@ -62,8 +59,6 @@ def _sha256(path: Path) -> str:
 
 
 def _require_parent_locks() -> dict[str, str]:
-    if len(LOCKS) != 2:
-        raise SystemExit("set MLX2_GPU_LOCK_PATHS to the two host lock files")
     if os.environ.get("MLX2_GPU_DUAL_FLOCK_HELD") != "1":
         raise SystemExit("live gate requires MLX2_GPU_DUAL_FLOCK_HELD=1")
     result = {}
@@ -200,7 +195,7 @@ def run(argv: list[str] | None = None) -> int:
         default=0,
         help="Prime this many one-token words into APCv2 before the atomic B2 gate",
     )
-    parser.add_argument("--ownership-receipt", required=True)
+    parser.add_argument("--cpg-lease", required=True)
     parser.add_argument("--i-own-the-gpu", action="store_true")
     args = parser.parse_args(argv)
     if not args.i_own_the_gpu:
@@ -230,7 +225,7 @@ def run(argv: list[str] | None = None) -> int:
             "harness_sha256": _sha256(Path(__file__)),
         },
         "model_path": str(model),
-        "ownership_receipt": args.ownership_receipt,
+        "cpg_lease": args.cpg_lease,
         "gpu_locks": locks,
         "request": {
             "max_context": args.max_context,

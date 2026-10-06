@@ -178,6 +178,64 @@ class Qwen3NextAttention(nn.Module):
 Attention = Qwen3NextAttention
 
 
+def _deep_memory_components(memory: dict) -> tuple[dict, ...]:
+    components = memory.get("components")
+    if components is None:
+        return (memory,)
+    if not isinstance(components, (list, tuple)) or not components:
+        raise ValueError("deep concept memory components must be a nonempty ordered list")
+    if any(not isinstance(component, dict) or "components" in component for component in components):
+        raise ValueError("deep concept memory components must be flat mappings")
+    return tuple(components)
+
+
+def _validate_deep_concept_component(
+    hidden_states: mx.array, memory: dict, *, layer_count: int
+) -> int:
+    """Validate all device geometry before any decoder layer can write cache."""
+    if hidden_states.shape[0] != 1:
+        raise ValueError("deep concept memory requires an isolated B=1 prefill")
+    injection_layer = memory.get("layer")
+    if isinstance(injection_layer, bool) or not isinstance(injection_layer, int):
+        raise ValueError("deep concept memory layer must be an integer")
+    if not 0 <= injection_layer < layer_count:
+        raise ValueError("deep concept memory layer is outside the Qwen trunk")
+    operation = memory.get("operation", "cross_attention_memory")
+    if operation not in {
+        "directional_residual",
+        "continuous_prefix",
+        "cross_attention_memory",
+    }:
+        raise ValueError("unsupported deep concept memory operation")
+    values = memory.get("values")
+    gate = memory.get("gate")
+    hidden = hidden_states.shape[-1]
+    if not isinstance(values, mx.array) or values.ndim != 2 or values.shape[1] != hidden:
+        raise ValueError("deep concept memory values do not match Qwen hidden geometry")
+    if not 1 <= values.shape[0] <= 32:
+        raise ValueError("deep concept memory requires 1..32 values")
+    if not isinstance(gate, (int, float)) or not 0.0 <= float(gate) <= 1.0:
+        raise ValueError("deep concept memory gate is out of bounds")
+    if operation == "directional_residual":
+        if values.shape[0] != 1:
+            raise ValueError("directional residual requires exactly one value")
+        return injection_layer
+    keys = memory.get("keys")
+    temperature = memory.get("temperature")
+    if not isinstance(keys, mx.array) or keys.shape != values.shape:
+        raise ValueError("deep concept memory keys do not match its values")
+    if not isinstance(temperature, (int, float)) or not 0.001 <= float(temperature) <= 1.0:
+        raise ValueError("deep concept memory temperature is out of bounds")
+    order_bias = memory.get("order_bias")
+    if order_bias is not None and (
+        not isinstance(order_bias, mx.array)
+        or order_bias.ndim != 1
+        or order_bias.shape[0] != keys.shape[0]
+    ):
+        raise ValueError("deep concept memory order bias geometry mismatch")
+    return injection_layer
+
+
 def _apply_deep_concept_memory(hidden_states: mx.array, memory: dict) -> mx.array:
     """Attend from the final prompt state into request-scoped concept memory.
 
@@ -185,33 +243,36 @@ def _apply_deep_concept_memory(hidden_states: mx.array, memory: dict) -> mx.arra
     bounded to the final token of an isolated prefill; later decoder layers
     consume the amended state and write ordinary Qwen cache planes.
     """
+    operation = memory.get("operation", "cross_attention_memory")
+    gate = float(memory["gate"])
+    # A disabled learned gate is an exact object-level bypass.  Validation was
+    # already completed before the layer loop, so this does not hide a stale
+    # capsule binding or malformed tensor.
+    if gate == 0.0:
+        return hidden_states
     keys = memory.get("keys")
     values = memory.get("values")
     temperature = memory.get("temperature")
-    gate = memory.get("gate")
-    hidden = hidden_states.shape[-1]
-    if not isinstance(keys, mx.array) or not isinstance(values, mx.array):
-        raise ValueError("deep concept memory requires device key/value arrays")
-    if keys.ndim != 2 or values.shape != keys.shape or keys.shape[1] != hidden:
-        raise ValueError("deep concept memory does not match Qwen hidden geometry")
-    if not 1 <= keys.shape[0] <= 32:
-        raise ValueError("deep concept memory requires 1..32 concepts")
-    if not isinstance(temperature, (int, float)) or not 0.001 <= float(temperature) <= 1.0:
-        raise ValueError("deep concept memory temperature is out of bounds")
-    if not isinstance(gate, (int, float)) or not 0.0 <= float(gate) <= 1.0:
-        raise ValueError("deep concept memory gate is out of bounds")
     query = hidden_states[:, -1:, :].astype(mx.float32)
     query_norm = mx.maximum(mx.linalg.norm(query, axis=-1, keepdims=True), 1e-6)
-    query = query / query_norm
-    keys = keys.astype(mx.float32)
     values = values.astype(mx.float32)
-    keys = keys / mx.maximum(mx.linalg.norm(keys, axis=-1, keepdims=True), 1e-6)
     values = values / mx.maximum(mx.linalg.norm(values, axis=-1, keepdims=True), 1e-6)
-    weights = mx.softmax((query @ keys.T) / float(temperature), axis=-1)
+    if operation == "directional_residual":
+        residual_direction = values[None, :1, :]
+    else:
+        query = query / query_norm
+        keys = keys.astype(mx.float32)
+        keys = keys / mx.maximum(mx.linalg.norm(keys, axis=-1, keepdims=True), 1e-6)
+        logits = (query @ keys.T) / float(temperature)
+        order_bias = memory.get("order_bias")
+        if order_bias is not None:
+            logits = logits + order_bias.astype(mx.float32)[None, None, :]
+        weights = mx.softmax(logits, axis=-1)
+        residual_direction = weights @ values
     # ``gate`` is a relative hidden-state norm, not an absolute embedding
     # delta.  This keeps the bridge meaningful at different depths while
     # bounding it to at most one current-state norm.
-    residual = (float(gate) * query_norm * (weights @ values)).astype(
+    residual = (gate * query_norm * residual_direction).astype(
         hidden_states.dtype
     )
     return mx.concatenate(
@@ -319,17 +380,18 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
             ssm_mask = create_ssm_mask(hidden_states, cache[self.ssm_idx])
         if pipeline_rank < pipeline_size - 1:
             hidden_states = mx.distributed.recv_like(hidden_states, pipeline_rank + 1)
-        injection_layer = None
+        injection_layers = {}
         if deep_concept_memory is not None:
             if pipeline_size != 1:
                 raise ValueError("deep concept memory is not qualified with pipeline parallelism")
-            if hidden_states.shape[0] != 1:
-                raise ValueError("deep concept memory requires an isolated B=1 prefill")
-            injection_layer = deep_concept_memory.get("layer")
-            if isinstance(injection_layer, bool) or not isinstance(injection_layer, int):
-                raise ValueError("deep concept memory layer must be an integer")
-            if not 0 <= injection_layer < len(self.pipeline_layers):
-                raise ValueError("deep concept memory layer is outside the Qwen trunk")
+            # Validate every component before the first decoder layer.  Some
+            # layers write attention or recurrent cache state, so late
+            # validation would leave an invalid request partially committed.
+            for component in _deep_memory_components(deep_concept_memory):
+                layer = _validate_deep_concept_component(
+                    hidden_states, component, layer_count=len(self.pipeline_layers)
+                )
+                injection_layers.setdefault(layer, []).append(component)
         stride = self.eager_dispatch_stride if pipeline_size == 1 else 0
         if stride:
             if hidden_states.shape[0] * hidden_states.shape[1] <= self.eager_dispatch_max_rows:
@@ -344,10 +406,8 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
             if stride and (layer_index == last or (layer_index + 1) % stride == 0):
                 mx.async_eval(hidden_states)
                 _lv.bump("eager_async_evals")
-            if layer_index == injection_layer:
-                hidden_states = _apply_deep_concept_memory(
-                    hidden_states, deep_concept_memory
-                )
+            for component in injection_layers.get(layer_index, ()):
+                hidden_states = _apply_deep_concept_memory(hidden_states, component)
             if hidden_sink is not None and layer_index in capture_layers:
                 # Post-block residual stream, before the final norm: the
                 # tap an external block drafter conditions on.

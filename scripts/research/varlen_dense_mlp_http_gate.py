@@ -38,7 +38,8 @@ MAX_RSS_BY_FAMILY = {
 }
 QWEN4_MODEL = (
     Path.home()
-    / "mlx-models/Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP"
+    / "mlx-models"
+    / "Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP"
 )
 
 

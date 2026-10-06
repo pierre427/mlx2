@@ -91,6 +91,9 @@ class HTTPGateCPU(unittest.TestCase):
             shutdown.assert_called_once_with(wait=False,cancel_futures=True)
     def test_text_first_fixture_real_local_tokenizer_cpu(self):
         # Optional artifact verification: stdlib preflight remains usable elsewhere.
+        mlx_modules_before = {
+            name for name in sys.modules if name == 'mlx' or name.startswith('mlx.')
+        }
         model=Path('~/mlx-models/Qwen3.8-27B-MLX-4bit')
         if not model.is_dir():self.skipTest('local tokenizer artifact absent')
         try:import tokenizers
@@ -104,7 +107,10 @@ class HTTPGateCPU(unittest.TestCase):
             self.assertTrue(text.startswith('Explain database isolation'))
             self.assertEqual(tuple(adapter.prompt_tokens({'prompt':text})),ids)
             self.assertEqual(tuple(adapter.prompt_tokens({'prompt':tokenizer.decode(list(ids))})),ids)
-        self.assertFalse(any(name=='mlx' or name.startswith('mlx.') for name in sys.modules))
+        mlx_modules_after = {
+            name for name in sys.modules if name == 'mlx' or name.startswith('mlx.')
+        }
+        self.assertEqual(mlx_modules_after, mlx_modules_before)
     def test_dry_cli_forbids_runtime_imports(self):
         with tempfile.TemporaryDirectory() as directory:
             out=Path(directory)/'out.json'
