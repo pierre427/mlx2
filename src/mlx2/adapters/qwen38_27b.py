@@ -479,12 +479,9 @@ def inspect_external_policy(
             "MLX2_TENSORFOLD_COHORT_LIMIT",
         )):
             raise ValueError("tree15 bounded route conflicts with explicit topology override")
-        source = os.environ.get("MLX2_TENSORFOLD_SOURCE")
-        if not source:
-            raise ValueError("tree15 bounded route requires MLX2_TENSORFOLD_SOURCE")
         from .qwen38_tensorfold_source import validate_source
 
-        validate_source(Path(source).expanduser().resolve())
+        validate_source()
         _tree_node_budgets(
             policy.get("tree_node_budget_by_lanes"),
             _TREE_BATCH_ROUTES[batch_route],

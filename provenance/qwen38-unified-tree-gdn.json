@@ -2,7 +2,7 @@
   "component": "Qwen3.8 unified mlx2-owned tree and cohort GDN backend",
   "date": "2026-10-06",
   "status": "implemented_host_metal_and_real_route_passed_unqualified_unselected",
-  "source_repository": "https://github.com/pierre427/mlx2.git (branch tensorfold-qwen38-corrected-20261006)",
+  "source_repository": "https://github.com/pierre427/mlx2.git (main, vendored TensorFold projection)",
   "source_revision": "1a5f38e12afbb560d8fc61c88ccb5900f7d5d170",
   "source_tree": "d9d141b99525a8866f48475858d7011fb192c11b",
   "upstream_repository": "https://github.com/ashhart/TensorFold.git",
@@ -20,9 +20,9 @@
   "modifications": [
     "Port the corrected topology-aware packed and split-projection pre, tree recurrence, accepted-path replay and convolution-tail kernels into mlx2 ownership",
     "Replace TensorFold input and parent helpers with local exact equivalents",
-    "Install the mlx2 backend into the pinned TensorFold tree orchestrator after source validation",
+    "Install the mlx2 backend into the vendored, hash-validated TensorFold tree orchestrator",
     "Add backend identity and observed-use counters to TensorFold target receipts",
-    "Keep TensorFold tree attention and row orchestration pinned and externally provenance-checked",
+    "Keep TensorFold tree attention and row orchestration pinned, vendored in mlx2 and provenance-checked",
     "Keep ordinary reference GDN available for unsupported shapes and the explicit fused_gdn false kill switch"
   ],
   "validation": {
@@ -32,5 +32,5 @@
     "qualified": false,
     "selected": false
   },
-  "boundaries": "This ownership port does not qualify or select the DFlash2 route. Tree attention and orchestration remain supplied by the pinned TensorFold checkout; only GDN arithmetic and commit kernels move under mlx2 ownership."
+  "boundaries": "This ownership port does not qualify the DFlash2 route. Tree attention and orchestration are now shipped as a minimal MIT-licensed source projection in mlx2 main; GDN arithmetic and commit kernels remain mlx2-owned."
 }

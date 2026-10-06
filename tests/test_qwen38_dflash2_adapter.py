@@ -205,32 +205,26 @@ def test_external_prefill_coalesce_min_tokens_is_positive_integer(tmp_path, valu
 
 
 @pytest.mark.parametrize("route", ["tree15_b1_chain_b2plus_v1", "tree15_b1_b4_chain_b5plus_v1"])
-def test_bounded_route_requires_pinned_tensorfold_source(tmp_path, monkeypatch, route):
+def test_bounded_route_requires_valid_vendored_tensorfold_source(tmp_path, monkeypatch, route):
     from mlx2.adapters import qwen38_tensorfold_source
     from mlx2.adapters.qwen38_27b import inspect_external_policy
 
     target, draft = _write_artifacts(tmp_path)
     policy = {**_pins(target, draft), "batch_size_route": route}
-    monkeypatch.delenv("MLX2_TENSORFOLD_SOURCE", raising=False)
-    with pytest.raises(ValueError, match="requires MLX2_TENSORFOLD_SOURCE"):
-        inspect_external_policy(policy, target)
-    source = tmp_path / "tensorfold"
-    source.mkdir()
-    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(source))
     checked = []
     monkeypatch.setattr(
         qwen38_tensorfold_source,
         "validate_source",
-        lambda path: checked.append(path),
+        lambda: checked.append("vendored"),
     )
     assert inspect_external_policy(policy, target)["args"].block_size == 8
-    assert checked == [source.resolve()]
+    assert checked == ["vendored"]
 
-    def reject_source(path):
-        raise RuntimeError("TensorFold revision mismatch")
+    def reject_source():
+        raise RuntimeError("vendored TensorFold module mismatch")
 
     monkeypatch.setattr(qwen38_tensorfold_source, "validate_source", reject_source)
-    with pytest.raises(RuntimeError, match="revision mismatch"):
+    with pytest.raises(RuntimeError, match="module mismatch"):
         inspect_external_policy(policy, target)
 
 
@@ -268,7 +262,7 @@ def test_bounded_route_validates_lane_pressure_budgets(
     source = tmp_path / "tensorfold"
     source.mkdir()
     monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(source))
-    monkeypatch.setattr(qwen38_tensorfold_source, "validate_source", lambda _path: None)
+    monkeypatch.setattr(qwen38_tensorfold_source, "validate_source", lambda: None)
     policy = {
         **_pins(target, draft),
         "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
@@ -289,7 +283,7 @@ def test_bounded_route_validates_tensorfold_cohort_limit(
     source = tmp_path / "tensorfold"
     source.mkdir()
     monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(source))
-    monkeypatch.setattr(qwen38_tensorfold_source, "validate_source", lambda _path: None)
+    monkeypatch.setattr(qwen38_tensorfold_source, "validate_source", lambda: None)
     policy = {
         **_pins(target, draft),
         "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",

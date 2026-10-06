@@ -943,11 +943,10 @@ def test_tree_policy_ordinary_inspection_is_host_only(monkeypatch, tmp_path):
     from mlx2.adapters import dflash2, qwen38_27b, qwen38_tensorfold_source
 
     checked = []
-    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(tmp_path))
     monkeypatch.setattr(
         qwen38_tensorfold_source,
         "validate_source",
-        lambda path: checked.append(path) or {"revision": "pinned"},
+        lambda: checked.append("vendored") or {"revision": "pinned"},
     )
     monkeypatch.setattr(qwen38_27b, "_legacy_content_revision", lambda _path: "1" * 64)
     monkeypatch.setattr(
@@ -987,49 +986,38 @@ def test_tree_policy_ordinary_inspection_is_host_only(monkeypatch, tmp_path):
     inspected = qwen38_27b.inspect_external_policy(policy, tmp_path / "target")
     assert inspected["target_revision"] == "2" * 64
     assert inspected["draft_revision"] == "3" * 64
-    assert checked == [tmp_path.resolve()]
+    assert checked == ["vendored"]
     assert mlx_module_names() == []
 
 
-def test_tensorfold_validation_helper_preserves_runtime_revision_error(monkeypatch):
+def test_tensorfold_validation_helper_rejects_changed_vendored_module(
+    monkeypatch, tmp_path
+):
     block_mlx_imports(monkeypatch, __name__)
     from mlx2.adapters import qwen38_tensorfold_source
 
-    def check_output(command, **_kwargs):
-        if command[1:3] == ["rev-parse", "HEAD"]:
-            return "not-the-pin\n"
-        return ""
-
+    module = tmp_path / "module.py"
+    module.write_text("changed = True\n")
+    monkeypatch.setattr(qwen38_tensorfold_source, "VENDORED_ROOT", tmp_path)
     monkeypatch.setattr(
-        qwen38_tensorfold_source.subprocess, "check_output", check_output
+        qwen38_tensorfold_source,
+        "QUALIFICATION_MODULE_SHA256",
+        {"module.py": "0" * 64},
     )
-    with pytest.raises(RuntimeError, match="TensorFold source revision mismatch"):
-        qwen38_tensorfold_source.validate_source("/unused")
+    with pytest.raises(RuntimeError, match="vendored TensorFold module mismatch"):
+        qwen38_tensorfold_source.validate_source()
     runtime_source = (ROOT / "src/mlx2/runtime/qwen38_tensorfold.py").read_text()
     assert "validate_source(root)" in runtime_source
     assert "import subprocess" not in runtime_source
     assert mlx_module_names() == []
 
 
-def test_tensorfold_validation_covers_untracked_full_import_tree(monkeypatch):
+def test_tensorfold_validation_refuses_an_external_source_root(monkeypatch, tmp_path):
     block_mlx_imports(monkeypatch, __name__)
     from mlx2.adapters import qwen38_tensorfold_source
 
-    calls = []
-
-    def check_output(command, **_kwargs):
-        calls.append(command)
-        if command[1:3] == ["rev-parse", "HEAD"]:
-            return qwen38_tensorfold_source.EXPECTED_REVISION + "\n"
-        return "?? src/tensorfold/kernels/inputs.py\n"
-
-    monkeypatch.setattr(
-        qwen38_tensorfold_source.subprocess, "check_output", check_output
-    )
-    with pytest.raises(RuntimeError, match="source tree is dirty"):
-        qwen38_tensorfold_source.validate_source("/unused")
-    assert calls[-1][-1] == "src/tensorfold"
-    assert "--untracked-files=all" in calls[-1]
+    with pytest.raises(RuntimeError, match="must be the vendored mlx2 package"):
+        qwen38_tensorfold_source.validate_source(tmp_path)
     assert mlx_module_names() == []
 
 
@@ -1039,37 +1027,26 @@ def test_tensorfold_qualification_identity_binds_tree_and_module_hashes(
     block_mlx_imports(monkeypatch, __name__)
     from mlx2.adapters import qwen38_tensorfold_source
 
-    module_path = tmp_path / "src/tensorfold/example.py"
-    module_path.parent.mkdir(parents=True)
+    module_path = tmp_path / "example.py"
     module_path.write_text("bound = True\n")
     digest = hashlib.sha256(module_path.read_bytes()).hexdigest()
     monkeypatch.setattr(
         qwen38_tensorfold_source,
-        "validate_source",
-        lambda _root: {
-            "root": str(tmp_path),
-            "revision": qwen38_tensorfold_source.EXPECTED_REVISION,
-            "tracked_source": "src/tensorfold",
-            "tracked_diff": "",
-        },
+        "VENDORED_ROOT",
+        tmp_path,
     )
     monkeypatch.setattr(qwen38_tensorfold_source, "EXPECTED_TREE", "a" * 40)
     monkeypatch.setattr(
         qwen38_tensorfold_source,
         "QUALIFICATION_MODULE_SHA256",
-        {"src/tensorfold/example.py": digest},
+        {"example.py": digest},
     )
-    monkeypatch.setattr(
-        qwen38_tensorfold_source.subprocess,
-        "check_output",
-        lambda *_args, **_kwargs: "a" * 40 + "\n",
-    )
-    identity = qwen38_tensorfold_source.qualification_source_identity(tmp_path)
+    identity = qwen38_tensorfold_source.qualification_source_identity()
     assert identity["tree"] == "a" * 40
-    assert identity["module_sha256"] == {"src/tensorfold/example.py": digest}
+    assert identity["module_sha256"] == {"example.py": digest}
     module_path.write_text("bound = False\n")
-    with pytest.raises(RuntimeError, match="qualification module mismatch"):
-        qwen38_tensorfold_source.qualification_source_identity(tmp_path)
+    with pytest.raises(RuntimeError, match="vendored TensorFold module mismatch"):
+        qwen38_tensorfold_source.qualification_source_identity()
     assert mlx_module_names() == []
 
 

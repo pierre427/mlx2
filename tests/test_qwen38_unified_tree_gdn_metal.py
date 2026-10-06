@@ -2,26 +2,12 @@
 
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
-
 import mlx.core as mx
-import pytest
 
 from mlx2.runtime.models import qwen38_tree_gdn as owned
 
 def _reference():
-    configured = os.environ.get("MLX2_TENSORFOLD_SOURCE")
-    if not configured:
-        pytest.skip("MLX2_TENSORFOLD_SOURCE is required for source-bound parity")
-    tensorfold = Path(configured)
-    if not (tensorfold / "src/tensorfold").is_dir():
-        pytest.skip("MLX2_TENSORFOLD_SOURCE does not contain src/tensorfold")
-    source = str(tensorfold / "src")
-    if source not in sys.path:
-        sys.path.insert(0, source)
-    from tensorfold.kernels.qwen.dense.v1 import lane_glue, stream_gdn
+    from mlx2.runtime.tensorfold_qwen38 import lane_glue, stream_gdn
 
     return stream_gdn, lane_glue
 

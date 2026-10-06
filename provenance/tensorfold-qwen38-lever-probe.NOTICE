@@ -4,8 +4,10 @@ was adapted from TensorFold revision
 
   src/tensorfold/drafters/dflash_tree.py
 
-src/mlx2/runtime/qwen38_tensorfold.py loads TensorFold kernels at runtime from a
-separately pinned local checkout; no kernel source is copied into mlx2.
+The Qwen3.8 tree executor in src/mlx2/runtime/tensorfold_qwen38/ is a minimal
+vendored projection of the reviewed TensorFold kernel slice at revision
+1a5f38e12afbb560d8fc61c88ccb5900f7d5d170.  Imports were rewritten into the
+mlx2 package; mlx2 supplies its corrected owned GDN implementation at runtime.
 
 The source repository is distributed under the MIT License:
 

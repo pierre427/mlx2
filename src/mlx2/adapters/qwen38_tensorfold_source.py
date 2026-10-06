@@ -1,106 +1,62 @@
-"""Host-only identity validation for the pinned Qwen3.8 TensorFold source."""
+"""Identity validation for mlx2's vendored Qwen3.8 TensorFold executor."""
 
 from __future__ import annotations
 
 import hashlib
-import subprocess
 from pathlib import Path
 
 EXPECTED_REVISION = "1a5f38e12afbb560d8fc61c88ccb5900f7d5d170"
 EXPECTED_TREE = "d9d141b99525a8866f48475858d7011fb192c11b"
-TRACKED_SOURCE = "src/tensorfold"
+VENDORED_SOURCE = "src/mlx2/runtime/tensorfold_qwen38"
+VENDORED_ROOT = Path(__file__).resolve().parents[1] / "runtime" / "tensorfold_qwen38"
 QUALIFICATION_MODULE_SHA256 = {
-    "src/tensorfold/families/qwen3_5/__init__.py": (
-        "1b3501c5713a3c289f912620359290335b44b3ab8f16d28ec4fc76ded41e9546"
-    ),
-    "src/tensorfold/kernels/qwen/dense/v1/lane_fuse.py": (
-        "c993ee6aa40b1b3b35e8df8095581f1a029b22a70238ea7bca8d0b56ace1abd0"
-    ),
-    "src/tensorfold/kernels/qwen/dense/v1/lane_glue.py": (
-        "6346d180310ed4b066e0615a9009cbe2575f2798e71da1742fa53e083919c715"
-    ),
-    "src/tensorfold/kernels/qwen/dense/v1/lane_multi.py": (
-        "b122e496f9ae9620717bbaa16c23e523ea8adaead5b111bddc75bb0beced5be3"
-    ),
-    "src/tensorfold/kernels/qwen/dense/v1/row_glue.py": (
-        "5da32bedf4bbc9402be5fe68fde10b50ffae5d1c5e97c74cdd297724b0918bdf"
-    ),
-    "src/tensorfold/kernels/qwen/dense/v1/row_streams.py": (
-        "9fa0fb3787f34c817847bc95e3fb7a1b336c01cf1e2df7fd0a50d130d5e8c13d"
-    ),
-    "src/tensorfold/kernels/qwen/dense/v1/stream_attention.py": (
-        "7646c12946cdd990b76265c5664276033ce0597b60d40c11e0c8f9faa6dcd288"
-    ),
-    "src/tensorfold/kernels/qwen/dense/v1/stream_gdn.py": (
-        "53531129f56eacedc83d5778189bae358be46c2832967fc6d92e8f3f4e86a892"
-    ),
+    "__init__.py": "95ab120332366704fc5aeaac38a96c4cd85695e96d151eae6f8374028bdb855c",
+    "inputs.py": "e13ffabe1a413781c846f50aeb69181ecb668a2ef8860311ae1222f96fcaf32c",
+    "lane_attention.py": "fc66173e75b660c069011eb15d63ca51368132f017c55fc49d5c91c6529efd91",
+    "lane_fuse.py": "af84f208d1bd718afddbb263a4f049e803764345fee972cc8a87bb81016b5831",
+    "lane_glue.py": "aece8b0239e0960e88a929b8abb35ccfedfaab2f557087ab6b2f11003f89f899",
+    "lane_multi.py": "d2b7d81038eec7e1cf035eddf340e28d5ff0a776f28feb8ce4252ade67624884",
+    "lane_qmm.py": "02ee84c02a46e2b91ca3d77806fc57f0e19003115e766d975dbe9f1eefc158ac",
+    "lane_tree.py": "e6de53828708e4833fcf390bc1dd330377cbdd26629da235c9728822770b5839",
+    "lane_widen.py": "66369189f5300c06af754c0d867b7f50a55519aadb2342fe05785275767e8b77",
+    "stream_attention.py": "cf3560e44bdf4789f7a0dc1cd6fe5c6760364347db0558dc5b97c10945ff63a0",
+    "stream_gdn.py": "f120c8c25c5e2712ee214b770200d621b7d0824acb01cafc8f1a9b04ababc9a0",
 }
 
 
-def inspect_source(root: str | Path) -> dict[str, str]:
-    """Return the source identity without importing TensorFold or MLX."""
+def inspect_source(root: str | Path | None = None) -> dict[str, str]:
+    """Return the in-package source identity without importing MLX."""
 
-    path = Path(root).expanduser().resolve()
-    revision = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=path, text=True
-    ).strip()
-    tracked_diff = subprocess.check_output(
-        [
-            "git",
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-            "--",
-            TRACKED_SOURCE,
-        ],
-        cwd=path,
-        text=True,
-    ).strip()
+    path = VENDORED_ROOT if root is None else Path(root).expanduser().resolve()
+    if path != VENDORED_ROOT:
+        raise RuntimeError(
+            f"Qwen3.8 TensorFold source must be the vendored mlx2 package: {VENDORED_ROOT}"
+        )
     return {
         "root": str(path),
-        "revision": revision,
-        "tracked_source": TRACKED_SOURCE,
-        "tracked_diff": tracked_diff,
+        "revision": EXPECTED_REVISION,
+        "tree": EXPECTED_TREE,
+        "tracked_source": VENDORED_SOURCE,
+        "tracked_diff": "",
     }
 
 
-def validate_source(root: str | Path) -> dict[str, str]:
-    """Require the pinned clean source tree and return its host-only identity."""
+def validate_source(root: str | Path | None = None) -> dict[str, str]:
+    """Require every vendored module to match the reviewed source projection."""
 
     identity = inspect_source(root)
-    revision = identity["revision"]
-    if revision != EXPECTED_REVISION:
-        raise RuntimeError(
-            f"TensorFold source revision mismatch: {revision}, "
-            f"expected {EXPECTED_REVISION}"
-        )
-    if identity["tracked_diff"]:
-        raise RuntimeError(
-            "TensorFold source tree is dirty:\n" + identity["tracked_diff"]
-        )
-    return identity
-
-
-def qualification_source_identity(root: str | Path) -> dict:
-    """Bind the corrected source tree and qualification-relevant modules."""
-
-    identity = validate_source(root)
-    path = Path(identity["root"])
-    tree = subprocess.check_output(
-        ["git", "rev-parse", "HEAD^{tree}"], cwd=path, text=True
-    ).strip()
-    if tree != EXPECTED_TREE:
-        raise RuntimeError(
-            f"TensorFold source tree mismatch: {tree}, expected {EXPECTED_TREE}"
-        )
-    modules = {}
     for name, expected in QUALIFICATION_MODULE_SHA256.items():
-        module_path = path / name
+        module_path = VENDORED_ROOT / name
         digest = hashlib.sha256(module_path.read_bytes()).hexdigest()
         if digest != expected:
             raise RuntimeError(
-                f"TensorFold qualification module mismatch: {name}: "
-                f"{digest}, expected {expected}"
+                f"vendored TensorFold module mismatch: {name}: {digest}, expected {expected}"
             )
-        modules[name] = digest
-    return {**identity, "tree": tree, "module_sha256": modules}
+    return identity
+
+
+def qualification_source_identity(root: str | Path | None = None) -> dict:
+    """Return the revision, tree and module hashes bound by qualification."""
+
+    identity = validate_source(root)
+    return {**identity, "module_sha256": dict(QUALIFICATION_MODULE_SHA256)}

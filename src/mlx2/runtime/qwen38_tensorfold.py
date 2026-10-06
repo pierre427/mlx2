@@ -1,8 +1,8 @@
-"""Default-off TensorFold Qwen3.8 target executor for lever measurement.
+"""Vendored TensorFold Qwen3.8 target executor for the bounded tree route.
 
-This module imports kernels from an explicitly pinned local TensorFold source
-checkout. It is an experimental probe, not a qualified serving dependency.
-See ``provenance/tensorfold-qwen38-lever-probe.json``.
+The reviewed TensorFold kernel slice lives inside mlx2 and is hash-validated
+before use.  The route remains a candidate until its serving qualification is
+complete; repository ownership does not itself qualify it.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import mlx.core as mx
 
 from ..adapters.qwen38_tensorfold_source import (
     EXPECTED_REVISION,
+    VENDORED_ROOT,
     validate_source,
 )
 
@@ -22,15 +23,19 @@ from ..adapters.qwen38_tensorfold_source import (
 # The cached executor imports them all at validation so a later lazy import
 # cannot read a checkout that changed after its revision was checked.
 _KERNEL_MODULES = (
-    "tensorfold.kernels.qwen.dense.v1.lane_tree",
-    "tensorfold.kernels.qwen.dense.v1.lane_multi",
-    "tensorfold.kernels.qwen.dense.v1.lane_fuse",
-    "tensorfold.kernels.qwen.dense.v1.lane_glue",
-    "tensorfold.kernels.qwen.dense.v1.stream_attention",
-    "tensorfold.kernels.qwen.dense.v1.stream_gdn",
+    "mlx2.runtime.tensorfold_qwen38.lane_tree",
+    "mlx2.runtime.tensorfold_qwen38.lane_multi",
+    "mlx2.runtime.tensorfold_qwen38.lane_fuse",
+    "mlx2.runtime.tensorfold_qwen38.lane_glue",
+    "mlx2.runtime.tensorfold_qwen38.stream_attention",
+    "mlx2.runtime.tensorfold_qwen38.stream_gdn",
+)
+_EXTERNAL_KERNEL_MODULES = tuple(
+    name.replace("mlx2.runtime.tensorfold_qwen38", "tensorfold.kernels.qwen.dense.v1")
+    for name in _KERNEL_MODULES
 )
 
-# Resolved source root -> validated lane_tree module (MLX2_TENSORFOLD_CACHE_EXECUTOR).
+# One validated vendored lane_tree module (MLX2_TENSORFOLD_CACHE_EXECUTOR).
 _EXECUTORS = {}
 
 # The imported TensorFold tree kernel owns a B1 cache record.  mlx2 may queue
@@ -39,7 +44,7 @@ _EXECUTORS = {}
 MAX_COHORT_LANES = 4
 
 
-def _install_owned_gdn(source_root: Path) -> None:
+def _install_owned_gdn(source_root: Path | None = None) -> None:
     """Replace TensorFold's GDN leaf with mlx2's provenance-pinned backend.
 
     TensorFold continues to own tree attention and row orchestration.  GDN
@@ -48,10 +53,17 @@ def _install_owned_gdn(source_root: Path) -> None:
     arithmetic contract.
     """
 
-    external = importlib.import_module(
-        "tensorfold.kernels.qwen.dense.v1.stream_gdn"
+    package = (
+        "mlx2.runtime.tensorfold_qwen38"
+        if source_root is None
+        else "tensorfold.kernels.qwen.dense.v1"
     )
-    expected = (source_root / "src").resolve()
+    external = importlib.import_module(f"{package}.stream_gdn")
+    expected = (
+        VENDORED_ROOT.resolve()
+        if source_root is None
+        else (source_root / "src").resolve()
+    )
     if not Path(external.__file__).resolve().is_relative_to(expected):
         raise RuntimeError(
             "TensorFold GDN module was not imported from the validated source"
@@ -63,7 +75,7 @@ def _install_owned_gdn(source_root: Path) -> None:
     external.MAX_STREAMS = owned.MAX_STREAMS
     external.MAX_TREE = owned.MAX_TREE
     external.MLX2_BACKEND = owned.stats()["backend"]
-    lane_glue = importlib.import_module("tensorfold.kernels.qwen.dense.v1.lane_glue")
+    lane_glue = importlib.import_module(f"{package}.lane_glue")
     if not Path(lane_glue.__file__).resolve().is_relative_to(expected):
         raise RuntimeError(
             "TensorFold GDN glue module was not imported from the validated source"
@@ -77,28 +89,29 @@ def gdn_backend_stats() -> dict:
     return stats()
 
 
-def _validate(root):
+def _validate(root=None):
     validate_source(root)
 
 
 def _import(root, names):
-    source = str(root / "src")
-    if source not in sys.path:
-        sys.path.insert(0, source)
+    expected = VENDORED_ROOT.resolve()
+    if root is not None:
+        source = str(root / "src")
+        if source not in sys.path:
+            sys.path.insert(0, source)
+        expected = Path(source).resolve()
     modules = [importlib.import_module(name) for name in names]
     for module in modules:
-        # sys.modules is keyed by name, not checkout: a module already
-        # imported from another root must not pass as this root's.
-        if not Path(module.__file__).resolve().is_relative_to(Path(source).resolve()):
+        if not Path(module.__file__).resolve().is_relative_to(expected):
             raise RuntimeError(
                 f"TensorFold module {module.__name__} was imported from "
-                f"{module.__file__}, not the validated source {source}"
+                f"{module.__file__}, not the validated source {expected}"
             )
     return modules[0]
 
 
-def _modules(source_root, *, cached=False):
-    """Return ``(lane_tree, cache_hit)`` for a revision-checked source root.
+def _modules(source_root=None, *, cached=False):
+    """Return ``(lane_tree, cache_hit)`` for the hash-checked vendored source.
 
     Uncached (the default) re-runs ``git rev-parse`` for every forward.
     Cached validates each resolved root once per process and then reuses the
@@ -106,17 +119,19 @@ def _modules(source_root, *, cached=False):
     so a per-call revision check adds a subprocess without adding safety.
     """
 
-    root = Path(source_root).resolve()
+    root = None if source_root is None else Path(source_root).resolve()
+    key = "vendored" if root is None else root
+    names = _KERNEL_MODULES if root is None else _EXTERNAL_KERNEL_MODULES
     if cached:
-        module = _EXECUTORS.get(root)
+        module = _EXECUTORS.get(key)
         if module is not None:
             _install_owned_gdn(root)
             return module, True
     _validate(root)
-    module = _import(root, _KERNEL_MODULES if cached else _KERNEL_MODULES[:1])
+    module = _import(root, names if cached else names[:1])
     _install_owned_gdn(root)
     if cached:
-        _EXECUTORS[root] = module
+        _EXECUTORS[key] = module
     return module, False
 
 
@@ -290,7 +305,9 @@ def _forward(lane_tree, model, tokens, parents, cache, capture_layers, *, cached
     return logits, features, transaction
 
 
-def forward(model, tokens, parents, cache, capture_layers, source_root, *, cached=False):
+def forward(
+    model, tokens, parents, cache, capture_layers, source_root=None, *, cached=False
+):
     """Return logits, target taps, and an exact arbitrary-path transaction."""
 
     lane_tree, hit = _modules(source_root, cached=cached)
@@ -307,7 +324,7 @@ def forward_many(
     parent_rows,
     caches,
     capture_layers,
-    source_root,
+    source_root=None,
     *,
     cached=False,
 ):
@@ -339,11 +356,15 @@ def forward_many(
     ):
         raise ValueError("TensorFold cohort requires uniform token/parent widths")
 
-    root = Path(source_root).resolve()
+    root = None if source_root is None else Path(source_root).resolve()
     lane_tree, hit = _modules(root, cached=cached)
     lane_multi = _import(
         root,
-        ("tensorfold.kernels.qwen.dense.v1.lane_multi",),
+        (
+            "mlx2.runtime.tensorfold_qwen38.lane_multi"
+            if root is None
+            else "tensorfold.kernels.qwen.dense.v1.lane_multi",
+        ),
     )
     capture_layers = tuple(int(index) for index in capture_layers)
     storage = _capture_storage(model, capture_layers, cached)

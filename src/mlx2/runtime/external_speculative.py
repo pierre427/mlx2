@@ -564,12 +564,10 @@ class ExternalDraftBatchGenerator:
             raise ValueError(
                 "MLX2_QWEN_TARGET_EXECUTION must be reference or tensorfold"
             )
-        if self.target_execution == "tensorfold" and not os.environ.get(
-            "MLX2_TENSORFOLD_SOURCE"
-        ):
-            raise ValueError(
-                "TensorFold target execution requires MLX2_TENSORFOLD_SOURCE"
-            )
+        if self.target_execution == "tensorfold":
+            from ..adapters.qwen38_tensorfold_source import validate_source
+
+            validate_source()
         self.tree_gates = _tree_gates(
             self.draft_topology, self.target_execution,
             default_on=dynamic_singleton_tree,
@@ -1735,7 +1733,6 @@ class ExternalDraftBatchGenerator:
             parents,
             lane.cache,
             self.layers,
-            os.environ["MLX2_TENSORFOLD_SOURCE"],
             cached=cached,
         )
         self._record_tensorfold_dispatch([lane])
@@ -1768,7 +1765,6 @@ class ExternalDraftBatchGenerator:
             parents,
             [lane.cache for lane in cohort],
             self.layers,
-            os.environ["MLX2_TENSORFOLD_SOURCE"],
             cached=cached,
         )
         self._record_tensorfold_dispatch(cohort)
