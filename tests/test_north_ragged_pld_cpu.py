@@ -128,14 +128,14 @@ def test_pld_final_cache_stops_before_pending_anchor_and_resumes_exactly(
         full = list(prompts[lane]) + speculative["tokens"]
 
         assert speculative["tokens"] == reference["tokens"]
-        assert reference["all_tokens"] == full
-        assert reference["covered_tokens"] == len(full)
-
-        # PLD has forwarded and committed every token except the final sample,
-        # which is the pending anchor for the next target forward.
+        # Ordinary and PLD both retain the producing forward's authoritative
+        # cache: every token except the final delivered sample, which remains
+        # the pending anchor for the next target forward.
+        assert reference["all_tokens"] == full[:-1]
+        assert reference["covered_tokens"] == len(full) - 1
         assert speculative["all_tokens"] == full[:-1]
         assert speculative["covered_tokens"] == len(full) - 1
-        assert speculative["covered_tokens"] == reference["covered_tokens"] - 1
+        assert speculative["covered_tokens"] == reference["covered_tokens"]
 
         resumed = speculative["continuation"]
         assert resumed["status"] == "complete"

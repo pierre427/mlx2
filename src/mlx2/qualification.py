@@ -63,6 +63,8 @@ APPROVED_QUALIFICATION_HARNESS = {
     # deliberately poison sys.modules/sys.meta_path now run in fresh import-
     # guard interpreters instead of contaminating later collection. Receipts
     # from f20fe750... must be regenerated.
+    # Re-pinned 2026-10-06 (Qwen3.8 corrected fused GDN): observations include
+    # admitted verify/prefill calls alongside one-token decode engagements.
     # Re-pinned 2026-10-05 (external-prefill identity): feature observations
     # now require paired run-local counter deltas for dense/sparse live-row
     # compaction and Qwen external packed prefill, plus target-width ingress
@@ -90,7 +92,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # (8a2ced1d..., NAX gather default) must be regenerated.
     # Re-pinned 2026-10-02 (flip integrate): benchmark_adaptive_mtp.py model
     # defaults now use Path.home(), so APPROVED_ADAPTIVE_BENCHMARK_SHA256 moved.
-    "sha256": "5e31876aedc2c6632ab097ead5defde6b0a48c321c4ca2c502aae7d96d8b51d5",
+    "sha256": "3e5d898a72cd957e6f841a50673cc5d331582fb6d9a090b500a0a36ba6aaf733",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -546,7 +548,7 @@ def _default_on_mechanisms(settings):
     if _environment_mode_enabled(env.get("MLX_QWEN4_MOE_ROUTED_DECODE")):
         required.add("moe_routed_decode")
     if env.get("MLX2_QWEN38_FUSED_GDN") == "1":
-        # Qwen3.8-27B: one-token decode on the shared fused kernels.
+        # Qwen3.8-27B: decode and admitted bounded multi-token blocks.
         required.add("qwen38_fused_gdn")
     invariant = bool((settings.get("prefill_execution") or {}).get("invariant"))
     if moe_nax_gather_selection(settings) in {"gather", "fused"}:

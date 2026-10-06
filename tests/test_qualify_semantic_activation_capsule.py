@@ -12,6 +12,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+MLX_MODULES_AT_COLLECTION = frozenset(
+    name for name in sys.modules if name == "mlx" or name.startswith("mlx.")
+)
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/research/qualify_semantic_activation_capsule.py"
 SPEC = importlib.util.spec_from_file_location("semantic_activation_gate", SCRIPT)
@@ -19,6 +22,9 @@ assert SPEC and SPEC.loader
 gate = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = gate
 SPEC.loader.exec_module(gate)
+MLX_MODULES_AFTER_GATE_IMPORT = frozenset(
+    name for name in sys.modules if name == "mlx" or name.startswith("mlx.")
+)
 
 
 def _owner(path: Path, *, lease: str = "lease-1", cpg: bool = True) -> None:
@@ -29,7 +35,7 @@ def _owner(path: Path, *, lease: str = "lease-1", cpg: bool = True) -> None:
 
 
 def test_import_and_default_path_are_host_only():
-    assert not any(name == "mlx" or name.startswith("mlx.") for name in sys.modules)
+    assert MLX_MODULES_AFTER_GATE_IMPORT == MLX_MODULES_AT_COLLECTION
     assert gate.DEFAULT_RECEIPT.parts[-3:] == (
         "artifacts",
         "research",
@@ -204,6 +210,9 @@ def test_artifact_manifest_recomputes_weight_and_envelope_fingerprints(tmp_path)
 
 
 def test_real_arm_payloads_round_trip_through_strict_core_store(tmp_path):
+    mlx_modules_before = frozenset(
+        name for name in sys.modules if name == "mlx" or name.startswith("mlx.")
+    )
     from mlx2.runtime.neural_concepts import (
         NeuralConceptArtifact,
         RecurrentConceptEncoder,
@@ -245,4 +254,6 @@ def test_real_arm_payloads_round_trip_through_strict_core_store(tmp_path):
         payloads["ordered"]["tensors"]["prefix"],
         payloads["reversed"]["tensors"]["prefix"],
     )
-    assert not any(name == "mlx" or name.startswith("mlx.") for name in sys.modules)
+    assert frozenset(
+        name for name in sys.modules if name == "mlx" or name.startswith("mlx.")
+    ) == mlx_modules_before
