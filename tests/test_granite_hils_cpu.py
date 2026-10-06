@@ -15,7 +15,7 @@ from mlx2.adapters.olmo_hils import inspect_artifact as inspect_hils
 from mlx2.contracts import Capability
 
 GRANITE_ROOT = Path("~/mlx-models")
-HILS_ROOT = Path("~/Desktop/mlx-uag/models")
+HILS_ROOT = Path("~/mlx-models")
 
 
 def _require_artifact(path):
@@ -71,7 +71,7 @@ sys.meta_path.insert(0, Block())
 from mlx2.adapters.granite_swa import inspect_artifact as g
 from mlx2.adapters.olmo_hils import inspect_artifact as h
 g("~/mlx-models/granite-swash-3b-a600m")
-h("~/Desktop/mlx-uag/models/HiLS-Attention-7B-q6")
+h("~/mlx-models/HiLS-Attention-7B-q6")
 assert "mlx.core" not in sys.modules
 '''
     proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)

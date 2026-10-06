@@ -22,7 +22,12 @@ DESCRIPTOR = ModelDescriptor(
                             Capability.PREFIX_REUSE, Capability.APC_V2, Capability.LAYERED_CACHE}),
     cache_layout="granite-swash-full-swa-kv-v1",
     metadata={"execution": "mlx2.adapters.granite_swa.GraniteSWAAdapter",
-              "qualification": "pending", "scope": "ordinary text only"},
+              "qualification": "pending", "scope": "ordinary text only",
+              "proposal_strategy": {
+                  "algorithm": "longest-first-exact-prefix-v1",
+                  "implemented": True, "qualified": False, "selected": False,
+                  "observed_used": False,
+              }},
 )
 
 # The local generation_config.json has do_sample=true and no sampling fields.
@@ -144,6 +149,36 @@ class GraniteSWAAdapter(OrdinaryTextAdapter):
     descriptor = DESCRIPTOR
     sampling_defaults = SAMPLING
     profile = "granite-swash-apcv2-ordinary"
+
+    def prefill_step_default(self):
+        """Own the 8K artifact's 512-token prefill rung.
+
+        This equals the generic prompt-length schedule at Granite's maximum
+        context, but records the family decision explicitly.  Operator input
+        still wins in ``ServingEngine``.
+        """
+        return 512
+
+    def proposal_verification_strategy(self, prompt_cache):
+        """Describe the default-off strategy only after exact cache validation."""
+        geometry = self.model.exact_prefix_reuse_contract(prompt_cache)
+        return {
+            "algorithm": "longest-first-exact-prefix-v1",
+            "ordering": "longest_first_stable",
+            "pruning": "authoritative_accepted_plus_correction_prefix",
+            "shared_prefix": "reuse_committed_cache_without_recompute",
+            "cache_geometry": geometry,
+            "implemented": True,
+            "qualified": False,
+            "selected": False,
+            "observed_used": False,
+        }
+
+    def diagnostics(self):
+        return {
+            **super().diagnostics(),
+            "proposal_strategy": dict(self.descriptor.metadata["proposal_strategy"]),
+        }
 
     def __init__(self, model_path: str, *, execution_policy=None):
         if execution_policy not in (None, {}):

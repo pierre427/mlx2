@@ -331,7 +331,7 @@ def _values_per_thread(bits: int, fast: bool) -> int:
 
 def decline_reason(linear, x: mx.array) -> str | None:
     """Why the kernel does not cover ``linear`` at ``x`` (None when it does)."""
-    if not isinstance(linear, nn.QuantizedLinear):
+    if not isinstance(linear, (nn.QuantizedLinear, nn.QuantizedEmbedding)):
         return "not_quantized_linear"
     if mx.default_device() != mx.gpu or not mx.metal.is_available():
         return "device"

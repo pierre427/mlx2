@@ -368,6 +368,8 @@ def configure_environment(kernels=None, moe_nax_gather=None) -> dict[str, str]:
 
 
 class Qwen3635BA3BAdapter(Qwen3827BAdapter):
+    EXTERNAL_PROFILE = "qwen36-35b-a3b-apcv2-dflash2"
+    EXTERNAL_ROUTE_TAG = "qwen36-dflash2-v1"
     # Native MTP, restored 2026-09-20 once the wide-cohort ordinary handoff
     # removed the reason it was demoted.  The 2026-09-19 demotion to ordinary
     # was correct on its own evidence: native MTP matched ordinary
@@ -450,6 +452,42 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
+        self.external_policy = {}
+        self.draft_model = None
+        draft_record = None
+        if "draft_model" in policy:
+            if require_mtp:
+                raise ValueError("External draft is not native MTP")
+            if stream_request is not None:
+                raise ValueError(
+                    "Qwen3.6 expert streaming refuses the external draft route"
+                )
+            allowed = {
+                "draft_model",
+                "num_draft",
+                "pairwise_selection",
+                "adaptive_verification",
+                "continuation_pool",
+                "continuation_strategy",
+                "draft_revision",
+                "target_revision",
+                "draft_quantization",
+            }
+            unknown = set(policy) - allowed
+            if unknown:
+                raise ValueError(
+                    f"Qwen3.6 external draft policy has unknown keys: {sorted(unknown)}"
+                )
+            from .qwen38_27b import inspect_external_policy
+
+            draft_record = inspect_external_policy(
+                policy,
+                model_path,
+                allow_continuation_strategy=True,
+            )
+            self.external_policy = policy
+            self._check_num_draft(draft_record)
+            policy = {}
         if set(policy) - {
             "num_draft",
             "gdn_state_dtype",
@@ -543,7 +581,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         path = Path(self.identity["path"])
         config = dict(artifact["config"])
         config["text_config"] = dict(config.get("text_config", config))
-        if not artifact["has_mtp"]:
+        if not artifact["has_mtp"] or draft_record is not None:
             config["text_config"]["mtp_num_hidden_layers"] = 0
 
         from transformers import AutoTokenizer
@@ -581,9 +619,61 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             if self.weight_stream is not None:
                 # The dtype probe above paged experts in as load evidence only.
                 self.weight_stream.begin_serving()
+            if draft_record is not None:
+                from .dflash2 import load_drafter
+
+                self.identity = {
+                    **self.identity,
+                    "draft_revision": draft_record["draft_revision"],
+                    "target_revision": draft_record["target_revision"],
+                }
+                self._bind_external_drafter(
+                    draft_record,
+                    lambda record, target: load_drafter(
+                        record,
+                        target,
+                        runtime_quantization=record["runtime_quantization"],
+                    ),
+                    descriptor_for(has_mtp=False),
+                )
         except BaseException:
             self.close()
             raise
+
+    def prefill_step_default(self):
+        """Keep the measured routed-MoE chunk instead of dense autoscaling."""
+        return 2048
+
+    def continuation_verification_strategy(self):
+        """Exact-prefix strategy for an explicitly bound Qwen3.6 pool."""
+        if self.external_policy.get("continuation_strategy") is None:
+            return None
+        from ..runtime.continuation_strategy import ContinuationStrategy
+
+        return ContinuationStrategy(
+            algorithm="longest_first_exact_prefix_v1",
+            prune_incompatible_siblings=True,
+            shared_prefix_reuse=True,
+            state_scope="request_private_exact_qwen36_hybrid_segments",
+            qualified=False,
+            cache_layout=CACHE_LAYOUT,
+            proposal_state="bound_source_only",
+            target_state="authoritative_exact",
+            routed_experts_per_token=8,
+            routed_moe_layers=40,
+        )
+
+    def execution_numerics_contract(self):
+        """Bind the external route to this adapter's live target arithmetic."""
+        return {
+            "qwen36_target": {
+                "cache_layout": CACHE_LAYOUT,
+                "moe_nax_gather": self.moe_nax_gather,
+                "decode_kernels": dict(sorted(self._kernels.items())),
+                "proposal_state": "bound_source_only",
+                "target_state": "authoritative_exact",
+            }
+        }
 
     def _load_weights(
         self,

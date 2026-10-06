@@ -18,6 +18,20 @@ _GATHER_SORT_MIN_ASSIGNMENTS = 20
 _QMM_TILE = 32
 _SORTED_QMM_K_TILE = 64
 
+
+def _switch_sort_decision(
+    policy: str, *, assignments: int, token_length: int, invariant: bool
+) -> tuple[bool, str]:
+    """Pure host decision for SwitchGLU gather ordering and its counter key."""
+    if policy not in {"auto", "unsorted_decode"}:
+        raise ValueError("SwitchGLU sort policy must be auto or unsorted_decode")
+    if invariant:
+        return True, "invariant_sorted"
+    if policy == "unsorted_decode" and token_length == 1:
+        return False, "unsorted_decode"
+    sorted_route = assignments >= _GATHER_SORT_MIN_ASSIGNMENTS
+    return sorted_route, "auto_sorted" if sorted_route else "auto_unsorted"
+
 # MLX's GatherQMM streams each expert once (``gather_qmm_rhs``) only when a
 # sorted gather has M == 1, B >= 16 and B // E >= 4 (mlx 39400a0d4,
 # quantized.cpp GatherQMM::eval_gpu); below that every row runs a
@@ -410,10 +424,37 @@ class SwitchGLU(nn.Module):
         self.up_proj = SwitchLinear(input_dims, hidden_dims, num_experts, bias=bias)
         self.down_proj = SwitchLinear(hidden_dims, input_dims, num_experts, bias=bias)
         self.activation = activation
+        # Adapter-owned, default-off decode exactness probe. ``unsorted_decode``
+        # keeps one-token cohorts on the B=1 expert-gather route even when
+        # B * top_k crosses the global sorting threshold. Prefill and invariant
+        # prefill retain their existing route.
+        self._sort_policy = "auto"
+        self._sort_counts = {
+            "auto_sorted": 0,
+            "auto_unsorted": 0,
+            "invariant_sorted": 0,
+            "unsorted_decode": 0,
+        }
+
+    def set_sort_policy(self, policy: str) -> str:
+        if policy not in {"auto", "unsorted_decode"}:
+            raise ValueError("SwitchGLU sort policy must be auto or unsorted_decode")
+        old, self._sort_policy = self._sort_policy, policy
+        return old
+
+    def sort_status(self) -> dict:
+        return {"policy": self._sort_policy, "counts": dict(self._sort_counts)}
 
     def __call__(self, x, indices) -> mx.array:
         x = mx.expand_dims(x, (-2, -3))
-        do_sort = indices.size >= _GATHER_SORT_MIN_ASSIGNMENTS or _invariant.active()
+        token_length = int(indices.shape[-2]) if indices.ndim >= 2 else 1
+        do_sort, counter = _switch_sort_decision(
+            self._sort_policy,
+            assignments=int(indices.size),
+            token_length=token_length,
+            invariant=_invariant.active(),
+        )
+        self._sort_counts[counter] += 1
         idx = indices
         inv_order = None
         if do_sort:

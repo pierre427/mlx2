@@ -100,7 +100,8 @@ def test_stale_gdn_core_latch_refuses(monkeypatch, tmp_path, name):
 @pytest.mark.parametrize("name", ["qwen36_35b", "qwen35_122b"])
 def test_stale_moe_fused_gate_up_latch_refuses(monkeypatch, tmp_path, name):
     _latched(monkeypatch, {"MLX_QWEN4_MOE_FUSED_GATE_UP": "1"})
-    with pytest.raises(import_env.ImportOrderError, match="MOE_FUSED_GATE_UP"):
+    expected = "MOE_FUSED_GATE_UP" if name == "qwen36_35b" else "import-time flags"
+    with pytest.raises(import_env.ImportOrderError, match=expected):
         BUILDERS[name](monkeypatch, tmp_path)
 
 
@@ -233,6 +234,7 @@ def test_standard_decoder_refuses_explicit_tf32(monkeypatch, tmp_path):
         raise _Loaded
 
     monkeypatch.setattr(standard_decoder, "inspect_artifact", inspect)
+    (tmp_path / "config.json").write_text('{"model_type":"llama"}')
     monkeypatch.setenv("MLX_ENABLE_TF32", "1")
     with pytest.raises(process_env.ProcessNumericsConflict, match="standard decoder"):
         standard_decoder.StandardDecoderAdapter(str(tmp_path))
@@ -322,7 +324,7 @@ def test_qwen36_routed_decode_and_topk_applied_live(monkeypatch, latched, kernel
 PROFILE_MODULES = [
     "agnes_3_flash", "flash_next", "gpt_oss", "hy_v3", "laguna_xs21",
     "muse_glimmer", "nemotron3_super", "north_mini_code", "qwen35_9b",
-    "qwen36_35b", "qwen38_27b", "xing",
+    "qwen36_27b", "qwen36_35b", "qwen38_27b", "xing",
 ]
 
 

@@ -357,15 +357,15 @@ def test_strict_policy_rejected_before_allocation(pack, monkeypatch, value):  # 
 
 
 @pytest.mark.parametrize(
-    "config",
+    ("config", "error"),
     [
-        {"quantization": {"bits": 4, "group_size": 64}},
-        {"rope_scaling": {}},
-        {"sliding_window": 32},
-        {"num_experts": 2},
+        ({"quantization": {"bits": 4, "group_size": 64}}, "unquantized dense"),
+        ({"rope_scaling": {}}, "unquantized dense"),
+        ({"sliding_window": 32}, "requires full attention"),
+        ({"num_experts": 2}, "does not support expert layers"),
     ],
 )
-def test_unsupported_target_rejected_before_allocation(pack, monkeypatch, config):  # noqa: F811
+def test_unsupported_target_rejected_before_allocation(pack, monkeypatch, config, error):  # noqa: F811
     import mlx2.runtime.models.standard_decoder as runtime
 
     draft, target = pack
@@ -373,7 +373,7 @@ def test_unsupported_target_rejected_before_allocation(pack, monkeypatch, config
     original = json.loads(path.read_text())
     path.write_text(json.dumps({**original, **config}))
     monkeypatch.setattr(runtime, "Model", lambda *a: pytest.fail("allocated target"))
-    with pytest.raises(ValueError, match="unquantized dense"):
+    with pytest.raises(ValueError, match=error):
         StandardDecoderAdapter(
             str(target),
             execution_policy={

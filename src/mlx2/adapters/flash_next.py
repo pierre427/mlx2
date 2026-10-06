@@ -194,6 +194,18 @@ def chat_template(tokenizer, request: dict, *, tokenize: bool):
 
 
 class FlashNextAdapter:
+    # Complete native self-MTP row contract.  The selected copy policy reaches
+    # 15 rows (14 copied tokens plus the pending target token); the installed
+    # Qwen4 verifier and every rollback plane are validated through 17.  Keep
+    # these numeric and paired: serving clamps proposer widths to their minimum.
+    max_exact_self_mtp_verification_rows = 17
+    max_exact_self_mtp_rollback_rows = 17
+
+    # Explicit opt-in for the default-off, revision-bound serving candidate.
+    # The renderer receives a private frozen HF tokenizer, so neither live
+    # backend nor same-length chat-template mutation can mix revisions.
+    incremental_tokenizer_cache_supported = True
+    incremental_tokenizer_renderer_revision = "flash-next-renderer-v1"
     from .qwen import QWEN4_FLASH_NEXT as descriptor
 
     # The file-backed PLE profile is large enough that an operator's explicit
@@ -303,6 +315,49 @@ class FlashNextAdapter:
         """Adapter-preferred depth bound on the prefill chunk, or None (off)."""
         policy = getattr(self, "policy", None)
         return None if policy is None else policy.prefill_depth_budget
+
+    def exact_prefix_cascade_contract(self):
+        """Qwen4 ownership boundary for staged continuation cascades.
+
+        Longest-first ordering and invalid-sibling pruning are semantic-only
+        control-plane operations.  Reusing a multi-row verify cache as the
+        authoritative next-token state is deliberately refused: QSA and GDN
+        transactions preserve accepted history, but have not established the
+        ordinary one-row numerical state required by an *exact* route.  A
+        future serving integration must rebuild the accepted prefix through
+        canonical one-row replay before it may reuse that checkpoint.
+        """
+
+        if getattr(self, "policy", None) is None:
+            return None
+
+        return {
+            "schema": "mlx2.exact-prefix-cascade-contract.v1",
+            "verification_order": "longest_first",
+            "invalid_sibling_pruning": True,
+            "accepted_prefix_state": "canonical_ordinary_replay",
+            "request_private_only": True,
+            "apcv2_publication": False,
+            "transactional_multirow_state_reuse": False,
+            "implemented": True,
+            "implementation_scope": "planner_and_adapter_contract",
+            "qualified": False,
+            "selected": False,
+            "observed_used": False,
+        }
+
+    def plan_exact_prefix_cascade(
+        self, paths, accepted_prefix=(), *, attempted=()
+    ):
+        """Plan one Qwen4 cascade stage without claiming reusable model state."""
+
+        if self.exact_prefix_cascade_contract() is None:
+            raise ValueError("exact-prefix cascade is not declared by this adapter")
+        from ..runtime.exact_prefix_cascade import next_cascade_stage
+
+        return next_cascade_stage(
+            paths, accepted_prefix, attempted=attempted
+        )
 
     def execution_config(self, *, max_lanes, prefill_step):
         return self.policy.batch_config(max_lanes=max_lanes, prefill_step=prefill_step)
@@ -519,6 +574,13 @@ class FlashNextAdapter:
             self._diagnostic_modules = self._snapshot_diagnostic_modules(self.model)
             weights.clear()
             mx.clear_cache()
+            # Start the opt-in #687 whole-table warm only after model weights
+            # finish loading.  Starting inside sidecar installation races the
+            # remaining quantize/load work and can re-evict freshly warmed PLE
+            # pages before serving begins.  The warmer only publishes a flag;
+            # the next wide foreground lookup performs the refresh.
+            for table in self._tables:
+                table.start_adaptive_warm()
             tokenizer = AutoTokenizer.from_pretrained(
                 path, local_files_only=True, trust_remote_code=False
             )
@@ -560,6 +622,14 @@ class FlashNextAdapter:
         if "messages" in request:
             return chat_template(self.tokenizer, request, tokenize=True)
         return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
+
+    @staticmethod
+    def render_incremental_prompt(tokenizer, request: dict) -> str:
+        """Render against the cache's immutable tokenizer/template snapshot."""
+
+        if "messages" in request:
+            return chat_template(tokenizer, request, tokenize=False)
+        return request["prompt"]
 
     def render_prompt(self, request: dict) -> str:
         """Prompt text whose special-token-free encoding is ``prompt_tokens``."""
@@ -625,9 +695,9 @@ class FlashNextAdapter:
         )
 
     def diagnostics(self) -> dict:
-        from dataclasses import asdict
         from ..runtime.models.flash_tensorfold_qmv import counters as tensorfold_qmv_counters
         from ..runtime.models.varlen_dense_mlp import status as varlen_mlp_status
+        from ..runtime.models.qwen4_ple_nvme import ple_table_diagnostics
 
         from ..runtime.models.qwen4_exp import (
             qwen4_eager_dispatch_status,
@@ -792,7 +862,7 @@ class FlashNextAdapter:
                 else {}
             ),
             "eager_dispatch": qwen4_eager_dispatch_status(),
-            "ple_tables": [asdict(table.stats) for table in self._tables],
+            "ple_tables": [ple_table_diagnostics(table) for table in self._tables],
             "fused_gdn": qwen4_fused_gdn_stats(self.model, modules=diagnostic_modules),
             "fused_gate_inject": qwen4_gate_inject_stats(),
             "ple_compile": qwen4_ple_compile_status(),

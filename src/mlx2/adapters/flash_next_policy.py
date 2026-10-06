@@ -96,6 +96,13 @@ class FlashNextPolicy:
     # async_eval boundary).  Opt-in; enters the environment and receipts
     # only when enabled.
     ple_early_dispatch: bool = False
+    # mlx-serve #687 adaptive serial/pooled PLE reads.  The Flash-Next
+    # profile strips inherited MLX_QWEN* variables, so these choices must be
+    # carried by the explicit execution policy (and therefore its receipt).
+    # "pooled" preserves the historical route.  Whole-table warming is only
+    # meaningful with "adaptive" and stays independently explicit there.
+    ple_read_policy: str = "pooled"
+    ple_adaptive_warm: bool = True
     # Widest verify block the fused GDN verify kernel admits
     # (MLX_QWEN4_FUSED_GDN_VERIFY_MAX_STEPS, 2..17; the kernel module's own
     # default stays 8).  17 since 2026-09-25: every width is bit-exact to the
@@ -497,6 +504,10 @@ class FlashNextPolicy:
             raise ValueError("tensorfold_prefill_backend must be native or metal")
         if self.tensorfold_prefill_backend != "native" and not self.tensorfold_prefill:
             raise ValueError("tensorfold_prefill_backend requires tensorfold_prefill")
+        if self.ple_read_policy not in ("pooled", "serial", "adaptive"):
+            raise ValueError("ple_read_policy must be pooled, serial, or adaptive")
+        if type(self.ple_adaptive_warm) is not bool:
+            raise ValueError("ple_adaptive_warm must be boolean")
         for name in ("eager_dispatch_max_rows", "eager_dispatch_stride", "prefill_step"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
@@ -550,6 +561,11 @@ class FlashNextPolicy:
         for name in _OPTIONAL_KERNEL_ENV:
             if getattr(self, name) == _DEFAULTS[name]:
                 del values[name]
+        if self.ple_read_policy == "pooled":
+            del values["ple_read_policy"]
+            del values["ple_adaptive_warm"]
+        elif self.ple_read_policy != "adaptive":
+            del values["ple_adaptive_warm"]
         # Fields whose default is not their "off" value are omitted only at the
         # default, so a receipt read back reproduces an explicit choice.
         if self.fused_gdn_verify_max_steps == _DEFAULTS["fused_gdn_verify_max_steps"]:
@@ -670,6 +686,12 @@ class FlashNextPolicy:
             )
         if self.qsa_nax_batched:
             environment["MLX_QWEN4_QSA_NAX_BATCHED"] = "1"
+        if self.ple_read_policy != "pooled":
+            environment["MLX_QWEN4_PLE_NVME_READ_POLICY"] = self.ple_read_policy
+        if self.ple_read_policy == "adaptive":
+            environment["MLX_QWEN4_PLE_NVME_ADAPTIVE_WARM"] = str(
+                int(self.ple_adaptive_warm)
+            )
         return environment
 
     def batch_config(self, *, max_lanes, prefill_step):

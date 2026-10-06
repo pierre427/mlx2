@@ -15,7 +15,275 @@ from mlx import nn
 from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache, RotatingKVCache
-from .switch_layers import SwitchGLU
+from .switch_layers import QuantizedSwitchLinear, SwitchGLU
+
+NORTH_BATCH_ROW_EXACT_Q4_VERSION = "north-batch-row-exact-q4-v1"
+
+
+class BatchRowExactQ4:
+    """Explicit North decode-only q4 row arithmetic policy."""
+
+    def __init__(self):
+        self.selected = False
+        self.counts = {
+            "started_forwards": 0,
+            "complete_forwards": 0,
+            "physical_rows": 0,
+            "dense_projection_calls": 0,
+            "dense_projection_rows": 0,
+            "head_calls": 0,
+            "head_rows": 0,
+            "ordinary_q8_router_calls": 0,
+            "ordinary_q8_router_rows": 0,
+            "ordinary_expert_calls": 0,
+            "ordinary_expert_rows": 0,
+            "kernel": 0,
+            "group_kernel": 0,
+            "per_row": 0,
+            "one_row": 0,
+            "refusals": 0,
+        }
+        self.geometry_audit = None
+        self._forward_start = None
+
+    @staticmethod
+    def _geometry(module, input_dims, output_dims, *, bits=4, embedding=False):
+        expected = nn.QuantizedEmbedding if embedding else nn.QuantizedLinear
+        if type(module) is not expected:
+            raise ValueError(
+                "North batch row-exact q4 requires native quantized modules"
+            )
+        if (
+            module.bits != bits
+            or module.group_size != 64
+            or module.mode != "affine"
+            or module.weight.dtype != mx.uint32
+            or module.scales.dtype != mx.bfloat16
+            or module.biases is None
+            or module.biases.dtype != mx.bfloat16
+            or (not embedding and "bias" in module)
+            or tuple(module.weight.shape) != (output_dims, input_dims * bits // 32)
+            or tuple(module.scales.shape) != (output_dims, input_dims // 64)
+            or tuple(module.biases.shape) != (output_dims, input_dims // 64)
+        ):
+            raise ValueError(
+                f"North batch row-exact q4 requires affine q{bits} group-64 BF16 geometry"
+            )
+
+    @staticmethod
+    def _expert_geometry(module, experts, input_dims, output_dims):
+        if (
+            type(module) is not QuantizedSwitchLinear
+            or module.bits != 4
+            or module.group_size != 64
+            or module.mode != "affine"
+            or module.weight.dtype != mx.uint32
+            or module.scales.dtype != mx.bfloat16
+            or module.biases is None
+            or module.biases.dtype != mx.bfloat16
+            or tuple(module.weight.shape) != (experts, output_dims, input_dims // 8)
+            or tuple(module.scales.shape) != (experts, output_dims, input_dims // 64)
+            or tuple(module.biases.shape) != (experts, output_dims, input_dims // 64)
+            or "bias" in module
+        ):
+            raise ValueError("North batch row-exact q4 requires ordinary q4 expert geometry")
+
+    def configure(self, model, enabled):
+        if type(enabled) is not bool:
+            raise ValueError("batch_row_exact_q4 must be a boolean")
+        if enabled:
+            if (
+                model.args.model_type != "cohere2_moe"
+                or not model.args.tie_word_embeddings
+            ):
+                raise ValueError("batch_row_exact_q4 requires tied North Cohere2-MoE")
+            hidden = model.args.hidden_size
+            heads = model.args.num_attention_heads * model.args.head_dim
+            kv_heads = model.args.num_key_value_heads * model.args.head_dim
+            self._geometry(
+                model.model.embed_tokens,
+                hidden,
+                model.args.vocab_size,
+                embedding=True,
+            )
+            audit = {
+                "dense_q4_linears": 0,
+                "tied_q4_heads": 1,
+                "ordinary_q8_routers": 0,
+                "ordinary_q4_expert_tables": 0,
+            }
+            for index, layer in enumerate(model.layers):
+                for name, input_dims, output_dims in (
+                    ("q_proj", hidden, heads),
+                    ("k_proj", hidden, kv_heads),
+                    ("v_proj", hidden, kv_heads),
+                    ("o_proj", heads, hidden),
+                ):
+                    self._geometry(getattr(layer.self_attn, name), input_dims, output_dims)
+                    audit["dense_q4_linears"] += 1
+                if index < model.args.first_k_dense_replace:
+                    if type(layer.mlp) is not MLP:
+                        raise ValueError("North dense-prefix topology changed")
+                    dense = model.args.prefix_dense_intermediate_size
+                    for name, input_dims, output_dims in (
+                        ("gate_proj", hidden, dense),
+                        ("up_proj", hidden, dense),
+                        ("down_proj", dense, hidden),
+                    ):
+                        self._geometry(getattr(layer.mlp, name), input_dims, output_dims)
+                        audit["dense_q4_linears"] += 1
+                elif type(layer.mlp) is not Cohere2MoeSparseBlock:
+                    raise ValueError("North sparse-layer topology changed")
+                else:
+                    gate = layer.mlp.gate
+                    self._geometry(
+                        gate, hidden, model.args.num_experts, bits=8
+                    )
+                    audit["ordinary_q8_routers"] += 1
+                    intermediate = model.args.intermediate_size
+                    for name, input_dims, output_dims in (
+                        ("gate_proj", hidden, intermediate),
+                        ("up_proj", hidden, intermediate),
+                        ("down_proj", intermediate, hidden),
+                    ):
+                        expert = getattr(layer.mlp.switch_mlp, name)
+                        self._expert_geometry(
+                            expert,
+                            model.args.num_experts,
+                            input_dims,
+                            output_dims,
+                        )
+                        audit["ordinary_q4_expert_tables"] += 1
+            self.geometry_audit = audit
+        else:
+            self.geometry_audit = None
+        self.selected = enabled
+
+    def begin_tokens(self, tokens):
+        if (
+            not self.selected
+            or tokens.ndim != 2
+            or tokens.shape[1] != 1
+            or tokens.shape[0] <= 1
+        ):
+            return False
+        from .row_exact_qmv import MAX_ROWS
+
+        if tokens.shape[0] > MAX_ROWS:
+            raise ValueError("North batch row-exact q4 exceeds its 32-lane capability")
+        self.counts["started_forwards"] += 1
+        self.counts["physical_rows"] += int(tokens.shape[0])
+        self._forward_start = {
+            key: self.counts[key]
+            for key in (
+                "dense_projection_calls",
+                "ordinary_q8_router_calls",
+                "ordinary_expert_calls",
+                "head_calls",
+            )
+        }
+        self._forward_start["rows"] = int(tokens.shape[0])
+        self._forward_start["dense_projection_rows"] = self.counts[
+            "dense_projection_rows"
+        ]
+        self._forward_start["ordinary_q8_router_rows"] = self.counts[
+            "ordinary_q8_router_rows"
+        ]
+        self._forward_start["ordinary_expert_rows"] = self.counts[
+            "ordinary_expert_rows"
+        ]
+        self._forward_start["head_rows"] = self.counts["head_rows"]
+        return True
+
+    def note_ordinary_sparse(self, x):
+        self.counts["ordinary_q8_router_calls"] += 1
+        self.counts["ordinary_q8_router_rows"] += int(x.shape[0])
+        self.counts["ordinary_expert_calls"] += 1
+        self.counts["ordinary_expert_rows"] += int(x.shape[0])
+
+    def linear(self, module, x):
+        from .row_exact_qmv import quantized_linear
+
+        output, route = quantized_linear(module, x)
+        self.counts[route] += 1
+        self.counts["dense_projection_calls"] += 1
+        self.counts["dense_projection_rows"] += int(x.shape[0])
+        if route == "per_row":
+            self.counts["refusals"] += 1
+            raise RuntimeError("North batch row-exact q4 native projection declined")
+        return output
+
+    def linears(self, modules, x):
+        from .row_exact_qmv import quantized_linears
+
+        outputs, route = quantized_linears(modules, x)
+        self.counts[route] += 1
+        self.counts["dense_projection_calls"] += len(modules)
+        self.counts["dense_projection_rows"] += int(x.shape[0]) * len(modules)
+        if route == "per_row":
+            self.counts["refusals"] += 1
+            raise RuntimeError("North batch row-exact q4 native projection group declined")
+        return outputs
+
+    def head(self, embedding, x):
+        from .row_exact_qmv import quantized_linear
+
+        output, route = quantized_linear(embedding, x, call=embedding.as_linear)
+        self.counts[route] += 1
+        self.counts["head_calls"] += 1
+        self.counts["head_rows"] += int(x.shape[0])
+        if route == "per_row":
+            self.counts["refusals"] += 1
+            raise RuntimeError("North batch row-exact q4 native tied head declined")
+        start = self._forward_start
+        rows = None if start is None else start["rows"]
+        audit = self.geometry_audit or {}
+        dense_calls = audit.get("dense_q4_linears")
+        sparse_calls = audit.get("ordinary_q8_routers")
+        if start is None or (
+            self.counts["dense_projection_calls"] - start["dense_projection_calls"]
+            != dense_calls
+            or self.counts["ordinary_q8_router_calls"]
+            - start["ordinary_q8_router_calls"]
+            != sparse_calls
+            or self.counts["ordinary_expert_calls"] - start["ordinary_expert_calls"]
+            != sparse_calls
+            or self.counts["head_calls"] - start["head_calls"] != 1
+            or self.counts["dense_projection_rows"]
+            - start["dense_projection_rows"]
+            != dense_calls * rows
+            or self.counts["ordinary_q8_router_rows"]
+            - start["ordinary_q8_router_rows"]
+            != sparse_calls * rows
+            or self.counts["ordinary_expert_rows"] - start["ordinary_expert_rows"]
+            != sparse_calls * rows
+            or self.counts["head_rows"] - start["head_rows"] != rows
+        ):
+            self.counts["refusals"] += 1
+            raise RuntimeError("North batch row-exact q4 forward engagement was incomplete")
+        self.counts["complete_forwards"] += 1
+        self._forward_start = None
+        return output
+
+    def status(self):
+        return {
+            "schema": "mlx2.north-batch-row-exact-q4.v1",
+            "algorithm": NORTH_BATCH_ROW_EXACT_Q4_VERSION,
+            "implemented": True,
+            "qualified": False,
+            "selected": self.selected,
+            "observed_used": (
+                self.counts["complete_forwards"] > 0
+                and self.counts["refusals"] == 0
+                and self.counts["kernel"] > 0
+                and self.counts["group_kernel"] > 0
+            ),
+            "scope": "multi-lane one-token decode only",
+            "max_rows": 32,
+            "geometry": "affine-q4-group64-bfloat16",
+            "geometry_audit": self.geometry_audit,
+            "counts": dict(self.counts),
+        }
 
 
 @dataclass
@@ -146,7 +414,10 @@ class MLP(nn.Module):
         self.up_proj = nn.Linear(dim, hidden_dim, bias=False)
         self.down_proj = nn.Linear(hidden_dim, dim, bias=False)
 
-    def __call__(self, x: mx.array) -> mx.array:
+    def __call__(self, x: mx.array, row_exact=None) -> mx.array:
+        if row_exact is not None:
+            gate, up = row_exact.linears((self.gate_proj, self.up_proj), x)
+            return row_exact.linear(self.down_proj, swiglu(gate, up))
         return self.down_proj(swiglu(self.gate_proj(x), self.up_proj(x)))
 
 
@@ -159,7 +430,9 @@ class Cohere2MoeSparseBlock(nn.Module):
             args.hidden_size, args.intermediate_size, args.num_experts
         )
 
-    def __call__(self, x: mx.array) -> mx.array:
+    def __call__(self, x: mx.array, row_exact=None) -> mx.array:
+        if row_exact is not None:
+            row_exact.note_ordinary_sparse(x)
         dtype = x.dtype
         scores = mx.sigmoid(self.gate(x).astype(mx.float32))
         inds = mx.stop_gradient(
@@ -197,11 +470,15 @@ class Attention(nn.Module):
             else None
         )
 
-    def __call__(self, x: mx.array, mask=None, cache=None) -> mx.array:
+    def __call__(self, x: mx.array, mask=None, cache=None, row_exact=None) -> mx.array:
         batch, length, _ = x.shape
-        q = self.q_proj(x).reshape(batch, length, self.n_heads, self.head_dim)
-        k = self.k_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
-        v = self.v_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
+        if row_exact is None:
+            q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+        else:
+            q, k, v = row_exact.linears((self.q_proj, self.k_proj, self.v_proj), x)
+        q = q.reshape(batch, length, self.n_heads, self.head_dim)
+        k = k.reshape(batch, length, self.n_kv_heads, self.head_dim)
+        v = v.reshape(batch, length, self.n_kv_heads, self.head_dim)
         q, k, v = (
             q.transpose(0, 2, 1, 3),
             k.transpose(0, 2, 1, 3),
@@ -215,7 +492,12 @@ class Attention(nn.Module):
         out = scaled_dot_product_attention(
             q, k, v, cache=cache, scale=self.scale, mask=mask
         )
-        return self.o_proj(out.transpose(0, 2, 1, 3).reshape(batch, length, -1))
+        out = out.transpose(0, 2, 1, 3).reshape(batch, length, -1)
+        return (
+            self.o_proj(out)
+            if row_exact is None
+            else row_exact.linear(self.o_proj, out)
+        )
 
 
 class DecoderLayer(nn.Module):
@@ -230,9 +512,9 @@ class DecoderLayer(nn.Module):
         self.input_layernorm = _norm_layer(args)
         self.attention_type = args.layer_types[layer_idx]
 
-    def __call__(self, x: mx.array, mask=None, cache=None) -> mx.array:
+    def __call__(self, x: mx.array, mask=None, cache=None, row_exact=None) -> mx.array:
         h = self.input_layernorm(x)
-        return x + self.self_attn(h, mask, cache) + self.mlp(h)
+        return x + self.self_attn(h, mask, cache, row_exact) + self.mlp(h, row_exact)
 
 
 class ResidualTaps:
@@ -268,7 +550,7 @@ class Cohere2MoeModel(nn.Module):
     def residual_taps(self):
         return self._taps
 
-    def __call__(self, inputs: mx.array, cache=None):
+    def __call__(self, inputs: mx.array, cache=None, row_exact=None):
         h = self.embed_tokens(inputs)
         if cache is None:
             cache = [None] * len(self.layers)
@@ -283,10 +565,10 @@ class Cohere2MoeModel(nn.Module):
         steer, capture = self._taps.steer, self._taps.capture
         if steer is None and capture is None:
             for layer, layer_cache in zip(self.layers, cache):
-                h = layer(h, masks[layer.attention_type], layer_cache)
+                h = layer(h, masks[layer.attention_type], layer_cache, row_exact)
             return self.norm(h)
         for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
-            h = layer(h, masks[layer.attention_type], layer_cache)
+            h = layer(h, masks[layer.attention_type], layer_cache, row_exact)
             if steer is not None and index == steer[0]:
                 h = h + steer[1].astype(h.dtype)
             if capture is not None and index in capture:
@@ -300,6 +582,7 @@ class Model(nn.Module):
         self.args = args
         self.model_type = args.model_type
         self.model = Cohere2MoeModel(args)
+        self._batch_row_exact_q4 = BatchRowExactQ4()
         if not args.tie_word_embeddings:
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
@@ -308,13 +591,13 @@ class Model(nn.Module):
         return "north-mini-code-layer-segments-v1"
 
     def __call__(self, inputs: mx.array, cache=None):
-        hidden = self.model(inputs, cache)
-        logits = (
-            self.model.embed_tokens.as_linear(hidden)
-            if self.args.tie_word_embeddings
-            else self.lm_head(hidden)
+        row_exact = (
+            self._batch_row_exact_q4
+            if self._batch_row_exact_q4.begin_tokens(inputs)
+            else None
         )
-        return logits * self.args.logit_scale
+        hidden = self.model(inputs, cache, row_exact)
+        return self._project_with_policy(hidden, row_exact)
 
     def _project(self, hidden):
         logits = (
@@ -323,6 +606,13 @@ class Model(nn.Module):
             else self.lm_head(hidden)
         )
         return logits * self.args.logit_scale
+
+    def _project_with_policy(self, hidden, row_exact):
+        if row_exact is None:
+            return self._project(hidden)
+        if not self.args.tie_word_embeddings:
+            raise ValueError("North batch row-exact q4 requires its tied head")
+        return row_exact.head(self.model.embed_tokens, hidden) * self.args.logit_scale
 
     def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
         """Target features for external drafters, paired with consumed tokens.
@@ -343,13 +633,28 @@ class Model(nn.Module):
             or capture_layers[-1] > count
         ):
             raise ValueError("Invalid target capture layers")
+        if (
+            body_only
+            and self._batch_row_exact_q4.selected
+            and inputs.ndim == 2
+            and inputs.shape[1] == 1
+            and inputs.shape[0] > 1
+        ):
+            raise ValueError(
+                "North batch row-exact q4 requires tied-head completion"
+            )
         taps = self.model.residual_taps
         if taps.capture is not None:
             raise RuntimeError("North residual capture is already in use")
         residual = {i: None for i in capture_layers if i < count}
         taps.capture = residual or None
         try:
-            hidden = self.model(inputs, cache)
+            row_exact = (
+                self._batch_row_exact_q4
+                if self._batch_row_exact_q4.begin_tokens(inputs)
+                else None
+            )
+            hidden = self.model(inputs, cache, row_exact)
         finally:
             taps.capture = None
         features = mx.concatenate(
@@ -357,10 +662,17 @@ class Model(nn.Module):
         )
         if body_only:
             return None, features
-        return self._project(hidden), features
+        return self._project_with_policy(hidden, row_exact), features
 
     def prefill_body(self, inputs, cache, capture_layers):
         return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
+
+    def configure_batch_row_exact_q4(self, enabled):
+        self._batch_row_exact_q4.configure(self, enabled)
+
+    @property
+    def batch_row_exact_q4_status(self):
+        return self._batch_row_exact_q4.status()
 
     def make_cache(self):
         return [

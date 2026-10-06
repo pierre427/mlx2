@@ -70,17 +70,22 @@ def _processed(processors, history, anchor, path, values):
 
 
 class ExternalContinuationSource:
-    """Loaded XPress refined block or LiLiCoRR correlation lattice provider."""
+    """Loaded external head as a request-private complete-path provider."""
 
     def __init__(self, draft):
-        if getattr(draft, "proposal_distribution", None) != "deterministic_point_mass":
+        distribution = getattr(draft, "proposal_distribution", None)
+        if distribution != "deterministic_point_mass" and not callable(
+            getattr(draft, "propose_tree", None)
+        ):
             raise ValueError(
-                "complete external continuations require deterministic head"
+                "complete external continuations require deterministic or tree head"
             )
         if hasattr(draft, "xpress_head"):
             self.mechanism = "xpress"
         elif hasattr(draft, "lilicorr"):
             self.mechanism = "lilicorr"
+        elif callable(getattr(draft, "propose_tree", None)):
+            self.mechanism = "dflash2"
         else:
             raise ValueError(
                 "loaded external head has no supported continuation protocol"
@@ -88,13 +93,44 @@ class ExternalContinuationSource:
         self.draft = draft
 
     def __call__(self, context, limit):
-        import mlx.core as mx
-
         draft, config = self.draft, self.draft.config
         if not 1 <= context.depth < config.block_size:
             raise ValueError("continuation depth exceeds the loaded trained block")
         cache = copy.deepcopy(context.draft_cache)
         pending = context.pending_features
+        if self.mechanism == "dflash2":
+            from ..runtime.drafters.dflash_tree import tree_paths
+
+            nodes = 15
+            tokens, parents = draft.propose_tree(
+                [context.anchor],
+                pending,
+                cache,
+                nodes,
+                lattice_positions=context.depth + 1,
+            )[0]
+            result = []
+            seen = set()
+            for ordinal, rows in enumerate(tree_paths(parents)):
+                if len(rows) != context.depth:
+                    continue
+                path = tuple(int(tokens[row]) for row in rows)
+                if path in seen:
+                    continue
+                seen.add(path)
+                result.append(
+                    SourceContinuation(
+                        path,
+                        tuple(None for _ in path),
+                        float(-ordinal),
+                        "dflash2_best_first_node_ordinal_proxy",
+                    )
+                )
+                if len(result) >= limit:
+                    break
+            return result
+        import mlx.core as mx
+
         anchor = mx.array([context.anchor], mx.int32)
         inputs = mx.concatenate(
             [

@@ -28,6 +28,7 @@ class ExternalDraftAdapterMixin:
             "adaptive_verification",
             "proposal_composition",
             "continuation_pool",
+            "continuation_strategy",
             "lilicorr_feedback",
         } or (self.external_policy and not self.external_policy.get("draft_model")):
             raise ValueError(
@@ -64,10 +65,16 @@ class ExternalDraftAdapterMixin:
             if not (
                 hasattr(record["args"], "xpress_rank")
                 or hasattr(record["args"], "lilicorr_candidate_topk")
+                or record["config"].get("architectures") == ["DFlash2DraftModel"]
             ):
                 raise ValueError(
-                    "continuation_pool requires a compatible deterministic external head"
+                    "continuation_pool requires a compatible complete-path external head"
                 )
+        if "continuation_strategy" in self.external_policy:
+            if self.external_policy["continuation_strategy"] != "longest_first_exact_prefix":
+                raise ValueError("unsupported continuation_strategy")
+            if "continuation_pool" not in self.external_policy:
+                raise ValueError("continuation_strategy requires continuation_pool")
         if "lilicorr_feedback" in self.external_policy:
             from ..runtime.lilicorr_feedback import LiLiCorrFeedbackPolicy
 
@@ -148,6 +155,16 @@ class ExternalDraftAdapterMixin:
             composition_identity = json.dumps(
                 normalized, sort_keys=True, separators=(",", ":")
             )
+            if "continuation_strategy" in self.external_policy:
+                composition_identity += json.dumps(
+                    {
+                        "continuation_strategy": self.external_policy[
+                            "continuation_strategy"
+                        ]
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
             adaptive = AdaptiveVerificationPolicy.from_value(
                 self.external_policy.get("adaptive_verification"),
                 self._external_num_draft(),
@@ -164,6 +181,9 @@ class ExternalDraftAdapterMixin:
                         "draft_revision": self._external_draft_revision,
                         "route": self.EXTERNAL_ROUTE_TAG,
                         "continuation_pool": normalized,
+                        "continuation_strategy": self.external_policy.get(
+                            "continuation_strategy"
+                        ),
                         "draft_settings": effective_draft_settings,
                         "num_draft": self._external_num_draft(),
                         "adaptive_verification": adaptive_settings,
@@ -253,6 +273,13 @@ class ExternalDraftAdapterMixin:
         self._external_execution_started = True
         if hasattr(self.draft_model, "last_continuation_selections"):
             kwargs.setdefault("continuation_pool", self.draft_model.policy)
+            strategy = getattr(self, "continuation_verification_strategy", None)
+            if callable(strategy):
+                selected_strategy = strategy()
+                if selected_strategy is not None:
+                    kwargs.setdefault(
+                        "continuation_verification_strategy", selected_strategy
+                    )
 
         adaptive = self.external_policy.get("adaptive_verification")
         if adaptive is not None:

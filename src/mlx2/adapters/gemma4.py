@@ -158,6 +158,116 @@ class _Gemma4Adapter(_MLXVLMAdapter):
         """Adapter-preferred prefill chunk; an explicit engine setting wins."""
         return int(type(self).default_prefill_step)
 
+    def exact_prefix_cascade_contract(self):
+        """Gemma 4 ownership boundary for continuation-prefix reuse.
+
+        Both variants have attention-KV state only, but their full/sliding
+        geometry differs in depth and the A4B variant additionally owns MoE
+        tensor math.  Prefix reuse is exact only after APCv2 has restored the
+        declared cache layout at one logical token boundary.  Cascade-private
+        verify state is not publishable to APCv2 and ordinary decode remains
+        the reference path.
+        """
+
+        variant = self.descriptor.variant
+        topology = _TOPOLOGIES[variant]
+        full = topology["layers"] // 6
+        return {
+            "schema": "mlx2.exact-prefix-cascade-contract.v1",
+            "family": "gemma-4",
+            "variant": variant,
+            "verification_order": "longest_first",
+            "invalid_sibling_pruning": True,
+            "accepted_prefix_state": "exact_apcv2_restore_or_canonical_replay",
+            "shared_prefix_reuse": {
+                "authority": "apcv2",
+                "exact_only": True,
+                "recompute_common_tokens": False,
+                "cache_layout": self.descriptor.cache_layout,
+                "full_attention_layers": full,
+                "sliding_attention_layers": topology["layers"] - full,
+                "sliding_window": 1024,
+            },
+            "moe_tensor_math": "adapter_owned" if topology["moe"] else "not_present",
+            "request_private_only": True,
+            "apcv2_publication": False,
+            "transactional_multirow_state_reuse": False,
+            "implemented": True,
+            "implementation_scope": "planner_adapter_contract_and_geometry_gate",
+            "qualified": False,
+            "selected": False,
+            "observed_used": False,
+        }
+
+    def exact_shared_prefix_geometry(self, caches, prefix_tokens):
+        """Fail closed unless a restored cache is an exact Gemma 4 boundary.
+
+        The check is intentionally about state geometry, not model identity:
+        APCv2 already binds revision, tokenizer, media fingerprint and layout.
+        A successful result allows a caller to verify only proposal suffixes;
+        it does not select a serving route or authorize publication.
+        """
+
+        if type(prefix_tokens) is not int or prefix_tokens < 0:
+            raise ValueError("prefix_tokens must be a nonnegative integer")
+        expected = [
+            "full_attention" if index % 6 == 5 else "sliding_attention"
+            for index in range(_TOPOLOGIES[self.descriptor.variant]["layers"])
+        ]
+        caches = tuple(caches)
+        if len(caches) != len(expected):
+            return {
+                "eligible": False,
+                "reason": "cache_layer_count_mismatch",
+                "expected_layers": len(expected),
+                "actual_layers": len(caches),
+            }
+        for index, (kind, cache) in enumerate(zip(expected, caches)):
+            wanted = "KVCache" if kind == "full_attention" else "RotatingKVCache"
+            actual_type = type(cache)
+            actual = f"{actual_type.__module__}.{actual_type.__qualname__}"
+            if actual != f"mlx2.runtime.models.cache.{wanted}":
+                return {
+                    "eligible": False,
+                    "reason": "cache_plane_type_mismatch",
+                    "layer": index,
+                    "expected": wanted,
+                    "actual": actual_type.__name__,
+                }
+            if int(cache.offset) != prefix_tokens:
+                return {
+                    "eligible": False,
+                    "reason": "cache_logical_offset_mismatch",
+                    "layer": index,
+                    "expected": prefix_tokens,
+                    "actual": int(cache.offset),
+                }
+            if kind == "sliding_attention" and (
+                int(cache.max_size) != 1024 or int(cache.keep) != 0
+            ):
+                return {
+                    "eligible": False,
+                    "reason": "sliding_cache_geometry_mismatch",
+                    "layer": index,
+                }
+        return {
+            "eligible": True,
+            "authority": "apcv2_exact_restore",
+            "prefix_tokens": prefix_tokens,
+            "recompute_common_tokens": False,
+            "suffix_only": True,
+            "publishable": False,
+        }
+
+    def plan_exact_prefix_cascade(
+        self, paths, accepted_prefix=(), *, attempted=()
+    ):
+        """Plan one Gemma 4 cascade stage without mutating model state."""
+
+        from ..runtime.exact_prefix_cascade import next_cascade_stage
+
+        return next_cascade_stage(paths, accepted_prefix, attempted=attempted)
+
     def _budget_prefill_step(self):
         return getattr(self, "_prefill_step", self.prefill_step_default())
 

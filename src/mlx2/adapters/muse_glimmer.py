@@ -14,9 +14,9 @@ import re
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from .muse_glimmer_config import ModelArgs
-from ..sampling_defaults import SamplingDefaults, VendorSampling
 from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..sampling_defaults import SamplingDefaults, VendorSampling
+from .muse_glimmer_config import ModelArgs
 
 
 MUSE_GLIMMER = ModelDescriptor(
@@ -309,6 +309,73 @@ class MuseGlimmerAdapter:
     sampling_defaults = MUSE_GLIMMER_SAMPLING
     reasoning_effort_semantics = "reasoning_strength"
 
+    def prefill_step_default(self):
+        """Adapter-owned Muse chunk; an explicit engine value still wins.
+
+        Existing Muse ordinary and DFlash2 route evidence used 2,048 rows for
+        the 2,048-token sliding-window topology.  This is a geometry/default
+        choice, not a performance or current-source qualification claim.
+        """
+
+        return 2048
+
+    def exact_prefix_cascade_contract(self):
+        """Muse boundary for staged exact-prefix proposal verification.
+
+        Longest-first ordering and sibling pruning are model-neutral.  Reusing
+        a selected multi-row verification cache is not: the q8 target still
+        needs canonical ordinary-S1 parity across every global and rotating KV
+        plane.  Until that native gate passes, callers may omit common tokens
+        only when they already own an exact canonical prefix checkpoint.
+        """
+
+        return {
+            "schema": "mlx2.exact-prefix-cascade-contract.v1",
+            "verification_order": "longest_first",
+            "verification_law": "target_draw_then_prefix_match",
+            "invalid_sibling_pruning": True,
+            "accepted_prefix_state": "canonical_ordinary_replay",
+            "shared_prefix_reuse": "suffix_only_after_exact_canonical_prefix",
+            "required_cache_geometry": {
+                "full_attention": "KVCache",
+                "sliding_attention": "RotatingKVCache",
+                "layout_identity_required": True,
+                "offsets_and_window_boundaries_required": True,
+            },
+            "proposal_sources": {
+                "assistant": {
+                    "role": "proposal_only",
+                    "implementation": "metadata_only",
+                },
+                "dflash2": {
+                    "role": "proposal_only",
+                    "implementation": "external_draft_integrated",
+                },
+            },
+            "state_separation": {
+                "target_text": "authoritative",
+                "draft": "request_private_proposal_state",
+                "multimodal": "not_admitted_by_text_adapter",
+            },
+            "request_private_only": True,
+            "apcv2_publication": False,
+            "transactional_multirow_state_reuse": False,
+            "implemented": True,
+            "implementation_scope": "planner_and_adapter_contract",
+            "qualified": False,
+            "selected": False,
+            "observed_used": False,
+        }
+
+    def plan_exact_prefix_cascade(
+        self, paths, accepted_prefix=(), *, attempted=()
+    ):
+        """Plan one Muse stage without claiming reusable target state."""
+
+        from ..runtime.exact_prefix_cascade import next_cascade_stage
+
+        return next_cascade_stage(paths, accepted_prefix, attempted=attempted)
+
     def cache_budget(self, *, mtp):
         from .mlx_vlm_memory import SlidingKVCacheBudget
 
@@ -380,10 +447,11 @@ class MuseGlimmerAdapter:
         config = json.loads((path / "config.json").read_text())
         self._config = config
         import mlx.core as mx
-        import mlx.nn as nn
+        from mlx import nn
         from transformers import AutoTokenizer
+
         from ..runtime.models.muse_glimmer import Model
-        from ..runtime.tokenizer_utils import TokenizerWrapper, BPEStreamingDetokenizer
+        from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         from ..runtime.ubc_evict import load_shards_evicting
 
         self.model = Model(ModelArgs.from_dict(config))
@@ -430,8 +498,9 @@ class MuseGlimmerAdapter:
         )
 
         if draft_record is not None:
-            from .dflash2 import load_drafter
             from dataclasses import replace
+
+            from .dflash2 import load_drafter
             self.draft_model = load_drafter(draft_record, self.model)
             self.profile_name = self.external_profile_name
             digest = hashlib.sha256((self.identity["fingerprint"] + draft_record["fingerprint"] + "external-dflash2-v1").encode()).hexdigest()

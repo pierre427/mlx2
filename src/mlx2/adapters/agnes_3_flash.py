@@ -123,6 +123,7 @@ class Agnes3FlashAdapter(OrdinaryTextAdapter):
         import mlx.core as mx
         from mlx import nn
         from transformers import AutoTokenizer
+
         from ..runtime.models.agnes import Model, ModelArgs
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         from ..runtime.ubc_evict import load_shards_evicting
@@ -151,3 +152,72 @@ class Agnes3FlashAdapter(OrdinaryTextAdapter):
                                           detokenizer_class=BPEStreamingDetokenizer,
                                           eos_token_ids=[eos] if isinstance(eos, int) else list(eos))
         self.max_context = int(config["text_config"]["max_position_embeddings"])
+
+    def prefill_step_default(self):
+        """Own the pinned Agnes text-prefill chunk independently of vision."""
+
+        return 2048
+
+    def exact_prefix_cascade_contract(self):
+        """Declare Agnes's text-only exact-prefix ownership boundary.
+
+        Ordering and sibling pruning are model-neutral. Reusing an accepted
+        prefix is allowed only after the caller proves that the checkpoint is
+        the exact Agnes autoregressive text layout, including every recurrent
+        and attention plane. Conditional-generation inputs and vision prefill
+        are deliberately outside this contract.
+        """
+
+        return {
+            "schema": "mlx2.exact-prefix-cascade-contract.v1",
+            "verification_order": "longest_first",
+            "verification_law": "canonical_target_draw_prefix_match",
+            "invalid_sibling_pruning": True,
+            "accepted_prefix_state": "exact_text_decoder_hybrid_checkpoint",
+            "shared_prefix_reuse": "suffix_only_without_common_token_replay",
+            "required_cache_layout": CACHE_LAYOUT,
+            "required_state_planes": ("attention_kv", "recurrent"),
+            "state_scope": "autoregressive_text_decoder",
+            "conditional_generation_prefill": False,
+            "vision_prefill": False,
+            "request_private_only": True,
+            "apcv2_publication": False,
+            "ordinary_reference_preserved": True,
+            "implemented": True,
+            "implementation_scope": "planner_and_adapter_contract",
+            "qualified": False,
+            "selected": False,
+            "observed_used": False,
+        }
+
+    def plan_exact_prefix_cascade(
+        self,
+        paths,
+        accepted_prefix=(),
+        *,
+        attempted=(),
+        state_scope="autoregressive_text_decoder",
+        cache_layout=None,
+        exact_state_geometry=False,
+    ):
+        """Plan a text cascade, refusing unproved prefix-state reuse.
+
+        A cold first stage does not reuse state. Every later stage consumes
+        only its suffix, so it requires an exact hybrid checkpoint proof for
+        this adapter layout. The explicit scope guard prevents an embedded
+        vision/conditional-generation prefill from being mistaken for text
+        decoder state.
+        """
+
+        prefix = tuple(accepted_prefix)
+        if state_scope != "autoregressive_text_decoder":
+            raise ValueError("Agnes exact-prefix cascades are text-decoder only")
+        if prefix and (
+            cache_layout != CACHE_LAYOUT or exact_state_geometry is not True
+        ):
+            raise ValueError(
+                "accepted Agnes prefixes require exact text hybrid cache geometry"
+            )
+        from ..runtime.exact_prefix_cascade import next_cascade_stage
+
+        return next_cascade_stage(paths, prefix, attempted=attempted)

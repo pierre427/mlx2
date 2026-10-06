@@ -185,6 +185,14 @@ def _qwen3_5_dense(path: Path, config: dict) -> AdapterResolution:
         )
     if topology != (64, 5120):
         raise ValueError(f"No mlx2 dense qwen3_5 adapter for topology {topology!r}")
+    qwen36 = importlib.import_module(".qwen36_27b", __package__)
+    if qwen36.is_attested_revision(path):
+        artifact = qwen36.inspect_artifact(path)
+        return AdapterResolution(
+            qwen36.Qwen3627BAdapter,
+            qwen36.descriptor_for(has_mtp=False),
+            artifact,
+        )
     module = importlib.import_module(".qwen38_27b", __package__)
     artifact = module.inspect_artifact(path)
     return AdapterResolution(

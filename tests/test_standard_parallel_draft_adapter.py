@@ -129,6 +129,43 @@ def test_bad_policy_rejected_before_target_allocation(
         )
 
 
+def test_longest_first_requires_exact_target_geometry_before_allocation(
+    pack, monkeypatch
+):
+    import mlx2.runtime.models.standard_decoder as runtime
+
+    draft, target = pack
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("target allocation preceded exact-prefix rejection")
+
+    monkeypatch.setattr(runtime, "Model", forbidden)
+    with pytest.raises(ValueError, match="target_verify_row_exact"):
+        StandardDecoderAdapter(
+            str(target),
+            execution_policy={
+                "draft_model": str(draft),
+                "num_draft": 2,
+                "continuation_pool": {
+                    "verification_algorithm": "longest-first-exact-prefix-v1"
+                },
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "architecture", ["Qwen3XPressModel", "DFlashDraftModel", "DFlash2DraftModel"]
+)
+def test_qwen3_sidecar_artifacts_are_not_target_adapters(tmp_path, architecture):
+    from mlx2.adapters.standard_decoder import inspect_artifact
+
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": "qwen3", "architectures": [architecture]})
+    )
+    with pytest.raises(ValueError, match="sidecars"):
+        inspect_artifact(tmp_path)
+
+
 def test_pass_changes_bind_distinct_paired_cache_identities(pack):
     draft, target = pack
     first = StandardDecoderAdapter(

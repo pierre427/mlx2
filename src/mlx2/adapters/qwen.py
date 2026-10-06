@@ -159,3 +159,29 @@ QWEN36_35B_SAMPLING = VendorSampling(
     non_thinking="instruct",
     model="Qwen/Qwen3.6-35B-A3B",
 )
+
+# Dense Qwen3.6 uses the same declared Qwen3.6 sampling profiles, but keeps a
+# distinct model identity so status and request receipts never attribute the
+# 27B artifact's defaults to the 35B-A3B checkpoint.
+QWEN36_27B_SAMPLING = VendorSampling(
+    {
+        "thinking": _qwen_thinking("Qwen/Qwen3.6-27B", 0.0),
+        "coding": SamplingDefaults(
+            temperature=0.6,
+            top_p=0.95,
+            top_k=20,
+            min_p=0.0,
+            presence_penalty=0.0,
+            repetition_penalty=1.0,
+            source=(
+                "model card (Qwen/Qwen3.6-27B): thinking mode, "
+                "precise coding tasks"
+            ),
+        ),
+        "instruct": _qwen_instruct("Qwen/Qwen3.6-27B"),
+    },
+    general="thinking",
+    thinking="thinking",
+    non_thinking="instruct",
+    model="Qwen/Qwen3.6-27B",
+)

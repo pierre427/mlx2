@@ -1,7 +1,9 @@
 """Agnes 3.0 embedded vision candidate; ordinary text remains the default."""
 
 from .pinned_vlm_candidate import (
-    PinnedVisionCandidateAdapter, descriptor_for, inspect_vision_artifact,
+    PinnedVisionCandidateAdapter,
+    descriptor_for,
+    inspect_vision_artifact,
 )
 
 DESCRIPTOR = descriptor_for("agnes")
@@ -15,3 +17,8 @@ class AgnesVisionCandidateAdapter(PinnedVisionCandidateAdapter):
     model_type = "agnes"
     descriptor = DESCRIPTOR
     artifact_inspector = staticmethod(inspect_artifact)
+
+    def prefill_step_default(self):
+        """Do not inherit the text decoder's pinned prefill policy."""
+
+        return

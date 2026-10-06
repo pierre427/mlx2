@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
-from .artifact_paths import shard_within_artifact
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from .ordinary_text import OrdinaryTextAdapter
 from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from .artifact_paths import shard_within_artifact
+from .ordinary_text import OrdinaryTextAdapter
+
+LIVE_CACHE_LAYOUT = "hils-landmark-custom-cache-v1"
 
 
 DESCRIPTOR = ModelDescriptor(
@@ -27,7 +30,7 @@ def inspect_artifact(model_path: str | Path) -> dict:
     path = Path(model_path).expanduser().resolve()
     config = json.loads((path / "config.json").read_text())
     if not isinstance(config, dict):
-        raise ValueError("HiLS config must be an object")
+        raise TypeError("HiLS config must be an object")
     expected = {
         "model_type": "olmo_hils", "architectures": ["HiLSForCausalLM"],
         "hidden_size": 4096, "intermediate_size": 11008,
@@ -97,7 +100,7 @@ class OlmoHiLSAdapter(OrdinaryTextAdapter):
         artifact = inspect_artifact(model_path)
         self.identity = artifact["identity"]
         self.config = artifact["config"]
-        self.layout = "hils-landmark-custom-cache-v1"
+        self.layout = LIVE_CACHE_LAYOUT
         # Refuse an explicit TF32 value before the profile overwrites it.
         require_process_numerics("the OLMo HiLS profile")
         self.environment = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", **PROCESS_NUMERICS}
@@ -106,6 +109,7 @@ class OlmoHiLSAdapter(OrdinaryTextAdapter):
         import mlx.core as mx
         from mlx import nn
         from transformers import AutoTokenizer
+
         from ..runtime.models.olmo_hils import Model, ModelArgs
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         from ..runtime.ubc_evict import load_shards_evicting
@@ -145,6 +149,209 @@ class OlmoHiLSAdapter(OrdinaryTextAdapter):
         if max_lanes != 1:
             raise ValueError("HiLS landmark bookkeeping supports one lane")
         return super().execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
+
+    def prefill_step_default(self):
+        """Fill an integral eight-chunk/512-inserted-row landmark window.
+
+        A 64-row HiLS chunk contains 63 real tokens and one inserted landmark.
+        The released 512-row window therefore spans 8 * 63 = 504 real tokens.
+        This is a family geometry choice, not a performance qualification.
+        """
+        chunk = int(self.config["chunk_size"])
+        window = int(self.config["hils_sliding_window"])
+        if chunk < 2 or window < chunk or window % chunk:
+            raise ValueError("HiLS prefill geometry is not whole landmark chunks")
+        return (chunk - 1) * (window // chunk)
+
+    def exact_prefix_cascade_contract(self):
+        """Declare the request-private ordinary-S1 continuation boundary."""
+
+        return {
+            "schema": "mlx2.exact-prefix-cascade-contract.v1",
+            "family": "hils-attention",
+            "verification_order": "longest_first",
+            "invalid_sibling_pruning": True,
+            "accepted_prefix_state": "authoritative_ordinary_s1_live",
+            "shared_prefix_reuse": "suffix_only_after_hils_live_cache_gate",
+            "cache_layout": LIVE_CACHE_LAYOUT,
+            "state_planes": ("attention_kv", "rng", "transcript"),
+            "hils_layers": 8,
+            "sliding_attention_layers": 24,
+            "inserted_chunk_size": 64,
+            "sliding_window": 512,
+            "request_private_only": True,
+            "apcv2_publication": False,
+            "transactional_multirow_state_reuse": False,
+            "ordinary_reference_preserved": True,
+            "implemented": True,
+            "implementation_scope": "planner_adapter_contract_and_live_s1_gate",
+            "qualified": False,
+            "selected": False,
+            "observed_used": False,
+        }
+
+    def exact_shared_prefix_geometry(self, caches, checkpoint_position):
+        """Validate one live authoritative HiLS cache boundary.
+
+        This gate describes state already produced by ordinary single-token
+        execution.  It does not authorize rollback, multirow verification, or
+        serialization into APCv2.
+        """
+
+        if type(checkpoint_position) is not int or checkpoint_position < 1:
+            raise ValueError("checkpoint_position must be a positive integer")
+        caches = tuple(caches)
+        layers = int(self.config["num_hidden_layers"])
+        chunk = int(self.config["chunk_size"])
+        window = int(self.config["hils_sliding_window"])
+        heads = int(self.config["num_attention_heads"])
+        head_dim = int(self.config["hidden_size"]) // heads
+        if len(caches) != layers:
+            return {
+                "eligible": False,
+                "reason": "cache_layer_count_mismatch",
+                "expected_layers": layers,
+                "actual_layers": len(caches),
+            }
+        expected_inserted = checkpoint_position + checkpoint_position // (chunk - 1)
+        expected_pooled = expected_inserted // chunk
+        for index, cache in enumerate(caches):
+            hils = index % int(self.config["full_attn_interleave"]) == 3
+            wanted = "HiLSCache" if hils else "SWABandCache"
+            actual_type = type(cache)
+            actual = f"{actual_type.__module__}.{actual_type.__qualname__}"
+            if actual != f"mlx2.runtime.models.olmo_hils.{wanted}":
+                return {
+                    "eligible": False,
+                    "reason": "cache_plane_type_mismatch",
+                    "layer": index,
+                    "expected": wanted,
+                    "actual": actual_type.__name__,
+                }
+            if (
+                int(cache.offset) != checkpoint_position
+                or int(cache.ins_offset) != expected_inserted
+                or int(cache.chunk_size) != chunk
+            ):
+                return {
+                    "eligible": False,
+                    "reason": "inserted_coordinate_mismatch",
+                    "layer": index,
+                }
+            start = int(cache.start_pos)
+            rows = expected_inserted - start
+            key_shape = tuple(getattr(getattr(cache, "keys", None), "shape", ()))
+            value_shape = tuple(getattr(getattr(cache, "values", None), "shape", ()))
+            expected_prefix = (1, heads)
+            if (
+                start < 0
+                or rows < 1
+                or len(key_shape) != 4
+                or len(value_shape) != 4
+                or key_shape[:2] != expected_prefix
+                or value_shape[:2] != expected_prefix
+                or key_shape[2] < rows
+                or value_shape[2] < rows
+                or key_shape[3] != head_dim
+                or value_shape[3] != head_dim
+            ):
+                return {
+                    "eligible": False,
+                    "reason": "cache_tensor_geometry_mismatch",
+                    "layer": index,
+                }
+            if hils:
+                landmark_shape = tuple(
+                    getattr(getattr(cache, "lmk_k", None), "shape", ())
+                )
+                prior_shape = tuple(
+                    getattr(getattr(cache, "prior_b", None), "shape", ())
+                )
+                if (
+                    start != 0
+                    or int(cache.num_pooled_chunks) != expected_pooled
+                    or (
+                        expected_pooled
+                        and (
+                            landmark_shape != (1, expected_pooled, heads, head_dim)
+                            or prior_shape != (1, expected_pooled, heads)
+                        )
+                    )
+                ):
+                    return {
+                        "eligible": False,
+                        "reason": "landmark_pool_geometry_mismatch",
+                        "layer": index,
+                    }
+            elif int(cache.window) != window:
+                return {
+                    "eligible": False,
+                    "reason": "sliding_window_geometry_mismatch",
+                    "layer": index,
+                }
+        return {
+            "eligible": True,
+            "authority": "live_authoritative_ordinary_s1",
+            "cache_layout": LIVE_CACHE_LAYOUT,
+            "checkpoint_position": checkpoint_position,
+            "inserted_position": expected_inserted,
+            "recompute_common_tokens": False,
+            "suffix_only": True,
+            "rollback_authorized": False,
+            "multirow_verify": False,
+            "publishable": False,
+        }
+
+    def plan_exact_prefix_cascade(
+        self, paths, accepted_prefix=(), *, attempted=(), state_binding=None
+    ):
+        """Plan one suffix only after binding it to exact live S1 state."""
+
+        from ..runtime.exact_prefix_cascade import next_cascade_stage
+
+        stage = next_cascade_stage(paths, accepted_prefix, attempted=attempted)
+        if stage is None or not stage.accepted_prefix:
+            return stage
+        if not isinstance(state_binding, Mapping):
+            raise TypeError("HiLS shared-prefix reuse requires a state binding")
+        checkpoint = state_binding.get("checkpoint_position")
+        expected_revision = getattr(self, "identity", {}).get("fingerprint")
+        failures = []
+        if state_binding.get("execution_domain") != "ordinary_s1":
+            failures.append("execution domain")
+        if state_binding.get("cache_layout") != LIVE_CACHE_LAYOUT:
+            failures.append("cache layout")
+        if state_binding.get("state_revision") != expected_revision:
+            failures.append("state revision")
+        if state_binding.get("checkpoint_kind") != "live_authoritative_exact":
+            failures.append("checkpoint kind")
+        if type(checkpoint) is not int or checkpoint < len(stage.accepted_prefix):
+            failures.append("checkpoint position")
+        if tuple(state_binding.get("transcript_tail", ())) != stage.accepted_prefix:
+            failures.append("transcript tail")
+        if state_binding.get("rng_state") != "authoritative_after_prefix":
+            failures.append("RNG state")
+        if state_binding.get("batch_size") != 1:
+            failures.append("batch size")
+        if failures:
+            raise ValueError(
+                "HiLS exact-prefix state binding differs: " + ", ".join(failures)
+            )
+        geometry = self.exact_shared_prefix_geometry(
+            state_binding.get("caches", ()), checkpoint
+        )
+        if geometry.get("eligible") is not True:
+            raise ValueError(
+                "HiLS exact-prefix cache differs: " + str(geometry.get("reason"))
+            )
+        return stage
+
+    def diagnostics(self):
+        return {
+            "route": "ordinary",
+            "qualification": "pending",
+            "prefix_candidate_verification": self.exact_prefix_cascade_contract(),
+        }
 
     def close(self):
         self.model = None

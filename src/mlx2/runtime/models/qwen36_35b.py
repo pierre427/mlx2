@@ -486,6 +486,7 @@ class TextModel(DenseTextWrapper):
 class Model(nn.Module):
     apc_v2_layout = "qwen36-35b-a3b-hybrid-layer-segments-v1"
     supports_speculative_rollback = True
+    supports_contextual_prefix_equivalence = True
 
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -509,6 +510,22 @@ class Model(nn.Module):
     @property
     def layers(self):
         return self.language_model.model.pipeline_layers
+
+    @property
+    def speculative_args(self):
+        """Text geometry for external draft executors and compatibility gates."""
+        return self.language_model.args
+
+    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        return self.language_model.forward_with_taps(
+            inputs,
+            cache,
+            capture_layers,
+            body_only=body_only,
+        )
+
+    def prefill_body(self, inputs, cache, capture_layers):
+        return self.language_model.prefill_body(inputs, cache, capture_layers)
 
     def make_cache(self):
         return self.language_model.make_cache()

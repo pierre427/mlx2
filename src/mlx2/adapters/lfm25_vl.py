@@ -14,6 +14,7 @@ import importlib.util
 import json
 import secrets
 import struct
+from collections.abc import Mapping
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
@@ -420,6 +421,10 @@ class LFM25VLAdapter:
     descriptor = LFM25_VL
     sampling_defaults = None
 
+    def prefill_step_default(self):
+        """Decline a family override so the generic prompt schedule owns it."""
+        return None
+
     def __init__(self, model_path: str, *, execution_policy=None):
         self.media_checkpoint_enabled = execution_policy == {
             "lfm_media_checkpoint": "candidate_v1"
@@ -470,6 +475,116 @@ class LFM25VLAdapter:
                 else "off"
             ),
         }
+
+    def exact_prefix_cascade_contract(self):
+        """Declare the exact, language-only continuation-cascade boundary.
+
+        LFM's eight attention and 22 ShortConv planes can reuse an exact
+        request-private ordinary checkpoint.  Vision/frame prefill is outside
+        the cascade and must already be bound below that checkpoint.  DSpark
+        has a separate state machine and is never admitted by this contract.
+        """
+        return {
+            "execution_domain": "autoregressive_language_only",
+            "verification_order": "longest_first",
+            "invalid_sibling_pruning": True,
+            "accepted_prefix_state": "exact_ordinary_hybrid_checkpoint",
+            "shared_prefix_reuse": "suffix_only_after_exact_geometry_gate",
+            "cache_layout": CACHE_LAYOUT,
+            "attention_layers": 8,
+            "recurrent_layers": 22,
+            "max_lanes": 1,
+            "media_prefill": "bound_below_language_checkpoint",
+            "dspark_state": "excluded",
+            "request_private_only": True,
+            "apcv2_publication": False,
+            "ordinary_reference_preserved": True,
+            "implemented": True,
+            "implementation_scope": "planner_and_adapter_state_gate",
+            "qualified": False,
+            "selected": False,
+            "observed_used": False,
+        }
+
+    def _require_exact_prefix_state_binding(self, binding, *, prefix_tokens):
+        if not isinstance(binding, Mapping):
+            raise ValueError("LFM exact-prefix reuse requires a state binding")
+        expected_fingerprint = getattr(self, "identity", {}).get("fingerprint")
+        required_planes = frozenset(plane.value for plane in self.descriptor.state_planes)
+        raw_planes = binding.get("state_planes")
+        if not isinstance(raw_planes, (tuple, list, set, frozenset)):
+            raise ValueError("LFM exact-prefix state planes are missing")
+        planes = frozenset(raw_planes)
+        start = binding.get("prefix_start_position")
+        checkpoint = binding.get("checkpoint_position")
+        media_end = binding.get("media_token_end", 0)
+        media_fingerprint = binding.get("media_fingerprint")
+        media_tokens = binding.get("media_prompt_tokens")
+        media_proof = binding.get("media_proof")
+        failures = []
+        if binding.get("execution_domain") != "autoregressive_language_only":
+            failures.append("execution domain")
+        if binding.get("cache_layout") != CACHE_LAYOUT:
+            failures.append("cache layout")
+        if expected_fingerprint is None or binding.get("artifact_fingerprint") != expected_fingerprint:
+            failures.append("artifact fingerprint")
+        if binding.get("source_revision") != SOURCE_REVISION:
+            failures.append("source revision")
+        if binding.get("checkpoint_kind") != "ordinary_exact":
+            failures.append("checkpoint kind")
+        if type(start) is not int or start < 0:
+            failures.append("prefix start")
+        if type(checkpoint) is not int or type(start) is not int or checkpoint != start + prefix_tokens:
+            failures.append("checkpoint position")
+        if planes != required_planes:
+            failures.append("state planes")
+        if binding.get("attention_layers") != 8 or binding.get("recurrent_layers") != 22:
+            failures.append("hybrid layer geometry")
+        if binding.get("batch_size") != 1:
+            failures.append("batch size")
+        if binding.get("dspark_state") != "absent":
+            failures.append("DSpark state")
+        if type(media_end) is not int or media_end < 0 or type(start) is not int or media_end > start:
+            failures.append("media boundary")
+        if media_end:
+            if not isinstance(media_fingerprint, str) or not media_fingerprint:
+                failures.append("media fingerprint")
+            if (
+                not isinstance(media_tokens, list)
+                or not media_tokens
+                or any(type(token) is not int or token < 0 for token in media_tokens)
+                or media_end > len(media_tokens) - 1
+                or not isinstance(media_proof, str)
+                or not hmac.compare_digest(
+                    media_proof,
+                    self._media_checkpoint_proof(
+                        media_tokens, media_fingerprint, media_end
+                    ),
+                )
+            ):
+                failures.append("media proof")
+        elif any(
+            value is not None
+            for value in (media_fingerprint, media_tokens, media_proof)
+        ):
+            failures.append("unexpected media binding")
+        if failures:
+            raise ValueError(
+                "LFM exact-prefix state binding differs: " + ", ".join(failures)
+            )
+
+    def plan_exact_prefix_cascade(
+        self, paths, accepted_prefix=(), *, attempted=(), state_binding=None
+    ):
+        """Plan a suffix-only AR stage after validating reusable hybrid state."""
+        from ..runtime.exact_prefix_cascade import next_cascade_stage
+
+        stage = next_cascade_stage(paths, accepted_prefix, attempted=attempted)
+        if stage is not None and stage.accepted_prefix:
+            self._require_exact_prefix_state_binding(
+                state_binding, prefix_tokens=len(stage.accepted_prefix)
+            )
+        return stage
 
     def _media_checkpoint_proof(self, tokens, fingerprint, media_end):
         payload = json.dumps(

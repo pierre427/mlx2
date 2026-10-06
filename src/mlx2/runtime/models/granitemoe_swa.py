@@ -183,6 +183,7 @@ class Model(nn.Module):
     # Sliding-window layers use RotatingKVCache, which records an exact rollback
     # within the verify window — enables --draft-model speculative decoding.
     supports_speculative_rollback = True
+    exact_prefix_reuse_algorithm = "granite-full-swa-segmented-kv-v1"
 
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -232,6 +233,60 @@ class Model(nn.Module):
             else:
                 caches.append(RotatingKVCache(max_size=self.args.sliding_window))
         return caches
+
+    def exact_prefix_reuse_contract(self, cache):
+        """Validate the full/SWA cache geometry before sharing a prefix.
+
+        Sliding rows may have wrapped, so offset-only rewind is insufficient.
+        ``SegmentedKVRows`` retains each rotating window and replays only the
+        committed prefix.  This adapter hook admits that generic transaction
+        only for the exact layer order and window declared by this model.
+        """
+        from numbers import Integral
+
+        if not isinstance(cache, (list, tuple)) or len(cache) != len(
+            self.args.layer_types
+        ):
+            raise ValueError("Granite exact prefix reuse needs one cache per layer")
+        offsets = set()
+        full = sliding = 0
+        for index, (kind, entry) in enumerate(zip(self.args.layer_types, cache)):
+            if kind == "sliding_attention":
+                if (
+                    type(entry) is not RotatingKVCache
+                    or entry.max_size != self.args.sliding_window
+                    or entry.keep != 0
+                ):
+                    raise ValueError(
+                        f"Granite sliding layer {index} has incompatible cache geometry"
+                    )
+                sliding += 1
+            elif kind == "full_attention":
+                if type(entry) not in (KVCache, RotatingKVCache):
+                    raise ValueError(
+                        f"Granite full layer {index} has incompatible cache geometry"
+                    )
+                full += 1
+            else:
+                raise ValueError(f"unsupported Granite attention kind: {kind}")
+            if (
+                isinstance(entry.offset, bool)
+                or not isinstance(entry.offset, Integral)
+                or entry.offset < 0
+                or getattr(entry, "speculating", False)
+            ):
+                raise ValueError("Granite exact prefix reuse needs idle host offsets")
+            offsets.add(int(entry.offset))
+        if len(offsets) != 1:
+            raise ValueError("Granite cache layers disagree on the committed position")
+        return {
+            "algorithm": self.exact_prefix_reuse_algorithm,
+            "full_layers": full,
+            "sliding_layers": sliding,
+            "sliding_window": int(self.args.sliding_window),
+            "committed_offset": offsets.pop(),
+            "transaction": "SegmentedKVRows exact rotating-window snapshot/replay",
+        }
 
     @property
     def layers(self):

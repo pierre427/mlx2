@@ -949,6 +949,66 @@ class Model(nn.Module):
         factory = KVCache if cache_factory is None else cache_factory
         return [factory() for _ in self.model.layers]
 
+    def exact_prefix_reuse_geometry(self, cache, *, state_revision):
+        """Derive the live exact Xing MLA cache geometry or fail closed.
+
+        Xing does not cache dense GQA K/V rows.  Its only trunk state is one
+        compressed MLA latent and one rotated positional key per layer; mHC
+        streams are local to a forward.  A continuation verifier may reuse a
+        shared prefix only when every layer is the ordinary unsegmented exact
+        ``KVCache`` at one aligned, populated boundary.
+        """
+        from ..proposal_cascade import PrefixCascadeError, PrefixReuseGeometry
+
+        if not isinstance(cache, (list, tuple)) or len(cache) != len(self.layers):
+            raise PrefixCascadeError(
+                "Xing exact-prefix reuse requires one cache per trunk layer"
+            )
+        if any(type(layer_cache) is not KVCache for layer_cache in cache):
+            raise PrefixCascadeError(
+                "Xing exact-prefix reuse requires exact unsegmented KVCache state"
+            )
+        offsets = {layer_cache.offset for layer_cache in cache}
+        if len(offsets) != 1 or next(iter(offsets)) < 1:
+            raise PrefixCascadeError(
+                "Xing exact-prefix reuse requires one populated aligned boundary"
+            )
+        position = offsets.pop()
+        latent_widths = set()
+        rope_widths = set()
+        for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
+            latent, rope = layer_cache.keys_and_values()
+            if not isinstance(latent, mx.array) or not isinstance(rope, mx.array):
+                raise PrefixCascadeError(
+                    f"Xing layer {index} has no dense exact MLA state"
+                )
+            expected = layer.self_attn
+            if (
+                latent.ndim != 4
+                or rope.ndim != 4
+                or latent.shape[:2] != (1, 1)
+                or rope.shape[:2] != (1, 1)
+                or latent.shape[-2] != position
+                or rope.shape[-2] != position
+                or latent.shape[-1] != expected.kv_lora_rank
+                or rope.shape[-1] != expected.qk_rope_head_dim
+            ):
+                raise PrefixCascadeError(
+                    f"Xing layer {index} MLA cache geometry disagrees with the adapter"
+                )
+            latent_widths.add(int(latent.shape[-1]))
+            rope_widths.add(int(rope.shape[-1]))
+        if len(latent_widths) != 1 or len(rope_widths) != 1:
+            raise PrefixCascadeError("Xing MLA cache widths differ between layers")
+        return PrefixReuseGeometry(
+            state_revision=state_revision,
+            cache_layout=self.apc_v2_layout,
+            position=position,
+            layer_count=len(cache),
+            state_components=("mla_latent", "rope_key"),
+            component_widths=(latent_widths.pop(), rope_widths.pop()),
+        )
+
     def mtp_backbone(self, inputs: mx.array, cache=None):
         """(LM-head hidden, MTP seed hidden): both the post-final-norm hidden."""
         hidden = self.model(inputs, cache=cache)

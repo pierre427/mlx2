@@ -31,6 +31,8 @@ def selected_contract(enabled, *, state_dtype=None, fp32_head=False):
     adapter = SimpleNamespace(
         fused_gdn=enabled,
         model=SimpleNamespace(named_modules=lambda: [("layer", layer)]),
+        _external_execution_numerics=lambda: {},
+        external_policy={},
     )
     if state_dtype is not None:
         from mlx2.runtime.models.gdn_state import install_state_dtype
@@ -243,7 +245,8 @@ def test_gdn_precision_contract_checks_actual_live_storage_selection(selected):
 
     layer = GatedDeltaNet(TextModelArgs(hidden_size=16, linear_num_key_heads=1,
         linear_num_value_heads=2, linear_key_head_dim=8, linear_value_head_dim=8))
-    adapter = SimpleNamespace(fused_gdn=False,
+    adapter = SimpleNamespace(fused_gdn=False, external_policy={},
+        _external_execution_numerics=lambda: {},
         model=SimpleNamespace(named_modules=lambda: [("layer", layer)]))
     if selected:
         adapter.gdn_state = install_state_dtype(adapter.model, "float16")
@@ -261,7 +264,8 @@ def test_explicit_default_gdn_dtype_keeps_contract_absent(explicit_default):
     layer = GatedDeltaNet(TextModelArgs(hidden_size=16, linear_num_key_heads=1,
         linear_num_value_heads=2, linear_key_head_dim=8, linear_value_head_dim=8))
     object.__setattr__(layer, "_gdn_state_dtype", None if explicit_default is None else mx.float32)
-    adapter = SimpleNamespace(fused_gdn=False,
+    adapter = SimpleNamespace(fused_gdn=False, external_policy={},
+        _external_execution_numerics=lambda: {},
         model=SimpleNamespace(named_modules=lambda: [("layer", layer)]))
     assert Qwen3827BAdapter.execution_numerics_contract(adapter) is None
 
@@ -274,7 +278,8 @@ def test_fp32_head_contract_refuses_stale_receipt():
 
     language_model = nn.Module()
     language_model.lm_head = nn.QuantizedLinear(64, 64, bias=False)
-    adapter = SimpleNamespace(fused_gdn=False,
+    adapter = SimpleNamespace(fused_gdn=False, external_policy={},
+        _external_execution_numerics=lambda: {},
         model=SimpleNamespace(language_model=language_model, named_modules=list))
     adapter.fp32_head = enable_fp32_head_logits(language_model)
     language_model.lm_head.scales = language_model.lm_head.scales.astype(mx.bfloat16)

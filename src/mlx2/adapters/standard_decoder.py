@@ -14,6 +14,16 @@ from .external_draft_policy import ExternalDraftAdapterMixin
 
 FAMILIES = frozenset({"qwen3", "qwen3_moe", "qwen2", "llama"})
 CACHE_LAYOUT = "standard-full-kv-layer-segments-v1"
+QWEN3_PREFILL_STEP = 512
+QWEN3_SIDECAR_ARCHITECTURES = frozenset(
+    {
+        "Qwen3XPressModel",
+        "DFlashDraftModel",
+        "DFlash2DraftModel",
+        "Lfm2DSparkDraftModel",
+        "LiLiCorrDraftModel",
+    }
+)
 
 
 def descriptor_for(family: str) -> ModelDescriptor:
@@ -106,6 +116,12 @@ def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> 
     family = config.get("model_type")
     if family not in FAMILIES or (expected is not None and family != expected):
         raise ValueError(f"unsupported artifact family: {family!r}")
+    architectures = config.get("architectures")
+    if (
+        isinstance(architectures, list)
+        and any(name in QWEN3_SIDECAR_ARCHITECTURES for name in architectures)
+    ):
+        raise ValueError("Qwen3 proposal sidecars cannot be loaded as target adapters")
     for key in (
         "hidden_size",
         "num_hidden_layers",
@@ -384,6 +400,17 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
     EXTERNAL_ROUTE_TAG = "external-xpress-qwen3-v1"
     EXTERNAL_PROFILE = "qwen3-apcv2-xpress"
 
+    def prefill_step_default(self):
+        """Keep the Qwen3 target's conservative chunk ownership in its adapter.
+
+        This is a bounded scheduling default, not a throughput selection or a
+        qualification claim. Other standard families decline and therefore use
+        the engine's generic prompt-length autoscaling fallback.
+        """
+        if self.config.get("model_type") in {"qwen3", "qwen3_moe"}:
+            return QWEN3_PREFILL_STEP
+        return None
+
     def create_native_paged_qwen3_request(self, *, revision, prompt_tokens,
                                           max_tokens, apc_cache=None,
                                           cached_tokens=0,
@@ -576,6 +603,19 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
             raise ValueError("target_verify_row_exact must be a boolean")
         if not row_exact:
             self.external_policy.pop("target_verify_row_exact", None)
+        continuation = self.external_policy.get("continuation_pool")
+        if isinstance(continuation, dict):
+            from ..runtime.proposal_providers import LONGEST_FIRST_EXACT_PREFIX
+
+            if (
+                continuation.get("verification_algorithm")
+                == LONGEST_FIRST_EXACT_PREFIX
+                and not row_exact
+            ):
+                raise ValueError(
+                    "longest-first exact-prefix verification requires "
+                    "target_verify_row_exact"
+                )
         if set(self.external_policy) - allowed or (
             self.external_policy and not self.external_policy.get("draft_model")
         ):
@@ -721,8 +761,19 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
             from ..runtime.models.standard_decoder import (
                 TARGET_VERIFY_ROW_EXACT_VERSION,
             )
+            from ..runtime.proposal_providers import LONGEST_FIRST_EXACT_PREFIX
 
             self.model.configure_target_verify_row_exact(True)
+            if (
+                isinstance(continuation, dict)
+                and continuation.get("verification_algorithm")
+                == LONGEST_FIRST_EXACT_PREFIX
+                and not self.model.supports_contextual_prefix_equivalence
+            ):
+                raise ValueError(
+                    "longest-first exact-prefix verification requires a "
+                    "BF16 row-exact Qwen3 target"
+                )
             # Pin the changed target arithmetic before source/session/teacher
             # identities are created by the external drafter binding.
             execution_settings = {

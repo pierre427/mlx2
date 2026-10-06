@@ -15,9 +15,14 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from .qwen38_27b import Qwen3827BAdapter
 from ..process_env import PROCESS_NUMERICS, require_process_numerics
-
+from ..runtime.activation_injection import (
+    bind_activation_injection_bridge,
+    compose_deep_concept_memory,
+    prepare_activation_injection,
+    prepare_loaded_activation_injection,
+)
+from .qwen38_27b import Qwen3827BAdapter
 
 CACHE_LAYOUT = "qwen35-9b-hybrid-layer-segments-v1"
 
@@ -188,6 +193,10 @@ class Qwen359BAdapter(Qwen3827BAdapter):
     environment_configurator = staticmethod(configure_environment)
     from .qwen import QWEN35_9B_SAMPLING as sampling_defaults
 
+    def prefill_step_default(self):
+        """No 27B prefill preference inheritance without 9B evidence."""
+        return None
+
     def configure_neural_concept_bridge(self, artifact):
         """Bind the learned bridge to this exact dense hidden geometry."""
         text_config = self.model.args.text_config
@@ -207,6 +216,125 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         self._neural_concept_artifact = artifact
         self._neural_concept_injection_layer = injection_layer
         self._neural_concept_counts = {"prefills": 0, "concepts": 0, "tokens": 0}
+
+    def configure_activation_capsule_bridge(self, artifact=None):
+        """Bind activation injection to a pinned learned projector.
+
+        The neural-concept artifact may be shared deliberately: both routes
+        then use the same bound projection geometry while retaining distinct
+        capsule payloads and receipts.  This does not authorize another model,
+        route, layer, or artifact revision.
+        """
+        if artifact is None:
+            artifact = getattr(self, "_neural_concept_artifact", None)
+        if artifact is None:
+            raise ValueError("activation capsule bridge requires a configured artifact")
+        text_config = self.model.args.text_config
+        hidden_size = (
+            text_config["hidden_size"]
+            if isinstance(text_config, Mapping)
+            else text_config.hidden_size
+        )
+        layer_count = len(self.model.language_model.model.layers)
+        self._activation_capsule_bridge = bind_activation_injection_bridge(
+            artifact, hidden_dim=int(hidden_size), layer_count=layer_count
+        )
+        self._activation_capsule_counts = {
+            "requests": 0,
+            "prepared": 0,
+            "states": 0,
+            "decode_steps": 0,
+        }
+
+    def activation_capsule_prefill(
+        self,
+        tokens,
+        snapshot,
+        *,
+        prefill_step,
+        route="ordinary",
+        batch_size=1,
+    ):
+        """Prepare one ordinary-B1 activation snapshot for model input."""
+        bridge = getattr(self, "_activation_capsule_bridge", None)
+        if bridge is None:
+            raise ValueError("Qwen3.5 9B activation capsule bridge is not configured")
+        if isinstance(snapshot, Mapping) and {
+            "manifest",
+            "tensors",
+            "capsule_digest",
+            "gate",
+        } <= set(snapshot):
+            prepared = prepare_loaded_activation_injection(
+                snapshot["manifest"],
+                snapshot["tensors"],
+                bridge,
+                capsule_digest=snapshot["capsule_digest"],
+                gate=snapshot["gate"],
+                tokens=tokens,
+                prefill_step=prefill_step,
+                route=route,
+                batch_size=batch_size,
+            )
+        else:
+            prepared = prepare_activation_injection(
+                snapshot,
+                bridge,
+                tokens=tokens,
+                prefill_step=prefill_step,
+                route=route,
+                batch_size=batch_size,
+            )
+        import mlx.core as mx
+
+        memory = dict(prepared.memory)
+        for name in ("keys", "values", "order_bias", "decode_values"):
+            value = memory.get(name)
+            if value is not None:
+                memory[name] = mx.array(value, dtype=mx.float32)
+        result = {"deep_concept_memory": memory, "receipt": dict(prepared.receipt)}
+        if memory.get("decode_values") is not None:
+            result["_mlx2_persistent_decode_inputs"] = {
+                "deep_concept_memory": memory
+            }
+        counts = self._activation_capsule_counts
+        counts["requests"] += 1
+        # Preparation is not execution. Serving owns engagement/observed-use
+        # and requires evaluated model-forward evidence for the exact UID.
+        counts["prepared"] += 1
+        counts["states"] += int(prepared.receipt["states"])
+        counts["decode_steps"] += int(prepared.receipt["decode_steps"])
+        return result
+
+    @staticmethod
+    def compose_semantic_prefill_inputs(*prepared_inputs):
+        """Compose neural concepts with activation capsules in source order."""
+        memories = []
+        persistent = False
+        receipts = []
+        for prepared in prepared_inputs:
+            if prepared is None:
+                continue
+            memory = prepared.get("deep_concept_memory")
+            if memory is None:
+                raise ValueError("semantic prefill input has no deep concept memory")
+            memories.append(memory)
+            persistent = persistent or prepared.get(
+                "_mlx2_persistent_decode_inputs"
+            ) is not None
+            receipt = prepared.get("receipt")
+            if receipt is not None:
+                receipts.append(receipt)
+        memory = compose_deep_concept_memory(*memories)
+        result = {
+            "deep_concept_memory": memory,
+            "receipts": tuple(receipts),
+        }
+        if persistent:
+            result["_mlx2_persistent_decode_inputs"] = {
+                "deep_concept_memory": memory
+            }
+        return result
 
     def neural_concept_prefill(self, tokens, payload, *, prefill_step):
         """Apply learned cross-attention to one request's prefill embeddings."""
@@ -377,6 +505,18 @@ class Qwen359BAdapter(Qwen3827BAdapter):
                 "artifact_fingerprint": artifact.fingerprint,
                 "injection_layer": self._neural_concept_injection_layer,
                 "counts": dict(self._neural_concept_counts),
+            }
+        bridge = getattr(self, "_activation_capsule_bridge", None)
+        if bridge is not None:
+            result["activation_capsule_bridge"] = {
+                "state": "implemented-unqualified-default-off",
+                "projector_fingerprint": bridge.artifact_fingerprint,
+                "capsule_revision": bridge.capsule_revision,
+                "injection_layer": bridge.injection_layer,
+                "hidden_dim": bridge.hidden_dim,
+                "ordinary_b1_only": True,
+                "speculative_routes": "refused",
+                "counts": dict(self._activation_capsule_counts),
             }
         return result
 

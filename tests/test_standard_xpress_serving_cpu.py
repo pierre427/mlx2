@@ -130,7 +130,13 @@ def test_real_xpress_greedy_matches_standard_reference_batched_and_budget(tied):
         assert end.finish_reason == "length"
         end.cache_sidecar.validate("tiny-xpress-v1", len(end.all_tokens))
         assert end.speculative_receipt["kind"] == "external_xpress"
-        assert end.speculative_receipt["draft_settings"] == draft.receipt_settings
+        settings = end.speculative_receipt["draft_settings"]
+        assert {
+            key: settings[key] for key in draft.receipt_settings
+        } == draft.receipt_settings
+        assert settings["minimum_proposal_length"] == 1
+        assert settings["proposal_floor_raises"] == 0
+        assert settings["terminal_exhaustion_may_shorten"] is True
         assert (
             end.speculative_receipt["draft_settings"]["proposal_distribution"]
             == "deterministic_point_mass"

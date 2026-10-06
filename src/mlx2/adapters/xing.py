@@ -380,6 +380,45 @@ class XingAdapter:
         # experts, the router, mHC operands, heads and the MTP layer stay stock.
         return ("mlp", "all")
 
+    def prefill_step_default(self):
+        """Keep Xing on its qualified 2K chunk; explicit engine values win."""
+        return 2048
+
+    @staticmethod
+    def proposal_verification_policy():
+        """Candidate policy; selection still requires a compatible route.
+
+        The order and pruning law are model-neutral.  Prefix reuse is guarded
+        by :meth:`exact_prefix_reuse_geometry`, which derives compressed MLA
+        dimensions from a live exact cache instead of assuming dense GQA rows.
+        """
+        from ..runtime.proposal_cascade import ALGORITHM
+
+        return {
+            "algorithm": ALGORITHM,
+            "order": "longest_first",
+            "prune": "authoritative_target_prefix",
+            "shared_prefix_reuse": "exact_adapter_geometry_only",
+            "implemented": True,
+            "qualified": False,
+            "selected": False,
+            "observed_used": False,
+        }
+
+    def exact_prefix_reuse_geometry(self, cache):
+        """Delegate live target-state validation to Xing model arithmetic."""
+        return self.model.exact_prefix_reuse_geometry(
+            cache, state_revision=self.identity["fingerprint"]
+        )
+
+    def proposal_verification_plan(self, paths, cache):
+        """Build an executable host plan only after exact cache attestation."""
+        from ..runtime.proposal_cascade import LongestFirstPrefixCascade
+
+        return LongestFirstPrefixCascade(
+            paths, geometry=self.exact_prefix_reuse_geometry(cache)
+        )
+
     def __init__(self, model_path: str, *, require_mtp: bool = False, execution_policy=None):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
@@ -552,6 +591,7 @@ class XingAdapter:
             "tokenizer": dict(getattr(self, "tokenizer_receipt", {})),
             "mhc": mhc_stats(),
             "segmented_mtp": segmented_self_mtp_stats(),
+            "proposal_verification": self.proposal_verification_policy(),
         }
 
     def close(self):
