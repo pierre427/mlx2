@@ -75,7 +75,10 @@ _GDN_PRE = r"""
     float ss = 0.0f;
     for (int j = 0; j < PER; j++) ss += vals[j] * vals[j];
     ss = simd_sum(ss);
-    const float inv = metal::rsqrt(ss / float(DK) + 1e-6f);
+    // mlx_lm expresses FLA's L2 epsilon through RMSNorm: dividing the sum by
+    // DK must divide the 1e-6 epsilon by DK as well.
+    const float norm_eps = 1e-6f / float(DK);
+    const float inv = metal::rsqrt(ss / float(DK) + norm_eps);
     // mlx_lm: q = (DK^-0.5)^2 * rms_norm(q), k = DK^-0.5 * rms_norm(k), scales rounded to bf16
     const float scale = isq ? float(bfloat(1.0f / float(DK))) : float(bfloat(metal::rsqrt(float(DK))));
     for (int j = 0; j < PER; j++) {
