@@ -2,7 +2,7 @@
   "component": "Qwen3.8 mlx2 fused GDN bounded multi-token verify and prefill",
   "date": "2026-10-06",
   "status": "implemented_validation_pending_unqualified_unselected",
-  "source_repository": "archived corrected TensorFold source (not publicly available)",
+  "source_repository": "https://github.com/pierre427/mlx2.git (branch tensorfold-qwen38-corrected-20261006)",
   "source_revision": "1a5f38e12afbb560d8fc61c88ccb5900f7d5d170",
   "source_tree": "d9d141b99525a8866f48475858d7011fb192c11b",
   "upstream_repository": "https://github.com/ashhart/TensorFold.git",
