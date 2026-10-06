@@ -209,6 +209,17 @@ def test_explicit_current_algorithm_normalizes_to_default_and_roundtrips():
     assert ContinuationPoolPolicy.from_value(normalized).as_dict() == normalized
 
 
+def test_longest_first_exact_prefix_algorithm_is_revision_bound_and_explicit():
+    from mlx2.runtime.proposal_providers import LONGEST_FIRST_EXACT_PREFIX
+
+    default = ContinuationPoolPolicy.from_value({})
+    cascade = ContinuationPoolPolicy.from_value(
+        {"verification_algorithm": LONGEST_FIRST_EXACT_PREFIX}
+    )
+    assert cascade.verification_algorithm == LONGEST_FIRST_EXACT_PREFIX
+    assert cascade.as_dict() != default.as_dict()
+
+
 @pytest.mark.parametrize(
     "algorithm", ["target-draw-then-prefix-match-v1", "", None, False, 2]
 )

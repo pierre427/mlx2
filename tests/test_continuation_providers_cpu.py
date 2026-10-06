@@ -290,8 +290,10 @@ def test_header_policy_refuses_incompatible_feedback_or_continuation_before_load
     with pytest.raises(ValueError, match="LiLiCoRR artifact"):
         adapter._check_num_draft({"args": SimpleNamespace(block_size=4)})
     adapter.external_policy = {"num_draft": 2, "continuation_pool": {}}
-    with pytest.raises(ValueError, match="deterministic external head"):
-        adapter._check_num_draft({"args": SimpleNamespace(block_size=4)})
+    with pytest.raises(ValueError, match="complete-path external head"):
+        adapter._check_num_draft(
+            {"args": SimpleNamespace(block_size=4), "config": {}}
+        )
 
 
 @pytest.mark.parametrize("kind", ["xpress", "lilicorr"])

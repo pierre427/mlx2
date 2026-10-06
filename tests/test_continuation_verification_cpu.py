@@ -10,7 +10,9 @@ from test_standard_xpress_serving_cpu import reference, tiny
 from mlx2.runtime.continuation_verification import (
     SelectedContinuationTransaction,
     prepare_continuations,
+    prepare_longest_first_continuations,
     sample_continuations,
+    verify_longest_first_continuations,
 )
 from mlx2.runtime.segmented_rotating_kv import SegmentedKVRows as SegmentedVerifyRows
 from mlx2.runtime.speculative_sampling import RequestRNG, softmax
@@ -190,6 +192,98 @@ def test_fifteen_complete_sequences_have_fifteen_physical_target_rows(monkeypatc
     assert calls == [(15, 4)] and outcome.physical_width == 15
     assert list(outcome.emitted) == expected
     SelectedContinuationTransaction(tx, outcome.selected_index, len(paths)).commit([4])
+
+
+def test_longest_first_prunes_impossible_sibling_and_reuses_exact_prefix():
+    target, _ = tiny()
+    prompt = [1, 2, 3]
+    cache = target.make_cache()
+    mx.eval(target(mx.array([prompt[:-1]]), cache=cache))
+    before = copy.deepcopy(cache)
+    expected = reference(target, prompt, 4)
+    vocab = target.args.vocab_size
+    longest_bad = (
+        expected[0],
+        (expected[1] + 1) % vocab,
+        (expected[2] + 2) % vocab,
+        (expected[3] + 3) % vocab,
+    )
+    impossible = ((expected[0] + 1) % vocab, expected[1], expected[2])
+    good = tuple(expected[:3])
+    attempts = []
+
+    def prepare_attempt(branch, anchor, suffix):
+        attempts.append((anchor, tuple(suffix)))
+        _paths, logits, features, transaction = prepare_continuations(
+            target,
+            mx,
+            branch,
+            anchor,
+            (suffix,),
+            [0, 2],
+            SegmentedVerifyRows,
+            max_sequences=1,
+            max_depth=4,
+        )
+        return logits, features, transaction
+
+    outcome, feature_slices, transaction = verify_longest_first_continuations(
+        (longest_bad, impossible, good),
+        cache,
+        prompt[-1],
+        prepare_attempt,
+        lambda row, _prefix: int(mx.argmax(row).item()),
+        maximum=4,
+    )
+    assert list(outcome.emitted) == expected
+    assert outcome.selected_index == 2 and outcome.accepted == 3
+    assert outcome.attempted_indices == (0, 2)
+    assert outcome.pruned_siblings == 1
+    assert outcome.shared_prefix_tokens_reused == 1
+    assert outcome.physical_width == 1 and outcome.physical_span == 7
+    assert attempts == [
+        (prompt[-1], longest_bad),
+        (expected[1], (expected[2],)),
+    ]
+    assert [part.shape[1] for part in feature_slices] == [2, 2]
+    selected = transaction.commit([4])[0]
+    fresh = target.make_cache()
+    mx.eval(target(mx.array([prompt + expected[:3]]), cache=fresh))
+    assert_cache(selected, fresh)
+    assert_cache(cache, before)
+
+
+def test_longest_first_reuses_reached_prefix_without_recomputing_common_rows(
+    monkeypatch,
+):
+    target, prompt, cache, expected, calls, (paths, _logits, _features, tx) = prepared(
+        monkeypatch
+    )
+    tx.abort()
+    outcome, hidden, transaction = prepare_longest_first_continuations(
+        target,
+        mx,
+        cache,
+        prompt[-1],
+        paths,
+        [0, 2],
+        SegmentedVerifyRows,
+        lambda row, _prefix: int(mx.argmax(row).item()),
+        maximum=4,
+        max_depth=3,
+    )
+    assert outcome.emitted == tuple(expected)
+    assert outcome.algorithm == "longest_first_exact_prefix_v1"
+    assert outcome.launches == 2
+    assert outcome.input_lengths == (4, 3)
+    assert outcome.target_rows == 7
+    assert outcome.shared_prefix_reused_tokens == 1
+    assert calls[-2:] == [(1, 4), (1, 3)]
+    assert hidden.shape[1] == 4
+    selected = transaction.commit([4])[0]
+    fresh = target.make_cache()
+    mx.eval(target(mx.array([prompt + expected[:3]]), cache=fresh))
+    assert_cache(selected, fresh)
 
 
 @pytest.mark.parametrize("kind", ["gdn", "qsa", "mamba"])
