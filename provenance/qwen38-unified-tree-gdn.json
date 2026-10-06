@@ -1,0 +1,36 @@
+{
+  "component": "Qwen3.8 unified mlx2-owned tree and cohort GDN backend",
+  "date": "2026-10-06",
+  "status": "implemented_host_metal_and_real_route_passed_unqualified_unselected",
+  "source_repository": "archived corrected TensorFold source (not publicly available)",
+  "source_revision": "1a5f38e12afbb560d8fc61c88ccb5900f7d5d170",
+  "source_tree": "d9d141b99525a8866f48475858d7011fb192c11b",
+  "upstream_repository": "https://github.com/ashhart/TensorFold.git",
+  "upstream_base_revision": "71377a5373ed7b394f1b480ba2a6a3986b03af1c",
+  "license": "MIT",
+  "source_paths": [
+    "src/tensorfold/kernels/qwen/dense/v1/stream_gdn.py",
+    "src/tensorfold/kernels/qwen/dense/v1/lane_multi.py",
+    "src/tensorfold/kernels/qwen/dense/v1/lane_tree.py"
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen38_tree_gdn.py",
+    "src/mlx2/runtime/qwen38_tensorfold.py"
+  ],
+  "modifications": [
+    "Port the corrected topology-aware packed and split-projection pre, tree recurrence, accepted-path replay and convolution-tail kernels into mlx2 ownership",
+    "Replace TensorFold input and parent helpers with local exact equivalents",
+    "Install the mlx2 backend into the pinned TensorFold tree orchestrator after source validation",
+    "Add backend identity and observed-use counters to TensorFold target receipts",
+    "Keep TensorFold tree attention and row orchestration pinned and externally provenance-checked",
+    "Keep ordinary reference GDN available for unsupported shapes and the explicit fused_gdn false kill switch"
+  ],
+  "validation": {
+    "host": "focused GDN and TensorFold bridge suites passed on 2026-10-06",
+    "metal_topology_parity": "exact pre, tree, replay and conv-tail equality against the corrected pinned TensorFold source passed on 2026-10-06",
+    "real_weight_route_smoke": "three-repetition Qwen3.8 DFlash2 TensorFold benchmark passed on 2026-10-06; final receipt observed 151728 pre calls, 122016 tree calls, 122016 replay calls and 122016 conv-tail calls in the mlx2-owned backend",
+    "qualified": false,
+    "selected": false
+  },
+  "boundaries": "This ownership port does not qualify or select the DFlash2 route. Tree attention and orchestration remain supplied by the pinned TensorFold checkout; only GDN arithmetic and commit kernels move under mlx2 ownership."
+}

@@ -20,12 +20,18 @@ def layer():
 def test_qwen35_adapter_binds_supported_fused_geometry(monkeypatch):
     from mlx2.adapters.qwen35_4b import Qwen354BAdapter
     from mlx2.adapters.qwen35_9b import Qwen359BAdapter
+    from mlx2.adapters.qwen36_27b import Qwen3627BAdapter
     from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
     from mlx2.runtime.models import qwen38_fused_gdn as route
 
     assert Qwen354BAdapter.fused_gdn_architecture == 'qwen35'
     assert Qwen359BAdapter.fused_gdn_architecture == 'qwen35'
+    assert Qwen3627BAdapter.fused_gdn_architecture == 'qwen38'
     assert Qwen3827BAdapter.fused_gdn_architecture == 'qwen38'
+    assert "default_fused_gdn" not in vars(Qwen354BAdapter)
+    assert "default_fused_gdn" not in vars(Qwen359BAdapter)
+    assert "default_fused_gdn" not in vars(Qwen3627BAdapter)
+    assert Qwen3827BAdapter.default_fused_gdn is True
     args = TextModelArgs(hidden_size=16, intermediate_size=32, num_hidden_layers=2,
         num_attention_heads=2, num_key_value_heads=1, head_dim=8, vocab_size=32,
         linear_num_key_heads=16, linear_num_value_heads=32,

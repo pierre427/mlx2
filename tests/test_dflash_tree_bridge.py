@@ -7,6 +7,7 @@ fence, phase timing, default-off behavior and fault recovery.
 import subprocess
 import sys
 from collections import deque
+from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
@@ -319,6 +320,21 @@ def test_cached_executor_does_not_spawn_git_per_forward(fake_tensorfold, monkeyp
     for _ in range(3):
         _forward_with_offset(model, roots[0], True)
     assert not spawned and len(calls) == 1
+
+
+def test_tensorfold_bridge_installs_mlx2_owned_gdn_backend(fake_tensorfold):
+    roots, _, _ = fake_tensorfold
+    qwen38_tensorfold._modules(roots[0], cached=True)
+
+    from mlx2.runtime.models import qwen38_tree_gdn as owned
+    from tensorfold.kernels.qwen.dense.v1 import lane_glue, stream_gdn
+
+    assert stream_gdn.MLX2_BACKEND == "mlx2_qwen38_unified_tree_gdn_v1"
+    for name in owned.__all__:
+        assert getattr(stream_gdn, name) is getattr(owned, name)
+    assert lane_glue.gdn_pre is owned.gdn_pre_split
+    source = Path(owned.__file__).read_text()
+    assert "from tensorfold" not in source
 
 
 def test_cohort_executor_keeps_parents_cache_and_commit_paths_per_lane(fake_tensorfold):

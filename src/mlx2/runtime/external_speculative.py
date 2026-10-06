@@ -1162,6 +1162,9 @@ class ExternalDraftBatchGenerator:
             ),
             "target_width_rounds": width_rounds,
         }
+        from .qwen38_tensorfold import gdn_backend_stats
+
+        result["tensorfold_target"]["gdn_backend"] = gdn_backend_stats()
         if lane is not None:
             result["tensorfold_target"].update(
                 lane_width_histogram={

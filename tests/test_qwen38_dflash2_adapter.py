@@ -20,6 +20,16 @@ TARGET = Path.home() / "mlx-models/Qwen3.8-27B-oQ4e-mtp"
 POLICY = Path(__file__).parents[1] / "qualification/policies/qwen38-27b-dflash2.json"
 
 
+def test_tree_gdn_state_dtype_fails_closed_outside_fp32():
+    from mlx2.adapters.qwen38_27b import _validate_tree_gdn_state_dtype
+
+    tree = {"batch_size_route": "tree15_b1_b4_chain_b5plus_v1"}
+    _validate_tree_gdn_state_dtype(tree, "float32")
+    _validate_tree_gdn_state_dtype({}, "float16")
+    with pytest.raises(ValueError, match="requires float32 recurrent state"):
+        _validate_tree_gdn_state_dtype(tree, "float16")
+
+
 def test_varlen_tree_declares_row_stable_lane_geometry():
     from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
 
@@ -812,7 +822,11 @@ def test_dflash2_receipt_settings_bind_complete_tree_geometry():
 
 
 def test_real_checkpoint_headers_map_onto_the_drafter():
-    if not (DRAFT / "config.json").exists() or not (TARGET / "config.json").exists():
+    if (
+        not (DRAFT / "config.json").exists()
+        or not (TARGET / "config.json").exists()
+        or not POLICY.exists()
+    ):
         pytest.skip("local Qwen3.8 27B DFlash2 artifacts are not installed")
     from mlx2.adapters.dflash2 import _read_safetensors_header
     from mlx2.adapters.qwen38_27b import (

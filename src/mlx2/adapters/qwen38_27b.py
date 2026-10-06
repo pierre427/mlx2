@@ -593,6 +593,16 @@ def fused_gdn_policy(policy: dict, default: bool = False) -> bool:
     return enabled
 
 
+def _validate_tree_gdn_state_dtype(external_policy: dict, value: str) -> None:
+    """The owned topology kernel currently preserves exact fp32 recurrence."""
+
+    if external_policy.get("batch_size_route") is not None and value != "float32":
+        raise ValueError(
+            "TensorFold tree GDN requires float32 recurrent state; "
+            "gdn_state_dtype=float16 is unsupported"
+        )
+
+
 EAGER_DISPATCH_POLICY_KEYS = ("eager_dispatch_stride", "eager_dispatch_max_rows")
 # Route identity of a selected stride: recorded in the adapter environment
 # (and so in qualification settings) only when the lever is on, so receipts
@@ -871,6 +881,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             policy = {}
         else:
             policy.pop("varlen_dense_mlp", None)
+        _validate_tree_gdn_state_dtype(self.external_policy, gdn_state_dtype)
         if set(policy) - {
             "num_draft",
             "gdn_core",
@@ -1466,8 +1477,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             raise ValueError("selected fused_gdn policy disagrees with live target layers")
         contract = self._external_execution_numerics()
         if enabled:
+            architecture = getattr(self, "fused_gdn_architecture", "qwen38")
             contract["fused_gdn"] = {
-                "algorithm": "qwen38-corrected-served-silu-v2",
+                "algorithm": f"{architecture}-corrected-served-silu-v2",
+                "architecture": architecture,
                 "scope": "initialized-single-token-or-b1-unmasked-width-2-to-17",
                 "verify_prefill": "fused-when-admitted-reference-otherwise",
                 "speculative_rollback": "exact-snapshots",
@@ -1526,4 +1539,4 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     def _fused_gdn_diagnostics(self):
         from ..runtime.models.qwen38_fused_gdn import stats
 
-        return stats(self.model)
+        return {"architecture": self.fused_gdn_architecture, **stats(self.model)}

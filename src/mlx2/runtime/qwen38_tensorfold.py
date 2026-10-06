@@ -39,6 +39,44 @@ _EXECUTORS = {}
 MAX_COHORT_LANES = 4
 
 
+def _install_owned_gdn(source_root: Path) -> None:
+    """Replace TensorFold's GDN leaf with mlx2's provenance-pinned backend.
+
+    TensorFold continues to own tree attention and row orchestration.  GDN
+    projection, convolution, recurrence, replay and conv-tail commit are all
+    dispatched by the mlx2 module so linear and tree routes share one owned
+    arithmetic contract.
+    """
+
+    external = importlib.import_module(
+        "tensorfold.kernels.qwen.dense.v1.stream_gdn"
+    )
+    expected = (source_root / "src").resolve()
+    if not Path(external.__file__).resolve().is_relative_to(expected):
+        raise RuntimeError(
+            "TensorFold GDN module was not imported from the validated source"
+        )
+    from .models import qwen38_tree_gdn as owned
+
+    for name in owned.__all__:
+        setattr(external, name, getattr(owned, name))
+    external.MAX_STREAMS = owned.MAX_STREAMS
+    external.MAX_TREE = owned.MAX_TREE
+    external.MLX2_BACKEND = owned.stats()["backend"]
+    lane_glue = importlib.import_module("tensorfold.kernels.qwen.dense.v1.lane_glue")
+    if not Path(lane_glue.__file__).resolve().is_relative_to(expected):
+        raise RuntimeError(
+            "TensorFold GDN glue module was not imported from the validated source"
+        )
+    lane_glue.gdn_pre = owned.gdn_pre_split
+
+
+def gdn_backend_stats() -> dict:
+    from .models.qwen38_tree_gdn import stats
+
+    return stats()
+
+
 def _validate(root):
     validate_source(root)
 
@@ -72,9 +110,11 @@ def _modules(source_root, *, cached=False):
     if cached:
         module = _EXECUTORS.get(root)
         if module is not None:
+            _install_owned_gdn(root)
             return module, True
     _validate(root)
     module = _import(root, _KERNEL_MODULES if cached else _KERNEL_MODULES[:1])
+    _install_owned_gdn(root)
     if cached:
         _EXECUTORS[root] = module
     return module, False
@@ -354,4 +394,5 @@ __all__ = [
     "TensorfoldTransaction",
     "forward",
     "forward_many",
+    "gdn_backend_stats",
 ]
