@@ -237,8 +237,8 @@ def _variant_sources() -> dict[str, tuple[str, list[str], list[str]]]:
     from tensorfold.kernels.qwen.dense.v1 import lane_glue
 
     post = _replace_once(lane_glue._GDN_POST, "float(Z[m * NV * DV + hv * DV + d])", "float(Z[m * ZS + hv * DV + d])")
-    act = _replace_once(lane_glue._MLP_ACT, "float(GATE[e])", "float(GATE[e + int(m) * N])")    # rows of 2N
-    act = _replace_once(act, "float(UP[e])", "float(UP[e + int(m) * N + N])")
+    act = _replace_once(lane_glue._MLP_ACT, "GATE[e]", "GATE[e + int(m) * N]")    # rows of 2N
+    act = _replace_once(act, "UP[e]", "UP[e + int(m) * N + N]")
     return {
         "gdn_post": (post, ["Y", "Z", "NW", "eps", "dims"], ["OUT", "XS"]),
         "mlp_act": (act, ["GATE", "UP", "dims"], ["HOUT", "XS"]),

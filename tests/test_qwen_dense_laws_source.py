@@ -49,6 +49,16 @@ def test_dense_mlp_swiglu_keeps_bf16_boundaries_and_stable_sigmoid():
         assert write in source
         assert "metal::exp(-gf)" not in source
 
+    from tensorfold.kernels.qwen.dense.v1 import lane_fuse
+
+    fused = lane_fuse.sources()["mlp_act"]
+    for spelling in required:
+        assert spelling in fused
+    assert "GATE[e + int(m) * N]" in fused
+    assert "UP[e + int(m) * N + N]" in fused
+    assert "GATE[e]" not in fused
+    assert "UP[e]" not in fused
+
 
 def test_norm_launch_geometry_matches_embedded_mlx_geometry():
     lane = (KERNELS / "lane_glue.py").read_text()
