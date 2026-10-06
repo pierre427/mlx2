@@ -114,6 +114,8 @@ class DeepSeekV4Candidate:
         self.artifact = inspect_artifact(model_path)
         self.backend = backend or load_backend(SOURCE_ROOT, SOURCE_REVISION, SOURCE_PATHS)
         self.model, self.processor = self.backend.load(self.artifact["identity"]["path"], strict=True)
+        from ..runtime.chat_templates import secure_model_chat_templates
+        secure_model_chat_templates(self.processor)
         if getattr(self.model, "model_type", None) != "deepseek_v4":
             raise ValueError("MLX-VLM loaded a different model family")
 

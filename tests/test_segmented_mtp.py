@@ -1194,6 +1194,27 @@ def test_empty_cohort_resets_opt_in_single_lane_latch_for_new_request():
     incoming.close()
 
 
+def test_empty_cohort_discards_warm_policy_for_reproducible_greedy_request():
+    from mlx2.runtime.adaptive_policy import CohortAdaptiveMTPDepth
+    from mlx2.runtime.generate import MTPGenerationBatch
+
+    retained = CohortAdaptiveMTPDepth(max_depth=2, current_depth=0)
+    active = MTPGenerationBatch.empty(
+        object(), segmented_live_tip=True, adaptive_depth_policy=retained,
+    )
+    fresh = CohortAdaptiveMTPDepth(max_depth=2, reproducible_greedy=True)
+    incoming = MTPGenerationBatch.empty(
+        object(), segmented_live_tip=True, adaptive_depth_policy=fresh,
+    )
+    active.extend(incoming)
+    assert active.adaptive_depth_policy is fresh
+    assert fresh.select(width=8) == 2
+    fresh.observe(16, 0, width=8, committed=8, elapsed_seconds=100.0)
+    assert fresh.select(width=8) == 2
+    active.close()
+    incoming.close()
+
+
 def test_live_true_batched_width_lock_defers_join_until_empty_cohort():
     """A live B2 consumer must not silently become B3 mid-generation."""
     from mlx2.runtime.generate import MTPGenerationBatch, StopSequenceMatcher

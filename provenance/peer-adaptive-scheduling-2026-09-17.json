@@ -30,13 +30,24 @@
       "paths": [
         "vllm_mlx/spec_decode/mtp/draft_k_controller_v2.py:DepthController"
       ]
+    },
+    {
+      "repository": "https://github.com/raullenchai/Rapid-MLX",
+      "revision": "9ca182a573d548ef519c4284ac73d3bf44148979",
+      "license": "Apache-2.0",
+      "paths": [
+        "rapid_mlx/spec_decode/mtp/reproducible_depth.py",
+        "rapid_mlx/spec_decode/mtp/generator.py",
+        "tests/test_mtp_greedy_determinism.py"
+      ]
     }
   ],
   "modifications": [
     "Reimplemented both policies as model-neutral host-only state machines; no peer scheduler or serving tree was copied.",
     "Decode fairness derives a grid-aligned token cap from best observed prefill throughput, accrues bounded wall-time debt, and admits another chunk only after decode repays it.",
     "Adaptive MTP aggregates acceptance across a whole physical cohort, applies one depth at a closed transaction boundary, supports depth-zero ordinary target parks, and guarantees bounded depth-one re-entry probes.",
+    "Applied Rapid-MLX PR 4221's reproducibility invariant, not its host calibration implementation: any mlx2 greedy lane pins its whole cohort to the adapter-qualified depth so neither wall-clock goodput nor prior-request state can change verification geometry.",
     "Only default-on bounded integer counters are retained; no device reads, synchronization, allocation, or hot-path timers are introduced by these policy objects."
   ],
-  "validation": "CPU policy, runtime, and serving tests cover wall-time cap/debt accounting, route-conditional fairness identity, contention reset, uniform physical-cohort depth changes, exact K=0 target parks, bounded K=1 re-entry, growth, admission-cap clamping, strict settings validation, qualification-only CLI selection, BatchGenerator propagation, profile identity, and receipt fields. On 2026-09-18, two concurrent live Qwen3.6-35B Apple-GPU requests observed adaptive_depth.selected=true, 81/98 boundaries, one depth change, current depth 1, and native-MTP acceptance 0.455/0.521. Decode fairness is selected only on ordinary/native-MTP BatchGenerator routes. The live run establishes mechanism engagement and finite output, not performance or quality qualification; adaptive MTP remains default-off and qualification-only."
+  "validation": "CPU policy, runtime, and serving tests cover wall-time cap/debt accounting, route-conditional fairness identity, contention reset, uniform physical-cohort depth changes, exact K=0 target parks, bounded K=1 re-entry, growth, admission-cap clamping, strict settings validation, qualification-only CLI selection, BatchGenerator propagation, profile identity, receipt fields, and greedy depth invariance across fresh versus warm controller history and opposing wall-clock samples. On 2026-09-18, two concurrent live Qwen3.6-35B Apple-GPU requests observed adaptive_depth.selected=true, 81/98 boundaries, one depth change, current depth 1, and native-MTP acceptance 0.455/0.521. On 2026-10-06, Qwen3.8-27B Metal receipts observed four greedy requests pinned to depth 2, no adaptive depth changes or probes, and exact repeated token hashes. Decode fairness is selected only on ordinary/native-MTP BatchGenerator routes. The live runs establish mechanism engagement and finite output, not performance or quality qualification; adaptive MTP remains default-off and qualification-only."
 }

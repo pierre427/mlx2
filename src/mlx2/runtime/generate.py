@@ -368,6 +368,28 @@ def _merge_caches(caches):
             raise ValueError(
                 f"{type(caches[0][i])} does not yet support batching with history"
             )
+    # A restored APCv2 row owns a lease on its immutable source until the row
+    # branch closes. Once every layer has been merged, the physical batch is
+    # authoritative and no longer reads those per-row descriptors. Release
+    # them only after the whole merge succeeds so a failed join retains its
+    # inputs for the caller's cleanup path.
+    seen = set()
+    for source in caches:
+        ident = id(source)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        close = getattr(source, "close", None)
+        if (
+            callable(close)
+            and hasattr(source, "cow_owner")
+            and hasattr(source, "cow_generation")
+            # Frozen APC sources expose the lineage fields too, but close()
+            # invalidates the owner. Only mutable lease-bearing branches
+            # publish the idempotent ``closed`` lifetime contract.
+            and hasattr(source, "closed")
+        ):
+            close()
     return batch_cache
 
 
@@ -933,6 +955,11 @@ class GenerationBatch:
         # the same async graph as the step that sampled them.
         self._next_finite = None
         self._current_finite = None
+        # Each pending sample belongs to the forward that produced it. Keep
+        # that width with the sample: a later ragged join/filter may change
+        # the live batch before the output is consumed.
+        self._next_execution_widths = [len(self.uids)] * len(self.uids)
+        self._current_execution_widths = []
         self._decode_steps = 0
         self._next_tokens = inputs
         self._next_logprobs = []
@@ -993,6 +1020,8 @@ class GenerationBatch:
         self._token_context.extend(batch._token_context)
         self._num_tokens.extend(batch._num_tokens)
         self._matcher_states.extend(batch._matcher_states)
+        self._next_execution_widths.extend(batch._next_execution_widths)
+        self._current_execution_widths.extend(batch._current_execution_widths)
         self.route_receipts.extend(batch.route_receipts)
         self.lane_rngs.extend(batch.lane_rngs)
         self._lane_failures.extend(batch._lane_failures)
@@ -1078,6 +1107,7 @@ class GenerationBatch:
         self._current_tokens = self._next_tokens
         self._current_logprobs = self._next_logprobs
         self._current_finite = self._next_finite
+        self._current_execution_widths = self._next_execution_widths
         inputs = self._current_tokens
         if BATCH_UID_HOOK is not None:
             BATCH_UID_HOOK(list(self.uids))
@@ -1161,6 +1191,7 @@ class GenerationBatch:
             sampled = self.fallback_sampler(logprobs)
         self._next_tokens = sampled
         self._next_logprobs = list(logprobs)
+        self._next_execution_widths = [len(self.uids)] * len(self.uids)
         self._decode_steps += 1
         eval_targets = [self._next_tokens, self._next_logprobs, token_context]
         if validity == "deferred" or (validity is None and step_validity_mode() == "deferred"):
@@ -1247,8 +1278,98 @@ class GenerationBatch:
         self._token_context = [self._token_context[idx] for idx in keep]
         self._num_tokens = [self._num_tokens[idx] for idx in keep]
         self._matcher_states = [self._matcher_states[idx] for idx in keep]
+        self._next_execution_widths = [
+            self._next_execution_widths[idx] for idx in keep
+        ]
+        self._current_execution_widths = [
+            self._current_execution_widths[idx]
+            for idx in keep
+            if idx < len(self._current_execution_widths)
+        ]
         self.route_receipts = [self.route_receipts[idx] for idx in keep]
         self.lane_rngs = [self.lane_rngs[idx] for idx in keep]
+
+    @staticmethod
+    def _record_execution_width(receipt, width):
+        if receipt is None:
+            return
+        ordinary_widths = set(receipt.get("ordinary_compute_widths", ()))
+        ordinary_widths.add(int(width))
+        receipt["ordinary_compute_widths"] = sorted(ordinary_widths)
+        observed = set(receipt.get("observed_compute_widths", ()))
+        observed.add(int(width))
+        receipt["observed_compute_widths"] = sorted(observed)
+
+    def _settle_budget_terminal_outputs(self):
+        """Retire pending final outputs without launching a discard forward."""
+        terminal = [
+            index
+            for index, maximum in enumerate(self.max_tokens)
+            if self._num_tokens[index] + 1 >= maximum
+        ]
+        if not terminal:
+            return []
+
+        pending_tokens = self._next_tokens[terminal]
+        pending_logprobs = [self._next_logprobs[index] for index in terminal]
+        vocab, selected_finite = _corrupt_rows(pending_tokens, pending_logprobs)
+        mx.eval(pending_tokens, pending_logprobs, selected_finite)
+        keep_local, failures = _resolve_corrupt_rows(
+            vocab,
+            pending_tokens,
+            selected_finite,
+            [self.uids[index] for index in terminal],
+        )
+        self._lane_failures.extend(failures)
+        valid = {terminal[index] for index in keep_local}
+        host_tokens = pending_tokens.tolist()
+        token_by_index = {
+            terminal[index]: int(token)
+            for index, token in enumerate(host_tokens)
+            if terminal[index] in valid
+        }
+        logprobs_by_index = {
+            terminal[index]: pending_logprobs[index]
+            for index in range(len(terminal))
+        }
+        responses = []
+        for index in terminal:
+            if index not in valid:
+                continue
+            token = token_by_index[index]
+            matcher_state, matched = StopSequenceMatcher.match(
+                self._matcher_states[index],
+                self.stop_matchers[index]._trie,
+                token,
+            )
+            self._matcher_states[index] = matcher_state
+            receipt = self.route_receipts[index]
+            width = self._next_execution_widths[index]
+            self._record_execution_width(receipt, width)
+            responses.append(
+                self.Response(
+                    uid=self.uids[index],
+                    token=token,
+                    logprobs=logprobs_by_index[index],
+                    finish_reason="stop" if matched else "length",
+                    prompt_cache=self.extract_cache(index),
+                    all_tokens=list(self.tokens[index]),
+                    lane_rng=self.lane_rngs[index],
+                    rng_draws=(
+                        self.lane_rngs[index].draws
+                        if self.lane_rngs[index] is not None
+                        else 0
+                    ),
+                    mtp_receipt=receipt,
+                    execution_width=width,
+                )
+            )
+
+        terminal_set = set(terminal)
+        self.filter(
+            [index for index in range(len(self.uids)) if index not in terminal_set]
+        )
+        return responses
 
     def next(self) -> List[Response]:
         """
@@ -1259,19 +1380,16 @@ class GenerationBatch:
         """
         if not self.uids:
             return []
+        original_order = {uid: index for index, uid in enumerate(self.uids)}
+        responses = self._settle_budget_terminal_outputs()
+        if not self.uids:
+            return sorted(responses, key=lambda response: original_order[response.uid])
         (tokens, logprobs) = self._step()
-        width = len(self.uids)
         keep = []
-        responses = []
         for i in range(len(self.uids)):
             receipt = self.route_receipts[i]
-            if receipt is not None:
-                ordinary_widths = set(receipt.get("ordinary_compute_widths", ()))
-                ordinary_widths.add(width)
-                receipt["ordinary_compute_widths"] = sorted(ordinary_widths)
-                observed = set(receipt.get("observed_compute_widths", ()))
-                observed.add(width)
-                receipt["observed_compute_widths"] = sorted(observed)
+            width = self._current_execution_widths[i]
+            self._record_execution_width(receipt, width)
             finish_reason = None
             self._num_tokens[i] += 1
             if self._num_tokens[i] >= self.max_tokens[i]:
@@ -1296,6 +1414,7 @@ class GenerationBatch:
                             if self.lane_rngs[i] is not None else 0
                         ),
                         mtp_receipt=receipt,
+                        execution_width=width,
                     )
                 )
             else:
@@ -1309,13 +1428,12 @@ class GenerationBatch:
                         prompt_cache=None,
                         all_tokens=None,
                         mtp_receipt=receipt,
+                        execution_width=width,
                     )
                 )
         if len(keep) < len(self.uids):
             self.filter(keep)
-        for response in responses:
-            response.execution_width = width
-        return responses
+        return sorted(responses, key=lambda response: original_order[response.uid])
 
     @classmethod
     def empty(cls, model: nn.Module, fallback_sampler: Callable[[mx.array], mx.array]):
@@ -2419,6 +2537,10 @@ class MTPGenerationBatch:
             if (
                 current_adaptive is None
                 or incoming_adaptive is None
+                # A greedy cohort gets a fresh fixed-depth controller. Its
+                # verification width must not inherit timing/history from a
+                # completed request in this long-lived batch object.
+                or incoming_adaptive.reproducible_greedy
                 # A single-stream latch must start from the qualified depth
                 # for each new request. Reusing an empty batch's learned
                 # depth lets one request's proposals change the next one's
@@ -2457,6 +2579,15 @@ class MTPGenerationBatch:
                     incoming_adaptive.counters.update(current_adaptive.counters)
                 self.adaptive_depth_policy = incoming_adaptive
             self._adaptive_admitted_cap = batch._adaptive_admitted_cap
+        elif (
+            self.adaptive_depth_policy is not None
+            and batch.adaptive_depth_policy is not None
+            and batch.adaptive_depth_policy.reproducible_greedy
+        ):
+            # Depth is cohort-wide. If a greedy lane joins a live sampled
+            # cohort, pin the whole physical cohort rather than let sampled
+            # timing or acceptance alter the greedy lane's geometry.
+            self.adaptive_depth_policy.reproducible_greedy = True
         if getattr(self, "acceptance_logger", None) is None:
             self.acceptance_logger = getattr(batch, "acceptance_logger", None)
         if self.segmented_live_tip and was_empty:
@@ -2663,6 +2794,9 @@ class MTPGenerationBatch:
                     if self.adaptive_depth_policy is None
                     else {
                         "selected": True,
+                        "reproducible_greedy": bool(
+                            self.adaptive_depth_policy.reproducible_greedy
+                        ),
                         "max_depth": int(self.adaptive_depth_policy.max_depth),
                         "current": int(self.adaptive_depth_policy.current_depth),
                         "acceptance_ewma": self.adaptive_depth_policy.acceptance_ewma,
@@ -4733,6 +4867,9 @@ class BatchGenerator:
                     else CohortAdaptiveMTPDepth(
                         max_depth=max(
                             int(item.lane.num_draft) for item in detached
+                        ),
+                        reproducible_greedy=any(
+                            item.lane.sampling_temp <= 0 for item in detached
                         ),
                         **self.adaptive_mtp_depth,
                     )

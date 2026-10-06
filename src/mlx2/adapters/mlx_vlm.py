@@ -391,6 +391,8 @@ class _MLXVLMAdapter:
             expected=self.descriptor.model_type,
             config=self.identity["config"],
         )
+        from ..runtime.chat_templates import secure_model_chat_templates
+        secure_model_chat_templates(self.processor)
         self.model = self._wrap_model(model)
         self.media_feature_cache = MediaFeatureCache()
         tokenizer = self.processor.tokenizer

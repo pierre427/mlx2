@@ -129,6 +129,82 @@ def test_opt_in_single_lane_mtp_latch_selects_faster_ordinary_sections():
     assert policy.counters["cost_depth_changes"] >= 1
 
 
+def test_greedy_adaptive_depth_ignores_warm_history_and_wall_clock():
+    """A width-sensitive greedy target must see the same K every run.
+
+    The token stand-in models a bf16 near tie whose argmax changes between a
+    one-row step and a two-row verify.  A warm controller first learns from
+    deliberately opposite wall-clock samples; marking the incoming greedy
+    cohort reproducible must restore the qualified depth and keep it pinned.
+    """
+
+    def run(*, ordinary_rate, warm):
+        policy = CohortAdaptiveMTPDepth(
+            max_depth=1,
+            adaptive_single_lane=True,
+            goodput_alpha=1.0,
+            goodput_hysteresis=0.05,
+            min_samples_per_depth=1,
+            goodput_window=1,
+            probe_interval=2,
+            stale_rounds=2,
+        )
+        if warm:
+            for _ in range(8):
+                depth = policy.select(width=1)
+                rate = ordinary_rate if depth == 0 else 100.0
+                policy.observe(
+                    depth,
+                    depth,
+                    width=1,
+                    committed=1,
+                    elapsed_seconds=1 / rate,
+                )
+        prior_probes = policy.counters["cost_probes"]
+        prior_cost_changes = policy.counters["cost_depth_changes"]
+        policy.reproducible_greedy = True
+        depths = []
+        tokens = []
+        for elapsed in (1e-6, 10.0, 0.25, 4.0):
+            depth = policy.select(width=1)
+            depths.append(depth)
+            # Width-sensitive fake target: K=0 and K=1 choose different
+            # near-tie winners even though each geometry is deterministic.
+            tokens.append(11 if depth == 0 else 22)
+            policy.observe(
+                depth,
+                depth,
+                width=1,
+                committed=1,
+                elapsed_seconds=elapsed,
+            )
+        return depths, tokens, policy, prior_probes, prior_cost_changes
+
+    fresh = run(ordinary_rate=120.0, warm=False)
+    warm_ordinary = run(ordinary_rate=120.0, warm=True)
+    warm_mtp = run(ordinary_rate=80.0, warm=True)
+    assert fresh[:2] == warm_ordinary[:2] == warm_mtp[:2] == (
+        [1, 1, 1, 1],
+        [22, 22, 22, 22],
+    )
+    for _, _, policy, prior_probes, prior_cost_changes in (
+        fresh,
+        warm_ordinary,
+        warm_mtp,
+    ):
+        bucket = policy.diagnostics()["buckets"]["1"]
+        assert bucket["chosen_depth"] == 1
+        assert policy.counters["cost_probes"] == prior_probes
+        assert policy.counters["cost_depth_changes"] == prior_cost_changes
+
+
+def test_reproducible_greedy_still_honors_admission_cap():
+    policy = CohortAdaptiveMTPDepth(max_depth=2, reproducible_greedy=True)
+    assert policy.select(admitted_cap=1, width=8) == 1
+    policy.observe(8, 8, width=8, committed=16, elapsed_seconds=10.0)
+    assert policy.select(admitted_cap=2, width=8) == 2
+
+
 def test_single_lane_mtp_latch_policy_is_explicit_and_strict():
     assert "adaptive_single_lane" not in AdaptiveMTPDepthPolicy(
         enabled=True

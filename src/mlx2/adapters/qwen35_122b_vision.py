@@ -59,6 +59,8 @@ class Qwen35122BVisionCandidate:
         if not media.is_file():
             raise ValueError("Qwen3.5 vision media file is missing")
         model, processor = self._load()
+        from ..runtime.chat_templates import secure_model_chat_templates
+        secure_model_chat_templates(processor)
         from mlx_vlm.generate import generate
         from mlx_vlm.prompt_utils import apply_chat_template
         formatted = apply_chat_template(processor, model.config, prompt,

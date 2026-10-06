@@ -123,6 +123,8 @@ class Qwen35VLMAdapter:
             if not draft_path.is_dir() or not (draft_path / "config.json").is_file():
                 raise ValueError("MTP draft must be a local extracted artifact")
         model, processor = self._load()
+        from ..runtime.chat_templates import secure_model_chat_templates
+        secure_model_chat_templates(processor)
         kwargs = {"max_tokens": max_tokens}
         if draft_path is not None:
             # The pinned source owns MTP extraction, verification and cache

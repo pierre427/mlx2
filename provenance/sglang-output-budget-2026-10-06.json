@@ -1,0 +1,24 @@
+{
+  "implementation": "Ordinary decode pending-output budget settlement",
+  "destination_files": [
+    "src/mlx2/runtime/generate.py",
+    "tests/test_terminal_output_budget_cpu.py"
+  ],
+  "source": {
+    "repository": "https://github.com/sgl-project/sglang",
+    "revision": "fa2fc9872f4a33ef20fa2adbf2c1375076e01d41",
+    "license": "Apache-2.0",
+    "paths": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/managers/schedule_batch.py",
+      "test/registered/unit/managers/test_scheduler_output_budget_reservations.py"
+    ]
+  },
+  "modifications": [
+    "Applied PR 42720's pending-output invariant to mlx2's different synchronous one-token-ahead ordinary pipeline; no SGLang scheduler or CUDA code was copied.",
+    "Rows whose pending sample fills max_tokens are materialized and detached before the next ordinary or mixed forward, while survivor rows continue as a ragged batch.",
+    "Terminal checkpoints retain the exact cache-covered prefix and expose the pending final token separately, matching speculative-route continuation semantics.",
+    "Native self-MTP needs no reservation: proposal depth is already bounded by remaining output and terminal commit settles delivered rows before another scheduler boundary."
+  ],
+  "validation": "CPU forward-count tests cover ordinary max_tokens=2, ragged max_tokens cohorts, mixed prompt/decode ownership, exact terminal cache offsets, and unchanged native self-MTP terminal bounds. A 2026-10-06 Qwen3.8-27B Metal functional smoke returned exactly one completion token for max_tokens=1 on the ordinary candidate route. The no-discard-forward claim is established by the instrumented CPU tests; the Metal receipt establishes serving compatibility, not a throughput qualification or selection change."
+}

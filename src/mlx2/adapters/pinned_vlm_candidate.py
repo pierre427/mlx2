@@ -170,6 +170,8 @@ class PinnedVisionCandidateAdapter:
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         model, self.processor = load(self.identity["path"], lazy=False, strict=True,
                                      trust_remote_code=False)
+        from ..runtime.chat_templates import secure_model_chat_templates
+        secure_model_chat_templates(self.processor)
         self.model = _CandidateLogitsModel(model)
         self.tokenizer = TokenizerWrapper(
             self.processor.tokenizer, detokenizer_class=BPEStreamingDetokenizer,

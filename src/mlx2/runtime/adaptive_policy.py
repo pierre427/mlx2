@@ -440,6 +440,11 @@ class CohortAdaptiveMTPDepth:
     probe_interval: int = 16
     stale_rounds: int = 128
     adaptive_single_lane: bool = False
+    # Runtime-owned, not an operator policy knob.  Greedy lanes need one
+    # verification geometry for the request: different K+1 target widths can
+    # choose different near-tie argmaxes, so elapsed-time or prior-request
+    # history must not steer K while such a lane is present.
+    reproducible_greedy: bool = False
     current_depth: int | None = None
     acceptance_ewma: float | None = None
     bad_streak: int = 0
@@ -517,6 +522,8 @@ class CohortAdaptiveMTPDepth:
         )
         if not isinstance(self.adaptive_single_lane, bool):
             raise ValueError("adaptive MTP adaptive_single_lane must be boolean")
+        if not isinstance(self.reproducible_greedy, bool):
+            raise ValueError("adaptive MTP reproducible_greedy must be boolean")
         if self.current_depth is not None and (
             isinstance(self.current_depth, bool)
             or not isinstance(self.current_depth, int)
@@ -648,7 +655,15 @@ class CohortAdaptiveMTPDepth:
         previous_label = self._active_bucket
         self._active_bucket = label
         state = self._bucket(label)
-        if width == 1 and not self.adaptive_single_lane:
+        if self.reproducible_greedy:
+            # Pin the qualified depth for every boundary of a greedy cohort.
+            # Admission remains an independent upper bound.  In particular,
+            # do not run deterministic-cadence cost probes: although their
+            # cadence is stable, their alternate verification width can flip
+            # a numerically close greedy argmax.
+            state["chosen_depth"] = self.max_depth
+            state["parked_remaining"] = 0
+        elif width == 1 and not self.adaptive_single_lane:
             # Width one is the fixed-depth correctness anchor. Cost learning
             # remains diagnostic here; neither acceptance nor a previous
             # concurrent choice may change the qualified depth.
@@ -690,7 +705,8 @@ class CohortAdaptiveMTPDepth:
                     _bump(self.counters, "probes")
                     probe_kind = "reentry"
         elif (
-            (width > 1 or self.adaptive_single_lane)
+            not self.reproducible_greedy
+            and (width > 1 or self.adaptive_single_lane)
             and int(state["rounds"]) % self.probe_interval == 0
         ):
             candidates = [
@@ -836,7 +852,11 @@ class CohortAdaptiveMTPDepth:
                 state["pending_samples"][selected_depth] = 0
             current = int(state["chosen_depth"])
             estimates = state["goodput"]
-            if estimate_updated and current in estimates:
+            if (
+                not self.reproducible_greedy
+                and estimate_updated
+                and current in estimates
+            ):
                 best = max(estimates, key=lambda depth: (estimates[depth], depth))
                 if (
                     best != current
@@ -895,6 +915,20 @@ class CohortAdaptiveMTPDepth:
             else self.ewma_alpha * ratio
             + (1.0 - self.ewma_alpha) * state["acceptance_ewma"]
         )
+        if self.reproducible_greedy:
+            # Acceptance remains observable, but it cannot change the target
+            # forward width of this request.  This is deliberately a fixed-K
+            # correctness mode, not a performance qualification claim.
+            state["bad_streak"] = state["good_streak"] = 0
+            self._set_chosen_depth(state, self.max_depth, width=width)
+            self._sync_public_state(state)
+            if self._active_trace is not None:
+                self._active_trace.update(
+                    acceptance_ewma=self.acceptance_ewma,
+                    current_after_observation=int(self.current_depth),
+                    chosen_after_observation=int(state["chosen_depth"]),
+                )
+            return
         if width == 1 and not self.adaptive_single_lane:
             state["bad_streak"] = state["good_streak"] = 0
             self._set_chosen_depth(state, self.max_depth, width=width)

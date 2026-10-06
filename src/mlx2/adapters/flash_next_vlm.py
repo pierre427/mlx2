@@ -165,6 +165,8 @@ class FlashNextVisionCandidate:
         if draft_model is not None and not Path(draft_model).expanduser().is_dir():
             raise ValueError("Flash-Next extracted MTP draft is missing")
         model, processor = self._load()
+        from ..runtime.chat_templates import secure_model_chat_templates
+        secure_model_chat_templates(processor)
         kwargs = {"max_tokens": max_tokens}
         if draft_model is not None:
             from mlx_vlm.speculative.drafters import load_drafter, validate_drafter_compatibility

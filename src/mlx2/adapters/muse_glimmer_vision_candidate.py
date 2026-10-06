@@ -117,6 +117,8 @@ class MuseGlimmerVisionCandidate:
         from ._direct_mlx_vlm import validate_media_paths
         paths = validate_media_paths(images, kind="image")
         model, processor = self._load()
+        from ..runtime.chat_templates import secure_model_chat_templates
+        secure_model_chat_templates(processor)
         content = [{"type": "image"} for _ in paths]
         content.append({"type": "text", "text": prompt})
         rendered = processor.tokenizer.apply_chat_template(

@@ -10,7 +10,7 @@ def deferred_engine(monkeypatch):
     from mlx2 import serving, memory
     from mlx2.runtime import apc_v2, generate, os_memory
     import mlx.core as mx
-    state = dict(free=21 * 2**30, lookups=[], stores=[], tokenizations=[],
+    state = dict(free=21 * 2**30, lookups=[], lookup_tokens=[], stores=[], tokenizations=[],
                  branches=[], cycles=0,
                  recover=False, pending=threading.Event(), allocator_reclaims=0,
                  cold=False, native_uids=set(), native_jobs={},
@@ -28,6 +28,7 @@ def deferred_engine(monkeypatch):
         def key(self, *a, **kw): return 'key'
         def lookup(self, key, tokens, **kw):
             state['lookups'].append(len(tokens))
+            state['lookup_tokens'].append(tuple(tokens))
             if len(tokens) > 10: state['pending'].set()
             if state['cold']:
                 return NS(cache=None, cached_tokens=0,
@@ -103,8 +104,9 @@ def deferred_engine(monkeypatch):
         def profile_name(self, mtp): return 'fake'
         def execution_config(self, **kw): return {'num_draft': 0}
         def prompt_tokens(self, request):
-            state['tokenizations'].append(request.get('large', False))
-            return [1] * (1000 if request.get('large') else 2)
+            large = bool(request.get('large')) or len(request.get('prompt', '')) >= 100_000
+            state['tokenizations'].append(large)
+            return [1] * (1000 if large else 2)
         def output_parser(self, request):
             return NS(push=lambda *a, **kw: [], stopped=False, tool_count=0)
         def diagnostics(self): return {}
@@ -152,6 +154,52 @@ def test_transient_admission_keeps_warm_lease_and_active_work_progresses(deferre
     assert state['allocator_reclaims'] >= 1
     assert all(branch.closed == 1 for branch in state['branches'])
     assert waiting.admission_hit is None and waiting.cache_branch is None
+
+
+def test_warm_long_prompt_is_tokenized_once_across_validation_retry_and_apc(deferred_engine):
+    """Count the full host-side lifecycle; only pre-render may encode the prompt."""
+    from mlx2.server import validate_request
+
+    engine, state = deferred_engine
+    raw = {
+        'model': 'fake',
+        'prompt': 'agent-system-and-tools:' + ('x' * 117_000),
+        'max_tokens': 1,
+        'temperature': 0,
+        'context_limit': 1500,
+    }
+    request = validate_request(raw, chat=False)
+    assert state['tokenizations'] == []  # structural validation never renders
+
+    state['recover'] = True
+    # Keep one tiny decode active while the long request waits on admission;
+    # this exercises the real retry path that must not re-render the waiter.
+    active = engine.submit({'prompt': 'tick', 'max_tokens': 1})
+    first = engine.submit(request)
+    assert active.events.get(timeout=5)['finish_reason'] == 'length'
+    assert first.events.get(timeout=5)['finish_reason'] == 'length'
+    assert first.prompt_tokens == 1000  # context/admission used the pre-rendered list
+    assert state['tokenizations'] == [False, True]
+    assert state['lookups'] == [2, 1000]  # APC lookup/boundary probe reused those ids
+    assert state['lookup_tokens'][-1] == (1,) * 1000
+    assert engine.counts['memory_admission_retries'] >= 1
+
+    # Sampling and output controls do not change prompt identity.  A warm turn
+    # must hit HostPromptCache and carry the same ids through admission/APCv2.
+    warm = engine.submit({
+        **request,
+        'temperature': 0.8,
+        'top_p': 0.9,
+        'max_tokens': 2,
+    })
+    assert warm.events.get(timeout=5)['finish_reason'] == 'length'
+    assert warm.prompt_tokens == 1000
+    assert state['tokenizations'] == [False, True]
+    assert state['lookups'] == [2, 1000, 1000]
+    assert state['lookup_tokens'][-1] == state['lookup_tokens'][-2]
+    status = engine.host_prompt_cache.status()
+    assert status['misses'] == 2
+    assert status['hits'] >= 1
 
 
 @pytest.mark.parametrize('ending', ['timeout', 'cancel', 'shutdown'])

@@ -438,6 +438,8 @@ class LFM25VLAdapter:
         from mlx_vlm import load
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         self.model, self.processor = load(str(self.identity["path"]), lazy=False, strict=True, trust_remote_code=False)
+        from ..runtime.chat_templates import secure_model_chat_templates
+        secure_model_chat_templates(self.processor)
         from .lfm25_fused_shortconv import (
             ShortConvCounters, enabled as fused_shortconv_enabled,
             install as install_shortconv,

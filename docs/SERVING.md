@@ -300,6 +300,17 @@ qualification-bound and appears in `/v1/status.settings.default_max_tokens` and
 each request receipt. Lowering it restores admission width for clients that do
 not send an explicit output cap; explicit caps remain unaffected.
 
+Ordinary decode keeps one sampled output pending while its producing forward
+finishes. When that pending output fills `max_tokens`, the scheduler returns it
+without feeding it through a discard-only follow-up forward. In a ragged batch
+the terminal row detaches before survivors run; in a mixed prefill/decode round
+an all-terminal decode side leaves the prompt slice for a prompt-only forward.
+The terminal checkpoint covers the exact prefix already owned by KV state and
+exposes the final pending token separately, so APCv2 never publishes tokens
+beyond its cache offset. Native self-MTP already bounds proposals by remaining
+output and settles delivered terminal rows at commit, so it needs no parallel
+reservation mechanism.
+
 All output parsers retain the exact client stop string they match in the route
 receipt. OpenAI Chat keeps `finish_reason:"stop"`; Anthropic Messages maps the
 same receipt to `stop_reason:"stop_sequence"` plus `stop_sequence`.
@@ -1271,6 +1282,19 @@ resolve.
 
 The `draft_cycles` / `draft_accepted` aggregates are exactly the
 zeroth and first moments of `verify_accept_hist`, and are unchanged.
+
+### Adaptive native-MTP depth (default-off)
+
+Greedy cohorts use the adapter's qualified fixed depth for every closed
+boundary, subject only to the independent admission cap. They still publish
+acceptance and wall-time diagnostics, but neither those timings nor retained
+history from earlier requests can change verification depth. This preserves
+run-to-run greedy output when near-tied logits differ across `(K+1)` target
+forward widths. If a greedy lane joins a live sampled cohort, the one
+cohort-wide controller is pinned for the remainder of that cohort. Sampled
+cohorts retain adaptive behavior. This is an implemented correctness guard,
+not performance qualification; adaptive MTP remains default-off and
+unqualified.
 
 ### Self-MTP acceptance logging (default-off, qualification-only)
 

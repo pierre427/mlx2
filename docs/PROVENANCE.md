@@ -807,3 +807,25 @@ checks do not qualify Muse GPU execution or select its external route.
   `qualification/runs/qsa-stage1-pr91-20260928/qualification.json`.
 - Exact paths and modifications are recorded in
   `provenance/qsa-stage1-keys-stationary-2026-09-28.json`.
+
+## 2026-10-06 — Sandboxed model chat templates (mlx-vlm #2444; idea only)
+
+- Source reviewed: `Blaizzy/mlx-vlm` PR #2444, commit `f56da79` (MIT), which
+  identifies six custom processor renderers that bypass Transformers' sandbox.
+  Reviewed paths: `mlx_vlm/models/chat_template.py`, the six processor files
+  under `ernie4_5_moe_vl`, `kimi_vl`, `locateanything`, `molmo`, `molmo2`, and
+  `phi3_v`, plus `mlx_vlm/tests/test_chat_template_sandbox.py`. No upstream
+  code was copied.
+- mlx2 independently installs a revision-bound
+  `jinja2.sandbox.ImmutableSandboxedEnvironment` on those six processors while
+  preserving ordinary rendering, loop controls, helper globals, JSON output,
+  and the processors' tokenization contract. Transformers-owned renderers are
+  left intact because the installed Transformers implementation is already
+  sandboxed. Hostile Python attribute traversal fails before generation.
+- CPU validation: `tests/test_chat_template_sandbox_cpu.py` (11 passed), plus
+  the affected adapter suites (39 passed, 15 skipped) and the isolated LFM
+  host-only contract suites (209 passed). A pinned-source LFM2.5-VL Metal
+  compatibility smoke produced exact repeated greedy token hashes on the
+  ordinary candidate route; because that artifact uses Transformers' already
+  sandboxed renderer, it is compatibility evidence rather than execution of
+  one of the six replaced custom renderers.
