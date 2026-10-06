@@ -322,9 +322,21 @@ def test_apcv2_interior_pool_has_its_own_count_cap():
     apc.clear(release_memory=False)
 
 
-@pytest.mark.parametrize("prompt_length", [2047, 2048, 2049])
+_HYBRID_MTP_PAGE = 2048
+_HYBRID_MTP_PAGE_NEIGHBORS = [
+    multiple * _HYBRID_MTP_PAGE + delta
+    for multiple in (1, 2, 3)
+    for delta in (-1, 0, 1)
+]
+
+
+@pytest.mark.parametrize(
+    "prompt_length",
+    _HYBRID_MTP_PAGE_NEIGHBORS,
+    ids=[f"tokens-{length}" for length in _HYBRID_MTP_PAGE_NEIGHBORS],
+)
 def test_apcv2_hybrid_mtp_boundary_hits_around_prefill_page(prompt_length):
-    """P-1 target/P-2 draft coverage must not collapse at a 2048 boundary."""
+    """P-1 target/P-2 draft coverage must not collapse around page multiples."""
     covered = prompt_length - 1
     prompt = list(range(prompt_length))
     target = [_recurrent(covered), _state(KVCache(), covered)]

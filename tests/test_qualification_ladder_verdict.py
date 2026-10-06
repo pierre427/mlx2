@@ -9,7 +9,7 @@ H3: the verdict bound no identity, compared against a reference from another
     model/route/artifact, and qualified runs_per_cell 0.
 """
 
-import importlib
+import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -20,6 +20,16 @@ ROOT = Path(__file__).resolve().parents[1]
 RUN = ROOT / "qualification" / "runs" / "qualify-e8861bb5-uncensored"
 
 
+def _load_exact_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load qualification module {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.fixture(scope="module")
 def run_modules():
     missing = [name for name in ("thermal_ladder.py", "qualification_verdict.py")
@@ -27,14 +37,31 @@ def run_modules():
     if missing:
         pytest.skip(f"private qualification run copies absent ({RUN.relative_to(ROOT)}: "
                     f"{', '.join(missing)}); not exported to the public mirror")
+    previous_path = list(sys.path)
     sys.path.insert(0, str(RUN))
     previous = os.environ.get("MLX2_CAMPAIGN_ROOT")
     os.environ["MLX2_CAMPAIGN_ROOT"] = str(ROOT)
+    unique = {
+        "thermal": "_mlx2_qualify_e8861bb5_thermal_ladder",
+        "verdict": "_mlx2_qualify_e8861bb5_qualification_verdict",
+    }
+    shadowed = {
+        name: sys.modules.pop(name, None)
+        for name in ("ladder", "run_qualification_matrix")
+    }
     try:
-        yield (importlib.import_module("thermal_ladder"),
-               importlib.import_module("qualification_verdict"))
+        yield (
+            _load_exact_module(unique["thermal"], RUN / "thermal_ladder.py"),
+            _load_exact_module(unique["verdict"], RUN / "qualification_verdict.py"),
+        )
     finally:
-        sys.path.remove(str(RUN))
+        for name in unique.values():
+            sys.modules.pop(name, None)
+        for name, module in shadowed.items():
+            sys.modules.pop(name, None)
+            if module is not None:
+                sys.modules[name] = module
+        sys.path[:] = previous_path
         if previous is None:
             os.environ.pop("MLX2_CAMPAIGN_ROOT", None)
         else:

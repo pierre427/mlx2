@@ -4620,7 +4620,11 @@ def build_parser():
     parser.add_argument("--max-context", type=int, default=262144)
     parser.add_argument(
         "--prefill-step", type=prefill_step_arg,
-        help="prefill chunk step; the resolved value is bound to route qualification",
+        help=(
+            "prefill chunk step; explicit values override adapter policy, while "
+            "models without an adapter override autoscale from prompt length; "
+            "the resolved policy is bound to route qualification"
+        ),
     )
     parser.add_argument(
         "--prefill-depth-budget", type=prefill_step_arg,
@@ -4861,6 +4865,27 @@ def build_parser():
         type=int,
         default=1 << 20,
         help="maximum token IDs retained by the host prompt cache (0 disables)",
+    )
+    parser.add_argument(
+        "--incremental-tokenizer-cache-entries",
+        type=int,
+        default=0,
+        help=(
+            "unqualified revision-bound incremental tokenizer entries; "
+            "0 keeps the candidate off"
+        ),
+    )
+    parser.add_argument(
+        "--incremental-tokenizer-cache-characters",
+        type=int,
+        default=8 << 20,
+        help="maximum rendered characters retained by the incremental tokenizer",
+    )
+    parser.add_argument(
+        "--incremental-tokenizer-cache-tokens",
+        type=int,
+        default=1 << 20,
+        help="maximum token IDs retained by the incremental tokenizer",
     )
     execution = parser.add_mutually_exclusive_group()
     execution.add_argument("--ordinary", action="store_true", help="ordinary decode reference with APCv2")
@@ -5242,6 +5267,15 @@ def serving_engine_kwargs(
         "cache_dir": args.cache_dir,
         "host_prompt_cache_entries": args.host_prompt_cache_entries,
         "host_prompt_cache_tokens": args.host_prompt_cache_tokens,
+        "incremental_tokenizer_cache_entries": getattr(
+            args, "incremental_tokenizer_cache_entries", 0
+        ),
+        "incremental_tokenizer_cache_characters": getattr(
+            args, "incremental_tokenizer_cache_characters", 8 << 20
+        ),
+        "incremental_tokenizer_cache_tokens": getattr(
+            args, "incremental_tokenizer_cache_tokens", 1 << 20
+        ),
         "coalesce_window_ms": args.coalesce_window_ms,
         "batch_cohort_timeout_ms": args.batch_cohort_timeout_ms,
         "mtp": native_mtp,
@@ -5576,6 +5610,12 @@ def main():
         if semantic_middleware.neural_memory is not None:
             try:
                 engine.configure_neural_concept_bridge(
+                    semantic_middleware.neural_memory.artifact
+                )
+                # Reuse the same revision-bound learned projector for the
+                # default-off activation-capsule capability. Selection still
+                # requires a trusted bus-issued request payload.
+                engine.configure_activation_capsule_bridge(
                     semantic_middleware.neural_memory.artifact
                 )
             except (RuntimeError, TimeoutError, ValueError) as error:

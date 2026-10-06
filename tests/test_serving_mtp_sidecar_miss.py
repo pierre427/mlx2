@@ -185,6 +185,7 @@ def test_checkpoint_publication_failure_does_not_escape():
 
     engine = serving.ServingEngine.__new__(serving.ServingEngine)
     engine.counts = Counter()
+    engine.apc_reuse_disabled_reason = None
 
     class APC:
         def store(self, *_a, **_kw):

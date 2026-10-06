@@ -172,6 +172,7 @@ def test_parallel_samples_publish_only_the_prefill_leader():
     engine.error = None
     engine.thread = SimpleNamespace(is_alive=lambda: True)
     engine.host_prompt_cache = HostPromptCache()
+    engine.apc_reuse_disabled_reason = None
     engine.route_capabilities = frozenset()
     engine.qualification_mode = False
     engine.slots = threading.BoundedSemaphore(4)

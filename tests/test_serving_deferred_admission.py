@@ -314,7 +314,7 @@ def test_idle_worker_reaps_terminal_native_admission_owner(deferred_engine):
         reap_quarantine=lambda: calls.append("quarantine"),
     )
     writer = NS(poisoned=False)
-    record = (owner, writer)
+    record = (owner, writer, None)
     serving._NATIVE_ADMISSION_ORPHANS.append(record)
     try:
         deadline = time.monotonic() + 2

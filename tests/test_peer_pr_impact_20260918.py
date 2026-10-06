@@ -170,15 +170,28 @@ def _run_with_interiors(gen, uid):
     return boundary, gen.pop_interior_checkpoints(uid), finish, tokens
 
 
-@pytest.mark.parametrize("prompt_len", [3, 4, 5, 8, 9])
+_MTP_PREFILL_CHUNK = 4
+_MTP_PREFILL_BOUNDARY_LADDER = [
+    multiple * _MTP_PREFILL_CHUNK + delta
+    for multiple in (1, 2, 3, 4)
+    for delta in (-1, 0, 1)
+]
+
+
+@pytest.mark.parametrize(
+    "prompt_len",
+    _MTP_PREFILL_BOUNDARY_LADDER,
+    ids=[f"tokens-{length}" for length in _MTP_PREFILL_BOUNDARY_LADDER],
+)
 def test_mtp_replay_reaches_the_deepest_reusable_prefix(model, prompt_len):
     """vllm#52244: hit depth under MTP, including chunk-aligned prompt ends.
 
-    With ``prefill_step_size=4`` the lengths 4 and 8 end exactly on a chunk
-    boundary, which is where vLLM's page/hash-unit alignment collapsed the
-    hit to zero.  mlx2 publishes the prompt boundary at P-1 (the deepest
-    position a replay can land on, since the last token must be recomputed
-    for logits) and the finish checkpoint at the committed key, so:
+    The boundary ladder covers several ``prefill_step_size=4`` multiples and
+    both immediate neighbours.  vLLM's separate page/hash-unit intersection
+    collapsed hits at analogous boundaries; mlx2 does not import that
+    arithmetic.  It publishes the prompt boundary at P-1 (the deepest position
+    its replay can land on, since the last token must be recomputed for logits)
+    and the finish checkpoint at the committed key, so:
 
     - an exact replay hits P-1 tokens;
     - the next turn hits every committed token of the previous turn;

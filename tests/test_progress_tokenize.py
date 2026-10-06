@@ -558,6 +558,7 @@ def test_external_and_pld_prefill_report_progress():
 
     generator = PromptLookupBatchGenerator.__new__(PromptLookupBatchGenerator)
     generator.prefill_step = 3
+    generator.prefill_step_autoscale = False
     generator.scheduler_stats = Counter()
     generator.boundaries = {}
     generator.model = lambda *a, **kw: None
@@ -577,6 +578,7 @@ def test_external_and_pld_prefill_report_progress():
     external = ExternalDraftBatchGenerator.__new__(ExternalDraftBatchGenerator)
     empty = NS(shape=(1, 0))
     external.prefill_step = 3
+    external.prefill_step_autoscale = False
     external.layers = None
     external.scheduler_stats = Counter()
     external.boundaries = {}

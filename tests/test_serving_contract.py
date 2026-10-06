@@ -2325,15 +2325,81 @@ def test_runtime_has_no_legacy_apc_or_unified_import():
     from pathlib import Path
 
     root = Path(__file__).parents[1] / "src" / "mlx2"
+    external_worker = root / "runtime/tensorfold_owned_worker.py"
+    allowed_external_imports = {
+        ("from", "mlx_lm", "load", "mlx_lm_load"),
+        ("import", "mlx_lm", None, None),
+    }
+    observed_external_imports = set()
     for path in root.rglob("*.py"):
         tree = ast.parse(path.read_text())
+        allowed_nodes = set()
+        if path == external_worker:
+            functions = [
+                node
+                for node in tree.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "prepare_sources"
+            ]
+            assert len(functions) == 1
+            allowed_nodes = {id(node) for node in ast.walk(functions[0])}
+            identity_calls = {
+                node.func.id: node.lineno
+                for node in ast.walk(functions[0])
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in {"source_identity", "mlx_lm_identity"}
+            }
+            assert set(identity_calls) == {"source_identity", "mlx_lm_identity"}
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                assert not (node.module or "").startswith("mlx_lm")
+            if isinstance(node, ast.ImportFrom) and (
+                node.module or ""
+            ).startswith("mlx_lm"):
+                imports = {
+                    ("from", node.module, alias.name, alias.asname)
+                    for alias in node.names
+                }
+                assert path == external_worker and id(node) in allowed_nodes
+                assert node.lineno > max(identity_calls.values())
+                assert imports <= allowed_external_imports
+                observed_external_imports.update(imports)
             if isinstance(node, ast.Import):
-                assert all(not n.name.startswith("mlx_lm") for n in node.names)
+                imports = {
+                    ("import", alias.name, None, alias.asname)
+                    for alias in node.names
+                    if alias.name.startswith("mlx_lm")
+                }
+                if imports:
+                    assert path == external_worker and id(node) in allowed_nodes
+                    assert node.lineno > max(identity_calls.values())
+                    assert imports <= allowed_external_imports
+                    observed_external_imports.update(imports)
             if isinstance(node, ast.ClassDef):
                 assert node.name not in {"AutomaticPrefixCache", "LRUPromptCache"}
+    assert observed_external_imports == allowed_external_imports
+
+
+def test_tensorfold_owned_worker_does_not_import_external_stacks_at_module_load():
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    code = (
+        "import sys; import mlx2.runtime.tensorfold_owned_worker; "
+        "assert 'mlx_lm' not in sys.modules; assert 'tensorfold' not in sys.modules"
+    )
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
+    subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
 
 
 def test_tool_history_arguments_are_normalized_without_mutation():

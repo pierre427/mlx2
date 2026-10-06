@@ -29,15 +29,23 @@ from .models.cache import (
     record_state_checkpoints,
     release_window_checkpoints,
 )
-from .sample_utils import LaneRNG, draw_key
-from .prefill_plan import depth_bounded_prefill_rows
-from .state_boundaries import BoundaryPurpose, StateBoundary
-from .multi_lora import bind_lora_rows, clear_lora_rows
 from .mixed_step import (
     aligned_prompt_rows,
     mixed_prefill_decode_enabled,
     model_supports_mixed_forward,
 )
+from .multi_lora import bind_lora_rows, clear_lora_rows
+from .prefill_plan import (
+    checkpoint_bounded_prefill_rows,
+    depth_bounded_prefill_rows,
+    next_prefill_checkpoint,
+    prefill_fits_one_chunk,
+    prompt_length_prefill_step,
+    shared_prefill_budget_width,
+    single_round_prefill_rows,
+)
+from .sample_utils import LaneRNG, draw_key
+from .state_boundaries import BoundaryPurpose, StateBoundary
 
 DEFAULT_MAX_TOKENS = 100
 MTP_STARVED_BOUNDARIES_BEFORE_PLAIN = 8
@@ -460,6 +468,10 @@ class PromptProcessingBatch:
         progress: tuple
         end_of_segment: bool
         end_of_prompt: bool
+        # Filled only after the matching UID's model forward and cache
+        # evaluation complete.  This is execution evidence, not a declaration
+        # copied from the request or from bridge preparation.
+        consumed_prefill_inputs: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -522,6 +534,7 @@ class PromptProcessingBatch:
         )
         if len(self.prefill_inputs) != len(self.uids):
             raise ValueError("prefill_inputs must have one entry per sequence")
+        self._consumed_prefill_inputs = {}
         self.persistent_inputs = []
         for value in self.prefill_inputs:
             persistent = (
@@ -617,6 +630,9 @@ class PromptProcessingBatch:
         new_batch.max_tokens = list(self.max_tokens)
         new_batch.prefill_inputs = list(self.prefill_inputs)
         new_batch.persistent_inputs = list(self.persistent_inputs)
+        new_batch._consumed_prefill_inputs = dict(
+            getattr(self, "_consumed_prefill_inputs", {})
+        )
         return new_batch
 
     def split(self, indices: List[int]):
@@ -633,6 +649,7 @@ class PromptProcessingBatch:
         return new_batch
 
     def filter(self, keep: List[int]):
+        kept_uids = {self.uids[idx] for idx in keep}
         self.uids = [self.uids[idx] for idx in keep]
         if not keep:
             self.prompt_cache.clear()
@@ -652,6 +669,11 @@ class PromptProcessingBatch:
         self.stop_matchers = [self.stop_matchers[idx] for idx in keep]
         self.prefill_inputs = [self.prefill_inputs[idx] for idx in keep]
         self.persistent_inputs = [self.persistent_inputs[idx] for idx in keep]
+        self._consumed_prefill_inputs = {
+            uid: keys
+            for uid, keys in getattr(self, "_consumed_prefill_inputs", {}).items()
+            if uid in kept_uids
+        }
         self._restart_prompt_rollback()
 
     def prompt(self, tokens: List[List[int]], *, forward_fn=None):
@@ -748,6 +770,14 @@ class PromptProcessingBatch:
             # the life of the request.  Exact.
             compact_prompt_cache_windows(self.prompt_cache)
             mx.eval([c.state for c in self.prompt_cache])
+            if kwargs:
+                # The model call returned and its cache graph evaluated for
+                # this isolated row.  Preserve the exact reserved kwargs that
+                # crossed the forward boundary until prompt promotion emits
+                # the matching UID response.
+                self._consumed_prefill_inputs[self.uids[0]] = tuple(
+                    sorted(kwargs)
+                )
             processed += n_to_process
             record_state_checkpoints(
                 self.prompt_cache,
@@ -800,6 +830,7 @@ class PromptProcessingBatch:
         self.max_tokens = []
         self.prefill_inputs = []
         self.persistent_inputs = []
+        self._consumed_prefill_inputs = {}
         return generation
 
     @classmethod
@@ -1004,28 +1035,11 @@ class GenerationBatch:
             return {}
         persistent = self.persistent_inputs[0]
         memory = persistent["deep_concept_memory"]
-        schedule = memory.get("decode_values")
-        if schedule is None:
-            return persistent
-        if not isinstance(schedule, mx.array) or schedule.ndim != 2:
-            raise ValueError("concept decode_values must be a rank-2 device array")
-        if self._decode_steps >= schedule.shape[0]:
+        from .activation_injection import step_persistent_deep_memory
+
+        stepped = step_persistent_deep_memory(memory, self._decode_steps)
+        if stepped is None:
             return {}
-        stepped = dict(memory)
-        stepped.pop("decode_values")
-        gates = stepped.pop("decode_gates", None)
-        if gates is not None:
-            if (
-                not isinstance(gates, (list, tuple))
-                or len(gates) != schedule.shape[0]
-            ):
-                raise ValueError(
-                    "concept decode_gates must match the capsule schedule"
-                )
-            stepped["gate"] = float(gates[self._decode_steps])
-        stepped["values"] = schedule[
-            self._decode_steps : self._decode_steps + 1
-        ]
         return {"deep_concept_memory": stepped}
 
     def _step(self, *, prompt_tail: bool = False) -> Tuple[List[int], List[mx.array]]:
@@ -3064,6 +3078,7 @@ class BatchGenerator:
         completion_batch_size: int = 32,
         prefill_batch_size: int = 8,
         prefill_step_size: int = 2048,
+        prefill_step_autoscale: bool = False,
         prefill_batch_window: Optional[int] = None,
         decode_priority_cadence: int = 1,
         adaptive_prefill: bool = False,
@@ -3131,6 +3146,9 @@ class BatchGenerator:
                 "BatchGenerator only supports quantized_kv_start=0 with kv_bits set — delayed/threshold quantization is not implemented for the continuous-batching path."
             )
         self.model = model
+        if type(prefill_step_autoscale) is not bool:
+            raise ValueError("prefill_step_autoscale must be boolean")
+        self.prefill_step_autoscale = prefill_step_autoscale
         self.self_mtp = dict(self_mtp) if self_mtp is not None else None
         self.mtp_admission = mtp_admission
         if adaptive_mtp_depth is not None and self.self_mtp is None:
@@ -4764,13 +4782,20 @@ class BatchGenerator:
         (batch, prepared) = self._make_mtp_batch(n)
         return (batch, progress + list(prepared))
 
+    def _peek_interior_checkpoint(self, uid: int, covered: int):
+        positions = getattr(self, "_interior_checkpoint_positions", {}).get(
+            int(uid)
+        )
+        return next_prefill_checkpoint(positions or (), covered)
+
     def _next_interior_checkpoint(self, uid: int, covered: int):
         positions = getattr(self, "_interior_checkpoint_positions", {}).get(
             int(uid)
         )
+        next_position = self._peek_interior_checkpoint(uid, covered)
         while positions and positions[0] <= int(covered):
             positions.popleft()
-        return None if not positions else int(positions[0])
+        return next_position
 
     def _boundary_purpose(self, uid: int, position: int) -> BoundaryPurpose:
         return getattr(self, "_state_boundary_purposes", {}).get(
@@ -5258,6 +5283,9 @@ class BatchGenerator:
         return {
             "schema": "mlx2.prefill-chunk-trace.v1",
             "configured_step": int(getattr(self, "prefill_step_size", 0)),
+            "prompt_length_autoscale": bool(
+                getattr(self, "prefill_step_autoscale", False)
+            ),
             "adaptive": bool(getattr(self, "adaptive_prefill", False)),
             "adaptive_slices": list(getattr(self, "adaptive_prefill_slices", ())),
             "depth_budget": getattr(self, "prefill_depth_budget", None),
@@ -5491,10 +5519,22 @@ class BatchGenerator:
             _bump_bounded_counter(self.scheduler_stats, "prefill_depth_bounded_chunks")
         return rows
 
-    def _prefill_chunk_length(self, segments):
+    def _prompt_prefill_step(self, total_tokens: int) -> int:
+        if not self.prefill_step_autoscale:
+            return self.prefill_step_size
+        return prompt_length_prefill_step(
+            int(total_tokens), maximum=self.prefill_step_size
+        )
+
+    def _prefill_chunk_length(self, segments, total_tokens=None):
         if len(segments) == 1 and len(segments[0]) == 1:
             return 0
-        return min(len(segments[0]), self.prefill_step_size)
+        total = (
+            sum(len(segment) for segment in segments)
+            if total_tokens is None
+            else int(total_tokens)
+        )
+        return min(len(segments[0]), self._prompt_prefill_step(total))
 
     def _admit_one_chunk_overflow(self, adaptive_chunk: int) -> bool:
         """Give a one-chunk request one extra slot beside full long prefills.
@@ -5522,15 +5562,55 @@ class BatchGenerator:
             if BatchGenerator._bounded_prefill_chunks(self)
             else self.prefill_step_size
         )
-        if any(
-            sum(len(segment) for segment in sequence[0]) <= step
+        # Execution shares this round's width across every ordinary prompt
+        # row after admission. Query the same policy without recording an
+        # execution counter for a candidate that may not exist or be admitted.
+        overflow_rows = 1 + sum(
+            1
             for sequence in self._currently_processing
-        ):
-            return False
+            if not (len(sequence) > 6 and sequence[6] is not None)
+        )
+        step = self._shared_prefill_width(step, overflow_rows, record=False)
+        for active_index, sequence in enumerate(self._currently_processing):
+            remaining = single_round_prefill_rows(
+                len(segment) for segment in sequence[0]
+            )
+            depth = int(sequence[4] or 0) + int(sequence[1])
+            next_checkpoint = self._peek_interior_checkpoint(
+                self._prompt_batch.uids[active_index], depth
+            )
+            if remaining is not None and prefill_fits_one_chunk(
+                remaining,
+                int(sequence[2]),
+                int(step),
+                autoscale=bool(self.prefill_step_autoscale),
+                maximum=int(self.prefill_step_size),
+                depth=depth,
+                depth_budget=getattr(self, "prefill_depth_budget", None),
+                depth_floor=self.PREFILL_DEPTH_FLOOR,
+                next_checkpoint=next_checkpoint,
+            ):
+                return False
         for index, sequence in enumerate(self._unprocessed_sequences):
             if len(sequence) > 9 and sequence[9] is not None:
                 continue
-            if sum(len(segment) for segment in sequence[1]) <= step:
+            total = sum(len(segment) for segment in sequence[1])
+            remaining = single_round_prefill_rows(
+                len(segment) for segment in sequence[1]
+            )
+            depth = len(sequence[4]) if sequence[4] else 0
+            next_checkpoint = self._peek_interior_checkpoint(sequence[0], depth)
+            if remaining is not None and prefill_fits_one_chunk(
+                remaining,
+                total,
+                int(step),
+                autoscale=bool(self.prefill_step_autoscale),
+                maximum=int(self.prefill_step_size),
+                depth=depth,
+                depth_budget=getattr(self, "prefill_depth_budget", None),
+                depth_floor=self.PREFILL_DEPTH_FLOOR,
+                next_checkpoint=next_checkpoint,
+            ):
                 break
         else:
             return False
@@ -5591,10 +5671,12 @@ class BatchGenerator:
         if window == n:
             selected = list(range(n))
             candidate_lengths = [
-                self._prefill_chunk_length(sequence[1]) for sequence in candidates
+                self._prefill_chunk_length(
+                    sequence[1], len(sequence[4]) + sum(map(len, sequence[1]))
+                ) for sequence in candidates
             ]
             active_lengths = [
-                self._prefill_chunk_length(sequence[0])
+                self._prefill_chunk_length(sequence[0], sequence[2])
                 for sequence in self._currently_processing
                 if not (len(sequence[0]) == 1 and len(sequence[0][0]) == 1)
             ]
@@ -5602,10 +5684,12 @@ class BatchGenerator:
                 selected, candidate_lengths, active_lengths
             )
         candidate_lengths = [
-            self._prefill_chunk_length(sequence[1]) for sequence in candidates
+            self._prefill_chunk_length(
+                sequence[1], len(sequence[4]) + sum(map(len, sequence[1]))
+            ) for sequence in candidates
         ]
         active_lengths = [
-            self._prefill_chunk_length(sequence[0])
+            self._prefill_chunk_length(sequence[0], sequence[2])
             for sequence in self._currently_processing
             if not (len(sequence[0]) == 1 and len(sequence[0][0]) == 1)
         ]
@@ -6250,7 +6334,12 @@ class BatchGenerator:
                 config = dict(self.self_mtp or {})
                 config.update(self._mtp_configs.get(candidate[0], {}))
                 step = self._depth_bounded_step(
-                    int(config.get("prefill_step_size", self.prefill_step_size)),
+                    min(
+                        int(config.get("prefill_step_size", self.prefill_step_size)),
+                        self._prompt_prefill_step(
+                            len(candidate[4]) + sum(map(len, candidate[1]))
+                        ),
+                    ),
                     len(candidate[4]),
                 )
                 # A prompt that fits one chunk is prepared in this round
@@ -6628,10 +6717,22 @@ class BatchGenerator:
                 # Each boundary now owns its lane's sliding-window restore
                 # snapshots; decode does not need a second copy.
                 release_window_checkpoints(ready.prompt_cache)
+            consumed_prefill_inputs = dict(
+                getattr(ready, "_consumed_prefill_inputs", {})
+            )
             gen_batch = ready.generate(last_inputs)
             for i, p in enumerate(progress):
+                uid = gen_batch.uids[i]
                 prompt_responses.append(
-                    PromptProcessingBatch.Response(gen_batch.uids[i], p, True, True)
+                    PromptProcessingBatch.Response(
+                        uid,
+                        p,
+                        True,
+                        True,
+                        tuple(
+                            consumed_prefill_inputs.get(uid, ())
+                        ),
+                    )
                 )
             (self._generation_batch if destination is None else destination).extend(
                 gen_batch
@@ -6684,18 +6785,19 @@ class BatchGenerator:
         seq = self._currently_processing[0]
         uid = self._prompt_batch.uids[0]
         segments = seq[0]
-        budget = self._fairness().stall_bound(self.prefill_step_size)
+        prompt_step = self._prompt_prefill_step(seq[2])
+        budget = self._fairness().stall_bound(prompt_step)
         # A mixed slice always runs beside decode lanes: the contended slice
         # floor applies as in the ordinary round (sweep 2026-10-02 P4).
         budget = self._fairness().floor_slice(
-            min(budget, self.prefill_step_size), self.prefill_step_size,
+            min(budget, prompt_step), prompt_step,
             contended=True,
         )
         n = aligned_prompt_rows(budget, len(gen))
         covered = int(seq[4] or 0) + int(seq[1])
         n = min(
             n,
-            self._depth_bounded_step(self.prefill_step_size, covered),
+            self._depth_bounded_step(prompt_step, covered),
             len(segments[0]),
         )
         next_checkpoint = self._next_interior_checkpoint(uid, covered)
@@ -6917,15 +7019,16 @@ class BatchGenerator:
             )
             segments = seq[0]
             covered = int(seq[4] or 0) + int(seq[1])
-            step_size = self._depth_bounded_step(round_slice, covered)
+            step_size = self._depth_bounded_step(
+                min(round_slice, self._prompt_prefill_step(seq[2])), covered
+            )
             if len(seq) > 6 and seq[6] is not None:
                 step_size = len(segments[0])
             n = min(len(segments[0]), step_size)
             next_checkpoint = self._next_interior_checkpoint(
                 self._prompt_batch.uids[i], covered
             )
-            if next_checkpoint is not None:
-                n = min(n, next_checkpoint - covered)
+            n = checkpoint_bounded_prefill_rows(n, covered, next_checkpoint)
             prompts.append(segments[0][:n])
             self._record_prefill_chunk(
                 self._prompt_batch.uids[i], len(prompts[-1])
@@ -6986,7 +7089,9 @@ class BatchGenerator:
     def _decode_first_mode(self) -> str:
         return getattr(self, "_decode_first_round_mode", "off")
 
-    def _shared_prefill_width(self, base: int, rows: int) -> int:
+    def _shared_prefill_width(
+        self, base: int, rows: int, *, record: bool = True
+    ) -> int:
         """Per-row slice when rows share one prefill token budget.
 
         mlx-vlm #1630 counts the budget as rows x padded width; prompt rows
@@ -6994,15 +7099,16 @@ class BatchGenerator:
         row keeps the padded tile within the budget.  Off unless
         decode-first publication runs in ``all`` mode.
         """
-        base = max(1, int(base))
-        if self._decode_first_mode() != "all":
-            return base
-        policy = self.decode_first
-        budget = base
-        if policy.prefill_token_budget is not None:
-            budget = min(budget, policy.prefill_token_budget)
-        width = max(1, budget // max(1, int(rows)))
-        if width < base:
+        configured = max(1, int(base))
+        enabled = self._decode_first_mode() == "all"
+        policy = self.decode_first if enabled else None
+        width = shared_prefill_budget_width(
+            configured,
+            rows,
+            enabled=enabled,
+            token_budget=(None if policy is None else policy.prefill_token_budget),
+        )
+        if record and width < configured:
             policy.bump("budget_split_rounds")
             self._sync_decode_first_stats()
         return width

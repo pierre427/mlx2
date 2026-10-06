@@ -44,6 +44,7 @@ def test_prepare_job_never_substitutes_base_for_a_removed_lora(model):
     engine.model_path = "fixture"
     engine.qualification_mode = False
     engine.counts = Counter()
+    engine.apc_reuse_disabled_reason = None
     engine.multi_lora = _manager()
     request = {"prompt": "hello"}
     if model is not None:
@@ -63,6 +64,7 @@ def test_explicit_base_model_is_not_reinterpreted_as_an_adapter_name():
     engine.model_path = "fixture"
     engine.qualification_mode = False
     engine.counts = Counter()
+    engine.apc_reuse_disabled_reason = None
     engine.multi_lora = _manager()
     engine.multi_lora.registry["fixture"] = SimpleNamespace(name="fixture", fingerprint="other")
     job = engine._prepare_job({"prompt": "hello", "model": "fixture"}, tenant_id="tenant")

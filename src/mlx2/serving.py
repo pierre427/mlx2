@@ -931,6 +931,7 @@ class HostPromptCache:
             "session_id",
             "return_progress",
             "_mlx2_prefill_inputs",
+            "_mlx2_activation_capsule",
             "_mlx2_multimodal_stats",
             "_mlx2_media_token_end",
         }
@@ -949,7 +950,7 @@ class HostPromptCache:
         self._lock = threading.Lock()
 
     @classmethod
-    def key(cls, request: dict) -> str:
+    def key(cls, request: dict, *, namespace: str | None = None) -> str:
         # Default unknown fields to prompt-affecting. This makes adapter
         # extensions safe by construction; only the explicit generation-only
         # controls above are ignored for cache reuse.
@@ -959,19 +960,19 @@ class HostPromptCache:
             if field not in cls._NON_PROMPT_FIELDS
         }
         encoded = json.dumps(
-            payload,
+            {"namespace": namespace, "request": payload},
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
         ).encode()
         return hashlib.sha256(encoded).hexdigest()
 
-    def get(self, request: dict) -> list[int] | None:
+    def get(self, request: dict, *, namespace: str | None = None) -> list[int] | None:
         if not self.max_entries or not self.max_tokens:
             with self._lock:
                 self._stats["disabled_misses"] += 1
             return None
-        key = self.key(request)
+        key = self.key(request, namespace=namespace)
         with self._lock:
             tokens = self._entries.pop(key, None)
             if tokens is None:
@@ -981,7 +982,7 @@ class HostPromptCache:
             self._stats["hits"] += 1
             return list(tokens)
 
-    def put(self, request: dict, tokens) -> None:
+    def put(self, request: dict, tokens, *, namespace: str | None = None) -> None:
         if not self.max_entries or not self.max_tokens:
             with self._lock:
                 self._stats["disabled_skips"] += 1
@@ -996,7 +997,7 @@ class HostPromptCache:
             with self._lock:
                 self._stats["oversize_skips"] += 1
             return
-        key = self.key(request)
+        key = self.key(request, namespace=namespace)
         with self._lock:
             old = self._entries.pop(key, None)
             if old is not None:
@@ -1257,7 +1258,7 @@ def row_exact_target_mutation_guard(adapter, *, lane_policy=None, lora=False):
 
 
 def request_apc_scope(request):
-    """APCv2 per-request scope: media fingerprint plus LoRA adapter identity."""
+    """APCv2 per-request scope, including the mounted capsule snapshot."""
     from .runtime.multi_lora import lora_apc_scope
 
     physical = lora_apc_scope(
@@ -1265,7 +1266,177 @@ def request_apc_scope(request):
         request.get("_mlx2_lora_fingerprint"),
     )
     semantic = request.get("_mlx2_semantic_fingerprint")
-    return physical if semantic is None else (physical, "hyper-directory", semantic)
+    result = physical if semantic is None else (physical, "hyper-directory", semantic)
+    activation = request.get("_mlx2_activation_capsule")
+    if activation is not None:
+        payload = activation_capsule_request(request)
+        result = (
+            result,
+            "activation-capsule-bus-v1",
+            payload["semantic_fingerprint"],
+            payload["capsule_digest"],
+        )
+    return result
+
+
+_ACTIVATION_CAPSULE_FIELDS = frozenset(
+    {"capsule_digest", "manifest", "tensors", "gate", "semantic_fingerprint"}
+)
+
+
+def _lower_sha256(value) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def activation_capsule_request(request):
+    """Validate the exact runtime-private payload written by the trusted bus."""
+    wrapped = request.get("_mlx2_activation_capsule")
+    if wrapped is None:
+        return None
+    from .runtime.capsule_bus import is_trusted_activation_request
+
+    if not is_trusted_activation_request(wrapped):
+        raise ValueError("public requests cannot provide runtime activation capsules")
+    payload = {
+        name: getattr(wrapped, name) for name in _ACTIVATION_CAPSULE_FIELDS
+    }
+    if not _lower_sha256(payload.get("capsule_digest")):
+        raise ValueError("runtime activation capsule digest is invalid")
+    if not _lower_sha256(payload.get("semantic_fingerprint")):
+        raise ValueError("runtime activation capsule semantic fingerprint is invalid")
+    if request.get("_mlx2_semantic_fingerprint") != payload["semantic_fingerprint"]:
+        raise ValueError("runtime activation capsule semantic fingerprint mismatch")
+    manifest = payload.get("manifest")
+    tensors = payload.get("tensors")
+    if (
+        not isinstance(manifest, Mapping)
+        or manifest.get("schema") != "mlx2-activation-capsule-v1"
+        or not isinstance(tensors, Mapping)
+        or not tensors
+    ):
+        raise ValueError("runtime activation capsule is not a mounted core payload")
+    gate = payload.get("gate")
+    if (
+        isinstance(gate, bool)
+        or not isinstance(gate, (int, float))
+        or not math.isfinite(gate)
+        or not 0.0 <= float(gate) <= 1.0
+    ):
+        raise ValueError("runtime activation capsule gate is invalid")
+    return payload
+
+
+def prepare_semantic_prefill_inputs(
+    adapter,
+    request,
+    tokens,
+    *,
+    prefill_step,
+    route,
+    prefill_input=None,
+):
+    """Prepare and compose neural and activation memory for one cold B1 prefill."""
+    neural_payload = request.get("_mlx2_neural_concepts")
+    activation_payload = activation_capsule_request(request)
+    if neural_payload is None and activation_payload is None:
+        return prefill_input, None, None
+    if route != "ordinary":
+        # No bridge runs before this refusal, so neither counters nor receipts
+        # can claim state a speculative route would drop.
+        label = "activation capsules" if activation_payload is not None else "concept inputs"
+        raise ValueError(f"the {route} route cannot apply {label}")
+    if prefill_input is not None:
+        raise ValueError("semantic activation and multimodal prefill cannot be combined")
+    prepared = []
+    neural_receipt = None
+    activation_receipt = None
+    if neural_payload is not None:
+        neural_bridge = getattr(adapter, "neural_concept_prefill", None)
+        if not callable(neural_bridge):
+            raise ValueError("loaded adapter has no neural concept bridge")
+        neural = neural_bridge(tokens, neural_payload, prefill_step=prefill_step)
+        neural_receipt = neural["receipt"]
+        prepared.append(neural)
+    if activation_payload is not None:
+        activation_bridge = getattr(adapter, "activation_capsule_prefill", None)
+        if not callable(activation_bridge):
+            raise ValueError("loaded adapter has no activation capsule bridge")
+        activation = activation_bridge(
+            tokens,
+            activation_payload,
+            prefill_step=prefill_step,
+            route=route,
+            batch_size=1,
+        )
+        activation_receipt = activation["receipt"]
+        prepared.append(activation)
+    if len(prepared) == 2:
+        compose = getattr(adapter, "compose_semantic_prefill_inputs", None)
+        if not callable(compose):
+            raise ValueError("loaded adapter cannot compose semantic prefill inputs")
+        combined = compose(*prepared)
+    else:
+        combined = prepared[0]
+    # Only reserved model kwargs leave this boundary. Receipts stay on Job.
+    model_input = {
+        key: combined[key]
+        for key in ("deep_concept_memory", "_mlx2_persistent_decode_inputs")
+        if key in combined
+    }
+    if set(model_input) not in (
+        {"deep_concept_memory"},
+        {"deep_concept_memory", "_mlx2_persistent_decode_inputs"},
+    ):
+        raise ValueError("semantic bridge returned no bounded model input")
+    return model_input, neural_receipt, activation_receipt
+
+
+def observe_activation_capsule_forward(
+    job, counts, *, uid, consumed_prefill_inputs=()
+) -> None:
+    """Publish engagement only from matching, evaluated prefill evidence."""
+    receipt = job.activation_capsule_receipt
+    if receipt is None or receipt.get("status") != "prepared":
+        return
+    if (
+        receipt.get("prepared_for_uid") != uid
+        or receipt.get("prepared_request_id") != job.id
+    ):
+        counts["activation_capsule_bridge_forward_identity_mismatches"] += 1
+        return
+    consumed = tuple(str(key) for key in consumed_prefill_inputs)
+    if "deep_concept_memory" not in consumed:
+        # Prompt completion proves only that the request advanced.  It does
+        # not prove that the prepared semantic input crossed the model
+        # boundary (fallback/requeue paths may also terminate a prompt).
+        job.activation_capsule_receipt = {
+            **receipt,
+            "status": "forward_completed",
+            "engaged": False,
+            "observed_used": False,
+            "forward_evidence": "prompt_end_without_conditioning_evidence",
+        }
+        counts["activation_capsule_bridge_forward_completed"] += 1
+        return
+    gate = float(receipt.get("relative_gate", 0.0))
+    engaged = gate > 0.0
+    job.activation_capsule_receipt = {
+        **receipt,
+        "status": "applied" if engaged else "identity",
+        "engaged": engaged,
+        # Identity validation is evidence, but it is not mechanism use.
+        "observed_used": engaged,
+        "forward_evidence": "evaluated_deep_concept_memory",
+        "consumed_prefill_inputs": list(consumed),
+    }
+    counts["activation_capsule_bridge_forward_validated"] += 1
+    if engaged:
+        counts["activation_capsule_bridge_engagements"] += 1
+        counts["activation_capsule_bridge_observed_used"] += 1
 
 
 def multi_lora_policy(
@@ -2260,7 +2431,7 @@ def adapter_shared_cohort_admission(adapter,jobs,*,profile_path,manifest_path,ml
     hook=getattr(adapter,'native_cohort_memory_admission',None)
     if type(jobs) is not tuple or not 1<=len(jobs)<=20 or not callable(hook) or not all((profile_path,manifest_path,mlx_wheel_path)):
         raise ValueError('complete adapter shared-cohort admission capability required')
-    if len({(job.tenant_id,job.request.get('batch_cohort',{}).get('id')) for job in jobs})!=1 or any(job.cancelled.is_set() or job.preempted or job.request.get('batch_cohort',{}).get('size')!=len(jobs) or job.request.get('skip_writing_prefix_cache') is not True or job.native_b2_cached_tokens!=0 or getattr(job,'lora_name',None) is not None or getattr(job,'lora_slot',None) is not None or any(job.request.get(k) is not None for k in ('_mlx2_prefill_inputs','_mlx2_neural_concepts','_mlx2_lora_fingerprint')) for job in jobs):
+    if len({(job.tenant_id,job.request.get('batch_cohort',{}).get('id')) for job in jobs})!=1 or any(job.cancelled.is_set() or job.preempted or job.request.get('batch_cohort',{}).get('size')!=len(jobs) or job.request.get('skip_writing_prefix_cache') is not True or job.native_b2_cached_tokens!=0 or getattr(job,'lora_name',None) is not None or getattr(job,'lora_slot',None) is not None or any(job.request.get(k) is not None for k in ('_mlx2_prefill_inputs','_mlx2_neural_concepts','_mlx2_activation_capsule','_mlx2_lora_fingerprint')) for job in jobs):
         raise ValueError('shared adapter admission requires one complete cold closed cohort')
     requests=tuple((job.request.get('native_research_input_id'),tuple(job.admission_tokens if job.admission_tokens is not None else job.native_b2_prompt),job.effective_max_tokens) for job in jobs)
     from .runtime.paged_cohort_memory import validate_shared_cohort_bound
@@ -2708,6 +2879,7 @@ class Job:
     observed_width: int = 1
     admission_hit: object = None
     admission_tokens: list | None = None
+    prompt_tokenization_receipt: dict | None = None
     # Only independent, exact APCv2-compatible requests use this admission key.
     apc_sequence_key: object = None
     apc_sequence_waited: bool = False
@@ -2787,6 +2959,7 @@ class Job:
     lora_slot: int | None = None
     lora_residency: str | None = None
     neural_concept_receipt: dict | None = None
+    activation_capsule_receipt: dict | None = None
     # The bounded event queue overflowed: None, "pending" (decided at finish,
     # the 429 not yet queued) or "delivered".  The 429 is the only terminal.
     output_overflow: str | None = None
@@ -2853,6 +3026,9 @@ class ServingEngine:
         cache_dir=None,
         host_prompt_cache_entries=128,
         host_prompt_cache_tokens=1 << 20,
+        incremental_tokenizer_cache_entries=0,
+        incremental_tokenizer_cache_characters=8 << 20,
+        incremental_tokenizer_cache_tokens=1 << 20,
         coalesce_window_ms=5.0,
         batch_cohort_timeout_ms=1000.0,
         mtp=True,
@@ -2897,10 +3073,12 @@ class ServingEngine:
         _validate_only=False,
     ):
         self.default_max_tokens = validate_default_max_tokens(default_max_tokens)
-        # None: the adapter's prefill_step_default() applies once it loads,
-        # else DEFAULT_PREFILL_STEP. An explicit value always wins.
+        # None: the adapter's prefill_step_default() applies once it loads;
+        # adapters that decline use prompt-length autoscaling. An explicit
+        # operator value always wins.
         self._prefill_step_override = prefill_step
         self.prefill_step_source = "engine_argument" if prefill_step is not None else "default"
+        self.prefill_step_autoscale = False
         if prefill_step is None:
             prefill_step = DEFAULT_PREFILL_STEP
         # rows x (KV depth + rows) cap per prefill chunk (jundot/omlx#4149);
@@ -3325,6 +3503,15 @@ class ServingEngine:
         self.host_prompt_cache = HostPromptCache(
             max_entries=host_prompt_cache_entries,
             max_tokens=host_prompt_cache_tokens,
+        )
+        from .runtime.incremental_tokenizer_cache import (
+            IncrementalPromptTokenizerCache,
+        )
+
+        self.incremental_tokenizer_cache = IncrementalPromptTokenizerCache(
+            max_entries=incremental_tokenizer_cache_entries,
+            max_characters=incremental_tokenizer_cache_characters,
+            max_tokens=incremental_tokenizer_cache_tokens,
         )
         self.coalesce_window_seconds = coalescing_window(coalesce_window_ms)
         if isinstance(batch_cohort_timeout_ms, bool):
@@ -3856,6 +4043,39 @@ class ServingEngine:
             if tenant_id is None or owner == str(tenant_id)
         ]
 
+    def open_exact_prefix_cascade(
+        self,
+        paths,
+        cache,
+        *,
+        request_id,
+        maximum,
+        state_binding,
+    ):
+        """Fail closed until exact-prefix target observation is request-bound.
+
+        Adapter state geometry alone cannot authorize a served route.  The
+        ordinary sampler, processors, RNG and history do not yet have an
+        atomic handoff contract, so the generic opener always refuses.
+        """
+
+        adapter = getattr(self, "adapter", None)
+        if adapter is None:
+            raise RuntimeError("model adapter is not ready")
+        from .runtime.exact_prefix_serving import (
+            open_exact_prefix_serving_session,
+        )
+
+        return open_exact_prefix_serving_session(
+            adapter,
+            cache,
+            paths,
+            request_id=request_id,
+            maximum=maximum,
+            state_binding=state_binding,
+            mtp_active=bool(getattr(self, "mtp", False)),
+        )
+
     def count_tokens(self, request):
         """Render a chat request through the loaded adapter without generating."""
         return len(self.render_prompt(request))
@@ -3933,10 +4153,46 @@ class ServingEngine:
                 raise ValueError("this model declares no sampling profiles")
             vendor.select(thinking=None, requested=profile)
         public_request = {key: value for key, value in request.items() if key != "mlx_fault"}
+        activation = activation_capsule_request(public_request)
         has_media = any(
             isinstance(message.get("content"), list)
             for message in public_request.get("messages", ())
         )
+        if activation is not None:
+            route = (self.snapshot.get("settings") or {}).get("route")
+            if route != "ordinary":
+                raise ValueError(
+                    f"the {route} route cannot apply activation capsules"
+                )
+            if has_media or public_request.get("_mlx2_prefill_inputs") is not None:
+                raise ValueError(
+                    "activation capsules cannot be combined with multimodal prefill"
+                )
+            if public_request.get("batch_cohort") is not None:
+                raise ValueError("activation capsules cannot enter a B2/coalesced cohort")
+            if any(
+                public_request.get(name) not in (None, False)
+                for name in (
+                    "paged_native_qwen3",
+                    "paged_native_qwen3_b2",
+                    "paged_native_hybrid_b2",
+                    "paged_native_hybrid_packed_prefill",
+                    "paged_native_packed_n20_research",
+                )
+            ):
+                raise ValueError("activation capsules require the ordinary B1 path")
+            if (
+                getattr(self.approximate_kv_policy, "enabled", False)
+                or getattr(self.spomin_policy, "enabled", False)
+                or self.memory_preemption_policy["enabled"]
+            ):
+                raise ValueError(
+                    "activation capsules are incompatible with approximate or replay state"
+                )
+            # The bridge is a request-local approximate target law. It must
+            # cold-prefill and never publish state into exact APCv2.
+            public_request["skip_writing_prefix_cache"] = True
+            self.counts["activation_capsule_requests"] += 1
         if has_media:
             prepare = getattr(self.adapter, "prepare_multimodal_request", None)
             if not callable(prepare):
@@ -4020,10 +4276,78 @@ class ServingEngine:
         if row_exact is not None:
             job.row_exact_verify_start = row_exact.snapshot()
         job.structured_automata = self._prepare_structured_automata(job.request)
-        job.admission_tokens = self._prerender_prompt(job.request)
+        job.admission_tokens = self._prerender_prompt(job.request, job=job)
         return job
 
-    def _prerender_prompt(self, request):
+    def _tokenize_prompt(self, request):
+        """Return tokens plus the selected tokenization-route receipt.
+
+        A revision-bound render happens before ``HostPromptCache`` lookup.
+        Consequently a live template change cannot retrieve an entry created
+        for different rendered text.  When the incremental route is off, this
+        is the pre-existing ordinary request-keyed host cache path.
+        """
+
+        cache = self.host_prompt_cache
+        incremental = getattr(self, "incremental_tokenizer_cache", None)
+        # Host lookup deliberately happens outside prompt_lock.  A lifecycle
+        # generation check on both hit and miss paths makes a concurrent
+        # clear/rebind retry instead of returning tokens from the old adapter.
+        for _attempt in range(3):
+            with self.prompt_lock:
+                adapter = self.adapter
+                prepared = (
+                    incremental.prepare(request)
+                    if incremental is not None and incremental.selected
+                    else None
+                )
+            namespace = prepared.namespace if prepared is not None else None
+            host_cacheable = prepared is None or not prepared.plain_spans
+            tokens = (
+                cache.get(request, namespace=namespace) if host_cacheable else None
+            )
+            if tokens is not None:
+                if prepared is None:
+                    with self.prompt_lock:
+                        if self.adapter is adapter and not (
+                            incremental is not None and incremental.selected
+                        ):
+                            return tokens, None
+                    continue
+                receipt = incremental.host_hit_receipt(prepared)
+                if receipt is not None and receipt["selected"]:
+                    return tokens, receipt
+                continue
+            with self.prompt_lock:
+                if self.adapter is not adapter:
+                    continue
+                if prepared is None:
+                    if incremental is not None and incremental.selected:
+                        continue
+                    tokens = render_prompt_tokens(adapter, request)
+                    receipt = None
+                else:
+                    if not incremental.is_current(prepared):
+                        continue
+                    tokens, receipt = incremental.tokenize(
+                        prepared, lambda: render_prompt_tokens(adapter, request)
+                    )
+                    if not incremental.is_current(prepared):
+                        continue
+            if host_cacheable:
+                cache.put(request, tokens, namespace=namespace)
+            return tokens, receipt
+
+        # Pathological repeated lifecycle churn stays exact and bypasses both
+        # caches.  It cannot accidentally publish another generation's entry.
+        with self.prompt_lock:
+            adapter = self.adapter
+            return (
+                render_prompt_tokens(adapter, request),
+                None,
+            )
+
+    def _prerender_prompt(self, request, *, job=None):
         """Render ``request`` to prompt tokens on the submitting thread.
 
         Admission rendered every fresh prompt on the generation worker under
@@ -4040,14 +4364,12 @@ class ServingEngine:
         lock = getattr(self, "prompt_lock", None)
         if cache is None or adapter is None or lock is None:
             return None  # a partially built engine: admission renders
-        tokens = cache.get(request)
-        if tokens is None:
-            try:
-                with lock:
-                    tokens = render_prompt_tokens(adapter, request)
-            except Exception:
-                return None
-            cache.put(request, tokens)
+        try:
+            tokens, receipt = self._tokenize_prompt(request)
+        except Exception:
+            return None
+        if job is not None:
+            job.prompt_tokenization_receipt = receipt
         return tokens
 
     def _prepare_structured_automata(self, request):
@@ -4432,6 +4754,10 @@ class ServingEngine:
         jobs = [
             self._prepare_job(request, tenant_id=tenant_id) for request in requests
         ]
+        if len(jobs) > 1 and any(
+            job.request.get("_mlx2_activation_capsule") is not None for job in jobs
+        ):
+            raise ValueError("activation capsules cannot enter parallel/B2 submission")
         prompt_keys = {HostPromptCache.key(job.request) for job in jobs}
         if len(prompt_keys) != 1:
             raise ValueError("parallel samples must share one rendered prompt")
@@ -4819,6 +5145,18 @@ class ServingEngine:
                     else {"enabled": False}
                 ),
                 "host_prompt_cache": self.host_prompt_cache.status(),
+                "incremental_tokenizer_cache": (
+                    self.incremental_tokenizer_cache.status()
+                    if hasattr(self, "incremental_tokenizer_cache")
+                    else {
+                        "implemented": True,
+                        "qualified": False,
+                        "selected": False,
+                        "observed_used": False,
+                        "serving_qualified": False,
+                        "default": "off",
+                    }
+                ),
                 "reasoning_signing": {
                     "key_id": self.reasoning_signer.key_id,
                     "ephemeral": self.reasoning_signer.ephemeral,
@@ -5015,6 +5353,7 @@ class ServingEngine:
     def _invalidate_model_state(self):
         self.model_revision += 1
         self.host_prompt_cache.clear()
+        self.incremental_tokenizer_cache.clear()
         invalidate_features = getattr(self.adapter, "invalidate_feature_cache", None)
         if callable(invalidate_features):
             invalidate_features()
@@ -6248,6 +6587,19 @@ class ServingEngine:
                 # it streams before materializing and owns the manager.
                 factory_kwargs["weight_streaming"] = self._weight_stream_request()
             adapter = self.adapter_factory(self.model_path, **factory_kwargs)
+            # Defensive teardown of request-keyed entries from a prior
+            # adapter.  Epoch-namespaced lookups are the exactness boundary;
+            # this also releases storage promptly on a lifecycle change.
+            self.host_prompt_cache.clear()
+            incremental_bound = self.incremental_tokenizer_cache.bind(adapter)
+            if self.incremental_tokenizer_cache.enabled and not incremental_bound:
+                refusal = self.incremental_tokenizer_cache.status()["refusal"]
+                raise ValueError(
+                    "incremental tokenizer cache was explicitly selected but "
+                    f"the adapter refused it: {refusal}"
+                )
+            # Publish only after the tokenizer lifecycle has atomically bound
+            # its immutable snapshots (or established that the route is off).
             self.adapter = adapter
             if getattr(self, "weight_streaming_route", None) == "early":
                 self._bind_adapter_stream(adapter)
@@ -6342,6 +6694,12 @@ class ServingEngine:
                     raise ValueError(f"adapter prefill_step_default must be positive, got {step}")
                 self.prefill_step = step
                 self.prefill_step_source = "adapter"
+            elif self._prefill_step_override is None:
+                from .runtime.prefill_plan import PROMPT_LENGTH_PREFILL_SCHEDULE
+
+                self.prefill_step = int(PROMPT_LENGTH_PREFILL_SCHEDULE[-1][1])
+                self.prefill_step_source = "prompt_length_autoscale"
+                self.prefill_step_autoscale = True
             refuse_state_codec_on_reduced_state(self.recurrent_state_codec_policy, adapter)
             budget_default = getattr(adapter, "prefill_depth_budget_default", None)
             if self._prefill_depth_budget_override is None and callable(budget_default):
@@ -6426,6 +6784,12 @@ class ServingEngine:
 
             identity = runtime_identity()
             self.max_context = min(self.max_context, adapter.max_context)
+            from .adapters.self_mtp_rows import (
+                constrain_self_mtp_proposers,
+                declared_exact_self_mtp_rows,
+            )
+
+            exact_self_mtp_rows = declared_exact_self_mtp_rows(adapter)
             if self.cache_bytes_source == "host_default" or vars(type(adapter)).get(
                 "apc_cache_headroom_guard", False
             ):
@@ -6460,6 +6824,7 @@ class ServingEngine:
                 "max_inflight": self.max_inflight,
                 "prefill_step": self.prefill_step,
                 "prefill_step_source": self.prefill_step_source,
+                "prefill_step_autoscale": self.prefill_step_autoscale,
                 "cache_bytes": self.cache_bytes,
                 # How the value was chosen is provenance, not route identity
                 # (qualification.PROVENANCE_ONLY_SETTINGS); ``cache_bytes``
@@ -6482,6 +6847,15 @@ class ServingEngine:
                 "apc_quarantine_max_bytes": self.apc_quarantine_max_bytes,
                 "host_prompt_cache_entries": self.host_prompt_cache.max_entries,
                 "host_prompt_cache_tokens": self.host_prompt_cache.max_tokens,
+                **(
+                    {
+                        "incremental_tokenizer_cache": self.incremental_tokenizer_cache.status()[
+                            "bounds"
+                        ]
+                    }
+                    if self.incremental_tokenizer_cache.enabled
+                    else {}
+                ),
                 "coalesce_window_ms": self.coalesce_window_seconds * 1000,
                 "batch_cohort_timeout_ms": self.batch_cohort_timeout_seconds * 1000,
                 "mtp": self.mtp,
@@ -6629,6 +7003,21 @@ class ServingEngine:
             config = adapter.execution_config(
                 max_lanes=self.max_lanes, prefill_step=self.prefill_step
             )
+            if self.mtp and exact_self_mtp_rows is not None:
+                (
+                    effective_num_draft,
+                    self.copy_draft_policy,
+                    exact_self_mtp_rows_receipt,
+                ) = constrain_self_mtp_proposers(
+                    exact_self_mtp_rows,
+                    self_mtp_num_draft=config["num_draft"],
+                    self_mtp_copy_draft_policy=self.copy_draft_policy,
+                )
+                # Work on a copy: adapters own their returned policy mapping.
+                config = dict(config)
+                config["num_draft"] = effective_num_draft
+                settings["self_mtp_copy_draft"] = self.copy_draft_policy.as_dict()
+                settings["exact_self_mtp_rows"] = exact_self_mtp_rows_receipt
             ingress_cohort = ingress_cohort_policy(
                 config.get("ingress_cohort"), max_lanes=self.max_lanes
             )
@@ -7548,6 +7937,7 @@ class ServingEngine:
                     return adapter.create_external_batch(
                         completion_batch_size=self.max_lanes,
                         prefill_step_size=self.prefill_step,
+                        prefill_step_autoscale=self.prefill_step_autoscale,
                         memory_headroom=lambda: max(0, execution_headroom() - controller.hard_reserve_gib * (1 << 30)),
                         reclaim_memory=reclaim_allocator,
                         evict_checkpoint=evict_unused_checkpoint,
@@ -7561,6 +7951,7 @@ class ServingEngine:
                         adapter.model,
                         completion_batch_size=self.max_lanes,
                         prefill_step_size=self.prefill_step,
+                        prefill_step_autoscale=self.prefill_step_autoscale,
                         prompt_lookup=prompt_lookup_policy,
                         stop_tokens=[[token] for token in stop_token_ids],
                     )
@@ -7574,6 +7965,7 @@ class ServingEngine:
                             1 if self.spomin_policy.enabled else min(2, self.max_lanes)
                         ),
                         prefill_step_size=self.prefill_step,
+                        prefill_step_autoscale=self.prefill_step_autoscale,
                         prefill_depth_budget=self.prefill_depth_budget,
                         prefill_batch_window=1,
                         adaptive_prefill=True,
@@ -8055,11 +8447,8 @@ class ServingEngine:
                                 )
                         tokens = job.admission_tokens
                         if tokens is None:
-                            tokens = self.host_prompt_cache.get(job.request)
-                            if tokens is None:
-                                with self.prompt_lock:
-                                    tokens = render_prompt_tokens(adapter, job.request)
-                                self.host_prompt_cache.put(job.request, tokens)
+                            tokens, receipt = self._tokenize_prompt(job.request)
+                            job.prompt_tokenization_receipt = receipt
                             job.admission_tokens = tokens
                         if defer_expired_ingress_follower(
                             coalescer,
@@ -8095,6 +8484,7 @@ class ServingEngine:
                             and not job.request.get("skip_writing_prefix_cache", False)
                             and not job.request.get("_mlx2_prefill_inputs")
                             and not job.request.get("_mlx2_neural_concepts")
+                            and not job.request.get("_mlx2_activation_capsule")
                             and not job.request.get("_mlx2_media_fingerprint")
                             and not self.approximate_kv_policy.enabled
                             and not self.memory_preemption_policy["enabled"]
@@ -8178,6 +8568,27 @@ class ServingEngine:
                                 self.counts["multimodal_apcv2_boundary_misses"] += 1
                             job.admission_hit = hit
                             job.cache_branch = hit.cache
+                        if (
+                            job.request.get("_mlx2_activation_capsule") is not None
+                            and hit.cached_tokens
+                        ):
+                            if hit.cache is not None and hasattr(hit.cache, "close"):
+                                hit.cache.close()
+                            hit = APCLookup(
+                                None,
+                                list(tokens),
+                                0,
+                                False,
+                                None,
+                                "activation_capsule_cold_only",
+                                branch_tokens=max(
+                                    int(hit.cached_tokens),
+                                    int(getattr(hit, "branch_tokens", 0) or 0),
+                                ),
+                            )
+                            job.admission_hit = hit
+                            job.cache_branch = None
+                            self.counts["activation_capsule_prefix_hits_refused"] += 1
                         cache_copy = warm_cache_copy_gib(
                             hit, context_tokens=len(tokens) + maximum,
                             prefill_step=self.prefill_step, mtp=self.mtp,
@@ -8205,6 +8616,7 @@ class ServingEngine:
                                     and not hit.cached_tokens
                                 )
                                 or job.request.get("_mlx2_neural_concepts") is not None
+                                or job.request.get("_mlx2_activation_capsule") is not None
                             ),
                         )
                         prefill_gib += cold_media_feature_peak_increment_gib(
@@ -9039,37 +9451,28 @@ class ServingEngine:
                                 len(hit.remaining_tokens),
                                 int(hit.cached_tokens or 0),
                             )
-                        neural_payload = job.request.get("_mlx2_neural_concepts")
-                        if neural_payload is not None:
-                            route = self.snapshot["settings"]["route"]
-                            if route != "ordinary":
-                                # Refuse before the bridge runs, so neither
-                                # the receipt nor the engagement counter
-                                # claims concepts this route would drop.
-                                raise ValueError(
-                                    f"the {route} route cannot apply concept inputs"
-                                )
-                            if prefill_input is not None:
-                                raise ValueError(
-                                    "neural concept and multimodal prefill cannot be combined"
-                                )
-                            bridge = getattr(adapter, "neural_concept_prefill", None)
-                            if not callable(bridge):
-                                raise ValueError(
-                                    "loaded adapter has no neural concept bridge"
-                                )
-                            prepared = bridge(
+                        prefill_input, neural_receipt, activation_receipt = (
+                            prepare_semantic_prefill_inputs(
+                                adapter,
+                                job.request,
                                 hit.remaining_tokens,
-                                neural_payload,
                                 prefill_step=self.prefill_step,
+                                route=self.snapshot["settings"]["route"],
+                                prefill_input=prefill_input,
                             )
-                            prefill_input = {
-                                key: value
-                                for key, value in prepared.items()
-                                if key != "receipt"
-                            }
-                            job.neural_concept_receipt = prepared["receipt"]
+                        )
+                        if neural_receipt is not None:
+                            job.neural_concept_receipt = neural_receipt
                             self.counts["neural_concept_bridge_engagements"] += 1
+                        if activation_receipt is not None:
+                            job.activation_capsule_receipt = {
+                                **activation_receipt,
+                                "status": "prepared",
+                                "selected": True,
+                                "engaged": False,
+                                "observed_used": False,
+                            }
+                            self.counts["activation_capsule_bridge_prepared"] += 1
                         if defer_expired_ingress_follower(
                             coalescer,
                             job,
@@ -9099,6 +9502,12 @@ class ServingEngine:
                             **state_options,
                             prefill_inputs=[prefill_input],
                         )[0]
+                        if job.activation_capsule_receipt is not None:
+                            job.activation_capsule_receipt = {
+                                **job.activation_capsule_receipt,
+                                "prepared_for_uid": job.uid,
+                                "prepared_request_id": job.id,
+                            }
                         if _native_b2_requested(job):
                             if (attaching_cohort is None or
                                     len(attaching_cohort.jobs) != (job.request.get("batch_cohort",{}).get("size") if job.request.get("paged_native_packed_n20_research") is True else 2) or
@@ -9534,6 +9943,17 @@ class ServingEngine:
                                 else None
                             )
                             owner = active.get(response.uid)
+                            if owner is not None:
+                                observe_activation_capsule_forward(
+                                    owner,
+                                    self.counts,
+                                    uid=response.uid,
+                                    consumed_prefill_inputs=getattr(
+                                        response,
+                                        "consumed_prefill_inputs",
+                                        (),
+                                    ),
+                                )
                             if owner is not None and surgery_receipt is not None:
                                 owner.spomin_receipt = surgery_receipt
                                 self.counts[
@@ -9721,17 +10141,14 @@ class ServingEngine:
                                         reason = None
                                         for sibling in siblings:
                                             try:
-                                                sibling_tokens = self.host_prompt_cache.get(
-                                                    sibling.request
-                                                )
-                                                if sibling_tokens is None:
-                                                    with self.prompt_lock:
-                                                        sibling_tokens = render_prompt_tokens(
-                                                            adapter, sibling.request
-                                                        )
-                                                    self.host_prompt_cache.put(
-                                                        sibling.request, sibling_tokens
+                                                sibling_tokens, receipt = (
+                                                    self._tokenize_prompt(
+                                                        sibling.request
                                                     )
+                                                )
+                                                sibling.prompt_tokenization_receipt = (
+                                                    receipt
+                                                )
                                                 sibling_hit = route_usable_hit(
                                                     lookup_apc(
                                                         key,
@@ -10214,6 +10631,13 @@ class ServingEngine:
                                     "qualification": self.snapshot["qualification"],
                                     "route_receipt": native_route or route_receipt,
                                     **(
+                                        {
+                                            "prompt_tokenization": job.prompt_tokenization_receipt
+                                        }
+                                        if job.prompt_tokenization_receipt is not None
+                                        else {}
+                                    ),
+                                    **(
                                         {"lora": self._multi_lora_receipt(job)}
                                         if self.multi_lora is not None
                                         else {}
@@ -10354,6 +10778,9 @@ class ServingEngine:
                                     "prefill_chunk": job.prefill_chunk_receipt,
                                     "approximate_kv": job.approximate_kv_receipt,
                                     "neural_concept_bridge": job.neural_concept_receipt,
+                                    "activation_capsule_bridge": (
+                                        job.activation_capsule_receipt
+                                    ),
                                     **(
                                         {"int8_prefill": self.int8_prefill_handle.receipt()}
                                         if self.int8_prefill_handle is not None
@@ -10584,6 +11011,7 @@ class ServingEngine:
             if adapter is not None:
                 with self.prompt_lock:
                     self.adapter = None
+                    self.incremental_tokenizer_cache.unbind()
                     close_tokenizer = getattr(
                         getattr(adapter, "tokenizer", None), "tokenizer_v1_close", None
                     )
@@ -10620,6 +11048,41 @@ class ServingEngine:
             if not callable(configure):
                 raise ValueError("loaded adapter has no neural concept bridge")
             configure(artifact)
+            diagnostics = _execution_diagnostics(adapter)
+        with self.lock:
+            self.snapshot = {**self.snapshot, "execution": diagnostics}
+
+    def configure_activation_capsule_bridge(self, artifact=None, *, timeout=300.0):
+        """Explicitly bind the default-off ordinary-B1 capsule projector."""
+        deadline = time.monotonic() + float(timeout)
+        while not self.ready.wait(
+            timeout=min(0.1, max(0.0, deadline - time.monotonic()))
+        ):
+            if not self.thread.is_alive():
+                raise RuntimeError(
+                    self.error or "generation worker stopped during load"
+                )
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "timed out waiting for activation capsule bridge binding"
+                )
+        route = (self.snapshot.get("settings") or {}).get("route")
+        if route != "ordinary":
+            raise ValueError(
+                f"the activation capsule bridge needs the ordinary route; the "
+                f"{route} route cannot apply activation capsules"
+            )
+        with self.prompt_lock:
+            adapter = self.adapter
+            configure = getattr(
+                adapter, "configure_activation_capsule_bridge", None
+            )
+            if not callable(configure):
+                raise ValueError("loaded adapter has no activation capsule bridge")
+            if artifact is None:
+                configure()
+            else:
+                configure(artifact)
             diagnostics = _execution_diagnostics(adapter)
         with self.lock:
             self.snapshot = {**self.snapshot, "execution": diagnostics}

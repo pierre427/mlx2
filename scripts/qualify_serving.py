@@ -22,6 +22,12 @@ APPROVED_ADAPTIVE_BENCHMARK_SHA256 = (
 )
 PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v2"
 CROSS_HOST_PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v3"
+PREFLIGHT_TENSORFOLD_OWNED_SOURCE = (
+    Path.home() / ".codex/worktrees/tensorfold-upstream-parity-20260928"
+)
+PREFLIGHT_TENSORFOLD_OWNED_MLX_LM_SOURCE = (
+    Path.home() / "Desktop/mlx-uag/mlx-lm-unified"
+)
 QUALIFICATION_COVERAGE = {
     "response_format_json_object": False,
     "strict_json_schema": True,
@@ -552,6 +558,8 @@ PREFLIGHT_IMPORT_GUARD_MODULES = (
     "tests/test_lfm25_hybrid_persistence_cpu.py",
     "tests/test_lfm25_vl_cpu.py",
     "tests/test_llada_denoising_cpu.py",
+    "tests/test_long_affine_diagnostics_cpu.py",
+    "tests/test_long_affine_plan_cpu.py",
     "tests/test_mechanism_intake_merge_cpu.py",
     "tests/test_multimodal_prefill_contract_cpu.py",
     "tests/test_multimodal_registry_gate_cpu.py",
@@ -559,6 +567,7 @@ PREFLIGHT_IMPORT_GUARD_MODULES = (
     "tests/test_native_mtp_head_probe_cpu.py",
     "tests/test_nemotron3_diarization_candidate_cpu.py",
     "tests/test_paired_direct_state_gate_cpu.py",
+    "tests/test_packed_prefill_serving_cpu.py",
     "tests/test_phi4mm_candidate_cpu.py",
     "tests/test_pinned_vlm_candidates_cpu.py",
     "tests/test_qsa_output_gate_vectors_cpu.py",
@@ -573,6 +582,7 @@ PREFLIGHT_IMPORT_GUARD_MODULES = (
     "tests/test_ragged_pld_survivor_continuation_cpu.py",
     "tests/test_segmented_moe_native_identity_cpu.py",
     "tests/test_smolvlm2_apcv2_cpu.py",
+    "tests/test_spomin400_init_order_cpu.py",
     "tests/test_standard_decoder_cpu.py",
     "tests/test_vision_feature_reuse_cpu.py",
 )
@@ -620,6 +630,16 @@ def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
     command, guard_command = preflight_test_commands(pytest_args=pytest_args)
     env = {**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
            "PYTEST_ADDOPTS": "", "PYTEST_PLUGINS": ""}
+    external_sources = (
+        ("MLX2_TEST_TENSORFOLD_OWNED_SOURCE", PREFLIGHT_TENSORFOLD_OWNED_SOURCE),
+        (
+            "MLX2_TEST_TENSORFOLD_OWNED_MLX_LM_SOURCE",
+            PREFLIGHT_TENSORFOLD_OWNED_MLX_LM_SOURCE,
+        ),
+    )
+    for name, source in external_sources:
+        if source.exists():
+            env.setdefault(name, str(source.resolve()))
     root = Path(__file__).resolve().parents[1]
     completed = run(command, capture_output=True, text=True, env=env, cwd=root)
     guarded = run(guard_command, capture_output=True, text=True, env=env, cwd=root)

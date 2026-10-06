@@ -51,6 +51,38 @@ def test_preflight_receipt_is_bound_to_git_runtime_tests_and_harness(tmp_path):
     assert evidence["guard_test_command"] == receipt["guard_test_command"]
 
 
+def test_preflight_wires_available_owned_tensorfold_sources(tmp_path, monkeypatch):
+    tensorfold = tmp_path / "tensorfold"
+    mlx_lm = tmp_path / "mlx-lm"
+    tensorfold.mkdir()
+    mlx_lm.mkdir()
+    monkeypatch.setattr(qualify, "PREFLIGHT_TENSORFOLD_OWNED_SOURCE", tensorfold)
+    monkeypatch.setattr(
+        qualify, "PREFLIGHT_TENSORFOLD_OWNED_MLX_LM_SOURCE", mlx_lm
+    )
+    monkeypatch.delenv("MLX2_TEST_TENSORFOLD_OWNED_SOURCE", raising=False)
+    monkeypatch.delenv(
+        "MLX2_TEST_TENSORFOLD_OWNED_MLX_LM_SOURCE", raising=False
+    )
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(kwargs["env"])
+        return SimpleNamespace(returncode=0, stdout="passed", stderr="")
+
+    qualify.write_preflight_receipt(
+        tmp_path / "preflight.json",
+        run=run,
+        identity_fn=lambda: {"runtime": {}},
+    )
+    assert len(calls) == 2
+    assert all(
+        env["MLX2_TEST_TENSORFOLD_OWNED_SOURCE"] == str(tensorfold)
+        and env["MLX2_TEST_TENSORFOLD_OWNED_MLX_LM_SOURCE"] == str(mlx_lm)
+        for env in calls
+    )
+
+
 def test_preflight_identity_binds_pytest_configuration():
     identity = qualify.preflight_identity(runtime_identity_fn=lambda: {"source_sha256": "test"})
     assert identity["pytest_config_sha256"] == hashlib.sha256(
@@ -946,10 +978,9 @@ def test_capability_scope_rejects_conflicting_status_fields():
 def test_live_media_companion_binds_the_generic_harness_route(tmp_path):
     from mlx2.qualification import APPROVED_MEDIA_PRODUCERS
 
-    fixture = ROOT / "docs/experiments/SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json"
-    if not fixture.is_file():
-        pytest.skip("source-bound private media receipt is absent from public projection")
-    report = json.loads(fixture.read_text())
+    report = json.loads(
+        (ROOT / "docs/experiments/SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json").read_text()
+    )
     # The recorded run names the producer revision that ran it; the producer
     # has since tightened its media-reuse predicate, which invalidates the
     # receipt until it is re-run.  Re-bind the real traces to the current pin

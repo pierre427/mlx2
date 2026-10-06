@@ -56,6 +56,13 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
+    # Re-pinned 2026-10-06 (external TensorFold preflight source): the full
+    # suite receives the available managed, revision-checked owned-worker
+    # source roots instead of consulting an orphaned temporary export.
+    # Re-pinned 2026-10-06 (preflight isolation): source-only tests that
+    # deliberately poison sys.modules/sys.meta_path now run in fresh import-
+    # guard interpreters instead of contaminating later collection. Receipts
+    # from f20fe750... must be regenerated.
     # Re-pinned 2026-10-05 (external-prefill identity): feature observations
     # now require paired run-local counter deltas for dense/sparse live-row
     # compaction and Qwen external packed prefill, plus target-width ingress
@@ -83,7 +90,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # (8a2ced1d..., NAX gather default) must be regenerated.
     # Re-pinned 2026-10-02 (flip integrate): benchmark_adaptive_mtp.py model
     # defaults now use Path.home(), so APPROVED_ADAPTIVE_BENCHMARK_SHA256 moved.
-    "sha256": "f20fe7502e2c8a6d0f3807aaf0ce086dd2757c149c3e1c9ad642f7772a4452d4",
+    "sha256": "5e31876aedc2c6632ab097ead5defde6b0a48c321c4ca2c502aae7d96d8b51d5",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A

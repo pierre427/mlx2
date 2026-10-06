@@ -85,6 +85,10 @@ def _scheduler_only_mtp_batch(prompt_tokens, *, step=4):
     batch._mtp_configs = {}
     batch.adaptive_prefill = True
     batch.prefill_step_size = step
+    batch.prefill_step_autoscale = False
+    batch._native_continuations = {}
+    batch._native_lane_rngs = {}
+    batch._native_prompt_responses = []
     batch._last_decode_completed_s = None
     batch._last_decode_duration_ms = None
     batch._last_decode_interval_ms = None
@@ -804,6 +808,9 @@ def test_removing_a_queued_cohort_member_fails_its_siblings_only():
         _mtp_lane_rngs={},
         _mtp_prefill_resident=set(),
         _mtp_prefill_projection_bytes={},
+        _native_continuations={},
+        _native_lane_rngs={},
+        _native_prompt_responses=[],
         scheduler_stats={},
     )
     cohort = {"tenant_id": "t", "id": "c", "size": 2}
