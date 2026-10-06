@@ -19,6 +19,15 @@ copy wholesale.
   declared and qualified with evidence.
 - Emit a route receipt and fail closed when a requested capability is absent.
 - Preserve an ordinary-decode reference path for every model family.
+- Keep APCv2 state, revision, layout, hit, and width-one replay gates exact.
+  At physical width greater than one, a qualification verdict may classify a
+  cold/warm token mismatch as `near_tie_equivalent` only when the first
+  divergence has a shared prefix, the same unordered top-two tokens in both
+  arms, both selected-versus-alternate margins are at most 0.5 nats, both
+  continuations pass the functional oracle, and no unexplained high-margin
+  divergence remains. Never label this exact token parity. A row satisfying
+  the complete contract passes numerical equivalence and must not be counted
+  as a correctness failure, regression, or unexplained mismatch.
 - Keep state operations revision-bound. Approximate state may only be published
   through an explicitly qualified approximate operation.
 - Never add an Apple copyright header to original project code.
