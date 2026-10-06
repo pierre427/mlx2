@@ -712,20 +712,22 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             "self_mtp_copy_draft": {"enabled": True},
             "decode_first": {"enabled": True, "shared_prefill_budget": False},
         },
-        # Keep the TensorFold tree topology and its node budgets explicit.
-        # The historical A/B-B/A shared the pinned TensorFold numerical law,
-        # so it cannot select that target after its ordinary-equivalence
-        # evidence was invalidated.  Pairwise draft selection and standalone
-        # target varlen remain independent route-local defaults.
+        # Artifact-bound external defaults for the exact target/DFlash2 pair
+        # declared below.  A different pair receives no tree defaults.  This
+        # selects the measured topology while keeping the route candidate and
+        # explicitly selected by --external-draft.
         "external_draft": {
-            "pairwise_selection": "batched",
-            "external_varlen_prefill": True,
-            "varlen_dense_mlp": {
-                "enabled": True,
-                "minimum_padding_fraction": 0.25,
-                "minimum_padding_rows": 1,
-            },
+            "pairwise_selection": "host",
+            "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
+            "tree_node_budget_by_lanes": {"1": 15, "2": 7, "3": 4, "4": 3},
+            "external_varlen_prefill": False,
+            "varlen_dense_mlp": False,
+            "draft_quantization": {"bits": 4, "group_size": 64},
         },
+    }
+    default_external_route_binding = {
+        "target_revision": "e59471c5c6fa8c6819b81cb5957bcab10736020db8bacb47fbb9089813fa93f8",
+        "draft_revision": "34ec93d71399f3dd6db9646194f1ad4db345715c61258d72318325e0d8095c90",
     }
     """Dense text adapter using shared chat parsing and modern runtime state."""
 

@@ -5195,7 +5195,10 @@ def resolve_execution_policy_defaults(
         if handoff is not None:
             resolved["mtp_ordinary_handoff"] = handoff
     if adapter_resolution is not None:
-        declared = adapter_resolution.default_execution_policy(route_selection.route)
+        declared = adapter_resolution.default_execution_policy(
+            route_selection.route,
+            operator_policy=resolved,
+        )
         external_route = route_selection.route == "external_draft"
         tree_geometry_overridden = (
             external_route

@@ -55,7 +55,9 @@ class AdapterResolution:
             )
         return {"enabled": True, "max_mtp_width": width}
 
-    def default_execution_policy(self, route: str) -> dict:
+    def default_execution_policy(
+        self, route: str, *, operator_policy: dict | None = None
+    ) -> dict:
         """Return adapter-declared server-owned policy defaults for ``route``.
 
         Read from the adapter class's *own* namespace, never inherited: these
@@ -84,6 +86,24 @@ class AdapterResolution:
             return {}
         if route == "native_mtp" and Capability.MTP not in self.descriptor.capabilities:
             return {}
+        if route == "external_draft":
+            binding = vars(self.adapter_type).get("default_external_route_binding")
+            if binding is not None:
+                if (
+                    not isinstance(binding, dict)
+                    or set(binding) != {"target_revision", "draft_revision"}
+                    or any(
+                        not isinstance(value, str) or len(value) != 64
+                        for value in binding.values()
+                    )
+                ):
+                    raise ValueError(
+                        f"{name} default_external_route_binding must contain "
+                        "64-character target_revision and draft_revision pins"
+                    )
+                supplied = operator_policy or {}
+                if any(supplied.get(key) != value for key, value in binding.items()):
+                    return {}
         policy = declared.get(route) or {}
         if not isinstance(policy, dict):
             raise ValueError(f"{name} {route} default policy must be an object")
@@ -116,6 +136,7 @@ ADAPTER_DEFAULT_POLICY_KEYS = frozenset(
         "tree_node_budget_by_lanes",
         "external_varlen_prefill",
         "varlen_dense_mlp",
+        "draft_quantization",
     }
 )
 # The subset that snapshots hybrid state; the engine refuses these on

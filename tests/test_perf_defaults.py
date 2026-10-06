@@ -66,50 +66,69 @@ def test_interior_default_is_native_mtp_only_and_explicit_policy_wins(
         assert external == {}
 
 
-def test_qwen38_external_draft_defaults_keep_varlen_without_tensorfold():
+def _qwen38_bound_external_policy(**overrides):
+    return {
+        "draft_model": "/revision-bound/operator-path",
+        **Qwen3827BAdapter.default_external_route_binding,
+        **overrides,
+    }
+
+
+def test_qwen38_exact_external_pair_defaults_to_owned_tensorfold_tree():
     resolution = _resolution(Qwen3827BAdapter, QWEN38_27B)
     policy = resolve_execution_policy_defaults(
-        {"draft_model": "/revision-bound/operator-path"},
+        _qwen38_bound_external_policy(),
         EXTERNAL,
         resolution,
     )
-    assert policy["pairwise_selection"] == "batched"
-    assert "batch_size_route" not in policy
-    assert "tree_node_budget_by_lanes" not in policy
-    assert policy["external_varlen_prefill"] is True
-    assert policy["varlen_dense_mlp"] == {
-        "enabled": True,
-        "minimum_padding_fraction": 0.25,
-        "minimum_padding_rows": 1,
+    assert policy["pairwise_selection"] == "host"
+    assert policy["batch_size_route"] == "tree15_b1_b4_chain_b5plus_v1"
+    assert policy["tree_node_budget_by_lanes"] == {
+        "1": 15, "2": 7, "3": 4, "4": 3,
     }
+    assert policy["external_varlen_prefill"] is False
+    assert policy["varlen_dense_mlp"] is False
+    assert policy["draft_quantization"] == {"bits": 4, "group_size": 64}
     # Defaults do not invent or replace the artifact binding.
     assert policy["draft_model"] == "/revision-bound/operator-path"
 
 
-def test_qwen38_external_draft_varlen_default_has_explicit_kill_switch():
+def test_qwen38_external_draft_defaults_keep_explicit_varlen_override():
+    resolution = _resolution(Qwen3827BAdapter, QWEN38_27B)
+    policy = resolve_execution_policy_defaults(
+        _qwen38_bound_external_policy(
+            external_varlen_prefill=True,
+            varlen_dense_mlp=True,
+        ),
+        EXTERNAL,
+        resolution,
+    )
+    assert policy["external_varlen_prefill"] is True
+    assert policy["varlen_dense_mlp"] is True
+
+
+def test_qwen38_external_defaults_do_not_leak_to_another_payload_pair():
     resolution = _resolution(Qwen3827BAdapter, QWEN38_27B)
     policy = resolve_execution_policy_defaults(
         {
-            "external_varlen_prefill": False,
             "draft_model": "/revision-bound/operator-path",
+            "target_revision": "a" * 64,
+            "draft_revision": "b" * 64,
         },
         EXTERNAL,
         resolution,
     )
-    assert "tree_node_budget_by_lanes" not in policy
-    assert policy["external_varlen_prefill"] is False
-    assert "varlen_dense_mlp" not in policy
+    assert set(policy) == {"draft_model", "target_revision", "draft_revision"}
 
 
 def test_qwen38_external_draft_explicit_tensorfold_geometry_survives_defaults():
     resolution = _resolution(Qwen3827BAdapter, QWEN38_27B)
     budgets = {1: 15, 2: 7, 3: 4, 4: 3}
     policy = resolve_execution_policy_defaults(
-        {
-            "draft_model": "/revision-bound/operator-path",
-            "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
-            "tree_node_budget_by_lanes": budgets,
-        },
+        _qwen38_bound_external_policy(
+            batch_size_route="tree15_b1_b4_chain_b5plus_v1",
+            tree_node_budget_by_lanes=budgets,
+        ),
         EXTERNAL,
         resolution,
     )
