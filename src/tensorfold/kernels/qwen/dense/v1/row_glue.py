@@ -52,12 +52,20 @@ _GDN_POST = r"""
     ss += yv[j] * yv[j];
   }
   ss = simd_sum(ss);
-  const float inv = metal::rsqrt(ss / float(DV) + eps[0]);
+  const float inv = metal::precise::rsqrt(ss / float(DV) + eps[0]);
   for (int j = 0; j < PER; j++) {
     const int d = int(lane) * PER + j;
-    const float x = float(bfloat(float(NW[d]) * (yv[j] * inv)));
+    // mx.fast.rms_norm materializes bf16 before its bf16 gain multiply.
+    const bfloat normalized = bfloat(yv[j] * inv);
+    const bfloat normed = bfloat(NW[d] * normalized);
     const float zf = float(Z[m * ZS + ZO + hv * DV + d]);
-    OUT[m * NV * DV + hv * DV + d] = bfloat(zf / (1.0f + metal::exp(-zf)) * x);
+    // Qwen3.8's swish gate widens z to fp32 and compiled nn.silu uses the
+    // stable symmetric fast-exp sigmoid.
+    const float gate_exp = metal::exp(metal::abs(zf));
+    const float gate_low = 1.0f / (1.0f + gate_exp);
+    const float gate_sigmoid = zf < 0.0f ? gate_low : 1.0f - gate_low;
+    const float gate = zf * gate_sigmoid;
+    OUT[m * NV * DV + hv * DV + d] = bfloat(float(normed) * gate);
   }
 """
 

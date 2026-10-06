@@ -35,9 +35,14 @@ _PRE = r"""
       const float xv = row < TAPS - 1 ? float(CSb[row * C + c]) : float(QKV[(row - (TAPS - 1)) * C + c]);
       acc += float(CW[c * TAPS + tap]) * xv;
     }
-    const float conv = float(bfloat(acc));
-    const float sig = float(bfloat(1.0f / (1.0f + metal::exp(-conv))));
-    vals[j] = float(bfloat(conv * sig));                // SiLU, bf16 like mlx_lm's two ops
+    // Compiled nn.silu on the served Qwen3.8 path evaluates the stable,
+    // symmetric fast-exp sigmoid in bf16, then rounds the product to bf16.
+    const bfloat conv = bfloat(acc);
+    const bfloat sigmoid_exp = bfloat(metal::exp(metal::abs(conv)));
+    const bfloat sigmoid_low = bfloat(bfloat(1.0f) / bfloat(bfloat(1.0f) + sigmoid_exp));
+    const bfloat sigmoid = conv < bfloat(0.0f)
+        ? sigmoid_low : bfloat(bfloat(1.0f) - sigmoid_low);
+    vals[j] = float(bfloat(conv * sigmoid));
   }
   if (isq || isk) {
     float ss = 0.0f;
@@ -46,9 +51,10 @@ _PRE = r"""
     // mlx_lm expresses FLA's L2 epsilon through RMSNorm: dividing the sum by
     // DK must divide the 1e-6 epsilon by DK as well.
     const float norm_eps = 1e-6f / float(DK);
-    const float inv = metal::rsqrt(ss / float(DK) + norm_eps);
+    const float inv = metal::precise::rsqrt(ss / float(DK) + norm_eps);
     // mlx_lm: q = (DK^-0.5)^2 * rms_norm(q), k = DK^-0.5 * rms_norm(k), scales rounded to bf16
-    const float scale = isq ? float(bfloat(1.0f / float(DK))) : float(bfloat(metal::rsqrt(float(DK))));
+    const float scale = isq ? float(bfloat(1.0f / float(DK)))
+                            : float(bfloat(metal::precise::rsqrt(float(DK))));
     for (int j = 0; j < PER; j++) {
       const bfloat out = bfloat(scale * float(bfloat(vals[j] * inv)));
       if (isq) Q[(w * NK + head) * DK + lane * PER + j] = out;
@@ -58,10 +64,25 @@ _PRE = r"""
     const int hv = int(head) - 2 * NK;
     for (int j = 0; j < PER; j++) Vout[(w * NV + hv) * DV + lane * PER + j] = bfloat(vals[j]);
     if (lane == 0) {
-      // g = exp(-exp(A_log) * softplus(a + dt_bias)), beta = sigmoid(b) (mlx_lm's compute_g, sigmoid)
-      const float s = float(bfloat(float(Ain[w * ZS + AO + hv]) + float(DT[hv])));
-      const float sp = float(bfloat(metal::max(s, 0.0f) + metal::log(1.0f + metal::exp(-metal::abs(s)))));
-      G[w * NV + hv] = metal::exp(-metal::exp(float(ALOG[hv])) * sp);
+      // compute_g keeps a + dt_bias and softplus in bf16.  MLX's softplus is
+      // max/min stabilized and uses a compensated log1p; both exponentials
+      // around it are precise fp32 operations.
+      const bfloat av = bfloat(float(Ain[w * ZS + AO + hv]) + float(DT[hv]));
+      const bfloat zero = bfloat(0.0f);
+      const bfloat hi = metal::max(av, zero);
+      const bfloat lo = metal::min(av, zero);
+      const bfloat softplus_arg = bfloat(metal::exp(lo - hi));
+      const float arg = float(softplus_arg);
+      const float arg_plus_one = 1.0f + arg;
+      const float log1p = arg_plus_one == 1.0f
+          ? arg : arg * (metal::log(arg_plus_one) / (arg_plus_one - 1.0f));
+      const bfloat sp = metal::isnan(av)
+          ? metal::numeric_limits<bfloat>::quiet_NaN()
+          : ((lo == -metal::numeric_limits<bfloat>::infinity()
+              || hi == metal::numeric_limits<bfloat>::infinity())
+             ? hi : bfloat(hi + bfloat(log1p)));
+      G[w * NV + hv] = metal::precise::exp(
+          -metal::precise::exp(float(ALOG[hv])) * float(sp));
       const float beta_x = float(Bin[w * ZS + BO + hv]);
       const float beta_y = 1.0f / (1.0f + metal::precise::exp(metal::abs(beta_x)));
       BETA[w * NV + hv] = beta_x < 0.0f ? beta_y : 1.0f - beta_y;
