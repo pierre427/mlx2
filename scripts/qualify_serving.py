@@ -1562,8 +1562,25 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
     segmented = execution.get("segmented_mtp", {})
     indexed = execution.get("indexed_qsa", {}).get("counts", {})
     scheduler = final.get("scheduler", {})
+    initial_scheduler = (initial or {}).get("scheduler") or {}
+
+    def run_delta(after, before, *path):
+        """A counter's growth during this run (its final value without an
+        initial snapshot), so engagement at load or in an earlier run
+        cannot pass for this run's evidence."""
+        def read(root):
+            value = root
+            for key in path:
+                if not isinstance(value, dict):
+                    return 0
+                value = value.get(key, 0)
+            return value if type(value) is int and value >= 0 else 0
+        return max(0, read(after) - read(before))
     fly_receipt_relaxed = 0
+    initial_receipts = (initial or {}).get("recent_receipts") or ()
     for receipt in final.get("recent_receipts", ()):
+        if receipt in initial_receipts:
+            continue  # served before this run
         for key in ("mtp", "speculation"):
             verification = receipt.get(key) or {}
             if verification.get("verification") == "fly":
@@ -1592,16 +1609,21 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
     # the unaccepted speculative suffix is discarded.  transaction_rejections
     # is narrower; it records an entire delivery/branch rejection and is not
     # expected during healthy nonterminal serving.
+    # Both are this run's growth, like every other engagement counter.
     native_segmented = settings.get("mtp") is True
     if native_segmented:
-        segmented_transactions = segmented.get("transaction_branches", 0)
+        def segmented_delta(key):
+            return run_delta(execution, initial_execution, "segmented_mtp", key)
+
+        segmented_transactions = segmented_delta("transaction_branches")
         segmented_rollbacks = (
-            segmented.get("accepted_zero", 0)
-            + segmented.get("accepted_partial", 0)
+            segmented_delta("accepted_zero") + segmented_delta("accepted_partial")
         )
     else:
-        segmented_transactions = scheduler.get("segmented_transactions", 0)
-        segmented_rollbacks = scheduler.get("segmented_rollbacks", 0)
+        segmented_transactions = run_delta(
+            scheduler, initial_scheduler, "segmented_transactions"
+        )
+        segmented_rollbacks = run_delta(scheduler, initial_scheduler, "segmented_rollbacks")
     counts = final.get("counts", {})
     apcv2 = final.get("apcv2", {})
     apc_lifetime = apcv2.get("lifetime", {})
@@ -1645,31 +1667,47 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
         "pooled_qsa": levers.get("qsa_pooled_key_cache_hits", 0),
         "scatter_qsa": levers.get("qsa_scatter_chosen_calls", 0),
         "fused_gdn_decode": fused_gdn_decode_observation(fused_gdn),
-        "fused_gdn_verify": fused_gdn.get("verify_calls", 0),
-        "fused_gdn_replay_rollback": fused_gdn.get("replay_rollback_calls", 0),
-        "eager_dispatch": levers.get("eager_async_evals", 0),
+        "fused_gdn_verify": run_delta(execution, initial_execution, "fused_gdn", "verify_calls"),
+        "fused_gdn_replay_rollback": run_delta(
+            execution, initial_execution, "fused_gdn", "replay_rollback_calls"
+        ),
+        "eager_dispatch": run_delta(
+            execution, initial_execution, "round_levers", "eager_async_evals"
+        ),
         "fused_moe": (sum(moe.get("dispatches", {}).values())
                       if moe.get("fused_gate_up_layers", 0) > 0 else 0),
-        "external_draft": (scheduler.get("external_rounds", 0)
-                           if scheduler.get("draft_fallbacks", 0) == 0 else 0),
-        "proposal_distribution": scheduler.get("proposed_tokens", 0),
-        "paired_draft_cache": scheduler.get("paired_cache_resumes", 0),
+        # A fallback during this run voids its external evidence; one from
+        # an earlier run does not.
+        "external_draft": (
+            run_delta(scheduler, initial_scheduler, "external_rounds")
+            if run_delta(scheduler, initial_scheduler, "draft_fallbacks") == 0
+            else 0
+        ),
+        "proposal_distribution": run_delta(scheduler, initial_scheduler, "proposed_tokens"),
+        "paired_draft_cache": run_delta(
+            scheduler, initial_scheduler, "paired_cache_resumes"
+        ),
         "segmented_transaction": segmented_transactions,
         "segmented_rollback": segmented_rollbacks,
-        "prompt_lookup": scheduler.get("pld_retrieval_cycles", 0),
-        "prompt_lookup_proposals": scheduler.get("pld_proposed", 0),
-        "prompt_lookup_rollback": scheduler.get("pld_rollbacks", 0),
-        "prompt_lookup_batched_verify": scheduler.get("pld_batched_rounds", 0),
-        "prompt_lookup_rotating_replay": scheduler.get("pld_rotating_replay_rounds", 0),
+        "prompt_lookup": run_delta(scheduler, initial_scheduler, "pld_retrieval_cycles"),
+        "prompt_lookup_proposals": run_delta(scheduler, initial_scheduler, "pld_proposed"),
+        "prompt_lookup_rollback": run_delta(scheduler, initial_scheduler, "pld_rollbacks"),
+        "prompt_lookup_batched_verify": run_delta(
+            scheduler, initial_scheduler, "pld_batched_rounds"
+        ),
+        "prompt_lookup_rotating_replay": run_delta(
+            scheduler, initial_scheduler, "pld_rotating_replay_rounds"
+        ),
         # The bound policy benchmark proves only the features it selected.
         # Adaptive depth still needs bounded exploration, complete sampling,
         # and conditional recovery; handoff uses its independent fixed-depth
         # event/correctness/throughput gate.
         "adaptive_mtp_depth": adaptive_observed,
         "mtp_ordinary_handoff": handoff_observed,
-        "self_mtp_copy_draft": scheduler.get("self_mtp_copy_rounds", 0),
+        "self_mtp_copy_draft": run_delta(scheduler, initial_scheduler, "self_mtp_copy_rounds"),
         "fly_verification": max(
-            int(scheduler.get("fly_relaxed_accepts", 0)), fly_receipt_relaxed
+            run_delta(scheduler, initial_scheduler, "fly_relaxed_accepts"),
+            fly_receipt_relaxed,
         ),
         "spomin_surgery": final.get("spomin_live_surgery", {}).get("counts", {}).get("applied", 0),
         "approximate_kv": final.get("approximate_kv", {}).get("applied", 0),
@@ -1769,8 +1807,14 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
             "constrained_tool_grammar_auto_engagements", 0
         ),
         "tool_grammar_streaming": counts.get("constrained_tool_grammar_streams", 0),
-        "external_pairwise_selection": scheduler.get(
-            "external_pairwise_selection_groups", 0
+        "external_pairwise_selection": run_delta(
+            scheduler, initial_scheduler, "external_pairwise_selection_groups"
+        ),
+        # The default Qwen3.8 tree route: lanes served by tree rounds and
+        # rounds the TensorFold target executed, both during this run.
+        "external_tree": min(
+            run_delta(scheduler, initial_scheduler, "external_tree_rounds"),
+            run_delta(scheduler, initial_scheduler, "external_tensorfold_target_rounds"),
         ),
         "fused_gdn_dynamic_accept": fused_gdn.get(
             "replay_dynamic_rollback_calls", 0
@@ -1862,7 +1906,23 @@ def default_on_observations(final, initial=None):
     q36_topk = delta(*q36, "topk_launch_calls") if topk_mode in {None, "launch"} else 0
     scores = ((execution.get("tensorfold_longctx") or {}).get("qsa_fused_scores") or {})
     qwen38 = execution.get("fused_gdn") or {}
+    lane_after = ((final.get("lane_matmul") or {}).get("counts") or {}).get("lane_calls", 0)
+    lane_before = (((initial or {}).get("lane_matmul") or {}).get("counts") or {}).get(
+        "lane_calls", 0
+    )
     return {
+        # Flash-Next fused GDN prefill prework: multi-token prefill forwards.
+        "fused_gdn_prefill": delta("fused_gdn", "prefill_calls"),
+        # Flash-Next sorted-order MoE weighted sum: sorted prefill tails.
+        "moe_weighted_sum": delta("moe", "weighted_sum", "calls"),
+        # Covered projections that ran the lane kernel (status["lane_matmul"]).
+        "lane_matmul": (
+            max(0, lane_after - lane_before)
+            if type(lane_after) is int and type(lane_before) is int
+            else 0
+        ),
+        # Base decode-time fairness: contended prefill slices it accounted.
+        "decode_fairness": scheduler_delta("decode_fairness_prefill_chunks"),
         "hc_decode": hc_decode,
         "fused_gdn_batch_decode": delta("fused_gdn", "batch_decode", "calls"),
         "fused_gdn_batch_verify": delta("fused_gdn", "batch_verify", "calls"),

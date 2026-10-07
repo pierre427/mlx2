@@ -1,8 +1,9 @@
 """GPU-free artifact dispatch; model selection stays outside the scheduler.
 
 Resolution validates the local artifact and requested implementation capability.
-It does not qualify a route or load a model. Normal serving still requires an
-artifact/runtime/settings-bound qualification receipt.
+It does not qualify a route or load a model. A route without an
+artifact/runtime/settings-bound qualification receipt still serves, labelled
+unqualified (AGENTS.md).
 """
 
 from __future__ import annotations
@@ -38,13 +39,16 @@ class AdapterResolution:
 
     @property
     def default_mtp_ordinary_handoff(self) -> dict | None:
-        """Return the adapter-declared native-MTP handoff policy, if any."""
+        """Return the adapter-declared native-MTP handoff policy, if any.
+
+        Read from the adapter class's own namespace, like
+        ``default_execution_policy``: the width is a per-model measurement,
+        and Nemotron (a Flash-Next subclass) must not serve Flash-Next's.
+        """
         if Capability.MTP not in self.descriptor.capabilities:
             return None
-        width = getattr(
-            self.adapter_type,
-            "default_mtp_ordinary_handoff_max_width",
-            None,
+        width = vars(self.adapter_type).get(
+            "default_mtp_ordinary_handoff_max_width"
         )
         if width is None:
             return None
@@ -397,10 +401,6 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "qwen2_5_vl": _qwen25_vl,
 }
 
-# These source-backed multimodal bridges expose cache-safe candidate contracts,
-# but have no model-path numerical qualification yet. Keep discovery available
-# for qualification runs without silently selecting an unqualified server route.
-_QUALIFICATION_GATED_TYPES = frozenset({"lfm2_vl", "smolvlm", "qwen2_5_vl"})
 
 
 def inspect_model(model_path: str | Path) -> AdapterResolution:
@@ -448,10 +448,8 @@ def resolve_adapter(
         raise ValueError(
             f"{result.descriptor.family} artifact has no implemented native MTP route"
         )
-    if (result.descriptor.model_type in _QUALIFICATION_GATED_TYPES
-            and not qualification_mode and not qualification):
-        raise ValueError(
-            f"{result.descriptor.family} requires qualification mode or an "
-            "artifact-bound qualification receipt before serving"
-        )
+    # The source-backed multimodal bridges (LFM2.5-VL, SmolVLM2, Qwen2.5-VL)
+    # have no model-path numerical qualification yet.  Like any unqualified
+    # route they serve labelled unqualified rather than being refused;
+    # qualification is confidence, not permission to run (AGENTS.md).
     return result.adapter_type

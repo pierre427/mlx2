@@ -173,6 +173,8 @@ def test_mtp_ordinary_handoff_is_explicit_qualified_and_native_only():
             "execution_policy": {},
             "environment": {},
             "max_context": 1024,
+            # Above the width: at max_lanes <= 8 the handoff cannot engage.
+            "max_lanes": 16,
         }
     )
     with pytest.raises(ValueError, match="enabled.*true"):

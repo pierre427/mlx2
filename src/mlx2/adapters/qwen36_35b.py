@@ -378,7 +378,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
     # single-stream (102.0 vs 102.7 tok/s) and lost 25-34% batched (B8 175 vs
     # 235, B16 212 vs 283), because a cohort locks its compute width after the
     # first true-batched cycle and defers late arrivals.  With the handoff (at
-    # ``max_mtp_width`` 4 for these numbers; 3 since 2026-10-02) the cohort migrates to the ordinary batcher at a
+    # ``max_mtp_width`` 4 for these numbers; 1 since the 2026-10-02 decode wins) the cohort migrates to the ordinary batcher at a
     # closed boundary and the batched loss inverts into a gain: on GPU at
     # mlx2 994123b, ordinary / fixed MTP / MTP+handoff was 96.6 / 97.0 / 98.3
     # single-stream, 234.5 / 163.0 / 243.8 at B8 and 282.6 / 212.1 / 305.0 at

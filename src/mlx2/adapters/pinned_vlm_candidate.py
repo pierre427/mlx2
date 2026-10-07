@@ -161,6 +161,11 @@ class PinnedVisionCandidateAdapter:
     model_type: str
 
     def __init__(self, model_path: str, *, execution_policy=None):
+        # Refuse an explicitly enabled TF32 switch like the standard decoder
+        # (process_env.require_process_numerics); MLX latches it.
+        from ..process_env import require_process_numerics
+
+        require_process_numerics(f"the {self.model_type} vision candidate adapter")
         if execution_policy not in (None, {}):
             raise ValueError("vision candidate has no qualified execution policy")
         self.identity = inspect_vision_artifact(model_path, expected=self.model_type)

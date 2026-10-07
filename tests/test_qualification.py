@@ -758,6 +758,8 @@ def test_mtp_ordinary_handoff_requires_observed_feature_check(tmp_path):
         "speculation": "native_mtp",
         "execution_policy": {"num_draft": 2},
         "environment": {},
+        # Above the handoff width: at max_lanes <= 8 it can never engage.
+        "max_lanes": 16,
         "mtp_ordinary_handoff": {"enabled": True, "max_mtp_width": 8},
     }
     checks = {
@@ -1289,12 +1291,17 @@ def test_external_adaptive_verification_is_serialized_but_unqualifiable():
 
 
 def test_external_tree_batch_size_route_is_unqualifiable():
+    # The artifact-bound default tree route is qualifiable (it needs
+    # feature_external_tree); any other tree route stays a candidate.
     from mlx2.qualification import unqualifiable_candidate
 
+    assert unqualifiable_candidate(
+        {"execution_policy": {"batch_size_route": "tree15_b1_b4_chain_b5plus_v1"}}
+    ) is None
     reason = unqualifiable_candidate(
         {
             "execution_policy": {
-                "batch_size_route": "tree15_b1_b4_chain_b5plus_v1"
+                "batch_size_route": "tree15_b1_chain_b2plus_v1"
             }
         }
     )

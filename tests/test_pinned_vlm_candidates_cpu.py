@@ -91,7 +91,7 @@ def test_candidate_mtp_route_fails_closed():
     assert "mlx.core" not in sys.modules
 
 
-def test_vision_bridges_are_discoverable_but_not_unqualified_serving_routes():
+def test_vision_bridges_are_discoverable_and_resolve_unqualified():
     from mlx2.adapters.registry import inspect_model, resolve_adapter
     from mlx2.contracts import Capability
 
@@ -101,7 +101,6 @@ def test_vision_bridges_are_discoverable_but_not_unqualified_serving_routes():
         result = inspect_model(path)
         assert result.descriptor.model_type == model_type
         assert Capability.APC_V2 in result.descriptor.capabilities
-        with pytest.raises(ValueError, match="requires qualification"):
-            resolve_adapter(path)
+        assert resolve_adapter(path) is result.adapter_type
         assert resolve_adapter(path, qualification_mode=True) is result.adapter_type
     assert "mlx.core" not in sys.modules

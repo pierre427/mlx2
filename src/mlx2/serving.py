@@ -3180,6 +3180,7 @@ class ServingEngine:
         mtp=True,
         prompt_lookup=False,
         route_selection_source="engine_argument",
+        skipped_route_defaults=None,
         qualification_mode=False,
         qualification=None,
         execution_policy=None,
@@ -3191,7 +3192,7 @@ class ServingEngine:
         thinking_steer_alpha=None,
         thinking_steer_hammer=None,
         thinking_auto_calibration=True,
-        lane_matmul="off",
+        lane_matmul="auto",
         lane_policy=None,
         cache_capsules=None,
         persistent_block_bytes=0,
@@ -3342,6 +3343,7 @@ class ServingEngine:
         # installs after the adapter loaded) or None.
         self.weight_streaming_route = None
         self.weight_streaming_lane_matmul = None
+        self.lane_matmul_stepped_aside = None
         # P4: consumers (preemption, rolling captures) read this callable.  It
         # is a constant NORMAL unless the operator enables host signals.
         from .runtime.os_memory import MemoryPressureMonitor, PressureLevel
@@ -3684,6 +3686,10 @@ class ServingEngine:
         self.mtp = mtp
         self.prompt_lookup = bool(prompt_lookup)
         self.route_selection_source = route_selection_source
+        # {policy key: reason} for adapter defaults the server left unselected
+        # because they cannot engage on this shape (server.py
+        # resolve_execution_policy_defaults).
+        self.skipped_route_defaults = dict(skipped_route_defaults or {})
         self.qualification_mode, self.qualification = qualification_mode, qualification
         # Qualification is confidence, not permission to run (AGENTS.md):
         # with neither a receipt nor qualification mode the route still
@@ -6861,6 +6867,22 @@ class ServingEngine:
                 raise ValueError(
                     "prefill candidates require qualification mode or a matching qualification receipt"
                 )
+            owners = [
+                name
+                for name in ("tensorfold_prefill", "tensorfold_qmv")
+                if getattr(adapter, name, None)
+            ] + [
+                name
+                for name in ("invariant_prefill", "row_exact_verify")
+                if getattr(adapter, name, None) is not None
+            ]
+            if self.lane_matmul == "auto" and owners:
+                # An explicitly selected mechanism that owns the projections
+                # wins over the automatic lane law, which steps aside (as it
+                # does for weight streaming).  An explicit lane mode is still
+                # refused below.
+                self.lane_matmul = "off"
+                self.lane_matmul_stepped_aside = f"auto->off ({', '.join(owners)})"
             if getattr(adapter, "tensorfold_prefill", None) and (
                 self.lane_matmul != "off"
                 or self.sp_qmm_enabled
@@ -6873,7 +6895,13 @@ class ServingEngine:
                 raise ValueError(
                     "TensorFold Flash qmv and lane_matmul cannot own the same projections"
                 )
-            if self.lane_matmul != "off":
+            from .runtime.lane import available as lane_available
+
+            if self.lane_matmul != "off" and not (
+                # No lane backend on this device (off the GPU): the automatic
+                # law installs nothing, so it does not inspect the model.
+                self.lane_matmul == "auto" and not lane_available()
+            ):
                 # Before any cache or generator exists: every later call of a
                 # covered projection sees the installed arithmetic.
                 from .runtime.lane import apply_policy
@@ -7191,6 +7219,8 @@ class ServingEngine:
                 settings["weight_streaming_lane_matmul"] = (
                     self.weight_streaming_lane_matmul
                 )
+            if self.lane_matmul_stepped_aside is not None:
+                settings["lane_matmul_stepped_aside"] = self.lane_matmul_stepped_aside
             if self.mtp_ordinary_handoff_policy.enabled:
                 settings["mtp_ordinary_handoff"] = (
                     self.mtp_ordinary_handoff_policy.as_dict()
@@ -7546,6 +7576,14 @@ class ServingEngine:
                 else settings["speculation"]
             )
             settings["route_selection_source"] = self.route_selection_source
+            from .runtime.env_switches import serving_env_switches
+
+            process_env = serving_env_switches()
+            if process_env:
+                # Behaviour-changing MLX2_* switches no adapter profile pins.
+                settings["process_env"] = process_env
+            if self.skipped_route_defaults:
+                settings["skipped_route_defaults"] = dict(self.skipped_route_defaults)
             if self.verify_bitexact_policy.enabled:
                 # Fails closed on an mlx without the mode.  Recorded in
                 # settings only when enabled so default-off records match.

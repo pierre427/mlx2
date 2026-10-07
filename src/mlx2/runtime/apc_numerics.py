@@ -33,7 +33,8 @@ TAG = "execution-numerics-v1"
 
 # Environment switches that select a KV-producing law outside the qualified
 # exact default.  "flag": on unless empty/0/false/off/no; "int": bound when
-# nonzero.  Each entry says why.
+# nonzero; "default_on": a default-on switch, bound when it is not "1".  Each
+# entry says why.
 CANDIDATE_ENV = {
     # Reduced-precision fp32 matmuls (process_env pins "0"; explicit wins).
     **{name: "flag" for name in PROCESS_NUMERICS},
@@ -47,6 +48,14 @@ CANDIDATE_ENV = {
     "MLX_QWEN4_QSA_NAX_BATCHED": "flag",
     # Tiled quantized-SDPA scores; checked on the pinned M5 build only.
     "MLX2_QSDPA_SCORES_BUDGET_BYTES": "int",
+    # Fused prompt-slice + decode forward: not bit-identical to separate
+    # forwards (runtime/mixed_step.py), default off.
+    "MLX2_MIXED_PREFILL_DECODE": "flag",
+    # North's legacy (incorrect) LayerNorm A/B arm: other model math.
+    "MLX2_NORTH_NORM": "flag",
+    # Xing's fused mHC kernels are on by default and differ from the compiled
+    # path in summation order; switching them off is the other law.
+    "MLX2_XING_MHC_KERNEL": "default_on",
 }
 _FALSE = {"", "0", "false", "off", "no"}
 
@@ -159,6 +168,9 @@ def _bound_value(kind: str, raw: str):
     value = raw.strip()
     if kind == "flag":
         return None if value.lower() in _FALSE else "1"
+    if kind == "default_on":
+        # Bound only when switched off (the module reads exactly "1" as on).
+        return None if value == "1" else "0"
     try:
         return None if int(value) == 0 else str(int(value))
     except ValueError:

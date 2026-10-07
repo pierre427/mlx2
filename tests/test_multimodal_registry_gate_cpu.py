@@ -1,4 +1,4 @@
-"""The three new APCv2 bridges are discoverable but need route evidence."""
+"""The three new APCv2 bridges resolve without route evidence (served unqualified)."""
 
 import json
 import sys
@@ -12,7 +12,7 @@ from mlx2.contracts import Capability, ModelDescriptor, StatePlane
 
 
 @pytest.mark.parametrize("model_type", ["lfm2_vl", "smolvlm", "qwen2_5_vl"])
-def test_new_multimodal_routes_require_qualification_before_serving(
+def test_new_multimodal_routes_resolve_unqualified(
     tmp_path, monkeypatch, model_type,
 ):
     block_mlx_imports(monkeypatch, __name__)
@@ -32,8 +32,9 @@ def test_new_multimodal_routes_require_qualification_before_serving(
         lambda path, config: registry.AdapterResolution(Candidate, descriptor, {}),
     )
     assert registry.inspect_model(tmp_path).adapter_type is Candidate
-    with pytest.raises(ValueError, match="requires qualification mode"):
-        registry.resolve_adapter(tmp_path)
+    # Qualification is confidence, not permission to run (AGENTS.md): the
+    # route serves labelled unqualified instead of being refused.
+    assert registry.resolve_adapter(tmp_path) is Candidate
     with pytest.raises(ValueError, match="native MTP"):
         registry.resolve_adapter(tmp_path, mtp=True, qualification_mode=True)
     assert registry.resolve_adapter(tmp_path, qualification_mode=True) is Candidate

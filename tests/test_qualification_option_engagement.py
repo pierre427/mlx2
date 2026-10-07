@@ -323,6 +323,9 @@ def _slice_floor_record(tmp_path, selected_not_observed=None, checks=None):
         "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
         "checks": {**{c: {"passed": True}
                       for c in REQUIRED_CHECKS | {"structured_output"}},
+                   # The base fairness policy the floor rides on is required
+                   # too; this helper isolates the floor.
+                   "feature_decode_fairness": {"passed": True},
                    **(checks or {})},
     }
     if selected_not_observed is not None:

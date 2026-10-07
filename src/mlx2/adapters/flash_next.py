@@ -125,6 +125,32 @@ def configure_environment(model_path: Path, policy=None) -> dict[str, str]:
     return profile
 
 
+def moe_weighted_sum_status(moe_modules) -> dict | None:
+    """Sorted-order MoE weighted-sum counters over the selected switch modules.
+
+    ``MLX_QWEN4_MOE_WEIGHTED_SUM`` is on in the profile; None while no module
+    selects it (a folded shared row keeps the stock tail), so default receipts
+    are unchanged.
+    """
+    weighted = [
+        switch
+        for switch in (getattr(m, "switch_mlp", None) for m in moe_modules)
+        if getattr(switch, "moe_weighted_sum", False)
+    ]
+    if not weighted:
+        return None
+    return {
+        "layers": len(weighted),
+        "calls": sum(s.moe_weighted_sum_calls for s in weighted),
+        "fallbacks": sum(s.moe_weighted_sum_fallbacks for s in weighted),
+        "last_fallback": next(
+            (s.moe_weighted_sum_last_fallback for s in weighted
+             if s.moe_weighted_sum_last_fallback),
+            None,
+        ),
+    }
+
+
 def qsa_indexer_geometry(text_config) -> dict:
     """The QSA indexer budget/ratio/heads a qwen4_exp model runs with."""
     from ..runtime.models.qwen4_exp import TextModelArgs
@@ -803,6 +829,9 @@ class FlashNextAdapter:
                 "batch_decode_max_rows": moe_window.batch_decode_max_rows(),
                 "window_shared": moe_window.window_shared_enabled(),
             }
+        weighted_sum = moe_weighted_sum_status(moe_modules)
+        if weighted_sum is not None:
+            moe["weighted_sum"] = weighted_sum
         return {
             "moe": moe,
             "policy": self.policy.as_dict(),

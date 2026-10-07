@@ -63,25 +63,28 @@ enabled by default. See the [mechanism matrix](docs/FLASHNEXT-PARITY.md).
 
 ## Model and qualification status
 
-| Model | Implemented slice | Serving qualification |
-|---|---|---|
-| Qwen4 Flash-Next | Optimized native MTP and ordinary reference, shared API/cache/scheduler | Modernized qualification paused; latest 262K rerun interrupted, no complete new profile or benchmark |
-| Qwen3.8 27B | Dense hybrid adapter, plain-KV segmented execution, native MTP on complete embedded-head artifacts | CPU/static candidate; no model GPU qualification or deployment |
-| Qwen3.6 35B-A3B | Hybrid GDN/MoE ordinary and native-MTP artifact slices, APCv2, bounded fused-GDN trial, prompt-lookup oracle | CPU-tested candidate plus bounded earlier GPU receipts; no matching current-source qualification, selection or deployment |
-| Muse Glimmer | Ordinary text adapter and linear external DFlash2 draft/verify with exact per-lane rotating-cache rollback | CPU-tested candidate; no production-weight load, GPU qualification or deployment |
+About twenty model adapters are registered (`src/mlx2/adapters/registry.py`):
+Qwen4 Flash-Next, Qwen3.8 27B, Qwen3.6 27B and 35B-A3B, Qwen3.5 4B/9B/122B,
+Nemotron 3 Super and 3.5 Lightning, gpt-oss (and Puzzle), Gemma 4 31B/A4B,
+Gemma3n, MiniCPM-o, Xing4.0, Muse Glimmer, North Mini Code, Laguna XS/S,
+Granite SWA, Agnes, Hy-V3, LFM2.5-VL and the SmolVLM2/Qwen2.5-VL vision candidates.
+Each declares its default route and per-model defaults; see
+[SERVING.md](docs/SERVING.md) for what each selects.
+
+Qualification is bound to the exact source (`runtime_identity()`), artifact,
+host and settings, so any change under `src/` invalidates earlier receipts
+(see [QUALIFICATION.md](docs/QUALIFICATION.md)). Read a model's qualification
+state from its `/v1/status` and route receipts, not from this file: a model
+without a matching receipt still serves and is labelled `unqualified`.
 
 The initial 16K Flash-Next measurements are retained as
 [historical results](docs/RESULTS.md). Their four concurrent HTTP requests do
 not establish four-wide model execution. New comparisons require observed
 compute widths and matching runtime/artifact/settings receipts.
 
-The 2026-09-16 source closeout passed 621 CPU tests, skipped 16 Metal tests and
-ran 59 subtests at runtime source
-`ad1d6f8d9bf715f1a32c5d12159fb129ec4b62e8066574448f48a784cb11429e`.
-This verification closes the repository workset, including the heterogeneous
-shared-QSA regression. It does not replace GPU qualification. The latest 262K
-Flash-Next run remains interrupted, and Qwen3.6 receipts bind earlier candidate
-sources. See [results](docs/RESULTS.md) and the [resume handoff](docs/RESUME.md).
+Earlier closeouts (for example the 2026-09-16 source closeout) are
+historical and bind their own sources; they do not replace GPU qualification
+of the current source. See [results](docs/RESULTS.md) and the [resume handoff](docs/RESUME.md).
 
 Before GPU testing another model, review its remaining functionality and
 optimization gaps: [Qwen3.8 27B](docs/ports/QWEN38-27B.md),

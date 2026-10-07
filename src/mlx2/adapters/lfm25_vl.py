@@ -441,6 +441,11 @@ class LFM25VLAdapter:
         return None
 
     def __init__(self, model_path: str, *, execution_policy=None):
+        # Refuse an explicitly enabled TF32 switch like the standard decoder
+        # (process_env.require_process_numerics); MLX latches it.
+        from ..process_env import require_process_numerics
+
+        require_process_numerics("the LFM2.5-VL adapter")
         self.media_checkpoint_enabled = execution_policy == {
             "lfm_media_checkpoint": "candidate_v1"
         }

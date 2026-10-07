@@ -5067,8 +5067,9 @@ def build_parser():
         "--adaptive-mtp-depth",
         action="store_true",
         help=(
-            "cohort-wide adaptive native-MTP depth; outside qualification mode "
-            "requires a matching qualification receipt (default: disabled)"
+            "cohort-wide adaptive native-MTP depth; exact, so it may run "
+            "unqualified (labelled so) without a matching receipt "
+            "(default: disabled)"
         ),
     )
     parser.add_argument(
@@ -5127,9 +5128,10 @@ def build_parser():
         default=None,
         help=(
             "strength of the adapter-calibrated commit-direction steering; unset uses the model "
-            "adapter's default (North-Mini-Code: 0.2), 0 disables. Applied to the "
-            "residual stream while a lane is reasoning (0 disables; ordinary route only; "
-            "the calibration campaign found 0.2 effective for North-Mini-Code)"
+            "adapter's default (North-Mini-Code: 0.0), 0 disables. Applied to the "
+            "residual stream while a lane is reasoning (ordinary route only; "
+            "North-Mini-Code keeps it off because it lengthened reasoning on the "
+            "corrected body)"
         ),
     )
     parser.add_argument(
@@ -5333,6 +5335,7 @@ def resolve_execution_policy_defaults(
     *,
     approximate_kv=False,
     max_lanes=None,
+    skipped=None,
 ):
     """Apply adapter defaults only after the serving route is known.
 
@@ -5340,7 +5343,9 @@ def resolve_execution_policy_defaults(
     explicit value, including ``null`` or a disabled object, wins.  State
     checkpoint defaults are skipped when approximate KV was requested, because
     the engine refuses them there and a default must never stop a startup
-    that would otherwise succeed.
+    that would otherwise succeed.  A default that cannot engage at
+    ``max_lanes`` steps aside; when ``skipped`` is a dict, each such default
+    is recorded there as ``{key: reason}`` for the engine's settings.
     """
     from .adapters.registry import STATE_CHECKPOINT_POLICY_KEYS
 
@@ -5351,6 +5356,20 @@ def resolve_execution_policy_defaults(
         and adapter_resolution is not None
     ):
         handoff = adapter_resolution.default_mtp_ordinary_handoff
+        if (
+            handoff is not None
+            and max_lanes is not None
+            and max_lanes <= handoff["max_mtp_width"]
+        ):
+            # The handoff fires only when the cohort grows past its width, so
+            # at --max-lanes <= width it can never engage.  Selecting it would
+            # only demand qualification evidence no run can produce.
+            if skipped is not None:
+                skipped["mtp_ordinary_handoff"] = (
+                    f"max_lanes {max_lanes} <= adapter default max_mtp_width "
+                    f"{handoff['max_mtp_width']}: the handoff cannot engage"
+                )
+            handoff = None
         if handoff is not None:
             resolved["mtp_ordinary_handoff"] = handoff
     if adapter_resolution is not None:
@@ -5364,21 +5383,19 @@ def resolve_execution_policy_defaults(
             and "batch_size_route" in resolved
             and resolved["batch_size_route"] != declared.get("batch_size_route")
         )
-        explicit_varlen = resolved.get("varlen_dense_mlp", True)
-        varlen_disabled = external_route and (
-            resolved.get("external_varlen_prefill") is False
-            or explicit_varlen is False
-            or (
-                isinstance(explicit_varlen, dict)
-                and explicit_varlen.get("enabled") is False
-            )
+        # The external varlen pair is one default group: external varlen
+        # prefill requires the varlen dense MLP selection, so an operator who
+        # names either key owns both, and the adapter's (off) defaults never
+        # contradict an explicit enable.
+        varlen_operator_owned = external_route and bool(
+            {"external_varlen_prefill", "varlen_dense_mlp"} & set(resolved)
         )
         for key, value in declared.items():
             if key in resolved:
                 continue
             if tree_geometry_overridden and key == "tree_node_budget_by_lanes":
                 continue
-            if varlen_disabled and key in {
+            if varlen_operator_owned and key in {
                 "external_varlen_prefill",
                 "varlen_dense_mlp",
             }:
@@ -5395,12 +5412,18 @@ def resolve_execution_policy_defaults(
         route_selection.native_mtp
         and "prefill_scheduling" not in resolved
         and max_lanes is not None
+    ):
         # The bypass cap needs a self-MTP admission window (--max-lanes) of
         # at least max_bypass + 1; below that the engine refuses the policy,
         # so the default steps aside instead of breaking a small startup.
-        and max_lanes > NATIVE_MTP_PREFILL_SCHEDULING["max_bypass"]
-    ):
-        resolved["prefill_scheduling"] = dict(NATIVE_MTP_PREFILL_SCHEDULING)
+        if max_lanes > NATIVE_MTP_PREFILL_SCHEDULING["max_bypass"]:
+            resolved["prefill_scheduling"] = dict(NATIVE_MTP_PREFILL_SCHEDULING)
+        elif skipped is not None:
+            skipped["prefill_scheduling"] = (
+                f"max_lanes {max_lanes} <= max_bypass "
+                f"{NATIVE_MTP_PREFILL_SCHEDULING['max_bypass']}: SRPT needs a "
+                "wider admission window"
+            )
     return resolved or None
 
 
@@ -5447,6 +5470,7 @@ def serving_engine_kwargs(
         "batch_cohort_timeout_ms": args.batch_cohort_timeout_ms,
         "mtp": native_mtp,
         "route_selection_source": route_selection_source,
+        "skipped_route_defaults": getattr(args, "skipped_route_defaults", None),
         "prompt_lookup": args.prompt_lookup,
         "tenant_scoped_cache": args.tenant_scoped_cache,
         "qualification_mode": args.qualification_mode,
@@ -5684,13 +5708,16 @@ def main():
         adapter_resolution = inspect_model(args.model)
         route_selection = resolve_route_selection(args, policy, adapter_resolution)
         native_mtp = route_selection.native_mtp
+        skipped_route_defaults = {}
         policy = resolve_execution_policy_defaults(
             policy,
             route_selection,
             adapter_resolution,
             approximate_kv=getattr(args, "approximate_kv", None) is not None,
             max_lanes=args.max_lanes,
+            skipped=skipped_route_defaults,
         )
+        args.skipped_route_defaults = skipped_route_defaults
     except ValueError as error:
         parser.error(str(error))
     from .runtime.adaptive_policy import (

@@ -175,7 +175,7 @@ BOUND = {
     ),
     **{
         f"env: {name}": (
-            {"env": {name: "1" if kind == "flag" else "65536"}},
+            {"env": {name: {"flag": "1", "default_on": "0"}.get(kind, "65536")}},
             "candidate or reduced-precision kernel law",
         )
         for name, kind in CANDIDATE_ENV.items()
@@ -273,7 +273,7 @@ def test_default_environment_keeps_existing_namespaces():
     """All-default switches add no wrapper, so persisted default blocks keep
     their identity; explicit defaults count as default."""
     assert execution_numerics_identity({}) is None
-    defaults = {name: ("0" if kind == "flag" else "0") for name, kind in CANDIDATE_ENV.items()}
+    defaults = {name: ("1" if kind == "default_on" else "0") for name, kind in CANDIDATE_ENV.items()}
     assert execution_numerics_identity(defaults) is None
     assert execution_numerics_identity({"MLX_GDN_CORE": "off", "MLX_ENABLE_TF32": ""}) is None
     assert apc_semantic_namespace("text-token-v1") == "text-token-v1"

@@ -56,6 +56,21 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
+    # Re-pinned 2026-10-07 (rfix-kad): external-draft observations
+    # (external_draft and its draft_fallbacks gate, proposal_distribution,
+    # paired_draft_cache, segmented transaction/rollback in both the
+    # scheduler and native segmented forms, external_pairwise_selection,
+    # fly_verification's counter and pre-run receipts) are now run deltas,
+    # not lifetime counters.  Receipts from 7e7d9dff... must be regenerated.
+    # Re-pinned 2026-10-06 (config sweep CQ-11): feature observations add
+    # external_tree (TensorFold tree rounds) so the default Qwen3.8 tree
+    # route can qualify.  Receipts from e7f3d8ef... must be regenerated.
+    # Re-pinned 2026-10-06 (config sweep CQ-4): feature observations add the
+    # default-on Flash-Next fused GDN prefill and MoE weighted sum, the lane
+    # matmul (covered routes) and base decode-time fairness (contention-
+    # gated); copy-draft, eager-dispatch, fused GDN verify/replay and PLD
+    # observations are now run deltas, not absolute counters.  Receipts from
+    # 3e5d898a... must be regenerated.
     # Re-pinned 2026-10-06 (external TensorFold preflight source): the full
     # suite receives the available managed, revision-checked owned-worker
     # source roots instead of consulting an orphaned temporary export.
@@ -90,7 +105,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # (8a2ced1d..., NAX gather default) must be regenerated.
     # Re-pinned 2026-10-02 (flip integrate): benchmark_adaptive_mtp.py model
     # defaults now use Path.home(), so APPROVED_ADAPTIVE_BENCHMARK_SHA256 moved.
-    "sha256": "5e31876aedc2c6632ab097ead5defde6b0a48c321c4ca2c502aae7d96d8b51d5",
+    "sha256": "4948b246e0f3bda45479953787ff84c9d5f412d2dcd2dd683eed8eb8531815f0",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -418,6 +433,17 @@ def _default_on_mechanisms(settings):
     )
     attn_rows = env.get("MLX_QWEN4_ATTN_FUSED_ROWS") == "1"
     indexer = _qsa_indexer_probe(settings, env)
+    if (
+        native_mtp
+        and handoff_width is not None
+        and handoff.get("adaptive_park") is None
+        and int(settings.get("max_lanes") or 1) <= handoff_width
+    ):
+        # The static handoff fires only when the cohort grows past its width.
+        not_observed["mtp_ordinary_handoff"] = (
+            f"max_lanes {settings.get('max_lanes')} <= max_mtp_width "
+            f"{handoff_width}: the cohort can never grow past the handoff width"
+        )
 
     def batch_decode(name):
         if width < 2:
@@ -545,6 +571,21 @@ def _default_on_mechanisms(settings):
             )
     if _environment_mode_enabled(env.get("MLX_QWEN4_MOE_ROUTED_DECODE")):
         required.add("moe_routed_decode")
+    if env.get("MLX_QWEN4_FUSED_GDN_PREFILL") == "1":
+        # Flash-Next fused GDN prefill prework: every multi-token prefill
+        # forward (diagnostics()["fused_gdn"]["prefill_calls"]).
+        required.add("fused_gdn_prefill")
+    if env.get("MLX_QWEN4_MOE_WEIGHTED_SUM") == "1":
+        # Sorted-order MoE weighted sum on sorted prefill tails of at least
+        # 64 routed rows; every qualifier route prefills past that
+        # (diagnostics()["moe"]["weighted_sum"]).
+        required.add("moe_weighted_sum")
+    if (settings.get("lane_matmul") or {}).get("covered"):
+        # Recorded only when the lane law covers projections on this device
+        # (--lane-matmul auto resolves on for dense M5 routes).  Engagement
+        # is a covered call inside the crossover window
+        # (status["lane_matmul"]["counts"]["lane_calls"]).
+        required.add("lane_matmul")
     if env.get("MLX2_QWEN38_FUSED_GDN") == "1":
         # Qwen3.8-27B: decode and admitted bounded multi-token blocks.
         required.add("qwen38_fused_gdn")
@@ -596,6 +637,17 @@ def _default_on_mechanisms(settings):
         # Every prefill forward runs through the slice-invariant lane.
         required.add("invariant_prefill")
     fairness = settings.get("decode_time_fairness") or {}
+    if fairness.get("enabled") is True:
+        # Base decode-time fairness accounts a prefill slice taken beside a
+        # decoding lane.  Contention-gated: a run that never overlapped them
+        # records it as "selected, not observed" (CONTENTION_GATED_FEATURES).
+        if lanes < 2:
+            not_observed["decode_fairness"] = (
+                f"max_lanes {settings.get('max_lanes')}: no prefill slice runs "
+                "beside a decoding lane"
+            )
+        else:
+            required.add("decode_fairness")
     slice_floor = fairness.get("slice_floor")
     if type(slice_floor) is int and slice_floor > 0:
         # Lifts happen only on a contended slice the stall target cut below
@@ -864,8 +916,9 @@ def _host_gated_exemption(record, name):
 # A run in which that never happened records the mechanism as "selected, not
 # observed" with the reason.  A run whose scheduler never reported the lift
 # counter at all (the floor was not constructed) stays a failed check.
-CONTENTION_GATED_FEATURES = frozenset({"decode_fairness_slice_floor"})
+CONTENTION_GATED_FEATURES = frozenset({"decode_fairness", "decode_fairness_slice_floor"})
 SLICE_FLOOR_LIFTS = "decode_fairness_slice_floor_lifts"
+FAIRNESS_PREFILL_CHUNKS = "decode_fairness_prefill_chunks"
 
 
 def contention_gated_not_observed(final, initial=None):
@@ -874,6 +927,14 @@ def contention_gated_not_observed(final, initial=None):
     out = {}
     after = (final or {}).get("scheduler") or {}
     before = (initial or {}).get("scheduler") or {}
+    chunks = after.get(FAIRNESS_PREFILL_CHUNKS)
+    if type(chunks) is int:
+        base = before.get(FAIRNESS_PREFILL_CHUNKS, 0)
+        if chunks - (base if type(base) is int else 0) <= 0:
+            out["decode_fairness"] = (
+                "no prefill slice ran beside a decoding lane in this run; "
+                "decode-time fairness was constructed but had nothing to bound"
+            )
     lifts = after.get(SLICE_FLOOR_LIFTS)
     if type(lifts) is int:
         base = before.get(SLICE_FLOOR_LIFTS, 0)
@@ -950,6 +1011,10 @@ def _route_feature_checks(settings):
             features.add("fly_verification")
         if (settings.get("execution_policy") or {}).get("pairwise_selection") == "batched":
             features.add("external_pairwise_selection")
+        if (settings.get("execution_policy") or {}).get(
+            "batch_size_route"
+        ) in QUALIFIABLE_BATCH_SIZE_ROUTES:
+            features.add("external_tree")
         if ((settings.get("execution_policy") or {}).get(
             "external_varlen_prefill"
         ) or {}).get("enabled") is True:
@@ -1023,7 +1088,10 @@ def _route_feature_checks(settings):
         return {"feature_" + name for name in features}
     if settings.get("adaptive_mtp_depth", {}).get("enabled") is True:
         features.add("adaptive_mtp_depth")
-    if settings.get("mtp_ordinary_handoff", {}).get("enabled") is True:
+    if (
+        settings.get("mtp_ordinary_handoff", {}).get("enabled") is True
+        and "mtp_ordinary_handoff" not in _default_on_mechanisms(settings)[1]
+    ):
         features.add("mtp_ordinary_handoff")
     if settings.get("fly_verification", {}).get("enabled") is True:
         features.add("fly_verification")
@@ -1090,6 +1158,9 @@ def required_descriptor_checks(descriptor):
 PROVENANCE_ONLY_SETTINGS = frozenset(
     {
         "route_selection_source",
+        # Why an adapter default was left unselected; derived from the
+        # bound max_lanes and policy settings it explains.
+        "skipped_route_defaults",
         "cache_bytes_source",
         "cache_bytes_clamped_from",
         "cache_bytes_headroom",
@@ -1139,12 +1210,23 @@ def unqualifiable_candidate(settings):
             "exact_verification block "
             "(no qualification gate observes block acceptance yet)"
         )
-    if execution_policy.get("batch_size_route") is not None:
+    route = execution_policy.get("batch_size_route")
+    if route is not None and route not in QUALIFIABLE_BATCH_SIZE_ROUTES:
         return (
             "batch_size_route "
             "(tree target execution has no route-specific qualification gate yet)"
         )
     return None
+
+
+# Tree batch-size routes the generic harness may qualify: the artifact-bound
+# adapter default of the explicit Qwen3.8 27B / DFlash2 external route
+# (adapters/qwen38_27b.py default_route_execution_policy, since 187c6aa23).
+# The generic text checks prove it decodes properly; feature_external_tree
+# proves the TensorFold target ran tree rounds in that run (the qualifier's
+# 1-4-lane probes are inside the route's tree window).  Other routes stay
+# unqualifiable candidates.
+QUALIFIABLE_BATCH_SIZE_ROUTES = frozenset({"tree15_b1_b4_chain_b5plus_v1"})
 
 
 def load_qualified_route(

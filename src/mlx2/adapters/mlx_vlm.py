@@ -392,6 +392,12 @@ class _MLXVLMAdapter:
         return _LogitsModel(model)
 
     def __init__(self, model_path, *, execution_policy=None):
+        # Refuse an explicitly enabled TF32 switch like the standard decoder
+        # (process_env.require_process_numerics): MLX latches it, and these
+        # receipts record no TF32 value, so they would match a TF32=0 run.
+        from ..process_env import require_process_numerics
+
+        require_process_numerics(f"the {type(self).__name__} mlx-vlm adapter")
         if execution_policy:
             raise ValueError("mlx-vlm adapters do not accept speculative policy")
         self.identity = inspect_artifact(model_path, expected=self.descriptor.model_type)
