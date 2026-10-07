@@ -160,8 +160,9 @@ def test_lookup_reports_branch_tokens_for_untrimmable_hybrid_paths(qwen38):
     assert hit.hit and hit.cached_tokens == len(shared)
     assert hit.retention_role == "junction" and hit.branch_tokens == 0
     assert apc.apc_stats["lifetime"]["junction_hits"] == 1
-    # Retained like an ordinary exact entry (between interior and boundary).
-    assert APCv2._entry_retention_rank(apc._trie.get("k", shared)) == 1
+    # Retained like an ordinary exact entry: since 2026-10-07 finished turns,
+    # junctions and prompt boundaries share one rank (recency decides).
+    assert APCv2._entry_retention_rank(apc._trie.get("k", shared)) == 2
     apc.clear(release_memory=False)
 
 

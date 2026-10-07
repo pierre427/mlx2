@@ -827,7 +827,10 @@ def test_idle_worker_does_not_retain_evicted_cache_transfers(monkeypatch):
                                    max_inflight=20, max_lanes=20)
     try:
         assert engine.ready.wait(5)
-        assert apc_configuration["max_size"] == 20
+        # The count is a backstop; the byte budget governs residency.
+        assert apc_configuration["max_size"] == max(
+            apc_v2.SERVING_ENTRY_COUNT_BACKSTOP, 20
+        )
         assert apc_configuration["max_bytes"] == engine.cache_bytes
         assert apc_configuration["max_tokens"] == engine.max_context == 1000
         # The ready event is the public status boundary.  Qualification takes

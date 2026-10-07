@@ -139,6 +139,17 @@ def save_prompt_cache(file_name: str, cache: List[Any], metadata: Dict[str, str]
         metadata (Dict[str, str]): Optional metadata to save along with model
             state.
     """
+    mx.save_safetensors(file_name, *prompt_cache_payload(cache, metadata))
+
+
+def prompt_cache_payload(cache: List[Any], metadata: Optional[Dict[str, str]] = None):
+    """The ``(arrays, metadata)`` pair ``save_prompt_cache`` writes.
+
+    Split out so a caller can build (and evaluate) the payload on the thread
+    that owns the arrays' stream and write it from another thread.
+    """
+    if metadata is None:
+        metadata = {}
     cache_data = [c.state for c in cache]
     cache_info = [c.meta_state for c in cache]
     cache_data = dict(tree_flatten(cache_data))
@@ -185,7 +196,7 @@ def save_prompt_cache(file_name: str, cache: List[Any], metadata: Dict[str, str]
             )
         )
     cache_metadata = dict(tree_flatten(cache_metadata))
-    mx.save_safetensors(file_name, cache_data, cache_metadata)
+    return cache_data, cache_metadata
 
 
 def load_prompt_cache(file_name, return_metadata=False):

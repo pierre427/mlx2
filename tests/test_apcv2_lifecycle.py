@@ -299,11 +299,13 @@ def test_apcv2_interior_checkpoint_survives_a_count_full_cache():
     assert hit.hit and hit.retention_role == "interior_checkpoint"
     hit.cache.close()
     # The ordinary pool is still capped at max_size, and interiors do not
-    # relieve it: a third ordinary entry evicts the least-recent ordinary one.
+    # relieve it: a third ordinary entry evicts the least-recent ordinary one
+    # (the boundary [1]; finished turns and boundaries share a rank).
     apc.store(key, [5], [_state(KVCache(), 1)])
     assert apc._resident_entry_count_locked(interior=False) == 2
     assert apc.lookup(key, [3, 4]).hit
-    assert not apc.lookup(key, [2, 4]).hit
+    assert not apc.lookup(key, [1, 4]).hit
+    assert apc.lookup(key, [2, 4]).hit
     assert apc.apc_stats["interior"]["max_entries"] == 2
     apc.clear(release_memory=False)
 
@@ -1124,8 +1126,14 @@ def test_pressure_eviction_preserves_leased_checkpoint_generation():
     assert len(apc) == 0
 
 
-def test_pressure_prefers_terminal_tail_and_retains_exact_mtp_prompt_boundary():
-    """A P+tail checkpoint cannot replace the exact P-1/P-2 MTP boundary."""
+def test_pressure_evicts_the_less_recent_of_mtp_boundary_and_terminal_tail():
+    """Under pressure, recency decides between an exact P-1 MTP boundary and
+    the finished P+tail turn.  The tail cannot serve a resend of P on a hybrid
+    (recurrent state does not trim), but it is what the next agent round
+    resumes from; a resend re-hits the boundary and makes it the recent one.
+    Until 2026-10-07 the boundary always won, which re-prefilled every agent
+    tool round's reply on a busy server (intake-probes-20261007/apcdiag-busy).
+    """
     apc = APCv2(max_size=4, layout_name="test-hybrid-v1")
     key = APCKey("near-limit", revision="v1")
     prompt = list(range(64))
@@ -1157,14 +1165,16 @@ def test_pressure_prefers_terminal_tail_and_retains_exact_mtp_prompt_boundary():
 
     assert apc.evict_oldest_unleased()
     assert len(apc) == 1
-    hit = apc.lookup(key, prompt)
+    follow_up = terminal + [7]
+    hit = apc.lookup(key, follow_up)
     assert hit.hit_kind == "mtp_sidecar"
-    assert hit.cached_tokens == covered
-    assert hit.remaining_tokens == [prompt[-1]]
+    assert hit.cached_tokens == len(terminal)
+    assert hit.remaining_tokens == [7]
     hit.cache.close()
+    assert not apc.lookup(key, prompt).hit
     assert apc.apc_stats["cow"]["active_leases"] == 0
-    # A sole unleased boundary is the final pressure candidate, so admission
-    # can still make progress when retaining it would deadlock reclamation.
+    # A sole unleased entry is the final pressure candidate, so admission can
+    # still make progress when retaining it would deadlock reclamation.
     assert apc.evict_oldest_unleased()
     assert len(apc) == 0
     apc.clear()
@@ -1200,9 +1210,13 @@ def test_max_size_assigns_role_before_limits_and_repeated_mtp_reuse_has_no_lease
             ),
         )
         assert len(apc) == 1
-        hit = apc.lookup(key, prompt)
+        # Finished turns rank with prompt boundaries since 2026-10-07, so the
+        # single slot keeps the more recent one: the finished turn, which the
+        # next round (its prompt plus a new message) resumes from.
+        follow_up = prompt + [100 + seed, 7]
+        hit = apc.lookup(key, follow_up)
         assert hit.hit_kind == "mtp_sidecar"
-        assert hit.cached_tokens == covered
+        assert hit.cached_tokens == len(prompt) + 1
         hit.cache.close()
         assert apc.apc_stats["cow"]["active_leases"] == 0
     apc.clear()

@@ -482,6 +482,9 @@ def test_fanout_leases_a_boundary_republished_over_its_spilled_copy(
     )
     try:
         apc = engine.apc
+        # Serving's count cap is a 512 backstop (bytes govern residency); a
+        # small count pool reproduces the spill this test needs cheaply.
+        apc.max_size = 4
         prompt = [(5 * i + 2) % 120 + 1 for i in range(10)]
 
         def run(tokens):

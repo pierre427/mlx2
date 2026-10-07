@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import queue
 import re
 import shutil
 import stat
@@ -49,6 +50,7 @@ from .models.cache import (
     can_trim_prompt_cache,
     can_trim_prompt_cache_at,
     load_prompt_cache,
+    prompt_cache_payload,
     save_prompt_cache,
 )
 from .recurrent_state_codec import (
@@ -551,6 +553,184 @@ def _check_aux_array_layout(arrays, recorded, *, required: bool) -> None:
 from .apc_retention import APC_RETENTION_VALUE_DEFAULTS, apc_retention_policy  # noqa: E402,F401
 
 
+# Serving's resident entry-count backstop.  Residency is governed by the byte
+# budget (``max_bytes``); the count only bounds bookkeeping for very many
+# tiny entries.  A count of 16 used to bind long before 16 GiB did (27B
+# 4K-token entries are ~270 MB), so the count pool, not bytes, decided what
+# stayed resident.
+SERVING_ENTRY_COUNT_BACKSTOP = 512
+
+
+@dataclass
+class _SpillFile:
+    kind: str  # target, draft or aux
+    path: Path
+    signature: str
+    # A synchronous spill saves ``cache`` (target/draft) or ``arrays`` (aux)
+    # through the job's save callables.  A background spill first converts
+    # ``cache`` to an evaluated ``arrays`` + ``metadata`` payload.
+    cache: Any = None
+    arrays: Any = None
+    metadata: Optional[dict] = None
+
+
+@dataclass
+class _SpillJob:
+    """One spill's payload, built under the APC lock, written without it."""
+
+    key: Any
+    tokens: Any
+    entry: Any
+    files: List[_SpillFile]
+    persist: bool
+    block_bytes: int
+    sidecar_info: Optional[dict]
+    cow_metadata: Any
+    resident_nbytes: int
+    submitted_at: float
+    save_cache: Any = None
+    save_arrays: Any = None
+    payload_record: Any = None
+    created: list = None
+    file_records: dict = None
+    written: int = 0
+    error: Optional[BaseException] = None
+    cancelled: bool = False
+    # Set (with cancelled) when the APC stops waiting for this job; the
+    # writer then removes whatever it wrote.
+    abandoned: bool = False
+    finished: bool = False
+    done: Any = None
+    handoff: Any = None
+
+    def __post_init__(self):
+        self.created = []
+        self.file_records = {}
+        self.done = threading.Event()
+        # Orders "writer finished" against "APC abandoned the job", so
+        # exactly one side removes an abandoned job's files.
+        self.handoff = threading.Lock()
+
+    def abandon(self) -> bool:
+        """Mark abandoned; True if the writer already finished (caller cleans)."""
+        with self.handoff:
+            self.cancelled = True
+            self.abandoned = True
+            return self.finished
+
+
+def _payload_record(path: Path) -> dict:
+    """Capture an immutable payload record once, immediately after writing."""
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(8 << 20):
+            size += len(chunk)
+            digest.update(chunk)
+    return {"name": path.name, "size": size, "sha256": digest.hexdigest()}
+
+
+def _atomic_save_payload(path: Path, arrays, metadata) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp.safetensors")
+    try:
+        if metadata is None:
+            mx.save_safetensors(str(temporary), arrays)
+        else:
+            mx.save_safetensors(str(temporary), arrays, metadata)
+        os.chmod(temporary, 0o600)
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
+def _write_spill_job(job: _SpillJob) -> None:
+    """Write a spill's files.  Touches no APCv2 state, so it may run on the
+    writer thread; the payload arrays must already be evaluated there."""
+    for spill in job.files:
+        if spill.cache is not None:
+            job.save_cache(spill.path, spill.cache)
+        elif spill.metadata is None:
+            job.save_arrays(spill.path, spill.arrays)
+        else:
+            _atomic_save_payload(spill.path, spill.arrays, spill.metadata)
+        job.created.append(spill.path)
+        if job.persist:
+            job.file_records[spill.kind] = job.payload_record(spill.path)
+        else:
+            encode_block_file(
+                spill.path, block_bytes=job.block_bytes, signature=spill.signature
+            )
+    job.written = (
+        sum(int(record["size"]) for record in job.file_records.values())
+        if job.persist
+        else sum(
+            path.stat().st_size for root in job.created for path in block_file_paths(root)
+        )
+    )
+
+
+# How long clear()/close() wait (outside the APC lock) for in-flight spill
+# writes before abandoning them to the writer, which removes their files.
+_SPILL_DRAIN_SECONDS = 30.0
+
+
+class _SpillWriter:
+    """One daemon thread writing background spills in submission order.
+
+    It never takes the APC lock: results are published by the next APC
+    operation (``_collect_spills_locked``), so waiting for it under the lock
+    cannot deadlock.
+    """
+
+    def __init__(self):
+        self._queue = queue.SimpleQueue()
+        self._thread = threading.Thread(
+            target=self._run, name="apcv2-spill-writer", daemon=True
+        )
+        self._thread.start()
+
+    def submit(self, job: _SpillJob) -> None:
+        self._queue.put(job)
+
+    def close(self, timeout: Optional[float] = None) -> bool:
+        """Stop after the queued jobs; True once the thread has exited."""
+        self._queue.put(None)
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
+    def _run(self) -> None:
+        while True:
+            job = self._queue.get()
+            if job is None:
+                return
+            try:
+                if not job.cancelled:
+                    _write_spill_job(job)
+            except BaseException as exc:  # noqa: BLE001 - reported at publication
+                job.error = exc
+            finally:
+                for spill in job.files:
+                    spill.arrays = spill.cache = None  # release once written
+                with job.handoff:
+                    job.finished = True
+                    abandoned = job.abandoned
+                if abandoned:
+                    # Nobody will collect this job (APC closed or cleared
+                    # before it finished): remove what it wrote.
+                    for path in job.created:
+                        try:
+                            remove_block_file(path)
+                        except OSError:
+                            pass
+                job.done.set()
+
+
 class APCv2(PrefixIndex):
     """APCv2: atomic segmented state ownership, prefix indexing and bounded residency."""
 
@@ -564,9 +744,24 @@ class APCv2(PrefixIndex):
     # Transient restore errors keep the snapshot for a retry this many times
     # before the entry is dropped as unusable.
     _RESTORE_TRANSIENT_STRIKES = 3
+    # Background-spill defaults for instances built without __init__ (tests
+    # use object.__new__); __init__ replaces the tuple with a list.
+    _wall_time = staticmethod(time.time)
+    _background_spill = False
+    _background_spill_max_bytes = 0
+    _spill_jobs = ()
+    _spill_writer = None
+    _turn_supersessions = {}
     _DISK_STAT_KEYS = (
         "idle_spills",
         "pressure_spills",
+        # Store-time pressure spills written by the writer thread.
+        "background_spills_submitted",
+        "background_spills_published",
+        "background_spills_kept_hot",
+        "background_spills_discarded",
+        "background_spill_failures",
+        "background_spill_sync_fallbacks",
         "restores",
         "restore_failures",
         "restore_budget_deferrals",
@@ -615,10 +810,21 @@ class APCv2(PrefixIndex):
     _RETENTION_VALUE_PRIORS = {
         _RETENTION_PROMPT_BOUNDARY: 0.5,
         _RETENTION_JUNCTION: 0.3,
-        _RETENTION_DEFAULT: 0.3,
+        # A finished turn is what the conversation's next request extends
+        # (an agent tool round is the previous prompt plus this reply), so it
+        # starts with a prompt boundary's claim.
+        _RETENTION_DEFAULT: 0.5,
         _RETENTION_INTERIOR: 0.1,
         _RETENTION_ROLLING: 0.0,
     }
+    # The prior of a prompt boundary whose own finished turn is stored above
+    # it (``_boundary_superseded_locked``): continuations now resume from the
+    # finished turn, so the boundary only serves regenerations of the same
+    # prompt.  Its own hits (a real regenerate) replace the prior as usual.
+    _RETENTION_SUPERSEDED_BOUNDARY_PRIOR = 0.1
+    # Ancestors walked from a finished turn to find its prompt boundary
+    # (interior and junction checkpoints may lie between them).
+    _SUPERSESSION_WALK_LIMIT = 8
     # Served depths kept per entry so a withdrawn hit can restore the depth
     # it replaced; older hits fold into a base nothing withdraws.
     _SERVED_DEPTH_HISTORY = 16
@@ -660,9 +866,24 @@ class APCv2(PrefixIndex):
         generation_prompt_suffixes: Iterable[Iterable[int]] = (),
         state_codec: Any = None,
         retention_policy: Any = None,
+        background_spill: bool = False,
+        background_spill_max_bytes: Optional[int] = None,
     ):
         if not layout_name:
             raise ValueError("APCv2 requires a model cache-layout declaration")
+        # Store-time pressure spills can write on a background thread
+        # (``_submit_background_spill_locked``).  Off by default for direct
+        # construction; serving turns it on.  In-flight bytes are capped at
+        # a quarter of the resident budget (at least 1 GiB) before spills
+        # fall back to writing synchronously.
+        self._background_spill = bool(background_spill)
+        if background_spill_max_bytes is None:
+            background_spill_max_bytes = max(1 << 30, int(max_bytes) // 4)
+        self._background_spill_max_bytes = int(background_spill_max_bytes)
+        self._spill_jobs = []
+        self._spill_writer = None
+        # (key, prompt-boundary tokens) -> {finished-turn tokens: entry}.
+        self._turn_supersessions = {}
         self._retention_policy = apc_retention_policy(retention_policy)
         self._retention_stats = {
             "value_evictions": 0,
@@ -986,17 +1207,7 @@ class APCv2(PrefixIndex):
 
     def _payload_file_record(self, path: Path) -> dict:
         """Capture an immutable payload record once, immediately after writing."""
-        digest = hashlib.sha256()
-        size = 0
-        with path.open("rb") as handle:
-            while chunk := handle.read(8 << 20):
-                size += len(chunk)
-                digest.update(chunk)
-        return {
-            "name": path.name,
-            "size": size,
-            "sha256": digest.hexdigest(),
-        }
+        return _payload_record(path)
 
     @staticmethod
     def _manifest_file_records(disk: dict) -> dict:
@@ -1482,15 +1693,23 @@ class APCv2(PrefixIndex):
             # sessions) has proven its value; evict it like ordinary entries
             # instead of first.
             return 1
+        # A finished turn (default role) shares the prompt boundary's rank so
+        # that recency decides between them.  Ranking it below every
+        # boundary meant that once ``max_size`` boundaries from unrelated
+        # requests were resident, each finished turn was spilled by its own
+        # publication.  The next agent tool round, which is that turn's
+        # prompt plus its reply, then fell back to the prompt boundary and
+        # re-prefilled the whole reply
+        # (qualification/runs/intake-probes-20261007/apcdiag-busy).
         return {
             cls._RETENTION_ROLLING: -1,
             cls._RETENTION_INTERIOR: 0,
-            cls._RETENTION_DEFAULT: 1,
+            cls._RETENTION_DEFAULT: 2,
             # A junction is where two observed conversations diverged; it is
             # retained like an ordinary exact entry.
-            cls._RETENTION_JUNCTION: 1,
+            cls._RETENTION_JUNCTION: 2,
             cls._RETENTION_PROMPT_BOUNDARY: 2,
-        }.get(role, 1)
+        }.get(role, 2)
 
     def _decayed_hit_rate(self, entry, now: float) -> float:
         """The entry's hit rate, decayed to ``now`` (hits per half-life)."""
@@ -1626,9 +1845,14 @@ class APCv2(PrefixIndex):
         else:
             # The prior decays from publication like a hit would, so an entry
             # nobody reuses loses its claim instead of keeping it forever.
-            rate = self._RETENTION_VALUE_PRIORS.get(
-                getattr(entry, "_apc_retention_role", self._RETENTION_DEFAULT), 0.3
-            ) * 0.5 ** (
+            role = getattr(entry, "_apc_retention_role", self._RETENTION_DEFAULT)
+            prior = (
+                self._RETENTION_SUPERSEDED_BOUNDARY_PRIOR
+                if role == self._RETENTION_PROMPT_BOUNDARY
+                and self._boundary_superseded_locked(key, tokens, entry)
+                else self._RETENTION_VALUE_PRIORS.get(role, 0.3)
+            )
+            rate = prior * 0.5 ** (
                 max(0.0, now - float(getattr(entry, "_apc_inserted_at", now)))
                 / self._retention_policy["half_life_seconds"]
             )
@@ -1654,10 +1878,77 @@ class APCv2(PrefixIndex):
         unique = max(1, self._entry_unique_nbytes_locked(entry))
         return rate * max(0.0, saved) / unique
 
+    def _record_turn_supersession_locked(self, key, tokens, turn) -> None:
+        """Note that finished turn ``turn`` sits above its prompt boundary.
+
+        Walks stored ancestors past interior/junction checkpoints to the
+        deepest prompt boundary; an earlier finished turn on the way means the
+        boundary belongs to that turn instead.  Recorded by the boundary's
+        tokens, so a republished boundary stays superseded; liveness is
+        checked when the boundary is valued.
+        """
+        probe = list(tokens)[:-1]
+        for _ in range(self._SUPERSESSION_WALK_LIMIT):
+            if not probe:
+                return
+            nearest = self._trie.search(key, probe)
+            path = nearest.exact if nearest.exact is not None else nearest.shorter
+            if not path:
+                return
+            try:
+                holder = self._trie.get(key, path)
+            except KeyError:
+                return
+            role = getattr(holder, "_apc_retention_role", self._RETENTION_DEFAULT)
+            if role == self._RETENTION_PROMPT_BOUNDARY:
+                self._turn_supersessions.setdefault((key, tuple(path)), {})[
+                    tuple(tokens)
+                ] = turn
+                return
+            if role == self._RETENTION_DEFAULT:
+                return
+            probe = list(path)[:-1]
+
+    def _boundary_superseded_locked(self, key, tokens, entry) -> bool:
+        """True while a stored finished turn above this boundary covers every
+        session the boundary serves (an unowned boundary needs any turn)."""
+        index = (key, tuple(tokens))
+        turns = self._turn_supersessions.get(index)
+        if not turns:
+            return False
+        covered = set()
+        for turn_tokens, turn in list(turns.items()):
+            try:
+                current = self._trie.get(key, list(turn_tokens))
+            except KeyError:
+                current = None
+            if current is not turn:
+                del turns[turn_tokens]  # rejected, dropped or replaced
+                continue
+            covered |= set(getattr(turn, "_apc_session_tags", ()))
+        if not turns:
+            del self._turn_supersessions[index]
+            return False
+        return set(getattr(entry, "_apc_session_tags", ())) <= covered
+
+    def _resident_pin_live(self, entry, now_wall: float) -> bool:
+        """A session prefetch pinned this entry resident until a later time.
+
+        Read-only (no expiry bookkeeping): candidate ordering runs under the
+        lock on every pressure decision.
+        """
+        pins = getattr(entry, "_apc_resident_pin_expiries", None)
+        return bool(pins) and any(float(expiry) > now_wall for expiry in pins.values())
+
     def _retention_ordered_candidates_locked(
         self, *, resident_only: bool, exclude=None, include_exclude: bool = False
     ):
-        """Prefer generic checkpoints, retaining prompt boundaries until last."""
+        """Rolling and unreused interior checkpoints first, then least recent.
+
+        Like a lease, a live resident pin (a session prefetch) takes an entry
+        out of pressure eviction in either policy until it expires; a
+        publication that cannot fit beside pinned entries is rejected.
+        """
         if self._retention_policy is not None:
             return self._value_ordered_candidates_locked(
                 resident_only=resident_only,
@@ -1666,10 +1957,13 @@ class APCv2(PrefixIndex):
             )
         records = []
         excluded = []
+        now_wall = self._wall_time()
         for key, tokens, entry in self._legacy_order_records_locked():
-            if self._entry_pinned(entry):
+            if self._entry_pinned(entry) or self._resident_pin_live(entry, now_wall):
                 continue
-            if resident_only and not entry.prompt_cache:
+            if resident_only and (
+                not entry.prompt_cache or self._spill_job_of(entry) is not None
+            ):
                 continue
             record = (
                 self._entry_retention_rank(entry),
@@ -1702,10 +1996,13 @@ class APCv2(PrefixIndex):
         scored = []
         excluded = []
         lru_head = None
+        now_wall = self._wall_time()
         for key, tokens, entry in self._legacy_order_records_locked():
-            if self._entry_pinned(entry):
+            if self._entry_pinned(entry) or self._resident_pin_live(entry, now_wall):
                 continue
-            if resident_only and not entry.prompt_cache:
+            if resident_only and (
+                not entry.prompt_cache or self._spill_job_of(entry) is not None
+            ):
                 continue
             rank = self._entry_retention_rank(entry)
             last_access = float(getattr(entry, "_apc_last_access_at", 0.0))
@@ -1890,6 +2187,12 @@ class APCv2(PrefixIndex):
         current = self._trie.pop(key, tokens)
         if current is None:
             return
+        job = self._spill_job_of(current)
+        if job is not None:
+            # Its files are removed when the write is collected.
+            job.cancelled = True
+        if self._turn_supersessions:
+            self._turn_supersessions.pop((key, tuple(tokens)), None)
         self._ledger_detach_locked(current)
         self._record_entry_eviction_locked(current)
         self._lru.remove(key, tokens)
@@ -1907,29 +2210,35 @@ class APCv2(PrefixIndex):
 
     def _spill_entry_locked(
         self, key, tokens, entry, *, reason: str, hard_cap: Optional[int] = None,
-        keep_resident: bool = False,
+        keep_resident: bool = False, background: bool = False,
     ) -> bool:
         if not _loop_trace.enabled():
             return self._spill_entry_untraced_locked(
                 key, tokens, entry, reason=reason, hard_cap=hard_cap,
-                keep_resident=keep_resident,
+                keep_resident=keep_resident, background=background,
             )
         nbytes = int(getattr(entry, "nbytes", 0) or 0)
         start = _loop_trace.now()
         spilled = self._spill_entry_untraced_locked(
             key, tokens, entry, reason=reason, hard_cap=hard_cap,
-            keep_resident=keep_resident,
+            keep_resident=keep_resident, background=background,
         )
         _loop_trace.event(
             "apc_spill", start, _loop_trace.now(), reason=reason,
             bytes=nbytes, tokens=len(tokens), spilled=bool(spilled),
+            background=bool(self._spill_job_of(entry) is not None),
         )
         return spilled
 
     def _spill_entry_untraced_locked(
         self, key, tokens, entry, *, reason: str, hard_cap: Optional[int] = None,
-        keep_resident: bool = False,
+        keep_resident: bool = False, background: bool = False,
     ) -> bool:
+        if self._spill_job_of(entry) is not None and not self._spill_job_of(entry).cancelled:
+            # Already being written in the background: finish that first.
+            self._settle_spill_locked(entry)
+            if not entry.prompt_cache:
+                return True
         self._spill_capacity_violation = None
         if self._idle_disk_dir is None or not entry.prompt_cache:
             return False
@@ -1969,138 +2278,158 @@ class APCv2(PrefixIndex):
                 self._disk_stats["spill_capacity_skips"] += 1
                 return False
         if not disk:
-            stem = f"apc-idle-{uuid.uuid4().hex}"
-            target = self._idle_disk_dir / f"{stem}.target.safetensors"
-            draft = self._idle_disk_dir / f"{stem}.draft.safetensors"
-            aux = self._idle_disk_dir / f"{stem}.aux.safetensors"
-            created = []
-            file_records = {}
+            job = self._prepare_spill_job_locked(key, tokens, entry)
+            if (
+                background
+                and not keep_resident
+                and self._submit_background_spill_locked(job)
+            ):
+                return True
             try:
-                self._atomic_save_cache(target, entry.prompt_cache)
-                created.append(target)
-                if self._persist_dir is not None:
-                    file_records["target"] = self._payload_file_record(target)
-                target_signature = self._persistent_signature(
-                    key, tokens, entry.cache_type, "target"
-                )
-                if self._persist_dir is None:
-                    encode_block_file(
-                        target,
-                        block_bytes=self._persistent_block_bytes,
-                        signature=target_signature,
-                    )
-                sidecar = entry.sidecar
-                sidecar_info = None
-                if sidecar is not None:
-                    (draft_cache, tail_hidden) = sidecar.state
-                    self._atomic_save_cache(draft, draft_cache)
-                    created.append(draft)
-                    if self._persist_dir is not None:
-                        file_records["draft"] = self._payload_file_record(draft)
-                    draft_signature = self._persistent_signature(
-                        key, tokens, entry.cache_type, "draft"
-                    )
-                    if self._persist_dir is None:
-                        encode_block_file(
-                            draft,
-                            block_bytes=self._persistent_block_bytes,
-                            signature=draft_signature,
-                        )
-                    arrays = {}
-                    if tail_hidden is not None:
-                        arrays["tail_hidden"] = tail_hidden
-                    if sidecar.rng_key is not None:
-                        arrays["rng_key"] = sidecar.rng_key
-                    if arrays:
-                        self._atomic_save_arrays(aux, arrays)
-                        created.append(aux)
-                        if self._persist_dir is not None:
-                            file_records["aux"] = self._payload_file_record(aux)
-                        else:
-                            # The aux file carries the seeded lane's RNG key,
-                            # so it gets the same MAC'd manifest as target and
-                            # draft; a plain file here could be swapped freely.
-                            encode_block_file(
-                                aux,
-                                block_bytes=self._persistent_block_bytes,
-                                signature=self._persistent_signature(
-                                    key, tokens, entry.cache_type, "aux"
-                                ),
-                            )
-                    sidecar_info = {
-                        "covered_tokens": int(sidecar.covered_tokens),
-                        "rng_draws": int(sidecar.rng_draws),
-                        "kind": getattr(sidecar, "kind", "self_mtp"),
-                        "binding": getattr(sidecar, "binding", ""),
-                        "aux_arrays": _aux_array_layout(arrays),
-                    }
-                metadata = getattr(
-                    getattr(entry.prompt_cache, "cow_owner", None), "metadata", None
-                )
-                disk = {
-                    "target": str(target),
-                    "draft": str(draft) if draft in created else None,
-                    "aux": str(aux) if aux in created else None,
-                    "sidecar": sidecar_info,
-                    "cow_metadata": metadata,
-                    "resident_nbytes": self._entry_full_nbytes(entry),
-                    "target_signature": target_signature,
-                    "identity_sha256": self._persistent_identity_digest(
-                        target_signature
-                    ),
-                    "token_count": len(tokens),
-                    "draft_signature": (
-                        draft_signature if draft in created else None
-                    ),
-                    "files": file_records if self._persist_dir is not None else None,
-                    # Target, draft and aux were replaced by MAC'd block
-                    # manifests; restore must refuse anything else there.
-                    "block_encoded": (
-                        self._persist_dir is None
-                        and int(self._persistent_block_bytes) > 0
-                    ),
-                }
-                entry._apc_disk = disk
-                written = (
-                    sum(int(record["size"]) for record in file_records.values())
-                    if self._persist_dir is not None
-                    else sum(
-                        path.stat().st_size
-                        for root in created
-                        for path in block_file_paths(root)
-                    )
-                )
-                self._disk_bytes += int(written)
-                if self._persist_dir is not None:
-                    if not self._write_manifest_locked(key, tokens, entry):
-                        raise OSError("APCv2 manifest publication failed")
-                violation = self._pin_limit_violation_locked()
-                if violation is not None:
-                    raise APCSessionCapacityError(violation)
-                # Count only snapshots that stay published, never the ones a
-                # failed publication step discards below.
-                self._disk_stats["bytes_written"] += int(written)
-            except Exception as exc:
-                if isinstance(exc, APCSessionCapacityError):
-                    self._spill_capacity_violation = str(exc)
-                if reason == "park" and _foreign_stream_error(exc):
-                    # MLX streams are thread-local: a park arriving on an HTTP
-                    # thread cannot save arrays the generation worker's
-                    # stream produced.  The entry stays park-pending and the
-                    # worker's next idle scan (forced below) spills it on the
-                    # owning thread.  Not a failure.
-                    self._disk_stats["park_deferred_to_worker"] += 1
-                else:
-                    self._disk_stats["spill_failures"] += 1
-                if getattr(entry, "_apc_disk", None):
-                    self._remove_disk_files_locked(entry)
-                else:
-                    for path in created:
-                        try:
-                            remove_block_file(path)
-                        except OSError:
-                            self._disk_stats["persistence_io_failures"] += 1
+                _write_spill_job(job)
+                self._commit_spill_job_locked(job)
+            except Exception as exc:  # noqa: BLE001 - a lost spill keeps the entry
+                self._abort_spill_job_locked(job, exc, reason=reason)
                 return False
+        return self._finish_spill_locked(
+            key, tokens, entry, reason=reason, keep_resident=keep_resident
+        )
+
+    def _prepare_spill_job_locked(self, key, tokens, entry) -> _SpillJob:
+        """Everything a spill writes, built under the lock without any I/O."""
+        stem = f"apc-idle-{uuid.uuid4().hex}"
+        target = self._idle_disk_dir / f"{stem}.target.safetensors"
+        draft = self._idle_disk_dir / f"{stem}.draft.safetensors"
+        aux = self._idle_disk_dir / f"{stem}.aux.safetensors"
+        files = [
+            _SpillFile(
+                "target",
+                target,
+                self._persistent_signature(key, tokens, entry.cache_type, "target"),
+                cache=list(entry.prompt_cache),
+            )
+        ]
+        sidecar = entry.sidecar
+        sidecar_info = None
+        if sidecar is not None:
+            (draft_cache, tail_hidden) = sidecar.state
+            files.append(
+                _SpillFile(
+                    "draft",
+                    draft,
+                    self._persistent_signature(key, tokens, entry.cache_type, "draft"),
+                    cache=list(draft_cache),
+                )
+            )
+            arrays = {}
+            if tail_hidden is not None:
+                arrays["tail_hidden"] = tail_hidden
+            if sidecar.rng_key is not None:
+                arrays["rng_key"] = sidecar.rng_key
+            if arrays:
+                # The aux file carries the seeded lane's RNG key, so it gets
+                # the same MAC'd manifest as target and draft; a plain file
+                # here could be swapped freely.
+                files.append(
+                    _SpillFile(
+                        "aux",
+                        aux,
+                        self._persistent_signature(key, tokens, entry.cache_type, "aux"),
+                        arrays=arrays,
+                    )
+                )
+            sidecar_info = {
+                "covered_tokens": int(sidecar.covered_tokens),
+                "rng_draws": int(sidecar.rng_draws),
+                "kind": getattr(sidecar, "kind", "self_mtp"),
+                "binding": getattr(sidecar, "binding", ""),
+                "aux_arrays": _aux_array_layout(arrays),
+            }
+        metadata = getattr(
+            getattr(entry.prompt_cache, "cow_owner", None), "metadata", None
+        )
+        return _SpillJob(
+            key=key,
+            tokens=tokens,
+            entry=entry,
+            files=files,
+            persist=self._persist_dir is not None,
+            block_bytes=int(self._persistent_block_bytes),
+            sidecar_info=sidecar_info,
+            cow_metadata=metadata,
+            resident_nbytes=self._entry_full_nbytes(entry),
+            submitted_at=float(self._now()),
+            save_cache=self._atomic_save_cache,
+            save_arrays=self._atomic_save_arrays,
+            payload_record=self._payload_file_record,
+        )
+
+    def _commit_spill_job_locked(self, job: _SpillJob) -> None:
+        """Publish a written spill's disk record; raises if publication fails."""
+        entry = job.entry
+        by_kind = {spill.kind: spill for spill in job.files}
+        created = set(job.created)
+        target = by_kind["target"]
+        draft = by_kind.get("draft")
+        aux = by_kind.get("aux")
+        disk = {
+            "target": str(target.path),
+            "draft": str(draft.path) if draft and draft.path in created else None,
+            "aux": str(aux.path) if aux and aux.path in created else None,
+            "sidecar": job.sidecar_info,
+            "cow_metadata": job.cow_metadata,
+            "resident_nbytes": job.resident_nbytes,
+            "target_signature": target.signature,
+            "identity_sha256": self._persistent_identity_digest(target.signature),
+            "token_count": len(job.tokens),
+            "draft_signature": (
+                draft.signature if draft and draft.path in created else None
+            ),
+            "files": job.file_records if job.persist else None,
+            # Target, draft and aux were replaced by MAC'd block manifests;
+            # restore must refuse anything else there.
+            "block_encoded": not job.persist and job.block_bytes > 0,
+        }
+        entry._apc_disk = disk
+        self._disk_bytes += int(job.written)
+        if self._persist_dir is not None:
+            if not self._write_manifest_locked(job.key, job.tokens, entry):
+                raise OSError("APCv2 manifest publication failed")
+        violation = self._pin_limit_violation_locked()
+        if violation is not None:
+            raise APCSessionCapacityError(violation)
+        # Count only snapshots that stay published, never the ones a failed
+        # publication step discards.
+        self._disk_stats["bytes_written"] += int(job.written)
+
+    def _abort_spill_job_locked(self, job: _SpillJob, exc, *, reason: str) -> None:
+        entry = job.entry
+        if isinstance(exc, APCSessionCapacityError):
+            self._spill_capacity_violation = str(exc)
+        if reason == "park" and _foreign_stream_error(exc):
+            # MLX streams are thread-local: a park arriving on an HTTP thread
+            # cannot save arrays the generation worker's stream produced.  The
+            # entry stays park-pending and the worker's next idle scan (forced
+            # below) spills it on the owning thread.  Not a failure.
+            self._disk_stats["park_deferred_to_worker"] += 1
+        else:
+            self._disk_stats["spill_failures"] += 1
+        if getattr(entry, "_apc_disk", None):
+            self._remove_disk_files_locked(entry)
+        else:
+            self._remove_job_files_locked(job)
+
+    def _remove_job_files_locked(self, job: _SpillJob) -> None:
+        for path in job.created:
+            try:
+                remove_block_file(path)
+            except OSError:
+                self._disk_stats["persistence_io_failures"] += 1
+
+    def _finish_spill_locked(
+        self, key, tokens, entry, *, reason: str, keep_resident: bool
+    ) -> bool:
+        """Release the resident copy of an entry whose disk record is published."""
         if keep_resident:
             # Persist only: the caller keeps serving the resident copy and
             # needs a crash-safe snapshot of exactly this content.
@@ -2125,6 +2454,149 @@ class APCv2(PrefixIndex):
             self._note_retention_eviction_locked(entry)
         self._capsule_generation.advance()
         return True
+
+    # ------------------------------------------------------------ background
+
+    def _submit_background_spill_locked(self, job: _SpillJob) -> bool:
+        """Hand a pressure spill's writes to the writer thread.
+
+        The entry stays resident and servable until the write lands; only
+        the store-time budget checks stop counting it
+        (``_budget_nbytes_locked``).  Returns False (write synchronously)
+        when background spill is off, the in-flight bytes would pass their
+        cap, or the payload cannot be evaluated here.
+        """
+        if not self._background_spill:
+            return False
+        entry = job.entry
+        if getattr(entry, "_apc_background_spill_failed", False):
+            return False
+        if self._inflight_spill_nbytes_locked() + int(entry.nbytes) > int(
+            self._background_spill_max_bytes
+        ):
+            self._disk_stats["background_spill_sync_fallbacks"] += 1
+            return False
+        try:
+            # The writer thread cannot evaluate arrays another thread's stream
+            # owns; build and evaluate the whole payload here, on the owning
+            # thread.
+            for spill in job.files:
+                if spill.cache is not None:
+                    spill.arrays, spill.metadata = prompt_cache_payload(spill.cache)
+                    spill.cache = None
+            mx.eval([a for spill in job.files for a in spill.arrays.values()])
+        except Exception:  # noqa: BLE001 - any failure here: write synchronously
+            self._disk_stats["background_spill_sync_fallbacks"] += 1
+            return False
+        entry._apc_spill_job = job
+        self._spill_jobs.append(job)
+        self._disk_stats["background_spills_submitted"] += 1
+        if self._spill_writer is None:
+            self._spill_writer = _SpillWriter()
+        self._spill_writer.submit(job)
+        return True
+
+    @staticmethod
+    def _spill_job_of(entry) -> Optional[_SpillJob]:
+        return getattr(entry, "_apc_spill_job", None)
+
+    def _job_entry_current_locked(self, job: _SpillJob) -> bool:
+        if job.cancelled or not job.entry.prompt_cache:
+            return False
+        try:
+            return self._trie.get(job.key, job.tokens) is job.entry
+        except KeyError:
+            return False
+
+    def _inflight_spill_nbytes_locked(self) -> int:
+        """Bytes in-flight spills will free: only what each victim alone
+        holds (shared COW buffers move to an heir), and only while the victim
+        is still the stored entry (a replacement has already left _n_bytes)."""
+        return sum(
+            self._entry_unique_nbytes_locked(job.entry)
+            for job in self._spill_jobs
+            if self._job_entry_current_locked(job)
+        )
+
+    def _budget_nbytes_locked(self) -> int:
+        """Resident bytes for store-time budget checks: in-flight spills are
+        already leaving, so they no longer count against the budget."""
+        return max(0, int(self._n_bytes) - self._inflight_spill_nbytes_locked())
+
+    def _collect_spills_locked(self, *, wait: bool = False) -> None:
+        """Publish background spills whose writes have finished (all, if wait)."""
+        if not self._spill_jobs:
+            return
+        jobs, self._spill_jobs = self._spill_jobs, []
+        pending = []
+        unmet = False
+        for job in jobs:
+            if wait:
+                job.done.wait()
+            if job.done.is_set():
+                unmet |= self._publish_spill_job_locked(job)
+            else:
+                pending.append(job)
+        self._spill_jobs = pending + self._spill_jobs
+        if unmet and not self._closed:
+            # A victim stayed resident (reused, pinned, or its write failed):
+            # the store that chose it was admitted on the assumption it would
+            # leave, so pick another victim now.
+            self._enforce_entry_limits_locked()
+
+    def _settle_spill_locked(self, entry) -> None:
+        """Wait for an entry's in-flight spill and publish it."""
+        job = self._spill_job_of(entry)
+        if job is None:
+            return
+        job.done.wait()
+        self._collect_spills_locked()
+
+    def _publish_spill_job_locked(self, job: _SpillJob) -> bool:
+        """Publish one finished job; True if its victim is still resident."""
+        entry = job.entry
+        entry._apc_spill_job = None
+        try:
+            present = (not job.cancelled) and self._trie.get(job.key, job.tokens) is entry
+        except KeyError:
+            present = False
+        if job.error is not None or not present:
+            self._remove_job_files_locked(job)
+            if job.error is not None and present:
+                self._disk_stats["spill_failures"] += 1
+                self._disk_stats["background_spill_failures"] += 1
+                log.warning("APCv2 background spill failed: %r", job.error)
+                # Retry it synchronously, whose failure handling drops the
+                # entry, instead of resubmitting a write that keeps failing
+                # while its bytes are discounted from the budget.
+                entry._apc_background_spill_failed = True
+                return True
+            self._disk_stats["background_spills_discarded"] += 1
+            return False
+        try:
+            self._commit_spill_job_locked(job)
+        except Exception as exc:  # noqa: BLE001 - same handling as a sync spill
+            self._abort_spill_job_locked(job, exc, reason="pressure")
+            self._disk_stats["background_spill_failures"] += 1
+            entry._apc_background_spill_failed = True
+            return True
+        if (
+            float(getattr(entry, "_apc_last_access_at", 0.0)) > job.submitted_at
+            or self._entry_pinned(entry)
+            or self._entry_resident_pinned_locked(job.key, job.tokens, entry)
+        ):
+            # Reused, leased or resident-pinned (a session prefetch) while its
+            # write was in flight: keep it resident.  The disk record stays,
+            # so a later spill only drops the resident copy.
+            self._disk_stats["background_spills_kept_hot"] += 1
+            self._enforce_disk_limit_locked()
+            return True
+        self._finish_spill_locked(
+            job.key, job.tokens, entry, reason="pressure", keep_resident=False
+        )
+        self._disk_stats["background_spills_published"] += 1
+        self._enforce_disk_limit_locked()
+        return False
 
     @staticmethod
     def _restored_resident_nbytes(cache, sidecar) -> int:
@@ -2369,12 +2841,19 @@ class APCv2(PrefixIndex):
 
     def _spill_resident_budget_locked(
         self, *, exclude=None, include_exclude: bool = True,
-        hard_cap: Optional[int] = None,
+        hard_cap: Optional[int] = None, background: bool = False,
     ) -> int:
-        if self._idle_disk_dir is None or self._n_bytes <= self._resident_entry_budget:
+        if not background:
+            # Callers that need the bytes actually free (restore and capsule
+            # reservations) wait for in-flight writes first.
+            self._collect_spills_locked(wait=True)
+        if (
+            self._idle_disk_dir is None
+            or self._budget_nbytes_locked() <= self._resident_entry_budget
+        ):
             return 0
         spilled = 0
-        while self._n_bytes > self._resident_entry_budget:
+        while self._budget_nbytes_locked() > self._resident_entry_budget:
             records = self._pressure_candidates_locked(
                 exclude=exclude, include_exclude=include_exclude
             )
@@ -2384,7 +2863,8 @@ class APCv2(PrefixIndex):
             if key is None or tokens is None:
                 break
             if not self._spill_entry_locked(
-                key, tokens, entry, reason="pressure", hard_cap=hard_cap
+                key, tokens, entry, reason="pressure", hard_cap=hard_cap,
+                background=background,
             ):
                 break
             spilled += 1
@@ -2411,8 +2891,10 @@ class APCv2(PrefixIndex):
             if id(entry) in seen:
                 continue
             seen.add(id(entry))
-            if entry.prompt_cache and (
-                interior is None or self._is_interior_entry(entry) == interior
+            if (
+                entry.prompt_cache
+                and self._spill_job_of(entry) is None
+                and (interior is None or self._is_interior_entry(entry) == interior)
             ):
                 count += 1
         return count
@@ -2431,7 +2913,9 @@ class APCv2(PrefixIndex):
             <= self.max_interior_entries
         )
 
-    def _enforce_count_pool_locked(self, *, interior: bool, limit: int) -> None:
+    def _enforce_count_pool_locked(
+        self, *, interior: bool, limit: int, background: bool = False
+    ) -> None:
         """Spill or drop within one count pool, in retention order."""
         while self._resident_entry_count_locked(interior=interior) > limit:
             records = [
@@ -2451,7 +2935,7 @@ class APCv2(PrefixIndex):
             progressed = False
             for _rank, _last_access, key, tokens, entry in records:
                 if self._idle_disk_dir is not None and self._spill_entry_locked(
-                    key, tokens, entry, reason="pressure"
+                    key, tokens, entry, reason="pressure", background=background
                 ):
                     progressed = True
                     break
@@ -2467,19 +2951,24 @@ class APCv2(PrefixIndex):
     def _enforce_entry_limits_locked(self, *, publication=None) -> bool:
         """Apply APC count/resident limits after the retention role is visible."""
         publication_rejected = False
-        self._enforce_count_pool_locked(interior=False, limit=self.max_size)
+        # Store-time spills may write in the background: this is the path a
+        # request waits on.
         self._enforce_count_pool_locked(
-            interior=True, limit=self.max_interior_entries
+            interior=False, limit=self.max_size, background=True
+        )
+        self._enforce_count_pool_locked(
+            interior=True, limit=self.max_interior_entries, background=True
         )
         # Capsule reservations are hard-reserved against the same cap.
         original_limit = int(self.max_bytes)
         if self._idle_disk_dir is not None:
             self._spill_resident_budget_locked(
-                exclude=None, include_exclude=True, hard_cap=original_limit
+                exclude=None, include_exclude=True, hard_cap=original_limit,
+                background=True,
             )
         # A failed/unavailable spill must not turn a retention preference into
         # permission to exceed the hard resident cap.
-        while self._n_bytes > self._resident_entry_budget:
+        while self._budget_nbytes_locked() > self._resident_entry_budget:
             records = self._pressure_candidates_locked(
                 exclude=None, include_exclude=True
             )
@@ -2500,7 +2989,10 @@ class APCv2(PrefixIndex):
             _rank, _last_access, key, tokens, entry = victim
             self._note_retention_eviction_locked(entry)
             self._drop_entry_locked(key, tokens, entry)
-        fits = self._count_pools_fit_locked() and self._n_bytes <= self._resident_entry_budget
+        fits = (
+            self._count_pools_fit_locked()
+            and self._budget_nbytes_locked() <= self._resident_entry_budget
+        )
         if not fits and publication is not None:
             key, tokens, entry = publication
             try:
@@ -2511,7 +3003,10 @@ class APCv2(PrefixIndex):
                 self._drop_entry_locked(key, tokens, entry)
                 self._disk_stats["publication_rejections"] += 1
                 publication_rejected = True
-            fits = self._count_pools_fit_locked() and self._n_bytes <= self._resident_entry_budget
+            fits = (
+                self._count_pools_fit_locked()
+                and self._budget_nbytes_locked() <= self._resident_entry_budget
+            )
         self._enforce_disk_limit_locked()
         if publication is not None and not publication_rejected:
             key, tokens, entry = publication
@@ -3105,6 +3600,7 @@ class APCv2(PrefixIndex):
         now = self._now() if now is None else float(now)
         scan_interval = 1.0
         with self._apc_lock:
+            self._collect_spills_locked()
             if now - self._last_idle_scan < scan_interval:
                 return 0
             self._last_idle_scan = now
@@ -4070,6 +4566,9 @@ class APCv2(PrefixIndex):
             pass
         superseded_parks = []
         for reason, _removed_key, _removed_tokens, entry in removed_entries:
+            job = self._spill_job_of(entry)
+            if job is not None:
+                job.cancelled = True  # files removed when collected
             if reason != "replaced":
                 self._record_entry_eviction_locked(entry)
             if not (
@@ -4136,6 +4635,10 @@ class APCv2(PrefixIndex):
             )
             stored_entry._apc_disk_pin_expiries = existing_disk_pins
             stored_entry._apc_resident_pin_expiries = existing_resident_pins
+            if retention_role == self._RETENTION_DEFAULT:
+                self._record_turn_supersession_locked(
+                    key, list(survivor.exact), stored_entry
+                )
             if superseded_parks:
                 persisted = self._spill_entry_locked(
                     key, list(survivor.exact), stored_entry,
@@ -4210,6 +4713,7 @@ class APCv2(PrefixIndex):
             self._sweep_retirements_locked()
 
     def _sweep_retirements_locked(self) -> None:
+        self._collect_spills_locked()
         for (key, tokens), role in tuple(self._pending_retirements.items()):
             self._retire_locked(key, tokens, role)
 
@@ -4227,10 +4731,35 @@ class APCv2(PrefixIndex):
         request that is already generating from storing its own result
         afterwards; drain first when that matters.
         """
+        self._wait_spill_jobs(_SPILL_DRAIN_SECONDS)
         with self._apc_lock:
             return self._clear_locked(release_memory=release_memory)
 
+    def _wait_spill_jobs(self, timeout: float) -> None:
+        """Wait (without the APC lock) for in-flight spills, up to timeout."""
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        for job in list(self._spill_jobs):
+            if not job.done.wait(max(0.0, deadline - time.monotonic())):
+                break
+
+    def _abandon_spill_jobs_locked(self) -> None:
+        """Publish finished spills; the writer cleans up the rest itself."""
+        self._collect_spills_locked()
+        for job in self._spill_jobs:
+            if job.abandon():
+                self._remove_job_files_locked(job)
+            job.entry._apc_spill_job = None
+        if self._spill_jobs:
+            self._disk_stats["background_spills_discarded"] += len(self._spill_jobs)
+            log.warning(
+                "APCv2 abandoned %d in-flight spill(s) still writing",
+                len(self._spill_jobs),
+            )
+        self._spill_jobs = []
+
     def _clear_locked(self, *, release_memory: bool = True) -> dict:
+        self._abandon_spill_jobs_locked()
+        self._turn_supersessions = {}
         entries = list(_iter_trie_entries(self._trie))
         report = {
             "entries": len(entries),
@@ -4321,6 +4850,10 @@ class APCv2(PrefixIndex):
                 "resident_bytes": int(self._n_bytes),
                 "disk_bytes": int(self._disk_bytes),
                 "disk_max_bytes": int(self._idle_disk_max_bytes),
+                "background_spill": self._background_spill,
+                "background_spill_inflight": len(self._spill_jobs),
+                "background_spill_inflight_bytes": self._inflight_spill_nbytes_locked(),
+                "background_spill_max_bytes": self._background_spill_max_bytes,
                 "disk_entries": sum(
                     (
                         1
@@ -4397,6 +4930,19 @@ class APCv2(PrefixIndex):
             self._closed = True
             self._capsule_generation.advance()
             self._cancel_pending_prefetch_locked()
+        self._wait_spill_jobs(
+            max(float(time_budget_seconds or 0.0), _SPILL_DRAIN_SECONDS)
+        )
+        with self._apc_lock:
+            self._abandon_spill_jobs_locked()
+            writer, self._spill_writer = self._spill_writer, None
+        writer_stopped = writer is None or writer.close(timeout=_SPILL_DRAIN_SECONDS)
+        if not writer_stopped:
+            log.error(
+                "APCv2 spill writer still blocked in a disk write after %.0f s; "
+                "keeping the persistent directory lock so no other owner "
+                "writes beside it", 2 * _SPILL_DRAIN_SECONDS,
+            )
         if self._persist_dir is not None and persist_resident:
             self.park_all(time_budget_seconds=time_budget_seconds)
         with self._apc_lock:
@@ -4421,7 +4967,8 @@ class APCv2(PrefixIndex):
                 self._shared_buffers = {}
                 if release_memory:
                     mx.clear_cache()
-            self._release_persist_lock()
+            if writer_stopped:
+                self._release_persist_lock()
 
     def resident_nbytes(self) -> int:
         """Bytes of every resident checkpoint, leased or not."""

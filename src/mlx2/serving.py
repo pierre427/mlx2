@@ -7028,6 +7028,7 @@ class ServingEngine:
             import mlx.core as mx
             execution_headroom = self.admission_headroom_fn()
             from .runtime.apc_v2 import (
+                SERVING_ENTRY_COUNT_BACKSTOP,
                 APCLookup,
                 APCv2,
                 MTPAPCSidecar,
@@ -7848,7 +7849,7 @@ class ServingEngine:
             disk_dir = self.apc_persist_dir or self.cache_dir
             apc = APCv2(
                 layout_name=adapter.layout,
-                max_size=max(16, self.max_lanes),
+                max_size=max(SERVING_ENTRY_COUNT_BACKSTOP, self.max_lanes),
                 max_bytes=self.cache_bytes,
                 max_tokens=self.max_context,
                 idle_disk_seconds=180 if disk_dir else 0,
@@ -7871,6 +7872,11 @@ class ServingEngine:
                 generation_prompt_suffixes=self.apc_generation_prompt_suffixes,
                 state_codec=self.recurrent_state_codec_policy,
                 retention_policy=self.apc_retention_policy,
+                # Store-time pressure spills write on a background thread so a
+                # full cache does not add the disk write to the next request's
+                # TTFT (~1 s per 27B 4K-token request, intake-probes-20261007).
+                # MLX2_APC_BACKGROUND_SPILL=0 restores synchronous writes.
+                background_spill=os.environ.get("MLX2_APC_BACKGROUND_SPILL", "1") != "0",
             )
             self.apc = apc
             cache_keys = {}
