@@ -52,6 +52,7 @@ MODES = ("off", "max_throughput", "efficient", "budget")
 #: Modes that change nothing; ``off`` at startup means no governor at all.
 NEUTRAL_MODES = frozenset({"off", "max_throughput"})
 ACTUATORS = ("pace", "lanes")
+CONTROL_TIME_BASES = ("sample", "physical")
 RECEIPT_SCHEMA = "mlx2.power-governor.v1"
 
 
@@ -74,6 +75,12 @@ class PowerGovernorPolicy:
     lane_floor: int = 1
     #: Release only below ``budget * (1 - hysteresis)``.
     hysteresis: float = 0.1
+    #: Keep the proven per-sample ramp by default; ``physical`` scales the
+    #: controller by valid observed duration instead.
+    control_time_basis: str = "sample"
+    #: A delayed aggregate sample cannot apply more than this much controller
+    #: time at once.  It is used only by the opt-in physical-time law.
+    max_control_interval_seconds: float = 1.0
 
     @property
     def enabled(self) -> bool:
@@ -108,6 +115,18 @@ class PowerGovernorPolicy:
         hold = _number(value.get("efficient_hold_ms", 50.0), "efficient_hold_ms", 0.0, 1000.0)
         min_duty = _number(value.get("min_duty", 0.1), "min_duty", 0.05, 1.0)
         hysteresis = _number(value.get("hysteresis", 0.1), "hysteresis", 0.0, 0.5)
+        time_basis = value.get("control_time_basis", "sample")
+        if time_basis not in CONTROL_TIME_BASES:
+            raise ValueError(
+                "power_governor control_time_basis must be one of "
+                + ", ".join(CONTROL_TIME_BASES)
+            )
+        interval_cap = _number(
+            value.get("max_control_interval_seconds", 1.0),
+            "max_control_interval_seconds",
+            0.01,
+            3600.0,
+        )
         order = tuple(value.get("actuator_order", ("pace", "lanes")))
         if not order or len(set(order)) != len(order) or set(order) - set(ACTUATORS):
             raise ValueError(
@@ -126,6 +145,8 @@ class PowerGovernorPolicy:
             min_duty=min_duty,
             lane_floor=floor,
             hysteresis=hysteresis,
+            control_time_basis=time_basis,
+            max_control_interval_seconds=interval_cap,
         )
 
     def as_dict(self) -> dict:
@@ -200,6 +221,7 @@ class PowerGovernor:
         self._budget = self.policy.budget_watts
         self._throttle = 0.0
         self._below_since = None
+        self._below_seconds = 0.0
         self._samples = deque()
         self._last_sample_at = None
         self._last_watts = None
@@ -254,6 +276,7 @@ class PowerGovernor:
                     self._throttle = 0.0
                     self._owed = 0.0
                 self._below_since = None
+                self._below_seconds = 0.0
             self._mode, self._budget = mode, budget
             self._last_change = {
                 "at": time.time(), "mode": mode, "budget_watts": budget,
@@ -283,34 +306,64 @@ class PowerGovernor:
             self._observed += 1
             if self._mode == "budget":
                 self._step_locked(
-                    now, watts, active=self._active_in_interval is not False
+                    now, watts, seconds,
+                    active=self._active_in_interval is not False,
                 )
             self._active_in_interval = self._active_now
 
-    def _step_locked(self, now, watts, *, active=True) -> None:
+    def _control_seconds(self, seconds) -> float:
+        if self.policy.control_time_basis == "sample":
+            return 1.0
+        return min(seconds, self.policy.max_control_interval_seconds)
+
+    def _step_amount(self, relative_error, control_seconds) -> float:
+        return min(
+            self.MAX_STEP * control_seconds,
+            self.GAIN * relative_error * control_seconds,
+        )
+
+    def _step_locked(self, now, watts, seconds, *, active=True) -> None:
         budget = self._budget
         release_at = budget * (1.0 - self.policy.hysteresis)
+        control_seconds = self._control_seconds(seconds)
         if watts > budget:
             self._below_since = None
+            self._below_seconds = 0.0
             if not active:
                 # Anti-windup: the reading is host-wide.  With no lane of
                 # ours running in the interval the throttle cannot lower it,
                 # so tightening would only bank throttle for our next round.
                 self._counts["idle_tighten_skipped"] += 1
                 return
-            step = min(self.MAX_STEP, self.GAIN * (watts - budget) / budget)
+            step = self._step_amount((watts - budget) / budget, control_seconds)
             if self._throttle < 1.0:
                 self._throttle = min(1.0, self._throttle + step)
                 self._counts["tighten_steps"] += 1
         elif watts < release_at:
-            if self._below_since is None:
-                self._below_since = now
-            if now - self._below_since >= self.RELEASE_HOLD_SECONDS and self._throttle > 0:
-                step = min(self.MAX_STEP, self.GAIN * (release_at - watts) / budget)
+            if self.policy.control_time_basis == "sample":
+                if self._below_since is None:
+                    self._below_since = now
+                release_seconds = (
+                    control_seconds
+                    if now - self._below_since >= self.RELEASE_HOLD_SECONDS
+                    else 0.0
+                )
+            else:
+                previous = self._below_seconds
+                self._below_seconds += control_seconds
+                release_seconds = max(
+                    0.0,
+                    self._below_seconds - max(previous, self.RELEASE_HOLD_SECONDS),
+                )
+            if release_seconds > 0 and self._throttle > 0:
+                step = self._step_amount(
+                    (release_at - watts) / budget, release_seconds
+                )
                 self._throttle = max(0.0, self._throttle - step)
                 self._counts["release_steps"] += 1
         else:
             self._below_since = None  # inside the band: hold
+            self._below_seconds = 0.0
 
     # -- actuators -----------------------------------------------------------
 
@@ -422,8 +475,13 @@ class PowerGovernor:
             }
 
     def _window_locked(self) -> dict:
-        seconds = sum(record[1] for record in self._samples)
-        joules = sum(record[2] for record in self._samples)
+        seconds = joules = 0.0
+        if self._last_sample_at is not None:
+            horizon = self._last_sample_at - self.policy.window_seconds
+            for ended, duration, energy in self._samples:
+                overlap = max(0.0, ended - max(ended - duration, horizon))
+                seconds += overlap
+                joules += energy * overlap / duration
         return {
             "seconds": seconds,
             "samples": len(self._samples),

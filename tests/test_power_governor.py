@@ -71,6 +71,13 @@ def test_policy_default_off_and_validation():
     policy = PowerGovernorPolicy.from_value({"mode": "budget", "budget_watts": 25})
     assert policy.budget_watts == 25.0 and policy.actuator_order == ("pace", "lanes")
     assert PowerGovernorPolicy.from_value(policy.as_dict()) == policy
+    physical = PowerGovernorPolicy.from_value({
+        "mode": "budget", "budget_watts": 25,
+        "control_time_basis": "physical", "max_control_interval_seconds": 0.5,
+    })
+    assert physical.control_time_basis == "physical"
+    assert physical.max_control_interval_seconds == 0.5
+    assert PowerGovernorPolicy.from_value(physical.as_dict()) == physical
     with pytest.raises(ValueError, match="requires budget_watts"):
         PowerGovernorPolicy.from_value("budget")
     with pytest.raises(ValueError, match="mode must be"):
@@ -81,6 +88,12 @@ def test_policy_default_off_and_validation():
         PowerGovernorPolicy.from_value({"mode": "efficient", "actuator_order": ["dvfs"]})
     with pytest.raises(ValueError, match="budget_watts"):
         PowerGovernorPolicy.from_value({"mode": "budget", "budget_watts": 0})
+    with pytest.raises(ValueError, match="control_time_basis"):
+        PowerGovernorPolicy.from_value({"mode": "efficient", "control_time_basis": "wall"})
+    with pytest.raises(ValueError, match="max_control_interval_seconds"):
+        PowerGovernorPolicy.from_value({
+            "mode": "efficient", "max_control_interval_seconds": 0,
+        })
 
 
 # -- controller ------------------------------------------------------------
@@ -112,6 +125,55 @@ def test_ramp_is_bounded_per_sample():
         assert throttle - previous <= PowerGovernor.MAX_STEP + 1e-9
         previous = throttle
     assert previous == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("interval,count", [(0.1, 10), (0.25, 4), (0.5, 2), (1.0, 1)])
+def test_physical_time_ramp_is_cadence_stable(interval, count):
+    governor, clock = _governor({
+        "mode": "budget", "budget_watts": 25,
+        "control_time_basis": "physical",
+    })
+    for _ in range(count):
+        clock.now += interval
+        governor.observe(interval, 50.0)
+    assert governor.status()["throttle"] == pytest.approx(0.1)
+
+
+def test_sample_time_ramp_remains_per_observation():
+    throttles = []
+    for interval, count in ((0.1, 10), (1.0, 1)):
+        governor, clock = _governor({"mode": "budget", "budget_watts": 25})
+        for _ in range(count):
+            clock.now += interval
+            governor.observe(interval, 50.0)
+        throttles.append(governor.status()["throttle"])
+    assert throttles == pytest.approx([1.0, 0.1])
+
+
+@pytest.mark.parametrize("interval,count", [(0.1, 40), (0.25, 16), (0.5, 8), (1.0, 4)])
+def test_physical_time_release_is_cadence_stable(interval, count):
+    governor, clock = _governor({
+        "mode": "budget", "budget_watts": 25,
+        "control_time_basis": "physical",
+    })
+    for _ in range(10):
+        clock.now += 1.0
+        governor.observe(1.0, 50.0)
+    assert governor.status()["throttle"] == pytest.approx(1.0)
+    for _ in range(count):
+        clock.now += interval
+        governor.observe(interval, 0.0)
+    assert governor.status()["throttle"] == pytest.approx(0.9)
+
+
+def test_physical_time_ramp_caps_a_delayed_interval_and_ignores_wall_clock_gap():
+    governor, clock = _governor({
+        "mode": "budget", "budget_watts": 25,
+        "control_time_basis": "physical", "max_control_interval_seconds": 0.5,
+    })
+    clock.now += 100.0
+    governor.observe(10.0, 50.0)
+    assert governor.status()["throttle"] == pytest.approx(0.05)
 
 
 def test_hysteresis_holds_in_band_and_releases_after_a_delay():
@@ -300,3 +362,28 @@ def test_budget_steps_on_each_interval_not_the_lagging_window_mean():
     watts = [IDLE_W] * 60 + [w for w, _busy in _simulate(governor, clock, 180)]
     worst = max(sum(watts[i - 30:i]) / 30 for i in range(30, len(watts) + 1))
     assert worst <= 25 * 1.05, worst
+
+
+def test_budget_window_trims_a_straddling_interval_in_proportion():
+    governor, clock = _governor({
+        "mode": "budget", "budget_watts": 70, "window_seconds": 30,
+    })
+    clock.now = 30.0
+    governor.observe(30.0, 100.0)
+    clock.now = 40.0
+    governor.observe(10.0, 0.0)
+    window = governor.status()["window"]
+    assert window["seconds"] == pytest.approx(30.0)
+    assert window["gpu_dram_watts"] == pytest.approx(2000.0 / 30.0)
+    assert window["within_budget"] is True
+
+
+def test_budget_window_trims_one_long_interval_to_the_window():
+    governor, clock = _governor({
+        "mode": "max_throughput", "window_seconds": 30,
+    })
+    clock.now = 60.0
+    governor.observe(60.0, 42.0)
+    window = governor.status()["window"]
+    assert window["seconds"] == pytest.approx(30.0)
+    assert window["gpu_dram_watts"] == pytest.approx(42.0)

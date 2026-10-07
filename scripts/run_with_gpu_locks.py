@@ -15,8 +15,10 @@ import os
 import re
 import signal
 import subprocess
+import tempfile
 import time
 import traceback
+import uuid
 from pathlib import Path
 
 LOCKS = (Path("/Users/Shared/mlxuag/gpu.lock"), Path("/tmp/gpu.lock"))
@@ -27,6 +29,48 @@ MODEL_PROCESS = re.compile(
     r"qualify_hils_declared_groups\.py",
     re.IGNORECASE,
 )
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Replace a mutable JSON receipt without exposing a partial write."""
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.tmp."
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o644)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_json_exclusive(path: Path, payload: dict) -> None:
+    """Create an immutable JSON receipt, refusing to replace any prior evidence."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _immutable_receipt_path(receipt_path: Path, attempt_id: str) -> Path:
+    return receipt_path.with_name(
+        f"{receipt_path.stem}.attempt-{attempt_id}{receipt_path.suffix}"
+    )
+
+
+def _save_terminal(
+    receipt_path: Path, immutable_path: Path, receipt: dict
+) -> None:
+    """Seal terminal evidence before updating the mutable compatibility receipt."""
+    _write_json_exclusive(immutable_path, receipt)
+    _atomic_write_json(receipt_path, receipt)
 
 
 def snapshot(path: Path) -> dict:
@@ -177,11 +221,17 @@ def main(argv: list[str] | None = None) -> int:
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("a command is required after --")
+    attempt_id = uuid.uuid4().hex
+    logical_run_id = f"{args.session}:{args.label}"
+    immutable_receipt = _immutable_receipt_path(args.receipt, attempt_id)
     WAITERS.mkdir(parents=True, exist_ok=True)
     created = int(time.time())
     waiter = WAITERS / f"{args.session}.{args.label}.{os.getpid()}.{created}"
     receipt = {
         "schema": "mlx2.gpu-lock-window.v1",
+        "attempt_id": attempt_id,
+        "logical_run_id": logical_run_id,
+        "immutable_receipt": str(immutable_receipt),
         "session": args.session,
         "label": args.label,
         "pid": os.getpid(),
@@ -194,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def save() -> None:
         receipt["updated_at"] = time.time()
-        args.receipt.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+        _atomic_write_json(args.receipt, receipt)
 
     backups: list[tuple[Path, Path | None]] = []
     child = None
@@ -255,7 +305,8 @@ def main(argv: list[str] | None = None) -> int:
             receipt["status"] = "release_failed"
             rc = 1
         receipt["finished_at"] = time.time()
-        save()
+        receipt["updated_at"] = time.time()
+        _save_terminal(args.receipt, immutable_receipt, receipt)
     return rc
 
 
