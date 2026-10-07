@@ -828,6 +828,7 @@ def prepare_self_mtp_lane(
     fused_gdn_catchup: bool = False,
     prompt_boundary_out: Optional[dict] = None,
     fly_verification=None,
+    clear_cache: bool = True,
 ) -> Tuple[DetachedSelfMTPLane, MTPToken]:
     """Prefill one canonical persistent self-MTP lane without attaching it.
 
@@ -921,7 +922,8 @@ def prepare_self_mtp_lane(
             mx.eval([c.state for c in target_cache], [c.state for c in draft_cache])
             finish_diagnostic_stage("cache_eval_ms")
             y = y[n:]
-            mx.clear_cache()
+            if clear_cache:
+                mx.clear_cache()
             finish_diagnostic_stage("cache_clear_ms")
         if prompt_boundary_out is not None and prev_h is not None:
             checkpoint = capture_self_mtp_checkpoint(
@@ -1016,6 +1018,7 @@ def advance_self_mtp_prefill(
     mtp_state: Optional[Tuple[List[Any], mx.array]],
     max_tokens: int,
     fused_gdn_catchup: bool = False,
+    clear_cache: bool = True,
 ) -> Tuple[mx.array, List[Any], Tuple[List[Any], mx.array], int]:
     """Advance one exact teacher-forced self-MTP prefill slice.
 
@@ -1056,7 +1059,8 @@ def advance_self_mtp_prefill(
             model.mtp_step(hs, ts, draft_cache)
         prev_h = h_chunk[:, -1:, :]
         mx.eval([c.state for c in target_cache], [c.state for c in draft_cache])
-        mx.clear_cache()
+        if clear_cache:
+            mx.clear_cache()
     return (prompt[n:], target_cache, (draft_cache, prev_h), n)
 
 

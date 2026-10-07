@@ -160,6 +160,10 @@ def flatten(value, prefix=""):
     if isinstance(value, dict):
         for k, v in value.items():
             out.update(flatten(v, f"{prefix}{k}."))
+    elif isinstance(value, list):
+        # Per-table diagnostics (e.g. execution.ple_tables) are lists of dicts.
+        for i, v in enumerate(value):
+            out.update(flatten(v, f"{prefix}{i}."))
     elif isinstance(value, bool):
         pass
     elif isinstance(value, (int, float)):

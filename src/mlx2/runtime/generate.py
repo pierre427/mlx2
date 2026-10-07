@@ -4908,6 +4908,7 @@ class BatchGenerator:
                 fused_gdn_catchup=bool(config.get("fused_gdn_catchup", False)),
                 prompt_boundary_out=prompt_boundary,
                 fly_verification=getattr(self, "fly_verification", None),
+                clear_cache=prefill_clear_cache(self._has_active_decode()),
             )
             toc = time.perf_counter()
             # A one-call preparation is a prefill forward like any slice: it
@@ -5201,6 +5202,7 @@ class BatchGenerator:
             mtp_state=self._mtp_states.get(uid),
             max_tokens=max_tokens,
             fused_gdn_catchup=bool(config.get("fused_gdn_catchup", False)),
+            clear_cache=prefill_clear_cache(self._has_active_decode()),
         )
         toc = time.perf_counter()
         remaining = remaining.tolist()
