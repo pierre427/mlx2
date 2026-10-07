@@ -39,6 +39,7 @@ from .power_governor import PowerGovernor, PowerGovernorPolicy
 from .power_telemetry import PowerTelemetry, PowerTelemetryPolicy
 from .runtime.apc_numerics import MOE_RHS_PAD_DEFAULT as _MOE_RHS_PAD_DEFAULT
 from .runtime.apc_numerics import moe_rhs_pad_identity as _moe_rhs_pad_identity
+from .runtime import loop_trace as _loop_trace
 from .runtime.gpu_keep_warm import GpuKeepWarm, GpuKeepWarmPolicy
 
 log = logging.getLogger(__name__)
@@ -8496,11 +8497,391 @@ class ServingEngine:
             self.ready.set()
             last_snapshot = 0
             last_reclaim = 0
+            trace_iteration = None
             preemption = self.memory_preemption_policy["enabled"]
             stall_seconds = (
                 self.memory_preemption_policy["stall_seconds"] if preemption else 60
             )
+            def publish_interior(response, owner, surgery_receipt, checkpoint):
+                """Publish one captured interior/junction checkpoint (a snapshot)."""
+                purpose = checkpoint.get(
+                    "purpose", BoundaryPurpose.INTERIOR
+                )
+                # Junction snapshots share the interior
+                # capture path; their counters are separate.
+                counter = (
+                    "apc_junction_checkpoints"
+                    if purpose == BoundaryPurpose.JUNCTION
+                    else "apc_interior_checkpoints"
+                )
+                if owner is not None and owner.request.get(
+                    "skip_writing_prefix_cache", False
+                ):
+                    self.counts[
+                        counter + "_skipped_write_suppressed"
+                    ] += 1
+                    return
+                if (
+                    owner is not None
+                    and owner.approximate_kv_applied
+                ) or (
+                    surgery_receipt is not None
+                    and surgery_receipt.get("status") == "applied"
+                ):
+                    self.counts[
+                        counter + "_skipped_approximate"
+                    ] += 1
+                    return
+                checkpoint_sidecar = (
+                    MTPAPCSidecar(
+                        checkpoint["mtp_state"],
+                        checkpoint["covered_tokens"],
+                        rng_key=checkpoint.get("rng_key"),
+                        rng_draws=checkpoint.get("rng_draws", 0),
+                    )
+                    if checkpoint.get("mtp_state")
+                    else None
+                )
+                checkpoint_key = cache_key_for(
+                    owner.tenant_id if owner else None,
+                    (
+                        request_apc_scope(owner.request)
+                        if owner is not None
+                        else None
+                    ),
+                )
+                if self._publish_checkpoint(
+                    apc,
+                    checkpoint_key,
+                    checkpoint["tokens"],
+                    checkpoint["target_cache"],
+                    sidecar=checkpoint_sidecar,
+                    retention_role=RETENTION_ROLE[purpose],
+                    session_tag=session_tag_for(owner),
+                ):
+                    self.counts[counter + "_published"] += 1
+                else:
+                    self.counts[
+                        counter + "_skipped_publish_failed"
+                    ] += 1
+
+            def publish_prompt_boundary(response, owner, surgery_receipt):
+                """Store a request's committed prompt boundary; fanout siblings follow."""
+                boundary = batch.pop_prompt_boundary(response.uid)
+                if (
+                    boundary
+                    and surgery_receipt is not None
+                    and surgery_receipt.get("status") == "applied"
+                    and not boundary.get("pre_transform_exact", False)
+                ):
+                    # Compacted rows still carry the removed
+                    # history's influence: this is approximate
+                    # state and must never enter the exact prefix
+                    # cache under the retained-token key.
+                    self.counts["apcv2_store_skipped_approximate"] += 1
+                    boundary = None
+                if (
+                    boundary
+                    and owner is not None
+                    and owner.request.get(
+                        "skip_writing_prefix_cache", False
+                    )
+                ):
+                    boundary = None
+                if (
+                    boundary
+                    and boundary.get("committed_only")
+                    and boundary["tokens"]
+                ):
+                    sidecar = boundary.get("cache_sidecar") or (
+                        MTPAPCSidecar(
+                            boundary["mtp_state"],
+                            boundary["covered_tokens"],
+                        )
+                        if boundary.get("mtp_state")
+                        else None
+                    )
+                    boundary_job = owner
+                    key = cache_key_for(
+                        boundary_job.tenant_id if boundary_job else None,
+                        request_apc_scope(boundary_job.request)
+                        if boundary_job
+                        else None,
+                    )
+                    stored = self._publish_checkpoint(
+                        apc,
+                        key,
+                        boundary["tokens"],
+                        boundary["target_cache"],
+                        sidecar=sidecar,
+                        # The shadow is an ordinary exact committed
+                        # boundary; its origin is tracked by the
+                        # Spomin counters, not a new APCv2 role.
+                        retention_role="committed_prompt_boundary",
+                        approximate=bool(
+                            boundary_job is not None
+                            and boundary_job.approximate_kv_applied
+                        ),
+                        session_tag=session_tag_for(boundary_job),
+                    )
+                    if boundary.get("pre_transform_exact", False):
+                        self.counts[
+                            "spomin_exact_boundary_stores"
+                            if stored
+                            else "spomin_exact_boundary_store_failures"
+                        ] += 1
+                    if (
+                        stored
+                        and boundary_job is not None
+                        and boundary_job.rolling_checkpoint is not None
+                    ):
+                        # The committed prompt boundary supersedes
+                        # the lane's disposable progress point.
+                        self._retire_rolling_checkpoint(
+                            apc, active, boundary_job
+                        )
+                    leader = owner
+                    if (
+                        leader is not None
+                        and leader.fanout_role == "prefill_leader"
+                    ):
+                        with self.lock:
+                            siblings = self.fanout_waiting.pop(
+                                leader.fanout_group, ()
+                            )
+                        if siblings and stored:
+                            expected = len(boundary["tokens"])
+                            prepared = []
+                            reason = None
+                            for sibling in siblings:
+                                try:
+                                    sibling_tokens, receipt = (
+                                        self._tokenize_prompt(
+                                            sibling.request
+                                        )
+                                    )
+                                    sibling.prompt_tokenization_receipt = (
+                                        receipt
+                                    )
+                                    sibling_hit = route_usable_hit(
+                                        lookup_apc(
+                                            key,
+                                            sibling_tokens,
+                                            allow_disk_restore=False,
+                                            session_tag=session_tag_for(sibling),
+                                        ),
+                                        sibling_tokens,
+                                    )
+                                except Exception:  # noqa: BLE001 - fail the group, not the worker
+                                    log.exception(
+                                        "APCv2 fanout boundary acquisition failed"
+                                    )
+                                    reason = "boundary_lookup_failed"
+                                    break
+                                if (
+                                    expected <= 0
+                                    or sibling_hit.cache is None
+                                    or sibling_hit.cached_tokens != expected
+                                    or sibling_tokens[:expected]
+                                    != boundary["tokens"][:expected]
+                                ):
+                                    reason = "committed_boundary_miss"
+                                    discard_lookup(
+                                        sibling_hit, "fanout_boundary_miss"
+                                    )
+                                    close = getattr(
+                                        sibling_hit.cache, "close", None
+                                    )
+                                    if callable(close):
+                                        close()
+                                    break
+                                sibling.admission_tokens = list(
+                                    sibling_tokens
+                                )
+                                sibling.admission_hit = sibling_hit
+                                sibling.cache_branch = sibling_hit.cache
+                                sibling.fanout_boundary_tokens = expected
+                                sibling.fanout_one_prefill = True
+                                sibling.fanout_reason = "boundary_reused"
+                                prepared.append(sibling)
+                            if reason is not None:
+                                for sibling in prepared:
+                                    discard_lookup(
+                                        sibling.admission_hit,
+                                        "fanout_boundary_miss",
+                                    )
+                                    close = getattr(
+                                        sibling.cache_branch, "close", None
+                                    )
+                                    if callable(close):
+                                        close()
+                                    sibling.cache_branch = None
+                                    sibling.admission_hit = None
+                                    sibling.admission_tokens = None
+                                    sibling.fanout_one_prefill = False
+                                    sibling.fanout_reason = reason
+                                leader.fanout_reason = reason
+                                self.counts[
+                                    "apcv2_fanout_boundary_misses"
+                                ] += 1
+                                for sibling in siblings:
+                                    self._finish(
+                                        sibling,
+                                        {
+                                            "error": "APCv2 fanout could not lease the committed prompt boundary",
+                                            "status": 503,
+                                        },
+                                    )
+                                siblings = ()
+                        elif siblings:
+                            leader.fanout_reason = "checkpoint_not_stored"
+                            self.counts[
+                                "apcv2_fanout_store_failures"
+                            ] += 1
+                            for sibling in siblings:
+                                sibling.fanout_reason = "checkpoint_not_stored"
+                                self._finish(
+                                    sibling,
+                                    {
+                                        "error": "APCv2 fanout prompt boundary was not stored",
+                                        "status": 503,
+                                    },
+                                )
+                            siblings = ()
+                        if siblings:
+                            if (
+                                capsule_pool is not None
+                                and len(siblings) >= 2
+                                and self._cache_capsule_fanout_fits(
+                                    active, siblings
+                                )
+                            ):
+                                from .runtime.cache_capsule import (
+                                    prepare_prompt_cache_capsules,
+                                )
+
+                                # The capsule replaces every
+                                # sibling's prompt cache, so its
+                                # source must be the very state
+                                # the siblings leased: look it up
+                                # with their tokens and require
+                                # the same committed length.  A
+                                # lookup of the boundary tokens
+                                # alone is an exact hit, which
+                                # APCv2 serves one token short
+                                # (KV trimmed to len-1) or from an
+                                # older hybrid checkpoint, and the
+                                # siblings then decoded their
+                                # one remaining token on a state
+                                # missing 1-7 prompt tokens.
+                                capsule_hit = lookup_apc(
+                                    key,
+                                    siblings[0].admission_tokens,
+                                    allow_disk_restore=False,
+                                )
+                                # A source probe; the siblings'
+                                # own lookups already counted.
+                                discard_lookup(
+                                    capsule_hit, "capsule_source"
+                                )
+                                prepared = None
+                                started = time.monotonic()
+                                try:
+                                    failure = self._cache_capsule_source_failure(
+                                        capsule_hit, expected, len(siblings)
+                                    )
+                                    if failure is not None and failure["reason"] == "boundary_mismatch":
+                                        self.counts[
+                                            "cache_capsule_boundary_mismatch_fallbacks"
+                                        ] += 1
+                                    compatible = failure is None
+                                    if compatible:
+                                        prepared = prepare_prompt_cache_capsules(
+                                            capsule_hit.cache,
+                                            target_batch=len(siblings),
+                                            generation=capsule_hit.capsule_generation,
+                                            pool=capsule_pool,
+                                            compatibility_signature=apc.capsule_compatibility_signature(
+                                                key, apc.layout_name
+                                            ),
+                                            backend=self.cache_capsule_policy["backend"],
+                                            fallback=self.cache_capsule_policy["fallback"],
+                                            source_prefix=leader.fanout_group,
+                                        )
+                                        elapsed_ms = (
+                                            time.monotonic() - started
+                                        ) * 1000
+                                        if elapsed_ms > self.cache_capsule_policy["deadline_ms"]:
+                                            prepared.close()
+                                            prepared = None
+                                            self.counts[
+                                                "cache_capsule_deadline_fallbacks"
+                                            ] += 1
+                                    else:
+                                        self.counts[
+                                            "cache_capsule_incompatible_fallbacks"
+                                        ] += 1
+                                        receipt = {
+                                            "schema": "mlx2.cache-capsule.v1",
+                                            "status": "fallback",
+                                            "reason": "source_incompatible",
+                                            "rows": len(siblings),
+                                            "source_failure": failure,
+                                        }
+                                        for sibling in siblings:
+                                            sibling.cache_capsule_receipt = dict(receipt)
+                                except Exception:
+                                    if prepared is not None:
+                                        prepared.close()
+                                    prepared = None
+                                    self.counts[
+                                        "cache_capsule_prepare_fallbacks"
+                                    ] += 1
+                                    log.exception(
+                                        "cache capsule preparation declined"
+                                    )
+                                finally:
+                                    close = getattr(
+                                        capsule_hit.cache, "close", None
+                                    )
+                                    if callable(close):
+                                        close()
+                                if prepared is not None:
+                                    self.fanout_capsules[
+                                        leader.fanout_group
+                                    ] = prepared
+                                    for sibling in siblings:
+                                        sibling.cache_capsule = prepared
+                                        sibling.cache_capsule_rows = len(
+                                            siblings
+                                        )
+                                    self.counts[
+                                        "cache_capsule_prepared"
+                                    ] += 1
+                            leader.fanout_boundary_tokens = expected
+                            leader.fanout_one_prefill = True
+                            leader.fanout_reason = "boundary_reused"
+                            # Siblings must join the leader's live
+                            # batch; an atomic cohort would be held
+                            # until every active lane drained.
+                            self._publish_jobs(
+                                siblings,
+                                already_registered=True,
+                                atomic=False,
+                            )
+                            self.counts[
+                                "apcv2_fanout_boundaries"
+                            ] += 1
+
+            pending_interiors = deque()
+
             while not self.stop_event.is_set():
+                if _loop_trace.enabled():
+                    _loop_trace.flush(trace_iteration)
+                    trace_iteration = {
+                        "t": _loop_trace.now(),
+                        "active": len(active),
+                    }
                 quiesce_action = self._worker_quiesce_action()
                 if quiesce_action is not None:
                     if quiesce_action["timed_out"]:
@@ -10319,7 +10700,15 @@ class ServingEngine:
                     self.batch_metrics.batch_cycle(len(active), len(deferred))
                     try:
                         self._inject_device_fault(active)
+                        if _loop_trace.enabled():
+                            trace_iteration["next0"] = _loop_trace.now()
                         prompts, responses = batch.next()
+                        if _loop_trace.enabled():
+                            trace_iteration["next1"] = _loop_trace.now()
+                            trace_iteration["prompts"] = [
+                                [int(r.uid), bool(r.end_of_prompt)] for r in prompts
+                            ]
+                            trace_iteration["responses"] = len(responses)
                     except RuntimeError as exc:
                         fault = device_fault_kind(exc)
                         if fault is None:
@@ -10399,6 +10788,12 @@ class ServingEngine:
                                 self.counts["memory_pressure_evictions"] += 1
                             last_reclaim = now
                         self.stop_event.wait(0.01)
+                    finishing_uids = {
+                        response.uid
+                        for response in responses
+                        if getattr(response, "finish_reason", None)
+                    }
+                    deferred_prompt_ends = []
                     for response in prompts:
                         if response.uid in active:
                             active[response.uid].last_progress = time.monotonic()
@@ -10466,372 +10861,32 @@ class ServingEngine:
                                 self.counts[
                                     "apc_junction_checkpoints_captured"
                                 ] += junctions
-                            for checkpoint in interiors:
-                                purpose = checkpoint.get(
-                                    "purpose", BoundaryPurpose.INTERIOR
-                                )
-                                # Junction snapshots share the interior
-                                # capture path; their counters are separate.
-                                counter = (
-                                    "apc_junction_checkpoints"
-                                    if purpose == BoundaryPurpose.JUNCTION
-                                    else "apc_interior_checkpoints"
-                                )
-                                if owner is not None and owner.request.get(
-                                    "skip_writing_prefix_cache", False
-                                ):
-                                    self.counts[
-                                        counter + "_skipped_write_suppressed"
-                                    ] += 1
-                                    continue
-                                if (
-                                    owner is not None
-                                    and owner.approximate_kv_applied
-                                ) or (
-                                    surgery_receipt is not None
-                                    and surgery_receipt.get("status") == "applied"
-                                ):
-                                    self.counts[
-                                        counter + "_skipped_approximate"
-                                    ] += 1
-                                    continue
-                                checkpoint_sidecar = (
-                                    MTPAPCSidecar(
-                                        checkpoint["mtp_state"],
-                                        checkpoint["covered_tokens"],
-                                        rng_key=checkpoint.get("rng_key"),
-                                        rng_draws=checkpoint.get("rng_draws", 0),
-                                    )
-                                    if checkpoint.get("mtp_state")
-                                    else None
-                                )
-                                checkpoint_key = cache_key_for(
-                                    owner.tenant_id if owner else None,
-                                    (
-                                        request_apc_scope(owner.request)
-                                        if owner is not None
-                                        else None
-                                    ),
-                                )
-                                if self._publish_checkpoint(
-                                    apc,
-                                    checkpoint_key,
-                                    checkpoint["tokens"],
-                                    checkpoint["target_cache"],
-                                    sidecar=checkpoint_sidecar,
-                                    retention_role=RETENTION_ROLE[purpose],
-                                    session_tag=session_tag_for(owner),
-                                ):
-                                    self.counts[counter + "_published"] += 1
-                                else:
-                                    self.counts[
-                                        counter + "_skipped_publish_failed"
-                                    ] += 1
-                            boundary = batch.pop_prompt_boundary(response.uid)
                             if (
-                                boundary
-                                and surgery_receipt is not None
-                                and surgery_receipt.get("status") == "applied"
-                                and not boundary.get("pre_transform_exact", False)
+                                owner is not None
+                                and owner.fanout_role != "prefill_leader"
+                                and response.uid not in finishing_uids
                             ):
-                                # Compacted rows still carry the removed
-                                # history's influence: this is approximate
-                                # state and must never enter the exact prefix
-                                # cache under the retained-token key.
-                                self.counts["apcv2_store_skipped_approximate"] += 1
-                                boundary = None
-                            if (
-                                boundary
-                                and owner is not None
-                                and owner.request.get(
-                                    "skip_writing_prefix_cache", False
+                                # Publication runs after this round's tokens
+                                # are delivered: an APCv2 store can spill
+                                # entries to disk synchronously (0.3-0.9 s for
+                                # a 16K boundary plus its interiors on
+                                # Qwen3.8-27B), and the decoding neighbours'
+                                # tokens from this same round waited behind it.
+                                # Nothing decodes in between, so the boundary
+                                # is still exactly this prompt's state.
+                                deferred_prompt_ends.append(
+                                    (response, owner, surgery_receipt, interiors)
                                 )
-                            ):
-                                boundary = None
-                            if (
-                                boundary
-                                and boundary.get("committed_only")
-                                and boundary["tokens"]
-                            ):
-                                sidecar = boundary.get("cache_sidecar") or (
-                                    MTPAPCSidecar(
-                                        boundary["mtp_state"],
-                                        boundary["covered_tokens"],
+                            else:
+                                for checkpoint in interiors:
+                                    publish_interior(
+                                        response, owner, surgery_receipt, checkpoint
                                     )
-                                    if boundary.get("mtp_state")
-                                    else None
+                                publish_prompt_boundary(
+                                    response, owner, surgery_receipt
                                 )
-                                boundary_job = active.get(response.uid)
-                                key = cache_key_for(
-                                    boundary_job.tenant_id if boundary_job else None,
-                                    request_apc_scope(boundary_job.request)
-                                    if boundary_job
-                                    else None,
-                                )
-                                stored = self._publish_checkpoint(
-                                    apc,
-                                    key,
-                                    boundary["tokens"],
-                                    boundary["target_cache"],
-                                    sidecar=sidecar,
-                                    # The shadow is an ordinary exact committed
-                                    # boundary; its origin is tracked by the
-                                    # Spomin counters, not a new APCv2 role.
-                                    retention_role="committed_prompt_boundary",
-                                    approximate=bool(
-                                        boundary_job is not None
-                                        and boundary_job.approximate_kv_applied
-                                    ),
-                                    session_tag=session_tag_for(boundary_job),
-                                )
-                                if boundary.get("pre_transform_exact", False):
-                                    self.counts[
-                                        "spomin_exact_boundary_stores"
-                                        if stored
-                                        else "spomin_exact_boundary_store_failures"
-                                    ] += 1
-                                if (
-                                    stored
-                                    and boundary_job is not None
-                                    and boundary_job.rolling_checkpoint is not None
-                                ):
-                                    # The committed prompt boundary supersedes
-                                    # the lane's disposable progress point.
-                                    self._retire_rolling_checkpoint(
-                                        apc, active, boundary_job
-                                    )
-                                leader = active.get(response.uid)
-                                if (
-                                    leader is not None
-                                    and leader.fanout_role == "prefill_leader"
-                                ):
-                                    with self.lock:
-                                        siblings = self.fanout_waiting.pop(
-                                            leader.fanout_group, ()
-                                        )
-                                    if siblings and stored:
-                                        expected = len(boundary["tokens"])
-                                        prepared = []
-                                        reason = None
-                                        for sibling in siblings:
-                                            try:
-                                                sibling_tokens, receipt = (
-                                                    self._tokenize_prompt(
-                                                        sibling.request
-                                                    )
-                                                )
-                                                sibling.prompt_tokenization_receipt = (
-                                                    receipt
-                                                )
-                                                sibling_hit = route_usable_hit(
-                                                    lookup_apc(
-                                                        key,
-                                                        sibling_tokens,
-                                                        allow_disk_restore=False,
-                                                        session_tag=session_tag_for(sibling),
-                                                    ),
-                                                    sibling_tokens,
-                                                )
-                                            except Exception:  # noqa: BLE001 - fail the group, not the worker
-                                                log.exception(
-                                                    "APCv2 fanout boundary acquisition failed"
-                                                )
-                                                reason = "boundary_lookup_failed"
-                                                break
-                                            if (
-                                                expected <= 0
-                                                or sibling_hit.cache is None
-                                                or sibling_hit.cached_tokens != expected
-                                                or sibling_tokens[:expected]
-                                                != boundary["tokens"][:expected]
-                                            ):
-                                                reason = "committed_boundary_miss"
-                                                discard_lookup(
-                                                    sibling_hit, "fanout_boundary_miss"
-                                                )
-                                                close = getattr(
-                                                    sibling_hit.cache, "close", None
-                                                )
-                                                if callable(close):
-                                                    close()
-                                                break
-                                            sibling.admission_tokens = list(
-                                                sibling_tokens
-                                            )
-                                            sibling.admission_hit = sibling_hit
-                                            sibling.cache_branch = sibling_hit.cache
-                                            sibling.fanout_boundary_tokens = expected
-                                            sibling.fanout_one_prefill = True
-                                            sibling.fanout_reason = "boundary_reused"
-                                            prepared.append(sibling)
-                                        if reason is not None:
-                                            for sibling in prepared:
-                                                discard_lookup(
-                                                    sibling.admission_hit,
-                                                    "fanout_boundary_miss",
-                                                )
-                                                close = getattr(
-                                                    sibling.cache_branch, "close", None
-                                                )
-                                                if callable(close):
-                                                    close()
-                                                sibling.cache_branch = None
-                                                sibling.admission_hit = None
-                                                sibling.admission_tokens = None
-                                                sibling.fanout_one_prefill = False
-                                                sibling.fanout_reason = reason
-                                            leader.fanout_reason = reason
-                                            self.counts[
-                                                "apcv2_fanout_boundary_misses"
-                                            ] += 1
-                                            for sibling in siblings:
-                                                self._finish(
-                                                    sibling,
-                                                    {
-                                                        "error": "APCv2 fanout could not lease the committed prompt boundary",
-                                                        "status": 503,
-                                                    },
-                                                )
-                                            siblings = ()
-                                    elif siblings:
-                                        leader.fanout_reason = "checkpoint_not_stored"
-                                        self.counts[
-                                            "apcv2_fanout_store_failures"
-                                        ] += 1
-                                        for sibling in siblings:
-                                            sibling.fanout_reason = "checkpoint_not_stored"
-                                            self._finish(
-                                                sibling,
-                                                {
-                                                    "error": "APCv2 fanout prompt boundary was not stored",
-                                                    "status": 503,
-                                                },
-                                            )
-                                        siblings = ()
-                                    if siblings:
-                                        if (
-                                            capsule_pool is not None
-                                            and len(siblings) >= 2
-                                            and self._cache_capsule_fanout_fits(
-                                                active, siblings
-                                            )
-                                        ):
-                                            from .runtime.cache_capsule import (
-                                                prepare_prompt_cache_capsules,
-                                            )
-
-                                            # The capsule replaces every
-                                            # sibling's prompt cache, so its
-                                            # source must be the very state
-                                            # the siblings leased: look it up
-                                            # with their tokens and require
-                                            # the same committed length.  A
-                                            # lookup of the boundary tokens
-                                            # alone is an exact hit, which
-                                            # APCv2 serves one token short
-                                            # (KV trimmed to len-1) or from an
-                                            # older hybrid checkpoint, and the
-                                            # siblings then decoded their
-                                            # one remaining token on a state
-                                            # missing 1-7 prompt tokens.
-                                            capsule_hit = lookup_apc(
-                                                key,
-                                                siblings[0].admission_tokens,
-                                                allow_disk_restore=False,
-                                            )
-                                            # A source probe; the siblings'
-                                            # own lookups already counted.
-                                            discard_lookup(
-                                                capsule_hit, "capsule_source"
-                                            )
-                                            prepared = None
-                                            started = time.monotonic()
-                                            try:
-                                                failure = self._cache_capsule_source_failure(
-                                                    capsule_hit, expected, len(siblings)
-                                                )
-                                                if failure is not None and failure["reason"] == "boundary_mismatch":
-                                                    self.counts[
-                                                        "cache_capsule_boundary_mismatch_fallbacks"
-                                                    ] += 1
-                                                compatible = failure is None
-                                                if compatible:
-                                                    prepared = prepare_prompt_cache_capsules(
-                                                        capsule_hit.cache,
-                                                        target_batch=len(siblings),
-                                                        generation=capsule_hit.capsule_generation,
-                                                        pool=capsule_pool,
-                                                        compatibility_signature=apc.capsule_compatibility_signature(
-                                                            key, apc.layout_name
-                                                        ),
-                                                        backend=self.cache_capsule_policy["backend"],
-                                                        fallback=self.cache_capsule_policy["fallback"],
-                                                        source_prefix=leader.fanout_group,
-                                                    )
-                                                    elapsed_ms = (
-                                                        time.monotonic() - started
-                                                    ) * 1000
-                                                    if elapsed_ms > self.cache_capsule_policy["deadline_ms"]:
-                                                        prepared.close()
-                                                        prepared = None
-                                                        self.counts[
-                                                            "cache_capsule_deadline_fallbacks"
-                                                        ] += 1
-                                                else:
-                                                    self.counts[
-                                                        "cache_capsule_incompatible_fallbacks"
-                                                    ] += 1
-                                                    receipt = {
-                                                        "schema": "mlx2.cache-capsule.v1",
-                                                        "status": "fallback",
-                                                        "reason": "source_incompatible",
-                                                        "rows": len(siblings),
-                                                        "source_failure": failure,
-                                                    }
-                                                    for sibling in siblings:
-                                                        sibling.cache_capsule_receipt = dict(receipt)
-                                            except Exception:
-                                                if prepared is not None:
-                                                    prepared.close()
-                                                prepared = None
-                                                self.counts[
-                                                    "cache_capsule_prepare_fallbacks"
-                                                ] += 1
-                                                log.exception(
-                                                    "cache capsule preparation declined"
-                                                )
-                                            finally:
-                                                close = getattr(
-                                                    capsule_hit.cache, "close", None
-                                                )
-                                                if callable(close):
-                                                    close()
-                                            if prepared is not None:
-                                                self.fanout_capsules[
-                                                    leader.fanout_group
-                                                ] = prepared
-                                                for sibling in siblings:
-                                                    sibling.cache_capsule = prepared
-                                                    sibling.cache_capsule_rows = len(
-                                                        siblings
-                                                    )
-                                                self.counts[
-                                                    "cache_capsule_prepared"
-                                                ] += 1
-                                        leader.fanout_boundary_tokens = expected
-                                        leader.fanout_one_prefill = True
-                                        leader.fanout_reason = "boundary_reused"
-                                        # Siblings must join the leader's live
-                                        # batch; an atomic cohort would be held
-                                        # until every active lane drained.
-                                        self._publish_jobs(
-                                            siblings,
-                                            already_registered=True,
-                                            atomic=False,
-                                        )
-                                        self.counts[
-                                            "apcv2_fanout_boundaries"
-                                        ] += 1
+                    if _loop_trace.enabled():
+                        trace_iteration["prompts1"] = _loop_trace.now()
                     for response in responses:
                         job = active.get(response.uid)
                         if job is None:
@@ -11483,7 +11538,33 @@ class ServingEngine:
                     # Responses and prompt boundaries carry entire target and
                     # draft caches. Drop the transfer references after APC and
                     # active lanes have taken ownership, before next admission.
-                    response = boundary = sidecar = None
+                    if _loop_trace.enabled():
+                        trace_iteration["responses1"] = _loop_trace.now()
+                    for (prompt_end, owner, surgery_receipt, interiors) in (
+                        deferred_prompt_ends
+                    ):
+                        if prompt_end.uid not in active:
+                            # Failed or removed while its first tokens were
+                            # delivered: its batch row may already be gone.
+                            batch.pop_prompt_boundary(prompt_end.uid)
+                            self.counts["apc_prompt_end_publications_dropped"] += 1
+                            continue
+                        publish_prompt_boundary(prompt_end, owner, surgery_receipt)
+                        pending_interiors.extend(
+                            (prompt_end, owner, surgery_receipt, checkpoint)
+                            for checkpoint in interiors
+                        )
+                    deferred_prompt_ends = ()
+                    # Interior checkpoints are snapshots: beside other
+                    # decoding lanes publish one per round so their stores'
+                    # disk spills do not stack into one neighbour gap.
+                    while pending_interiors:
+                        publish_interior(*pending_interiors.popleft())
+                        if len(active) >= 2:
+                            self.counts["apc_interior_publications_paced"] += 1
+                            break
+                    response = sidecar = None
+                    prompt_end = owner = surgery_receipt = interiors = None
                     prompts = responses = ()
                     job = None
                 else:
@@ -11494,6 +11575,8 @@ class ServingEngine:
                     from .runtime.paged_apcv2_native_restore import reap_failed_native_restores
 
                     reap_failed_native_restores()
+                    while pending_interiors:
+                        publish_interior(*pending_interiors.popleft())
                     self._service_admin_prefetch(apc)
                     self._service_pending_prefetch(apc)
                     apc.spill_idle_entries()
@@ -11541,6 +11624,8 @@ class ServingEngine:
                             }
                         )
                     last_snapshot = now
+                    if _loop_trace.enabled():
+                        trace_iteration["snapshot1"] = _loop_trace.now()
         except BaseException as exc:
             log.exception("generation worker failed")
             self.error = f"{type(exc).__name__}: {exc}"

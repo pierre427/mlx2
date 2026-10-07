@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Hashable, Iterable, List, Optional
 import mlx.core as mx
+from . import loop_trace as _loop_trace
 from .cache_capsule import CacheCapsuleGeneration, CacheCapsulePool
 from .cache_planes import (
     CompiledScheduleMetadata,
@@ -1908,6 +1909,27 @@ class APCv2(PrefixIndex):
         self, key, tokens, entry, *, reason: str, hard_cap: Optional[int] = None,
         keep_resident: bool = False,
     ) -> bool:
+        if not _loop_trace.enabled():
+            return self._spill_entry_untraced_locked(
+                key, tokens, entry, reason=reason, hard_cap=hard_cap,
+                keep_resident=keep_resident,
+            )
+        nbytes = int(getattr(entry, "nbytes", 0) or 0)
+        start = _loop_trace.now()
+        spilled = self._spill_entry_untraced_locked(
+            key, tokens, entry, reason=reason, hard_cap=hard_cap,
+            keep_resident=keep_resident,
+        )
+        _loop_trace.event(
+            "apc_spill", start, _loop_trace.now(), reason=reason,
+            bytes=nbytes, tokens=len(tokens), spilled=bool(spilled),
+        )
+        return spilled
+
+    def _spill_entry_untraced_locked(
+        self, key, tokens, entry, *, reason: str, hard_cap: Optional[int] = None,
+        keep_resident: bool = False,
+    ) -> bool:
         self._spill_capacity_violation = None
         if self._idle_disk_dir is None or not entry.prompt_cache:
             return False
@@ -2138,6 +2160,17 @@ class APCv2(PrefixIndex):
         return self._n_bytes <= temporary_limit - self._capsule_reserved_bytes
 
     def _restore_entry_locked(self, key, tokens, entry) -> bool:
+        if not _loop_trace.enabled():
+            return self._restore_entry_untraced_locked(key, tokens, entry)
+        start = _loop_trace.now()
+        restored = self._restore_entry_untraced_locked(key, tokens, entry)
+        _loop_trace.event(
+            "apc_restore", start, _loop_trace.now(), tokens=len(tokens),
+            restored=bool(restored),
+        )
+        return restored
+
+    def _restore_entry_untraced_locked(self, key, tokens, entry) -> bool:
         disk = getattr(entry, "_apc_disk", None) or {}
         target = disk.get("target")
         if not target:
@@ -3827,7 +3860,20 @@ class APCv2(PrefixIndex):
             if callable(getattr(c, "is_trimmable", None))
         )
 
-    def store(
+    def store(self, key, tokens, prompt_cache, **kwargs) -> APCCapabilities:
+        if not _loop_trace.enabled():
+            return self._store_untraced(key, tokens, prompt_cache, **kwargs)
+        tokens = list(tokens)
+        start = _loop_trace.now()
+        try:
+            return self._store_untraced(key, tokens, prompt_cache, **kwargs)
+        finally:
+            _loop_trace.event(
+                "apc_store", start, _loop_trace.now(), tokens=len(tokens),
+                role=kwargs.get("retention_role"),
+            )
+
+    def _store_untraced(
         self,
         key: Hashable,
         tokens: Iterable[int],

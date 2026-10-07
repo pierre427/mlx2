@@ -16,6 +16,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import loop_trace as _loop_trace
+
 _COUNTER_MAX = (1 << 63) - 1
 
 
@@ -43,6 +45,14 @@ def _bump(counters: dict[str, int], key: str, amount: int = 1) -> None:
 # must not size a deep slice (and vice versa).
 PREFILL_COST_DEPTH_BUCKETS = (4096, 16384, 65536)
 PREFILL_COST_KINDS = ("ordinary", "mixed", "mtp")
+# Forwards that cost a base kind's forward plus a per-call overhead.  A
+# self-MTP lane preparation runs the prompt's last rows through the target
+# and the draft head like a slice, then samples the first token and builds
+# the lane: on Qwen3.8-27B a 7-row preparation took 127 ms where a 7-row
+# slice is ~58 ms.  Its samples are kept apart so (a) the overhead is
+# charged when a preparation is bounded and (b) they never inflate the
+# per-row cost that sizes ordinary slices.
+PREFILL_COST_OVERHEAD_KINDS = {"mtp_prepare": "mtp"}
 DECODE_FAIRNESS_ESTIMATORS = ("cost_model", "running_max")
 # Depth at which attention is assumed to cost as much per row as the rest of
 # the forward; only used to extrapolate into a depth bucket with no samples
@@ -88,7 +98,32 @@ class PrefillCostModel:
     _streaks: dict = field(default_factory=dict, repr=False)
     _ceiling: dict = field(default_factory=dict, repr=False)
     _errors: deque = field(default_factory=lambda: deque(maxlen=64), repr=False)
+    _overheads: dict = field(default_factory=dict, repr=False)
     _seq: int = field(default=0, repr=False)
+
+    def overhead(self, kind: str) -> float:
+        """Conservative per-call overhead of an overhead kind (0 if unseen)."""
+        ring = self._overheads.get(kind)
+        if not ring:
+            return 0.0
+        now = time.monotonic()
+        while ring and now - ring[0][1] > self.max_age_s:
+            ring.popleft()
+        if not ring:
+            return 0.0
+        values = sorted(value for (value, _ts) in ring)
+        index = min(len(values) - 1, max(0, math.ceil(self.quantile * len(values)) - 1))
+        return values[index]
+
+    def _observe_overhead(self, kind, rows, seconds, depth) -> None:
+        base = self.estimate(PREFILL_COST_OVERHEAD_KINDS[kind], depth)
+        predicted = (
+            self.fixed_cost() if base is None else base[0] + base[1] * rows
+        )
+        ring = self._overheads.setdefault(kind, deque(maxlen=self.window))
+        ring.append((max(0.0, seconds - predicted), time.monotonic()))
+        _bump(self.counters, "cost_overhead_samples")
+        self.counters["cost_prepare_overhead_us"] = int(self.overhead(kind) * 1e6)
 
     def observe_decode(self, seconds: float) -> None:
         seconds = float(seconds)
@@ -144,9 +179,17 @@ class PrefillCostModel:
         than ``max_age_s`` are dropped first: after an idle period the next
         slice must not be sized from an earlier regime's measurements.
         """
+        if kind in PREFILL_COST_OVERHEAD_KINDS:
+            base = self.estimate(PREFILL_COST_OVERHEAD_KINDS[kind], depth)
+            if base is not None:
+                return (base[0] + self.overhead(kind), base[1], base[2])
+            # No slice measured yet: the preparations' own ring (whole
+            # cost per row, conservative for long preparations).
+            kinds = [kind]
+        else:
+            kinds = [kind] + [k for k in PREFILL_COST_KINDS if k != kind]
         self._expire(time.monotonic())
         bucket = _depth_bucket(depth)
-        kinds = [kind] + [k for k in PREFILL_COST_KINDS if k != kind]
         for candidate_kind in kinds:
             populated = sorted(
                 b for (k, b), ring in self._samples.items()
@@ -190,7 +233,11 @@ class PrefillCostModel:
         seconds = float(seconds)
         if rows <= 0 or seconds <= 0 or not math.isfinite(seconds):
             return
-        if kind not in PREFILL_COST_KINDS:
+        if kind in PREFILL_COST_OVERHEAD_KINDS:
+            # Overhead over the base kind's prediction, plus the kind's own
+            # ring (used only to bound this kind before any base sample).
+            self._observe_overhead(kind, rows, seconds, depth)
+        elif kind not in PREFILL_COST_KINDS:
             raise ValueError(f"unknown prefill cost kind {kind!r}")
         now = time.monotonic()
         self._seq += 1
@@ -201,7 +248,8 @@ class PrefillCostModel:
             fixed = self.fixed_cost(key)
             predicted = fixed + self._per_row(key, fixed) * rows
             ratio = seconds / predicted if predicted > 0 else 1.0
-            self._errors.append(abs(ratio - 1.0))
+            if kind not in PREFILL_COST_OVERHEAD_KINDS:
+                self._errors.append(abs(ratio - 1.0))
             (up, down) = self._streaks.get(key, (0, 0))
             if ratio > self.up_ratio_once or (ratio > self.up_ratio and up >= 1):
                 # Slowdown (thermal, contention, deeper context): keep only
@@ -281,6 +329,11 @@ class DecodeTimeFairness:
     estimator: str = "cost_model"
     # Fraction of the stall target held back from the cost-model prediction.
     margin: float = 0.1
+    # Charge host time already spent in a decode gap against the next slice
+    # (``_host_gap_s``).  Set by the ordinary/self-MTP generator, whose
+    # decode-first rounds measure that gap; the external-draft and PLD
+    # generators keep their measured behaviour.
+    charge_host_gap: bool = False
     debt_seconds: float = 0.0
     best_prefill_tokens_per_second: float = 0.0
     counters: dict[str, int] = field(default_factory=dict)
@@ -290,6 +343,44 @@ class DecodeTimeFairness:
     # when that decode ended (host clock).
     _gap_prefill_s: float = field(default=0.0, repr=False)
     _last_decode_end: float | None = field(default=None, repr=False)
+    _host_deferred: bool = field(default=False, repr=False)
+
+    def _host_gap_s(self) -> float:
+        """Host time already spent in the current decode gap (cost model).
+
+        The decoding lanes' gap runs from the last decode's end to the next
+        one's; work the serving loop did since (token delivery, APCv2
+        publication and its disk spills, admission) is already in it, so a
+        prefill slice gets only the rest of the stall target.  Prefill
+        forwards already taken in this gap are not host time.
+        """
+        if (
+            not self.enabled
+            or not self.charge_host_gap
+            or self.estimator != "cost_model"
+            or self._last_decode_end is None
+        ):
+            return 0.0
+        return max(
+            0.0, time.monotonic() - self._last_decode_end - self._gap_prefill_s
+        )
+
+    def _host_charge_s(self) -> float:
+        """Host gap charged against a slice, past a routine allowance.
+
+        The first ``margin`` share of the target is not charged: every
+        serving-loop pass (token delivery, the status snapshot) costs a few
+        ms, and charging it moved a bound just above a 64-row tile down a
+        whole tile (Flash-Next confirm-20261007: 512- became 448-row slices,
+        more slices for the same prompt).  Real stalls -- an APCv2 store
+        that spills to disk, a long admission -- are hundreds of ms and
+        stay charged.  At most half the target: a larger host gap defers
+        the prefill once (``may_prefill``), and a stale decode clock must
+        not pin every slice to the floor.
+        """
+        target = self.stall_target_ms / 1000.0
+        allowance = self.margin * target
+        return min(max(0.0, self._host_gap_s() - allowance), 0.5 * target)
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.fair_share) or self.fair_share < 0:
@@ -347,6 +438,19 @@ class DecodeTimeFairness:
         (value, unreachable) = self._bound(
             configured, rows=rows, depth=depth, kind=kind, decode_rows=decode_rows
         )
+        if record and _loop_trace.enabled():
+            estimate = (
+                self.cost.estimate(kind, depth)
+                if self.estimator == "cost_model"
+                else None
+            )
+            _loop_trace.event(
+                "cap", _loop_trace.now(), configured=configured, value=value,
+                rows=int(rows), depth=int(depth), kind=kind,
+                unreachable=bool(unreachable),
+                fixed_ms=None if estimate is None else round(estimate[0] * 1e3, 3),
+                per_row_us=None if estimate is None else round(estimate[1] * 1e6, 3),
+            )
         if record:
             self._settle_pending_clamp()
             if unreachable:
@@ -365,7 +469,7 @@ class DecodeTimeFairness:
             _bump(self.counters, "cap_clamps")
 
     def burst_keep(self, forwards, *, kind: str = "ordinary") -> int:
-        """How many leading ``(rows, depth)`` forwards fit one stall target.
+        """How many leading ``(rows, depth[, kind])`` forwards fit one stall target.
 
         The forwards run back to back in one round before decode resumes,
         so each pays its own fixed cost at its own KV depth and the stall is
@@ -377,9 +481,13 @@ class DecodeTimeFairness:
         forwards = list(forwards)
         target = self.stall_target_ms / 1000.0
         if self.estimator == "cost_model":
-            target *= 1.0 - self.margin
+            target = target * (1.0 - self.margin) - self._host_charge_s()
         total = 0.0
-        for keep, (rows, depth) in enumerate(forwards):
+        default_kind = kind
+        for keep, forward in enumerate(forwards):
+            # ``(rows, depth)`` or ``(rows, depth, kind)``.
+            (rows, depth) = forward[:2]
+            kind = forward[2] if len(forward) > 2 else default_kind
             rows = max(1, int(rows))
             if self.estimator == "running_max":
                 rate = self.best_prefill_tokens_per_second
@@ -439,7 +547,9 @@ class DecodeTimeFairness:
             else:
                 value = self.fallback_cap
             return (max(self.floor, min(configured, value)), False)
-        target = self.stall_target_ms / 1000.0 * (1.0 - self.margin)
+        target = (
+            self.stall_target_ms / 1000.0 * (1.0 - self.margin) - self._host_charge_s()
+        )
         (forward_rows, unreachable) = self.cost.bound_rows(
             target, kind=kind, depth=depth
         )
@@ -486,9 +596,25 @@ class DecodeTimeFairness:
         if self.debt_seconds > 0:
             _bump(self.counters, "debt_deferrals")
             return False
+        if (
+            not self._host_deferred
+            and self._host_gap_s() >= 0.5 * self.stall_target_ms / 1000.0
+        ):
+            # Host work already took half this gap: decode first, then
+            # prefill in the next gap.  Once per gap, so a gap that never
+            # closes (no decode observed) cannot starve prefill.
+            self._host_deferred = True
+            _bump(self.counters, "host_gap_deferrals")
+            return False
         return True
 
     def observe_decode(self, seconds: float) -> None:
+        if _loop_trace.enabled():
+            end = _loop_trace.now()
+            _loop_trace.event(
+                "decode", end - max(0.0, float(seconds)), end,
+                debt_ms=round(self.debt_seconds * 1000.0, 3),
+            )
         paid = min(self.debt_seconds, max(0.0, float(seconds)))
         self.debt_seconds -= paid
         if self.debt_seconds < 1e-12:
@@ -529,6 +655,7 @@ class DecodeTimeFairness:
                 _bump(self.counters, "contended_stalls_over_target")
         self._gap_prefill_s = 0.0
         self._last_decode_end = now
+        self._host_deferred = False
 
     def observe_prefill(
         self,
@@ -545,6 +672,13 @@ class DecodeTimeFairness:
 
         ``decode_rows`` are decode lanes carried by the same (mixed) forward.
         """
+        if _loop_trace.enabled():
+            end = _loop_trace.now()
+            _loop_trace.event(
+                "prefill", end - max(0.0, float(seconds)), end,
+                tokens=int(tokens), rows=int(rows), depth=int(depth), kind=kind,
+                decode_rows=int(decode_rows), contended=bool(contended),
+            )
         seconds = max(0.0, float(seconds))
         tokens = max(0, int(tokens))
         if tokens and seconds:

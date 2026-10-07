@@ -2573,6 +2573,17 @@ class MTPGenerationBatch:
             raise first_error
 
     def extend(self, batch):
+        from . import loop_trace
+
+        if not loop_trace.enabled():
+            return self._extend_untraced(batch)
+        start = loop_trace.now()
+        try:
+            return self._extend_untraced(batch)
+        finally:
+            loop_trace.event("mtp_extend", start, loop_trace.now())
+
+    def _extend_untraced(self, batch):
         if not isinstance(batch, MTPGenerationBatch):
             raise TypeError("MTPGenerationBatch can extend only another MTP batch")
         if self.segmented_live_tip != batch.segmented_live_tip:
@@ -3455,6 +3466,9 @@ class BatchGenerator:
         self.decode_time_fairness = DecodeTimeFairness(
             **dict(decode_time_fairness or {})
         )
+        # Decode-first rounds put serving-loop work (token delivery, APCv2
+        # publication) between a decode and the next slice: charge it.
+        self.decode_time_fairness.charge_host_gap = True
         from .adaptive_policy import PrefillOrder
 
         self.prefill_order = PrefillOrder.from_value(prefill_scheduling)
@@ -4904,7 +4918,7 @@ class BatchGenerator:
                 toc - tic,
                 contended=prepare_contended,
                 depth=len(history),
-                kind="mtp",
+                kind="mtp_prepare",
             )
             self._sync_decode_fairness_stats()
             lane.lane.token_prefix = mx.array(history + prompt, dtype=mx.uint32)
@@ -5193,9 +5207,17 @@ class BatchGenerator:
         history = list(history) + prompt[:processed]
         self._record_prefill_chunk(uid, int(processed))
         self._mtp_states[uid] = mtp_state
-        self._capture_mtp_interior_checkpoint(
+        from . import loop_trace
+
+        capture_start = loop_trace.now() if loop_trace.enabled() else None
+        captured = self._capture_mtp_interior_checkpoint(
             uid, history, prompt_cache, mtp_state
         )
+        if capture_start is not None and captured:
+            loop_trace.event(
+                "mtp_interior_capture", capture_start, loop_trace.now(),
+                position=len(history),
+            )
         self._mtp_prefill_resident.add(uid)
         if uid not in self._mtp_prefill_projection_bytes:
             cache_projection = getattr(
@@ -5238,10 +5260,11 @@ class BatchGenerator:
         self._unprocessed_sequences = deque(queued)
         self._prompt_tokens_counter += processed
         self._prompt_time_counter += toc - tic
+        slice_contended = self._prefill_contends_decode()
         self._fairness().observe_prefill(
             processed,
             toc - tic,
-            contended=self._prefill_contends_decode(),
+            contended=slice_contended,
             depth=len(history) - int(processed),
             kind="mtp",
         )
@@ -5262,6 +5285,20 @@ class BatchGenerator:
             PromptProcessingBatch.Response(uid, (len(history), total), False, False)
         ]
         if len(remaining) == 1:
+            if (
+                processed
+                and slice_contended
+                and (self.adaptive_prefill or self._fairness().enabled)
+            ):
+                # The slice was sized to the stall target on its own; the
+                # lane preparation (target + draft forward of the final
+                # token, first-token sampling, cohort join) would extend the
+                # same neighbour gap past it.  The next round prepares the
+                # one-token residual alone (one-call path).
+                _bump_bounded_counter(
+                    self.scheduler_stats, "mtp_release_deferred_rounds"
+                )
+                return (None, progress)
             return self._release_prefilled_mtp_lane(index, progress)
         return (None, progress)
 
@@ -6762,13 +6799,15 @@ class BatchGenerator:
                 )
                 one_call = step
                 if contended_raw is not None:
+                    # The one call is a lane preparation: bound it with the
+                    # preparation's own overhead, not as a bare slice.
                     one_call = min(
                         step,
                         self._bounded_slice(
                             contended_raw,
                             contended=True,
                             depth=len(candidate[4]),
-                            kind="mtp",
+                            kind="mtp_prepare",
                             record=False,
                         ),
                     )
@@ -6780,6 +6819,23 @@ class BatchGenerator:
                 one_chunk = (
                     sum(len(segment) for segment in candidate[1]) <= one_call + 1
                 )
+                if one_chunk and contended_raw is not None:
+                    # Beside live decode (no cohort to form) the boundary
+                    # captures and the preparation are separate forwards of
+                    # one round: each pays its fixed cost.  A 16K prompt's
+                    # final 273-row slice to its turn boundary plus the
+                    # 7-row preparation ran 634 ms in one neighbour gap on
+                    # Qwen3.8-27B.  When they do not fit one stall target
+                    # together, advance to the boundary this round and
+                    # prepare in a later one.
+                    forwards = self._one_call_forwards(candidate)
+                    if len(forwards) > 1 and self._fairness().burst_keep(
+                        forwards
+                    ) < len(forwards):
+                        one_chunk = False
+                        _bump_bounded_counter(
+                            self.scheduler_stats, "mtp_one_call_split_rounds"
+                        )
                 next_checkpoint = self._next_interior_checkpoint(
                     candidate[0], len(candidate[4])
                 )
@@ -7039,19 +7095,25 @@ class BatchGenerator:
             raw_chunk,
             contended=True,
             depth=len(candidates[0][4]),
-            kind="mtp",
+            kind="mtp_prepare",
             record=False,
         )
         residuals = [
             sum(len(segment) for segment in candidate[1]) for candidate in candidates
         ]
-        timed = self._fairness().burst_keep(
-            [
-                (residual, len(candidate[4]))
-                for (residual, candidate) in zip(residuals, candidates)
-            ],
-            kind="mtp",
+        # Every forward of the burst: each row's boundary captures, then its
+        # preparation.  A row is kept only when all of its forwards fit.
+        plans = [self._one_call_forwards(candidate) for candidate in candidates]
+        kept_forwards = self._fairness().burst_keep(
+            [forward for plan in plans for forward in plan]
         )
+        timed = 0
+        for plan in plans:
+            if kept_forwards < len(plan):
+                break
+            kept_forwards -= len(plan)
+            timed += 1
+        timed = max(1, timed)
         total = keep = 0
         for residual in residuals[:timed]:
             if keep and total + residual > budget + 1:
@@ -7063,6 +7125,26 @@ class BatchGenerator:
                 self.scheduler_stats, "mtp_stall_budget_deferred_rows", n - keep
             )
         return keep
+
+    def _one_call_forwards(self, candidate):
+        """``(rows, depth, kind)`` forwards one-call preparation runs.
+
+        ``_prepare_mtp_rows`` advances to every planned boundary strictly
+        inside the residual (one ``mtp`` slice each), then prepares the lane
+        from the rest (``mtp_prepare``).  Pure.
+        """
+        (uid, segments, history) = (candidate[0], candidate[1], candidate[4])
+        covered = len(history)
+        end = covered + sum(len(segment) for segment in segments)
+        forwards = []
+        while True:
+            boundary = self._peek_interior_checkpoint(uid, covered)
+            if boundary is None or not 0 < boundary - covered < end - covered - 1:
+                break
+            forwards.append((boundary - covered, covered, "mtp"))
+            covered = boundary
+        forwards.append((max(1, end - covered), covered, "mtp_prepare"))
+        return forwards
 
     def _has_active_decode(self):
         if getattr(self, "self_mtp", None) is None:
