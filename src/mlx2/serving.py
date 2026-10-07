@@ -37,6 +37,7 @@ from .sampling_defaults import (
 from .batch_metrics import BatchFaultSpec, BatchRuntimeMetrics, HttpRuntimeMetrics
 from .runtime.apc_numerics import MOE_RHS_PAD_DEFAULT as _MOE_RHS_PAD_DEFAULT
 from .runtime.apc_numerics import moe_rhs_pad_identity as _moe_rhs_pad_identity
+from .runtime.gpu_keep_warm import GpuKeepWarm, GpuKeepWarmPolicy
 
 log = logging.getLogger(__name__)
 
@@ -3209,6 +3210,7 @@ class ServingEngine:
         verify_bitexact=None,
         prefill_depth_budget=None,
         recurrent_state_codec=None,
+        gpu_keep_warm=None,
         _validate_only=False,
     ):
         self.default_max_tokens = validate_default_max_tokens(default_max_tokens)
@@ -3693,6 +3695,8 @@ class ServingEngine:
         # under server tenant auth (mlx2.tenant_auth); otherwise it is the
         # client's X-Tenant-ID.
         self.tenant_scoped_cache = bool(tenant_scoped_cache)
+        # Off by default: idle-loop GPU keep-warm ticks (omlx #3974).
+        self.gpu_keep_warm_policy = GpuKeepWarmPolicy.from_value(gpu_keep_warm)
         if _validate_only:
             return
         from .reasoning_signatures import ReasoningSigner
@@ -3793,6 +3797,7 @@ class ServingEngine:
                 },
             }
         )
+        self.gpu_keep_warm = GpuKeepWarm(self.gpu_keep_warm_policy, self.counts)
         self._memory_reclaim_lock = threading.Lock()
         self._memory_reclaim_last = 0.0
         from .memory import FootprintSettler
@@ -5242,6 +5247,11 @@ class ServingEngine:
                 )(),
                 "queue_depth": self.queued_jobs,
                 "counts": {**dict(self.counts), **self.expert_stream_counters()},
+                **(
+                    {"gpu_keep_warm": self.gpu_keep_warm.status()}
+                    if self.gpu_keep_warm_policy.enabled
+                    else {}
+                ),
                 "quiesce": quiesce,
                 "admissions_rejected": {
                     endpoint: self.counts[f"admissions_rejected_{endpoint}"]
@@ -7387,6 +7397,11 @@ class ServingEngine:
                         "self-MTP route"
                     )
                 settings["decode_first"] = dict(self.decode_first_policy)
+            if self.gpu_keep_warm_policy.enabled:
+                # Provenance only (qualification.PROVENANCE_ONLY_SETTINGS):
+                # idle ticks touch no cache, model state or output.  Absent
+                # at the default so receipts are unchanged.
+                settings["gpu_keep_warm"] = self.gpu_keep_warm_policy.as_dict()
             if self.batch_geometry_policy is not None:
                 if external_draft or prompt_lookup or self.mtp:
                     raise ValueError(
@@ -9320,6 +9335,13 @@ class ServingEngine:
                             # stop state: the client already saw that text.
                             job.detokenizer = adapter.tokenizer.detokenizer
                             job.detokenizer.reset()
+                            if "messages" not in job.request and hasattr(
+                                job.detokenizer, "trim_space"
+                            ):
+                                # A raw completion continues the prompt: its
+                                # first token's leading space is part of the
+                                # text (vLLM #59046).  Chat keeps the trim.
+                                job.detokenizer.trim_space = False
                             parser_request = job.request
                             if self.tolerant_tool_markers:
                                 parser_request = {
@@ -10148,6 +10170,7 @@ class ServingEngine:
                     )
                     self.counts["ingress_cohort_wait_us"] += int(waited_ms * 1000)
                 if active:
+                    self.gpu_keep_warm.note_work()
                     self.counts["cycles"] += 1
                     if self.counts["cycles"] % 64 == 0:
                         _reap_native_admission_orphans()
@@ -11318,6 +11341,12 @@ class ServingEngine:
                     self._service_admin_prefetch(apc)
                     self._service_pending_prefetch(apc)
                     apc.spill_idle_entries()
+                    # Last in the idle branch, on this (MLX) thread, so a tick
+                    # never overlaps a stepped request; a queued one wakes the
+                    # GPU itself.
+                    self.gpu_keep_warm.maybe_tick(
+                        pending_work=bool(published) or not self.incoming.empty()
+                    )
                 now = time.monotonic()
                 if now - last_snapshot > 1:
                     # A reading outside rejection keeps the settle baseline

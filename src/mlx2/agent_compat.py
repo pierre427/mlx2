@@ -64,6 +64,9 @@ COUNTERS = {
     "agent_compat_thinking_restored": "thinking_restored",
     "agent_compat_thinking_cleared": "thinking_cleared",
     "agent_compat_output_effort": "output_effort",
+    "agent_compat_tools_deferred": "tool_deferred",
+    "agent_compat_tool_additions": "tool_addition",
+    "agent_compat_tool_removals": "tool_removal",
 }
 
 

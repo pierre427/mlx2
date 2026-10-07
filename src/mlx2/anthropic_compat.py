@@ -45,7 +45,7 @@ def _cache_control(value):
         raise ValueError("cache_control ttl must be 5m or 1h")
 
 
-def _chat_tool(tool, *, anthropic=False, default_strict=None):
+def _chat_tool(tool, *, anthropic=False, default_strict=None, compat=False):
     tool = _object(tool, "tool")
     if anthropic:
         allowed = {"name", "description", "input_schema", "cache_control"}
@@ -53,7 +53,13 @@ def _chat_tool(tool, *, anthropic=False, default_strict=None):
             # The explicit form of a client tool; server tool types stay
             # unsupported.
             allowed.add("type")
+        if compat:
+            # Claude Code's tool search declares tools it withholds until a
+            # ``tool_addition`` surfaces them; ``_resolve_tools`` applies it.
+            allowed.add("defer_loading")
         _only(tool, allowed, "tool")
+        if "defer_loading" in tool and not isinstance(tool["defer_loading"], bool):
+            raise ValueError("tool defer_loading must be boolean")
         if "cache_control" in tool:
             _cache_control(tool["cache_control"])
         name = _text(tool.get("name"), "tool name", empty=False)
@@ -90,7 +96,47 @@ def _chat_tool(tool, *, anthropic=False, default_strict=None):
     return {"type": "function", "function": function}
 
 
-def _anthropic_system(value):
+def _tool_change(block, compat):
+    """Parse one ``tool_addition``/``tool_removal`` block.
+
+    Returns ``(kind, name, chat_tool_or_None)``; a by-value
+    ``tool_definition`` carries its translated tool, a ``tool_reference``
+    names one declared earlier.
+    """
+    kind = block["type"]
+    _only(block, {"type", "tool", "cache_control"}, f"{kind} block")
+    if "cache_control" in block:
+        _cache_control(block["cache_control"])
+    tool = _object(block.get("tool"), f"{kind} tool")
+    ref = tool.get("type")
+    if ref in ("mcp_tool_reference", "mcp_toolset_reference"):
+        raise ValueError("MCP tool references are unsupported: no MCP connector")
+    if ref == "tool_reference":
+        _only(tool, {"type", "name"}, f"{kind} tool_reference")
+        return kind, _text(tool.get("name"), "tool_reference name", empty=False), None
+    if ref == "tool_definition" and kind == "tool_addition":
+        _only(tool, {"type", "definition"}, "tool_definition")
+        definition = _object(tool.get("definition"), "tool_definition definition")
+        if definition.get("type") == "mcp_toolset":
+            raise ValueError("MCP toolsets are unsupported: no MCP connector")
+        if "cache_control" in block and "cache_control" in definition:
+            raise ValueError(
+                "cache_control goes on the tool_addition block or its definition, "
+                "not both"
+            )
+        if definition.get("defer_loading") is True:
+            raise ValueError("a tool_addition definition cannot be deferred")
+        translated = _chat_tool(definition, anthropic=True, compat=compat)
+        return kind, translated["function"]["name"], translated
+    raise ValueError(f"unsupported {kind} tool type: {ref!r}")
+
+
+def _anthropic_system(value, tool_changes=None):
+    """Join system text.  ``tool_changes`` (a list) admits tool-change blocks.
+
+    Only a mid-conversation ``role: "system"`` message under agent compat
+    passes ``tool_changes``; the top-level ``system`` stays text only.
+    """
     if isinstance(value, str):
         return value
     if not isinstance(value, list):
@@ -98,6 +144,11 @@ def _anthropic_system(value):
     parts = []
     for block in value:
         block = _object(block, "system block")
+        if tool_changes is not None and block.get("type") in (
+            "tool_addition", "tool_removal",
+        ):
+            tool_changes.append(_tool_change(block, compat=True))
+            continue
         _only(block, {"type", "text", "cache_control"}, "system block")
         if "cache_control" in block:
             _cache_control(block["cache_control"])
@@ -107,19 +158,64 @@ def _anthropic_system(value):
     return "".join(parts)
 
 
+def _resolve_tools(tools, tool_changes, *, compat, counts=None):
+    """Return the tools the prompt offers at the end of the transcript.
+
+    Follows Anthropic's mid-conversation tool semantics (vLLM #57693): a
+    declared tool is offered unless ``defer_loading``; ``tool_addition``
+    offers a deferred or removed tool (or declares one by value);
+    ``tool_removal`` withdraws one until it is added again; a reference to a
+    tool never declared is a 400.  Offered tools keep declaration order, so
+    a request without deferral or tool changes renders exactly as before.
+    Returns ``(offered, withheld_any)``.
+    """
+    if not isinstance(tools, list):
+        raise ValueError("tools must be a list")
+    declared, offered = {}, set()
+    for raw in tools:
+        tool = _chat_tool(raw, anthropic=True, compat=compat)
+        name = tool["function"]["name"]
+        if name in declared:
+            raise ValueError("tool names must be nonempty and unique")
+        declared[name] = tool
+        if raw.get("defer_loading") is True:
+            _agent.count(counts, "agent_compat_tools_deferred")
+        else:
+            offered.add(name)
+    for kind, name, tool in tool_changes:
+        if tool is not None:
+            declared[name] = tool
+        elif name not in declared:
+            raise ValueError(
+                f"tool_reference_unresolved: {kind} references undeclared tool {name!r}"
+            )
+        if kind == "tool_addition":
+            offered.add(name)
+            _agent.count(counts, "agent_compat_tool_additions")
+        else:
+            offered.discard(name)
+            _agent.count(counts, "agent_compat_tool_removals")
+    result = [tool for name, tool in declared.items() if name in offered]
+    return result, len(result) < len(declared)
+
+
 def _anthropic_message(
     message, *, signer=None, model=None, tenant_id="default", compat=False,
-    counts=None, resolved=None,
+    counts=None, resolved=None, tool_changes=None,
 ):
     message = _object(message, "message")
     _only(message, {"role", "content"}, "message")
     role = message.get("role")
     if compat and role == "system":
         # Claude Code's mid-conversation-system beta.  Folded into a user turn
-        # by ``fold_system_messages`` once the whole transcript is known.
-        return [{"role": "system", "content": _anthropic_system(
-            message.get("content")
-        )}], 0
+        # by ``fold_system_messages`` once the whole transcript is known; its
+        # tool changes are resolved into ``tools`` by ``_resolve_tools``.
+        changes = [] if tool_changes is None else tool_changes
+        before = len(changes)
+        text = _anthropic_system(message.get("content"), tool_changes=changes)
+        if not text and len(changes) > before:
+            return [], 0  # Only tool changes: nothing to render in place.
+        return [{"role": "system", "content": text}], 0
     if role not in ("user", "assistant"):
         raise ValueError("Anthropic message role must be user or assistant")
     content = message.get("content")
@@ -389,6 +485,7 @@ def anthropic_request_to_chat(
     if raw_messages[-1].get("role") == "assistant":
         raise ValueError("assistant prefill is unsupported")
     rejections = 0
+    tool_changes = []
     for message in raw_messages:
         translated, dropped = _anthropic_message(
             message,
@@ -398,6 +495,7 @@ def anthropic_request_to_chat(
             compat=compat,
             counts=counts,
             resolved=agent_compat,
+            tool_changes=tool_changes,
         )
         messages.extend(translated)
         rejections += dropped
@@ -429,14 +527,32 @@ def anthropic_request_to_chat(
             result[target] = body[source]
     if count_tokens and result.get("stream"):
         raise ValueError("stream is unsupported for count_tokens")
-    if "tools" in body:
+    withheld = False
+    if compat and ("tools" in body or tool_changes):
+        tools, withheld = _resolve_tools(
+            body.get("tools", []), tool_changes, compat=compat, counts=counts
+        )
+        if tools or not withheld:
+            # An explicit ``tools: []`` keeps failing in ``validate_request``.
+            result["tools"] = tools
+    elif "tools" in body:
         if not isinstance(body["tools"], list):
             raise ValueError("tools must be a list")
         result["tools"] = [_chat_tool(tool, anthropic=True) for tool in body["tools"]]
     if "tool_choice" in body:
-        result["tool_choice"] = _anthropic_tool_choice(body["tool_choice"])
-        if body["tool_choice"].get("disable_parallel_tool_use") is True:
-            result["parallel_tool_calls"] = False
+        choice = _anthropic_tool_choice(body["tool_choice"])
+        if withheld:
+            # vLLM #59718: a forced choice must name a tool still offered
+            # (``/count_tokens`` never reaches ``normalize_tool_choice``).
+            offered = {tool["function"]["name"] for tool in result.get("tools", ())}
+            if choice == "required" and not offered:
+                raise ValueError("tool_choice any needs a tool that is currently offered")
+            if isinstance(choice, dict) and choice["function"]["name"] not in offered:
+                raise ValueError("tool_choice names a tool that is not currently offered")
+        if "tools" in result or not withheld:
+            result["tool_choice"] = choice
+            if body["tool_choice"].get("disable_parallel_tool_use") is True:
+                result["parallel_tool_calls"] = False
     if "thinking" in body:
         thinking = _object(body["thinking"], "thinking")
         kind = thinking.get("type")

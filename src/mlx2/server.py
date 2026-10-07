@@ -1093,6 +1093,19 @@ def _request_json(raw):
         raise ValueError("request JSON is nested too deeply") from error
     if not isinstance(value, dict):
         raise ValueError("request must be a JSON object")
+    # A ``\ud800`` escape (or surrogate bytes, which ``json.loads`` decodes
+    # with ``surrogatepass``) parses to a lone surrogate no tokenizer can
+    # encode; it surfaced as a 500 template failure (omlx #4253).  Only bodies
+    # that can hold one pay for the check.
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", "surrogatepass")
+    if b"\\ud" in raw or b"\\uD" in raw or b"\xed" in raw:
+        try:
+            json.dumps(value, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError(
+                "request text contains an unpaired UTF-16 surrogate"
+            ) from error
     return value
 
 
@@ -4675,6 +4688,25 @@ def build_parser():
         help="idle-to-active wait for B1-B4 admission (default: 5 ms)",
     )
     parser.add_argument(
+        "--gpu-keep-warm-seconds",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help=(
+            "after a request, keep the GPU out of its idle power state for "
+            "this long by submitting a one-element kernel from the idle "
+            "worker loop, so the next request skips the wake-up stall "
+            "(default: 0, disabled)"
+        ),
+    )
+    parser.add_argument(
+        "--gpu-keep-warm-interval",
+        type=float,
+        default=0.5,
+        metavar="SECONDS",
+        help="seconds between keep-warm ticks (default: %(default)s)",
+    )
+    parser.add_argument(
         "--batch-cohort-timeout-ms",
         type=float,
         default=1000.0,
@@ -5352,6 +5384,14 @@ def serving_engine_kwargs(
         "int8_prefill": args.int8_prefill,
         "verify_bitexact": bool(getattr(args, "verify_bitexact", False)),
         "recurrent_state_codec": getattr(args, "recurrent_state_codec", "off"),
+        "gpu_keep_warm": (
+            {
+                "window_seconds": args.gpu_keep_warm_seconds,
+                "interval_seconds": getattr(args, "gpu_keep_warm_interval", 0.5),
+            }
+            if getattr(args, "gpu_keep_warm_seconds", 0)
+            else None
+        ),
     }
 
 

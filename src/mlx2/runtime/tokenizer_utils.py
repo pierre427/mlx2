@@ -189,7 +189,8 @@ class BPEStreamingDetokenizer(StreamingDetokenizer):
 
     _byte_decoder = None
 
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, trim_space=True):
+        self.trim_space = trim_space
         ids = [operator.index(tokenid) for tokenid in tokenizer.vocab.values()]
         if any(tokenid < 0 for tokenid in ids):
             raise ValueError("BPE vocabulary contains a negative token ID")
@@ -225,7 +226,7 @@ class BPEStreamingDetokenizer(StreamingDetokenizer):
             return current_text
         elif current_text[0] != " ":
             return current_text
-        elif not self.text:
+        elif not self.text and self.trim_space:
             return current_text[1:]
         return current_text
 

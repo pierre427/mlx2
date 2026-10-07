@@ -225,6 +225,7 @@ class PrometheusBuilder:
 
 
 from .agent_compat import COUNTERS as _AGENT_COMPAT_COUNTERS
+from .runtime.gpu_keep_warm import COUNTERS as _GPU_KEEP_WARM_COUNTERS
 
 _ENGINE_EVENTS = {
     "apcv2_fanout_groups": ("apcv2_fanout", "groups"),
@@ -418,6 +419,10 @@ _ENGINE_EVENTS = {
 _ENGINE_EVENTS.update(
     {key: ("agent_compat", event) for key, event in _AGENT_COMPAT_COUNTERS.items()}
 )
+# Opt-in GPU keep-warm ticker (``--gpu-keep-warm-seconds``).
+_ENGINE_EVENTS.update(
+    {key: ("gpu_keep_warm", event) for key, event in _GPU_KEEP_WARM_COUNTERS.items()}
+)
 
 # Default-off mechanisms.  Their counters do not exist on a server that never
 # enabled the policy, and an unconditional zero series would make a default
@@ -427,6 +432,7 @@ _OPTIONAL_COMPONENTS = frozenset(
     {
         "apcv2_rolling", "apcv2_junction", "memory_preemption",
         "expert_stream_load", "dense_stream", "dense_stream_load",
+        "gpu_keep_warm",
     }
 )
 _OPTIONAL_ENGINE_EVENTS = {

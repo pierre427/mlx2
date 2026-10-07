@@ -1093,6 +1093,8 @@ PROVENANCE_ONLY_SETTINGS = frozenset(
         "cache_bytes_source",
         "cache_bytes_clamped_from",
         "cache_bytes_headroom",
+        # Idle-loop GPU keep-warm ticks: host power state, not route identity.
+        "gpu_keep_warm",
     }
 )
 
