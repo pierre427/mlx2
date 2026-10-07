@@ -68,7 +68,10 @@ NORTH_SOURCE = "src/mlx2/adapters/north_mini_code.py"
 # row-exact q4 support, prefill-step ownership, and a disabled prefix-cascade
 # planner.  The exact REFERENCE_FUNCTIONS/constants AST allowlist is unchanged
 # from the prior pin.
-NORTH_SHA256 = "fbc4c264382ae2b087650152a478faa091069aadefb93b296630c25a7f132ee8"
+# Re-pinned 2026-10-06 (sweep): process-global claims moved into the shared
+# claim_stock_moe helper and the workspace receipt string; the allowlisted
+# inspector functions and constants are byte-identical.
+NORTH_SHA256 = "494c7225a679616b699cbe07732d9679c4b34db3c7c7d2ea80220955f1c5683c"
 REFERENCE_FUNCTIONS = ("_load_json", "_safe_index", "_quantized_shapes", "_expected_weight_headers",
                        "_validate_weight_headers", "_unique_pairs", "inspect_artifact")
 REFERENCE_CONSTANTS = ("_SAFETENSORS_HEADER_LIMIT", "_DTYPE_BYTES")

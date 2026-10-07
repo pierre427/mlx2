@@ -29,10 +29,19 @@ from mlx2.exit_trace import ExitTrace
 def spawn(body: str, *, preexec=None) -> subprocess.Popen:
     env = dict(os.environ, PYTHONPATH=SRC + os.pathsep + os.environ.get("PYTHONPATH", ""))
     env.pop("MLX2_FAULT_LOG", None)
+    def child_setup():
+        # Start from default dispositions: a runner launched with nohup or as
+        # a background job passes SIGHUP / SIGINT down as ignored, and these
+        # tests are about what ExitTrace does with the signals.
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+        if preexec is not None:
+            preexec()
+
     return subprocess.Popen(
         [sys.executable, "-u", "-c", PRELUDE + textwrap.dedent(body)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
-        preexec_fn=preexec,
+        preexec_fn=child_setup,
     )
 
 
@@ -166,13 +175,16 @@ def test_first_reason_wins_and_the_exit_line_reports_it(caplog):
 
 def test_uninstall_restores_hooks_and_signals():
     before = (sys.excepthook, threading.excepthook, signal.getsignal(signal.SIGTERM))
+    # The runner's own SIGINT disposition (SIG_IGN under nohup or a background
+    # job) is what uninstall must restore.
+    before_int = signal.getsignal(signal.SIGINT)
     trace = ExitTrace().install()
     assert signal.getsignal(signal.SIGTERM) == trace._startup_signal
     trace.uninstall()
     assert (sys.excepthook, threading.excepthook, signal.getsignal(signal.SIGTERM)) == (
         before[0], before[1], signal.SIG_DFL,
     )
-    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    assert signal.getsignal(signal.SIGINT) is before_int
 
 
 def test_fault_log_flag_and_env(monkeypatch, tmp_path):

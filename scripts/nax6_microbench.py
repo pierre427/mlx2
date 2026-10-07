@@ -193,7 +193,8 @@ def main():
         rec["summary"] = summary
         results.append(rec)
         print(json.dumps({"n": n, "key": key, "T": T, "summary": summary, "invalid": rec["invalid"]}), flush=True)
-        del x_tok, hidden, row_map, idx, order, inds
+        # Release the case's arrays (closures above captured the names).
+        x_tok = hidden = row_map = idx = order = inds = None
         mx.clear_cache()
         if swapouts() > swap0:
             print(json.dumps({"abort": "swapouts rose"}), flush=True)

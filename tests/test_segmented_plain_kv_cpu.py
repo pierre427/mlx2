@@ -57,6 +57,14 @@ def load_cpu_classes():
         if isinstance(n, ast.FunctionDef) and n.name == "create_causal_mask"
     )
     cache = ast.parse((ROOT / "models/cache.py").read_text())
+    # KVCache.trim notes rewinds for borrowed recovery guards; the oracle has
+    # none registered, so the helper is a no-op over an empty registry.
+    namespace["_RECOVERY_REWIND_GUARDS"] = {}
+    nodes.extend(
+        n
+        for n in cache.body
+        if isinstance(n, ast.FunctionDef) and n.name == "_note_recovery_rewind"
+    )
     nodes.extend(
         n for n in cache.body if isinstance(n, ast.ClassDef) and n.name == "KVCache"
     )

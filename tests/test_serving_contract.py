@@ -2330,10 +2330,35 @@ def test_runtime_has_no_legacy_apc_or_unified_import():
         ("from", "mlx_lm", "load", "mlx_lm_load"),
         ("import", "mlx_lm", None, None),
     }
+    # The vendored TensorFold executor keeps its standalone ``install()``
+    # entry point byte-identical (its source hash is pinned).  mlx2 never
+    # calls it; only that function may import mlx_lm's qwen3_next module.
+    vendored = root / "runtime/tensorfold_qwen38/lane_attention.py"
+    vendored_imports = {("import", "mlx_lm.models.qwen3_next", None, "qn")}
     observed_external_imports = set()
     for path in root.rglob("*.py"):
         tree = ast.parse(path.read_text())
         allowed_nodes = set()
+        if path == vendored:
+            install = [
+                node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "install"
+            ]
+            assert len(install) == 1
+            vendored_nodes = {id(node) for node in ast.walk(install[0])}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import) and any(
+                    alias.name.startswith("mlx_lm") for alias in node.names
+                ):
+                    assert id(node) in vendored_nodes
+                    assert {
+                        ("import", a.name, None, a.asname) for a in node.names
+                    } <= vendored_imports
+                assert not (
+                    isinstance(node, ast.ImportFrom)
+                    and (node.module or "").startswith("mlx_lm")
+                )
+            continue
         if path == external_worker:
             functions = [
                 node

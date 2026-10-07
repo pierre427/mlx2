@@ -486,11 +486,12 @@ def test_tensorfold_dispatch_seam_groups_depths_with_cpu_hybrid_substitute(monke
         parent_rows,
         caches,
         capture_layers,
-        source_root,
+        source_root=None,
         *,
         cached=False,
     ):
-        assert source_root == "/tmp/unused-native-seam-test" and not cached
+        # The executor is vendored (cfa2ff599): no external source root.
+        assert source_root is None and not cached
         for tokens, parents in zip(token_rows, parent_rows):
             assert parents == list(range(-1, len(tokens) - 1))
         assert len({id(row) for row in caches}) == len(caches)

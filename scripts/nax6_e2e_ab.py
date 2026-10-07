@@ -38,7 +38,7 @@ ARMS = {"nax4": (4, 8), "nax6": (4, 6, 8)}
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit")
+    ap.add_argument("--model", default=str(Path.home() / "mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit"))
     ap.add_argument("--context", type=int, default=8192)
     ap.add_argument("--chunk", type=int, default=2048)
     ap.add_argument("--reps", type=int, default=6)

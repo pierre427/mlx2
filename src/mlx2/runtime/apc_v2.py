@@ -599,6 +599,9 @@ class APCv2(PrefixIndex):
     _SESSION_TAG_LIMIT = 16
     # Longest wait before an idle scan retries a snapshot that failed to spill.
     _SPILL_RETRY_MAX_SECONDS = 300.0
+    # Instance value set in __init__; the class default keeps owners built
+    # without __init__ (tests, restore paths) on the historical LRU order.
+    _retention_policy = None
     _RETENTION_DEFAULT = "default"
     _RETENTION_INTERIOR = "interior_checkpoint"
     _RETENTION_PROMPT_BOUNDARY = "committed_prompt_boundary"

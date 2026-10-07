@@ -61,6 +61,7 @@ def test_nemotron_incremental_cache_serves_the_ordinary_prompt(kind):
 
 
 def _tiny_gemma4():
+    pytest.importorskip("mlx_vlm")
     import mlx.core as mx
     import mlx.nn as nn
     from mlx_vlm.models.gemma4.config import ModelConfig, TextConfig, VisionConfig
@@ -566,6 +567,7 @@ def test_llada_records_and_applies_its_seed(monkeypatch):
 
 
 def _muse_pair(dtype):
+    pytest.importorskip("mlx_vlm")
     import mlx.core as mx
     from mlx.utils import tree_flatten, tree_map
     from mlx_vlm.models.muse_glimmer.config import TextConfig
