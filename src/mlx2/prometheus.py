@@ -635,6 +635,7 @@ _SCHEDULER_EVENTS = frozenset(
         "self_mtp_copy_probe_rounds",
         "self_mtp_copy_gate_declines",
         "self_mtp_copy_lookup_misses",
+        "self_mtp_copy_cohort_refusals",
         "apc_interior_checkpoints_skipped_trimmable",
         "apc_interior_checkpoints_skipped_inexact",
         "apc_rolling_checkpoints_captured",

@@ -2273,6 +2273,9 @@ def _greedy_batch_sampler(logprobs):
 
 
 _greedy_batch_sampler.batch_groupable = True
+# Draws nothing, so prompt lookup may sample verify rows past the accept
+# point in the same sync as its forward.
+_greedy_batch_sampler.deterministic = True
 _GREEDY_BATCH_SAMPLER = _greedy_batch_sampler
 
 

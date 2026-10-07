@@ -129,6 +129,32 @@ def test_cohort_cap_bounds_batched_padding():
     assert cohort_copy_cap(wide, lanes=4, head_depths=[2]) == 4
 
 
+def test_cohort_refusal_is_not_reported_as_a_lookup_miss():
+    """SPEC-09: a B>=2 round refused by the cohort cap says so in its receipt."""
+    from types import SimpleNamespace
+
+    from mlx2.runtime.generate import _note_copy_draft_round
+    from mlx2.runtime.hybrid_speculative import _plan_copy_drafts
+
+    policy = CopyDraftPolicy(enabled=True, ngram_min=2, ngram_max=2)
+    states = [CopyDraftState(policy, [1, 2, 3, 1, 2]) for _ in range(2)]
+    lanes = [
+        SimpleNamespace(copy_draft=state, max_tokens=64, ntoks=0) for state in states
+    ]
+    rows, decisions = _plan_copy_drafts(lanes, [2, 2])
+    assert rows == ((), ()) and decisions == ("cohort_refused", "cohort_refused")
+    receipt = states[0].receipt()
+    assert receipt["cohort_refusals"] == 1 and receipt["lookup_misses"] == 0
+    stats = {}
+    _note_copy_draft_round(stats, SimpleNamespace(
+        copy_spans=rows, accepted_lengths=(1, 1), copy_decisions=decisions,
+    ))
+    assert stats == {"self_mtp_copy_cohort_refusals": 2}
+    # The same source still copies when the lane decodes alone.
+    rows, decisions = _plan_copy_drafts(lanes[:1], [2])
+    assert rows[0] and decisions == ("copy",)
+
+
 def test_point_mass_sampling_law_is_exact():
     """Accept d with p(d); otherwise emit p restricted to != d (renormalised)."""
     rng = np.random.default_rng(5)

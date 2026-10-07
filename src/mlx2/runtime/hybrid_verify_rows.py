@@ -17,7 +17,13 @@ cache topology: a lane whose caches are only plain/rotating KV keeps the
 Per round: every recurrent row starts a fresh rollback epoch, the verify
 forward records one replay per recurrent layer, commit trims each row to its
 consumed prefix and stops speculation (dropping the records and the
-pre-forward state they pin).  No capability is qualified by this module.
+pre-forward state they pin).  Abort returns every row to the pre-round
+boundary: KV rows trim to their base offsets and recurrent rows take back
+the state references held at ``begin`` (a forward replaces recurrent state,
+never mutates it, which is what the rollback records' own snapshots rely
+on), so an interrupted forward that wrote some layers and not others, or a
+plain step without records, still rewinds exactly.  No capability is
+qualified by this module.
 """
 
 from __future__ import annotations
@@ -104,15 +110,24 @@ class HybridVerifyRows:
         self._note = note
         self._active = None
 
-    def begin(self, lengths):
+    def begin(self, lengths, *, plain_single_token=False):
+        """Lease the rows to one verify forward of ``lengths`` tokens per row.
+
+        ``plain_single_token`` lets a round whose every row is one token skip
+        the rollback epoch: commit then accepts exactly that token and trims
+        nothing, so the forward is an ordinary decode step and takes the
+        plain recurrent path instead of the verify kernel and its records.
+        """
         if self._active is not None and not self._active.closed:
             raise RuntimeError("hybrid lanes are leased by an active transaction")
-        self._active = HybridVerifyTransaction(self, lengths)
+        self._active = HybridVerifyTransaction(
+            self, lengths, plain_single_token=plain_single_token
+        )
         return self._active
 
 
 class HybridVerifyTransaction:
-    def __init__(self, owner, lengths):
+    def __init__(self, owner, lengths, *, plain_single_token=False):
         from .hybrid_speculative import _prepare_self_mtp_cache_group
 
         rows = owner.rows
@@ -130,10 +145,18 @@ class HybridVerifyTransaction:
             for row in rows
         ]
         self._started = []
+        # The pre-round recurrent state, by reference (see the module note).
+        self._recurrent_base = [
+            (cache, list(cache.cache), cache.lengths, cache.left_padding)
+            for row in rows
+            for cache in row
+            if isinstance(cache, ArraysCache)
+        ]
+        self.plain = bool(plain_single_token) and self.width == 1
         try:
             for row in rows:
                 for cache in row:
-                    if isinstance(cache, ArraysCache):
+                    if isinstance(cache, ArraysCache) and not self.plain:
                         cache.start_speculation()
                         self._started.append(cache)
             if len(rows) == 1:
@@ -146,6 +169,12 @@ class HybridVerifyTransaction:
 
                 self.batched = True
                 self.caches = build_segmented_batch_cache_group(rows, note=owner._note)
+                if self.plain:
+                    # The batched recurrent view assumes a verify epoch; a
+                    # plain step writes state through it without records.
+                    for cache in self.caches:
+                        if isinstance(cache, ArraysCache):
+                            cache.speculating = False
                 _prepare_self_mtp_cache_group(
                     self.caches,
                     self.lengths,
@@ -189,6 +218,7 @@ class HybridVerifyTransaction:
             owner._active = None
         self.closed = True
         self._kv_base = []
+        self._recurrent_base = []
         self.caches = []
         self.owner = None
 
@@ -239,25 +269,41 @@ class HybridVerifyTransaction:
         return rows
 
     def abort(self):
-        """Best-effort rewind to the pre-round boundary; recovery snapshots win."""
+        """Rewind every row to the pre-round boundary, KV and recurrent alike.
+
+        Every row is attempted; the first failure is raised afterwards, so a
+        caller never takes a partly rewound lane for an exact one.
+        """
         if self.closed:
             return
         self.closed = True
+        first = None
         try:
             self._finalize()
-        except BaseException:  # noqa: BLE001, S110 - snapshots restore authoritatively
-            pass
-        try:
-            for row, bases in zip(self.owner.rows, self._kv_base):
-                for cache, base in zip(row, bases):
-                    if base is not None and _kv_offset(cache) > base:
-                        cache.trim(_kv_offset(cache) - base)
-        except BaseException:  # noqa: BLE001, S110
-            pass
+        except BaseException as error:  # noqa: BLE001 - every row gets its turn
+            first = error
+        for row, bases in zip(self.owner.rows, self._kv_base):
+            for cache, base in zip(row, bases):
+                try:
+                    if base is not None and _kv_offset(cache) != base:
+                        drop = _kv_offset(cache) - base
+                        if drop < 0 or int(cache.trim(drop)) != drop:
+                            raise RuntimeError(
+                                f"hybrid abort could not rewind KV to offset {base}"
+                            )
+                except BaseException as error:  # noqa: BLE001
+                    first = first or error
+        for cache, state, lengths, left_padding in self._recurrent_base:
+            cache.cache = list(state)
+            cache.lengths, cache.left_padding = lengths, left_padding
         try:
             self._stop()
+        except BaseException as error:  # noqa: BLE001
+            first = first or error
         finally:
             self._close()
+        if first is not None:
+            raise first
 
 
 __all__ = [

@@ -106,6 +106,25 @@ def _invalid_output_reason(token: int, logprobs: mx.array) -> Optional[str]:
     return None
 
 
+def _outputs_all_valid(outputs) -> bool:
+    """Whether ``_invalid_output_reason`` passes every output, in one host read.
+
+    A self-MTP round emits several tokens per lane, and checking each one
+    took its own device-to-host sync (mlx-lm #1950 measured such per-token
+    reads).  This reads every emitted log probability in one stacked check.
+    It has no side effects: a False answer sends the caller back to the
+    per-token check, which then raises exactly as before.
+    """
+    values = []
+    for output in outputs:
+        token = int(output.token)
+        if token < 0 or token >= int(output.logprobs.shape[-1]):
+            return False
+        values.append(output.logprobs[token])
+    # Stacking only widens dtypes, which preserves finiteness.
+    return not values or bool(mx.isfinite(mx.stack(values)).all().item())
+
+
 def prefill_clear_cache(decode_active: bool) -> bool:
     """Whether a prefill chunk ends with ``mx.clear_cache()``.
 
@@ -1650,6 +1669,8 @@ def _note_copy_draft_round(stats: Dict[str, Any], proposal: Any) -> None:
                 _bump_bounded_counter(stats, "self_mtp_copy_probe_rounds")
         elif decision == "declined":
             _bump_bounded_counter(stats, "self_mtp_copy_gate_declines")
+        elif decision == "cohort_refused":
+            _bump_bounded_counter(stats, "self_mtp_copy_cohort_refusals")
         else:
             _bump_bounded_counter(stats, "self_mtp_copy_lookup_misses")
 
@@ -3016,8 +3037,11 @@ class MTPGenerationBatch:
             terminal = []
             responses = []
             last = {}
+            all_valid = _outputs_all_valid(
+                output for outputs in proposal.outputs for output in outputs
+            )
             for i, outputs in enumerate(proposal.outputs):
-                for output in outputs:
+                for output in () if all_valid else outputs:
                     reason = _invalid_output_reason(int(output.token), output.logprobs)
                     if reason is not None:
                         raise RuntimeError(
@@ -3397,6 +3421,7 @@ class BatchGenerator:
                 "self_mtp_copy_probe_rounds",
                 "self_mtp_copy_gate_declines",
                 "self_mtp_copy_lookup_misses",
+                "self_mtp_copy_cohort_refusals",
             ):
                 self.scheduler_stats.setdefault(key, 0)
         self.post_prefill_transform = post_prefill_transform

@@ -145,15 +145,23 @@ class ComposedDraftModel:
             )
         histories = [list(history) for history in processor_histories]
         # Determine host copies before opening the backend call; indexes see
-        # committed tokens and the current anchor exactly once.
+        # committed tokens and the current anchor exactly once.  ``propose``
+        # only reads sources that start inside the last ``lookback`` tokens,
+        # whose keys reach back at most ``ngram_max`` tokens, so indexing
+        # that window proposes exactly what the full history would at
+        # O(lookback) per row-round instead of O(context).  The index is
+        # rebuilt every round, so it carries no rejected-source feedback
+        # (``reject_ttl=0`` says so) and no acceptance gate.
+        window = self.policy.lookback + self.policy.ngram_max
         replacements = []
         for history, anchor in zip(histories, anchors):
             copied = []
             if self.policy.prompt_lookup and proposal_length:
                 lookup = IndexedPromptLookup(
-                    [*history, int(anchor)],
+                    [*history[-(window - 1):], int(anchor)],
                     ngram_min=self.policy.ngram_min,
                     ngram_max=self.policy.ngram_max,
+                    reject_ttl=0,
                 )
                 copied = lookup.propose(proposal_length, lookback=self.policy.lookback)
             replacements.append(list(copied))

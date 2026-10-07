@@ -396,3 +396,51 @@ def test_shared_adapter_binding_selects_reachable_wrapper_and_revision_policy():
         assert outputs[ids[0]] == reference(model, [1, 2, 1, 2], 4)
         fingerprints.append(adapter.identity["fingerprint"])
     assert fingerprints[0] != fingerprints[1]
+
+
+def test_copy_index_covers_only_the_lookback_window(monkeypatch):
+    """SPEC-04: the per-round index is bounded by lookback, not history."""
+    import mlx2.runtime.proposal_composition as composition
+
+    model, draft = pair("xpress", [2])
+    wrapped = ComposedDraftModel(
+        draft, {"ngram_min": 1, "ngram_max": 2, "lookback": 8}
+    )
+    built = []
+    real = composition.IndexedPromptLookup
+
+    def spy(tokens, **kwargs):
+        built.append(list(tokens))
+        return real(tokens, **kwargs)
+
+    monkeypatch.setattr(composition, "IndexedPromptLookup", spy)
+    history = [1, 2, 3] * 40
+    hidden = model.prefill_body(mx.array([[1, 2], [4, 5]]), model.make_cache(), [0, 2])
+    caches = [wrapped.make_cache(), wrapped.make_cache()]
+    tokens, _laws = wrapped.draft_distributions(
+        [1, 6], hidden, wrapped.batch_caches(caches), 2, [None, None], [0, 0],
+        processor_histories=[history, [4, 5]],
+    )
+    assert built == [(history + [1])[-10:], [4, 5, 6]]
+    assert tokens[0] == [2, 3]
+
+
+def test_windowed_lookup_proposes_exactly_what_the_full_index_proposes():
+    from mlx2.runtime.prompt_lookup import IndexedPromptLookup
+
+    rng = np.random.default_rng(1)
+    for _ in range(1500):
+        n = int(rng.integers(5, 300))
+        vocab = int(rng.integers(2, 6))
+        history = rng.integers(0, vocab, n).tolist()
+        lookback = int(rng.integers(1, 120))
+        span = int(rng.integers(1, 9))
+        ngram_max = int(rng.integers(1, 7))
+        ngram_min = int(rng.integers(1, ngram_max + 1))
+        full = IndexedPromptLookup(history, ngram_min=ngram_min, ngram_max=ngram_max)
+        windowed = IndexedPromptLookup(
+            history[-(lookback + ngram_max):], ngram_min=ngram_min, ngram_max=ngram_max
+        )
+        assert full.propose(span, lookback=lookback) == windowed.propose(
+            span, lookback=lookback
+        )

@@ -112,14 +112,15 @@ def test_deferred_admission_probes_on_plain_path_then_activates():
     )[0]
     generator.next()
     _, first = generator.next()
-    assert first[0].uid == uid and not first[0].from_draft
-    _, second = generator.next()
-    receipts = [response.speculative_receipt for response in second]
-    assert receipts[-1]["admission_activations"] == 1
+    # Each poll hands out every token its round verified: the plain probe
+    # round's one token, whose commit activates admission.
+    assert [response.uid for response in first] == [uid]
+    assert not first[0].from_draft
+    assert first[0].speculative_receipt["admission_activations"] == 1
     # The activation happens only after the ordinary probe commits; the next
     # closed boundary is the first one allowed to run a verify span.
-    _, third = generator.next()
-    assert any(response.from_draft for response in third)
+    _, second = generator.next()
+    assert any(response.from_draft for response in second)
 
 
 def test_deferred_admission_probe_stride_keeps_plain_rounds_unprobed():

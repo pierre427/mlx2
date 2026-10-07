@@ -1132,6 +1132,11 @@ def unqualifiable_candidate(settings):
             "adaptive_verification "
             "(harness cannot observe external adaptive verification engagement yet)"
         )
+    if execution_policy.get("exact_verification", "token") == "block":
+        return (
+            "exact_verification block "
+            "(no qualification gate observes block acceptance yet)"
+        )
     if execution_policy.get("batch_size_route") is not None:
         return (
             "batch_size_route "

@@ -349,6 +349,7 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "tree_node_budget_by_lanes",
         "tensorfold_cohort_limit",
         "minimum_draft_proposals",
+        "exact_verification",
     }
 )
 _TREE_BATCH_ROUTES = {
@@ -471,6 +472,19 @@ def inspect_external_policy(
     batch_route = policy.get("batch_size_route")
     if batch_route is None and os.environ.get("MLX2_DFLASH_TOPOLOGY") == "tree15":
         raise ValueError("tree15 requires an explicit batch_size_route policy")
+    exact_verification = policy.get("exact_verification", "token")
+    if exact_verification not in ("token", "block"):
+        raise ValueError("exact_verification must be 'token' or 'block'")
+    if exact_verification == "block" and (
+        batch_route is not None
+        or any(key in policy for key in ("adaptive_verification", "continuation_pool"))
+    ):
+        # Block verification decides over one linear chain; the pinned
+        # pair's default tree route is left with "batch_size_route": null.
+        raise ValueError(
+            "block verification requires the linear chain route without tree "
+            "batch_size_route, adaptive_verification or continuation_pool"
+        )
     if batch_route is not None:
         if type(batch_route) is not str or batch_route not in _TREE_BATCH_ROUTES:
             raise ValueError("unsupported Qwen3.8 external batch_size_route")
@@ -1199,6 +1213,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         adaptive = self.external_policy.get("adaptive_verification")
         if adaptive is not None:
             kwargs.setdefault("adaptive_verification", adaptive)
+        if self.external_policy.get("exact_verification", "token") != "token":
+            kwargs.setdefault(
+                "exact_verification", self.external_policy["exact_verification"]
+            )
         route = self.external_policy.get("batch_size_route")
         tree_width = _TREE_BATCH_ROUTES.get(route) if type(route) is str else None
         if route is not None and tree_width is None:
@@ -1377,6 +1395,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             contract["external_adaptive_verification"] = {
                 "algorithm": "exact-chain-adaptive-target-verify-width-v1",
                 "policy": adaptive,
+            }
+        if self.external_policy.get("exact_verification", "token") == "block":
+            # Same target law, another RNG schedule: seeded outputs differ.
+            contract["external_exact_verification"] = {
+                "algorithm": "block-verification-sun-2024-alg2-v1",
             }
         return contract
 

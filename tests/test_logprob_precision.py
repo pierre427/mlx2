@@ -53,7 +53,7 @@ def test_ordinary_generation_normalizes_bf16_logits_in_float32():
 def test_prompt_lookup_normalizes_bf16_logits_in_float32():
     generator = PromptLookupBatchGenerator.__new__(PromptLookupBatchGenerator)
     lane = SimpleNamespace(processors=[], lookup_history=[])
-    row = generator._processed_row(lane, _bf16_tie_witness()[0], tentative=[])
+    row = generator._processed_row(lane, _bf16_tie_witness()[0])
 
     _assert_float32_preserves_true_max(row[None])
 

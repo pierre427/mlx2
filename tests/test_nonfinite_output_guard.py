@@ -247,7 +247,7 @@ def test_prompt_lookup_rejects_sample_before_emitted_or_cache_commit(invalid):
         else mx.array([[0.0, 1.0]])
     )
     with pytest.raises(PromptLookupLaneFailure):
-        steps.send(logits)
+        steps.send((logits, None))
     assert lane.anchor == 7
     assert lane.generated == 0
 

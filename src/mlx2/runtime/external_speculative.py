@@ -38,7 +38,12 @@ from .speculative_sampling import (
     FLyVerificationPolicy,
     RequestRNG,
     probability,
+    verify_block_proposals,
+    verify_compact_block_proposals,
     verify_compact_proposals,
+    validate_compact_proposal_laws,
+    validate_proposal_laws,
+    verify_greedy_proposals,
     verify_proposals,
 )
 from ..thinking_guard import stack_block_steer, verify_block_steer
@@ -50,8 +55,11 @@ def _bump(stats, key, amount=1):
     stats[key] = min(_COUNTER_MAX, int(stats.get(key, 0)) + int(amount))
 
 
-# Default-off tree15 round-cost experiment gates (TensorFold parity bridge).
-# Each maps to its environment spelling and the accepted value that enables it.
+# Tree15 round-cost gates (TensorFold parity bridge).  Off on an explicit
+# tree15 topology unless set; on by default for a selected bounded tree route
+# (``dynamic_singleton_tree``, the Qwen3.8 DFlash2 default policy since
+# 187c6aa23), where ``0`` turns one off.  Each maps to its environment
+# spelling and the accepted value that enables it.
 _TREE_GATES = {
     "cache_executor": ("MLX2_TENSORFOLD_CACHE_EXECUTOR", "1"),
     "codebook_cache": ("MLX2_DFLASH_TREE_CODEBOOK_CACHE", "1"),
@@ -79,6 +87,25 @@ _TREE_GATE_COUNTERS = {
         "external_tree_pipeline_discards",
     ),
 }
+
+
+def _chain_draft_cap(tree_budgets, max_tree_width, active_width):
+    """Per-lane chain depth on the bounded tree route's B5+ chain leg.
+
+    The adapter's tree budgets hold the verify forward near one row budget
+    at every tree width (15/7/4/3 nodes: 16/16/15/16 target rows).  Past the
+    widest tree the route switches to chains; uncapped that was
+    ``num_draft + 1`` rows per lane (40 at B5, 64 at B8) on the unpacked
+    reference target, a geometry no campaign measured and wider than the
+    32-row built-in lane law.  Keep the same row budget instead:
+    ``rows // lanes - 1`` drafts (2 at B5, 1 at B6-B8, 0 from B9).  ``None``
+    when no cap applies (tree widths, and the B1-only tree route).
+    """
+    active_width = int(active_width)
+    if max_tree_width != 4 or active_width <= max_tree_width:
+        return None
+    rows = max(lanes * (nodes + 1) for lanes, nodes in tree_budgets.items())
+    return max(0, rows // active_width - 1)
 
 
 def _tree_gates(topology, target_execution, *, default_on=False):
@@ -330,6 +357,32 @@ class RoundDecision:
     committed_inputs: object = None
 
 
+def _greedy_proposal_supported(block, laws, drafts, vocab):
+    """Validate q as the dense/compact verifier would, before a greedy compare.
+
+    The greedy verifier never reads q again, so a malformed law (negative,
+    non-finite or zero-sum mass, wrong shape or count, duplicate or
+    out-of-range compact ids) must be refused here, before any RNG draw,
+    exactly where ``verify_proposals``/``verify_compact_proposals`` refuse it.
+    """
+    if not drafts:
+        return
+    if isinstance(laws, CompactDraftRow):
+        validate_compact_proposal_laws(
+            drafts, laws.candidate_ids, laws.candidate_probs, vocab
+        )
+    elif laws is None:
+        # A compact ``DraftBlock`` row read without its dense laws.
+        import mlx.core as mx
+
+        length = len(drafts)
+        ids = np.asarray(block.cand_ids)[0, :length]
+        probs = np.asarray(block.cand_q.astype(mx.float32))[0, :length]
+        validate_compact_proposal_laws(drafts, list(ids), list(probs), vocab)
+    else:
+        validate_proposal_laws(drafts, laws, vocab)
+
+
 def _block_row(block, vocab):
     """(draft tokens, dense proposal laws) of a one-row proposal block."""
     if block is None:
@@ -398,6 +451,7 @@ class ExternalDraftBatchGenerator:
                  minimum_draft_proposals=None,
                  external_prefill_coalesce_ms=0,
                  external_prefill_coalesce_min_tokens=1,
+                 exact_verification="token",
                  decode_time_fairness=None,
                  **kwargs):
         import mlx.core as mx
@@ -590,6 +644,26 @@ class ExternalDraftBatchGenerator:
             self.acceptance_estimator = OnlineAcceptanceEstimator(
                 self.num_draft, refit_interval=self.adaptive_policy.refit_interval
             )
+        # Exact chain verification rule.  "token" (default) is the token-wise
+        # residual rule; "block" is block verification (Sun et al. 2024): the
+        # same target law, a never-shorter expected accepted prefix for
+        # stochastic drafts, and its own RNG schedule.  Block decisions are
+        # defined for one linear chain under the exact law only.
+        if exact_verification not in ("token", "block"):
+            raise ValueError("exact_verification must be 'token' or 'block'")
+        if exact_verification == "block" and (
+            self.fly_verification.enabled
+            or self.draft_topology != "chain"
+            or dynamic_singleton_tree
+            or self.continuation_policy is not None
+            or self.adaptive_policy is not None
+        ):
+            raise ValueError(
+                "block verification requires exact linear chain verification: "
+                "it refuses FLy, tree topologies, the continuation pool and "
+                "adaptive verification"
+            )
+        self.exact_verification = exact_verification
         # "one" (default, unchanged): one ready token per lane per poll.  A
         # lane still draining a multi-token round sits out the next cohort,
         # so at B>1 a lane that accepted more waits one round of the others
@@ -1064,11 +1138,16 @@ class ExternalDraftBatchGenerator:
             for lane in lanes
         ]
 
-    def _target_law(self, lane, logits, history, reachable=True, response_rows=None):
+    def _target_law(
+        self, lane, logits, history, reachable=True, response_rows=None,
+        greedy_token=False,
+    ):
         """Return the verification law of one target row.
 
         When ``response_rows`` is a list, also append the log-probability row
         to publish for this position, or ``None`` to publish the law itself.
+        ``greedy_token`` returns a greedy row's argmax instead of its dense
+        one-hot law (``verify_greedy_proposals``).
         """
         from .sample_utils import make_transformed_logprobs
         value = logits[None]
@@ -1095,6 +1174,8 @@ class ExternalDraftBatchGenerator:
                 )
             if response_rows is not None:
                 response_rows.append(row - normalizer)
+            if greedy_token:
+                return int(selected.item())
             p = np.zeros(value.shape[-1]); p[int(selected.item())] = 1; return p
         if response_rows is not None:
             response_rows.append(None)
@@ -1127,6 +1208,18 @@ class ExternalDraftBatchGenerator:
             "relaxed_accepts": lane.relaxed_accepts,
             **hists,
         }
+        if getattr(self, "exact_verification", "token") == "block":
+            # Greedy rows verify by token compare under either rule (block
+            # and token-wise decisions coincide for one-hot targets).
+            result["verification"] = (
+                "exact_block" if getattr(lane, "block_verified_rounds", 0) else "exact"
+            )
+            result["exact_verification"] = {
+                "selected": "block",
+                "algorithm": "block-verification-sun-2024-alg2-v1",
+                "block_verified_rounds": getattr(lane, "block_verified_rounds", 0),
+                "qualified": False,
+            }
         if self.fly_verification.enabled and lane.processors:
             result["fly_disabled"] = "logits_processors"
         return result
@@ -1207,6 +1300,10 @@ class ExternalDraftBatchGenerator:
                 ),
                 "qualified": False,
             }
+            if self.dynamic_tree_max_width == 4:
+                result["batch_size_route"]["chain_draft_cap"] = _chain_draft_cap(
+                    tree_budgets, 4, self._auto_active_width
+                )
         tensorfold_selected = getattr(
             self,
             "tensorfold_target_selected",
@@ -1460,8 +1557,11 @@ class ExternalDraftBatchGenerator:
         tree_budget = (
             self._tree_node_budget() if self.draft_topology == "tree15" else None
         )
+        chain_cap = None if tree_budget is not None else self._chain_draft_cap()
         requested_count = min(
-            tree_budget if tree_budget is not None else self.num_draft,
+            tree_budget if tree_budget is not None
+            else self.num_draft if chain_cap is None
+            else min(self.num_draft, chain_cap),
             min(l.maximum-l.generated-1 for l in cohort),
         )
         if tree_budget is not None:
@@ -1546,6 +1646,8 @@ class ExternalDraftBatchGenerator:
                         trees = self._adopt_prelaunched(
                             lanes[0], requested_count, forbidden[0]
                         )
+                    else:
+                        self._discard_prelaunched([lane.uid for lane in lanes])
                     if trees is None:
                         tree_options = self._tree_options(count_hits=True)
                         if self._tree_clock is not None:
@@ -1700,7 +1802,17 @@ class ExternalDraftBatchGenerator:
         vocab = int(logits.shape[-1])
         decisions = []
         for row, lane in enumerate(cohort):
-            drafts, laws = _block_row(blocks[row], vocab)
+            fly = self.fly_verification.enabled and not lane.processors
+            # A greedy row's target law is one-hot: verify by token compare
+            # instead of 2K+1 dense vocabulary laws (3.6 ms per lane-round at
+            # K=7 and a 248K vocabulary).  Same decisions, same RNG schedule.
+            greedy = float(lane.sampling.get("sampling_temp", 0)) == 0 and not fly
+            drafts, laws = _block_row(
+                blocks[row],
+                None if greedy and hasattr(blocks[row], "cand_ids") else vocab,
+            )
+            if greedy:
+                _greedy_proposal_supported(blocks[row], laws, drafts, vocab)
             inputs = [lane.anchor] + drafts
             targets, reachable = [], True
             response_rows = [] if lane.sampling.get("emit_logprobs", True) else None
@@ -1710,11 +1822,27 @@ class ExternalDraftBatchGenerator:
             # past it (steps, tail bound, a latched budget overrun) at commit.
             window = VerifyWindow(lane.processors)
             for j in range(count+1):
-                targets.append(self._target_law(lane, logits[row,j], lane.history + inputs[:j+1], reachable, response_rows))
+                targets.append(self._target_law(lane, logits[row,j], lane.history + inputs[:j+1], reachable, response_rows, greedy_token=greedy))
                 window.mark()
-                if reachable and j < count and lane.processors and targets[-1][int(drafts[j])] <= 0:
+                if reachable and j < count and lane.processors and (
+                    targets[-1] != int(drafts[j]) if greedy
+                    else targets[-1][int(drafts[j])] <= 0
+                ):
                     reachable = False
-            if isinstance(laws, CompactDraftRow):
+            if greedy:
+                result = verify_greedy_proposals(drafts, targets, lane.rng)
+            elif getattr(self, "exact_verification", "token") == "block":
+                # A draft the processed target forbids zeroes P from its row
+                # on, so the unprocessed rows past it cannot change tau.
+                if isinstance(laws, CompactDraftRow):
+                    result = verify_compact_block_proposals(
+                        drafts, laws.candidate_ids, laws.candidate_probs,
+                        targets, lane.rng,
+                    )
+                else:
+                    result = verify_block_proposals(drafts, laws, targets, lane.rng)
+                lane.block_verified_rounds = getattr(lane, "block_verified_rounds", 0) + 1
+            elif isinstance(laws, CompactDraftRow):
                 result = verify_compact_proposals(
                     drafts, laws.candidate_ids, laws.candidate_probs, targets,
                     lane.rng,
@@ -1747,7 +1875,8 @@ class ExternalDraftBatchGenerator:
                 RoundDecision(
                     result.accepted,
                     emitted,
-                    result.target_probabilities,
+                    # A greedy row publishes its processed log-softmax rows.
+                    None if greedy else result.target_probabilities,
                     result.relaxed_accepts,
                     response_rows,
                     window,
@@ -1908,6 +2037,14 @@ class ExternalDraftBatchGenerator:
         )
         return budgets[width]
 
+    def _chain_draft_cap(self, active_width=None):
+        width = self._auto_active_width if active_width is None else active_width
+        if not getattr(self, "dynamic_singleton_tree", False):
+            return None
+        return _chain_draft_cap(
+            self.tree_node_budget_by_lanes, self.dynamic_tree_max_width, width
+        )
+
     def _tree_count(self, lane):
         return min(self._tree_node_budget(), lane.maximum - lane.generated - 1)
 
@@ -1921,7 +2058,7 @@ class ExternalDraftBatchGenerator:
         Any failure here discards the work; the committed round stands.
         """
 
-        self._prelaunched.pop(lane.uid, None)
+        self._discard_prelaunched([lane.uid])
         if (
             lane.ordinary
             or lane.cancelled
@@ -2388,14 +2525,17 @@ class ExternalDraftBatchGenerator:
                 lane.generated += 1
                 finish = "stop" if token in self.stops else "length" if lane.generated >= lane.maximum else None
                 final = j == len(emitted)-1
-                logp = (
-                    self.mx.log(self.mx.array(decision.target_laws[j].astype(np.float32)))
-                    if lane.sampling.get("emit_logprobs", True) and decision.target_laws is not None
-                    else None
-                )
-                if logp is not None and decision.response_logprobs:
-                    if j < len(decision.response_logprobs) and decision.response_logprobs[j] is not None:
+                # The published row when one was kept, else the law itself.
+                logp = None
+                if lane.sampling.get("emit_logprobs", True):
+                    if (
+                        decision.response_logprobs
+                        and j < len(decision.response_logprobs)
+                        and decision.response_logprobs[j] is not None
+                    ):
                         logp = decision.response_logprobs[j]
+                    elif decision.target_laws is not None:
+                        logp = self.mx.log(self.mx.array(decision.target_laws[j].astype(np.float32)))
                 lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=(decision.continuation_outcome.physical_width if decision.continuation_outcome is not None else len(cohort)), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._target_execution_receipt(lane), **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt(), **self._proposal_composition_receipt(lane), **self._continuation_receipt(lane)}))
         if clock is not None:
             self._mark("emit", clock)
@@ -3387,11 +3527,15 @@ class ExternalDraftBatchGenerator:
             )
             if phase is not None:
                 phase.skip()
-            if self.tree_gates["pipeline_draft"]:
-                for lane, decision in zip(cohort, decisions):
-                    self._prelaunch_tree(lane, decision)
+            # ``_propose`` adopts a queued lattice only for a singleton group,
+            # so a multi-lane cohort's prelaunches were built and thrown away
+            # every round (SPEC-01, packed TensorFold B2-B4).
+            if self.tree_gates["pipeline_draft"] and len(cohort) == 1:
+                self._prelaunch_tree(cohort[0], decisions[0])
                 if phase is not None:
                     phase("tree_draft_prelaunch")
+            else:
+                self._discard_prelaunched([lane.uid for lane in cohort])
             _bump(self.scheduler_stats, "external_tree_rounds", len(cohort))
             _bump(
                 self.scheduler_stats,
@@ -3821,11 +3965,13 @@ class ExternalDraftBatchGenerator:
             if self.dynamic_tree_max_width == 4 else len(self.lanes)
         )
         concurrent = self.dynamic_singleton_tree and active_width > self.dynamic_tree_max_width
+        chain_cap = self._chain_draft_cap(active_width) if concurrent else None
+        depth = self.num_draft if chain_cap is None else min(self.num_draft, chain_cap)
         groups = {}
         for lane in ready:
             # Another lane's token budget must not change this lane's proposal
             # count and random draw schedule. Cohort only compatible counts.
-            count = 0 if lane.ordinary else min(self.num_draft,lane.maximum-lane.generated-1)
+            count = 0 if lane.ordinary else min(depth,lane.maximum-lane.generated-1)
             # Permanent ordinary lanes must not share a zero-depth round with
             # transient final-budget rows, whose draft context remains exact.
             groups.setdefault((count, lane.ordinary),[]).append(lane)

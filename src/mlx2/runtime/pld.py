@@ -15,7 +15,7 @@ from typing import Any
 
 import mlx.core as mx
 
-from .committed_recovery import CommittedRecoverySlot
+from .committed_recovery import CommittedRecoverySlot, RecoveryCheckpointMismatch
 from .cow_cache import (
     restore_recovery_descriptors,
     snapshot_committed_cache,
@@ -25,7 +25,6 @@ from .generate import (
     ALLOCATOR_RECLAIM_STEP_INTERVAL,
     GenerationBatch,
     StopSequenceMatcher,
-    _invalid_output_reason,
     _crossed_counter_interval,
     generation_stream,
 )
@@ -71,6 +70,20 @@ class PromptLookupRoundFailures(PromptLookupLaneFailure):
     @property
     def failures(self):
         return self._failures
+
+
+def _output_reason(token, finite, vocab):
+    """``_invalid_output_reason`` from host values read in a batched sync."""
+    if token < 0 or token >= vocab:
+        return f"sampled token {token} is outside vocabulary of size {vocab}"
+    if not finite:
+        return f"sampled token {token} has non-finite log probability"
+    return None
+
+
+def _finite_at(row, token):
+    # Clipped: an out-of-vocabulary token is refused by its range check.
+    return mx.isfinite(row[mx.clip(token, 0, row.shape[-1] - 1)])
 
 
 def _walk_state(caches):
@@ -228,6 +241,14 @@ def _stop_speculation(caches):
         raise first_error
 
 
+def _argmax_sampler(value):
+    return mx.argmax(value, axis=-1)
+
+
+# Draws nothing: may run on verify rows past the accept point.
+_argmax_sampler.deterministic = True
+
+
 @dataclass
 class _Lane:
     uid: int
@@ -261,14 +282,20 @@ class _Lane:
     # Widest committed verify forward; the receipt's ``target_width``.
     target_max_width: int = 1
     cost_width1_cohort_splits: int = 0
+    # How this round's target rows ran: ``plain_decode`` (the ordinary
+    # one-token step) or ``verify_rows`` (a verify forward: proposals, a
+    # wider cohort, or a recurrent rollback epoch).  Receipts report it.
+    round_target_path: str = "plain_decode"
+    verify_path_rounds: int = 0
 
 
 class PromptLookupBatchGenerator:
     """Prompt-lookup executor with the same seam as ``BatchGenerator``.
 
-    Each lane owns an exact rollback epoch. Target verification is currently
-    B1 per lane, which preserves model/cache compatibility while still
-    amortizing multiple predicted positions into one target forward.
+    Each lane owns an exact rollback epoch.  Lanes whose planes a per-round
+    verify transaction owns (plain/rotating KV, or recurrent plus KV) share
+    one target forward per round; the others verify B1 per lane, amortizing
+    multiple predicted positions into one target forward.
     """
 
     # Every policy key this generator reads.  ``ServingEngine`` rejects an
@@ -500,6 +527,7 @@ class PromptLookupBatchGenerator:
             "pld_rotating_replay_replayed_tokens": 0,
             "pld_rotating_replay_refusals": 0,
             "pld_rotating_replay_rebuilds": 0,
+            "pld_failed_round_rebuilds": 0,
             "pld_batched_rounds": 0,
             "pld_batched_lanes": 0,
             "pld_batched_max_width": 0,
@@ -637,7 +665,7 @@ class PromptLookupBatchGenerator:
                 lookup_history=prefix + prompt,
                 proposer=proposer,
                 lookback=lookback,
-                sampler=sampler or (lambda value: mx.argmax(value, axis=-1)),
+                sampler=sampler or _argmax_sampler,
                 processors=list(processors or ()),
                 stop_matcher=matcher,
                 maximum=int(maximum),
@@ -765,6 +793,10 @@ class PromptLookupBatchGenerator:
             self.batched_verify
             and not self.rotating_replay
             and self._batchable(lane.cache)
+            and (
+                getattr(self.model, "supports_speculative_rollback", False)
+                or not self._hybrid(lane)
+            )
         )
         if lane.batched:
             # The per-round segmented transaction is this lane's rollback; it
@@ -785,6 +817,12 @@ class PromptLookupBatchGenerator:
             lane.rotating = _rotating_leaves(lane.cache)
             for entry in lane.rotating:
                 entry.stop_speculation()
+
+    @staticmethod
+    def _hybrid(lane):
+        from .hybrid_verify_rows import is_hybrid_rows
+
+        return is_hybrid_rows([lane.cache])
 
     def _capture_lane_recovery(self, lane):
         """Publish the lane's latest exact, request-private committed boundary."""
@@ -811,34 +849,45 @@ class PromptLookupBatchGenerator:
             if was_armed:
                 self._arm_lane_speculation(lane)
 
-    def _rebuild_lane_cache(self, lane, committed_inputs, taps=None, steer=None):
-        """Restore the last committed boundary, falling back to full re-prefill.
+    def _rebuild_lane_cache(
+        self, lane, committed_inputs, taps=None, steer=None,
+        counter="pld_rotating_replay_rebuilds",
+    ):
+        """Restore the last committed checkpoint, falling back to full re-prefill.
 
-        ``steer`` covers ``committed_inputs`` position by position, so the
-        replay recomputes the steered K/V the verify forward produced.
+        The checkpoint may be older than ``lane.history`` (batched lanes keep
+        only their prefill-end one): the committed tokens past its boundary
+        are replayed after it.  ``steer`` covers ``committed_inputs`` position
+        by position, so the replay recomputes the steered K/V the verify
+        forward produced.
         """
-        self.scheduler_stats["pld_rotating_replay_rebuilds"] = (
-            self.scheduler_stats.get("pld_rotating_replay_rebuilds", 0) + 1
-        )
+        self.scheduler_stats[counter] = self.scheduler_stats.get(counter, 0) + 1
         with suppress(Exception):
             self._close_lane(lane)
-        lane.cache = lane.recovery.restore(
-            route="prompt_lookup",
-            revision=self._recovery_revision,
-            boundary=len(lane.history),
-        )
+        boundary = lane.recovery_boundary
+        lane.cache = None
+        if boundary is not None and boundary <= len(lane.history):
+            try:
+                lane.cache = lane.recovery.restore(
+                    route="prompt_lookup",
+                    revision=self._recovery_revision,
+                    boundary=boundary,
+                )
+            except RecoveryCheckpointMismatch:
+                lane.cache = None
         if lane.cache is not None:
             self.scheduler_stats["pld_recovery_checkpoint_restores"] += 1
             self._arm_lane_speculation(lane)
-            tokens = list(committed_inputs)
+            tokens = list(lane.history[boundary:]) + list(committed_inputs)
         else:
             self.scheduler_stats["pld_recovery_full_rebuilds"] += 1
             lane.cache = cache_module.make_prompt_cache(self.model)
             tokens = list(lane.history) + list(committed_inputs)
         _set_ordinary_b1_mask(lane.cache, lane.cost_latch is not None)
-        # The committed inputs are the tail of ``tokens``.  A full re-prefill
-        # (no recovery checkpoint) replays earlier generated positions
-        # unsteered; it is the last-resort path after a failed transaction.
+        # The committed inputs are the tail of ``tokens``.  Earlier generated
+        # positions (after an older checkpoint, or in a full re-prefill) are
+        # replayed unsteered; this is the last-resort path after a failed
+        # transaction.
         steer_from = len(tokens) - len(committed_inputs)
         with mx.stream(generation_stream):
             step = (
@@ -862,27 +911,58 @@ class PromptLookupBatchGenerator:
         if not lane.speculation_started:
             self._arm_lane_speculation(lane)
 
-    def _processed_row(self, lane, logits, tentative):
+    @staticmethod
+    def _processed_row(lane, logits, context=None):
+        """The lane's processed log-softmax row, left lazy.
+
+        ``context`` is the token array the processors see (lookup history and
+        the row's tentative drafts); unused without processors.
+        """
         value = logits[None]
-        if lane.processors:
-            tokens = mx.array(lane.lookup_history + tentative, dtype=mx.uint32)
-            for processor in lane.processors:
-                value = processor(tokens, value)
+        for processor in lane.processors:
+            value = processor(context, value)
         row = value[0].astype(mx.float32)
-        row = row - mx.logsumexp(row)
-        mx.eval(row)
-        return row
+        return row - mx.logsumexp(row)
+
+    @classmethod
+    def _prepare_rows(cls, lane, logits, proposal):
+        """Lazy rows (and, for a deterministic sampler, tokens) of one lane.
+
+        Built beside the verify forward and evaluated with it, so a lane
+        without processors costs no host sync per verify row.  Its rows do
+        not depend on which drafts are accepted, and a sampler that draws
+        nothing (``deterministic``) may run on rows past the accept point.
+        A lane with processors keeps the sequential per-row path: they see
+        the tentative drafts and may count the rows they are shown.
+        """
+        if lane.processors:
+            return None
+        rows = [cls._processed_row(lane, logits[index]) for index in range(len(proposal) + 1)]
+        prepared = {"rows": rows}
+        if getattr(lane.sampler, "deterministic", False):
+            tokens = [lane.sampler(row[None])[0] for row in rows]
+            prepared["tokens"] = mx.stack(tokens)
+            prepared["finite"] = mx.stack([_finite_at(row, token) for row, token in zip(rows, tokens)])
+        return prepared
+
+    @staticmethod
+    def _prepared_arrays(prepared):
+        return [
+            value
+            for item in prepared
+            if item is not None
+            for value in (item["rows"], item.get("tokens"), item.get("finite"))
+            if value is not None
+        ]
 
     def _round(self, lane):
         """One lane, one verify forward: snapshot, verify, rewind and replay."""
         lane.round_width = 1
         steps = self._round_steps(lane)
         inputs, proposal = next(steps)
-        if (
-            proposal and lane.cost_latch is not None
-            and lane.recovery_boundary != len(lane.history)
-        ):
-            # Parked rounds need no recovery snapshot. Capture their exact
+        if proposal and lane.recovery_boundary != len(lane.history):
+            # A proposal-free round verifies only its anchor, which is always
+            # consumed, so it needs no recovery snapshot. Capture the exact
             # committed boundary immediately before the next verify attempt.
             self._capture_lane_recovery(lane)
         transaction = None
@@ -905,6 +985,13 @@ class PromptLookupBatchGenerator:
             skip_rotating=transaction is not None
             or (bool(lane.rotating) and not proposal),
         )
+        # A lane-long rollback epoch puts even an anchor-only round of a
+        # recurrent lane through the verify kernel.
+        lane.round_target_path = (
+            "verify_rows"
+            if proposal or (lane.speculation_started and self._hybrid(lane))
+            else "plain_decode"
+        )
         taps, steer, commits = self._verify_steer([lane], [inputs])
         try:
             if steer is not None:
@@ -914,7 +1001,8 @@ class PromptLookupBatchGenerator:
                     logits = self.model(
                         mx.array([inputs], dtype=mx.uint32), cache=lane.cache
                     )[0]
-                    mx.eval(logits)
+                    prepared = self._prepare_rows(lane, logits, proposal)
+                    mx.eval(logits, self._prepared_arrays([prepared]))
             finally:
                 if steer is not None:
                     taps.steer = None
@@ -926,7 +1014,7 @@ class PromptLookupBatchGenerator:
                     entry.stop_speculation()
             raise
         try:
-            consumed = steps.send(logits)
+            consumed = steps.send((logits, prepared))
         except PromptLookupLaneFailure:
             # The verify forward touched this lane's cache, but no generated
             # token or checkpoint has been published.  Restore the snapshot
@@ -1014,12 +1102,35 @@ class PromptLookupBatchGenerator:
 
     @staticmethod
     def _batchable(cache):
-        """Plain and rotating single-row planes can share a segmented transaction."""
+        """Lanes whose planes a per-round verify transaction owns exactly.
+
+        Plain and rotating single-row KV planes share a segmented KV
+        transaction; recurrent (``ArraysCache``) plus KV planes share the
+        hybrid record-and-trim transaction the external route uses.
+        """
+        from .hybrid_verify_rows import is_hybrid_rows
+
         return (
             isinstance(cache, list)
             and bool(cache)
-            and all(type(entry) in (KVCache, RotatingKVCache) for entry in cache)
+            and (
+                all(type(entry) in (KVCache, RotatingKVCache) for entry in cache)
+                or is_hybrid_rows([cache])
+            )
         )
+
+    @staticmethod
+    def _begin_verify(lanes, lengths):
+        """Open the verify transaction chosen by cache topology, never by model."""
+        from .hybrid_verify_rows import HybridVerifyRows, is_hybrid_rows
+        from .segmented_rotating_kv import SegmentedKVRows
+
+        rows = [lane.cache for lane in lanes]
+        if is_hybrid_rows(rows):
+            # A round of anchors only is a plain decode step: no rollback
+            # epoch, no verify kernel, nothing to trim at commit.
+            return HybridVerifyRows(rows).begin(lengths, plain_single_token=True)
+        return SegmentedKVRows(rows).begin(lengths=lengths)
 
     def _round_batched(self, lanes):
         """Verify several lanes in one target forward.
@@ -1027,23 +1138,31 @@ class PromptLookupBatchGenerator:
         Each lane keeps its own request-private B1 caches; the segmented
         transaction appends every lane's verify block (ragged lengths), and the
         commit republishes exactly the consumed prefix per lane from the K/V it
-        already computed, so a rejected tail costs no replay forward.
+        already computed, so a rejected tail costs no replay forward.  Hybrid
+        lanes trim their recurrent rows the same way, from the rollback
+        records the verify forward stages (``HybridVerifyRows``).
         """
-        from .segmented_rotating_kv import SegmentedKVRows
-
         for lane in lanes:
             lane.round_width = len(lanes)
         steps = [self._round_steps(lane) for lane in lanes]
         plans = [next(step) for step in steps]
-        for lane, (_inputs, proposal) in zip(lanes, plans):
-            if (
-                proposal and lane.cost_latch is not None
-                and lane.recovery_boundary != len(lane.history)
-            ):
-                self._capture_lane_recovery(lane)
+        # No per-round recovery capture: the transaction is the exact
+        # rollback, and a failed round rebuilds from the prefill-end
+        # checkpoint plus the committed tokens (``_recover_uncommitted_round``).
+        # A capture walked every cache plane of every proposing lane, every
+        # round, for a checkpoint the batched path never restored.
         lengths = [len(inputs) for inputs, _proposal in plans]
         width = max(lengths)
-        transaction = SegmentedKVRows([lane.cache for lane in lanes]).begin(lengths=lengths)
+        transaction = self._begin_verify(lanes, lengths)
+        # One forward serves the cohort: a lane without a proposal still runs
+        # as a verify row unless the whole round is one plain decode step.
+        path = (
+            "verify_rows"
+            if width > 1 or not getattr(transaction, "plain", True)
+            else "plain_decode"
+        )
+        for lane in lanes:
+            lane.round_target_path = path
         try:
             padded = [inputs + [0] * (width - len(inputs)) for inputs, _proposal in plans]
             taps, steer, commits = self._verify_steer(
@@ -1056,7 +1175,13 @@ class PromptLookupBatchGenerator:
                     logits = self.model(
                         mx.array(padded, dtype=mx.uint32), cache=transaction.caches
                     )
-                    mx.eval(logits)
+                    # Every lane's rows (and deterministic tokens) evaluate
+                    # with the forward: one host sync for the cohort.
+                    prepared = [
+                        self._prepare_rows(lane, logits[row], plans[row][1])
+                        for row, lane in enumerate(lanes)
+                    ]
+                    mx.eval(logits, self._prepared_arrays(prepared))
             finally:
                 if steer is not None:
                     taps.steer = None
@@ -1069,7 +1194,7 @@ class PromptLookupBatchGenerator:
             consumed, failures, failed_rows = [], [], set()
             for row, step in enumerate(steps):
                 try:
-                    consumed.append(step.send(logits[row]))
+                    consumed.append(step.send((logits[row], prepared[row])))
                 except PromptLookupLaneFailure as error:
                     failures.append(error)
                     failed_rows.add(row)
@@ -1079,17 +1204,13 @@ class PromptLookupBatchGenerator:
             for row, (commit, count) in enumerate(zip(commits, consumed)):
                 if row not in failed_rows:
                     commit(count)
-        except PromptLookupLaneFailure:
-            # Lane-local retry is sound only if the shared cache transaction
-            # actually aborts.  An abort failure must fail the cohort closed.
+        except BaseException:
+            # Nothing of this round is committed: every lane must be back at
+            # its committed boundary before the error leaves, whether the
+            # caller then drops one lane or retries the cohort.
             if transaction is not None:
-                transaction.abort()
-                transaction = None
+                self._recover_uncommitted_round(lanes, transaction)
             raise
-        finally:
-            if transaction is not None:
-                with suppress(Exception):
-                    transaction.abort()
         self.scheduler_stats["pld_batched_rounds"] += 1
         self.scheduler_stats["pld_batched_lanes"] += len(lanes)
         self.scheduler_stats["pld_batched_max_width"] = max(
@@ -1106,6 +1227,24 @@ class PromptLookupBatchGenerator:
                     next(step)
         if failures:
             raise PromptLookupRoundFailures(failures)
+
+    def _recover_uncommitted_round(self, lanes, transaction):
+        """Return every lane of a failed batched round to its committed boundary.
+
+        A completed abort is exact (KV trimmed, recurrent rows restored).  A
+        transaction that closed itself while failing (a commit error) or
+        whose abort raised may have rewound some planes and not others, so
+        each lane is rebuilt from its recovery checkpoint or re-prefilled
+        from its committed history instead of being trusted.
+        """
+        if not transaction.closed:
+            try:
+                transaction.abort()
+                return
+            except Exception:  # noqa: BLE001, S110 - the rebuild below is authoritative
+                pass
+        for lane in lanes:
+            self._rebuild_lane_cache(lane, [], counter="pld_failed_round_rebuilds")
 
     def _round_steps(self, lane):
         cost = lane.cost_latch
@@ -1183,13 +1322,37 @@ class PromptLookupBatchGenerator:
         inputs = [lane.anchor] + proposal
         # The driver owns the verify forward and the cache transaction, so a
         # round can run alone or share one batched forward with other lanes.
-        logits = yield inputs, proposal
+        logits, prepared = yield inputs, proposal
         emitted = []
         accepted = 0
+        vocab = int(logits.shape[-1])
+        tokens = finite = context = None
+        if prepared is not None and "tokens" in prepared:
+            # Evaluated with the forward: plain host reads, no sync.
+            tokens = prepared["tokens"].tolist()
+            finite = prepared["finite"].tolist()
+        elif prepared is None and lane.processors:
+            # One context array per round; row ``index`` sees its prefix.
+            context = mx.array(lane.lookup_history + proposal, dtype=mx.uint32)
         for index in range(len(proposal) + 1):
-            row = self._processed_row(lane, logits[index], proposal[:index])
-            token = int(lane.sampler(row[None])[0].item())
-            reason = _invalid_output_reason(token, row)
+            if prepared is not None:
+                row = prepared["rows"][index]
+            else:
+                row = self._processed_row(
+                    lane, logits[index],
+                    None if context is None
+                    else context[: len(lane.lookup_history) + index],
+                )
+            if tokens is not None:
+                token, token_finite = int(tokens[index]), bool(finite[index])
+            else:
+                # The sampler may draw: only rows up to the accept point,
+                # one host sync each (token and its finiteness together).
+                sampled = lane.sampler(row[None])[0]
+                sampled_finite = _finite_at(row, sampled)
+                mx.eval(row, sampled, sampled_finite)
+                token, token_finite = int(sampled.item()), bool(sampled_finite.item())
+            reason = _output_reason(token, token_finite, vocab)
             if reason is not None:
                 raise PromptLookupLaneFailure(lane.uid, reason)
             from_draft = index < len(proposal) and token == proposal[index]
@@ -1220,8 +1383,6 @@ class PromptLookupBatchGenerator:
         lane.matcher_state = matcher_state
         lane.anchor = delivered[-1][0]
         lane.generated += len(delivered)
-        if cost is None or proposal:
-            self._capture_lane_recovery(lane)
         lane.stats.cycles += 1
         lane.stats.verify_span_hist[len(inputs)] = lane.stats.verify_span_hist.get(len(inputs), 0) + 1
         _round_accepted = sum(item[2] for item in delivered)
@@ -1318,10 +1479,20 @@ class PromptLookupBatchGenerator:
         # Qualification reads ``target_width`` as the width the lane ran at,
         # as the external route reports it, not this round's width.
         lane.target_max_width = max(lane.target_max_width, getattr(lane, "round_width", 1))
+        # ``ordinary_target`` only for rows that ran the ordinary decode step:
+        # a proposal-free lane that shared a verify forward did not.
+        verify_path = bool(proposal) or lane.round_target_path == "verify_rows"
+        lane.verify_path_rounds += int(verify_path)
         receipt = {
             "schema": "mlx2.prompt-lookup-live.v1",
-            "execution": "prompt_lookup_verify" if lane.stats.retrieval_cycles else "ordinary_target",
-            "current_execution": "ordinary_target" if not proposal else "prompt_lookup_verify",
+            "execution": (
+                "prompt_lookup_verify"
+                if lane.stats.retrieval_cycles or lane.verify_path_rounds
+                else "ordinary_target"
+            ),
+            "current_execution": "prompt_lookup_verify" if verify_path else "ordinary_target",
+            "current_target_path": "verify_rows" if verify_path else "plain_decode",
+            "verify_path_rounds": lane.verify_path_rounds,
             "ordinary_fallback": lane.ordinary,
             "cycles": lane.stats.cycles,
             "retrieval_cycles": lane.stats.retrieval_cycles,
@@ -1428,9 +1599,14 @@ class PromptLookupBatchGenerator:
                         if len(pending) > 1:
                             lane.cost_width1_cohort_splits += 1
                             self.scheduler_stats["pld_cost_width1_cohort_splits"] += 1
-                        if getattr(lane, "batched", False) and not lane.ordinary:
+                        if getattr(lane, "batched", False) and (
+                            not lane.ordinary or self._hybrid(lane)
+                        ):
                             # Keep the exact segmented transaction for a
                             # speculative verify, but with one target row.
+                            # An unarmed hybrid lane has no snapshot epoch for
+                            # the direct driver; its one-lane transaction is
+                            # the ordinary B1 forward on its own caches.
                             self._round_batched([lane])
                         else:
                             if lane.ordinary:
@@ -1450,14 +1626,20 @@ class PromptLookupBatchGenerator:
                 time.perf_counter() - decode_started
             )
             self._sync_decode_fairness_stats()
+        # Every token a round verified goes out in this poll, as on the
+        # external route.  Handing out one per lane per poll kept a lane that
+        # accepted k tokens out of the next k-1 rounds while it drained, so
+        # the cohort fragmented into narrow forwards and B-lane PLD could not
+        # exceed one token per lane per forward.
         responses = []
         for uid, lane in list(self.lanes.items()):
-            if lane.ready:
+            while lane.ready:
                 response = lane.ready.popleft()
                 responses.append(response)
                 if response.finish_reason:
                     self._close_lane(lane)
                     del self.lanes[uid]
+                    break
         if responses:
             previous_steps = self._steps_counter
             self._steps_counter += 1

@@ -913,6 +913,12 @@ def test_external_fly_receipt_counter_and_structured_disable(monkeypatch):
         seen.append(dict(kwargs))
         return original(tokens,proposals,targets,rng,**kwargs)
     monkeypatch.setattr(module,'verify_proposals',exact_for_structured)
+    # A greedy lane verifies by token compare (SPEC-06), never through FLy.
+    greedy=module.verify_greedy_proposals
+    def exact_greedy(tokens,selected,rng):
+        seen.append({})
+        return greedy(tokens,selected,rng)
+    monkeypatch.setattr(module,'verify_greedy_proposals',exact_greedy)
     structured=generator(m,d,fly_verification=policy)
     structured.insert([[1,2,3]],max_tokens=[1],logits_processors=[[lambda _y,x:x]])
     _,final=drain(structured);receipt=final[0].speculative_receipt
@@ -931,11 +937,13 @@ def test_compact_verifier_disables_fly_for_processor_lane(monkeypatch):
                  logits_processors=[[lambda _tokens,value:value]])[0]
     lane=b.lanes[uid]
     while lane.anchor is None:b._prefill(lane)
+    # A sampled lane: greedy lanes verify by token compare, outside FLy.
+    lane.sampling["sampling_temp"]=0.7
     block=module.CompactDraftRow(
         [4],np.array([[4,5]],dtype=np.int32),
         np.array([[0.75,0.25]],dtype=np.float64),1,
     )
-    monkeypatch.setattr(b,"_target_law",lambda *_args:np.full(32,1/32))
+    monkeypatch.setattr(b,"_target_law",lambda *_args,**_kwargs:np.full(32,1/32))
     observed=[]
     original=module.verify_compact_proposals
     def inspect(*args,**kwargs):
@@ -1377,7 +1385,7 @@ def test_partial_fit_rotates_lanes_without_ready_queue_masking(monkeypatch, ordi
         real(anchors,hidden,cache,count,rngs,temperatures)
         return [[0]*count for _ in anchors],[[q]*count for _ in anchors]
     monkeypatch.setattr(d,'draft_distributions',proposals)
-    monkeypatch.setattr(b,'_target_law',lambda *args:p)
+    monkeypatch.setattr(b,'_target_law',lambda *args,greedy_token=False:1 if greedy_token else p)
     append=1 if ordinary else b.num_draft+1
     b._admit([b.lanes[0]],append);budget[0]=int(b.scheduler_stats['reservation_bytes']*1.8)
     assert not b._admit(list(b.lanes.values()),append)

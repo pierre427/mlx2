@@ -3356,7 +3356,11 @@ def test_partially_accepted_segmented_commit_replays_without_copying_kv():
 
 
 def test_prompt_lookup_round_does_not_copy_kv_buffers():
-    """X3-1: the prompt-lookup route captures the same checkpoint per round."""
+    """X3-1: prompt-lookup rounds do not copy KV buffers.
+
+    The hybrid lane batches, so its round transaction is the rollback and
+    only the prefill-end recovery checkpoint is captured (a failed round
+    rebuilds from it plus the committed tokens)."""
     from mlx2.runtime import pld
 
     model = _tiny_hybrid_mtp_model()
@@ -3376,9 +3380,11 @@ def test_prompt_lookup_round_does_not_copy_kv_buffers():
                 if any(r.finish_reason for r in responses):
                     break
         captures = generator.scheduler_stats["pld_recovery_checkpoint_captures"]
+        proposing = generator.scheduler_stats["pld_retrieval_cycles"]
     finally:
         generator.close()
-    assert captures > 10
+    # Captured at prefill end only; no round may copy KV buffers.
+    assert proposing > 0 and captures == 1
     copied = sorted(nbytes for (nbytes, _capacity) in appends.log)
     capacity = min(capacity for (_nbytes, capacity) in appends.log)
     assert len(copied) >= 10

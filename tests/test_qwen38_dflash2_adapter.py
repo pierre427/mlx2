@@ -842,3 +842,41 @@ def test_real_checkpoint_headers_map_onto_the_drafter():
     header.pop("__metadata__", None)
     assert len(header) == 81
     assert {name: record["shape"] for name, record in header.items()} == _expected_weight_shapes(args)
+
+
+@pytest.mark.parametrize("extra", [
+    {"batch_size_route": "tree15_b1_b4_chain_b5plus_v1"},
+    {"adaptive_verification": {"verification_costs": [1, 2, 4]}},
+    {"continuation_pool": {}},
+])
+def test_block_verification_refuses_tree_adaptive_and_pool(tmp_path, monkeypatch, extra):
+    from mlx2.adapters import qwen38_tensorfold_source
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+
+    monkeypatch.setattr(qwen38_tensorfold_source, "validate_source", lambda: None)
+    target, draft = _write_artifacts(tmp_path)
+    policy = {**_pins(target, draft), "exact_verification": "block", **extra}
+    with pytest.raises(ValueError, match="block verification requires the linear chain"):
+        inspect_external_policy(policy, target)
+
+
+def test_block_verification_is_bound_into_the_numerics_contract(tmp_path):
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter, inspect_external_policy
+    from mlx2.qualification import unqualifiable_candidate
+
+    target, draft = _write_artifacts(tmp_path)
+    policy = {**_pins(target, draft), "exact_verification": "block", "batch_size_route": None}
+    assert inspect_external_policy(policy, target)["args"].block_size == 8
+    with pytest.raises(ValueError, match="'token' or 'block'"):
+        inspect_external_policy({**policy, "exact_verification": "tree"}, target)
+    adapter = object.__new__(Qwen3827BAdapter)
+    adapter.external_policy = {"num_draft": 2}
+    assert "external_exact_verification" not in adapter._external_execution_numerics()
+    adapter.external_policy = {"num_draft": 2, "exact_verification": "block"}
+    assert adapter._external_execution_numerics()["external_exact_verification"] == {
+        "algorithm": "block-verification-sun-2024-alg2-v1",
+    }
+    assert "exact_verification block" in unqualifiable_candidate(
+        {"execution_policy": {"exact_verification": "block"}}
+    )
+    assert unqualifiable_candidate({"execution_policy": {"exact_verification": "token"}}) is None

@@ -138,6 +138,7 @@ def make_sampler(
     if 0 <= temp < SAMPLING_EPS:
         argmax_sampler = lambda x: mx.argmax(x, axis=-1)
         argmax_sampler.batch_groupable = True
+        argmax_sampler.deterministic = True  # draws nothing
         return argmax_sampler
     sampling_methods = []
     if top_p > 0 and top_p < 1.0:

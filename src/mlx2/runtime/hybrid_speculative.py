@@ -449,7 +449,7 @@ def _batched_residual_verify(
     Same rule as ``_accept_sampled_draft`` scanned per position, but every
     uniform and log-ratio is computed in one graph and drained with a single
     ``mx.eval`` (vs one per accepted position). A draft the target transform
-    filtered has ratio exactly 0 and is always rejected — ``u <= 0`` cannot
+    filtered has ratio exactly 0 and is always rejected — ``u < 0`` cannot
     rescue it. Returns ``(n_accept, bonus)``.
     """
     k = len(drafts)
@@ -465,7 +465,7 @@ def _batched_residual_verify(
     (ratios, us) = (ratios.tolist(), us.tolist())
     n_accept = 0
     while (
-        n_accept < k and ratios[n_accept] > 0.0 and (us[n_accept] <= ratios[n_accept])
+        n_accept < k and ratios[n_accept] > 0.0 and (us[n_accept] < ratios[n_accept])
     ):
         n_accept += 1
     if n_accept < k:
@@ -494,7 +494,9 @@ def _accept_sampled_draft(
     mx.eval(ratio, u)
     record_verify_sync("hybrid.accept_sampled.uniform_item")
     record_verify_sync("hybrid.accept_sampled.ratio_item")
-    return float(u.item()) <= float(ratio.item())
+    # Strict: u lies in [0, 1), so a zero ratio (a draft the target
+    # filtered) is never accepted, even on a u of exactly 0.0.
+    return float(u.item()) < float(ratio.item())
 
 
 def _block_verify(logprobs, draft_logprobs, drafts, sampling_temp: float, *, rng=None):
@@ -509,7 +511,7 @@ def _block_verify(logprobs, draft_logprobs, drafts, sampling_temp: float, *, rng
     ``h_i = S_i / (S_i + (1 - p_cum_i))`` with
     ``S_i = sum(relu(p_cum_i * p_{i+1} - q_{i+1}))`` over the vocabulary.
     The accepted length ``tau`` is the LARGEST ``i`` whose check
-    ``eta_i <= h_i`` passes — a later position can rescue an earlier
+    ``eta_i < h_i`` passes — a later position can rescue an earlier
     failure, which is why block verification provably accepts at least as
     many tokens in expectation as per-token rejection sampling while
     preserving the target distribution exactly. On ``tau < k`` the
@@ -549,7 +551,8 @@ def _block_verify(logprobs, draft_logprobs, drafts, sampling_temp: float, *, rng
             denom = s + (1.0 - p_cum)
             h = 1.0 if denom <= 0.0 else s / denom
         record_verify_sync("hybrid.block_verify.uniform_item")
-        if float(etas[i].item()) <= h:
+        # Strict, as in the token-wise rule: h == 0 never passes at eta == 0.
+        if float(etas[i].item()) < h:
             tau = i + 1
     if tau == k:
         bonus = _sample_from_logprobs(logprobs[k], sampling_temp, rng=rng)
@@ -1888,11 +1891,15 @@ def _plan_copy_drafts(
             decisions.append("off")
             continue
         remaining = max(lane.max_tokens - lane.ntoks - 1, 0)
-        cap = min(
-            remaining,
-            cohort_copy_cap(state.policy, lanes=len(lanes), head_depths=head_depths),
+        cohort_cap = cohort_copy_cap(
+            state.policy, lanes=len(lanes), head_depths=head_depths
         )
-        (span, decision) = state.plan(head_depth=head_depth, cap=cap)
+        if cohort_cap <= 0:
+            (span, decision) = state.refuse_cohort()
+        else:
+            (span, decision) = state.plan(
+                head_depth=head_depth, cap=min(remaining, cohort_cap)
+            )
         rows.append(tuple(int(token) for token in span))
         decisions.append(decision)
     return (tuple(rows), tuple(decisions))

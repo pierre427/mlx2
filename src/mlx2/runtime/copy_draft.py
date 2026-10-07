@@ -270,6 +270,7 @@ class CopyDraftState:
         self.gate_declines = 0
         self.probe_rounds = 0
         self.lookup_misses = 0
+        self.cohort_refusals = 0
         self.strong_matches = 0
         self.observe(context)
 
@@ -379,11 +380,20 @@ class CopyDraftState:
         cost = sum(item[1] for item in window)
         return tokens / cost if cost > 0 else None
 
+    def refuse_cohort(self) -> tuple:
+        """Record a round whose cohort cap refused copies (``batched_max_span``).
+
+        Distinct from ``"miss"``: a refused round never looked the source up,
+        so its receipt must not read as "this text has no matches".
+        """
+        self.cohort_refusals += 1
+        return ([], "cohort_refused")
+
     def plan(self, *, head_depth: int, cap: int) -> tuple:
         """Return ``(span_tokens, decision)`` for this round.
 
         ``decision`` is one of ``"copy"``, ``"probe"``, ``"declined"`` or
-        ``"miss"``.  Only the decline/probe bookkeeping mutates here; the index
+        ``"miss"`` (a cohort refusal is :meth:`refuse_cohort`).  Only the decline/probe bookkeeping mutates here; the index
         and sizer move only at commit (:meth:`record`).
         """
         cap = int(cap)
@@ -470,6 +480,7 @@ class CopyDraftState:
             "gate_declines": self.gate_declines,
             "probe_rounds": self.probe_rounds,
             "lookup_misses": self.lookup_misses,
+            "cohort_refusals": self.cohort_refusals,
             **({"strong_matches": self.strong_matches} if self.policy.strong_match else {}),
             "index_tokens": self.index_tokens,
             "sizer_width": self.width,
