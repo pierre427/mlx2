@@ -369,6 +369,36 @@ def configure_environment(kernels=None, moe_nax_gather=None) -> dict[str, str]:
     return profile
 
 
+# External draft policy keys of the Qwen3.6 35B DFlash2 chain route.
+EXTERNAL_POLICY_KEYS = frozenset(
+    {
+        "draft_model",
+        "num_draft",
+        "pairwise_selection",
+        "adaptive_verification",
+        # The shared plumbing defaults composition on for this chain drafter;
+        # ``false`` must be able to opt out.
+        "proposal_composition",
+        "continuation_pool",
+        "continuation_strategy",
+        "draft_revision",
+        "target_revision",
+        "draft_quantization",
+    }
+)
+
+
+def default_external_policy(policy: dict) -> dict:
+    """The Qwen3.6 35B chain policy with its own composition default.
+
+    The shared plumbing would attach PLD proposal composition to this chain.
+    The 2026-10-07 A/B (``qualification/runs/ab-20261007``, comp-q36) measured
+    it 4% slower on copy and 8% slower at B4, with prompt lookup winning one
+    composed round, so it is off unless the policy names it.
+    """
+    return {"proposal_composition": False, **policy}
+
+
 class Qwen3635BA3BAdapter(Qwen3827BAdapter):
     EXTERNAL_PROFILE = "qwen36-35b-a3b-apcv2-dflash2"
     EXTERNAL_ROUTE_TAG = "qwen36-dflash2-v1"
@@ -464,18 +494,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 raise ValueError(
                     "Qwen3.6 expert streaming refuses the external draft route"
                 )
-            allowed = {
-                "draft_model",
-                "num_draft",
-                "pairwise_selection",
-                "adaptive_verification",
-                "continuation_pool",
-                "continuation_strategy",
-                "draft_revision",
-                "target_revision",
-                "draft_quantization",
-            }
-            unknown = set(policy) - allowed
+            unknown = set(policy) - EXTERNAL_POLICY_KEYS
             if unknown:
                 raise ValueError(
                     f"Qwen3.6 external draft policy has unknown keys: {sorted(unknown)}"
@@ -487,7 +506,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 model_path,
                 allow_continuation_strategy=True,
             )
-            self.external_policy = policy
+            self.external_policy = default_external_policy(policy)
             self._check_num_draft(draft_record)
             policy = {}
         if set(policy) - {
