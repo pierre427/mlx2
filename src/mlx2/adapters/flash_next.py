@@ -713,7 +713,7 @@ class FlashNextAdapter:
             qsa_stage1_status,
         )
         from ..runtime.models.qwen4_hc_decode import hc_decode_status
-        from ..runtime.models.switch_layers import moe_pad_status
+        from ..runtime.models.switch_layers import moe_pad_reportable, moe_pad_status
         from ..runtime.models import moe_nax_gather as _moe_nax
         from ..runtime.models.qwen4_gate_inject import qwen4_gate_inject_stats
         from ..runtime.models.qwen4_qsa_indexed import qsa_indexed_status
@@ -850,10 +850,10 @@ class FlashNextAdapter:
             ),
             "round_levers": lever_snapshot(),
             # Sorted-MoE kernel choice (gather_qmv vs padded gather_qmm_rhs);
-            # absent under the default floor policy so receipts are unchanged.
+            # absent only under the default floor law while no pad has run.
             **(
-                {"moe_pad": moe_pad_status()}
-                if moe_pad_status()["policy"] != "floor"
+                {"moe_pad": pad_status}
+                if moe_pad_reportable(pad_status := moe_pad_status())
                 else {}
             ),
             # omlx #3995/#4022/#4029 NAX sorted gather; absent while off

@@ -469,8 +469,23 @@ def _kernel_batch(st16: bool = False):
     )
 
 
+# The outproj epilogue joins its 12 threadgroups through a grid-wide spin
+# barrier on relaxed device atomics.  Metal promises no forward progress
+# across threadgroups (all 12 of 1024 threads must be co-resident or it
+# hangs), and no device-scope release/acquire orders the counter reset before
+# the epoch store or the partials before the arrival count, so block 0 can
+# read stale partials or spin forever.  Research-only and never selected;
+# refused until it is split into two dispatches (partials, then reduce).
+OUTPROJ_DISABLED = (
+    "fused_outproj is disabled: its grid-wide spin barrier has no forward-"
+    "progress guarantee or device-scope ordering (kernels sweep 2026-10-06 KR-08)"
+)
+
+
 @lru_cache(maxsize=None)
 def _kernel_outproj():
+    # The builder stays for the two-dispatch rework; nothing may launch it.
+    raise RuntimeError(OUTPROJ_DISABLED)
     return mx.fast.metal_kernel(
         name="qwen4_fused_gdn_decode_outproj_q4",
         input_names=[
@@ -665,7 +680,8 @@ def qwen4_fused_gdn_decode_outproj(
     output_dim: int,
     output_group_size: int,
 ):
-    """One-dispatch GDN recurrence, gated norm, and affine-q4 QMV."""
+    """One-dispatch GDN recurrence, gated norm, and affine-q4 QMV (refused:
+    see ``OUTPROJ_DISABLED``)."""
     if output_dim != 2560 or output_group_size != 64:
         raise ValueError("only the production 2560x6144 affine-q4 epilogue")
     if recurrent_state.dtype != mx.float32:

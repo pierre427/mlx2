@@ -13,7 +13,11 @@ import mlx.core as mx
 
 from .import_env import snapshot as _import_env_snapshot
 from .qwen4_qsa_nax import nax_kernel_available
-from .qwen4_qsa_selector import select_scores_direct4, select_scores_direct8
+from .qwen4_qsa_selector import (
+    select_scores_direct4,
+    select_scores_direct8,
+    select_scores_gvr,
+)
 
 _import_env_snapshot(__name__)
 
@@ -35,13 +39,36 @@ _ONEPASS_TOPK_MIN_BLOCKS = max(
     int(os.environ.get("MLX_QWEN4_QSA_STAGE1_ONEPASS_TOPK_MIN_BLOCKS", "2048")),
 )
 _ONEPASS_TOPK_MAX = 1024
-_DIRECT_SELECTOR_RAW = (
-    os.environ.get("MLX_QWEN4_QSA_STAGE1_DIRECT_SELECTOR", "off").strip().lower()
+# Every accepted MLX_QWEN4_QSA_STAGE1_DIRECT_SELECTOR value; "gvr" is the
+# unqualified self-sampling research candidate.
+_DIRECT_SELECTOR_MODES = ("off", "direct8", "direct4", "gvr")
+
+
+def _direct_selector_mode(raw: str) -> str:
+    """Validate ``MLX_QWEN4_QSA_STAGE1_DIRECT_SELECTOR``; a typo fails closed
+    here instead of silently running the radix selector."""
+    value = (raw or "off").strip().lower()
+    if value not in _DIRECT_SELECTOR_MODES:
+        raise ValueError(
+            "MLX_QWEN4_QSA_STAGE1_DIRECT_SELECTOR must be one of "
+            f"{', '.join(repr(m) for m in _DIRECT_SELECTOR_MODES)}, got {raw!r}"
+        )
+    return value
+
+
+_DIRECT_SELECTOR = _direct_selector_mode(
+    os.environ.get("MLX_QWEN4_QSA_STAGE1_DIRECT_SELECTOR", "off")
 )
-_DIRECT_SELECTOR = (
-    _DIRECT_SELECTOR_RAW
-    if _DIRECT_SELECTOR_RAW in {"off", "direct8", "direct4"}
-    else "off"
+# Counting GVR paths reads the per-row diagnostics back to the host, which
+# synchronizes every dispatch.  Benchmarks and qualification only.
+_GVR_COUNT_PATHS = os.environ.get(
+    "MLX_QWEN4_QSA_STAGE1_GVR_COUNT_PATHS", "0"
+).strip().lower() in {"1", "true", "on", "yes"}
+_GVR_PATH_COUNTERS = (
+    "gvr_empty_rows",
+    "gvr_dense_rows",
+    "gvr_sampled_rows",
+    "gvr_fallback_rows",
 )
 _DIRECT_SELECTOR_MIN_BLOCKS = max(
     1,
@@ -68,7 +95,15 @@ def qsa_stage1_candidate_status(*, reset: bool = False) -> dict:
             "direct_selector_min_blocks": int(_DIRECT_SELECTOR_MIN_BLOCKS),
             "direct8_qualification": "qualified_default_off",
             "direct4_qualification": "qualified_default_off",
-            "direct_selector_selected": False,
+            "gvr_qualification": "unqualified_research_candidate",
+            "gvr_count_paths": bool(_GVR_COUNT_PATHS),
+            # Selected: the route takes it for every geometry it admits.
+            # Observed-used: it dispatched since the last reset.
+            "direct_selector_selected": _DIRECT_SELECTOR != "off",
+            "direct_selector_observed_used": any(
+                _CANDIDATE_STATS.get(f"{mode}_topk_dispatches", 0) > 0
+                for mode in ("direct8", "direct4", "gvr")
+            ),
             "qualification_receipt": (
                 "qualification/runs/qsa-stage1-pr91-20260928/qualification.json"
             ),
@@ -92,6 +127,20 @@ def qsa_stage1_candidate_status(*, reset: bool = False) -> dict:
 def _record_candidate_dispatch(name: str) -> None:
     with _CANDIDATE_STATS_LOCK:
         _CANDIDATE_STATS[name] += 1
+
+
+def _record_gvr_paths(diagnostics: mx.array) -> None:
+    paths = diagnostics[:, 0]
+    counts = [
+        int(value)
+        for value in mx.sum(
+            paths[:, None] == mx.arange(len(_GVR_PATH_COUNTERS))[None, :], axis=0
+        ).tolist()
+    ]
+    with _CANDIDATE_STATS_LOCK:
+        for name, count in zip(_GVR_PATH_COUNTERS, counts):
+            if count:
+                _CANDIDATE_STATS[name] += count
 
 
 def qsa_stage1_kernel_available() -> bool:
@@ -147,7 +196,7 @@ def qsa_stage1_score_producer(
 def qsa_stage1_selector_producer(*, blocks: int, block_topk: int) -> str:
     """Choose the exact selector without inspecting or evaluating arrays."""
     if (
-        _DIRECT_SELECTOR in {"direct8", "direct4"}
+        _DIRECT_SELECTOR in _DIRECT_SELECTOR_MODES[1:]
         and int(blocks) >= _DIRECT_SELECTOR_MIN_BLOCKS
         and 1 <= int(block_topk) <= min(int(blocks), _DIRECT_SELECTOR_MAX)
     ):
@@ -705,6 +754,24 @@ def _select_scores(
             topk=topk,
             compress_ratio=compress_ratio,
         )
+    if producer == "gvr_exact":
+        _record_candidate_dispatch("gvr_topk_dispatches")
+        if not _GVR_COUNT_PATHS:
+            return select_scores_gvr(
+                scores,
+                q_positions,
+                topk=topk,
+                compress_ratio=compress_ratio,
+            )
+        selected, diagnostics = select_scores_gvr(
+            scores,
+            q_positions,
+            topk=topk,
+            compress_ratio=compress_ratio,
+            return_diagnostics=True,
+        )
+        _record_gvr_paths(diagnostics)
+        return selected
     if producer == "onepass_exact":
         return _select_scores_onepass(
             scores,
@@ -768,18 +835,20 @@ def qsa_stage1_select(
             "lhd,lcd->lch", q[0].astype(mx.float32), candidate_keys.astype(mx.float32)
         )
         exact = mx.sum(mx.maximum(exact, 0), axis=-1) / math.sqrt(q.shape[-1])
-        candidate_valid = (
-            candidate_ids.astype(mx.int32) * int(compress_ratio)
-            + int(compress_ratio)
-            - 1
-            <= positions[:, None]
+        # Every selector emits a row's valid blocks first (ascending) and its
+        # fill ids after them, so the valid candidates are a slot prefix.
+        # Give the refine exactly that prefix as its valid count, by index:
+        # a -inf score sentinel does not survive the radix selector's relu
+        # and would tie with (and, by the larger-id rule, beat) a valid block
+        # whose exact score is 0.  Fill slots then map to the same fill ids
+        # the direct path emits.
+        ratio = int(compress_ratio)
+        valid_candidates = mx.clip(
+            (positions.astype(mx.int32) + 1) // ratio, 0, candidate_count
         )
-        exact = mx.where(candidate_valid, exact, -mx.inf)
-        all_candidate_positions = mx.full(
-            (rows,), candidate_count * int(compress_ratio) - 1, dtype=mx.int32
-        )
+        refine_positions = valid_candidates * ratio - 1
         selected_slots = _select_scores(
-            exact, all_candidate_positions, topk=topk, compress_ratio=compress_ratio
+            exact, refine_positions, topk=topk, compress_ratio=compress_ratio
         )
         selected = mx.take_along_axis(candidate_ids, selected_slots, axis=-1)
     else:

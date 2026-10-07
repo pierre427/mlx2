@@ -40,8 +40,11 @@ from ``switch_layers`` / ``qwen3_next`` behind ``MLX2_MOE_NAX_GATHER``
 Supported: ``transpose=True``, rhs-indices only, ``x`` of shape
 ``[M, 1, K]`` with a flat sorted ``uint32`` index of length ``M`` (each
 expert's rows one contiguous run), bf16/fp16 activations, N a multiple of
-32, affine 4/8-bit with group 32/64/128 (scales and biases in the activation
-dtype) and MXFP4 (group 32); the epilogue additionally needs
+32, affine 2/3/4/5/6/8-bit with group 32/64/128 (scales and biases in the
+activation dtype; mlx2: 2/3/5/6-bit unpack mlx's packed bit stream, 3/5-bit
+only on loader splits of 32-value runs, see ``geometry_ok``) and MXFP4
+(group 32); the route admits the affine widths in ``AFFINE_BITS``
+(``MLX2_MOE_NAX_GATHER_BITS``, default 4/6/8); the epilogue additionally needs
 ``2 * n % 64 == 0``, the row map a uint32 ``[M]`` map and fewer than 2**32
 token-row elements.  Anything else returns None and the caller keeps the
 stock path.
@@ -360,6 +363,16 @@ METAL_FUNC void store_act(
 // them into threadgroup memory (row stride BKP). The *_tail variants
 // cover a K tail of k_valid (a multiple of 32) columns and never touch a
 // word or group at or past it. PAIR maps tile rows through pair_row().
+//
+// mlx packs every affine width as a little-endian bit stream along K
+// (power-of-two widths 32 / bits values per uint32; 6-bit 4 values per 3
+// bytes, 3/5-bit 8 values per 3/5 bytes: quantized.h get_pack_factor /
+// get_bytes_per_pack), so value j of a row starts at bit j * bits. A thread
+// whose kVPT values span whole words reads them as words: power-of-two
+// widths unpack one word (kCV = 32 / bits values) at a time, the others a
+// run of kCW words holding kCV values (6-bit: 16 values in 3 words; 3/5-bit:
+// 32 values in 3/5 words), a value straddling two words taking its high
+// bits from the next one.
 template <typename Q, typename G, bool PAIR = false>
 struct TileLoader {
   using WT = typename Q::WT;
@@ -367,7 +380,11 @@ struct TileLoader {
   STEEL_CONST int kBits = Q::kBits;
   STEEL_CONST int kVPT = G::kVPT;
   STEEL_CONST int kWords = kVPT * kBits / 32;
-  STEEL_CONST int kPer = 32 / kBits;
+  STEEL_CONST bool kPow2 = (kBits & (kBits - 1)) == 0;
+  // Values and words per unpack chunk (see above).
+  STEEL_CONST int kCV = kPow2 ? 32 / kBits : (kBits == 6 ? 16 : 32);
+  STEEL_CONST int kCW = kCV * kBits / 32;
+  STEEL_CONST int kNC = kVPT / kCV;
   STEEL_CONST uint32_t kMask = (1u << kBits) - 1u;
   STEEL_CONST int kGV = kVPT < Q::kGroup ? kVPT : Q::kGroup;
   STEEL_CONST int kNG = kVPT / kGV;
@@ -375,6 +392,8 @@ struct TileLoader {
   STEEL_CONST int kBKP = G::kBK + 16 / sizeof(WT);
   static_assert(kWords * 32 == kVPT * kBits, "whole words per thread");
   static_assert(kWPG >= 1 && kNG * kWPG == kWords, "group split");
+  static_assert(kCW * 32 == kCV * kBits && kNC * kCV == kVPT, "chunk split");
+  static_assert(kGV % kCV == 0, "chunks lie in one group");
 
   const device uint32_t* src;
   Q q;
@@ -421,7 +440,9 @@ struct TileLoader {
     const device uint32_t* ptr = src + kb * (G::kBK * kBits / 32);
     STEEL_PRAGMA_UNROLL
     for (short i = 0; i < kWords; i++) {
-      if (col + i * kPer < k_valid) {
+      // Word i starts at value (32 * i) / kBits; k_valid is a multiple of
+      // 32 values, a word boundary for every width.
+      if (col + (32 * i) / kBits < k_valid) {
         raw[i] = ptr[i];
       }
     }
@@ -436,15 +457,42 @@ struct TileLoader {
   METAL_FUNC void store_words(threadgroup WT* Ws, const int k_valid) const
       thread {
     threadgroup WT* dst = Ws + row * kBKP + col;
-    STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kWords; i++) {
-      if (col + i * kPer < k_valid) {
-        vec<WT, kPer> v;
-        STEEL_PRAGMA_UNROLL
-        for (short j = 0; j < kPer; j++) {
-          v[j] = Q::dq(p[i / kWPG], (raw[i] >> (kBits * j)) & kMask);
+    if constexpr (kPow2) {
+      STEEL_PRAGMA_UNROLL
+      for (short i = 0; i < kWords; i++) {
+        if (col + i * kCV < k_valid) {
+          vec<WT, kCV> v;
+          STEEL_PRAGMA_UNROLL
+          for (short j = 0; j < kCV; j++) {
+            v[j] = Q::dq(p[i / kWPG], (raw[i] >> (kBits * j)) & kMask);
+          }
+          *(threadgroup vec<WT, kCV>*)(dst + i * kCV) = v;
         }
-        *(threadgroup vec<WT, kPer>*)(dst + i * kPer) = v;
+      }
+    } else {
+      // Chunks of kCV values (whole words, one group), stored 8 at a time.
+      STEEL_PRAGMA_UNROLL
+      for (short c = 0; c < kNC; c++) {
+        if (col + c * kCV < k_valid) {
+          const P pc = p[(c * kCV) / kGV];
+          const thread uint32_t* rw = raw + c * kCW;
+          STEEL_PRAGMA_UNROLL
+          for (short j0 = 0; j0 < kCV; j0 += 8) {
+            vec<WT, 8> v;
+            STEEL_PRAGMA_UNROLL
+            for (short jj = 0; jj < 8; jj++) {
+              const short bit = (j0 + jj) * kBits;
+              const short wi = bit / 32;
+              const short sh = bit % 32;
+              uint32_t qv = rw[wi] >> sh;
+              if (sh + kBits > 32) {
+                qv |= rw[wi + 1] << (32 - sh);
+              }
+              v[jj] = Q::dq(pc, qv & kMask);
+            }
+            *(threadgroup vec<WT, 8>*)(dst + c * kCV + j0) = v;
+          }
+        }
       }
     }
   }
@@ -1409,6 +1457,75 @@ def _plan(rows: int, experts: int, K: int, N: int) -> Plan:
     return Plan(_SCHED_SEG, 128, 128, _GX, 8192)
 
 
+# Affine widths the kernels unpack (mlx's packed layouts, see TileLoader).
+# Kernel capability only: the route admits the widths in ``affine_bits()``.
+AFFINE_KERNEL_BITS = (2, 3, 4, 5, 6, 8)
+
+
+def _loader_geometry(bm: int, bk: int) -> tuple[int, int]:
+    """``(kLT, kVPT)`` of the Metal ``Geo<BM, BK>``: loader threads and the
+    weight values each one dequantizes per K step."""
+    threads = (bm // 32) * _WN * 32
+    if threads & (threads - 1):
+        lt = 256 if threads > 256 else (128 if threads > 128 else 64)
+    else:
+        lt = threads
+    return lt, _BN * bk // lt
+
+
+def _chunk_values(bits: int) -> int:
+    """Values per unpack chunk (TileLoader ``kCV``)."""
+    if bits & (bits - 1) == 0:
+        return 32 // bits
+    return 16 if bits == 6 else 32
+
+
+def unpack_reference(words, bits: int, count: int) -> list:
+    """The first ``count`` quantized values of a packed affine row (uint32
+    ``words``), read the way TileLoader reads them: chunks of
+    ``_chunk_values(bits)`` values in whole words, value j at bit j * bits
+    of the little-endian stream, a straddling value taking its high bits
+    from the next word.  CPU mirror of the Metal unpack (tests check it
+    against ``mx.quantize``'s packing)."""
+    cv = _chunk_values(bits)
+    cw = cv * bits // 32
+    mask = (1 << bits) - 1
+    out = []
+    for c in range(count // cv):
+        for j in range(cv):
+            bit = j * bits
+            wi, sh = c * cw + bit // 32, bit % 32
+            q = int(words[wi]) >> sh
+            if sh + bits > 32:
+                q |= int(words[wi + 1]) << (32 - sh)
+            out.append(q & mask)
+    return out
+
+
+def geometry_ok(plan: "Plan", bits: int, group_size: int) -> bool:
+    """Whether ``plan``'s loader split holds ``bits``-wide values: every
+    thread's run (and group chunk) is whole uint32 words of whole unpack
+    chunks (the TileLoader static_asserts).  3/5-bit need 32-value runs, so
+    128-row tiles with 64-deep K steps (16 values a thread) do not fit."""
+    _, vpt = _loader_geometry(plan.bm, plan.bk)
+    gv = min(vpt, group_size)
+    cv = _chunk_values(bits)
+    return (
+        (vpt * bits) % 32 == 0
+        and (gv * bits) % 32 == 0
+        and vpt % gv == 0
+        and gv % cv == 0
+    )
+
+
+def _fit_plan(plan: "Plan", bits: int, group_size: int) -> "Plan":
+    """``plan``, or 64-row 64-deep tiles (32 values a thread: every width)
+    when its loader split does not hold ``bits``."""
+    if geometry_ok(plan, bits, group_size):
+        return plan
+    return plan._replace(bm=64, bk=64, pad=0)
+
+
 def supports(
     x: mx.array,
     w: mx.array,
@@ -1450,7 +1567,7 @@ def supports(
     if E == 0 or E > _MAX_EXPERTS or N == 0 or N % 32 or K % 32:
         return False
     if mode == "affine":
-        if bits not in (4, 8) or group_size not in (32, 64, 128):
+        if bits not in AFFINE_KERNEL_BITS or group_size not in (32, 64, 128):
             return False
         if biases is None or K % group_size:
             return False
@@ -1918,6 +2035,7 @@ def sorted_gather_qmm(
     E, N = int(w.shape[0]), int(w.shape[1])
     if plan is None:
         plan = _plan(M, E, K, N)
+    plan = _fit_plan(plan, bits, group_size)
     if plan.sched == _SCHED_DB and (K % 64 or N % 64 or plan.bk != 64):
         # db runs aligned 64-deep K steps only.
         plan = plan._replace(sched=_SCHED_SEG)
@@ -1984,6 +2102,7 @@ def sorted_gather_qmm_swiglu(
             return None
     if plan is None:
         plan = _plan(M, E, K, N)
+    plan = _fit_plan(plan, bits, group_size)
     if plan.sched == _SCHED_DB and (K % 64 or plan.bk != 64):
         plan = plan._replace(sched=_SCHED_SEG)
     epi = _EPI_SWIGLU if limit is None else _EPI_CLAMPED
@@ -2047,6 +2166,7 @@ def sorted_gather_qmm_swiglu_split(
         return None
     if plan is None:
         plan = _plan(M, E, K, N)
+    plan = _fit_plan(plan, bits, group_size)
     if plan.sched == _SCHED_DB and (K % 64 or plan.bk != 64):
         plan = plan._replace(sched=_SCHED_SEG)
     if verify:
@@ -2087,12 +2207,60 @@ def mode_from_env(environ=None) -> str:
 
 MODE = mode_from_env()
 
+ENV_BITS = "MLX2_MOE_NAX_GATHER_BITS"
+# Affine widths the route admits (MXFP4 is always 4-bit).  The kernels
+# unpack every width in AFFINE_KERNEL_BITS bit-exactly (canaried per
+# instantiation); the route default is the widths measured faster than the
+# stock kernel on M5: 6-bit 1.29-1.56x per call and 1.071x on the
+# Qwen3.6-35B-A3B 8K prefill (qualification/runs/research-20261006/nax-6bit/).
+# 2/3/5-bit are canary-exact but unmeasured, so not admitted by default.
+DEFAULT_AFFINE_BITS = (4, 6, 8)
+
+
+def affine_bits_from_env(environ=None) -> tuple:
+    """The admitted affine widths: ``MLX2_MOE_NAX_GATHER_BITS`` as a comma
+    list (e.g. ``4,6,8``), else ``DEFAULT_AFFINE_BITS``."""
+    environ = os.environ if environ is None else environ
+    raw = (environ.get(ENV_BITS, "") or "").strip()
+    if not raw:
+        return DEFAULT_AFFINE_BITS
+    try:
+        bits = tuple(sorted({int(b) for b in raw.split(",") if b.strip()}))
+    except ValueError:
+        bits = ()
+    if not bits or any(b not in AFFINE_KERNEL_BITS for b in bits):
+        raise ValueError(
+            f"{ENV_BITS} must be a comma list of {AFFINE_KERNEL_BITS}, got {raw!r}"
+        )
+    return bits
+
+
+AFFINE_BITS = affine_bits_from_env()
+
+
+def set_affine_bits(bits) -> tuple:
+    """Switch the admitted affine widths at run time (in-process A/B);
+    returns the old tuple."""
+    global AFFINE_BITS
+    new = tuple(sorted({int(b) for b in bits}))
+    if not new or any(b not in AFFINE_KERNEL_BITS for b in new):
+        raise ValueError(f"affine bits must be a subset of {AFFINE_KERNEL_BITS}")
+    old, AFFINE_BITS = AFFINE_BITS, new
+    return old
+
+
+def bits_admitted(mode: str, bits: int) -> bool:
+    """The route's width admission (kernel capability is ``supports``)."""
+    return mode != "affine" or int(bits) in AFFINE_BITS
+
 # Observed-use counters (plain ints, no sync): engaged launches per route,
 # declines of calls that were candidates (the reason is the key), and calls
 # that are not candidates (below MLX's own rhs floor: they would not run the
 # row-block kernel either, so nothing is lost).
 calls = {"gather": 0, "swiglu": 0, "swiglu_map": 0, "swiglu_split": 0,
          "swiglu_split_map": 0}
+# The same engaged launches split by weight format: "<route>/<mode>-<bits>".
+calls_by_format: dict = {}
 fallbacks: dict = {}
 not_candidates = 0
 # Sorted gathers of a non-prefill forward (decode, MTP drafting, verify):
@@ -2183,6 +2351,8 @@ def status(*, reset: bool = False) -> dict:
         "nax_host": nax_host() if MODE != "off" else _nax_host,
         "device_name": _device_name,
         "calls": dict(calls),
+        "calls_by_format": dict(calls_by_format),
+        "affine_bits": list(AFFINE_BITS),
         "fallbacks": dict(fallbacks),
         "not_candidates": not_candidates,
         "not_prefill": not_prefill,
@@ -2192,6 +2362,7 @@ def status(*, reset: bool = False) -> dict:
     if reset:
         for k in calls:
             calls[k] = 0
+        calls_by_format.clear()
         fallbacks.clear()
         not_candidates = 0
         not_prefill = 0
@@ -2203,6 +2374,12 @@ def _fallback(reason: str) -> None:
     global last_fallback
     fallbacks[reason] = fallbacks.get(reason, 0) + 1
     last_fallback = reason
+
+
+def _engaged(route: str, mode: str, bits: int) -> None:
+    calls[route] += 1
+    key = f"{route}/{mode}-{int(bits)}"
+    calls_by_format[key] = calls_by_format.get(key, 0) + 1
 
 
 def rows_ok(rows: int, experts: int) -> bool:
@@ -2234,6 +2411,9 @@ def try_gather(x, layer, indices) -> Optional[mx.array]:
     if mx.default_device() != mx.gpu:
         _fallback("cpu_device")
         return None
+    if not bits_admitted(layer.mode, layer.bits):
+        _fallback("bits_not_admitted")
+        return None
     idx = _as_u32(indices)
     if not supports(
         x, w, layer["scales"], layer.get("biases"), idx,
@@ -2248,7 +2428,7 @@ def try_gather(x, layer, indices) -> Optional[mx.array]:
     if out is None:
         _fallback("kernel_unverified")
         return None
-    calls["gather"] += 1
+    _engaged("gather", layer.mode, layer.bits)
     return out
 
 
@@ -2269,6 +2449,9 @@ def try_swiglu(proj, x, indices, token_rows=None) -> Optional[mx.array]:
     if mx.default_device() != mx.gpu:
         _fallback("cpu_device")
         return None
+    if not bits_admitted(proj.mode, proj.bits):
+        _fallback("bits_not_admitted")
+        return None
     idx = _as_u32(indices)
     kw = dict(group_size=int(proj.group_size), bits=int(proj.bits), mode=proj.mode)
     if token_rows is not None:
@@ -2278,14 +2461,14 @@ def try_swiglu(proj, x, indices, token_rows=None) -> Optional[mx.array]:
             row_map=_as_u32(row_map), **kw
         )
         if out is not None:
-            calls["swiglu_map"] += 1
+            _engaged("swiglu_map", proj.mode, proj.bits)
             return out
         _fallback("row_map_declined")
     out = sorted_gather_qmm_swiglu(x, w, proj["scales"], proj.get("biases"), idx, **kw)
     if out is None:
         _fallback("swiglu_declined")
         return None
-    calls["swiglu"] += 1
+    _engaged("swiglu", proj.mode, proj.bits)
     return out
 
 
@@ -2313,6 +2496,9 @@ def try_swiglu_split(gate_proj, up_proj, x, indices, token_rows=None) -> Optiona
     ):
         _fallback("gate_up_formats_differ")
         return None
+    if not bits_admitted(gate_proj.mode, gate_proj.bits):
+        _fallback("bits_not_admitted")
+        return None
     idx = _as_u32(indices)
     kw = dict(group_size=int(gate_proj.group_size), bits=int(gate_proj.bits),
               mode=gate_proj.mode)
@@ -2322,12 +2508,12 @@ def try_swiglu_split(gate_proj, up_proj, x, indices, token_rows=None) -> Optiona
         out = sorted_gather_qmm_swiglu_split(x_tok, gate, up, idx,
                                              row_map=_as_u32(row_map), **kw)
         if out is not None:
-            calls["swiglu_split_map"] += 1
+            _engaged("swiglu_split_map", gate_proj.mode, gate_proj.bits)
             return out
         _fallback("row_map_declined")
     out = sorted_gather_qmm_swiglu_split(x, gate, up, idx, **kw)
     if out is None:
         _fallback("swiglu_declined")
         return None
-    calls["swiglu_split"] += 1
+    _engaged("swiglu_split", gate_proj.mode, gate_proj.bits)
     return out

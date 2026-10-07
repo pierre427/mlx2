@@ -15,9 +15,11 @@ from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from typing import ClassVar
 
 _SCOPE = ContextVar("mlx2_varlen_dense_mlp_scope", default=None)
+_PADDING_SIDES = ("right", "left")
 
 
 @dataclass(frozen=True)
@@ -166,11 +168,26 @@ def status(handle):
     }
 
 
+@lru_cache(maxsize=64)
+def _live_row_indices(lengths, width, padding):
+    """Flat slab indices of the live rows, built once per row geometry
+    (prefill repeats the same chunk shapes every forward)."""
+    import mlx.core as mx
+    import numpy as np
+
+    lengths = np.asarray(lengths, dtype=np.int64)[:, None]
+    columns = np.arange(width, dtype=np.int64)[None, :]
+    live = columns < lengths if padding == "right" else columns >= width - lengths
+    return mx.array(np.flatnonzero(live).astype(np.int32))
+
+
 @contextmanager
-def _active_scope(lengths, width, handle):
+def _active_scope(lengths, width, handle, padding="right"):
     if handle is None:
         yield
         return
+    if padding not in _PADDING_SIDES:
+        raise ValueError(f"prefill row padding must be one of {_PADDING_SIDES}")
     if type(width) is not int or width < 1:
         raise ValueError("prefill row width must be a positive integer")
     if not isinstance(lengths, (list, tuple)) or not lengths:
@@ -202,16 +219,7 @@ def _active_scope(lengths, width, handle):
         return
     if live_rows == 0:
         raise RuntimeError("a prefill slab cannot contain only padding")
-    import mlx.core as mx
-
-    indices = mx.array(
-        [
-            row * width + column
-            for row, length in enumerate(lengths)
-            for column in range(length)
-        ],
-        dtype=mx.int32,
-    )
+    indices = _live_row_indices(lengths, width, padding)
     counters["selected_scopes"] += 1
     token = _SCOPE.set(
         _LiveRows(
@@ -231,7 +239,9 @@ def _active_scope(lengths, width, handle):
         _SCOPE.reset(token)
 
 
-def prefill_row_context(model, lengths, *, width):
+def prefill_row_context(model, lengths, *, width, padding="right"):
+    """Scope one padded prefill forward.  ``padding`` names which side of
+    each row holds the padding; both current callers right-pad."""
     handles = tuple(
         handle
         for handle in (
@@ -245,7 +255,7 @@ def prefill_row_context(model, lengths, *, width):
     handle = handles[0] if handles else None
     if handle is None:
         return nullcontext()
-    return _active_scope(lengths, width, handle)
+    return _active_scope(lengths, width, handle, padding)
 
 
 def compact_rows(values, *, operation="dense_mlp"):
@@ -254,6 +264,8 @@ def compact_rows(values, *, operation="dense_mlp"):
     if scope is None or scope.operation != operation:
         return None
     if values.ndim != 3 or values.shape[:2] != (scope.batch, scope.width):
+        # A selected block saw another geometry: it runs uncompacted.
+        scope.counters[f"{scope.counter_prefix}_geometry_declines"] += 1
         return None
     features = int(values.shape[-1])
     packed = values.reshape(scope.batch * scope.width, features)[scope.indices]

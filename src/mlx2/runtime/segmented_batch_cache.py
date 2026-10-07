@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Sequence
 import mlx.core as mx
 from .models.cache import ArraysCache, KVCache, QuantizedKVCache
+from .models.qsdpa_verify_metal import lift_causal_mask
 from .models.qwen4_exp import (
     BatchQSAKVCache,
     QSACompactBlocks,
@@ -283,9 +284,9 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
                 gates.append(mx.zeros(pre_o_shape, dtype=hidden.dtype))
                 continue
             row_hidden = hidden[index : index + 1, :valid]
-            row_mask = row.make_mask(valid, return_array=True, window_size=None)
-            if row_mask is not None and row_mask.ndim == 2:
-                row_mask = row_mask[None, None]
+            row_mask = lift_causal_mask(
+                row.make_mask(valid, return_array=True, window_size=None)
+            )
             row_projected = tuple(
                 (value[index : index + 1, :valid] for value in projected)
             )
@@ -424,9 +425,9 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
             if offset < base_tokens:
                 raise RuntimeError("QSA private delta trimmed through its base")
             offsets.append(offset)
-            row_mask = row.make_mask(length, return_array=True, window_size=None)
-            if row_mask is not None and row_mask.ndim == 2:
-                row_mask = row_mask[None, None]
+            row_mask = lift_causal_mask(
+                row.make_mask(length, return_array=True, window_size=None)
+            )
             row_masks.append(row_mask)
         shared_rows = getattr(self.rows[0], "supports_shared_qsa_suffix", False)
         if shared_rows and batch >= 2 and (len(set(offsets)) == 1):

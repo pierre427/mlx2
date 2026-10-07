@@ -400,6 +400,20 @@ def register_causal_mask(mask, left_padding, *, kind: str = "left_padded"):
     return mask
 
 
+def lift_causal_mask(mask):
+    """``mask[None, None]`` for a 2-D mask, carrying its registration.
+
+    Indexing builds a new array, so a lifted registered mask would otherwise
+    lose its provenance and look unregistered (non-plain) to consumers."""
+    if not isinstance(mask, mx.array) or mask.ndim != 2:
+        return mask
+    lifted = mask[None, None, :, :]
+    entry = _CAUSAL_MASKS.get(id(mask))
+    if entry is not None and entry[0] is mask:
+        register_causal_mask(lifted, entry[1], kind=entry[2])
+    return lifted
+
+
 def registered_mask_kind(mask) -> Optional[str]:
     entry = _CAUSAL_MASKS.get(id(mask)) if isinstance(mask, mx.array) else None
     if entry is None or entry[0] is not mask:

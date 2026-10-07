@@ -753,11 +753,11 @@ class Model(nn.Module):
     def mixed_forward(self, segments):
         return self.language_model.mixed_forward(segments)
 
-    def prefill_row_context(self, lengths, *, width):
+    def prefill_row_context(self, lengths, *, width, padding="right"):
         """Adapter-installed live-row scope for ordinary padded prefill."""
         from .varlen_dense_mlp import prefill_row_context
 
-        return prefill_row_context(self, lengths, width=width)
+        return prefill_row_context(self, lengths, width=width, padding=padding)
 
     def make_mtp_cache(self):
         return self.language_model.make_mtp_cache()

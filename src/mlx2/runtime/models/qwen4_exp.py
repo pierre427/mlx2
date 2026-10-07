@@ -56,6 +56,7 @@ from .qwen4_fused_gdn import (
     qwen4_fused_gdn_batch_decode,
     qwen4_fused_gdn_decode,
     qwen4_fused_gdn_decode_outproj,
+    OUTPROJ_DISABLED,
     served_silu_refusal,
 )
 from .qwen4_fused_gdn_verify import (
@@ -86,6 +87,11 @@ from .qwen4_gdn_outproj import admit_qwen4_gdn_outproj
 from . import qwen4_fused_gdn_prefill as _gdn_prefill
 from . import qwen4_attn_rows as _attn_rows
 from . import qwen4_qsa_scores as _qsa_scores
+from .qsdpa_verify_metal import (
+    lift_causal_mask,
+    register_causal_mask,
+    registered_mask_kind,
+)
 from .qwen4_qsa_nax import (
     block_sparse_layout_supported,
     compact_blocks_to_kernel_inputs,
@@ -669,6 +675,35 @@ def qsa_nax_host_gate() -> dict:
     return {"nax_host": bool(supported), "device_name": _QSA_NAX_DEVICE_NAME}
 
 
+def _qsa_nax_plain_mask(selection) -> bool:
+    """Whether the selection's mask is proven plain causal plus left padding.
+
+    The NAX kernel derives validity from query positions and left padding
+    alone (``kl <= qp``), where the indexed path ANDs the mask itself in, so
+    the kernel is exact only under that plain mask.  An array mask must be
+    registered ``left_padded`` by the cache that built it (the QSA caches'
+    ``make_mask``); shape is no proof, since a same-shape boolean mask can
+    carry segment-diagonal, padding or all-false structure.  Unregistered and
+    ``segmented`` masks keep the indexed path, as do an additive (non-bool)
+    mask, a per-head mask, a passthrough mask, or another geometry (kernels
+    sweep 2026-10-06 KR-09; rfix-kad 2026-10-07).
+    """
+    if getattr(selection, "passthrough_mask", None) is not None:
+        return False
+    mask = getattr(selection, "causal_mask", None)
+    if mask is None:
+        return True
+    if isinstance(mask, str):
+        return mask == "causal"
+    if mask.dtype != mx.bool_:
+        return False
+    if registered_mask_kind(mask) != "left_padded":
+        return False
+    if mask.ndim == 2:
+        return True
+    return mask.ndim == 4 and mask.shape[1] == 1 and mask.shape[0] in (1, int(selection.batch))
+
+
 def decide_qsa_nax_admission(
     selection,
     *,
@@ -713,6 +748,8 @@ def decide_qsa_nax_admission(
             min_physical_kv = _QSA_NAX_AUTO_MIN_PHYSICAL_KV
         if selection.physical_width < int(min_physical_kv):
             return QSANAXAdmission(False, "auto_context_below_crossover")
+    if not _qsa_nax_plain_mask(selection):
+        return QSANAXAdmission(False, "nonstandard_mask")
     supported = (
         _qsa_nax_device_supported()
         if device_supported is None
@@ -730,6 +767,31 @@ def decide_qsa_nax_admission(
     if mode == "auto" and lanes != 1:
         return QSANAXAdmission(True, "engaged_auto_batched")
     return QSANAXAdmission(True, f"engaged_{mode}")
+
+
+def _qsa_nax_decode_reason(
+    selection, *, training: bool, layout_ok: bool, cache_layout_ok: bool, block_topk: int
+) -> str:
+    """Receipt reason of an opt-in NAX decode row; ``"engaged"`` admits it.
+
+    The kernel ignores ``causal_mask`` on decode as on prefill, so a row
+    takes the same plain-mask proof as ``decide_qsa_nax_admission``.
+    """
+    if selection.n_blocks <= block_topk:
+        return "dense_by_construction"
+    if selection.kind != "explicit":
+        return "selection_not_explicit"
+    if not layout_ok:
+        return "unsupported_layout"
+    if training:
+        return "training"
+    if not cache_layout_ok:
+        return "unsupported_cache_layout"
+    if not _qsa_nax_plain_mask(selection):
+        return "nonstandard_mask"
+    if not nax_kernel_available():
+        return "kernel_unavailable"
+    return "engaged"
 
 
 def _record_qsa_nax_admission(selection, decision: QSANAXAdmission) -> None:
@@ -1336,6 +1398,8 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             raise ValueError(
                 f"unknown fused GDN decode mode {mode!r}; expected one of {_FUSED_GDN_DECODE_MODES}"
             )
+        if mode == "fused_outproj":
+            raise ValueError(OUTPROJ_DISABLED)
         self.fused_gdn_decode_mode = mode
 
     def set_fused_gdn_batch_decode_mode(self, mode: str):
@@ -2023,6 +2087,10 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         refusal = served_silu_refusal()
         if refusal is not None:
             return self._fused_gdn_fallback(refusal)
+        if self.fused_gdn_decode_mode == "fused_outproj":
+            # set_fused_gdn_decode_mode refuses it; only a direct attribute
+            # write reaches this, and it falls back with the reason.
+            return self._fused_gdn_fallback(OUTPROJ_DISABLED)
         try:
             threadgroup_y = probe_qwen4_fused_gdn_decode(
                 qkv.dtype, **_state_probe(cache[1])
@@ -3902,6 +3970,21 @@ class BatchQSAKVCache(_StepGrownIndexLedger, BatchKVCache):
         super().__init__(left_padding, attention_backend=attention_backend)
         _init_qsa_summary_state(self, summary_identity)
 
+    # Packed (quantized) subclasses leave their masks unregistered: NAX never
+    # runs on them, and a registration would also admit them to the
+    # quantized verify kernel, a route this provenance does not qualify.
+    _registers_plain_mask = True
+
+    def make_mask(self, N: int, return_array: bool = False, **kwargs):
+        mask = super().make_mask(N, return_array=return_array, **kwargs)
+        if self._registers_plain_mask and not any(
+            v is not None for v in kwargs.values()
+        ):
+            # Plain causal + ``left_padding``: the NAX QSA kernel may take it
+            # (``_qsa_nax_plain_mask``) without reading the array.
+            register_causal_mask(mask, self.left_padding)
+        return mask
+
     def max_left_padding(self) -> int:
         """Host copy of ``left_padding.max()``, keyed by array identity.
 
@@ -4363,6 +4446,20 @@ class QSAKVCache(_StepGrownIndexLedger, KVCache):
         super().__init__()
         _init_qsa_summary_state(self, summary_identity)
 
+    _registers_plain_mask = True  # see BatchQSAKVCache._registers_plain_mask
+
+    def make_mask(self, *args, **kwargs):
+        mask = super().make_mask(*args, **kwargs)
+        window = kwargs.get("window_size", args[2] if len(args) > 2 else None)
+        if (
+            self._registers_plain_mask
+            and window is None
+            # The PLD ordinary lane's one-row mask hides left padding.
+            and getattr(self, "_pld_ordinary_mask_padding", None) is None
+        ):
+            register_causal_mask(mask, None)
+        return mask
+
     def update_index_keys(self, keys: mx.array):
         return self._append_index_keys(keys, self.offset)
 
@@ -4462,6 +4559,8 @@ def _check_qsa_quantization_boundary(cache, cursor: int):
 
 class QSAQuantizedKVCache(QSAKVCache):
     """Quantized attention K/V plus QSA's native raw index-key ledger."""
+
+    _registers_plain_mask = False
 
     _RECOVERY_APPEND_ONLY_FIELDS = QSAKVCache._RECOVERY_APPEND_ONLY_FIELDS
     _RECOVERY_DERIVED_FIELDS = QSAKVCache._RECOVERY_DERIVED_FIELDS
@@ -4620,6 +4719,8 @@ class QSAQuantizedKVCache(QSAKVCache):
 
 class BatchQSAQuantizedKVCache(BatchQSAKVCache):
     """Ragged batch QSA cache with packed attention K/V and native ledger."""
+
+    _registers_plain_mask = False
 
     _quantize = BatchQuantizedKVCache._quantize
 
@@ -6658,38 +6759,20 @@ class Attention(nn.Module):
             _invariant.note("qsa_nax_declined")
         if length >= _QSA_NAX_MIN_QUERY:
             _record_qsa_nax_admission(selection, nax_admission)
-        direct_nax = (
-            _QSA_NAX_DECODE
-            and length == 1
-            and (quantized_indexed is None)
-            and (selection.n_blocks > self.indexer.block_topk)
-        )
-        use_direct_nax = (
-            direct_nax
-            and (not self.training)
-            and (selection.kind == "explicit")
-            and self._nax_layout_ok
-            and nax_kernel_available()
-        )
-        use_nax = (nax_admission.engage or use_direct_nax) and not lane
+        use_direct_nax = False
         if length == 1 and _QSA_NAX_DECODE:
-            if use_direct_nax:
-                reason = "engaged"
-            elif selection.n_blocks <= self.indexer.block_topk:
-                reason = "dense_by_construction"
-            elif selection.kind != "explicit":
-                reason = "selection_not_explicit"
-            elif not self._nax_layout_ok:
-                reason = "unsupported_layout"
-            elif self.training:
-                reason = "training"
-            elif quantized_indexed is not None:
-                reason = "unsupported_cache_layout"
-            else:
-                reason = "kernel_unavailable"
+            reason = _qsa_nax_decode_reason(
+                selection,
+                training=self.training,
+                layout_ok=self._nax_layout_ok,
+                cache_layout_ok=quantized_indexed is None,
+                block_topk=self.indexer.block_topk,
+            )
+            use_direct_nax = reason == "engaged"
             _record_qsa_nax_decode(
                 engaged=use_direct_nax, reason=reason, context=selection.physical_width
             )
+        use_nax = (nax_admission.engage or use_direct_nax) and not lane
         if use_nax:
             (use_indexed, indexed_reason) = (False, "nax_engaged")
         elif lane:
@@ -7061,9 +7144,9 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
         fa_mask = None
         if self.fa_idx is not None:
             fa_cache = cache[self.fa_idx]
-            fa_mask = create_attention_mask(hidden, fa_cache, return_array=True)
-            if fa_mask is not None and fa_mask.ndim == 2:
-                fa_mask = fa_mask[None, None, :, :]
+            fa_mask = lift_causal_mask(
+                create_attention_mask(hidden, fa_cache, return_array=True)
+            )
         ssm_mask = (
             create_ssm_mask(hidden, cache[self.ssm_idx])
             if self.ssm_idx is not None
@@ -7308,11 +7391,11 @@ class Model(nn.Module):
     def make_cache(self):
         return self.language_model.make_cache()
 
-    def prefill_row_context(self, lengths, *, width):
+    def prefill_row_context(self, lengths, *, width, padding="right"):
         """Adapter-installed live-row scope for ordinary padded prefill."""
         from .varlen_dense_mlp import prefill_row_context
 
-        return prefill_row_context(self, lengths, width=width)
+        return prefill_row_context(self, lengths, width=width, padding=padding)
 
     @property
     def speculative_args(self):
@@ -7425,9 +7508,7 @@ class Model(nn.Module):
         embeddings = self.language_model.model.embed_tokens(tokens)
         multi = self.mtp.fuse(embeddings, hidden)
         cache = mtp_cache[0]
-        mask = create_attention_mask(multi, cache, return_array=True)
-        if mask is not None and mask.ndim == 2:
-            mask = mask[None, None, :, :]
+        mask = lift_causal_mask(create_attention_mask(multi, cache, return_array=True))
         multi = self.mtp.layers[0](multi, tokens, mask, cache, None)
         sample = self.mtp.hyper_connection_mixer(multi)
         draft_head = getattr(self, "mtp_draft_head", None)

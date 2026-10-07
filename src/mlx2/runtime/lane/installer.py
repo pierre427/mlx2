@@ -157,6 +157,27 @@ def law_id(min_rows: int, backend_name: str | None = None) -> str:
     return base if min_rows == 1 else f"{base}+stock-below-{min_rows}"
 
 
+def _lane_launch(x, lw, rows: int, max_rows: int):
+    """``lane_matmul`` of ``x`` under ``lw``, chunked by ``max_rows`` rows.
+
+    The split-K is a function of ``lw``'s N and K only, so chunking keeps
+    every row's bits; a grouped member therefore chunks its group's stacked
+    weights, never its own (KR-04, sweep 2026-10-06).
+    """
+    if rows <= max_rows:
+        STATS["lane_launches"] += 1
+        return lane_matmul(x, lw)
+    lead = x.shape[:-1]
+    flat = x.reshape(rows, x.shape[-1])
+    chunks = [
+        lane_matmul(flat[start : start + max_rows], lw)
+        for start in range(0, rows, max_rows)
+    ]
+    STATS["lane_chunked_launches"] += len(chunks)
+    STATS["lane_launches"] += len(chunks)
+    return mx.concatenate(chunks, axis=0).reshape(*lead, -1)
+
+
 class _LaneMixin:
     _lane_min_rows = 1
     _lane_max_rows = MAX_ROWS
@@ -174,33 +195,18 @@ class _LaneMixin:
             if group is not None and group.stock_stacked and GROUPING[0]:
                 STATS["stock_stacked_calls"] += 1
                 return _stock_stacked(self, group, x)
-        elif rows > self._lane_max_rows:
-            if self._lane_chunk_above_max:
-                lead = x.shape[:-1]
-                flat = x.reshape(rows, x.shape[-1])
-                chunks = [
-                    lane_matmul(flat[start : start + self._lane_max_rows], lw)
-                    for start in range(0, rows, self._lane_max_rows)
-                ]
-                y = mx.concatenate(chunks, axis=0).reshape(*lead, -1)
-                STATS["lane_chunked_calls"] += 1
-                STATS["lane_chunked_launches"] += len(chunks)
-                STATS["lane_chunked_rows"] += rows
-                STATS["lane_calls"] += 1
-                STATS["lane_launches"] += len(chunks)
-                STATS["lane_rows"] += rows
-                STATS[f"rows_{_bucket(rows)}"] += 1
-                return y
+        elif rows > self._lane_max_rows and not self._lane_chunk_above_max:
             STATS["stock_above_max_rows"] += 1
         else:
             group = _group(self) if GROUPING[0] else None
             try:
                 if group is None:
-                    y = lane_matmul(x, lw)
-                    STATS["lane_launches"] += 1
+                    y = _lane_launch(x, lw, rows, self._lane_max_rows)
                 else:
                     # The first sibling to see this input computes the whole
                     # group; the others take their columns of the same result.
+                    # Calls past max_rows chunk the same stacked launch, so a
+                    # row keeps the group's split-K at every call width.
                     start, stop = self.__dict__["_lane_columns"]
                     declared = group.declared
                     if group.last is None or group.last[0] is not x:
@@ -209,9 +215,8 @@ class _LaneMixin:
                             # The previous launch fed only part of the group:
                             # its members did not all see one tensor object.
                             STATS[f"declared_partial:{declared}"] += 1
-                        group.last = (x, lane_matmul(x, group.lw))
+                        group.last = (x, _lane_launch(x, group.lw, rows, self._lane_max_rows))
                         group.taken = 0
-                        STATS["lane_launches"] += 1
                         STATS["group_launches"] += 1
                         if declared is not None:
                             group.served = {start}
@@ -229,6 +234,9 @@ class _LaneMixin:
                         group.last = None
                     if lw.bias is not None:
                         y = y + lw.bias
+                if rows > self._lane_max_rows:
+                    STATS["lane_chunked_calls"] += 1
+                    STATS["lane_chunked_rows"] += rows
                 STATS["lane_calls"] += 1
                 STATS["lane_rows"] += rows
                 STATS[f"rows_{_bucket(rows)}"] += 1
@@ -564,11 +572,13 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS,
         # Calls up to max_rows take the lane arithmetic: a wider window is a
         # different law (33-64-row verify or prefill tails change).
         law += f"+rows-le-{max_rows}"
-    if chunk_above_max:
-        law += f"+chunk-above-{max_rows}"
     live = {group.declared for _name, module in model.named_modules()
             if (group := _group(module)) is not None and group.declared is not None}
     grouped = any(_group(module) is not None for _name, module in model.named_modules())
+    if chunk_above_max:
+        # Grouped members chunk their group's stacked launch (one split-K at
+        # every width); before 2026-10-06 they chunked their own weights.
+        law += f"+chunk-above-{max_rows}" + ("-stacked" if grouped else "")
     if live:
         law += _declared_digest([spec for spec in declared if spec.name in live])
     if twins.get("affine"):

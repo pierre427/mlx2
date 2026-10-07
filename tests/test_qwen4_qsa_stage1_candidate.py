@@ -278,7 +278,10 @@ def test_stage1_status_reports_and_resets_bounded_receipts(monkeypatch):
         "direct_selector_min_blocks": stage1._DIRECT_SELECTOR_MIN_BLOCKS,
         "direct8_qualification": "qualified_default_off",
         "direct4_qualification": "qualified_default_off",
-        "direct_selector_selected": False,
+        "gvr_qualification": "unqualified_research_candidate",
+        "gvr_count_paths": stage1._GVR_COUNT_PATHS,
+        "direct_selector_selected": stage1._DIRECT_SELECTOR != "off",
+        "direct_selector_observed_used": False,
         "qualification_receipt": (
             "qualification/runs/qsa-stage1-pr91-20260928/qualification.json"
         ),

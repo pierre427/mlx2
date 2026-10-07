@@ -2,6 +2,7 @@
 # Adapted from mlx-lm-unified; see docs/PROVENANCE.md and provenance/flashnext.json.
 import math
 import os
+import threading
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -46,19 +47,25 @@ def _switch_sort_decision(
 # up to 23% (Qwen3.6-35B) and 13% (Nemotron-3.5) without a measured loss; 2
 # lost 11% on Nemotron at 2.25 rows/expert
 # (qualification/runs/recon-20261001/l5-moe-pad).  Unqualified until the next
-# qualification campaign.
+# qualification campaign: ``moe_pad_status`` says so, and every receipt that
+# saw a pad run names it (``moe_pad_reportable``).
 _RHS_ROWS_PER_EXPERT = 4
 _RHS_MIN_ROWS = 16
+_RHS_PAD_DEFAULT_FLOOR = 3
+_RHS_PAD_QUALIFIED = False
 
 
 def _rhs_pad_floor(environ=os.environ) -> int:
-    return int(environ.get("MLX2_MOE_RHS_PAD_MIN_ROWS", "3") or 0)
+    return int(environ.get("MLX2_MOE_RHS_PAD_MIN_ROWS", str(_RHS_PAD_DEFAULT_FLOOR)) or 0)
 
 
 _RHS_PAD_MIN_ROWS_PER_EXPERT = _rhs_pad_floor()
 # Observed-use counters: padded gather_qmm calls, and pad rows added.
 rhs_pad_calls = 0
 rhs_pad_rows = 0
+# Guards the pad counters and ``pad_choice_counts`` so a status read with
+# ``reset`` clears them as one operation.
+_PAD_STATS_LOCK = threading.Lock()
 
 # Adaptive kernel choice (module default off: MLX2_MOE_RHS_PAD_POLICY=adaptive;
 # Flash-Next selects it through its policy, see flash_next_policy).
@@ -109,30 +116,63 @@ def set_pad_policy(policy: str) -> str:
 # assumes uniform routing; real routing touches fewer experts, which the
 # fitted r0/r1 absorb for this table.
 _PAD_COST_MODELS = {
-    # Flash-Next gate/up: 512 experts, 2560 -> 640.  rhs wins from ~120 rows.
+    # Flash-Next gate/up: 512 experts, 2560 -> 640.  rhs wins from ~1130
+    # sorted rows (~113 tokens at top-10).
     ("affine", 4, 64, 512, 640, 2560): (-0.091401, 0.00096, 0.163268, 0.001819),
-    # Flash-Next down: 512 experts, 640 -> 2560.  rhs wins from ~30 rows.
+    # Flash-Next down: 512 experts, 640 -> 2560.  rhs wins from ~310 sorted
+    # rows (~31 tokens).
     ("affine", 4, 64, 512, 2560, 640): (-0.26367, 0.002081, -0.009772, 0.001673),
 }
 pad_choice_counts = {}
 
 
 def _record_pad_choice(reason: str) -> None:
-    pad_choice_counts[reason] = pad_choice_counts.get(reason, 0) + 1
+    with _PAD_STATS_LOCK:
+        pad_choice_counts[reason] = pad_choice_counts.get(reason, 0) + 1
+
+
+def _record_pad(pad: int) -> None:
+    global rhs_pad_calls, rhs_pad_rows
+    with _PAD_STATS_LOCK:
+        rhs_pad_calls += 1
+        rhs_pad_rows += pad
 
 
 def moe_pad_status(*, reset: bool = False) -> dict:
-    """Which sorted-gather kernel was chosen, and why, since the last reset."""
-    out = {
-        "policy": _RHS_PAD_POLICY,
-        "floor_rows_per_expert": _RHS_PAD_MIN_ROWS_PER_EXPERT,
-        "padded_calls": rhs_pad_calls,
-        "pad_rows": rhs_pad_rows,
-        "choices": dict(pad_choice_counts),
-    }
-    if reset:
-        pad_choice_counts.clear()
+    """Which sorted-gather kernel was chosen, and why, since the last reset.
+
+    ``engaged`` is observed use (a pad ran, so those gathers took the
+    streaming kernel's bits); ``qualified`` is the pad's own qualification
+    state, separate from any route verdict.  ``reset`` clears every
+    counter, so ``engaged`` restarts from no observed pad.
+    """
+    global rhs_pad_calls, rhs_pad_rows
+    with _PAD_STATS_LOCK:
+        out = {
+            "policy": _RHS_PAD_POLICY,
+            "floor_rows_per_expert": _RHS_PAD_MIN_ROWS_PER_EXPERT,
+            "padded_calls": rhs_pad_calls,
+            "pad_rows": rhs_pad_rows,
+            "engaged": rhs_pad_calls > 0,
+            "qualified": _RHS_PAD_QUALIFIED,
+            "choices": dict(pad_choice_counts),
+        }
+        if reset:
+            pad_choice_counts.clear()
+            rhs_pad_calls = 0
+            rhs_pad_rows = 0
     return out
+
+
+def moe_pad_reportable(status: dict) -> bool:
+    """Whether a receipt must carry ``status``: the law is not the module
+    default, or a pad ran.  The default floor changes bits too, so an engaged
+    floor is reported like any other policy."""
+    return (
+        status.get("policy") != "floor"
+        or status.get("floor_rows_per_expert", _RHS_PAD_DEFAULT_FLOOR) != _RHS_PAD_DEFAULT_FLOOR
+        or bool(status.get("padded_calls"))
+    )
 
 
 def _adaptive_pad(n: int, layer) -> tuple:
@@ -266,7 +306,6 @@ class QuantizedSwitchLinear(nn.Module):
         return self.weight.shape[0]
 
     def __call__(self, x, indices, sorted_indices=False):
-        global rhs_pad_calls, rhs_pad_rows
         tail_policy = _quantized_gather_tail_policy(
             self.mode, int(x.shape[-1]), sorted_indices
         )
@@ -308,8 +347,7 @@ class QuantizedSwitchLinear(nn.Module):
                         pad = _rhs_stream_pad(rows, self.num_experts)
             rhs = indices
             if pad:
-                rhs_pad_calls += 1
-                rhs_pad_rows += pad
+                _record_pad(pad)
                 (x, rhs) = _pad_sorted_tail(x, indices, pad)
             nax = None
             if (

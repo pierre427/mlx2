@@ -35,6 +35,7 @@ from .sampling_defaults import (
     vendor_sampling,
 )
 from .batch_metrics import BatchFaultSpec, BatchRuntimeMetrics, HttpRuntimeMetrics
+from .runtime.apc_numerics import MOE_RHS_PAD_DEFAULT as _MOE_RHS_PAD_DEFAULT
 from .runtime.apc_numerics import moe_rhs_pad_identity as _moe_rhs_pad_identity
 
 log = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ log = logging.getLogger(__name__)
 _MOE_NAX_GATHER_MODULE = "mlx2.runtime.models.moe_nax_gather"
 _SWITCH_LAYERS_MODULE = "mlx2.runtime.models.switch_layers"
 _GATED_DELTA_MODULE = "mlx2.runtime.models.gated_delta"
+_MOE_RHS_PAD_DEFAULT_FLOOR = _MOE_RHS_PAD_DEFAULT["min_rows_per_expert"]
 
 
 def _moe_nax_gather_mode() -> str:
@@ -89,7 +91,14 @@ def _execution_diagnostics(adapter) -> dict:
     switch = sys.modules.get(_SWITCH_LAYERS_MODULE)
     if "moe_pad" not in execution and switch is not None:
         pad = switch.moe_pad_status()
-        if pad["policy"] != "floor":
+        # The default floor pads (bit-changing, unqualified) too: name the
+        # pad whenever one ran or the law is not the module default.
+        if (
+            pad["policy"] != "floor"
+            or pad.get("padded_calls")
+            or pad.get("floor_rows_per_expert", _MOE_RHS_PAD_DEFAULT_FLOOR)
+            != _MOE_RHS_PAD_DEFAULT_FLOOR
+        ):
             execution["moe_pad"] = pad
     gdn = sys.modules.get(_GATED_DELTA_MODULE)
     if (
