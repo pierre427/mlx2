@@ -398,6 +398,7 @@ class ExternalDraftBatchGenerator:
                  minimum_draft_proposals=None,
                  external_prefill_coalesce_ms=0,
                  external_prefill_coalesce_min_tokens=1,
+                 decode_time_fairness=None,
                  **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
@@ -654,6 +655,15 @@ class ExternalDraftBatchGenerator:
         self.prefill_allocator_reclaim = prefill_allocator_reclaim
         if prefill_allocator_reclaim:
             self.scheduler_stats.update(external_prefill_allocator_reclaims=0)
+        from .adaptive_policy import DecodeTimeFairness
+
+        # The serving route's decode-time fairness (the stall bound on a
+        # prefill slice taken beside decoding lanes).  Absent, as for a
+        # direct construction, it is constructed disabled and inert.
+        self.decode_time_fairness = DecodeTimeFairness(
+            **dict(decode_time_fairness or {})
+        )
+        self._sync_decode_fairness_stats()
         if pairwise_selection == "batched":
             # Default-off receipts keep their existing key set.
             self.scheduler_stats.update(external_pairwise_selection_groups=0, external_pairwise_selection_lanes=0)
@@ -876,6 +886,58 @@ class ExternalDraftBatchGenerator:
             len(lane.history) + len(lane.remaining), maximum=self.prefill_step
         )
 
+    def _sync_decode_fairness_stats(self):
+        fairness = self.decode_time_fairness
+        if fairness.enabled:
+            for key, value in fairness.counters.items():
+                self.scheduler_stats[f"decode_fairness_{key}"] = int(value)
+
+    def _decoding_beside_prefill(self):
+        """Whether a lane decodes in this poll beside its prefill slice.
+
+        A lane held at its prompt boundary for atomic-cohort peers waits for
+        this prefill rather than decoding, so it does not make a slice
+        contended (the check is the pure form of
+        ``_atomic_cohort_prefill_ready``).
+        """
+        for lane in self.lanes.values():
+            if lane.anchor is None or lane.cancelled:
+                continue
+            key = self._batch_cohort_key(lane)
+            if key is None:
+                return True
+            members = [
+                candidate
+                for candidate in self.lanes.values()
+                if not candidate.cancelled
+                and self._batch_cohort_key(candidate) == key
+            ]
+            if len(members) != key[2] or all(
+                candidate.anchor is not None for candidate in members
+            ):
+                return True
+        return False
+
+    def _fair_step(self, step, *, contended, rows=1, depth=0):
+        """Stall-bound a prefill slice taken beside decoding lanes.
+
+        The same cost-model bound and contended slice floor as the ordinary
+        route.  Before it the external route sliced at the configured (or
+        prompt-length autoscaled) step whatever the decode lanes paid: 512
+        rows on a 12K prompt, 2048 at 32-64K and 8192 above 64K.
+        """
+        fairness = self.decode_time_fairness
+        capped = fairness.cap(step, contended=contended, rows=rows, depth=depth)
+        return fairness.floor_slice(capped, step, contended=contended)
+
+    def _observe_prefill(self, width, seconds, *, contended, rows, depth):
+        fairness = self.decode_time_fairness
+        if fairness.enabled:
+            fairness.observe_prefill(
+                width, seconds, contended=contended, rows=rows, depth=depth
+            )
+            self._sync_decode_fairness_stats()
+
     def _prefill_response(self, lane, *, external_prefill_width=1):
         """Publish progress and the paired committed boundary after a chunk."""
         done = len(lane.remaining) == 1
@@ -896,18 +958,24 @@ class ExternalDraftBatchGenerator:
             external_prefill_width=external_prefill_width,
         )
 
-    def _prefill(self, lane, *, step=None):
+    def _prefill(self, lane, *, step=None, contended=False):
         if len(lane.remaining) > 1:
             n = min(
                 self._prefill_limit(lane) if step is None else step,
                 len(lane.remaining) - 1,
             )
+            depth = len(lane.history)
+            tic = time.perf_counter()
             if lane.tail.shape[1]:
                 self._append_context(lane, lane.remaining[0])
             inputs = [lane.remaining.popleft() for _ in range(n)]
             lane.tail = self.model.prefill_body(self.mx.array([inputs]), lane.cache, self.layers)
             lane.history.extend(inputs)
             self.mx.eval(lane.tail, [c.state for c in lane.cache], [c.state for c in lane.draft_cache if c.offset])
+            self._observe_prefill(
+                n, time.perf_counter() - tic, contended=contended, rows=1,
+                depth=depth,
+            )
             self.scheduler_stats["prefill_rounds"] += 1
             if self.prefill_allocator_reclaim:
                 # After the materialization above; lane.tail stays referenced.
@@ -915,7 +983,7 @@ class ExternalDraftBatchGenerator:
                 _bump(self.scheduler_stats, "external_prefill_allocator_reclaims")
         return self._prefill_response(lane)
 
-    def _prefill_many(self, lanes, *, step=None):
+    def _prefill_many(self, lanes, *, step=None, contended=False):
         """Advance several external target prompts through one padded slab.
 
         Target cache padding is handled by the same cache contract as ordinary
@@ -924,15 +992,22 @@ class ExternalDraftBatchGenerator:
         """
         lanes = [lane for lane in lanes if len(lane.remaining) > 1]
         if len(lanes) < 2:
-            return [self._prefill(lane, step=step) for lane in lanes]
+            return [
+                self._prefill(lane, step=step, contended=contended)
+                for lane in lanes
+            ]
         lengths = [
             min(
-                self._prefill_limit(lane) if step is None else step,
+                self._prefill_limit(lane)
+                if step is None
+                else min(step, self._prefill_limit(lane)),
                 len(lane.remaining) - 1,
             )
             for lane in lanes
         ]
         width = max(lengths)
+        depth = max(len(lane.history) for lane in lanes)
+        tic = time.perf_counter()
         chunks = []
         for lane, length in zip(lanes, lengths):
             if lane.tail.shape[1]:
@@ -960,6 +1035,10 @@ class ExternalDraftBatchGenerator:
                 [plane.state for plane in lane.cache],
                 [plane.state for plane in lane.draft_cache if plane.offset],
             )
+        self._observe_prefill(
+            width, time.perf_counter() - tic, contended=contended,
+            rows=len(lanes), depth=depth,
+        )
         self.scheduler_stats["prefill_rounds"] += 1
         _bump(self.scheduler_stats, "external_batched_prefill_rounds")
         _bump(self.scheduler_stats, "external_batched_prefill_lanes", len(lanes))
@@ -3645,6 +3724,10 @@ class ExternalDraftBatchGenerator:
         # At most one bounded prefill slice; active decode progresses every poll.
         active_count = sum(l.anchor is not None for l in self.lanes.values())
         defer_serial_prefill = False
+        # Beside a decoding lane the slice is also stall-bounded.
+        contended = (
+            self.decode_time_fairness.enabled and self._decoding_beside_prefill()
+        )
         if self.external_varlen_prefill and active_count < self.capacity:
             candidates = [
                 lane for lane in ordered
@@ -3682,18 +3765,34 @@ class ExternalDraftBatchGenerator:
                 ),
                 default=0,
             )
+            slab_step = None
+            if contended and append:
+                slab_step = self._fair_step(
+                    max(self._prefill_limit(lane) for lane in candidates),
+                    contended=True,
+                    rows=len(candidates),
+                    depth=max(len(lane.history) for lane in candidates),
+                )
+                append = min(append, slab_step)
             cohort = (
                 self._fit_cohort(candidates, append, prefill=True)
                 if append and not defer_serial_prefill else []
             )
             if len(cohort) > 1:
-                prompts.extend(self._prefill_many(cohort))
+                prompts.extend(
+                    self._prefill_many(cohort, step=slab_step, contended=contended)
+                )
         # A multirow slab is this poll's one bounded physical prefill slice.
         # If it could not form, retain the unchanged serial admission path.
         for lane in (() if prompts or defer_serial_prefill else ordered):
             if lane.anchor is not None or active_count >= self.capacity:
                 continue
-            append = min(self._prefill_limit(lane), max(1, len(lane.remaining)-1))
+            limit = self._prefill_limit(lane)
+            if contended:
+                limit = self._fair_step(
+                    limit, contended=True, depth=len(lane.history)
+                )
+            append = min(limit, max(1, len(lane.remaining)-1))
             admitted = self._admit([lane], append, prefill=True)
             while not admitted and self._reclaim_for_admission():
                 admitted = self._admit([lane], append, prefill=True)
@@ -3704,7 +3803,10 @@ class ExternalDraftBatchGenerator:
             if admitted:
                 if append < initial_append:
                     self.scheduler_stats["prefill_adaptive_slices"] = self.scheduler_stats.get("prefill_adaptive_slices", 0) + 1
-                prompts.append(self._prefill(lane, step=append)); break
+                prompts.append(
+                    self._prefill(lane, step=append, contended=contended)
+                )
+                break
             self._memory_waiting_uids.add(lane.uid)
         ready = [
             lane
@@ -3727,6 +3829,7 @@ class ExternalDraftBatchGenerator:
             # Permanent ordinary lanes must not share a zero-depth round with
             # transient final-budget rows, whose draft context remains exact.
             groups.setdefault((count, lane.ordinary),[]).append(lane)
+        decode_started = time.perf_counter()
         for (count, _ordinary), candidates in groups.items():
             if self.target_execution == "tensorfold" and not concurrent:
                 candidates = candidates[: self.tensorfold_cohort_limit]
@@ -3777,6 +3880,12 @@ class ExternalDraftBatchGenerator:
                     retry = [lane for lane in group if lane.uid != error.uid]
                     if retry:
                         pending.append(retry)
+        if groups and self.decode_time_fairness.enabled:
+            # Decode rounds set the cost model's fixed per-forward cost.
+            self.decode_time_fairness.observe_decode(
+                time.perf_counter() - decode_started
+            )
+            self._sync_decode_fairness_stats()
         # A lane can finish in the poll that completes its prefill
         # (max_tokens=1, or a stop as the first token).  Its end_of_prompt
         # response is in this same return, so its committed boundary stays

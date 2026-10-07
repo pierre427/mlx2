@@ -442,6 +442,7 @@ class PromptLookupBatchGenerator:
         prefill_step_autoscale=False,
         stop_tokens=(),
         prompt_lookup=None,
+        decode_time_fairness=None,
         **_kwargs,
     ):
         self.model = model
@@ -510,6 +511,21 @@ class PromptLookupBatchGenerator:
             "pld_recovery_full_rebuilds": 0,
             "target_max_width": 1,
         }
+        from .adaptive_policy import DecodeTimeFairness
+
+        # The serving route's decode-time fairness (the stall bound on a
+        # prefill slice taken beside decoding lanes).  Absent, as for a
+        # direct construction, it is constructed disabled and inert.
+        self.decode_time_fairness = DecodeTimeFairness(
+            **dict(decode_time_fairness or {})
+        )
+        self._sync_decode_fairness_stats()
+
+    def _sync_decode_fairness_stats(self):
+        fairness = self.decode_time_fairness
+        if fairness.enabled:
+            for key, value in fairness.counters.items():
+                self.scheduler_stats[f"decode_fairness_{key}"] = int(value)
 
     def __len__(self):
         return len(self.lanes)
@@ -646,7 +662,7 @@ class PromptLookupBatchGenerator:
             uids.append(uid)
         return uids
 
-    def _prefill(self, lane):
+    def _prefill(self, lane, *, contended=False):
         if len(lane.remaining) > 1:
             total = len(lane.history) + len(lane.remaining)
             step = (
@@ -654,11 +670,30 @@ class PromptLookupBatchGenerator:
                 if self.prefill_step_autoscale
                 else self.prefill_step
             )
+            fairness = self.decode_time_fairness
+            if contended:
+                # Beside decoding lanes the slice is stall-bounded, as on the
+                # ordinary route.  Before, it was the configured (or prompt-
+                # length autoscaled) step whatever the decode lanes paid: 512
+                # rows on a 12K prompt, 2048 at 32-64K and 8192 above 64K.
+                step = fairness.floor_slice(
+                    fairness.cap(step, contended=True, depth=len(lane.history)),
+                    step,
+                    contended=True,
+                )
             count = min(step, len(lane.remaining) - 1)
+            depth = len(lane.history)
             inputs = [lane.remaining.popleft() for _ in range(count)]
+            tic = time.perf_counter()
             with mx.stream(generation_stream):
                 self.model(mx.array([inputs], dtype=mx.uint32), cache=lane.cache)
                 mx.eval(_walk_state(lane.cache))
+            if fairness.enabled:
+                fairness.observe_prefill(
+                    count, time.perf_counter() - tic, contended=contended,
+                    depth=depth,
+                )
+                self._sync_decode_fairness_stats()
             mx.clear_cache()
             lane.history.extend(inputs)
             self.scheduler_stats["pld_prefill_rounds"] += 1
@@ -1361,7 +1396,11 @@ class PromptLookupBatchGenerator:
         if waiting:
             lane = waiting[self._prefill_cursor % len(waiting)]
             self._prefill_cursor += 1
-            prompts.append(self._prefill(lane))
+            contended = self.decode_time_fairness.enabled and any(
+                other.anchor is not None for other in self.lanes.values()
+            )
+            prompts.append(self._prefill(lane, contended=contended))
+        decode_started = time.perf_counter()
         # The cost latch measures one physical target row. Keep that geometry
         # when several PLD requests coexist: a width-two segmented target is
         # numerically distinct from the ordinary B1 path and has no matched
@@ -1405,6 +1444,12 @@ class PromptLookupBatchGenerator:
                             {"uid": failure.uid, "reason": failure.reason}
                         )
                         self.remove([failure.uid])
+        if pending and self.decode_time_fairness.enabled:
+            # Decode rounds set the cost model's fixed per-forward cost.
+            self.decode_time_fairness.observe_decode(
+                time.perf_counter() - decode_started
+            )
+            self._sync_decode_fairness_stats()
         responses = []
         for uid, lane in list(self.lanes.items()):
             if lane.ready:

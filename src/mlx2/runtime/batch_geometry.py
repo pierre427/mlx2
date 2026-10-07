@@ -103,9 +103,10 @@ class GeometrySchedulerPolicy:
             return cls(enabled=True)
         if not isinstance(value, Mapping):
             raise TypeError("batch_geometry must be boolean or an object")
+        # ``packed_padding_fraction`` is a planner (research replay) knob;
+        # the scheduler never reads it, so the server policy refuses it.
         allowed = {
-            "token_budget", "packed_padding_fraction",
-            "bucket_padding_fraction", "max_bucket_ratio",
+            "token_budget", "bucket_padding_fraction", "max_bucket_ratio",
         }
         unknown = set(value) - allowed
         if unknown:
@@ -119,7 +120,6 @@ class GeometrySchedulerPolicy:
             enabled=True,
             token_budget=budget,
             selection=GeometryPolicy(
-                packed_padding_fraction=value.get("packed_padding_fraction", .20),
                 bucket_padding_fraction=value.get("bucket_padding_fraction", .12),
                 max_bucket_ratio=value.get("max_bucket_ratio", 1.50),
             ),
@@ -127,7 +127,6 @@ class GeometrySchedulerPolicy:
 
     def as_dict(self) -> dict[str, int | float]:
         result: dict[str, int | float] = {
-            "packed_padding_fraction": self.selection.packed_padding_fraction,
             "bucket_padding_fraction": self.selection.bucket_padding_fraction,
             "max_bucket_ratio": self.selection.max_bucket_ratio,
         }

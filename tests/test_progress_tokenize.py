@@ -10,7 +10,6 @@ from types import SimpleNamespace as NS
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-import numpy as np
 import pytest
 
 from mlx2.anthropic_compat import anthropic_request_to_chat
@@ -562,6 +561,9 @@ def test_external_and_pld_prefill_report_progress():
     generator.scheduler_stats = Counter()
     generator.boundaries = {}
     generator.model = lambda *a, **kw: None
+    from mlx2.runtime.adaptive_policy import DecodeTimeFairness
+
+    generator.decode_time_fairness = DecodeTimeFairness()
     lane = NS(uid=1, remaining=deque([5, 6, 7, 8, 9]), history=[1, 2],
               lookup_history=[1, 2, 5, 6, 7, 8, 9], cache=[])
     generator._capture_lane_recovery = lambda lane: None
@@ -585,6 +587,7 @@ def test_external_and_pld_prefill_report_progress():
     external.mx = NS(array=lambda value: value, eval=lambda *a: None)
     external.model = NS(prefill_body=lambda *a: empty)
     external._sidecar = lambda lane: None
+    external.decode_time_fairness = DecodeTimeFairness()
     lane = NS(uid=2, remaining=deque([5, 6, 7, 8, 9]), history=[1, 2], tail=empty,
               cache=[], draft_cache=[])
     first = ExternalDraftBatchGenerator._prefill(external, lane)

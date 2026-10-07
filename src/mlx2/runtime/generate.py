@@ -53,6 +53,13 @@ MTP_STARVED_BOUNDARIES_BEFORE_PLAIN = 8
 # continues as ordinary decode beside the locked cohort instead of waiting for
 # the cohort to drain (which took the whole cohort's decode: 78 s measured).
 WIDTH_LOCK_DEFERRALS_BEFORE_PLAIN = 4
+# A prefilled segmented self-MTP lane that would start the cohort alone waits
+# for queued siblings while each sibling's remaining prefill is at most this
+# multiple of its own prompt.  Starting alone locks the cohort at width 1 and
+# sends every sibling plain beside it (two forwards per round for the whole
+# decode).  The same bound decides which co-arrivals may still be prepared
+# beside a cohort that started early without a stall bound.
+MTP_COARRIVAL_HOLD_RESIDUAL_FACTOR = 4
 CACHE_STATE_EVAL_INTERVAL = 256
 ALLOCATOR_RECLAIM_STEP_INTERVAL = 512
 # Self-MTP emits several tokens per step, and each cycle frees verify-width KV
@@ -3409,6 +3416,12 @@ class BatchGenerator:
         from .adaptive_policy import PrefillOrder
 
         self.prefill_order = PrefillOrder.from_value(prefill_scheduling)
+        if self.prefill_order.enabled and self.batch_geometry.enabled:
+            # SRPT admits its own picks and never reaches the geometry
+            # selector, so the pair would record a policy that never runs.
+            raise ValueError(
+                "batch_geometry cannot be combined with prefill_scheduling"
+            )
         if self.prefill_order.enabled:
             self._sync_prefill_order_stats()
         from .adaptive_policy import DecodeFirstPublish
@@ -3599,6 +3612,8 @@ class BatchGenerator:
         self._mtp_prefill_failures = []
         self._prompt_boundaries = {}
         self._interior_checkpoint_positions = {}
+        # Cut-only prefill positions (no snapshot), see ``insert_segments``.
+        self._prefill_cut_positions = {}
         self._interior_checkpoints = {}
         # Purpose of each planned position; absent positions are INTERIOR.
         self._state_boundary_purposes = {}
@@ -3680,6 +3695,7 @@ class BatchGenerator:
             generation_batch.close()
         getattr(self, "_prompt_boundaries", {}).clear()
         getattr(self, "_interior_checkpoint_positions", {}).clear()
+        getattr(self, "_prefill_cut_positions", {}).clear()
         getattr(self, "_interior_checkpoints", {}).clear()
         getattr(self, "_state_boundary_purposes", {}).clear()
         getattr(self, "_state_checkpoints", []).clear()
@@ -3752,6 +3768,7 @@ class BatchGenerator:
         apc_interior_positions: Optional[List[Optional[Sequence[int]]]] = None,
         prefill_inputs: Optional[List[Optional[dict]]] = None,
         state_boundaries: Optional[List[Optional[Sequence[StateBoundary]]]] = None,
+        prefill_cuts: Optional[List[Optional[Sequence[int]]]] = None,
     ):
         return self.insert_segments(
             [[p] for p in prompts],
@@ -3767,6 +3784,7 @@ class BatchGenerator:
             apc_interior_positions,
             prefill_inputs,
             state_boundaries,
+            prefill_cuts,
         )
 
     def bind_cache_capsule(self, group, uid, prepared, expected_rows):
@@ -3882,13 +3900,17 @@ class BatchGenerator:
         apc_interior_positions: Optional[List[Optional[Sequence[int]]]] = None,
         prefill_inputs: Optional[List[Optional[dict]]] = None,
         state_boundaries: Optional[List[Optional[Sequence[StateBoundary]]]] = None,
+        prefill_cuts: Optional[List[Optional[Sequence[int]]]] = None,
     ):
         """Queue prompts; ``state_boundaries`` plans exact prefill snapshots.
 
         ``apc_interior_positions`` is the INTERIOR-only alias of
         ``state_boundaries``; a lane's non-None ``state_boundaries`` entry
         wins.  With neither, a positive ``apc_interior_checkpoints.count``
-        plans the default interior lattice.
+        plans the default interior lattice.  ``prefill_cuts`` are absolute
+        positions where prefill slices end without a snapshot: serving
+        passes the cold plan's cuts above a warm hit so the continuation
+        slices exactly as a cold prefill of the same prompt would.
         """
         uids = []
         max_tokens = max_tokens or [self.max_tokens] * len(segments)
@@ -3910,6 +3932,7 @@ class BatchGenerator:
         state_boundaries = (
             [None] * len(segments) if state_boundaries is None else state_boundaries
         )
+        prefill_cuts = [None] * len(segments) if prefill_cuts is None else prefill_cuts
         for name, values in (
             ("mtp_states", mtp_states),
             ("lane_rngs", lane_rngs),
@@ -3917,6 +3940,7 @@ class BatchGenerator:
             ("apc_interior_positions", apc_interior_positions),
             ("prefill_inputs", prefill_inputs),
             ("state_boundaries", state_boundaries),
+            ("prefill_cuts", prefill_cuts),
         ):
             if len(values) != len(segments):
                 raise ValueError(f"{name} must have one entry per sequence")
@@ -3957,7 +3981,7 @@ class BatchGenerator:
                         min_stride=int(policy["min_stride"]),
                     )
                 )
-            if requested or int(policy.get("count", 0)) > 0:
+            if requested or prefill_cuts[i] or int(policy.get("count", 0)) > 0:
                 from .apc_v2 import inspect_apc_capabilities
 
                 capabilities = inspect_apc_capabilities(caches[i])
@@ -3989,6 +4013,20 @@ class BatchGenerator:
                         }
                         if purposes:
                             self._state_boundary_purposes[uid] = purposes
+                    cuts = tuple(prefill_cuts[i] or ())
+                    if any(
+                        isinstance(position, bool)
+                        or not isinstance(position, int)
+                        for position in cuts
+                    ) or tuple(sorted(set(cuts))) != cuts:
+                        raise ValueError("invalid prefill cut positions")
+                    cuts = tuple(
+                        position
+                        for position in cuts
+                        if passed < position < total - 1 and position not in positions
+                    )
+                    if cuts:
+                        self._prefill_cut_positions[self._uid_count + i] = deque(cuts)
                 else:
                     _bump_bounded_counter(
                         self.scheduler_stats,
@@ -4786,6 +4824,8 @@ class BatchGenerator:
             ]
             _prefetch_known_mtp_tail(self.model, history, prompt, config)
             prompt_boundary = {}
+            prepare_contended = self._prefill_contends_decode()
+            tic = time.perf_counter()
             (lane, first) = prepare_self_mtp_lane(
                 mx.array(prompt, dtype=mx.uint32),
                 self.model,
@@ -4813,6 +4853,18 @@ class BatchGenerator:
                 prompt_boundary_out=prompt_boundary,
                 fly_verification=getattr(self, "fly_verification", None),
             )
+            toc = time.perf_counter()
+            # A one-call preparation is a prefill forward like any slice: it
+            # calibrates the self-MTP stall bound and owes decode debt when
+            # it ran beside live decode.
+            self._fairness().observe_prefill(
+                len(prompt),
+                toc - tic,
+                contended=prepare_contended,
+                depth=len(history),
+                kind="mtp",
+            )
+            self._sync_decode_fairness_stats()
             lane.lane.token_prefix = mx.array(history + prompt, dtype=mx.uint32)
             lane.lane.logits_processors = processors
             lane.lane._initial_shared_prefix_attestation = config.get("shared_prefix_attestation")
@@ -4925,19 +4977,44 @@ class BatchGenerator:
         (batch, prepared) = self._make_mtp_batch(n)
         return (batch, progress + list(prepared))
 
-    def _peek_interior_checkpoint(self, uid: int, covered: int):
+    def _peek_capture_checkpoint(self, uid: int, covered: int):
         positions = getattr(self, "_interior_checkpoint_positions", {}).get(
             int(uid)
         )
         return next_prefill_checkpoint(positions or (), covered)
 
-    def _next_interior_checkpoint(self, uid: int, covered: int):
+    def _next_capture_checkpoint(self, uid: int, covered: int):
+        """Next planned snapshot position (capture paths only)."""
         positions = getattr(self, "_interior_checkpoint_positions", {}).get(
             int(uid)
         )
-        next_position = self._peek_interior_checkpoint(uid, covered)
+        next_position = self._peek_capture_checkpoint(uid, covered)
         while positions and positions[0] <= int(covered):
             positions.popleft()
+        return next_position
+
+    def _peek_interior_checkpoint(self, uid: int, covered: int):
+        """Next position a prefill slice must end at: snapshot or cut-only."""
+        capture = next_prefill_checkpoint(
+            getattr(self, "_interior_checkpoint_positions", {}).get(int(uid)) or (),
+            covered,
+        )
+        cut = next_prefill_checkpoint(
+            getattr(self, "_prefill_cut_positions", {}).get(int(uid)) or (),
+            covered,
+        )
+        return min((p for p in (capture, cut) if p is not None), default=None)
+
+    def _next_interior_checkpoint(self, uid: int, covered: int):
+        next_position = self._peek_interior_checkpoint(uid, covered)
+        positions = getattr(self, "_interior_checkpoint_positions", {}).get(
+            int(uid)
+        )
+        while positions and positions[0] <= int(covered):
+            positions.popleft()
+        cuts = getattr(self, "_prefill_cut_positions", {}).get(int(uid))
+        while cuts and cuts[0] <= int(covered):
+            cuts.popleft()
         return next_position
 
     def _boundary_purpose(self, uid: int, position: int) -> BoundaryPurpose:
@@ -5000,7 +5077,7 @@ class BatchGenerator:
     def _capture_mtp_interior_checkpoint(
         self, uid: int, history, prompt_cache, mtp_state
     ) -> bool:
-        position = self._next_interior_checkpoint(uid, len(history) - 1)
+        position = self._next_capture_checkpoint(uid, len(history) - 1)
         if position is None or position != len(history):
             return False
         if self._skip_state_boundary_for_pressure(uid, position):
@@ -5051,10 +5128,15 @@ class BatchGenerator:
         config = dict(self.self_mtp or {})
         config.update(self._mtp_configs.get(uid, {}))
         self._validate_mtp_config(config)
-        _prefetch_known_mtp_tail(self.model, history, prompt, config)
         next_checkpoint = self._next_interior_checkpoint(uid, len(history))
         if next_checkpoint is not None:
             max_tokens = min(max_tokens, next_checkpoint - len(history))
+        # Stage this slice's rows and the next one's.  Resubmitting the whole
+        # remaining prompt every slice cost O(prompt^2) host work beside live
+        # decode (Flash-Next 16K: 3.0 M rows staged for 0.24 M looked up).
+        _prefetch_known_mtp_tail(
+            self.model, history, prompt[: 2 * max(int(max_tokens), 1)], config
+        )
         tic = time.perf_counter()
         (remaining, prompt_cache, mtp_state, processed) = advance_self_mtp_prefill(
             mx.array(prompt, dtype=mx.uint32),
@@ -5117,7 +5199,9 @@ class BatchGenerator:
         self._fairness().observe_prefill(
             processed,
             toc - tic,
-            contended=self._has_active_decode(),
+            contended=self._prefill_contends_decode(),
+            depth=len(history) - int(processed),
+            kind="mtp",
         )
         self.scheduler_stats["prefill_rounds"] += 1
         self.scheduler_stats["adaptive_prefill_release_rounds"] += 1
@@ -5139,6 +5223,59 @@ class BatchGenerator:
             return self._release_prefilled_mtp_lane(index, progress)
         return (None, progress)
 
+    def _mtp_coarrival_hold(self, index: int) -> bool:
+        """Whether queued row ``index`` waits for co-arrived siblings.
+
+        Segmented live-tip decode cannot change width once a cohort runs, so
+        the first lane to finish prefill on an idle MTP batch would lock the
+        cohort at width 1 and send every sibling plain beside it.  The row is
+        held instead while (a) no self-MTP lane is live, (b) another row in
+        the admission window still needs prefill, and (c) every such
+        sibling's remaining prefill is at most
+        ``MTP_COARRIVAL_HOLD_RESIDUAL_FACTOR`` times this row's prompt.  (c)
+        is an outlier guard: a short prompt does not wait for a much longer
+        one.  It is per sibling, not summed, because a one-chunk burst of
+        any size is prepared together; summing released the first of eight
+        equal 700-token prompts alone (27B autoscale, 512-row steps).  When
+        no sibling needs another slice, ``_round_mtp`` prepares all of them
+        in one ``_make_mtp_batch``.  Declared ``batch_cohort`` rows keep
+        their own atomic hold.
+        """
+        if not _segment_aware_live_tip_enabled(self.self_mtp):
+            return False
+        batch = self._generation_batch
+        if batch.mtp_cycle_state() or batch.has_deferred_lanes:
+            return False
+        queued = list(self._unprocessed_sequences)
+        occupied = len(self._plain_fallback_batch)
+        window = min(
+            self.completion_batch_size - occupied,
+            _segment_aware_cohort_size(self.self_mtp) - occupied,
+            len(queued),
+        )
+        if index >= window:
+            return False
+        rows = queued[:window]
+        if any(
+            self._mtp_configs.get(sequence[0], {}).get("batch_cohort")
+            or self._mtp_configs.get(sequence[0], {}).get(
+                "target_only_plain_fallback"
+            )
+            for sequence in rows
+        ):
+            return False
+        own = rows[index]
+        own_tokens = len(own[4]) + sum(len(segment) for segment in own[1])
+        pending = [
+            residual
+            for (i, sequence) in enumerate(rows)
+            if i != index
+            and (residual := sum(len(segment) for segment in sequence[1])) > 1
+        ]
+        return bool(pending) and (
+            max(pending) <= MTP_COARRIVAL_HOLD_RESIDUAL_FACTOR * own_tokens
+        )
+
     def _release_prefilled_mtp_lane(self, index: int, progress):
         """Prepare one queued lane whose residual is its final prompt token.
 
@@ -5146,12 +5283,17 @@ class BatchGenerator:
         preparing it alone would start B1 decode while a sibling is still
         prefilling.  ``_next_mtp`` prepares the whole cohort in one
         ``_make_mtp_batch`` once no member needs another prefill slice.
+        Undeclared co-arrivals get the same bounded hold
+        (``_mtp_coarrival_hold``).
         """
         queued = list(self._unprocessed_sequences)
         if self._mtp_configs.get(queued[index][0], {}).get("batch_cohort"):
             self.scheduler_stats["atomic_cohort_prefill_holds"] = (
                 self.scheduler_stats.get("atomic_cohort_prefill_holds", 0) + 1
             )
+            return (None, progress)
+        if self._mtp_coarrival_hold(index):
+            _bump_bounded_counter(self.scheduler_stats, "mtp_coarrival_holds")
             return (None, progress)
         if index:
             queued.insert(0, queued.pop(index))
@@ -5371,6 +5513,7 @@ class BatchGenerator:
     def pop_interior_checkpoints(self, uid: int):
         """Transfer exact budgeted interior checkpoints to the server."""
         getattr(self, "_interior_checkpoint_positions", {}).pop(int(uid), None)
+        getattr(self, "_prefill_cut_positions", {}).pop(int(uid), None)
         getattr(self, "_state_boundary_purposes", {}).pop(int(uid), None)
         return getattr(self, "_interior_checkpoints", {}).pop(int(uid), [])
 
@@ -5471,6 +5614,7 @@ class BatchGenerator:
         for uid in uids:
             self._prompt_boundaries.pop(uid, None)
             getattr(self, "_interior_checkpoint_positions", {}).pop(uid, None)
+            getattr(self, "_prefill_cut_positions", {}).pop(uid, None)
             getattr(self, "_interior_checkpoints", {}).pop(uid, None)
             getattr(self, "_state_boundary_purposes", {}).pop(uid, None)
             # Serving pops these at end_of_prompt; a lane removed before then
@@ -5724,7 +5868,7 @@ class BatchGenerator:
             )
             if remaining is not None and prefill_fits_one_chunk(
                 remaining,
-                int(sequence[2]),
+                int(sequence[4] or 0) + int(sequence[2]),
                 int(step),
                 autoscale=bool(self.prefill_step_autoscale),
                 maximum=int(self.prefill_step_size),
@@ -5737,11 +5881,11 @@ class BatchGenerator:
         for index, sequence in enumerate(self._unprocessed_sequences):
             if len(sequence) > 9 and sequence[9] is not None:
                 continue
-            total = sum(len(segment) for segment in sequence[1])
+            depth = len(sequence[4]) if sequence[4] else 0
+            total = depth + sum(len(segment) for segment in sequence[1])
             remaining = single_round_prefill_rows(
                 len(segment) for segment in sequence[1]
             )
-            depth = len(sequence[4]) if sequence[4] else 0
             next_checkpoint = self._peek_interior_checkpoint(sequence[0], depth)
             if remaining is not None and prefill_fits_one_chunk(
                 remaining,
@@ -5787,8 +5931,12 @@ class BatchGenerator:
             and len(self._generation_batch) > 0
         )
 
-    def _select_prefill_indices(self, n: int):
-        """Select a padding-efficient, starvation-bounded admission cohort."""
+    def _select_prefill_indices(self, n: int, slice_limit=None):
+        """Select a padding-efficient, starvation-bounded admission cohort.
+
+        ``slice_limit`` is the round's bounded slice: batch geometry judges
+        rows at the width they will execute, not the uncontended step.
+        """
         if n <= 0:
             return []
         window = min(
@@ -5811,15 +5959,26 @@ class BatchGenerator:
             if self._isolated_prefill_must_wait(candidates[media[0]]):
                 return []
             return [media[0]]
+        geometry_limit = (
+            slice_limit
+            if slice_limit is not None and self.batch_geometry.enabled
+            else None
+        )
+
+        def executed(length):
+            return length if geometry_limit is None else min(length, geometry_limit)
+
         if window == n:
             selected = list(range(n))
             candidate_lengths = [
-                self._prefill_chunk_length(
+                executed(self._prefill_chunk_length(
                     sequence[1], len(sequence[4]) + sum(map(len, sequence[1]))
-                ) for sequence in candidates
+                )) for sequence in candidates
             ]
             active_lengths = [
-                self._prefill_chunk_length(sequence[0], sequence[2])
+                executed(self._prefill_chunk_length(
+                    sequence[0], int(sequence[4] or 0) + int(sequence[2])
+                ))
                 for sequence in self._currently_processing
                 if not (len(sequence[0]) == 1 and len(sequence[0][0]) == 1)
             ]
@@ -5827,12 +5986,14 @@ class BatchGenerator:
                 selected, candidate_lengths, active_lengths
             )
         candidate_lengths = [
-            self._prefill_chunk_length(
+            executed(self._prefill_chunk_length(
                 sequence[1], len(sequence[4]) + sum(map(len, sequence[1]))
-            ) for sequence in candidates
+            )) for sequence in candidates
         ]
         active_lengths = [
-            self._prefill_chunk_length(sequence[0], sequence[2])
+            executed(self._prefill_chunk_length(
+                sequence[0], int(sequence[4] or 0) + int(sequence[2])
+            ))
             for sequence in self._currently_processing
             if not (len(sequence[0]) == 1 and len(sequence[0][0]) == 1)
         ]
@@ -6031,17 +6192,51 @@ class BatchGenerator:
                 return True
         return False
 
-    def _one_slice_bound(self, chunk: int) -> int:
-        """Apply the stall bound to ``chunk`` under one-slice contention."""
+    def _one_slice_bound(self, chunk: int, *, rows=1, depth=0, kind=None) -> int:
+        """Apply the stall bound to ``chunk`` under one-slice contention.
+
+        Pure: ``_bounded_slice`` counts the clamp once the final slice is
+        known (a slice floor may lift it back).
+        """
         order = self._prefill_order()
         if not order.one_slice_contention:
             return chunk
-        bound = self._fairness().stall_bound(chunk)
+        bound = self._fairness().stall_bound(
+            chunk, rows=rows, depth=depth, kind=kind or self._prefill_cost_kind()
+        )
         if bound < chunk and self._one_slice_contended(bound):
-            order.note_one_slice_clamp()
-            self._sync_prefill_order_stats()
             return bound
         return chunk
+
+    def _prefill_cost_kind(self) -> str:
+        return "mtp" if getattr(self, "self_mtp", None) is not None else "ordinary"
+
+    def _bounded_slice(
+        self, chunk, *, contended, rows=1, depth=0, kind=None, record=True
+    ):
+        """Stall-bound one prefill slice once its rows and depth are known.
+
+        Fairness cap, one-slice contention bound, then the contended slice
+        floor.  Clamp counters are bumped only for the bound that still
+        holds in the applied slice (``record``); ``record=False`` is a pure
+        query for admission estimates.
+        """
+        fairness = self._fairness()
+        kind = kind or self._prefill_cost_kind()
+        capped = fairness.cap(
+            chunk, contended=contended, rows=rows, depth=depth, kind=kind,
+            record=record,
+        )
+        bounded = self._one_slice_bound(capped, rows=rows, depth=depth, kind=kind)
+        final = fairness.floor_slice(
+            bounded, self.prefill_step_size, contended=contended, record=record
+        )
+        if record:
+            if bounded < capped and final <= bounded:
+                self._prefill_order().note_one_slice_clamp()
+                self._sync_prefill_order_stats()
+            self._sync_decode_fairness_stats()
+        return final
 
     def _budget_admissible(self, n):
         """How many of the first n queued sequences fit the state budget.
@@ -6353,6 +6548,7 @@ class BatchGenerator:
         """
         generation_responses = []
         prompt_responses = []
+        self._coarrival_exempt_phase = False
         had_decode_work = self._has_active_decode()
         decode_started = (
             time.perf_counter()
@@ -6402,6 +6598,12 @@ class BatchGenerator:
                 plain_tokens=len(generation_responses) - park_plain_start,
                 quiet=park_quiet,
             )
+        if any(
+            getattr(response, "finish_reason", None)
+            for response in generation_responses
+        ):
+            # A finished lane decoded a whole request: the cohort is formed.
+            self._coarrival_members = None
         handoff_policy = getattr(self, "mtp_ordinary_handoff", None)
         if (
             getattr(self._generation_batch, "_ordinary_handoff_latched", False)
@@ -6458,10 +6660,21 @@ class BatchGenerator:
         if _segment_aware_live_tip_enabled(self.self_mtp):
             cohort_size = _segment_aware_cohort_size(self.self_mtp)
             n = min(n, max(0, cohort_size - occupied))
+        if not self._has_active_decode():
+            self._note_coarrival_window(n)
         n = self._budget_admissible(n)
         n = self._admit_mtp_joining(n)
         if n > 0:
-            active_decode = self._has_active_decode()
+            exempt = self._coarrival_exempt_rows(n)
+            if exempt:
+                # Co-arrivals of every decoding lane: prepare them as the
+                # idle boundary would have, then admit later arrivals.
+                n = exempt
+                self._coarrival_exempt_phase = True
+                _bump_bounded_counter(
+                    self.scheduler_stats, "mtp_coarrival_exempt_rows", exempt
+                )
+            active_decode = self._prefill_contends_decode()
             candidates = list(self._unprocessed_sequences)[:n]
             # ``prepare_self_mtp_lane`` consumes its entire residual prompt in
             # one call.  Keep that call bounded even when the server is idle or
@@ -6471,6 +6684,26 @@ class BatchGenerator:
             # watchdog checks.  A residual of ``step + 1`` tokens still needs
             # only one teacher-forced chunk because preparation retains the
             # final token for the generation boundary.
+            # Beside live decode every prefill of this round is stall-bounded,
+            # including a one-call preparation: a residual that fit the
+            # uncontended step used to be prepared whole (an 8K Flash-Next
+            # residual stalled the decoding lane for 9.5 s on GPU), with no
+            # debt and no rate sample.
+            fairness_contended = active_decode and (
+                self.adaptive_prefill or self._fairness().enabled
+            )
+            contended_decision = None
+            if fairness_contended:
+                contended_decision = self._adaptive_prefill_decision(
+                    time.perf_counter(), bound=False
+                )
+                if contended_decision[0]:
+                    return (prompt_responses, generation_responses)
+            contended_raw = (
+                None
+                if contended_decision is None
+                else self._mtp_raw_slice(contended_decision)
+            )
             candidate_steps = []
             incremental_indices = []
             for index, candidate in enumerate(candidates):
@@ -6485,12 +6718,26 @@ class BatchGenerator:
                     ),
                     len(candidate[4]),
                 )
+                one_call = step
+                if contended_raw is not None:
+                    one_call = min(
+                        step,
+                        self._bounded_slice(
+                            contended_raw,
+                            contended=True,
+                            depth=len(candidate[4]),
+                            kind="mtp",
+                            record=False,
+                        ),
+                    )
                 # A prompt that fits one chunk is prepared in this round
                 # whatever boundaries it plans: ``_prepare_mtp_rows`` captures
                 # them first.  Counting a planned boundary as a multi-slice
                 # prefill admitted cold short prompts one per round, so the
                 # first one decoded alone and locked the cohort at width 1.
-                one_chunk = sum(len(segment) for segment in candidate[1]) <= step + 1
+                one_chunk = (
+                    sum(len(segment) for segment in candidate[1]) <= one_call + 1
+                )
                 next_checkpoint = self._next_interior_checkpoint(
                     candidate[0], len(candidate[4])
                 )
@@ -6502,33 +6749,44 @@ class BatchGenerator:
             incremental_prefill = bool(incremental_indices)
             order = self._prefill_order()
             adaptive_residual = incremental_prefill and (
-                (
-                    (self.adaptive_prefill or self._fairness().enabled)
-                    and active_decode
-                )
+                fairness_contended
                 # One-slice contention bounds a long slice on an idle server
                 # too: the waiting short prompt is the contender.
                 or order.one_slice_contention
             )
-            (adaptive_defer, adaptive_chunk, deadline_forced) = (
-                self._adaptive_prefill_decision(time.perf_counter())
-                if adaptive_residual
-                else (False, self.prefill_step_size, False)
-            )
-            if adaptive_residual and deadline_forced:
-                adaptive_chunk = self._measured_adaptive_prefill_chunk()
-                adaptive_chunk = self._fairness().cap(
-                    adaptive_chunk, contended=True
+            if contended_decision is not None:
+                decision = contended_decision
+            elif adaptive_residual:
+                decision = self._adaptive_prefill_decision(
+                    time.perf_counter(), bound=False
                 )
-                adaptive_chunk = self._fairness().floor_slice(
-                    adaptive_chunk, self.prefill_step_size,
-                    contended=self._has_active_decode(),
-                )
-                self._sync_decode_fairness_stats()
+            else:
+                decision = (False, self.prefill_step_size, False)
+            (adaptive_defer, raw_chunk, deadline_forced) = decision
             if adaptive_residual and adaptive_defer:
                 return (prompt_responses, generation_responses)
+            raw_chunk = self._mtp_raw_slice(decision)
+            # A one-chunk row held for co-arrived siblings is not a short
+            # request to interleave: preparing it alone would lock the
+            # segmented cohort at width 1.
+            held_indices = (
+                [
+                    i
+                    for i in range(len(candidates))
+                    if i not in incremental_indices and self._mtp_coarrival_hold(i)
+                ]
+                if incremental_prefill
+                else []
+            )
+            if held_indices:
+                # Row-rounds spent waiting for siblings (observed-used).
+                _bump_bounded_counter(
+                    self.scheduler_stats, "mtp_coarrival_holds", len(held_indices)
+                )
             short_indices = [
-                i for i in range(len(candidates)) if i not in incremental_indices
+                i
+                for i in range(len(candidates))
+                if i not in incremental_indices and i not in held_indices
             ]
             has_cohort = any(
                 self._mtp_configs.get(candidate[0], {}).get("batch_cohort")
@@ -6550,7 +6808,12 @@ class BatchGenerator:
                 # below: a one-call prompt is always shorter than a multi-slice
                 # residual, and the bypass cap (not a turn flag) bounds how
                 # many of them may overtake a long prefill in a row.
-                srpt_selected = order.select(prefill_candidates)
+                eligible = [
+                    i for i in range(len(candidates)) if i not in held_indices
+                ]
+                srpt_selected = eligible[
+                    order.select([prefill_candidates[i] for i in eligible])
+                ]
                 if srpt_selected in short_indices:
                     self._commit_prefill_order(
                         [candidates[srpt_selected][0]], prefill_candidates
@@ -6617,6 +6880,16 @@ class BatchGenerator:
                     self._commit_prefill_order(
                         [candidates[selected][0]], prefill_candidates
                     )
+                adaptive_chunk = (
+                    self._bounded_slice(
+                        raw_chunk,
+                        contended=active_decode or deadline_forced,
+                        depth=len(candidates[selected][4]),
+                        kind="mtp",
+                    )
+                    if adaptive_residual
+                    else self.prefill_step_size
+                )
                 adaptive_chunk = min(adaptive_chunk, candidate_steps[selected])
                 (batch, progress) = self._advance_mtp_prefill(selected, adaptive_chunk)
                 if batch is not None:
@@ -6624,12 +6897,130 @@ class BatchGenerator:
             else:
                 if not has_cohort:
                     n = self._shared_budget_rows(candidates[:n])
+                    if contended_raw is not None:
+                        n = self._stall_budget_rows(candidates[:n], contended_raw)
                 (batch, progress) = self._prepare_mtp_rows(n)
                 if batch is not None:
                     self._generation_batch.extend(batch)
             prompt_responses.extend(progress)
             generation_responses.extend(self._migrate_plain_fallbacks())
         return (prompt_responses, generation_responses)
+
+    def _note_coarrival_window(self, n: int) -> None:
+        """Record the rows an idle self-MTP boundary considers together.
+
+        They arrived with no lane decoding.  When a boundary prepares only
+        some of them (memory admission queued the rest, or a lane was
+        released ahead of a long sibling), the ones that start decoding are
+        their co-arrivals, not neighbours that were already streaming.
+        Rows beyond the lane window wait for capacity and are not recorded.
+        """
+        self._coarrival_members = {
+            int(sequence[0]): len(sequence[4]) + sum(map(len, sequence[1]))
+            for sequence in list(self._unprocessed_sequences)[: max(n, 0)]
+        }
+
+    def _live_decode_uids(self):
+        batch = self._generation_batch
+        live = {int(uid) for uid in batch.uids}
+        live.update(int(uid) for uid in getattr(batch, "_paused", {}))
+        live.update(
+            int(package.detached.lane.uid)
+            for package in getattr(batch, "_plain_ready", ())
+        )
+        live.update(int(uid) for uid in self._plain_fallback_batch.uids)
+        return live
+
+    def _coarrival_exempt_rows(self, n: int) -> int:
+        """Leading queued rows prepared beside decode without a stall bound.
+
+        The decode stall bound protects lanes that were streaming when a
+        prompt arrived.  While every decoding lane came from the same idle
+        boundary as the queued rows (``_note_coarrival_window``), there is no
+        such lane: rationing the rest of the burst only staggered it (GPU
+        2026-10-07, Flash-Next B8: TTFT 1.25/8.9/12.2 s in three waves,
+        86.7 tok/s against 143-162 when the burst was prepared together).
+        A row qualifies when its prompt is at most
+        ``MTP_COARRIVAL_HOLD_RESIDUAL_FACTOR`` times the shortest decoding
+        co-arrival's prompt, the bound the co-arrival hold already applies;
+        a longer sibling is the outlier that lane was released ahead of, and
+        stays bounded.  The period ends when any lane finishes or a lane from
+        a later arrival decodes.
+        """
+        members = getattr(self, "_coarrival_members", None)
+        if not members or not self._has_active_decode():
+            return 0
+        live = self._live_decode_uids()
+        if not live or not live <= members.keys():
+            return 0
+        limit = MTP_COARRIVAL_HOLD_RESIDUAL_FACTOR * min(
+            members[uid] for uid in live
+        )
+        count = 0
+        for sequence in list(self._unprocessed_sequences)[:n]:
+            if members.get(int(sequence[0]), limit + 1) > limit:
+                break
+            count += 1
+        return count
+
+    def _prefill_contends_decode(self) -> bool:
+        """Whether this round's prefill is bounded for decoding neighbours."""
+        return self._has_active_decode() and not getattr(
+            self, "_coarrival_exempt_phase", False
+        )
+
+    def _mtp_raw_slice(self, decision) -> int:
+        """Pre-bound self-MTP slice for an adaptive decision.
+
+        A deadline-forced round keeps the measured adaptive slice here where
+        the ordinary path takes the smallest one: every self-MTP slice also
+        runs the draft head, so the smallest slice made forced progress too
+        slow to clear the deadline.  The stall bound still applies to it.
+        """
+        (_defer, chunk, forced) = decision
+        return self._measured_adaptive_prefill_chunk() if forced else chunk
+
+    def _stall_budget_rows(self, candidates, raw_chunk) -> int:
+        """How many one-call self-MTP prompts fit one contended stall bound.
+
+        Each row's whole residual is prepared in this round, so the burst is
+        cut where the residual sum would exceed the stall-bounded slice, or
+        where the preparations' summed predicted time would exceed the stall
+        target: each preparation is its own forward, with its own fixed cost
+        at its own KV depth.  The oldest row is always kept, so progress
+        never stops.
+        """
+        n = len(candidates)
+        if n <= 1:
+            return n
+        budget = self._bounded_slice(
+            raw_chunk,
+            contended=True,
+            depth=len(candidates[0][4]),
+            kind="mtp",
+            record=False,
+        )
+        residuals = [
+            sum(len(segment) for segment in candidate[1]) for candidate in candidates
+        ]
+        timed = self._fairness().burst_keep(
+            [
+                (residual, len(candidate[4]))
+                for (residual, candidate) in zip(residuals, candidates)
+            ],
+            kind="mtp",
+        )
+        total = keep = 0
+        for residual in residuals[:timed]:
+            if keep and total + residual > budget + 1:
+                break
+            total += residual
+            keep += 1
+        if keep < n:
+            _bump_bounded_counter(
+                self.scheduler_stats, "mtp_stall_budget_deferred_rows", n - keep
+            )
+        return keep
 
     def _has_active_decode(self):
         if getattr(self, "self_mtp", None) is None:
@@ -6687,25 +7078,25 @@ class BatchGenerator:
             if len(sequence) > 5:
                 sequence[5] = now
 
-    def _adaptive_prefill_decision(self, now):
-        """Return ``(defer, chunk, deadline_forced)`` at a decode boundary."""
-        contended = self._has_active_decode() and self._has_prefill_work()
+    def _adaptive_prefill_decision(self, now, *, bound=True):
+        """Return ``(defer, chunk, deadline_forced)`` at a decode boundary.
+
+        ``bound=False`` returns the slice before the stall bound so the
+        caller can apply ``_bounded_slice`` once the slice's rows and depth
+        are known (after admission).
+        """
+        contended = self._prefill_contends_decode() and self._has_prefill_work()
         if not self._fairness().may_prefill(contended=contended):
             self._sync_decode_fairness_stats()
             return (True, 0, False)
         if (
             not self.adaptive_prefill
-            or not self._has_active_decode()
+            or not self._prefill_contends_decode()
             or (not self._has_prefill_work())
         ):
-            chunk = self._fairness().cap(
-                self.prefill_step_size, contended=contended
-            )
-            chunk = self._one_slice_bound(chunk)
-            chunk = self._fairness().floor_slice(
-                chunk, self.prefill_step_size, contended=contended
-            )
-            self._sync_decode_fairness_stats()
+            chunk = self.prefill_step_size
+            if bound:
+                chunk = self._bounded_slice(chunk, contended=contended)
             return (False, chunk, False)
         forced = self._oldest_prefill_age_ms(now) >= self.adaptive_prefill_max_defer_ms
         if (
@@ -6719,12 +7110,8 @@ class BatchGenerator:
         if forced:
             self.scheduler_stats["adaptive_prefill_deadline_forced_rounds"] += 1
             chunk = self.adaptive_prefill_slices[0]
-        chunk = self._fairness().cap(chunk, contended=contended)
-        chunk = self._one_slice_bound(chunk)
-        chunk = self._fairness().floor_slice(
-            chunk, self.prefill_step_size, contended=contended
-        )
-        self._sync_decode_fairness_stats()
+        if bound:
+            chunk = self._bounded_slice(chunk, contended=contended)
         return (False, chunk, forced)
 
     def _sync_decode_fairness_stats(self):
@@ -6750,7 +7137,7 @@ class BatchGenerator:
         for index, sequence in enumerate(self._currently_processing):
             uid = int(self._prompt_batch.uids[index])
             covered = int(sequence[4] or 0) + int(sequence[1])
-            position = self._next_interior_checkpoint(uid, covered - 1)
+            position = self._next_capture_checkpoint(uid, covered - 1)
             if position is None or position != covered:
                 continue
             if self._skip_state_boundary_for_pressure(uid, position):
@@ -6928,16 +7315,20 @@ class BatchGenerator:
         seq = self._currently_processing[0]
         uid = self._prompt_batch.uids[0]
         segments = seq[0]
-        prompt_step = self._prompt_prefill_step(seq[2])
-        budget = self._fairness().stall_bound(prompt_step)
+        # Autoscale is sized from the complete prompt (history + new rows),
+        # as admission and the self-MTP path size it.
+        prompt_step = self._prompt_prefill_step(int(seq[4] or 0) + int(seq[2]))
+        covered = int(seq[4] or 0) + int(seq[1])
+        budget = self._fairness().stall_bound(
+            prompt_step, depth=covered, kind="mixed", decode_rows=len(gen)
+        )
         # A mixed slice always runs beside decode lanes: the contended slice
         # floor applies as in the ordinary round (sweep 2026-10-02 P4).
         budget = self._fairness().floor_slice(
             min(budget, prompt_step), prompt_step,
             contended=True,
         )
-        n = aligned_prompt_rows(budget, len(gen))
-        covered = int(seq[4] or 0) + int(seq[1])
+        n = aligned_prompt_rows(budget, len(gen), tile=self._fairness().grid)
         n = min(
             n,
             self._depth_bounded_step(prompt_step, covered),
@@ -7014,7 +7405,14 @@ class BatchGenerator:
             self._mark_prefill_progress(toc)
         self._prompt_time_counter += toc - tic
         # Throughput feeds the stall bound; a mixed forward owes no debt.
-        self._fairness().observe_prefill(len(chunk), toc - tic, contended=False)
+        self._fairness().observe_prefill(
+            len(chunk),
+            toc - tic,
+            contended=False,
+            depth=covered,
+            kind="mixed",
+            decode_rows=len(gen),
+        )
         self._sync_decode_fairness_stats()
         return ([response], generation_responses)
 
@@ -7076,12 +7474,13 @@ class BatchGenerator:
         if self._should_defer_prefill():
             prompt_responses.extend(self._promote_ready_prompts())
             return (prompt_responses, generation_responses)
-        (adaptive_defer, adaptive_chunk, _) = self._adaptive_prefill_decision(
-            time.perf_counter()
+        (adaptive_defer, raw_chunk, _) = self._adaptive_prefill_decision(
+            time.perf_counter(), bound=False
         )
         if adaptive_defer:
             prompt_responses.extend(self._promote_ready_prompts())
             return (prompt_responses, generation_responses)
+        contended = self._has_active_decode()
         n = min(
             self.prefill_batch_size - len(self._prompt_batch),
             self.completion_batch_size - len(self._generation_batch),
@@ -7123,12 +7522,33 @@ class BatchGenerator:
             self._prompt_batch.extend(self._make_batch(n, indices=list(range(n))))
             self._commit_prefill_order(served, ordered)
         elif n > 0:
-            indices = self._select_prefill_indices(n)
+            indices = self._select_prefill_indices(
+                n,
+                slice_limit=(
+                    self._bounded_slice(
+                        raw_chunk,
+                        contended=contended,
+                        rows=n + self._sliced_prompt_rows(),
+                        depth=self._prefill_depth(),
+                        record=False,
+                    )
+                    if self._bounded_prefill_chunks()
+                    else None
+                ),
+            )
             if indices:
                 self._prompt_batch.extend(
                     self._make_batch(len(indices), indices=indices)
                 )
-        elif self._admit_one_chunk_overflow(adaptive_chunk):
+        elif self._admit_one_chunk_overflow(
+            self._bounded_slice(
+                raw_chunk,
+                contended=contended,
+                rows=1 + self._sliced_prompt_rows(),
+                depth=self._prefill_depth(),
+                record=False,
+            )
+        ):
             self.scheduler_stats["short_prefill_overflow_admissions"] = (
                 self.scheduler_stats.get("short_prefill_overflow_admissions", 0) + 1
             )
@@ -7143,19 +7563,21 @@ class BatchGenerator:
             )
             return (prompt_responses, generation_responses)
         prompts = []
+        sliced_rows = self._sliced_prompt_rows()
+        slice_depth = self._prefill_depth()
+        # The stall bound applies now that admission fixed the round's rows:
+        # a B-row forward pays about B times a one-row slice.
         round_slice = (
-            adaptive_chunk
-            if self._bounded_prefill_chunks()
+            self._bounded_slice(
+                raw_chunk,
+                contended=contended and self._has_prefill_work(),
+                rows=max(1, sliced_rows),
+                depth=slice_depth,
+            )
+            if self._bounded_prefill_chunks() and self._currently_processing
             else self.prefill_step_size
         )
-        round_slice = self._shared_prefill_width(
-            round_slice,
-            sum(
-                1
-                for seq in self._currently_processing
-                if not (len(seq) > 6 and seq[6] is not None)
-            ),
-        )
+        round_slice = self._shared_prefill_width(round_slice, sliced_rows)
         for i, seq in enumerate(self._currently_processing):
             response = PromptProcessingBatch.Response(
                 self._prompt_batch.uids[i], 0, False, False
@@ -7163,7 +7585,11 @@ class BatchGenerator:
             segments = seq[0]
             covered = int(seq[4] or 0) + int(seq[1])
             step_size = self._depth_bounded_step(
-                min(round_slice, self._prompt_prefill_step(seq[2])), covered
+                min(
+                    round_slice,
+                    self._prompt_prefill_step(int(seq[4] or 0) + int(seq[2])),
+                ),
+                covered,
             )
             if len(seq) > 6 and seq[6] is not None:
                 step_size = len(segments[0])
@@ -7225,9 +7651,30 @@ class BatchGenerator:
                 max((len(prompt) for prompt in prompts), default=0),
                 toc - tic,
                 contended=len(self._generation_batch) > 0,
+                rows=len(prompts),
+                depth=slice_depth,
+                kind="ordinary",
             )
             self._sync_decode_fairness_stats()
         return (prompt_responses, generation_responses)
+
+    def _sliced_prompt_rows(self) -> int:
+        """Prompt rows the next ordinary round slices (media rows run whole)."""
+        return sum(
+            1
+            for seq in self._currently_processing
+            if not (len(seq) > 6 and seq[6] is not None)
+        )
+
+    def _prefill_depth(self) -> int:
+        """Deepest covered KV context among rows in prompt processing."""
+        return max(
+            (
+                int(seq[4] or 0) + int(seq[1])
+                for seq in self._currently_processing
+            ),
+            default=0,
+        )
 
     def _decode_first_mode(self) -> str:
         return getattr(self, "_decode_first_round_mode", "off")

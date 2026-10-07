@@ -20,13 +20,15 @@ class _Scheduler(generate.BatchGenerator):
         pass
 
 
-def _mixed_slice(slice_floor, *, enabled=True, decode_lanes=2):
+def _mixed_slice(slice_floor, *, enabled=True, decode_lanes=2, grid=64):
     scheduler = _Scheduler.__new__(_Scheduler)
     scheduler.prefill_step_size = 8192
     scheduler.prefill_step_autoscale = False
     scheduler.scheduler_stats = defaultdict(int)
+    # The legacy estimator pins the stall bound this test lifts.
     scheduler.decode_time_fairness = DecodeTimeFairness(
-        enabled=enabled, slice_floor=slice_floor
+        enabled=enabled, slice_floor=slice_floor, estimator="running_max",
+        grid=grid,
     )
     # 900 tok/s at the 500 ms stall target -> a 448-row stall bound.
     scheduler.decode_time_fairness.best_prefill_tokens_per_second = 900.0
@@ -61,3 +63,22 @@ def test_mixed_slice_is_lifted_to_the_floor():
 def test_mixed_slice_floor_needs_fairness_enabled():
     rows, _ = _mixed_slice(1024, enabled=False)
     assert rows + 2 <= 448
+
+
+def test_mixed_forward_fills_the_adapter_declared_tile():
+    """Sweep 2026-10-06 SS-7: one tile source (the fairness grid, which an
+    adapter may declare) instead of a separate hard-coded 64."""
+    rows, _ = _mixed_slice(0, grid=48)
+    assert (rows + 2) % 48 == 0
+
+
+def test_adapter_prefill_row_tile_is_recorded_only_when_declared():
+    from types import SimpleNamespace
+
+    from mlx2.serving import adapter_prefill_row_tile
+
+    assert adapter_prefill_row_tile(SimpleNamespace()) is None
+    assert adapter_prefill_row_tile(SimpleNamespace(prefill_row_tile=lambda: 64)) is None
+    assert adapter_prefill_row_tile(SimpleNamespace(prefill_row_tile=lambda: 32)) == 32
+    with pytest.raises(ValueError):
+        adapter_prefill_row_tile(SimpleNamespace(prefill_row_tile=lambda: 0))

@@ -64,7 +64,9 @@ class _Prompt:
 
 
 class _Fair:
-    def stall_bound(self, n):
+    grid = 64
+
+    def stall_bound(self, n, **_kw):
         return n
 
     def floor_slice(self, chunk, limit, *, contended):

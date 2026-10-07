@@ -18,21 +18,24 @@ def test_cli_adaptive_mtp_depth_is_explicit_and_default_off():
 
 
 @pytest.mark.parametrize(
-    ("external_draft", "prompt_lookup", "enabled"),
+    ("external_draft", "prompt_lookup", "fair_share"),
     [
-        (False, False, True),  # ordinary and native self-MTP use BatchGenerator
-        (True, False, False),
-        (False, True, False),
-        (True, True, False),
+        (False, False, 0.5),  # ordinary and native self-MTP use BatchGenerator
+        # The external-draft and prompt-lookup generators stall-bound their
+        # contended slices too (2026-10-06 rfix-sched) and repay no debt.
+        (True, False, 0.0),
+        (False, True, 0.0),
+        (True, True, 0.0),
     ],
 )
 def test_decode_time_fairness_identity_matches_selected_route(
-    external_draft, prompt_lookup, enabled
+    external_draft, prompt_lookup, fair_share
 ):
     policy = decode_time_fairness_policy(
         external_draft=external_draft, prompt_lookup=prompt_lookup
     )
-    assert policy["enabled"] is enabled
+    assert policy["enabled"] is True
+    assert policy["fair_share"] == fair_share
 
 
 def test_qualification_requires_observed_adaptive_mtp_engagement():
@@ -333,7 +336,8 @@ def test_decode_fairness_overrides_are_absent_by_default_and_strict():
     assert decode_fairness_overrides(None) == {}
     assert decode_time_fairness_policy(
         external_draft=False, prompt_lookup=False, overrides={}
-    ) == {"enabled": True, "fair_share": 0.5, "stall_target_ms": 500.0}
+    ) == {"enabled": True, "fair_share": 0.5, "stall_target_ms": 500.0,
+          "estimator": "cost_model"}
     assert decode_fairness_overrides({"slice_floor": 0}) == {}
     overrides = decode_fairness_overrides(
         {"slice_floor": 1024, "stall_target_ms": 850}
@@ -342,7 +346,7 @@ def test_decode_fairness_overrides_are_absent_by_default_and_strict():
     assert decode_time_fairness_policy(
         external_draft=False, prompt_lookup=False, overrides=overrides
     ) == {"enabled": True, "fair_share": 0.5, "stall_target_ms": 850.0,
-          "slice_floor": 1024}
+          "estimator": "cost_model", "slice_floor": 1024}
     for bad in (
         [],
         {"fair_share": 0.25},
@@ -367,9 +371,11 @@ def test_serving_parses_decode_fairness_at_construction():
 @pytest.mark.parametrize(
     ("prompt_lookup", "backend"), [(True, None), (False, "external_draft")]
 )
-def test_serving_rejects_decode_fairness_off_batch_generator_routes(
+def test_serving_accepts_decode_fairness_on_speculative_routes(
     monkeypatch, prompt_lookup, backend
 ):
+    """The external-draft and prompt-lookup generators construct the
+    policy now, so its overrides configure them instead of being refused."""
     import sys
     from pathlib import Path
 
@@ -391,8 +397,32 @@ def test_serving_rejects_decode_fairness_off_batch_generator_routes(
         execution_policy={"decode_fairness": {"slice_floor": 1024}},
     )
     try:
+        # This fixture adapter cannot serve the route; it now fails later,
+        # for that reason, instead of at the decode_fairness check.
         engine.thread.join(5)
-        assert not engine.ready.is_set()
-        assert "decode_fairness requires" in (engine.error or "")
+        assert engine.error is not None
+        assert "decode_fairness" not in engine.error
     finally:
         engine.close()
+
+
+def test_decode_fairness_estimator_override_round_trips():
+    """Sweep 2026-10-06 SS-2: the A/B knob for the stall-bound estimator."""
+    from mlx2.runtime.adaptive_policy import DecodeTimeFairness
+    from mlx2.serving import decode_fairness_overrides
+
+    overrides = decode_fairness_overrides({"estimator": "running_max"})
+    assert overrides == {"estimator": "running_max"}
+    policy = decode_time_fairness_policy(
+        external_draft=False, prompt_lookup=False, overrides=overrides
+    )
+    assert policy["estimator"] == "running_max"
+    assert DecodeTimeFairness(**policy).estimator == "running_max"
+    # Codex review P1: the default is recorded too, so a cost_model
+    # receipt is distinguishable from a running_max one.
+    default = decode_time_fairness_policy(external_draft=False, prompt_lookup=False)
+    assert default["estimator"] == "cost_model"
+    assert DecodeTimeFairness(**default).estimator == "cost_model"
+    assert default != policy
+    with pytest.raises(ValueError):
+        decode_fairness_overrides({"estimator": "ewma"})

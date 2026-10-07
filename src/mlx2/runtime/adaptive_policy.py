@@ -8,7 +8,9 @@ transactional cache machinery.
 
 from __future__ import annotations
 
+import bisect
 import math
+import time
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -36,9 +38,234 @@ def _bump(counters: dict[str, int], key: str, amount: int = 1) -> None:
     counters[key] = min(_COUNTER_MAX, int(counters.get(key, 0)) + int(amount))
 
 
+# Depth buckets of the covered KV context a prefill slice starts at.  Per-row
+# prefill cost grows with attention depth, so samples from shallow slices
+# must not size a deep slice (and vice versa).
+PREFILL_COST_DEPTH_BUCKETS = (4096, 16384, 65536)
+PREFILL_COST_KINDS = ("ordinary", "mixed", "mtp")
+DECODE_FAIRNESS_ESTIMATORS = ("cost_model", "running_max")
+# Depth at which attention is assumed to cost as much per row as the rest of
+# the forward; only used to extrapolate into a depth bucket with no samples
+# when no second bucket allows a fit (conservative: deeper costs more).
+_COST_DEPTH_PARITY = 4096
+
+
+def _depth_bucket(depth: int) -> int:
+    return bisect.bisect_right(PREFILL_COST_DEPTH_BUCKETS, max(0, int(depth)))
+
+
+@dataclass
+class PrefillCostModel:
+    """Completion-time model of one prefill forward: ``t = a + b * R``.
+
+    ``R`` is the forward's row count (prompt rows x padded width, plus decode
+    rows for a mixed forward; processed tokens for a self-MTP slice, whose
+    time includes the draft head).  ``a`` is a fixed per-forward cost seeded
+    from recent decode steps (B <= 16 decode is close to the weight-read
+    floor) and clamped to half the cheapest prefill sample.  ``b`` is kept
+    per ``(kind, depth bucket)`` as a conservative quantile of the marginal
+    per-row cost over a short ring of recent samples.
+
+    Regime changes are asymmetric: a slice much slower than predicted drops
+    all but the latest samples at once (the next bound shrinks), while a
+    faster regime needs ``down_streak`` consecutive fast slices.  A bound
+    never grows past ``growth`` times the largest forward measured in its
+    key since the last shift, so a sparse key never extrapolates far.
+    """
+
+    window: int = 16
+    quantile: float = 0.9
+    max_age_s: float = 60.0
+    max_age_samples: int = 128
+    growth: float = 2.0
+    up_ratio: float = 1.5
+    up_ratio_once: float = 3.0
+    down_ratio: float = 0.67
+    down_streak: int = 4
+    counters: dict[str, int] = field(default_factory=dict)
+    _decode: deque = field(default_factory=lambda: deque(maxlen=16), repr=False)
+    _samples: dict = field(default_factory=dict, repr=False)
+    _streaks: dict = field(default_factory=dict, repr=False)
+    _ceiling: dict = field(default_factory=dict, repr=False)
+    _errors: deque = field(default_factory=lambda: deque(maxlen=64), repr=False)
+    _seq: int = field(default=0, repr=False)
+
+    def observe_decode(self, seconds: float) -> None:
+        seconds = float(seconds)
+        if seconds > 0 and math.isfinite(seconds):
+            self._decode.append((seconds, time.monotonic()))
+
+    def _expire(self, now: float) -> None:
+        while self._decode and now - self._decode[0][1] > self.max_age_s:
+            self._decode.popleft()
+        for key, ring in self._samples.items():
+            while ring and (
+                self._seq - ring[0][3] > self.max_age_samples
+                or now - ring[0][2] > self.max_age_s
+            ):
+                ring.popleft()
+            if ring:
+                self._ceiling[key] = max(sample[0] for sample in ring)
+
+    def fixed_cost(self, key=None) -> float:
+        if not self._decode:
+            return 0.0
+        ordered = sorted(seconds for (seconds, _ts) in self._decode)
+        fixed = ordered[len(ordered) // 2]
+        rings = (
+            [self._samples[key]]
+            if key in self._samples and self._samples[key]
+            else [ring for ring in self._samples.values() if ring]
+        )
+        cheapest = min(
+            (sample[1] for ring in rings for sample in ring), default=None
+        )
+        if cheapest is not None:
+            fixed = min(fixed, 0.5 * cheapest)
+        return max(0.0, fixed)
+
+    def _per_row(self, key, fixed: float) -> float:
+        ring = self._samples[key]
+        values = sorted(max(t - fixed, 0.0) / rows for (rows, t, _ts, _s, _d) in ring)
+        index = min(len(values) - 1, max(0, math.ceil(self.quantile * len(values)) - 1))
+        return values[index]
+
+    @staticmethod
+    def _mean_depth(ring) -> float:
+        return sum(sample[4] for sample in ring) / len(ring)
+
+    def estimate(self, kind: str, depth: int):
+        """Return ``(a, b, ceiling)`` for a slice, or None with no samples.
+
+        An unseen depth bucket borrows the nearest deeper bucket of the same
+        kind (deeper is costlier, so conservative) or extrapolates the nearest
+        shallower one along ``b(D) = m + s * D`` (fit across two buckets when
+        available).  An unseen kind falls back to the other kinds.  Samples older
+        than ``max_age_s`` are dropped first: after an idle period the next
+        slice must not be sized from an earlier regime's measurements.
+        """
+        self._expire(time.monotonic())
+        bucket = _depth_bucket(depth)
+        kinds = [kind] + [k for k in PREFILL_COST_KINDS if k != kind]
+        for candidate_kind in kinds:
+            populated = sorted(
+                b for (k, b), ring in self._samples.items()
+                if k == candidate_kind and ring
+            )
+            if not populated:
+                continue
+            key = (candidate_kind, bucket)
+            if bucket in populated:
+                fixed = self.fixed_cost(key)
+                return (fixed, self._per_row(key, fixed), self._ceiling[key])
+            deeper = [b for b in populated if b > bucket]
+            if deeper:
+                source = (candidate_kind, deeper[0])
+                fixed = self.fixed_cost(source)
+                return (fixed, self._per_row(source, fixed), self._ceiling[source])
+            lower = [(candidate_kind, b) for b in populated]
+            source = lower[-1]
+            fixed = self.fixed_cost(source)
+            per_row = self._per_row(source, fixed)
+            source_depth = self._mean_depth(self._samples[source])
+            target_depth = max(
+                float(depth),
+                float(PREFILL_COST_DEPTH_BUCKETS[bucket - 1]) if bucket else 0.0,
+            )
+            scale = (target_depth + _COST_DEPTH_PARITY) / (
+                source_depth + _COST_DEPTH_PARITY
+            )
+            if len(lower) >= 2:
+                other = lower[-2]
+                other_depth = self._mean_depth(self._samples[other])
+                other_per_row = self._per_row(other, self.fixed_cost(other))
+                if source_depth > other_depth and per_row > other_per_row:
+                    slope = (per_row - other_per_row) / (source_depth - other_depth)
+                    scale = 1.0 + slope * (target_depth - source_depth) / per_row
+            return (fixed, per_row * max(1.0, scale), self._ceiling[source])
+        return None
+
+    def observe(self, rows: int, seconds: float, *, depth: int, kind: str) -> None:
+        rows = int(rows)
+        seconds = float(seconds)
+        if rows <= 0 or seconds <= 0 or not math.isfinite(seconds):
+            return
+        if kind not in PREFILL_COST_KINDS:
+            raise ValueError(f"unknown prefill cost kind {kind!r}")
+        now = time.monotonic()
+        self._seq += 1
+        self._expire(now)
+        key = (kind, _depth_bucket(depth))
+        ring = self._samples.get(key)
+        if ring:
+            fixed = self.fixed_cost(key)
+            predicted = fixed + self._per_row(key, fixed) * rows
+            ratio = seconds / predicted if predicted > 0 else 1.0
+            self._errors.append(abs(ratio - 1.0))
+            (up, down) = self._streaks.get(key, (0, 0))
+            if ratio > self.up_ratio_once or (ratio > self.up_ratio and up >= 1):
+                # Slowdown (thermal, contention, deeper context): keep only
+                # the latest prior sample so the next bound shrinks now.
+                for _ in range(len(ring) - 1):
+                    ring.popleft()
+                self._ceiling[key] = max(sample[0] for sample in ring)
+                _bump(self.counters, "cost_regime_shifts_up")
+                (up, down) = (0, 0)
+            elif ratio > self.up_ratio:
+                (up, down) = (up + 1, 0)
+            elif ratio < self.down_ratio:
+                down += 1
+                if down >= self.down_streak:
+                    # Speedup: expand only after a sustained run, keeping the
+                    # fast samples; growth past them stays capped.
+                    for _ in range(len(ring) - (self.down_streak - 1)):
+                        ring.popleft()
+                    self._ceiling[key] = max(sample[0] for sample in ring)
+                    _bump(self.counters, "cost_regime_shifts_down")
+                    down = 0
+                up = 0
+            else:
+                (up, down) = (0, 0)
+            self._streaks[key] = (up, down)
+        else:
+            ring = self._samples[key] = deque(maxlen=self.window)
+            self._ceiling[key] = 0
+        ring.append((rows, seconds, now, self._seq, int(depth)))
+        self._ceiling[key] = max(self._ceiling[key], rows)
+        _bump(self.counters, "cost_samples")
+        self.counters["cost_fixed_us"] = int(self.fixed_cost(key) * 1e6)
+        if self._errors:
+            ordered = sorted(self._errors)
+            index = min(len(ordered) - 1, math.ceil(0.9 * len(ordered)) - 1)
+            self.counters["cost_abs_error_p90_pct"] = int(ordered[index] * 100)
+
+    def bound_rows(self, target_seconds: float, *, kind: str, depth: int):
+        """Largest forward row count expected within ``target_seconds``.
+
+        Returns ``(rows, unreachable)``; ``rows`` is None with no samples.
+        ``unreachable`` means the fixed cost alone meets the target.
+        """
+        estimate = self.estimate(kind, depth)
+        if estimate is None:
+            return (None, False)
+        (fixed, per_row, ceiling) = estimate
+        budget = target_seconds - fixed
+        if budget <= 0:
+            return (0, True)
+        rows = budget / per_row if per_row > 0 else float("inf")
+        return (min(rows, self.growth * ceiling), False)
+
+
 @dataclass
 class DecodeTimeFairness:
-    """Bound prefill stalls and repay their wall-time cost with decode work."""
+    """Bound prefill stalls and repay their wall-time cost with decode work.
+
+    ``estimator`` selects how the stall bound predicts a slice's time:
+    ``cost_model`` (default) uses :class:`PrefillCostModel` (fixed plus
+    per-row cost by kind and KV depth, row-aware, tracks slowdowns);
+    ``running_max`` is the previous per-row-width running maximum rate,
+    kept reachable for A/B runs.
+    """
 
     enabled: bool = False
     fair_share: float = 0.5
@@ -51,9 +278,18 @@ class DecodeTimeFairness:
     # rows (never above the prefill step), so a slow stall-target estimate
     # cannot push it into the small-M regime where a row costs 2-3x more.
     slice_floor: int = 0
+    estimator: str = "cost_model"
+    # Fraction of the stall target held back from the cost-model prediction.
+    margin: float = 0.1
     debt_seconds: float = 0.0
     best_prefill_tokens_per_second: float = 0.0
     counters: dict[str, int] = field(default_factory=dict)
+    cost: PrefillCostModel = field(default_factory=PrefillCostModel, repr=False)
+    _pending_cap_clamp: int | None = field(default=None, repr=False)
+    # Gap attribution: contended prefill seconds since the last decode and
+    # when that decode ended (host clock).
+    _gap_prefill_s: float = field(default=0.0, repr=False)
+    _last_decode_end: float | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.fair_share) or self.fair_share < 0:
@@ -72,9 +308,20 @@ class DecodeTimeFairness:
             raise ValueError(
                 f"decode slice_floor must be a multiple of the {self.grid}-row grid"
             )
+        if self.estimator not in DECODE_FAIRNESS_ESTIMATORS:
+            raise ValueError(
+                "decode fairness estimator must be one of "
+                f"{list(DECODE_FAIRNESS_ESTIMATORS)}"
+            )
+        if not math.isfinite(self.margin) or not 0 <= self.margin < 1:
+            raise ValueError("decode fairness margin must be in [0, 1)")
         if self.slice_floor:
             # Present only when configured, so default counters are unchanged.
             self.counters.setdefault("slice_floor_lifts", 0)
+        if self.estimator == "cost_model":
+            # The cost model's regime and accuracy counters report through
+            # the same scheduler stats as the controller that uses it.
+            self.cost.counters = self.counters
         for name in (
             "prefill_chunks",
             "debt_deferrals",
@@ -83,44 +330,152 @@ class DecodeTimeFairness:
         ):
             self.counters.setdefault(name, 0)
 
-    def cap(self, configured: int, *, contended: bool) -> int:
+    def cap(
+        self,
+        configured: int,
+        *,
+        contended: bool,
+        rows: int = 1,
+        depth: int = 0,
+        kind: str = "ordinary",
+        decode_rows: int = 0,
+        record: bool = True,
+    ) -> int:
         configured = max(1, int(configured))
         if not self.enabled or not contended:
             return configured
-        value = self.stall_bound(configured)
-        if value < configured:
-            _bump(self.counters, "cap_clamps")
+        (value, unreachable) = self._bound(
+            configured, rows=rows, depth=depth, kind=kind, decode_rows=decode_rows
+        )
+        if record:
+            self._settle_pending_clamp()
+            if unreachable:
+                _bump(self.counters, "stall_target_unreachable")
+            if value < configured:
+                if self.slice_floor:
+                    # Count it once ``floor_slice`` shows the clamp held.
+                    self._pending_cap_clamp = value
+                else:
+                    _bump(self.counters, "cap_clamps")
         return value
 
-    def stall_bound(self, configured: int) -> int:
-        """Largest grid-aligned chunk expected to finish within the stall target.
+    def _settle_pending_clamp(self) -> None:
+        if self._pending_cap_clamp is not None:
+            self._pending_cap_clamp = None
+            _bump(self.counters, "cap_clamps")
 
-        Pure: it neither consults ``enabled`` nor bumps counters, so the
-        one-slice contention rule of :class:`PrefillOrder` can bound a slice
-        with the same measurement while decode fairness itself is off.
+    def burst_keep(self, forwards, *, kind: str = "ordinary") -> int:
+        """How many leading ``(rows, depth)`` forwards fit one stall target.
+
+        The forwards run back to back in one round before decode resumes,
+        so each pays its own fixed cost at its own KV depth and the stall is
+        their summed time.  A forward past the 2x growth ceiling of its key
+        does not fit (as in :meth:`stall_bound`); one with no estimate is
+        not limited here (the caller's row bound still applies).  The first
+        forward always runs, so progress never stops.  Pure.
         """
-        configured = max(1, int(configured))
-        if self.best_prefill_tokens_per_second > 0:
-            value = int(
-                self.best_prefill_tokens_per_second * self.stall_target_ms / 1000.0
-            )
-            value = max(self.grid, (value // self.grid) * self.grid)
-        else:
-            value = self.fallback_cap
-        return max(self.floor, min(configured, value))
+        forwards = list(forwards)
+        target = self.stall_target_ms / 1000.0
+        if self.estimator == "cost_model":
+            target *= 1.0 - self.margin
+        total = 0.0
+        for keep, (rows, depth) in enumerate(forwards):
+            rows = max(1, int(rows))
+            if self.estimator == "running_max":
+                rate = self.best_prefill_tokens_per_second
+                seconds = rows / rate if rate > 0 else None
+                ceiling = None
+            else:
+                estimate = self.cost.estimate(kind, depth)
+                (seconds, ceiling) = (
+                    (None, None)
+                    if estimate is None
+                    else (estimate[0] + estimate[1] * rows, estimate[2])
+                )
+            if seconds is None:
+                continue
+            if keep and (
+                total + seconds > target
+                or (ceiling is not None and rows > self.cost.growth * ceiling)
+            ):
+                return keep
+            total += seconds
+        return len(forwards)
 
-    def floor_slice(self, chunk: int, limit: int, *, contended: bool) -> int:
+    def stall_bound(
+        self,
+        configured: int,
+        *,
+        rows: int = 1,
+        depth: int = 0,
+        kind: str = "ordinary",
+        decode_rows: int = 0,
+    ) -> int:
+        """Largest grid-aligned per-row width expected within the stall target.
+
+        ``rows`` prompt rows share the forward (each padded to the returned
+        width); ``decode_rows`` ride along in a mixed forward.  ``depth`` is
+        the covered KV context the slice starts at.  Pure: it neither
+        consults ``enabled`` nor bumps counters, so the one-slice contention
+        rule of :class:`PrefillOrder` can bound a slice with the same
+        measurement while decode fairness itself is off.
+        """
+        return self._bound(
+            configured, rows=rows, depth=depth, kind=kind, decode_rows=decode_rows
+        )[0]
+
+    def _bound(self, configured, *, rows, depth, kind, decode_rows):
+        configured = max(1, int(configured))
+        rows = max(1, int(rows))
+        unreachable = False
+        if self.estimator == "running_max":
+            if self.best_prefill_tokens_per_second > 0:
+                value = int(
+                    self.best_prefill_tokens_per_second
+                    * self.stall_target_ms
+                    / 1000.0
+                )
+                value = max(self.grid, (value // self.grid) * self.grid)
+            else:
+                value = self.fallback_cap
+            return (max(self.floor, min(configured, value)), False)
+        target = self.stall_target_ms / 1000.0 * (1.0 - self.margin)
+        (forward_rows, unreachable) = self.cost.bound_rows(
+            target, kind=kind, depth=depth
+        )
+        if forward_rows is None:
+            # No measurement at all (fresh, or every sample expired): probe
+            # one grid tile and grow from its measurement (2x per slice).
+            # ``fallback_cap`` rows ignored the model's speed: ~650 ms on
+            # Qwen3.8-27B beside a decoding lane.
+            value = self.grid
+        else:
+            width = (forward_rows - max(0, int(decode_rows))) / rows
+            value = max(self.grid, int(width) // self.grid * self.grid)
+        return (max(self.floor, min(configured, value)), unreachable)
+
+    def floor_slice(
+        self, chunk: int, limit: int, *, contended: bool, record: bool = True
+    ) -> int:
         """Lift a contended prefill slice to ``slice_floor`` rows.
 
         ``limit`` is the configured prefill step; the floor never exceeds it.
         Off (``slice_floor`` 0), disabled, or uncontended returns ``chunk``.
+        A stall-bound clamp that the lift undoes is not counted as a clamp.
         """
         chunk = int(chunk)
         if not self.enabled or not contended or self.slice_floor <= 0:
+            if record:
+                self._settle_pending_clamp()
             return chunk
         lifted = min(max(1, int(limit)), max(chunk, self.slice_floor))
-        if lifted > chunk:
-            _bump(self.counters, "slice_floor_lifts")
+        if record:
+            if lifted > chunk:
+                _bump(self.counters, "slice_floor_lifts")
+            pending = self._pending_cap_clamp
+            self._pending_cap_clamp = None
+            if pending is not None and lifted <= pending:
+                _bump(self.counters, "cap_clamps")
         return lifted
 
     def may_prefill(self, *, contended: bool) -> bool:
@@ -140,19 +495,80 @@ class DecodeTimeFairness:
             self.debt_seconds = 0.0
         if paid:
             _bump(self.counters, "debt_repayments")
+        self.cost.observe_decode(seconds)
+        self._attribute_gap(max(0.0, float(seconds)))
 
-    def observe_prefill(self, tokens: int, seconds: float, *, contended: bool) -> None:
+    def _attribute_gap(self, decode_seconds: float) -> None:
+        """Split a decode-to-decode interval that carried contended prefill.
+
+        The interval since the previous decode ended is the decoding lanes'
+        token gap as the generator sees it.  ``contended_gap_other_max_us``
+        is the largest part of such a gap spent neither in this decode nor
+        in a measured prefill forward (lane release, cohort changes, the
+        serving loop): when it, not ``contended_forward_max_us``, tracks the
+        largest gap, the stall bound is not what let the gap grow.  Host
+        gauges only; a gap that opened before the first decode of a fresh
+        lane may overstate the other part.
+        """
+        now = time.monotonic()
+        if (
+            self.enabled
+            and self._gap_prefill_s > 0
+            and self._last_decode_end is not None
+        ):
+            interval = max(0.0, now - self._last_decode_end)
+            other = max(0.0, interval - decode_seconds - self._gap_prefill_s)
+            for key, value in (
+                ("contended_gap_max_us", interval),
+                ("contended_gap_other_max_us", other),
+            ):
+                self.counters[key] = max(
+                    int(self.counters.get(key, 0)), int(value * 1e6)
+                )
+            if interval - decode_seconds > self.stall_target_ms / 1000.0:
+                _bump(self.counters, "contended_stalls_over_target")
+        self._gap_prefill_s = 0.0
+        self._last_decode_end = now
+
+    def observe_prefill(
+        self,
+        tokens: int,
+        seconds: float,
+        *,
+        contended: bool,
+        rows: int = 1,
+        depth: int = 0,
+        kind: str = "ordinary",
+        decode_rows: int = 0,
+    ) -> None:
+        """Record one prefill forward of ``rows`` rows padded to ``tokens``.
+
+        ``decode_rows`` are decode lanes carried by the same (mixed) forward.
+        """
         seconds = max(0.0, float(seconds))
         tokens = max(0, int(tokens))
         if tokens and seconds:
-            # Contention only depresses a sample; a running maximum avoids a
-            # feedback loop where smaller measured chunks cause smaller caps.
+            # Kept for the ``running_max`` estimator (A/B reference).
             self.best_prefill_tokens_per_second = max(
                 self.best_prefill_tokens_per_second, tokens / seconds
+            )
+            self.cost.observe(
+                max(1, int(rows)) * tokens + max(0, int(decode_rows)),
+                seconds,
+                depth=depth,
+                kind=kind,
             )
         if self.enabled and contended and seconds:
             self.debt_seconds += seconds * self.fair_share
             _bump(self.counters, "prefill_chunks")
+            self._gap_prefill_s += seconds
+            self.counters["contended_forward_max_us"] = max(
+                int(self.counters.get("contended_forward_max_us", 0)),
+                int(seconds * 1e6),
+            )
+        elif not contended:
+            # No lane was decoding: the next decode starts a fresh gap.
+            self._last_decode_end = None
 
 
 @dataclass(frozen=True)

@@ -469,6 +469,11 @@ _SCHEDULER_GAUGES = frozenset(
         "external_tensorfold_cohort_max_width",
         "external_tensorfold_cohort_limit",
         "external_minimum_draft_proposals",
+        "decode_fairness_cost_fixed_us",
+        "decode_fairness_cost_abs_error_p90_pct",
+        "decode_fairness_contended_forward_max_us",
+        "decode_fairness_contended_gap_max_us",
+        "decode_fairness_contended_gap_other_max_us",
     }
 )
 
@@ -566,6 +571,14 @@ _SCHEDULER_EVENTS = frozenset(
         "decode_fairness_debt_deferrals",
         "decode_fairness_debt_repayments",
         "decode_fairness_cap_clamps",
+        "decode_fairness_stall_target_unreachable",
+        "decode_fairness_cost_samples",
+        "decode_fairness_cost_regime_shifts_up",
+        "decode_fairness_cost_regime_shifts_down",
+        "decode_fairness_contended_stalls_over_target",
+        "mtp_coarrival_holds",
+        "mtp_coarrival_exempt_rows",
+        "mtp_stall_budget_deferred_rows",
         "prefill_scheduling_bypasses",
         "prefill_scheduling_bypass_forced",
         "prefill_scheduling_one_slice_clamps",

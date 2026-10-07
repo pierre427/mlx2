@@ -82,9 +82,9 @@ def test_external_draft_receipt_does_not_claim_a_target_only_prefix(monkeypatch)
     starts = []
     original = external_speculative.ExternalDraftBatchGenerator._prefill
 
-    def prefill(self, lane, *, step=None):
+    def prefill(self, lane, **kwargs):
         starts.append(len(lane.history))
-        return original(self, lane, step=step)
+        return original(self, lane, **kwargs)
 
     monkeypatch.setattr(
         external_speculative.ExternalDraftBatchGenerator, "_prefill", prefill

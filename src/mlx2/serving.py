@@ -825,7 +825,7 @@ def budget_interior_checkpoint_positions(
     return tuple(reversed(selected)), charged
 
 
-_DECODE_FAIRNESS_KEYS = frozenset({"stall_target_ms", "slice_floor"})
+_DECODE_FAIRNESS_KEYS = frozenset({"stall_target_ms", "slice_floor", "estimator"})
 
 
 def decode_fairness_overrides(value) -> dict:
@@ -834,7 +834,9 @@ def decode_fairness_overrides(value) -> dict:
     Absent (None) keeps today's interleave.  ``stall_target_ms`` (positive)
     replaces the 500 ms stall target; ``slice_floor`` (a multiple of 64 rows,
     0 = off) lifts every prefill slice taken beside decode lanes to at least
-    that many rows.  Both change scheduling only.
+    that many rows.  ``estimator`` selects the stall-bound predictor:
+    ``cost_model`` (the default, row- and depth-aware) or ``running_max``
+    (the previous rule, for A/B runs).  All change scheduling only.
     """
     if value is None:
         return {}
@@ -860,21 +862,53 @@ def decode_fairness_overrides(value) -> dict:
         DecodeTimeFairness(slice_floor=value["slice_floor"])  # validates
         if value["slice_floor"]:
             out["slice_floor"] = int(value["slice_floor"])
+    if "estimator" in value:
+        from .runtime.adaptive_policy import DECODE_FAIRNESS_ESTIMATORS
+
+        if value["estimator"] not in DECODE_FAIRNESS_ESTIMATORS:
+            raise ValueError(
+                "decode_fairness estimator must be one of "
+                f"{list(DECODE_FAIRNESS_ESTIMATORS)}"
+            )
+        out["estimator"] = str(value["estimator"])
     return out
+
+
+def adapter_prefill_row_tile(adapter):
+    """The adapter-declared prefill matmul row tile, or None (64 rows).
+
+    Slices beside decode are grid-aligned to it and mixed forwards fill
+    whole tiles of it.  Only a declaration that differs from 64 is
+    returned, so routes whose adapter declares nothing keep their identity.
+    """
+    hook = getattr(adapter, "prefill_row_tile", None)
+    tile = hook() if callable(hook) else None
+    if tile is None:
+        return None
+    if isinstance(tile, bool) or not isinstance(tile, int) or tile < 1:
+        raise ValueError("adapter prefill_row_tile must be a positive integer")
+    return None if tile == 64 else int(tile)
 
 
 def decode_time_fairness_policy(
     *, external_draft: bool, prompt_lookup: bool, overrides=None
 ) -> dict:
-    """Return only the policy actually constructed by the selected route.
+    """Return the decode-time fairness policy the selected route constructs.
 
-    ``overrides`` (validated by :func:`decode_fairness_overrides`) appear only
-    when configured, so a default policy's identity is unchanged.
+    Every route stall-bounds a prefill slice taken beside decoding lanes.
+    The external-draft and prompt-lookup generators already interleave one
+    slice with every decode poll and repay no debt (``fair_share`` 0); the
+    ordinary and native self-MTP generator also repays half of each
+    contended slice with decode work.  ``estimator`` is recorded because it
+    changes slicing beside decode, and so the batch geometry a prompt is
+    prefilled under.  ``overrides`` (validated by
+    :func:`decode_fairness_overrides`) appear only when configured.
     """
     policy = {
-        "enabled": not (external_draft or prompt_lookup),
-        "fair_share": 0.5,
+        "enabled": True,
+        "fair_share": 0.0 if (external_draft or prompt_lookup) else 0.5,
         "stall_target_ms": 500.0,
+        "estimator": "cost_model",
     }
     policy.update(overrides or {})
     return policy
@@ -2925,6 +2959,11 @@ class Job:
     # Verify-span cap prompt-lookup admission seated this lane at, or None.
     prompt_lookup_span: int | None = None
     apc_interior_positions: tuple[int, ...] = ()
+    # Planned slice ends of a cold prefill of this prompt (APC-3), and
+    # whether the cached offset is one of them (or 0 / P-1): then the warm
+    # prefill is cut exactly as the cold one.  None until admission.
+    prefill_cold_cuts: tuple[int, ...] = ()
+    slice_aligned: bool | None = None
     # Budgeted P1 plan when rolling checkpoints are enabled (else empty), and
     # the (key, tokens) of this lane's latest disposable rolling checkpoint.
     state_boundaries: tuple = ()
@@ -3641,6 +3680,8 @@ class ServingEngine:
                 "apc_interior_positions_planned_lattice": 0,
                 "apc_interior_positions_skipped_media": 0,
                 "apc_interior_requests_skipped_continuation": 0,
+                "apc_warm_slices_unaligned": 0,
+                "apc_interior_positions_dropped_unaligned": 0,
                 "apc_interior_positions_headroom_capped": 0,
                 "apc_interior_hits": 0,
                 "apc_interior_hits_turn_boundary": 0,
@@ -5644,6 +5685,25 @@ class ServingEngine:
             return cached + self.stream_unfilled_reserve_gib()
         return cached
 
+    def admission_headroom_fn(self):
+        """``execution_headroom`` shaped by the host-memory signals policy.
+
+        Lane admission, parallel-sample fanout and checkpoint budgeting must
+        read the same headroom, including the opt-in host-available floor.
+        """
+        from .memory import execution_headroom
+
+        policy = getattr(self, "host_memory_signals_policy", None) or {}
+        if not policy.get("enabled"):
+            return execution_headroom
+        floor_gib = policy.get("minimum_host_available_gib", 0.0)
+        return partial(
+            execution_headroom,
+            host_signals=True,
+            **({"minimum_host_available_bytes": int(floor_gib * (1 << 30))}
+               if floor_gib else {}),
+        )
+
     def admit_parallel_samples(self, count):
         """Guard opt-in fanout by lane count and measured physical headroom."""
         if type(count) is not int or count < 1:
@@ -5655,10 +5715,7 @@ class ServingEngine:
                 f"n={count} parallel samples exceed configured lane capacity "
                 f"(--max-lanes {self.max_lanes})"
             )
-        from .memory import execution_headroom
-
-        if getattr(self, "host_memory_monitor", None) is not None:
-            execution_headroom = partial(execution_headroom, host_signals=True)
+        execution_headroom = self.admission_headroom_fn()
         # Preserve the same hard reserve used by lane admission: 20 GiB on the
         # 128 GiB calibration host, derived from that host's advisory and RAM
         # below it (a flat 20 refused every request on a 36 GiB M3 Pro).  Each
@@ -6743,17 +6800,7 @@ class ServingEngine:
                 if refusal is not None:
                     raise ValueError(f"invariant_prefill coverage lost: {refusal}")
             import mlx.core as mx
-            from .memory import execution_headroom
-            if self.host_memory_signals_policy["enabled"]:
-                floor_gib = self.host_memory_signals_policy.get(
-                    "minimum_host_available_gib", 0.0
-                )
-                execution_headroom = partial(
-                    execution_headroom,
-                    host_signals=True,
-                    **({"minimum_host_available_bytes": int(floor_gib * (1 << 30))}
-                       if floor_gib else {}),
-                )
+            execution_headroom = self.admission_headroom_fn()
             from .runtime.apc_v2 import (
                 APCLookup,
                 APCv2,
@@ -6762,6 +6809,7 @@ class ServingEngine:
             )
             from .runtime.generate import BatchGenerator
             from .runtime.interior_placement import (
+                cold_prefill_cuts,
                 generation_prompt_boundary,
                 plan_interior_positions,
             )
@@ -7243,6 +7291,12 @@ class ServingEngine:
                     raise ValueError(
                         "batch_geometry currently requires the ordinary route"
                     )
+                if self.prefill_scheduling_policy is not None:
+                    # SRPT admission bypasses the geometry selector: the
+                    # pair would record a policy that never engages.
+                    raise ValueError(
+                        "batch_geometry cannot be combined with prefill_scheduling"
+                    )
                 settings["batch_geometry"] = dict(self.batch_geometry_policy)
             prompt_lookup_policy = {}
             if "prompt_lookup" in (self.execution_policy or {}):
@@ -7262,15 +7316,16 @@ class ServingEngine:
                     self.execution_policy["prompt_lookup"]
                 )
             settings["prompt_lookup"] = dict(prompt_lookup_policy)
-            if self.decode_fairness_overrides and (external_draft or prompt_lookup):
-                raise ValueError(
-                    "decode_fairness requires the ordinary or native self-MTP route"
-                )
             settings["decode_time_fairness"] = decode_time_fairness_policy(
                 external_draft=external_draft,
                 prompt_lookup=prompt_lookup,
                 overrides=self.decode_fairness_overrides,
             )
+            row_tile = adapter_prefill_row_tile(adapter)
+            if row_tile is not None:
+                # The stall-bound grid and the mixed-forward alignment follow
+                # the adapter's kernel tile; recorded only when declared.
+                settings["decode_time_fairness"]["grid"] = row_tile
             settings["speculation"] = (
                 "external_draft"
                 if external_draft
@@ -7999,6 +8054,7 @@ class ServingEngine:
                         evict_checkpoint=evict_unused_checkpoint,
                         stop_tokens=[[token] for token in stop_token_ids],
                         fly_verification=self.fly_verification_policy,
+                        decode_time_fairness=settings["decode_time_fairness"],
                     )
                 elif prompt_lookup:
                     from .runtime.pld import PromptLookupBatchGenerator
@@ -8010,6 +8066,7 @@ class ServingEngine:
                         prefill_step_autoscale=self.prefill_step_autoscale,
                         prompt_lookup=prompt_lookup_policy,
                         stop_tokens=[[token] for token in stop_token_ids],
+                        decode_time_fairness=settings["decode_time_fairness"],
                     )
                 else:
                     return BatchGenerator(
@@ -8816,6 +8873,41 @@ class ServingEngine:
                             adapter, job.request, tokens,
                             cached_tokens=int(hit.cached_tokens),
                         )
+                        # Cut a warm continuation where a cold prefill of the
+                        # same prompt is cut (APC-3); the continuation skip
+                        # and the headroom budget only decide captures.
+                        job.prefill_cold_cuts = ()
+                        if self.apc_interior_route_supported and not job.request.get(
+                            "skip_writing_prefix_cache", False
+                        ):
+                            job.prefill_cold_cuts = cold_prefill_cuts(
+                                tokens,
+                                policy=self.apc_interior_checkpoint_policy,
+                                marker_ids=self.apc_interior_turn_markers,
+                                generation_suffixes=(
+                                    getattr(self, "apc_generation_prompt_suffixes", ())
+                                    if "messages" in job.request
+                                    else ()
+                                ),
+                                media_floor=int(
+                                    job.request.get("_mlx2_media_token_end", 0) or 0
+                                ),
+                                media_position=(
+                                    media_checkpoint_position
+                                    if not int(hit.cached_tokens)
+                                    else adapter_media_checkpoint_position(
+                                        adapter, job.request, tokens, cached_tokens=0,
+                                    )
+                                ),
+                            )
+                        if job.prefill_cold_cuts and not (
+                            hit.cache is None
+                            or inspect_apc_capabilities(
+                                hit.cache
+                            ).interior_checkpoint_target
+                        ):
+                            # A cold prefill plans no cuts on this cache type.
+                            job.prefill_cold_cuts = ()
                         planning_target = (
                             self.apc_interior_route_supported
                             and (
@@ -8907,6 +8999,19 @@ class ServingEngine:
                             self.counts[
                                 "apc_interior_positions_planned_media_boundary"
                             ] += 1
+                        if int(hit.cached_tokens) and job.prefill_cold_cuts:
+                            # A warm plan respaces its tail above the cached
+                            # offset; capturing there would cut where a cold
+                            # prefill never does (APC-3).  Keep cold cuts only.
+                            aligned = tuple(
+                                position
+                                for position in checkpoint_candidates
+                                if position in job.prefill_cold_cuts
+                            )
+                            self.counts[
+                                "apc_interior_positions_dropped_unaligned"
+                            ] += len(checkpoint_candidates) - len(aligned)
+                            checkpoint_candidates = aligned
                         if planning_target and self.apc_junction_checkpoints:
                             branch = int(getattr(hit, "branch_tokens", 0) or 0)
                             # A lookup never resumes inside a media span, so a
@@ -9064,6 +9169,13 @@ class ServingEngine:
                             )
                         else:
                             job.cached_tokens = hit.cached_tokens
+                            cached = int(hit.cached_tokens or 0)
+                            job.slice_aligned = (
+                                cached in (0, len(tokens) - 1)
+                                or cached in job.prefill_cold_cuts
+                            )
+                            if not job.slice_aligned:
+                                self.counts["apc_warm_slices_unaligned"] += 1
                             job.cache_retention_role = getattr(
                                 hit, "retention_role", None
                             )
@@ -9554,6 +9666,12 @@ class ServingEngine:
                             caches=[lane_cache], all_tokens=[tokens[:hit.cached_tokens]],
                             samplers=[sampler], logits_processors=[processors], lane_rngs=[rng],
                             apc_interior_positions=[job.apc_interior_positions],
+                            **(
+                                {"prefill_cuts": [job.prefill_cold_cuts]}
+                                if job.prefill_cold_cuts
+                                and not (external_draft or prompt_lookup)
+                                else {}
+                            ),
                             **({"session_keys": [proposal_session_scope_hash(
                                 job.tenant_id, job.request.get("session_id"),
                                 adapter.identity["fingerprint"],
@@ -10674,6 +10792,10 @@ class ServingEngine:
                                     "request_id": job.id,
                                     "cache": "apcv2",
                                     "cached_tokens": job.cached_tokens,
+                                    # Exact either way; True also means the
+                                    # warm prefill was cut where an idle cold
+                                    # prefill of this prompt is (APC-3).
+                                    "slice_aligned": job.slice_aligned,
                                     **(
                                         {
                                             "apcv2_reuse": {

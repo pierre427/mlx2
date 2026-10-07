@@ -275,3 +275,117 @@ def test_staggered_arrivals_hand_off_instead_of_locking_width_one(model):
         assert _widths(gen) == (0, 0, 8)
     finally:
         gen.close()
+
+
+# -- (d) multi-chunk co-arrivals form one cohort (sweep 2026-10-06, SS-1) ---
+
+
+def test_concurrent_multichunk_prompts_form_one_cohort(model):
+    """Four 150-token prompts at step 64 (three slices each), arriving together.
+
+    Before: one lane advanced per round, the first to finish decoded alone
+    and locked the cohort at width 1, and the other three went plain beside
+    it after the width-lock deferrals: (1, 0, 3) for the rest of the run.
+    """
+    segmented_self_mtp_stats(reset=True)
+    gen = _generator(model, mtp_admission=_admission())
+    try:
+        prompts = [[(7 * i + j) % 50 + 1 for j in range(150)] for i in range(4)]
+        gen.insert(prompts, max_tokens=[40] * 4)
+        seen = []
+        for _ in range(80):
+            gen.next()
+            seen.append(_widths(gen))
+        assert max(w[0] for w in seen) == 4, seen
+        # The cohort starts at full width: no width-1 round precedes it.
+        assert [w for w in seen if w != (0, 0, 0)][0] == (4, 0, 0), seen
+        assert segmented_self_mtp_stats()["width_lock_plain_fallbacks"] == 0
+        assert gen.scheduler_stats["mtp_coarrival_holds"] >= 3
+    finally:
+        gen.close()
+
+
+def test_autoscaled_600_token_prompts_form_one_cohort(model):
+    """The 27B serving shape: no adapter step, so autoscale picks 512 rows.
+
+    Every prompt over 513 tokens is then multi-chunk; four 600-token
+    co-arrivals used to settle at one MTP lane plus three plain lanes.
+    """
+    segmented_self_mtp_stats(reset=True)
+    gen = BatchGenerator(
+        model,
+        completion_batch_size=8,
+        prefill_step_size=8192,
+        prefill_step_autoscale=True,
+        self_mtp=dict(SELF_MTP, prefill_step_size=8192),
+        mtp_ordinary_handoff=MTPOrdinaryHandoffPolicy.from_value(
+            {"enabled": True, "max_mtp_width": 4}
+        ),
+        mtp_admission=_admission(),
+    )
+    try:
+        prompts = [[(11 * i + j) % 50 + 1 for j in range(600)] for i in range(4)]
+        gen.insert(prompts, max_tokens=[40] * 4)
+        seen = []
+        for _ in range(60):
+            gen.next()
+            seen.append(_widths(gen))
+        assert max(w[0] for w in seen) == 4, seen
+        assert segmented_self_mtp_stats()["width_lock_plain_fallbacks"] == 0
+    finally:
+        gen.close()
+
+
+def test_coarrival_hold_is_bounded_by_sibling_prefill(model):
+    """A short prompt does not wait for a sibling far longer than itself.
+
+    150 tokens beside 2000: the sibling's remaining prefill exceeds the hold
+    factor times the short prompt, so the short lane starts decoding while
+    the long one is still prefilling (the omlx#3726 TTFT guarantee).
+    """
+    segmented_self_mtp_stats(reset=True)
+    gen = _generator(model, mtp_admission=_admission())
+    try:
+        short = [(3 * j) % 50 + 1 for j in range(150)]
+        long_ = [(5 * j) % 50 + 1 for j in range(2000)]
+        gen.insert([short, long_], max_tokens=[40, 40])
+        first_mtp = None
+        for r in range(20):
+            gen.next()
+            if first_mtp is None and _widths(gen)[0]:
+                first_mtp = r
+                break
+        assert first_mtp is not None
+        # The long prompt is still queued for prefill when the short decodes.
+        assert len(gen._unprocessed_sequences) == 1
+        assert gen.scheduler_stats.get("mtp_coarrival_holds", 0) == 0
+    finally:
+        gen.close()
+
+
+def test_eight_multichunk_coarrivals_form_one_cohort(model):
+    """The 27B serving shape at B8: every prompt spans two prefill steps.
+
+    The hold compared the siblings' summed residual with four times the
+    row's own prompt, so eight equal prompts (seven siblings) released the
+    first lane alone at width 1.  Four equal prompts formed one cohort.
+    """
+    segmented_self_mtp_stats(reset=True)
+    gen = BatchGenerator(
+        model,
+        completion_batch_size=8,
+        prefill_step_size=64,
+        self_mtp=dict(SELF_MTP),
+        mtp_admission=_admission(),
+    )
+    try:
+        prompts = [[(7 * i + j) % 50 + 1 for j in range(100)] for i in range(8)]
+        gen.insert(prompts, max_tokens=[40] * 8)
+        seen = []
+        for _ in range(40):
+            gen.next()
+            seen.append(_widths(gen))
+        assert [w for w in seen if w != (0, 0, 0)][0] == (8, 0, 0), seen
+        assert segmented_self_mtp_stats()["width_lock_plain_fallbacks"] == 0
+    finally:
+        gen.close()

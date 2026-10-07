@@ -249,7 +249,7 @@ def test_idle_uncached_long_mtp_prefill_yields_before_lane_preparation():
 
     batch._advance_mtp_prefill = MethodType(advance, batch)
     batch._make_mtp_batch = MethodType(prepare, batch)
-    batch._adaptive_prefill_decision = lambda _now: (_ for _ in ()).throw(
+    batch._adaptive_prefill_decision = lambda _now, **_kw: (_ for _ in ()).throw(
         AssertionError("idle prefill must not use decode-latency deferral")
     )
 
@@ -351,7 +351,7 @@ def test_long_mtp_prefill_adaptive_defer_only_with_active_decode():
     batch._generation_batch = _EmptyMTPBatch(active=True)
     batch.completion_batch_size = 2
     decisions = []
-    batch._adaptive_prefill_decision = lambda now: (
+    batch._adaptive_prefill_decision = lambda now, **_kw: (
         decisions.append(now) or (True, 0, False)
     )
     batch._advance_mtp_prefill = MethodType(

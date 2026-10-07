@@ -128,7 +128,9 @@ def test_younger_requests_are_not_counted_as_overtaken():
 
 def test_stall_bound_ignores_enabled_and_counters():
     fairness = DecodeTimeFairness(enabled=False, stall_target_ms=1e-6)
-    assert fairness.stall_bound(2048) == fairness.fallback_cap
+    # No measurement: a one-tile probe (2026-10-06 rfix-sched; it was
+    # fallback_cap rows whatever the model's speed).
+    assert fairness.stall_bound(2048) == fairness.grid
     fairness.observe_prefill(1000, 1.0, contended=False)
     assert fairness.stall_bound(2048) == 64
     assert fairness.cap(2048, contended=True) == 2048

@@ -13,7 +13,7 @@ from mlx2.runtime.adaptive_policy import (
 def test_decode_time_fairness_caps_by_wall_time_and_repays_debt():
     policy = DecodeTimeFairness(
         enabled=True, fair_share=0.5, stall_target_ms=100, fallback_cap=256,
-        floor=64, grid=64,
+        floor=64, grid=64, estimator="running_max",
     )
     assert policy.cap(2048, contended=True) == 256
     policy.observe_prefill(256, 0.2, contended=True)
@@ -29,6 +29,8 @@ def test_decode_time_fairness_caps_by_wall_time_and_repays_debt():
         "debt_deferrals": 2,
         "debt_repayments": 2,
         "cap_clamps": 2,
+        # Gap-attribution gauge (2026-10-06 rfix-sched).
+        "contended_forward_max_us": 200000,
     }
 
 
@@ -542,7 +544,7 @@ def test_adaptive_prefill_decision_applies_contended_slice_floor(slice_floor, ex
     scheduler.prefill_order = PrefillOrder()
     scheduler.scheduler_stats = defaultdict(int)
     scheduler.decode_time_fairness = DecodeTimeFairness(
-        enabled=True, slice_floor=slice_floor
+        enabled=True, slice_floor=slice_floor, estimator="running_max"
     )
     # Measured best rate 900 tok/s at the 500 ms stall target -> 448 rows.
     scheduler.decode_time_fairness.best_prefill_tokens_per_second = 900.0

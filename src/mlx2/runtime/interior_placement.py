@@ -256,3 +256,48 @@ def generation_prompt_boundary(
         ]:
             return total - width
     return None
+
+
+def cold_prefill_cuts(
+    tokens: Sequence[int],
+    *,
+    policy,
+    marker_ids: Optional[Iterable[int]] = None,
+    generation_suffixes: Iterable[Sequence[int]] = (),
+    media_floor: int = 0,
+    media_position: Optional[int] = None,
+) -> Tuple[int, ...]:
+    """Planned slice ends of a cold (uncached) prefill of ``tokens``.
+
+    The serving plan with ``cached_tokens=0``: interior positions (re-planned
+    above ``media_floor`` when any falls inside the media span), the
+    generation-prompt boundary and the adapter's media boundary.  No
+    continuation skip and no headroom budget: those decide which positions
+    are *captured*, never where a cold prefill is cut.  Junction boundaries
+    depend on the lookup and rolling ones are absolute multiples, so neither
+    is part of this list.  A warm request cut at the positions above its
+    cached offset ``c`` slices exactly as the cold prefill whenever ``c`` is
+    itself one of these cuts (and the server is idle: adaptive and fairness
+    slicing are load dependent).
+    """
+    cuts = set()
+    count = int(policy.get("count", 0) or 0)
+    if count > 0:
+        options = dict(
+            count=count,
+            min_stride=int(policy["min_stride"]),
+            placement=policy.get("placement", "pow2"),
+            marker_ids=marker_ids,
+        )
+        positions, _ = plan_interior_positions(tokens, **options)
+        if media_floor and any(position < media_floor for position in positions):
+            positions, _ = plan_interior_positions(
+                tokens, floor_tokens=int(media_floor), **options
+            )
+        cuts.update(positions)
+    boundary = generation_prompt_boundary(tokens, generation_suffixes)
+    if boundary is not None and boundary > int(media_floor):
+        cuts.add(boundary)
+    if media_position is not None:
+        cuts.add(int(media_position))
+    return tuple(sorted(cuts))
