@@ -415,3 +415,25 @@ def test_refuted_dropped_proposals_latch_a_lane_off_retrieval(monkeypatch):
     assert stats["pld_fallbacks"] == len(uids)  # every lane latched
     for uid, ref in zip(uids, reference):
         assert tokens[uid] == ref
+
+
+def test_pipelined_anchor_is_clipped_into_the_vocabulary():
+    # 2026-10-07: the next plain round is dispatched with the previous round's
+    # lazy token before the read range-checks it.  An out-of-vocabulary draw
+    # (4096 on a 4096-row table) was fed to the embedding gather unclipped:
+    # undefined behaviour that segfaulted the CPU suite in one test order.
+    # The anchor fed forward must stay in range; the raw token is still what
+    # the read refuses.
+    row = mx.zeros((1, 64))
+
+    class Lane:
+        processors = ()
+        logprob_transform = None
+
+        @staticmethod
+        def sampler(rows):
+            return mx.full((rows.shape[0],), 4096, mx.uint32)
+
+    prepared = PromptLookupBatchGenerator._prepare_plain_row(Lane, row)
+    assert int(prepared["tokens"][0]) == 4096
+    assert int(prepared["anchor"][0]) == 63

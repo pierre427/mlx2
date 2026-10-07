@@ -1145,6 +1145,12 @@ class PromptLookupBatchGenerator:
         return {
             "rows": [row],
             "tokens": mx.stack([token]),
+            # The next pipelined round is dispatched before this token is
+            # read and range-checked, so it is fed a clipped copy: an
+            # out-of-vocabulary draw must not index past the embedding table.
+            # The read still refuses the raw token and drops the lane, whose
+            # following round is then discarded.
+            "anchor": mx.stack([mx.clip(token, 0, row.shape[-1] - 1)]),
             "finite": mx.stack([_finite_at(row, token)]),
         }
 
@@ -1556,7 +1562,7 @@ class PromptLookupBatchGenerator:
         following = dispatch_error = None
         if proceed:
             anchors = mx.concatenate(
-                [prepared["tokens"] for prepared in inflight.prepared]
+                [prepared["anchor"] for prepared in inflight.prepared]
             )
             try:
                 following = self._dispatch_plain(

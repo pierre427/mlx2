@@ -24,6 +24,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 APC_SOURCE = ROOT / "src/mlx2/runtime/apc_v2.py"
 LOCKS = (Path("/Users/Shared/mlxuag/gpu.lock/owner.json"), Path("/tmp/gpu.lock/owner.json"))
+# The method holding the restore body (runtime/loop_trace wraps the public one).
+RESTORE_METHOD = "_restore_entry_untraced_locked"
 COUNTERS = ("restores", "bytes_read", "restore_budget_deferrals",
             "restore_transient_deferrals", "restore_failures", "resident_bytes")
 
@@ -36,7 +38,9 @@ def phase_lines(source: Path = APC_SOURCE) -> dict[int, list[str]]:
     """Resolve the audited restore call sites without editing production code."""
     tree = ast.parse(source.read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "APCv2")
-    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "_restore_entry_locked")
+    methods = {node.name: node for node in cls.body if isinstance(node, ast.FunctionDef)}
+    # The opt-in loop trace wraps the restore; its body lives in the untraced method.
+    method = methods.get(RESTORE_METHOD) or methods["_restore_entry_locked"]
     phases: dict[int, list[str]] = {}
 
     def add(line: int, label: str) -> None:
@@ -251,7 +255,8 @@ def run(args, plan: dict) -> dict:
         # Resolve this only after adapter load. Importing APCv2 here before
         # the Qwen adapter pins its import-time GDN profile loads models.base
         # too early and causes a guarded startup refusal.
-        restore_code = type(engine.apc)._restore_entry_locked.__code__
+        apc_type = type(engine.apc)
+        restore_code = getattr(apc_type, RESTORE_METHOD, apc_type._restore_entry_locked).__code__
 
         def trace(frame, event, _arg):
             if frame.f_code is restore_code and event == "line":

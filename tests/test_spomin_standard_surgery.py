@@ -370,11 +370,13 @@ def test_declined_surgery_keeps_exact_publication(monkeypatch):
         collect_nonstream_job(engine.submit(body), body, chat=False)
     finally:
         engine.close()
-    assert [role for _t, role in stores] == [
-        "interior_checkpoint",
-        "committed_prompt_boundary",
-        None,
-    ]
+    # Every exact store is published.  Their order is not part of the
+    # contract: since the 2026-10-07 decode-gap fix the prompt boundary is
+    # published after the round's tokens are delivered and interior
+    # checkpoints follow it.
+    assert sorted((role or "" for _t, role in stores)) == sorted(
+        ["interior_checkpoint", "committed_prompt_boundary", ""]
+    )
     # Always-on sanity telemetry is derivable from /v1/status alone.
     assert engine.counts["finish_length"] == 1 and engine.counts["completed"] == 1
     assert engine.counts["prompt_tokens"] == 4 and engine.counts["peak_observed_width"] >= 1
