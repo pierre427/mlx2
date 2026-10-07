@@ -8,6 +8,7 @@ import math
 import operator
 import os
 import sys
+import weakref
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -764,6 +765,49 @@ def compact_prompt_cache_windows(cache: List[Any]) -> int:
     return trimmed
 
 
+class RecoveryRewindGuard:
+    """Set when a live cache is rewound below a borrowed recovery level.
+
+    A borrowed recovery point (``cow_cache.snapshot_recovery_descriptors``)
+    re-reads the live cache's buffers below ``level`` on restore.  A trim
+    below that level followed by appends rewrites part of that prefix, and
+    the fill level alone cannot show it.
+    """
+
+    __slots__ = ("level", "violated", "__weakref__")
+
+    def __init__(self, level: int):
+        self.level = int(level)
+        self.violated = False
+
+
+# Live cache -> guards of the recovery points borrowing from it.  Kept off
+# the cache object so descriptor snapshots never clone it.
+_RECOVERY_REWIND_GUARDS = weakref.WeakKeyDictionary()
+
+
+def register_recovery_rewind_guard(cache, level: int) -> RecoveryRewindGuard:
+    guard = RecoveryRewindGuard(level)
+    guards = _RECOVERY_REWIND_GUARDS.get(cache)
+    if guards is None:
+        guards = _RECOVERY_REWIND_GUARDS[cache] = weakref.WeakSet()
+    guards.add(guard)
+    return guard
+
+
+def _note_recovery_rewind(cache) -> None:
+    """Mark the recovery points whose borrowed prefix a rewind cut into."""
+    if not _RECOVERY_REWIND_GUARDS:
+        return
+    guards = _RECOVERY_REWIND_GUARDS.get(cache)
+    if not guards:
+        return
+    offset = cache.offset
+    for guard in list(guards):
+        if isinstance(offset, int) and offset < guard.level:
+            guard.violated = True
+
+
 def _state_checkpoint_max() -> int:
     """Max recorded state checkpoints per ArraysCache (0 disables)."""
     try:
@@ -1139,6 +1183,7 @@ class QuantizedKVCache(_BaseCache):
     def trim(self, n):
         n = min(self.offset, n)
         self.offset -= n
+        _note_recovery_rewind(self)
         return n
 
     @classmethod
@@ -1233,6 +1278,7 @@ class KVCache(_BaseCache):
     def trim(self, n):
         n = min(self.offset, n)
         self.offset -= n
+        _note_recovery_rewind(self)
         return n
 
     def to_quantized(

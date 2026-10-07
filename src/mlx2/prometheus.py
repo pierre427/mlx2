@@ -339,6 +339,9 @@ _ENGINE_EVENTS = {
         "memory_preemption", "drain_cancelled"
     ),
     "mtp_sidecar_missing_misses": ("mtp", "sidecar_missing_cache_miss"),
+    "external_draft_sidecar_missing_misses": (
+        "external_draft", "sidecar_missing_cache_miss"
+    ),
     "structured_output_failures": ("structured_output", "failed_closed"),
     "structured_output_dead_ends": ("structured_output", "dead_end"),
     "structured_output_completed": ("structured_output", "completed"),

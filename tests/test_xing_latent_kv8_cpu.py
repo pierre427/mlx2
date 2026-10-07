@@ -78,6 +78,7 @@ def _candidate(monkeypatch):
         "mlx2.runtime.models.cache": types.SimpleNamespace(
             KVCache=Exact, _BaseCache=Base,
             create_attention_mask=lambda *a, **k: None,
+            _note_recovery_rewind=lambda cache: None,
         ),
         "mlx2.runtime.segmented_plain_kv": types.SimpleNamespace(SegmentedBatchKVCache=Segmented),
     }

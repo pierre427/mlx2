@@ -270,7 +270,13 @@ def maybe_quantize_kv_cache(
                 kv_value_bits=kv_value_bits,
                 kv_rotate=kv_rotate,
             )
-            c.caches = tuple(leaves)
+            if any(new is not old for new, old in zip(leaves, c.caches)):
+                # Replace the container rather than its children: the caller's
+                # list owns the result, and a source the planes were staged
+                # from (approximate KV) must keep its exact planes.
+                replacement = copy.copy(c)
+                replacement.caches = tuple(leaves)
+                prompt_cache[e] = replacement
         elif hasattr(c, "to_quantized"):
             reason = getattr(c, "kv_quantization_unsupported", None)
             if reason:

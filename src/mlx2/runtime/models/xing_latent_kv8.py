@@ -12,7 +12,7 @@ from __future__ import annotations
 import mlx.core as mx
 
 from ..segmented_plain_kv import SegmentedBatchKVCache
-from .cache import KVCache, _BaseCache, create_attention_mask
+from .cache import KVCache, _BaseCache, _note_recovery_rewind, create_attention_mask
 
 _COUNTERS = {
     "prefix_conversions": 0,
@@ -184,6 +184,7 @@ class XingLatentKV8Cache(_BaseCache):
             raise ValueError("trim count must be a nonnegative integer")
         removed = min(n, self.offset)
         self.offset -= removed
+        _note_recovery_rewind(self)
         return removed
 
     def size(self):

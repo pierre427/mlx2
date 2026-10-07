@@ -3143,6 +3143,13 @@ class ServingEngine:
         if type(junction_policy) is not bool:
             raise ValueError("apc_junction_checkpoints must be boolean")
         self.apc_junction_checkpoints = junction_policy
+        # Default-off: evict by saved prefill per resident byte instead of
+        # rank-then-recency (runtime/apc_v2.py ``apc_retention_policy``).
+        from .runtime.apc_retention import apc_retention_policy
+
+        self.apc_retention_policy = apc_retention_policy(
+            (execution_policy or {}).get("apc_retention_policy")
+        )
         # Default-off: route small-M 4/5-bit verify matmuls through the mlx2
         # simdgroup kernel (runtime/models/sp_qmm.py) where it measured faster.
         self.sp_qmm_enabled = sp_qmm_selected(execution_policy)
@@ -6559,6 +6566,7 @@ class ServingEngine:
                         "mtp_ordinary_handoff",
                         "memory_preemption",
                         "apc_junction_checkpoints",
+                        "apc_retention_policy",
                         "apc_rolling_checkpoints",
                         "host_memory_signals",
                         "moe_expert_streaming",
@@ -6920,6 +6928,9 @@ class ServingEngine:
             if self.apc_junction_checkpoints:
                 # Present only when enabled so default receipts stay identical.
                 settings["apc_junction_checkpoints"] = True
+            if self.apc_retention_policy is not None:
+                # Present only when selected so default receipts stay identical.
+                settings["apc_retention_policy"] = dict(self.apc_retention_policy)
             if self.apc_rolling_checkpoint_policy["interval_tokens"]:
                 settings["apc_rolling_checkpoints"] = dict(
                     self.apc_rolling_checkpoint_policy
@@ -7545,6 +7556,7 @@ class ServingEngine:
                 quarantine_max_bytes=self.apc_quarantine_max_bytes,
                 generation_prompt_suffixes=self.apc_generation_prompt_suffixes,
                 state_codec=self.recurrent_state_codec_policy,
+                retention_policy=self.apc_retention_policy,
             )
             self.apc = apc
             cache_keys = {}
@@ -7561,7 +7573,26 @@ class ServingEngine:
                         None,
                         self.apc_reuse_disabled_reason,
                     )
+                # Draft routes resume only from entries carrying draft state,
+                # so a deeper plain entry must not hide a shallower sidecar.
+                kwargs.setdefault(
+                    "require_sidecar",
+                    bool((self.mtp or external_draft) and not prompt_lookup),
+                )
+                # Self-MTP decodes a target-only hit at ``len - 1`` plainly
+                # (route_usable_hit); external draft refuses every one.
+                kwargs.setdefault("allow_target_only_plain", not external_draft)
                 return apc.lookup(key, tokens, **kwargs)
+
+            def discard_lookup(hit, reason):
+                """Withdraw APCv2 credit for a lookup this request does not use.
+
+                Lifetime APCv2 counters are per request: a repeated lookup for
+                the same request, or a hit the route refuses, must not count.
+                """
+                discard = getattr(apc, "discard_lookup_credit", None)
+                if hit is not None and callable(discard):
+                    discard(hit, reason)
 
             def cache_key_for(tenant_id, media_fingerprint=None):
                 """APCv2 namespace for a request: shared, or per tenant."""
@@ -7836,9 +7867,32 @@ class ServingEngine:
                     branch = hit.cache
                     if hasattr(branch, "close"):
                         branch.close()
+                    discard_lookup(hit, "mtp_sidecar_missing")
                     self.counts["mtp_sidecar_missing_misses"] += 1
                     return APCLookup(
                         None, list(tokens), 0, False, None, "mtp_sidecar_missing",
+                        branch_tokens=max(
+                            int(hit.cached_tokens),
+                            int(getattr(hit, "branch_tokens", 0) or 0),
+                        ),
+                    )
+                if (
+                    external_draft
+                    and hit.cache is not None
+                    and hit.cached_tokens
+                    and hit.sidecar is None
+                ):
+                    # The external generator cannot pair a target-only prefix
+                    # with draft context and re-prefills the whole transcript,
+                    # so the receipt must not report the prefix as reused.
+                    branch = hit.cache
+                    if hasattr(branch, "close"):
+                        branch.close()
+                    discard_lookup(hit, "external_draft_sidecar_missing")
+                    self.counts["external_draft_sidecar_missing_misses"] += 1
+                    return APCLookup(
+                        None, list(tokens), 0, False, None,
+                        "external_draft_sidecar_missing",
                         branch_tokens=max(
                             int(hit.cached_tokens),
                             int(getattr(hit, "branch_tokens", 0) or 0),
@@ -7886,6 +7940,8 @@ class ServingEngine:
                         ),
                         replay_tokens,
                     )
+                    # The request's first admission already counted its lookup.
+                    discard_lookup(hit, "preemption_replay")
                 except Exception:  # noqa: BLE001 - admission looks up again
                     log.exception("APCv2 replay lease failed; replay will look up")
                 branch = job.cache_branch
@@ -8512,6 +8568,7 @@ class ServingEngine:
                                 # again after the leader publishes, and holds
                                 # no lease while it waits.
                                 branch = job.cache_branch
+                                discard_lookup(job.admission_hit, "same_prefix_sequenced")
                                 job.cache_branch = job.admission_hit = None
                                 if branch is not None and hasattr(branch, "close"):
                                     branch.close()
@@ -8552,10 +8609,13 @@ class ServingEngine:
                                 ),
                                 tokens,
                             )
+                            if job.preempted:
+                                discard_lookup(hit, "preemption_replay")
                             media_end = job.request.get("_mlx2_media_token_end", 0)
                             if hit.cached_tokens and hit.cached_tokens < media_end:
                                 if hit.cache is not None and hasattr(hit.cache, "close"):
                                     hit.cache.close()
+                                discard_lookup(hit, "media_boundary_not_cached")
                                 hit = APCLookup(
                                     None,
                                     list(tokens),
@@ -8574,6 +8634,7 @@ class ServingEngine:
                         ):
                             if hit.cache is not None and hasattr(hit.cache, "close"):
                                 hit.cache.close()
+                            discard_lookup(hit, "activation_capsule_cold_only")
                             hit = APCLookup(
                                 None,
                                 list(tokens),
@@ -8978,6 +9039,7 @@ class ServingEngine:
                             if position not in planned_positions
                         )
                         if hit.miss_reason == "disk_restore_requires_admission":
+                            discard_lookup(hit, "disk_restore_admission")
                             hit = route_usable_hit(
                                 lookup_apc(
                                     cache_key_for(
@@ -8988,6 +9050,8 @@ class ServingEngine:
                                     session_tag=session_tag_for(job),
                                 ), tokens
                             )
+                            if job.preempted:
+                                discard_lookup(hit, "preemption_replay")
                             job.cache_branch = hit.cache
                         decoded_leaves = int(getattr(hit, "codec_restored_leaves", 0))
                         job.recurrent_codec_restored_leaves += decoded_leaves
@@ -10172,6 +10236,9 @@ class ServingEngine:
                                                 != boundary["tokens"][:expected]
                                             ):
                                                 reason = "committed_boundary_miss"
+                                                discard_lookup(
+                                                    sibling_hit, "fanout_boundary_miss"
+                                                )
                                                 close = getattr(
                                                     sibling_hit.cache, "close", None
                                                 )
@@ -10189,6 +10256,10 @@ class ServingEngine:
                                             prepared.append(sibling)
                                         if reason is not None:
                                             for sibling in prepared:
+                                                discard_lookup(
+                                                    sibling.admission_hit,
+                                                    "fanout_boundary_miss",
+                                                )
                                                 close = getattr(
                                                     sibling.cache_branch, "close", None
                                                 )
@@ -10257,6 +10328,11 @@ class ServingEngine:
                                                 key,
                                                 siblings[0].admission_tokens,
                                                 allow_disk_restore=False,
+                                            )
+                                            # A source probe; the siblings'
+                                            # own lookups already counted.
+                                            discard_lookup(
+                                                capsule_hit, "capsule_source"
                                             )
                                             prepared = None
                                             started = time.monotonic()

@@ -662,6 +662,15 @@ class PromptLookupBatchGenerator:
             mx.clear_cache()
             lane.history.extend(inputs)
             self.scheduler_stats["pld_prefill_rounds"] += 1
+            # As the ordinary prefill loop does: the recurrent and sliding
+            # restore snapshots are what let a later prompt that shares only
+            # a prefix of this one trim the stored boundary back to it.
+            # Without them a hybrid model's boundary serves exact repeats only.
+            cache_module.record_state_checkpoints(
+                lane.cache,
+                [len(lane.history)],
+                force=len(lane.remaining) == 1,
+            )
         done = len(lane.remaining) == 1
         # (done, span) over the whole prompt, as the ordinary generator's
         # prompt responses report it; the final token is consumed by decode.

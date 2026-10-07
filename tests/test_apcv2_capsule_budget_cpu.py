@@ -38,6 +38,7 @@ def owner(apc_class, *, resident=0, reserved=60, disk=False):
         "reservation_rejections": 0, "reservations": 0, "reserved_bytes_peak": reserved,
     }
     apc._idle_disk_dir = "host-scratch" if disk else None
+    apc._retention_policy = None  # the default categorical order
     apc._enforce_count_pool_locked = lambda **_kwargs: None
     apc._count_pools_fit_locked = lambda: True
     apc._enforce_disk_limit_locked = lambda **_kwargs: None

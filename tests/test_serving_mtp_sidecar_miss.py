@@ -12,6 +12,7 @@ def _serve_warm_target_hit(monkeypatch, behind):
     short of the prompt, with no draft state (an ordinary-route checkpoint)."""
     inserted = []
     closed = []
+    discarded = []
 
     class Branch(list):
         def close(self):
@@ -34,6 +35,10 @@ def _serve_warm_target_hit(monkeypatch, behind):
                 sidecar=None,
                 hit=True,
             )
+
+        def discard_lookup_credit(self, _hit, reason):
+            discarded.append(reason)
+            return True
 
         def store(self, *_a, **_kw):
             pass
@@ -152,6 +157,8 @@ def _serve_warm_target_hit(monkeypatch, behind):
         _choice, _usage, receipt = collect_nonstream_job(job, body, chat=False)
     finally:
         engine.close()
+    engine.counts["test_discarded_lookups"] = len(discarded)
+    engine.counts.update(f"test_discarded_{reason}" for reason in discarded)
     return inserted, closed, receipt, engine.counts
 
 
@@ -178,6 +185,9 @@ def test_mtp_route_target_only_hit_below_the_boundary_fails_closed(monkeypatch):
     assert receipt["cached_tokens"] == 0
     assert counts["mtp_sidecar_missing_misses"] == 1
     assert counts["mtp_sidecar_missing_plain_fallbacks"] == 0
+    # The refused hit's APCv2 credit (a lookup hit, reused tokens, the
+    # entry's hit count) is withdrawn.
+    assert counts["test_discarded_mtp_sidecar_missing"] == 1
 
 
 def test_checkpoint_publication_failure_does_not_escape():

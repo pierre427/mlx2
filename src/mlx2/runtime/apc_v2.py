@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -33,6 +34,7 @@ from .cow_cache import (
     COWFrozenPromptCache,
     COWPromptCacheBranch,
     freeze_prompt_cache,
+    snapshot_token,
 )
 from .models.cache import (
     ArraysCache,
@@ -141,6 +143,10 @@ class APCLookup:
     branch_tokens: int = 0
     target_only_plain_fallback: bool = False
     codec_restored_leaves: int = 0
+    # What this lookup added to APCv2's request counters and entry hit
+    # counts, so a caller that does not consume it can withdraw it
+    # (``APCv2.discard_lookup_credit``).  None once withdrawn.
+    apc_credit: Any = None
 
 
 @dataclass
@@ -412,6 +418,35 @@ def _walk_cache_entries(prompt_cache: Iterable[Any]):
             yield entry
 
 
+def _snapshot_buffer_keys(prompt_cache: Iterable[Any]) -> dict:
+    """Buffers of the restore snapshots an entry's caches carry.
+
+    A lane keeps its recurrent (``ArraysCache``) and sliding-window restore
+    snapshots across every entry it publishes, so these are the arrays that
+    several entries hold at once.  Live state and KV buffers are not shared:
+    the lane's next write copies an aliased buffer.
+
+    Descriptor COW aliases a buffer through new array objects, so each
+    buffer is keyed by the ownership token its aliases share
+    (``cow_cache.snapshot_token``), not by Python identity, and not by its
+    data address: reading that evaluates the array, a host wait on the GPU
+    stream in the middle of prefill.
+    """
+    keys = {}
+    stack = [
+        getattr(cache, "_checkpoints", None)
+        for cache in _walk_cache_entries(prompt_cache)
+    ]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, mx.array):
+            if value.nbytes:
+                keys[snapshot_token(value)] = int(value.nbytes)
+        elif isinstance(value, (list, tuple)):
+            stack.extend(value)
+    return keys
+
+
 def _positions_disagree(prompt_cache: Iterable[Any], length: int) -> bool:
     """Whether a positional cache holds other than exactly ``length`` tokens.
 
@@ -510,12 +545,20 @@ def _check_aux_array_layout(arrays, recorded, *, required: bool) -> None:
         raise ValueError("APCv2 aux sidecar shape or dtype mismatch")
 
 
+# Parsed without importing model modules: ServingEngine validates it before
+# any adapter pins its import-time environment.
+from .apc_retention import APC_RETENTION_VALUE_DEFAULTS, apc_retention_policy  # noqa: E402,F401
+
+
 class APCv2(PrefixIndex):
     """APCv2: atomic segmented state ownership, prefix indexing and bounded residency."""
 
     _STAT_KEYS = (
         "lookups", "hits", "misses", "queried_tokens", "cached_tokens", "stores",
         "interior_hits", "rolling_hits", "junction_hits",
+        # Sidecar hits served from an ancestor a deeper sidecar-less entry
+        # hid from the trie candidates (``require_sidecar``).
+        "sidecar_ancestor_hits",
     )
     # Transient restore errors keep the snapshot for a retry this many times
     # before the entry is dropped as unusable.
@@ -563,6 +606,18 @@ class APCv2(PrefixIndex):
     # first, retired by their publisher once a later boundary supersedes them.
     _RETENTION_ROLLING = "prefill_rolling"
     _RETENTION_JUNCTION = "junction"
+    # Value retention: a fresh entry's prior hit rate by role, in hits per
+    # half-life, until its own hits replace it.
+    _RETENTION_VALUE_PRIORS = {
+        _RETENTION_PROMPT_BOUNDARY: 0.5,
+        _RETENTION_JUNCTION: 0.3,
+        _RETENTION_DEFAULT: 0.3,
+        _RETENTION_INTERIOR: 0.1,
+        _RETENTION_ROLLING: 0.0,
+    }
+    # Served depths kept per entry so a withdrawn hit can restore the depth
+    # it replaced; older hits fold into a base nothing withdraws.
+    _SERVED_DEPTH_HISTORY = 16
     _RETENTION_ROLES = frozenset(
         {
             _RETENTION_DEFAULT,
@@ -600,9 +655,18 @@ class APCv2(PrefixIndex):
         max_interior_entries: Optional[int] = None,
         generation_prompt_suffixes: Iterable[Iterable[int]] = (),
         state_codec: Any = None,
+        retention_policy: Any = None,
     ):
         if not layout_name:
             raise ValueError("APCv2 requires a model cache-layout declaration")
+        self._retention_policy = apc_retention_policy(retention_policy)
+        self._retention_stats = {
+            "value_evictions": 0,
+            # Victims other than the least recently used candidate of the
+            # same selection (the entry LRU order would have tried first).
+            "value_reordered_evictions": 0,
+        }
+        self._lru_head = None
         super().__init__(max_size=max_size, max_bytes=max_bytes, max_tokens=max_tokens)
         # Interior checkpoints get their own resident-entry allowance.  Sharing
         # ``max_size`` with prompt boundaries and finished lanes, whose count
@@ -646,7 +710,13 @@ class APCv2(PrefixIndex):
         }
         self._cow_branching = True
         self._cow_telemetry = COWCacheTelemetry()
+        # Snapshot buffers several resident entries hold at once (COW-1):
+        # buffer key -> [nbytes, holders]; the first holder is charged.
+        self._shared_buffers: dict = {}
         self._apc_stats = {key: 0 for key in self._STAT_KEYS}
+        # Entries credited with a hit by the lookup in progress.
+        self._credited_entries = None
+        self._discarded_lookups: dict = {}
         self._apc_lifetime = {key: 0 for key in self._STAT_KEYS}
         self._apc_clears = 0
         self._interior_reused_entries = 0
@@ -1418,17 +1488,72 @@ class APCv2(PrefixIndex):
             cls._RETENTION_PROMPT_BOUNDARY: 2,
         }.get(role, 1)
 
-    def _record_entry_hit_locked(self, entry) -> None:
+    def _decayed_hit_rate(self, entry, now: float) -> float:
+        """The entry's hit rate, decayed to ``now`` (hits per half-life)."""
+        rate = float(getattr(entry, "_apc_hit_rate", 0.0))
+        if rate <= 0.0:
+            return 0.0
+        elapsed = max(0.0, now - float(getattr(entry, "_apc_hit_rate_at", now)))
+        return rate * 0.5 ** (elapsed / self._retention_policy["half_life_seconds"])
+
+    def _push_served_depth_locked(self, entry, depth: int) -> list:
+        """Record a hit's served depth; returns the record that withdraws it."""
+        history = getattr(entry, "_apc_served_history", None)
+        if history is None:
+            entry._apc_served_base = int(getattr(entry, "_apc_served_depth", 0))
+            history = entry._apc_served_history = []
+        record = [int(depth)]
+        history.append(record)
+        if len(history) > self._SERVED_DEPTH_HISTORY:
+            entry._apc_served_base = history.pop(0)[0]
+        entry._apc_served_depth = record[0]
+        return record
+
+    @staticmethod
+    def _withdraw_served_depth_locked(entry, record) -> None:
+        """Undo one hit's served depth, whichever order hits are withdrawn.
+
+        The entry serves the depth of its newest hit still standing, so
+        withdrawing an older hit changes nothing and the newest one falls
+        back to its predecessor.
+        """
+        history = getattr(entry, "_apc_served_history", None)
+        if not history:
+            return
+        for index, standing in enumerate(history):
+            if standing is record:
+                del history[index]
+                break
+        else:
+            return  # folded into the base
+        entry._apc_served_depth = (
+            history[-1][0] if history else int(getattr(entry, "_apc_served_base", 0))
+        )
+
+    def _record_entry_hit_locked(self, entry, served: int = 0) -> None:
         now = self._now()
+        served_record = None
+        if self._retention_policy is not None:
+            entry._apc_hit_rate = self._decayed_hit_rate(entry, now) + 1.0
+            entry._apc_hit_rate_at = now
+            if served:
+                served_record = self._push_served_depth_locked(entry, served)
         inserted = float(getattr(entry, "_apc_inserted_at", now))
         entry._apc_last_access_at = now
         entry._apc_last_access_wall = self._wall_time()
         entry._apc_hit_count = int(getattr(entry, "_apc_hit_count", 0)) + 1
         self._reuse_histograms["hit_age_seconds"].observe(now - inserted)
         role = getattr(entry, "_apc_retention_role", None)
+        first_interior_reuse = (
+            role == self._RETENTION_INTERIOR and entry._apc_hit_count == 1
+        )
+        if self._credited_entries is not None:
+            self._credited_entries.append(
+                (entry, role == self._RETENTION_INTERIOR, now, served_record)
+            )
         if role == self._RETENTION_INTERIOR:
             self._apc_stats["interior_hits"] += 1
-            if entry._apc_hit_count == 1:
+            if first_interior_reuse:
                 self._interior_reused_entries = (
                     getattr(self, "_interior_reused_entries", 0) + 1
                 )
@@ -1475,10 +1600,66 @@ class APCv2(PrefixIndex):
                 records.append((key, list(tokens), entry))
         return records
 
+    def _prefill_cost(self, depth: int) -> float:
+        """Relative cost of prefilling ``depth`` tokens from empty."""
+        depth = max(0, int(depth))
+        return depth + depth * depth / (2.0 * self._retention_policy["attention_tokens"])
+
+    def _entry_retention_value_locked(self, key, tokens, entry, now: float) -> float:
+        """Prefill cost this entry saves per second, per byte its eviction frees.
+
+        value = rate x (C(d) - C(a)) / unique bytes, where ``rate`` is the
+        decayed hit rate (a role prior until the entry's first hit), ``d`` the
+        depth it last served (its own depth before that) and ``a`` the depth
+        of the deepest other stored entry on its path that would serve those
+        requests if it were gone: a nested chain is credited only for its
+        increment over the ancestor beneath it, so a shared prefix is valued
+        once.  Unique bytes come from the snapshot ledger: buffers another
+        resident entry also holds are not freed by this eviction.
+        """
+        if hasattr(entry, "_apc_hit_rate_at"):
+            rate = self._decayed_hit_rate(entry, now)
+        else:
+            # The prior decays from publication like a hit would, so an entry
+            # nobody reuses loses its claim instead of keeping it forever.
+            rate = self._RETENTION_VALUE_PRIORS.get(
+                getattr(entry, "_apc_retention_role", self._RETENTION_DEFAULT), 0.3
+            ) * 0.5 ** (
+                max(0.0, now - float(getattr(entry, "_apc_inserted_at", now)))
+                / self._retention_policy["half_life_seconds"]
+            )
+        if rate <= 0.0:
+            return 0.0
+        depth = int(getattr(entry, "_apc_served_depth", 0) or len(tokens))
+        ancestor = 0
+        if len(tokens) > 1:
+            nearest = self._trie.search(key, list(tokens)[:-1])
+            path = nearest.exact if nearest.exact is not None else nearest.shorter
+            if path:
+                try:
+                    holder = self._trie.get(key, path)
+                except KeyError:
+                    holder = None
+                # A draft route cannot resume from a sidecar-less ancestor.
+                if holder is not None and (
+                    getattr(entry, "sidecar", None) is None
+                    or getattr(holder, "sidecar", None) is not None
+                ):
+                    ancestor = min(len(path), depth)
+        saved = self._prefill_cost(depth) - self._prefill_cost(ancestor)
+        unique = max(1, self._entry_unique_nbytes_locked(entry))
+        return rate * max(0.0, saved) / unique
+
     def _retention_ordered_candidates_locked(
         self, *, resident_only: bool, exclude=None, include_exclude: bool = False
     ):
         """Prefer generic checkpoints, retaining prompt boundaries until last."""
+        if self._retention_policy is not None:
+            return self._value_ordered_candidates_locked(
+                resident_only=resident_only,
+                exclude=exclude,
+                include_exclude=include_exclude,
+            )
         records = []
         excluded = []
         for key, tokens, entry in self._legacy_order_records_locked():
@@ -1503,6 +1684,53 @@ class APCv2(PrefixIndex):
             excluded.sort(key=lambda record: record[:2])
             records.extend(excluded)
         return records
+
+    def _value_ordered_candidates_locked(
+        self, *, resident_only: bool, exclude=None, include_exclude: bool = False
+    ):
+        """Opt-in value retention: least saved prefill per byte first.
+
+        Records keep the LRU tuple shape; the categorical rank and recency
+        only break ties.  Values are recomputed on every call, so evicting an
+        ancestor raises its children's value at the next selection.
+        """
+        now = self._now()
+        scored = []
+        excluded = []
+        lru_head = None
+        for key, tokens, entry in self._legacy_order_records_locked():
+            if self._entry_pinned(entry):
+                continue
+            if resident_only and not entry.prompt_cache:
+                continue
+            rank = self._entry_retention_rank(entry)
+            last_access = float(getattr(entry, "_apc_last_access_at", 0.0))
+            record = (rank, last_access, key, tokens, entry)
+            value = (
+                self._entry_retention_value_locked(key, tokens, entry, now)
+                if entry.prompt_cache
+                else 0.0
+            )
+            if entry is not exclude and (lru_head is None or (rank, last_access) < lru_head[0]):
+                lru_head = ((rank, last_access), entry)
+            (excluded if entry is exclude else scored).append(
+                ((value, rank, last_access), record)
+            )
+        scored.sort(key=lambda item: item[0])
+        records = [record for _score, record in scored]
+        if include_exclude:
+            excluded.sort(key=lambda item: item[0])
+            records.extend(record for _score, record in excluded)
+        self._lru_head = lru_head[1] if lru_head is not None else None
+        return records
+
+    def _note_retention_eviction_locked(self, entry) -> None:
+        if self._retention_policy is None:
+            return
+        self._retention_stats["value_evictions"] += 1
+        if self._lru_head is not None and self._lru_head is not entry:
+            self._retention_stats["value_reordered_evictions"] += 1
+        self._lru_head = None
 
     def _pressure_candidates_locked(self, *, exclude=None, include_exclude=True):
         return self._retention_ordered_candidates_locked(
@@ -1586,10 +1814,79 @@ class APCv2(PrefixIndex):
     def _persistent_identity_digest(signature: str) -> str:
         return hashlib.sha256(signature.encode("utf-8")).hexdigest()
 
+    def _adjust_entry_charge_locked(self, entry, delta: int) -> None:
+        entry.nbytes = int(entry.nbytes) + int(delta)
+        self._n_bytes = max(0, self._n_bytes + int(delta))
+        self._n_bytes_by_type[entry.cache_type] = max(
+            0, self._n_bytes_by_type[entry.cache_type] + int(delta)
+        )
+
+    def _ledger_attach_locked(self, entry) -> None:
+        """Charge a newly resident entry only for snapshot buffers it adds.
+
+        Its ``nbytes`` was computed per entry; the snapshots another resident
+        entry already pays for are taken back out, so ``nbytes`` sums to the
+        bytes APCv2 actually holds.
+        """
+        self._ledger_detach_locked(entry)
+        keys = _snapshot_buffer_keys(entry.prompt_cache or ())
+        unpaid = 0
+        for key, nbytes in keys.items():
+            record = self._shared_buffers.get(key)
+            if record is None:
+                self._shared_buffers[key] = [nbytes, [entry]]
+            else:
+                record[1].append(entry)
+                unpaid += nbytes
+        entry._apc_buffer_keys = tuple(keys)
+        entry._apc_unpaid_nbytes = unpaid
+        if unpaid:
+            self._adjust_entry_charge_locked(entry, -unpaid)
+
+    def _ledger_detach_locked(self, entry) -> None:
+        """Release an entry's snapshot holds before it stops being resident.
+
+        A buffer it paid for that another resident entry still holds is not
+        freed by its departure, so the charge moves to that holder: evicting
+        an entry frees exactly the bytes it is charged for.
+        """
+        for key in getattr(entry, "_apc_buffer_keys", ()):
+            record = self._shared_buffers.get(key)
+            if record is None:
+                continue
+            nbytes, holders = record
+            paid = bool(holders) and holders[0] is entry
+            holders[:] = [holder for holder in holders if holder is not entry]
+            if not holders:
+                del self._shared_buffers[key]
+            elif paid:
+                heir = holders[0]
+                heir._apc_unpaid_nbytes = max(
+                    0, int(getattr(heir, "_apc_unpaid_nbytes", 0)) - nbytes
+                )
+                self._adjust_entry_charge_locked(heir, nbytes)
+        entry._apc_buffer_keys = ()
+        entry._apc_unpaid_nbytes = 0
+
+    def _entry_unique_nbytes_locked(self, entry) -> int:
+        """Bytes evicting ``entry`` would actually free."""
+        shared = 0
+        for key in getattr(entry, "_apc_buffer_keys", ()):
+            record = self._shared_buffers.get(key)
+            if record is not None and len(record[1]) > 1 and record[1][0] is entry:
+                shared += record[0]
+        return max(0, int(entry.nbytes) - shared)
+
+    @staticmethod
+    def _entry_full_nbytes(entry) -> int:
+        """The entry's footprint with nothing shared (a restored copy's size)."""
+        return int(entry.nbytes) + int(getattr(entry, "_apc_unpaid_nbytes", 0))
+
     def _drop_entry_locked(self, key, tokens, entry) -> None:
         current = self._trie.pop(key, tokens)
         if current is None:
             return
+        self._ledger_detach_locked(current)
         self._record_entry_eviction_locked(current)
         self._lru.remove(key, tokens)
         self._n_bytes = max(0, self._n_bytes - int(current.nbytes))
@@ -1721,7 +2018,7 @@ class APCv2(PrefixIndex):
                     "aux": str(aux) if aux in created else None,
                     "sidecar": sidecar_info,
                     "cow_metadata": metadata,
-                    "resident_nbytes": int(entry.nbytes),
+                    "resident_nbytes": self._entry_full_nbytes(entry),
                     "target_signature": target_signature,
                     "identity_sha256": self._persistent_identity_digest(
                         target_signature
@@ -1783,6 +2080,7 @@ class APCv2(PrefixIndex):
             # Persist only: the caller keeps serving the resident copy and
             # needs a crash-safe snapshot of exactly this content.
             return True
+        self._ledger_detach_locked(entry)
         resident_nbytes = int(entry.nbytes)
         if isinstance(entry.prompt_cache, COWFrozenPromptCache):
             entry.prompt_cache.close()
@@ -1799,6 +2097,7 @@ class APCv2(PrefixIndex):
             self._disk_stats["idle_spills"] += 1
         elif reason == "pressure":
             self._disk_stats["pressure_spills"] += 1
+            self._note_retention_eviction_locked(entry)
         self._capsule_generation.advance()
         return True
 
@@ -1956,6 +2255,7 @@ class APCv2(PrefixIndex):
             entry.nbytes = published_nbytes
             self._n_bytes += int(entry.nbytes)
             self._n_bytes_by_type[entry.cache_type] += int(entry.nbytes)
+            self._ledger_attach_locked(entry)
             # Publication ends the temporary restore exclusion.  The entry is
             # now resident, so ordinary enforcement may safely discard its
             # retained disk snapshot to satisfy the disk cap.
@@ -2109,6 +2409,9 @@ class APCv2(PrefixIndex):
             ]
             if not records:
                 break
+            if self._retention_policy is not None:
+                # Compare against the LRU choice within this pool only.
+                self._lru_head = min(records, key=lambda record: record[:2])[4]
             progressed = False
             for _rank, _last_access, key, tokens, entry in records:
                 if self._idle_disk_dir is not None and self._spill_entry_locked(
@@ -2118,6 +2421,7 @@ class APCv2(PrefixIndex):
                     break
                 if self._entry_disk_pinned_locked(key, tokens, entry):
                     continue
+                self._note_retention_eviction_locked(entry)
                 self._drop_entry_locked(key, tokens, entry)
                 progressed = True
                 break
@@ -2158,6 +2462,7 @@ class APCv2(PrefixIndex):
             if victim is None:
                 break
             _rank, _last_access, key, tokens, entry = victim
+            self._note_retention_eviction_locked(entry)
             self._drop_entry_locked(key, tokens, entry)
         fits = self._count_pools_fit_locked() and self._n_bytes <= self._resident_entry_budget
         if not fits and publication is not None:
@@ -2825,15 +3130,95 @@ class APCv2(PrefixIndex):
         *,
         allow_disk_restore: bool = True,
         session_tag: Optional[tuple] = None,
+        require_sidecar: bool = False,
+        allow_target_only_plain: bool = True,
     ) -> APCLookup:
+        """Find the deepest reusable prefix of ``tokens``.
+
+        ``require_sidecar`` is set by routes that can only resume from an
+        entry carrying draft state (self-MTP, external draft): the deepest
+        resident ancestor with a sidecar is then served instead of a
+        sidecar-less hit.  ``allow_target_only_plain`` keeps a sidecar-less
+        hit landing at ``len - 1`` ahead of it, for a route that decodes that
+        one token plainly (self-MTP); external draft cannot use a target-only
+        hit at any depth and passes False.
+        """
         with self._apc_lock:
             self._sweep_retirements_locked()
-            return self._lookup_locked(
-                key,
-                tokens,
-                allow_disk_restore=allow_disk_restore,
-                session_tag=session_tag,
+            before = dict(self._apc_stats)
+            self._credited_entries = []
+            try:
+                result = self._lookup_locked(
+                    key,
+                    tokens,
+                    allow_disk_restore=allow_disk_restore,
+                    session_tag=session_tag,
+                    require_sidecar=require_sidecar,
+                    allow_target_only_plain=allow_target_only_plain,
+                )
+                credited = tuple(self._credited_entries)
+            finally:
+                self._credited_entries = None
+            result.apc_credit = {
+                "stats": {
+                    name: self._apc_stats[name] - before[name]
+                    for name in self._STAT_KEYS
+                    if self._apc_stats[name] != before[name]
+                },
+                "entries": credited,
+                "clears": self._apc_clears,
+            }
+            return result
+
+    def discard_lookup_credit(self, hit: APCLookup, reason: str) -> bool:
+        """Withdraw a lookup's accounting when the request does not use it.
+
+        Lifetime counters are per request: a lookup serving re-does for the
+        same request (disk admission, preemption replay, a same-prefix
+        follower), or a hit the route then refuses, must neither count as
+        a lookup nor credit reused tokens, nor raise its entry's hit count
+        (which promotes an interior checkpoint's retention rank).  The lease
+        is the caller's to close.  Recency and the hit-age histogram keep
+        the access.  Idempotent; returns whether anything was withdrawn.
+        """
+        credit = getattr(hit, "apc_credit", None)
+        if not credit:
+            return False
+        hit.apc_credit = None
+        with self._apc_lock:
+            target = (
+                self._apc_stats
+                if credit["clears"] == self._apc_clears
+                else self._apc_lifetime
             )
+            for name, delta in credit["stats"].items():
+                target[name] = max(0, target[name] - delta)
+            for entry, interior, hit_at, served_record in credit["entries"]:
+                previous_hits = int(getattr(entry, "_apc_hit_count", 0))
+                entry._apc_hit_count = max(0, previous_hits - 1)
+                if served_record is not None:
+                    self._withdraw_served_depth_locked(entry, served_record)
+                if self._retention_policy is not None:
+                    # Take back the withdrawn hit's decayed contribution.
+                    now = self._now()
+                    contribution = 0.5 ** (
+                        max(0.0, now - hit_at)
+                        / self._retention_policy["half_life_seconds"]
+                    )
+                    entry._apc_hit_rate = max(
+                        0.0, self._decayed_hit_rate(entry, now) - contribution
+                    )
+                    entry._apc_hit_rate_at = now
+                # The entry stops counting as reused when its last hit goes,
+                # whichever credit recorded the first one.
+                if interior and previous_hits == 1:
+                    self._interior_reused_entries = max(
+                        0, self._interior_reused_entries - 1
+                    )
+            self._discarded_lookups[reason] = (
+                self._discarded_lookups.get(reason, 0) + 1
+            )
+        return True
 
     def _resolve_prefetch_locked(
         self, session_tag, expected, prefetched_ids, key, path, used_entry
@@ -2939,6 +3324,8 @@ class APCv2(PrefixIndex):
         *,
         allow_disk_restore: bool = True,
         session_tag: Optional[tuple] = None,
+        require_sidecar: bool = False,
+        allow_target_only_plain: bool = True,
     ) -> APCLookup:
         if self._closed:
             raise RuntimeError("APCv2 is closed")
@@ -3084,10 +3471,31 @@ class APCv2(PrefixIndex):
                 )
                 if cache_offset == covered:
                     sidecar_candidates.append((covered, path, entry, sidecar))
-        if sidecar_candidates:
-            (covered, selected_tokens, entry, sidecar) = max(
-                sidecar_candidates, key=lambda item: item[0]
+        ancestor = None
+        ancestor_deferred = None
+        if require_sidecar and not sidecar_candidates:
+            # A deeper sidecar-less entry (a plain-decode lane, a rolling
+            # checkpoint without draft state) hides any shallower sidecar
+            # checkpoint from the three trie candidates above, and the route
+            # cannot resume from it.  Offer the deepest ancestor that carries
+            # draft state instead.
+            (ancestor, ancestor_deferred, ancestor_restored) = (
+                self._sidecar_ancestor_locked(
+                    key, tokens, allow_disk_restore=allow_disk_restore
+                )
             )
+            if ancestor_restored:
+                # Reserving room for the restore may have evicted neighbors.
+                trie_result = (
+                    self._resident_trie_result_locked(key, tokens)
+                    if restore_deferred or restore_requires_admission
+                    else self._trie.search(key, tokens)
+                )
+
+        def serve_sidecar(candidate):
+            """Serve one sidecar checkpoint, or None to fall back to fetch."""
+            nonlocal prefetch_expected
+            (covered, selected_tokens, entry, sidecar) = candidate
             try:
                 restored_cache = _copy_prompt_cache_for_restore(entry.prompt_cache)
             except COWCacheStale:
@@ -3109,7 +3517,7 @@ class APCv2(PrefixIndex):
             self._apc_stats["lookups"] += 1
             self._apc_stats["hits"] += 1
             self._apc_stats["cached_tokens"] += covered
-            self._record_entry_hit_locked(entry)
+            self._record_entry_hit_locked(entry, covered)
             self._resolve_prefetch_locked(
                 session_tag, prefetch_expected, prefetched_ids,
                 key, selected_tokens, entry,
@@ -3156,6 +3564,10 @@ class APCv2(PrefixIndex):
                     branch_tokens=branch_beyond(covered),
                     codec_restored_leaves=restored_leaf_count(restored_cache),
                 )
+        if sidecar_candidates:
+            served = serve_sidecar(max(sidecar_candidates, key=lambda item: item[0]))
+            if served is not None:
+                return served
         hidden = []
         # Hit accounting must credit the entry fetch actually served.
         fetch_view = self._fetch_view_locked(key, tokens, trie_result)
@@ -3221,6 +3633,29 @@ class APCv2(PrefixIndex):
                 remaining = tokens
         cached_tokens = len(tokens) - len(remaining) if cache is not None else 0
         hit = cache is not None and cached_tokens > 0
+        plain_wins = (
+            allow_target_only_plain and hit and cached_tokens >= len(tokens) - 1
+        )
+        if ancestor is not None and not plain_wins:
+            # Only a plain landing at ``len - 1`` beats a draft checkpoint,
+            # and only on a route that decodes that one token plainly.
+            if cache is not None and callable(getattr(cache, "close", None)):
+                cache.close()
+            served = serve_sidecar(ancestor)
+            if served is not None:
+                self._apc_stats["sidecar_ancestor_hits"] += 1
+                return served
+            (cache, remaining, cached_tokens, hit) = (None, tokens, 0, False)
+        elif ancestor_deferred is not None and not plain_wins:
+            # The draft checkpoint waits on disk and the route cannot use the
+            # plain hit: report why, so admission restores it.
+            if cache is not None and callable(getattr(cache, "close", None)):
+                cache.close()
+            (cache, remaining, cached_tokens, hit) = (None, tokens, 0, False)
+            if ancestor_deferred == "admission":
+                restore_requires_admission = True
+            else:
+                restore_deferred = True
         self._apc_stats["lookups"] += 1
         self._apc_stats["hits" if hit else "misses"] += 1
         self._apc_stats["cached_tokens"] += cached_tokens
@@ -3245,7 +3680,7 @@ class APCv2(PrefixIndex):
             except KeyError:
                 selected_entry = None
             if selected_entry is not None:
-                self._record_entry_hit_locked(selected_entry)
+                self._record_entry_hit_locked(selected_entry, cached_tokens)
         self._resolve_prefetch_locked(
             session_tag, prefetch_expected, prefetched_ids,
             key, selected_path if selected_entry is not None else None,
@@ -3310,6 +3745,69 @@ class APCv2(PrefixIndex):
             branch_tokens=branch_beyond(cached_tokens),
             codec_restored_leaves=restored_leaf_count(cache) if hit else 0,
         )
+
+    def _sidecar_ancestor_locked(self, key, tokens, *, allow_disk_restore=True):
+        """Deepest entry whose draft sidecar resumes ``tokens``.
+
+        A disk-only checkpoint qualifies through the sidecar its manifest
+        records and is restored, under the restore budget, before it is
+        served.  Returns ``(candidate, deferred, restored)``: ``deferred`` is
+        ``"admission"`` when a deeper disk checkpoint needs the gated restore
+        and ``"budget"`` when there was no room for one; ``restored`` whether
+        a restore ran (it may have evicted other entries).
+        """
+        candidates = []
+        for candidate_key, path, entry in list(self._entry_records_locked()):
+            if candidate_key != key:
+                continue
+            if entry.prompt_cache:
+                sidecar = getattr(entry, "sidecar", None)
+                covered = int(getattr(sidecar, "covered_tokens", 0)) if sidecar else 0
+            elif getattr(entry, "_apc_disk", None):
+                recorded = entry._apc_disk.get("sidecar") or {}
+                covered = int(recorded.get("covered_tokens", 0) or 0)
+            else:
+                continue
+            if not 0 < covered < len(tokens):
+                continue
+            if len(path) < covered or list(path[:covered]) != tokens[:covered]:
+                continue
+            candidates.append((covered, list(path), entry))
+        deferred = None
+        restored = False
+        for covered, path, entry in sorted(
+            candidates, key=lambda item: item[0], reverse=True
+        ):
+            try:
+                if self._trie.get(key, path) is not entry:
+                    continue
+            except KeyError:
+                continue  # reclaimed while an earlier restore reserved room
+            if not entry.prompt_cache:
+                if not allow_disk_restore:
+                    deferred = deferred or "admission"
+                    continue
+                restored = True
+                outcome = self._restore_entry_locked(key, path, entry)
+                if outcome is None:
+                    deferred = deferred or "budget"
+                    continue
+                if not outcome:
+                    self._drop_entry_locked(key, path, entry)
+                    continue
+            sidecar = getattr(entry, "sidecar", None)
+            if int(getattr(sidecar, "covered_tokens", 0) or 0) != covered:
+                continue
+            cache_offset = max(
+                (
+                    getattr(c, "offset", 0)
+                    for c in _walk_cache_entries(entry.prompt_cache)
+                ),
+                default=0,
+            )
+            if cache_offset == covered:
+                return (covered, path, entry, sidecar), deferred, restored
+        return None, deferred, restored
 
     def _branch_lacks_restore_points_locked(self, key, trie_result) -> bool:
         """Whether the unusable branch holds a cache type that cannot record
@@ -3476,8 +3974,15 @@ class APCv2(PrefixIndex):
         )
         # PrefixIndex cannot see APC retention roles, session pins, or live
         # leases.  Subsumption is safe only for disposable ordinary prefixes;
-        # APC still owns size/byte eviction after publication.
+        # APC still owns size/byte eviction after publication.  Only a
+        # sidecar-less entry prunes, and a draft route cannot resume from it,
+        # so a shorter entry carrying draft state is never subsumed (nor a
+        # spilled one, whose sidecar lives in its disk manifest).
         def can_prune_prefix(_length, entry):
+            if getattr(entry, "sidecar", None) is not None or (
+                (getattr(entry, "_apc_disk", None) or {}).get("sidecar")
+            ):
+                return False
             return retention_role in (
                 self._RETENTION_DEFAULT,
                 self._RETENTION_JUNCTION,
@@ -3510,10 +4015,21 @@ class APCv2(PrefixIndex):
                 cow_source.close()
             return replace(capabilities, stored=False)
         self._capsule_generation.advance()
+        try:
+            self._ledger_attach_locked(self._trie.get(key, tokens))
+        except KeyError:
+            pass
         superseded_parks = []
         for reason, _removed_key, _removed_tokens, entry in removed_entries:
             if reason != "replaced":
                 self._record_entry_eviction_locked(entry)
+            if not (
+                reason == "replaced"
+                and existing_disk_pins
+                and self._persist_dir is not None
+                and getattr(entry, "_apc_disk", None)
+            ):
+                self._ledger_detach_locked(entry)
             if (
                 reason == "replaced"
                 and existing_disk_pins
@@ -3554,6 +4070,16 @@ class APCv2(PrefixIndex):
             stored_entry._apc_hit_count = getattr(
                 replaced_entry, "_apc_hit_count", existing_hit_count
             )
+            if self._retention_policy is not None and hasattr(
+                replaced_entry, "_apc_hit_rate_at"
+            ):
+                # A republish of the same tokens keeps the demand it earned.
+                stored_entry._apc_hit_rate = self._decayed_hit_rate(
+                    replaced_entry, now
+                )
+                stored_entry._apc_hit_rate_at = now
+                if hasattr(replaced_entry, "_apc_served_depth"):
+                    stored_entry._apc_served_depth = replaced_entry._apc_served_depth
             stored_entry._apc_created_wall = existing_created_wall
             stored_entry._apc_last_access_wall = self._wall_time()
             stored_entry._apc_session_tags = set(
@@ -3572,6 +4098,7 @@ class APCv2(PrefixIndex):
                     # Prefix pruning was disabled for this transaction, so
                     # restoring the exact entry also restores all accounting.
                     previous = superseded_parks[0]
+                    self._ledger_detach_locked(stored_entry)
                     self._trie.add(key, tokens, previous)
                     self._lru.remove(key, tokens)
                     self._lru.push(key, tokens, previous.cache_type)
@@ -3582,6 +4109,7 @@ class APCv2(PrefixIndex):
                         cow_source.close()
                     return replace(capabilities, stored=False)
         for entry in superseded_parks:
+            self._ledger_detach_locked(entry)
             if isinstance(entry.prompt_cache, COWFrozenPromptCache):
                 entry.prompt_cache.close()
             self._remove_disk_files_locked(entry)
@@ -3669,7 +4197,10 @@ class APCv2(PrefixIndex):
         self._lru = fresh_lru
         self._n_bytes = 0
         self._n_bytes_by_type = {key: 0 for key in fresh_lru._ordering}
+        self._shared_buffers = {}
         for entry in entries:
+            entry._apc_buffer_keys = ()
+            entry._apc_unpaid_nbytes = 0
             self._record_entry_eviction_locked(entry)
             if isinstance(entry.prompt_cache, COWFrozenPromptCache):
                 entry.prompt_cache.close()
@@ -3709,6 +4240,15 @@ class APCv2(PrefixIndex):
         with self._apc_lock:
             stats = dict(self._apc_stats)
             stats["clears"] = self._apc_clears
+            stats["discarded_lookups"] = dict(self._discarded_lookups)
+            stats["retention"] = {
+                "policy": (
+                    dict(self._retention_policy)
+                    if self._retention_policy is not None
+                    else {"policy": "lru"}
+                ),
+                **self._retention_stats,
+            }
             stats["lifetime"] = dict(self._apc_lifetime)
             for key in self._STAT_KEYS:
                 stats["lifetime"][key] += self._apc_stats[key]
@@ -3829,6 +4369,7 @@ class APCv2(PrefixIndex):
                 self._n_bytes_by_type = {
                     key: 0 for key in self._lru._ordering
                 }
+                self._shared_buffers = {}
                 if release_memory:
                     mx.clear_cache()
             self._release_persist_lock()
@@ -3839,12 +4380,29 @@ class APCv2(PrefixIndex):
             return int(self._n_bytes)
 
     def unleased_resident_nbytes(self) -> int:
-        """Resident bytes that pressure eviction could actually reclaim."""
+        """Resident bytes that pressure eviction could actually reclaim.
+
+        A shared snapshot's first holder is charged for it, but evicting
+        that holder only moves the charge while any other holder stays
+        resident; the snapshot counts only when every holder is evictable.
+        """
         with self._apc_lock:
-            return sum(
-                int(entry.nbytes)
-                for (_rank, _last, _key, _tokens, entry) in self._pressure_candidates_locked()
-            )
+            candidates = [
+                record[4] for record in self._pressure_candidates_locked()
+            ]
+            evictable = {id(entry) for entry in candidates}
+            total = 0
+            for entry in candidates:
+                total += int(entry.nbytes)
+                for key in getattr(entry, "_apc_buffer_keys", ()):
+                    record = self._shared_buffers.get(key)
+                    if (
+                        record is not None
+                        and record[1][0] is entry
+                        and any(id(holder) not in evictable for holder in record[1])
+                    ):
+                        total -= record[0]
+            return max(0, total)
 
     def evict_oldest_unleased(self) -> bool:
         """Reclaim one resident checkpoint without invalidating active branches.
@@ -3867,6 +4425,7 @@ class APCv2(PrefixIndex):
                     return True
                 if self._entry_disk_pinned_locked(key, tokens, entry):
                     continue
+                self._note_retention_eviction_locked(entry)
                 self._drop_entry_locked(key, tokens, entry)
                 return True
         return False
@@ -3895,6 +4454,7 @@ class APCv2(PrefixIndex):
                     break
                 if self._entry_disk_pinned_locked(key, tokens, entry):
                     continue
+                self._note_retention_eviction_locked(entry)
                 self._drop_entry_locked(key, tokens, entry)
                 progressed = True
                 break

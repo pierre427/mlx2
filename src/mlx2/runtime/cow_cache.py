@@ -627,6 +627,53 @@ class _COWTrackedList(list):
 
 _PRIMITIVES = (type(None), bool, int, float, complex, str, bytes)
 
+# Restore-snapshot ownership for APCv2's byte ledger.  A descriptor alias
+# shares its source's buffer, so every alias of one snapshot carries the
+# token first given to the array it was cloned from: two entries hold the
+# same buffer exactly when their snapshots share a token, and nothing has
+# to be evaluated to tell (a buffer address does: a host wait on the GPU
+# stream).  Snapshots are captured as fresh arrays and restored by copy,
+# never written in place, so a token never outlives its buffer.  Entries
+# are keyed by id() and dropped when the array dies.
+_SNAPSHOT_TOKENS: dict[int, tuple] = {}
+
+
+class SnapshotToken:
+    """Identity of one restore-snapshot buffer (see ``snapshot_token``)."""
+
+    __slots__ = ("__weakref__",)
+
+
+def _bind_snapshot_token(array: mx.array, token: SnapshotToken) -> None:
+    ident = id(array)
+
+    def forget(ref, ident=ident):
+        current = _SNAPSHOT_TOKENS.get(ident)
+        if current is not None and current[0] is ref:
+            del _SNAPSHOT_TOKENS[ident]
+
+    _SNAPSHOT_TOKENS[ident] = (weakref.ref(array, forget), token)
+
+
+def snapshot_token(array: mx.array) -> SnapshotToken:
+    """Evaluation-free identity of the buffer a snapshot array holds."""
+    record = _SNAPSHOT_TOKENS.get(id(array))
+    if record is not None and record[0]() is array:
+        return record[1]
+    token = SnapshotToken()
+    _bind_snapshot_token(array, token)
+    return token
+
+
+def _share_snapshot_tokens(source: Any, clone: Any) -> None:
+    """Give each aliased snapshot array its source's ownership token."""
+    if isinstance(source, mx.array):
+        if isinstance(clone, mx.array) and clone is not source:
+            _bind_snapshot_token(clone, snapshot_token(source))
+    elif isinstance(source, (list, tuple)) and isinstance(clone, (list, tuple)):
+        for source_item, clone_item in zip(source, clone):
+            _share_snapshot_tokens(source_item, clone_item)
+
 
 def _clone_graph(
     value: Any,
@@ -786,17 +833,16 @@ def _clone_graph(
         item_plane = clone_plane
         if clone_plane == "qsa_summary" and name in {"keys", "values"}:
             item_plane = "attention_kv"
-        setattr(
-            clone,
-            name,
-            _clone_graph(
-                item,
-                telemetry=telemetry,
-                plane=item_plane,
-                attach_tokens=attach_tokens,
-                memo=memo,
-            ),
+        cloned = _clone_graph(
+            item,
+            telemetry=telemetry,
+            plane=item_plane,
+            attach_tokens=attach_tokens,
+            memo=memo,
         )
+        if name == "_checkpoints":
+            _share_snapshot_tokens(item, cloned)
+        setattr(clone, name, cloned)
     if (
         attach_tokens
         and hasattr(clone, "nbytes")
@@ -1532,6 +1578,8 @@ class _BorrowedRecoveryPlane:
     # (field, sequence axis, fill-level attribute, fill level, geometry)
     fields: tuple
     derived: tuple
+    # Set if the live cache is trimmed below the captured offset afterwards.
+    rewind_guard: Any = None
 
 
 def snapshot_recovery_descriptors(
@@ -1592,8 +1640,18 @@ def snapshot_recovery_descriptors(
         for name in derived:
             setattr(clone, name, None)
         if record:
+            from .models.cache import register_recovery_rewind_guard
+
+            offset = getattr(live, "offset", None)
+            guard = (
+                register_recovery_rewind_guard(live, offset)
+                if isinstance(offset, int) and not isinstance(offset, bool)
+                else None
+            )
             borrowed.append(
-                _BorrowedRecoveryPlane(live, clone, tuple(record), tuple(derived))
+                _BorrowedRecoveryPlane(
+                    live, clone, tuple(record), tuple(derived), guard
+                )
             )
     return snapshot, snapshot_sidecar, tuple(borrowed)
 
@@ -1623,6 +1681,13 @@ def restore_recovery_descriptors(
         if target is None:
             raise COWCacheError("a recovery restore lost a borrowed cache plane")
         who = type(plane.live).__name__
+        if plane.rewind_guard is not None and plane.rewind_guard.violated:
+            # Trimmed below the captured level since: the positions between
+            # the trim point and the level may hold rewritten K/V even though
+            # the fill level is back above it.
+            raise COWCacheError(
+                f"{who} was rewound below its captured {plane.rewind_guard.level} positions; the recovery point cannot be restored exactly"
+            )
         for name, axis, level_name, level, geometry in plane.fields:
             value = getattr(plane.live, name, None)
             current = getattr(plane.live, level_name, None)

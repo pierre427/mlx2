@@ -215,7 +215,9 @@ class PagedKVPrivateCache:
     def poll_completions(self) -> bool:
         """Return true once a whole staged append has been accepted."""
         completions = self.writer.poll_completions()
-        if any(not item.succeeded for item in completions):
+        # A sibling cache on the same writer may have consumed this cache's
+        # failure event; the writer is poisoned by any failure either way.
+        if any(not item.succeeded for item in completions) or self.writer.poisoned:
             self._failed = True
         if not self._pending:
             return False

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import uuid
 from pathlib import Path
 
@@ -125,6 +126,13 @@ class PagedAPCIndex:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def _indexed_on_disk(self, name: str) -> bool:
+        try:
+            document = json.loads((self.directory / self.FILE).read_text())
+            return any(entry.get("name") == name for entry in document["entries"])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return False
+
     def store(self, *, key: APCKey, tokens: tuple[int, ...],
               source: PagedKVPrivateCache) -> Path:
         identity = _identity(key, tokens)
@@ -145,7 +153,16 @@ class PagedAPCIndex:
         entry = {"name": name, "identity": identity["key"],
                  "tokens": list(tokens), "payload_bytes": payload_bytes}
         updated = [*self._entries, entry]
-        self._write(updated)
+        try:
+            self._write(updated)
+        except BaseException:
+            # Not indexed, so never admitted: remove it, or the retry finds
+            # the name taken and a restart finds an unindexed checkpoint.  A
+            # failure after the index file was replaced (its directory fsync)
+            # keeps the checkpoint the file now names.
+            if not self._indexed_on_disk(name):
+                shutil.rmtree(path, ignore_errors=True)
+            raise
         self._entries = updated
         return path
 

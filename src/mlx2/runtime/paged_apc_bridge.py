@@ -125,6 +125,11 @@ class ExactPagedAPCCheckpoint:
         token_bytes = profile["kv_heads"] * profile["head_dim"] * 2
         if writer.page_bytes != PAGE_SIZE * token_bytes:
             raise ValueError("paged APCv2 checkpoint writer geometry mismatch")
+        # fp16 and bf16 pages have the same size; the bytes are not
+        # interchangeable.
+        storage_dtype = getattr(writer.backend, "storage_dtype", None)
+        if storage_dtype is not None and storage_dtype != profile["dtype"]:
+            raise ValueError("paged APCv2 checkpoint dtype differs from the arena storage dtype")
         if type(staging_headroom_pages) is not int or staging_headroom_pages < 0:
             raise ValueError("staging headroom must be a nonnegative page count")
         required = (len(tokens) + PAGE_SIZE - 1) // PAGE_SIZE
