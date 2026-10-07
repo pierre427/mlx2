@@ -25,6 +25,11 @@ from .activation_capsules import (
     ActivationCapsuleSpec,
     PayloadKind,
 )
+from .activation_injection import (
+    MAX_CAPSULE_STATES,
+    capsule_state_count,
+    validate_capsule_gate,
+)
 from .hyper_directory import DirectoryContext, HyperDirectory
 from .semantic_capsules import (
     DIGEST_PATTERN,
@@ -87,7 +92,9 @@ class CapsuleBusConfig:
 
     enabled: bool = False
     ordinary_only: bool = True
-    max_capsules: int = 8
+    # A request binds one activation payload (``bind_request``); composing
+    # several is not implemented or qualified, so one selection is the default.
+    max_capsules: int = 1
     max_bytes: int = 8 << 20
     allowed_scopes: tuple[str, ...] = ("session", "request")
     allowed_payload_kinds: tuple[str, ...] = tuple(sorted(PAYLOAD_KINDS))
@@ -825,6 +832,15 @@ class SemanticCapsuleBus:
             raise CapsuleBusError(
                 "payload_kind_denied", "activation payload kind is not enabled"
             )
+        states = capsule_state_count(manifest)
+        if states is not None and states > MAX_CAPSULE_STATES:
+            # The adapter prepares at most this many memory rows; refuse at
+            # mount instead of inside the scheduler loop.
+            raise CapsuleBusError(
+                "state_budget_exceeded",
+                f"activation capsule has {states} states; at most "
+                f"{MAX_CAPSULE_STATES} can be applied",
+            )
         expected_source = {
             "source_id": metadata.get("source_id"),
             "kind": metadata.get("source_kind"),
@@ -920,6 +936,15 @@ class SemanticCapsuleBus:
                 "unauthorized_handle",
                 "activation payload was not in the frozen selection",
             )
+        if len(mount.capsules) != 1:
+            # Every selected handle joins the snapshot fingerprint, but only
+            # one payload can condition a request.  Refuse rather than bind a
+            # selection whose other handles could never be engaged.
+            raise CapsuleBusError(
+                "multi_capsule_unsupported",
+                "a request binds exactly one activation capsule; "
+                "composing several selected capsules is not implemented",
+            )
         selected = next(
             item for item in mount.capsules if item.digest == capsule_digest
         )
@@ -959,20 +984,14 @@ class SemanticCapsuleBus:
             raise CapsuleBusError(
                 "invalid_gate", "activation capsule gate must be finite"
             )
-        bounds = selected.manifest.get("bounds")
-        minimum = bounds.get("minimum_gate") if isinstance(bounds, Mapping) else None
-        maximum = bounds.get("maximum_gate") if isinstance(bounds, Mapping) else None
-        if (
-            not isinstance(minimum, (int, float))
-            or not isinstance(maximum, (int, float))
-            or (
-                float(gate) != 0.0
-                and not float(minimum) <= float(gate) <= float(maximum)
-            )
-        ):
+        try:
+            # The adapter's own law, so a bound request is never refused
+            # later inside the scheduler loop.
+            validate_capsule_gate(gate, _thaw(selected.manifest.get("bounds")))
+        except ValueError as error:
             raise CapsuleBusError(
                 "invalid_gate", "activation capsule gate exceeds stored bounds"
-            )
+            ) from error
         if "_mlx2_activation_capsule" in request:
             raise CapsuleBusError(
                 "duplicate_activation_payload",

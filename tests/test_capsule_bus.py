@@ -414,7 +414,7 @@ def test_fingerprints_are_deterministic_and_order_sensitive(capsule_env):
         **second_result,
         "handles": [first_result["handles"][0], second_result["handles"][0]],
     }
-    bus = capsule_env["bus"]()
+    bus = capsule_env["bus"](max_capsules=2)
     a, _ = bus.mount(
         result, capsule_env["request"], existing_semantic_fingerprint="sidecar"
     )
@@ -443,16 +443,19 @@ def test_fingerprints_are_deterministic_and_order_sensitive(capsule_env):
             return [thaw(item) for item in value]
         return value
 
-    bound = SemanticCapsuleBus.bind_request(
-        {"messages": []},
-        a,
-        capsule_digest=first_item.digest,
-        manifest=thaw(first_item.manifest),
-        tensors={"residual": np.ones(4, dtype=np.float32)},
-        gate=0.5,
-    )
+    # Only one payload can condition a request, so a two-capsule selection
+    # is refused explicitly rather than bound with a handle never engaged.
+    with pytest.raises(CapsuleBusError) as error:
+        SemanticCapsuleBus.bind_request(
+            {"messages": []},
+            a,
+            capsule_digest=first_item.digest,
+            manifest=thaw(first_item.manifest),
+            tensors={"residual": np.ones(4, dtype=np.float32)},
+            gate=0.2,
+        )
+    assert error.value.code == "multi_capsule_unsupported"
     assert len(a.digests) == 2
-    assert bound["_mlx2_activation_capsule"].capsule_digest == first.digest
     lifecycle = SemanticCapsuleBus.engagement_receipt(
         a,
         engaged_handles=[first.digest],
@@ -554,7 +557,7 @@ def test_real_activation_store_envelope_mounts_and_loads_without_translation(tmp
         authority=Authority(
             "tenant-alice", AuthorityScope.SESSION, "session-one", EXPIRY_NS
         ),
-        bounds=NormGateBounds(0.2, 0.25, 0.75),
+        bounds=NormGateBounds(0.75, 0.25, 0.75),
         metadata={
             "source_id": "doc-17#decision-4",
             "source_kind": "document",

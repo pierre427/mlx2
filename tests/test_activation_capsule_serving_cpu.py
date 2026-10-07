@@ -45,7 +45,10 @@ def test_trusted_activation_is_observed_only_after_ordinary_model_forward(monkey
         ):
             assert route == "ordinary" and batch_size == 1
             return {
-                "deep_concept_memory": {"capsule": payload["capsule_digest"]},
+                "deep_concept_memory": {
+                    "capsule": payload["capsule_digest"],
+                    "gate": payload["gate"],
+                },
                 "receipt": {
                     "schema": "tiny.activation.v1",
                     "status": "applied",
@@ -72,8 +75,10 @@ def test_trusted_activation_is_observed_only_after_ordinary_model_forward(monkey
     assert receipt["status"] == "applied"
     assert receipt["engaged"] is True
     assert receipt["observed_used"] is True
-    assert receipt["forward_evidence"] == "evaluated_deep_concept_memory"
-    assert receipt["consumed_prefill_inputs"] == ["deep_concept_memory"]
+    assert receipt["forward_evidence"] == "evaluated_prompt_tail_deep_concept_memory"
+    assert receipt["read_position"] == "final_prompt_row"
+    # The memory reached the model only on the prompt-tail forward.
+    assert len(seen) == 1
     assert counts["activation_capsule_bridge_prepared"] == 1
     assert counts["activation_capsule_bridge_engagements"] == 1
     assert counts["activation_capsule_bridge_observed_used"] == 1
@@ -91,7 +96,7 @@ def test_zero_gate_forward_is_identity_not_observed_use(monkeypatch):
             self, tokens, payload, *, prefill_step, route, batch_size
         ):
             return {
-                "deep_concept_memory": {"identity": True},
+                "deep_concept_memory": {"identity": True, "gate": 0.0},
                 "receipt": {
                     "schema": "tiny.activation.v1",
                     "status": "identity",

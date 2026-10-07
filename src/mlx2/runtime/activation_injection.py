@@ -58,6 +58,53 @@ def _states(value: Any, name: str, width: int) -> np.ndarray:
     return result
 
 
+def validate_capsule_gate(gate: Any, bounds: Any) -> tuple[float, float]:
+    """The one gate law for a stored capsule; the bus and the adapter share it.
+
+    Zero is always the exact identity control.  A nonzero gate is a relative
+    hidden-state norm and must sit inside the stored gate range and under the
+    stored relative-norm bound (at most one current-state norm).  Returns the
+    gate and the relative-norm bound.
+    """
+    gate = _finite_float(gate, "gate", minimum=0.0, maximum=1.0)
+    if not isinstance(bounds, Mapping):
+        raise ValueError("loaded activation capsule has no norm/gate bounds")
+    minimum_gate = _finite_float(
+        bounds.get("minimum_gate"), "minimum gate", minimum=0.0, maximum=1.0
+    )
+    maximum_gate = _finite_float(
+        bounds.get("maximum_gate"), "maximum gate", minimum=0.0, maximum=1.0
+    )
+    maximum_norm = _finite_float(
+        bounds.get("maximum_relative_norm"),
+        "maximum relative norm",
+        minimum=0.0,
+        maximum=1.0,
+    )
+    if minimum_gate > maximum_gate or gate > maximum_gate or gate > maximum_norm:
+        raise ValueError("loaded activation capsule gate exceeds adapter bounds")
+    if gate != 0.0 and gate < minimum_gate:
+        raise ValueError("loaded activation capsule gate is below adapter bounds")
+    return gate, maximum_norm
+
+
+def capsule_state_count(manifest: Any) -> int | None:
+    """Memory rows a stored capsule manifest will prepare, when it says so."""
+    if not isinstance(manifest, Mapping):
+        return None
+    kind = manifest.get("payload_kind")
+    geometry = manifest.get("geometry")
+    if kind == "directional_residual":
+        return 1
+    if kind == "ordered_trajectory":
+        indices = manifest.get("ordered_transition_indices")
+        return len(indices) if isinstance(indices, Sequence) else None
+    if kind in {"continuous_prefix", "cross_attention_bank"} and isinstance(geometry, Mapping):
+        length = geometry.get("sequence_length")
+        return length if isinstance(length, int) and not isinstance(length, bool) else None
+    return None
+
+
 def _hex_digest(value: Any, name: str) -> str:
     if (
         not isinstance(value, str)
@@ -171,8 +218,10 @@ def prepare_activation_injection(
         raise ValueError(f"the {route} route cannot apply activation capsules")
     if batch_size != 1:
         raise ValueError("activation capsules require an isolated B=1 request")
-    if not tokens or len(tokens) > int(prefill_step):
-        raise ValueError("activation capsule requires one bounded prefill chunk")
+    # The memory acts on the final prompt row in the prompt-tail decode step,
+    # so prompt length is not bounded by one prefill chunk.
+    if not tokens:
+        raise ValueError("activation capsule requires a nonempty prompt")
     capsule_digest = _hex_digest(_required(snapshot, "capsule_digest"), "digest")
     revision = _required(snapshot, "capsule_revision")
     if revision != bridge.capsule_revision:
@@ -303,8 +352,10 @@ def prepare_loaded_activation_injection(
         raise ValueError(f"the {route} route cannot apply activation capsules")
     if batch_size != 1:
         raise ValueError("activation capsules require an isolated B=1 request")
-    if not tokens or len(tokens) > int(prefill_step):
-        raise ValueError("activation capsule requires one bounded prefill chunk")
+    # The memory acts on the final prompt row in the prompt-tail decode step,
+    # so prompt length is not bounded by one prefill chunk.
+    if not tokens:
+        raise ValueError("activation capsule requires a nonempty prompt")
     if not isinstance(manifest, Mapping) or manifest.get("schema") != _CORE_SCHEMA:
         raise ValueError("unsupported loaded activation capsule schema")
     if not isinstance(tensors, Mapping):
@@ -331,26 +382,7 @@ def prepare_loaded_activation_injection(
     geometry = manifest.get("geometry")
     if not isinstance(geometry, Mapping) or geometry.get("hidden_width") != bridge.hidden_dim:
         raise ValueError("loaded activation capsule hidden geometry mismatch")
-    bounds = manifest.get("bounds")
-    if not isinstance(bounds, Mapping):
-        raise ValueError("loaded activation capsule has no norm/gate bounds")
-    gate = _finite_float(gate, "gate", minimum=0.0, maximum=1.0)
-    minimum_gate = _finite_float(
-        bounds.get("minimum_gate"), "minimum gate", minimum=0.0, maximum=1.0
-    )
-    maximum_gate = _finite_float(
-        bounds.get("maximum_gate"), "maximum gate", minimum=0.0, maximum=1.0
-    )
-    maximum_norm = _finite_float(
-        bounds.get("maximum_relative_norm"),
-        "maximum relative norm",
-        minimum=0.0,
-        maximum=1.0,
-    )
-    if minimum_gate > maximum_gate or gate > maximum_gate or gate > maximum_norm:
-        raise ValueError("loaded activation capsule gate exceeds adapter bounds")
-    if gate != 0.0 and gate < minimum_gate:
-        raise ValueError("loaded activation capsule gate is below adapter bounds")
+    gate, maximum_norm = validate_capsule_gate(gate, manifest.get("bounds"))
     kind = manifest.get("payload_kind")
     metadata = manifest.get("metadata")
     if not isinstance(metadata, Mapping):
@@ -507,8 +539,32 @@ def compose_deep_concept_memory(*memories: Mapping[str, Any] | None) -> Mapping[
     return {"components": tuple(components)}
 
 
+def final_row_decode_memory(memory: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Give every unscheduled component a one-step decode lifetime.
+
+    ``_apply_deep_concept_memory`` amends the last row of the forward it is
+    given.  Serving prefills ``tokens[:-1]`` and feeds the final prompt token
+    in the first decode step (step 0), so a final-row intervention must ride
+    that step: it is the only forward whose last row produces the first
+    logits.  Scheduled components already start at step 0.
+    """
+    components = memory.get("components")
+    if components is not None:
+        return compose_deep_concept_memory(
+            *(final_row_decode_memory(component) for component in components)
+        )
+    if memory.get("decode_values") is not None or "persistent_steps" in memory:
+        return memory
+    return {**memory, "persistent_steps": 1}
+
+
 def step_persistent_deep_memory(memory: Mapping[str, Any], step: int) -> Mapping[str, Any] | None:
-    """Select one persistent decode step, including composed memory."""
+    """Select one persistent decode step, including composed memory.
+
+    A component is persistent only through an explicit lifetime: a
+    ``decode_values`` schedule, or ``persistent_steps``.  A component with
+    neither is prefill-only and never reaches decode.
+    """
     components = memory.get("components")
     if components is not None:
         active = [
@@ -521,7 +577,12 @@ def step_persistent_deep_memory(memory: Mapping[str, Any], step: int) -> Mapping
         return compose_deep_concept_memory(*active)
     schedule = memory.get("decode_values")
     if schedule is None:
-        return memory
+        lifetime = memory.get("persistent_steps")
+        if lifetime is None:
+            return None
+        if isinstance(lifetime, bool) or not isinstance(lifetime, int) or lifetime < 1:
+            raise ValueError("concept persistent_steps must be a positive integer")
+        return memory if step < lifetime else None
     shape = getattr(schedule, "shape", ())
     if len(shape) != 2:
         raise ValueError("concept decode_values must be a rank-2 array")
@@ -534,6 +595,12 @@ def step_persistent_deep_memory(memory: Mapping[str, Any], step: int) -> Mapping
         if not isinstance(gates, (list, tuple)) or len(gates) != shape[0]:
             raise ValueError("concept decode_gates must match the capsule schedule")
         selected["gate"] = float(gates[step])
+    # One schedule row is one direction.  Attention over a single value is
+    # weight 1.0, so this equals the one-key cross-attention it replaces, and
+    # it stays valid when the prefill memory held several keys.
+    for name in ("keys", "temperature", "order_bias"):
+        selected.pop(name, None)
+    selected["operation"] = "directional_residual"
     selected["values"] = schedule[step : step + 1]
     return selected
 

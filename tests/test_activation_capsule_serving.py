@@ -77,10 +77,11 @@ def test_trusted_capsule_binds_apc_scope_and_host_token_cache_stays_serializable
     payload = activation_capsule_request(request)
 
     assert payload["capsule_digest"] == DIGEST
-    assert request_apc_scope(request)[-3:] == (
+    assert request_apc_scope(request)[-4:] == (
         "activation-capsule-bus-v1",
         FINGERPRINT,
         DIGEST,
+        0.25,
     )
     first = HostPromptCache.key(request)
     other = _request(
@@ -150,10 +151,18 @@ def test_neural_and_activation_prefill_compose_without_receipt_kwargs():
     )
 
     assert adapter.calls == ["neural", "activation", "compose"]
-    assert tuple(
-        item["source"] for item in model_input["deep_concept_memory"]["components"]
-    ) == ("neural", "activation")
-    assert set(model_input) == {"deep_concept_memory"}
+    # Final-row memory is never a prefill kwarg: it rides the prompt-tail
+    # decode step with a one-step lifetime.
+    assert set(model_input) == {"_mlx2_persistent_decode_inputs"}
+    components = model_input["_mlx2_persistent_decode_inputs"][
+        "deep_concept_memory"
+    ]["components"]
+    assert tuple(item["source"] for item in components) == ("neural", "activation")
+    assert tuple(item["_mlx2_semantic_source"] for item in components) == (
+        "neural_concept",
+        "activation_capsule",
+    )
+    assert all(item["persistent_steps"] == 1 for item in components)
     assert neural_receipt["schema"] == "neural-v1"
     assert activation_receipt["schema"] == "activation-v1"
 
@@ -209,11 +218,19 @@ def test_forward_observation_preserves_observed_implies_engaged():
     )
     counts = Counter()
 
+    def tail(gate):
+        return {
+            "deep_concept_memory": {
+                "gate": gate,
+                "_mlx2_semantic_source": "activation_capsule",
+            }
+        }
+
     observe_activation_capsule_forward(
-        positive, counts, uid=1, consumed_prefill_inputs=("deep_concept_memory",)
+        positive, counts, uid=1, prompt_tail_inputs=tail(0.25)
     )
     observe_activation_capsule_forward(
-        zero, counts, uid=2, consumed_prefill_inputs=("deep_concept_memory",)
+        zero, counts, uid=2, prompt_tail_inputs=tail(0.0)
     )
 
     assert positive.activation_capsule_receipt["observed_used"] is True
@@ -255,7 +272,7 @@ def test_forward_observation_preserves_observed_implies_engaged():
         mismatch,
         counts,
         uid=10,
-        consumed_prefill_inputs=("deep_concept_memory",),
+        prompt_tail_inputs=tail(1.0),
     )
     assert mismatch.activation_capsule_receipt["status"] == "prepared"
     assert counts["activation_capsule_bridge_forward_identity_mismatches"] == 1

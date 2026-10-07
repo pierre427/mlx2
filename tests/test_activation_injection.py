@@ -182,6 +182,7 @@ def test_persistent_direction_schedule_advances_stops_and_composes():
         "keys": "neural-keys",
         "values": "neural-values",
         "gate": 0.5,
+        "persistent_steps": 3,
     }
     composed = compose_deep_concept_memory(neural, prepared.memory)
 
@@ -192,9 +193,10 @@ def test_persistent_direction_schedule_advances_stops_and_composes():
     assert first["components"][1]["gate"] == 0.25
     assert np.array_equal(first["components"][1]["values"], [[1.0, 0.0]])
     assert second["components"][1]["gate"] == 0.75
-    # The unscheduled neural component remains persistent after the capsule
+    # The neural component keeps its own explicit lifetime after the capsule
     # trajectory ends; it is not overwritten by activation memory.
     assert after is neural
+    assert step_persistent_deep_memory(composed, 3) is None
 
 
 def test_receipt_reports_observed_engagement_and_state_boundaries():

@@ -103,7 +103,12 @@ def test_trajectory_compiler_preserves_selected_order_and_signed_direction():
     assert np.array_equal(first.anchor, states[0])
     assert np.array_equal(first.basis, second.basis)
     assert np.array_equal(first.coefficients, second.coefficients)
-    assert np.allclose(first.reconstructed_deltas(), np.diff(states, axis=0)[[0, 2]], atol=2e-6)
+    # Each stored increment is the segment sum since the previous waypoint,
+    # so anchor + cumsum lands exactly on the retained states.
+    expected_segments = np.diff(states[[0, 1, 3]].astype(np.float64), axis=0)
+    assert np.allclose(first.reconstructed_deltas(), expected_segments, atol=2e-6)
+    assert np.allclose(first.reconstructed_waypoints(), states[[1, 3]], atol=2e-6)
+    assert first.waypoint_relative_error < 1e-6
     assert first.reconstructed_deltas()[0, 1] < 0
     assert first.reconstructed_deltas()[1, 0] < 0
 

@@ -1301,7 +1301,12 @@ def row_exact_target_mutation_guard(adapter, *, lane_policy=None, lora=False):
 
 
 def request_apc_scope(request):
-    """APCv2 per-request scope, including the mounted capsule snapshot."""
+    """APCv2 per-request scope, including the mounted capsule snapshot.
+
+    For an activation-capsule request this is the identity of the conditioned
+    suffix (the final prompt row and everything decoded after it): snapshot,
+    capsule digest and runtime gate.  Its writes stay suppressed.
+    """
     from .runtime.multi_lora import lora_apc_scope
 
     physical = lora_apc_scope(
@@ -1318,8 +1323,28 @@ def request_apc_scope(request):
             "activation-capsule-bus-v1",
             payload["semantic_fingerprint"],
             payload["capsule_digest"],
+            float(payload["gate"]),
         )
     return result
+
+
+def request_apc_lookup_scope(request):
+    """APCv2 scope under which this request may restore an exact prefix.
+
+    An activation capsule acts only on the prompt-tail forward, and a lookup
+    always leaves the final prompt token uncached, so every restorable row is
+    exact ordinary state: the capsule request reads the ordinary namespace
+    (shared system prompts included).  Other requests read their own scope.
+    """
+    if request.get("_mlx2_activation_capsule") is None:
+        return request_apc_scope(request)
+    from .runtime.multi_lora import lora_apc_scope
+
+    activation_capsule_request(request)
+    return lora_apc_scope(
+        request.get("_mlx2_media_fingerprint"),
+        request.get("_mlx2_lora_fingerprint"),
+    )
 
 
 _ACTIVATION_CAPSULE_FIELDS = frozenset(
@@ -1395,6 +1420,7 @@ def prepare_semantic_prefill_inputs(
     if prefill_input is not None:
         raise ValueError("semantic activation and multimodal prefill cannot be combined")
     prepared = []
+    sources = []
     neural_receipt = None
     activation_receipt = None
     if neural_payload is not None:
@@ -1404,6 +1430,7 @@ def prepare_semantic_prefill_inputs(
         neural = neural_bridge(tokens, neural_payload, prefill_step=prefill_step)
         neural_receipt = neural["receipt"]
         prepared.append(neural)
+        sources.append("neural_concept")
     if activation_payload is not None:
         activation_bridge = getattr(adapter, "activation_capsule_prefill", None)
         if not callable(activation_bridge):
@@ -1417,69 +1444,130 @@ def prepare_semantic_prefill_inputs(
         )
         activation_receipt = activation["receipt"]
         prepared.append(activation)
-    if len(prepared) == 2:
+        sources.append("activation_capsule")
+    tagged = []
+    for source, item in zip(sources, prepared):
+        memory = item.get("deep_concept_memory")
+        if not isinstance(memory, Mapping):
+            raise ValueError("semantic bridge returned no bounded model input")
+        tagged.append({**item, "deep_concept_memory": _tag_semantic_source(memory, source)})
+    if len(tagged) == 2:
         compose = getattr(adapter, "compose_semantic_prefill_inputs", None)
         if not callable(compose):
             raise ValueError("loaded adapter cannot compose semantic prefill inputs")
-        combined = compose(*prepared)
+        combined = compose(*tagged)
     else:
-        combined = prepared[0]
-    # Only reserved model kwargs leave this boundary. Receipts stay on Job.
-    model_input = {
-        key: combined[key]
-        for key in ("deep_concept_memory", "_mlx2_persistent_decode_inputs")
-        if key in combined
-    }
-    if set(model_input) not in (
-        {"deep_concept_memory"},
-        {"deep_concept_memory", "_mlx2_persistent_decode_inputs"},
-    ):
+        combined = tagged[0]
+    memory = combined.get("deep_concept_memory")
+    if not isinstance(memory, Mapping):
         raise ValueError("semantic bridge returned no bounded model input")
+    from .runtime.activation_injection import final_row_decode_memory
+
+    # Only reserved model kwargs leave this boundary. Receipts stay on Job.
+    # The memory acts on the final prompt row, which the first decode step
+    # (the prompt-tail forward) computes; it is never a prefill kwarg, so
+    # the prefilled rows stay exact ordinary state.
+    model_input = {
+        "_mlx2_persistent_decode_inputs": {
+            "deep_concept_memory": final_row_decode_memory(memory)
+        }
+    }
     return model_input, neural_receipt, activation_receipt
 
 
-def observe_activation_capsule_forward(
-    job, counts, *, uid, consumed_prefill_inputs=()
-) -> None:
-    """Publish engagement only from matching, evaluated prefill evidence."""
-    receipt = job.activation_capsule_receipt
+_SEMANTIC_SOURCE = "_mlx2_semantic_source"
+
+
+def _tag_semantic_source(memory, source):
+    """Mark each component with the bridge that prepared it (model ignores it)."""
+    components = memory.get("components")
+    if components is None:
+        return {**memory, _SEMANTIC_SOURCE: source}
+    return {
+        **memory,
+        "components": tuple(
+            {**component, _SEMANTIC_SOURCE: source} for component in components
+        ),
+    }
+
+
+def _prompt_tail_gates(prompt_tail_inputs):
+    """Largest applied gate per bridge source in the evaluated prompt-tail forward."""
+    memory = (prompt_tail_inputs or {}).get("deep_concept_memory")
+    if not isinstance(memory, Mapping):
+        return {}
+    components = memory.get("components") or (memory,)
+    gates = {}
+    for component in components:
+        source = component.get(_SEMANTIC_SOURCE)
+        gate = component.get("gate")
+        if source is None:
+            continue
+        value = (
+            float(gate)
+            if isinstance(gate, (int, float)) and not isinstance(gate, bool)
+            else 0.0
+        )
+        gates[source] = max(gates.get(source, 0.0), value)
+    return gates
+
+
+def _observe_semantic_receipt(receipt, job, counts, *, uid, gates, source, prefix):
     if receipt is None or receipt.get("status") != "prepared":
-        return
+        return receipt
     if (
         receipt.get("prepared_for_uid") != uid
         or receipt.get("prepared_request_id") != job.id
     ):
-        counts["activation_capsule_bridge_forward_identity_mismatches"] += 1
-        return
-    consumed = tuple(str(key) for key in consumed_prefill_inputs)
-    if "deep_concept_memory" not in consumed:
+        counts[f"{prefix}_forward_identity_mismatches"] += 1
+        return receipt
+    if source not in gates:
         # Prompt completion proves only that the request advanced.  It does
         # not prove that the prepared semantic input crossed the model
         # boundary (fallback/requeue paths may also terminate a prompt).
-        job.activation_capsule_receipt = {
+        counts[f"{prefix}_forward_completed"] += 1
+        return {
             **receipt,
             "status": "forward_completed",
             "engaged": False,
             "observed_used": False,
             "forward_evidence": "prompt_end_without_conditioning_evidence",
         }
-        counts["activation_capsule_bridge_forward_completed"] += 1
-        return
-    gate = float(receipt.get("relative_gate", 0.0))
-    engaged = gate > 0.0
-    job.activation_capsule_receipt = {
+    # The component amended the final prompt row of the evaluated
+    # prompt-tail forward; that row is read by every later layer and by the
+    # head that produced the first token.  A zero gate is an exact bypass.
+    engaged = gates[source] > 0.0
+    counts[f"{prefix}_forward_validated"] += 1
+    if engaged:
+        counts[f"{prefix}_engagements"] += 1
+        counts[f"{prefix}_observed_used"] += 1
+    return {
         **receipt,
         "status": "applied" if engaged else "identity",
         "engaged": engaged,
         # Identity validation is evidence, but it is not mechanism use.
         "observed_used": engaged,
-        "forward_evidence": "evaluated_deep_concept_memory",
-        "consumed_prefill_inputs": list(consumed),
+        "forward_evidence": "evaluated_prompt_tail_deep_concept_memory",
+        "read_position": "final_prompt_row",
+        "applied_gate": gates[source],
     }
-    counts["activation_capsule_bridge_forward_validated"] += 1
-    if engaged:
-        counts["activation_capsule_bridge_engagements"] += 1
-        counts["activation_capsule_bridge_observed_used"] += 1
+
+
+def observe_activation_capsule_forward(
+    job, counts, *, uid, prompt_tail_inputs=None
+) -> None:
+    """Publish engagement only from matching, evaluated prompt-tail evidence."""
+    gates = _prompt_tail_gates(prompt_tail_inputs)
+    job.activation_capsule_receipt = _observe_semantic_receipt(
+        job.activation_capsule_receipt, job, counts, uid=uid, gates=gates,
+        source="activation_capsule", prefix="activation_capsule_bridge",
+    )
+    neural = getattr(job, "neural_concept_receipt", None)
+    if neural is not None:
+        job.neural_concept_receipt = _observe_semantic_receipt(
+            neural, job, counts, uid=uid, gates=gates,
+            source="neural_concept", prefix="neural_concept_bridge",
+        )
 
 
 def multi_lora_policy(
@@ -4249,8 +4337,9 @@ class ServingEngine:
                 raise ValueError(
                     "activation capsules are incompatible with approximate or replay state"
                 )
-            # The bridge is a request-local approximate target law. It must
-            # cold-prefill and never publish state into exact APCv2.
+            # The bridge is a request-local approximate target law on the
+            # prompt tail. It may restore an exact ordinary prefix but never
+            # publishes state into exact APCv2.
             public_request["skip_writing_prefix_cache"] = True
             self.counts["activation_capsule_requests"] += 1
         if has_media:
@@ -8686,7 +8775,7 @@ class ServingEngine:
                         if hit is None:
                             key = cache_key_for(
                                 job.tenant_id,
-                                request_apc_scope(job.request),
+                                request_apc_lookup_scope(job.request),
                             )
                             hit = route_usable_hit(
                                 lookup_apc(
@@ -8720,24 +8809,9 @@ class ServingEngine:
                             job.request.get("_mlx2_activation_capsule") is not None
                             and hit.cached_tokens
                         ):
-                            if hit.cache is not None and hasattr(hit.cache, "close"):
-                                hit.cache.close()
-                            discard_lookup(hit, "activation_capsule_cold_only")
-                            hit = APCLookup(
-                                None,
-                                list(tokens),
-                                0,
-                                False,
-                                None,
-                                "activation_capsule_cold_only",
-                                branch_tokens=max(
-                                    int(hit.cached_tokens),
-                                    int(getattr(hit, "branch_tokens", 0) or 0),
-                                ),
-                            )
-                            job.admission_hit = hit
-                            job.cache_branch = None
-                            self.counts["activation_capsule_prefix_hits_refused"] += 1
+                            # Exact ordinary prefix; the capsule conditions
+                            # only the uncached prompt tail.
+                            self.counts["activation_capsule_exact_prefix_hits"] += 1
                         cache_copy = warm_cache_copy_gib(
                             hit, context_tokens=len(tokens) + maximum,
                             prefill_step=self.prefill_step, mtp=self.mtp,
@@ -8756,16 +8830,13 @@ class ServingEngine:
                             uncached_tokens=len(hit.remaining_tokens),
                             prefill_step=self.prefill_step,
                             # Same rule the insert below uses to pass a
-                            # prefill payload: a cold media request (or a
-                            # concept payload) prefills its uncached tail in
-                            # one isolated chunk.
+                            # prefill payload: a cold media request prefills
+                            # its uncached tail in one isolated chunk.
+                            # Concept and capsule memory rides the prompt-tail
+                            # decode step, so their prefill is ordinary.
                             single_chunk=(
-                                (
-                                    job.request.get("_mlx2_prefill_inputs") is not None
-                                    and not hit.cached_tokens
-                                )
-                                or job.request.get("_mlx2_neural_concepts") is not None
-                                or job.request.get("_mlx2_activation_capsule") is not None
+                                job.request.get("_mlx2_prefill_inputs") is not None
+                                and not hit.cached_tokens
                             ),
                         )
                         prefill_gib += cold_media_feature_peak_increment_gib(
@@ -9180,7 +9251,7 @@ class ServingEngine:
                                 lookup_apc(
                                     cache_key_for(
                                         job.tenant_id,
-                                        request_apc_scope(job.request),
+                                        request_apc_lookup_scope(job.request),
                                     ),
                                     tokens,
                                     session_tag=session_tag_for(job),
@@ -9237,7 +9308,7 @@ class ServingEngine:
                                 job.rolling_checkpoint = (
                                     cache_key_for(
                                         job.tenant_id,
-                                        request_apc_scope(job.request),
+                                        request_apc_lookup_scope(job.request),
                                     ),
                                     tuple(tokens[: hit.cached_tokens]),
                                 )
@@ -9669,8 +9740,15 @@ class ServingEngine:
                             )
                         )
                         if neural_receipt is not None:
-                            job.neural_concept_receipt = neural_receipt
-                            self.counts["neural_concept_bridge_engagements"] += 1
+                            # Engagement is counted from the evaluated
+                            # prompt-tail forward, not from preparation.
+                            job.neural_concept_receipt = {
+                                **neural_receipt,
+                                "status": "prepared",
+                                "engaged": False,
+                                "observed_used": False,
+                            }
+                            self.counts["neural_concept_bridge_prepared"] += 1
                         if activation_receipt is not None:
                             job.activation_capsule_receipt = {
                                 **activation_receipt,
@@ -9736,6 +9814,12 @@ class ServingEngine:
                         if job.activation_capsule_receipt is not None:
                             job.activation_capsule_receipt = {
                                 **job.activation_capsule_receipt,
+                                "prepared_for_uid": job.uid,
+                                "prepared_request_id": job.id,
+                            }
+                        if neural_receipt is not None:
+                            job.neural_concept_receipt = {
+                                **job.neural_concept_receipt,
                                 "prepared_for_uid": job.uid,
                                 "prepared_request_id": job.id,
                             }
@@ -10179,10 +10263,8 @@ class ServingEngine:
                                     owner,
                                     self.counts,
                                     uid=response.uid,
-                                    consumed_prefill_inputs=getattr(
-                                        response,
-                                        "consumed_prefill_inputs",
-                                        (),
+                                    prompt_tail_inputs=getattr(
+                                        response, "prompt_tail_inputs", None
                                     ),
                                 )
                             if owner is not None and surgery_receipt is not None:

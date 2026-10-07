@@ -180,7 +180,9 @@ class NormGateBounds:
         maximum_norm = _finite_positive("maximum_relative_norm", self.maximum_relative_norm)
         minimum = _finite_positive("minimum_gate", self.minimum_gate, allow_zero=True)
         maximum = _finite_positive("maximum_gate", self.maximum_gate, allow_zero=True)
-        if maximum_norm > 1_000 or minimum > maximum or maximum > 1:
+        # The gate is a relative hidden-state norm: the injection adds at most
+        # one current-state norm, so a bound above 1 could never be loaded.
+        if maximum_norm > 1 or minimum > maximum or maximum > 1:
             raise ActivationCapsuleError("invalid norm or gate bounds")
 
     def to_dict(self) -> dict[str, float]:
@@ -1019,17 +1021,75 @@ class ActivationCapsuleBus:
 
 @dataclass(frozen=True, slots=True)
 class CompiledTrajectory:
+    """Anchor plus low-rank *segment* increments between retained waypoints.
+
+    ``coefficients[k] @ basis`` is the movement from waypoint ``k-1`` (the
+    anchor for ``k == 0``) to waypoint ``k``, i.e. a segment sum that absorbs
+    every discarded increment in between.  ``anchor + cumsum`` therefore
+    lands on ``hidden_states[transition_indices[k]]`` up to the rank bound.
+    """
+
     anchor: np.ndarray
     basis: np.ndarray
     coefficients: np.ndarray
     transition_indices: tuple[int, ...]
+    # Conservative summary kept for existing callers: max of the two errors.
     reconstruction_relative_error: float
+    # ||segments - low-rank segments||_F / ||segments||_F
+    selected_delta_relative_error: float = 0.0
+    # ||waypoints - reconstructed waypoints||_F / ||waypoints - anchor||_F,
+    # measured on the stored dtype exactly as the adapter rebuilds them.
+    waypoint_relative_error: float = 0.0
+    # Largest angle between a true and a reconstructed absolute waypoint; the
+    # Qwen adapter row-normalises waypoints, so direction is what it consumes.
+    waypoint_max_angle_degrees: float = 0.0
+    # Share of total step-norm in increments that were not retained as
+    # their own waypoint (absorbed into a segment or beyond the last one).
+    discarded_motion_fraction: float = 0.0
+    # Movement after the last retained waypoint, relative to the full path
+    # displacement.  Nonzero means the capsule ends before the trajectory.
+    tail_relative_displacement: float = 0.0
 
     def tensors(self) -> dict[str, np.ndarray]:
         return {"anchor": self.anchor, "basis": self.basis, "coefficients": self.coefficients}
 
     def reconstructed_deltas(self) -> np.ndarray:
         return self.coefficients @ self.basis
+
+    def reconstructed_waypoints(self) -> np.ndarray:
+        """The absolute states the adapter will rebuild (before normalising)."""
+        anchor = np.asarray(self.anchor, dtype=np.float64)
+        deltas = np.asarray(self.coefficients, np.float64) @ np.asarray(self.basis, np.float64)
+        return anchor[None, :] + np.cumsum(deltas, axis=0)
+
+    def quality(self) -> dict[str, float]:
+        return {
+            "reconstruction_relative_error": self.reconstruction_relative_error,
+            "selected_delta_relative_error": self.selected_delta_relative_error,
+            "waypoint_relative_error": self.waypoint_relative_error,
+            "waypoint_max_angle_degrees": self.waypoint_max_angle_degrees,
+            "discarded_motion_fraction": self.discarded_motion_fraction,
+            "tail_relative_displacement": self.tail_relative_displacement,
+        }
+
+
+def _relative(numerator: np.ndarray, denominator: np.ndarray) -> float:
+    scale = float(np.linalg.norm(denominator))
+    return float(np.linalg.norm(numerator) / scale) if scale else 0.0
+
+
+def _max_angle_degrees(truth: np.ndarray, estimate: np.ndarray) -> float:
+    worst = 0.0
+    for left, right in zip(truth, estimate):
+        a = float(np.linalg.norm(left))
+        b = float(np.linalg.norm(right))
+        if a == 0.0 and b == 0.0:
+            continue
+        if a == 0.0 or b == 0.0:
+            return 180.0
+        cosine = max(-1.0, min(1.0, float(left @ right) / (a * b)))
+        worst = max(worst, math.degrees(math.acos(cosine)))
+    return worst
 
 
 def compile_pruned_trajectory(
@@ -1039,8 +1099,18 @@ def compile_pruned_trajectory(
     maximum_rank: int,
     maximum_width: int = 65_536,
     dtype: str = "<f4",
+    include_endpoint: bool = False,
 ) -> CompiledTrajectory:
-    """Compile ordered hidden-state deltas with deterministic salience and SVD signs."""
+    """Compile an ordered trajectory into exact-waypoint low-rank segments.
+
+    Salience still ranks single increments by norm.  The retained increments
+    pick the waypoint states; each stored increment is the *segment sum* from
+    the previous waypoint, so discarded movement is merged forward instead of
+    lost.  The basis is the top-``rank`` right singular space of the waypoint
+    displacements (Eckart-Young optimal for what ``anchor + cumsum`` rebuilds),
+    and coefficients are the first differences of their projections.  With
+    ``include_endpoint`` the final transition is always retained.
+    """
     states = np.asarray(hidden_states)
     if states.ndim != 2 or states.shape[0] < 2 or states.shape[1] <= 0:
         raise ActivationCapsuleError("hidden states must have shape [steps>=2, width>0]")
@@ -1052,34 +1122,57 @@ def compile_pruned_trajectory(
         raise ActivationCapsuleError("maximum_transitions must be positive")
     if isinstance(maximum_rank, bool) or not isinstance(maximum_rank, int) or maximum_rank <= 0:
         raise ActivationCapsuleError("maximum_rank must be positive")
+    if not isinstance(include_endpoint, bool):
+        raise ActivationCapsuleError("include_endpoint must be boolean")
     working = np.ascontiguousarray(states, dtype=np.float64)
     if not np.isfinite(working).all():
         raise ActivationCapsuleError("hidden states must be finite")
     all_deltas = np.diff(working, axis=0)
     scores = np.linalg.norm(all_deltas, axis=1)
-    keep = min(maximum_transitions, len(all_deltas))
-    ranked = sorted(range(len(all_deltas)), key=lambda index: (-float(scores[index]), index))[:keep]
-    selected_zero_based = tuple(sorted(ranked))
-    selected = all_deltas[list(selected_zero_based)]
-    rank = min(maximum_rank, selected.shape[0], selected.shape[1])
-    _u, _singular, vh = np.linalg.svd(selected, full_matrices=False)
+    count = len(all_deltas)
+    keep = min(maximum_transitions, count)
+    order = sorted(range(count), key=lambda index: (-float(scores[index]), index))
+    if include_endpoint:
+        order = [count - 1] + [index for index in order if index != count - 1]
+    selected_zero_based = tuple(sorted(order[:keep]))
+    waypoint_rows = [index + 1 for index in selected_zero_based]
+    anchor = working[0]
+    waypoints = working[waypoint_rows]
+    displacements = waypoints - anchor[None, :]
+    segments = np.diff(np.vstack([anchor[None, :], waypoints]), axis=0)
+    rank = min(maximum_rank, displacements.shape[0], displacements.shape[1])
+    _u, _singular, vh = np.linalg.svd(displacements, full_matrices=False)
     basis = vh[:rank].copy()
-    coefficients = selected @ basis.T
     for component in range(rank):
         pivot = int(np.argmax(np.abs(basis[component])))
         if basis[component, pivot] < 0:
             basis[component] *= -1
-            coefficients[:, component] *= -1
-    reconstruction = coefficients @ basis
-    denominator = float(np.linalg.norm(selected))
-    error = float(np.linalg.norm(selected - reconstruction) / denominator) if denominator else 0.0
+    projected = displacements @ basis.T
+    coefficients = np.diff(np.vstack([np.zeros((1, rank)), projected]), axis=0)
     output_dtype = np.dtype(dtype)
+    stored_anchor = np.ascontiguousarray(anchor, dtype=output_dtype)
+    stored_basis = np.ascontiguousarray(basis, dtype=output_dtype)
+    stored_coefficients = np.ascontiguousarray(coefficients, dtype=output_dtype)
+    # Measure on the stored dtype, exactly as the adapter rebuilds it.
+    rebuilt_segments = stored_coefficients.astype(np.float64) @ stored_basis.astype(np.float64)
+    rebuilt_waypoints = stored_anchor.astype(np.float64)[None, :] + np.cumsum(rebuilt_segments, axis=0)
+    selected_error = _relative(segments - rebuilt_segments, segments)
+    waypoint_error = _relative(waypoints - rebuilt_waypoints, displacements)
+    total_motion = float(np.sum(scores))
+    retained_motion = float(np.sum(scores[list(selected_zero_based)]))
+    discarded = (total_motion - retained_motion) / total_motion if total_motion else 0.0
+    tail = _relative(working[-1] - waypoints[-1], working[-1] - anchor)
     return CompiledTrajectory(
-        anchor=np.ascontiguousarray(working[0], dtype=output_dtype),
-        basis=np.ascontiguousarray(basis, dtype=output_dtype),
-        coefficients=np.ascontiguousarray(coefficients, dtype=output_dtype),
-        transition_indices=tuple(index + 1 for index in selected_zero_based),
-        reconstruction_relative_error=error,
+        anchor=stored_anchor,
+        basis=stored_basis,
+        coefficients=stored_coefficients,
+        transition_indices=tuple(waypoint_rows),
+        reconstruction_relative_error=max(selected_error, waypoint_error),
+        selected_delta_relative_error=selected_error,
+        waypoint_relative_error=waypoint_error,
+        waypoint_max_angle_degrees=_max_angle_degrees(waypoints, rebuilt_waypoints),
+        discarded_motion_fraction=max(0.0, discarded),
+        tail_relative_displacement=tail,
     )
 
 

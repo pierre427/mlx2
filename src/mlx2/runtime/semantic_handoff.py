@@ -341,7 +341,7 @@ def build_pruned_trajectory_capsule(
         metadata={
             "maximum_transitions": maximum_transitions,
             "maximum_rank": maximum_rank,
-            "reconstruction_relative_error": compiled.reconstruction_relative_error,
+            **compiled.quality(),
         },
     )
     return PreparedSemanticActivation(capsule_spec, compiled.tensors())
@@ -405,7 +405,7 @@ def build_subagent_handoff_capsule(
             "target_agent": target_agent,
             "maximum_transitions": maximum_transitions,
             "maximum_rank": maximum_rank,
-            "reconstruction_relative_error": compiled.reconstruction_relative_error,
+            **compiled.quality(),
         },
     )
     return PreparedSemanticActivation(capsule_spec, compiled.tensors())

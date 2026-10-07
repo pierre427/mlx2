@@ -38,7 +38,7 @@ def _prompt_batch(model, *, uids=(1,), inputs=None):
 
 def test_persistent_memory_is_forwarded_from_prefill_through_decode():
     model = RecordingModel()
-    memory = {"request": "a"}
+    memory = {"request": "a", "persistent_steps": 2}
     prompt = _prompt_batch(model, inputs=[_persistent(memory)])
 
     generation = prompt.generate([[1, 2]])
@@ -52,6 +52,32 @@ def test_persistent_memory_is_forwarded_from_prefill_through_decode():
     ]
     assert generation.has_persistent_inputs
     assert prompt.persistent_inputs == []
+    generation.next()
+    # The explicit two-step lifetime has ended.
+    assert model.calls[3] == {}
+
+
+def test_memory_without_a_lifetime_never_reaches_decode():
+    model = RecordingModel()
+    memory = {"request": "prefill-only"}
+    generation = _prompt_batch(model, inputs=[_persistent(memory)]).generate([[1, 2]])
+    generation.next()
+
+    assert model.calls == [{"deep_concept_memory": memory}, {}, {}]
+
+
+def test_decode_only_memory_leaves_ordinary_prefill():
+    model = RecordingModel()
+    memory = {"request": "tail", "persistent_steps": 1}
+    prompt = _prompt_batch(
+        model, inputs=[{"_mlx2_persistent_decode_inputs": {"deep_concept_memory": memory}}]
+    )
+    assert prompt.prefill_inputs == [None]
+    generation = prompt.generate([[1, 2, 3]])
+    generation.next()
+
+    # Prefill of tokens[:-1] is plain; the prompt tail (step 0) carries it.
+    assert model.calls == [{}, {"deep_concept_memory": memory}, {}]
 
 
 def test_ordinary_decode_has_no_persistent_kwargs():

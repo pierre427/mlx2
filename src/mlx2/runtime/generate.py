@@ -526,6 +526,10 @@ class PromptProcessingBatch:
         # evaluation complete.  This is execution evidence, not a declaration
         # copied from the request or from bridge preparation.
         consumed_prefill_inputs: tuple[str, ...] = ()
+        # The reserved kwargs the prompt-tail forward (the final prompt token,
+        # whose last row produces the first logits) actually received, after
+        # that forward evaluated.  Same evidence rule as above.
+        prompt_tail_inputs: Optional[dict] = None
 
     def __init__(
         self,
@@ -590,7 +594,7 @@ class PromptProcessingBatch:
             raise ValueError("prefill_inputs must have one entry per sequence")
         self._consumed_prefill_inputs = {}
         self.persistent_inputs = []
-        for value in self.prefill_inputs:
+        for index, value in enumerate(self.prefill_inputs):
             persistent = (
                 value.pop(_PERSISTENT_DECODE_INPUTS, None)
                 if value is not None
@@ -603,6 +607,10 @@ class PromptProcessingBatch:
                 raise ValueError(
                     "persistent decode inputs must contain only deep_concept_memory"
                 )
+            if persistent is not None and not value:
+                # Decode-only memory leaves no prefill kwargs: the prompt
+                # prefills in ordinary chunks.
+                self.prefill_inputs[index] = None
             self.persistent_inputs.append(persistent)
         if any(value is not None for value in self.persistent_inputs) and len(self.uids) != 1:
             raise RuntimeError(
@@ -1002,6 +1010,8 @@ class GenerationBatch:
         # One prompt segment ``(tokens, cache)`` to fuse into the next step's
         # forward; consumed (set to None) by ``_step`` when it rides along.
         self._mixed_segment = None
+        # Reserved kwargs the prompt-tail step passed, by UID (B=1 lanes only).
+        self._prompt_tail_inputs = {}
         if self.uids:
             self._step(prompt_tail=True)
 
@@ -1026,6 +1036,11 @@ class GenerationBatch:
             raise RuntimeError(
                 "persistent concept decode must run at an isolated B=1 boundary"
             )
+        if incoming_persistent:
+            # The schedule is indexed by this batch's step counter.  A
+            # long-lived batch that already ran other lanes must continue the
+            # incoming lane's count, not its own.
+            self._decode_steps = batch._decode_steps
         self.uids.extend(batch.uids)
         self.prompt_cache = _extend_cache(self.prompt_cache, batch.prompt_cache)
         self.tokens.extend(batch.tokens)
@@ -1171,6 +1186,8 @@ class GenerationBatch:
                 forward = (getattr(self.model, "prefill_forward", self.model)
                            if prompt_tail else self.model)
                 logits = forward(inputs[:, None], cache=self.prompt_cache, **kwargs)
+                if prompt_tail and kwargs:
+                    self._prompt_tail_inputs = {self.uids[0]: kwargs}
         finally:
             clear_lora_rows(lora_rows)
             if steer is not None:
@@ -7276,6 +7293,12 @@ class BatchGenerator:
                 getattr(ready, "_consumed_prefill_inputs", {})
             )
             gen_batch = ready.generate(last_inputs)
+            prompt_tail_inputs = getattr(gen_batch, "_prompt_tail_inputs", {})
+            if prompt_tail_inputs:
+                # Evidence only after the prompt-tail forward evaluated
+                # (isolated B=1 persistent lanes; one host sync).
+                mx.eval(gen_batch._next_tokens, gen_batch._next_logprobs)
+                gen_batch._prompt_tail_inputs = {}
             for i, p in enumerate(progress):
                 uid = gen_batch.uids[i]
                 prompt_responses.append(
@@ -7287,6 +7310,7 @@ class BatchGenerator:
                         tuple(
                             consumed_prefill_inputs.get(uid, ())
                         ),
+                        prompt_tail_inputs.get(uid),
                     )
                 )
             (self._generation_batch if destination is None else destination).extend(

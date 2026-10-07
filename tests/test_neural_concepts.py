@@ -439,7 +439,7 @@ def test_neural_concept_request_is_refused_where_the_route_would_drop_it(monkeyp
     class Bridge:
         def neural_concept_prefill(self, tokens, payload, *, prefill_step):
             return {
-                "deep_concept_memory": {"keys": 1},
+                "deep_concept_memory": {"keys": 1, "gate": 0.5},
                 "receipt": {"schema": "tiny.neural-concept.v1", "status": "applied"},
             }
 

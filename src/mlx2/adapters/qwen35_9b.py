@@ -354,10 +354,8 @@ class Qwen359BAdapter(Qwen3827BAdapter):
             concepts = concepts[:1]
         elif selection != "latent_attention":
             raise ValueError("unsupported neural concept selection policy")
-        if not tokens or len(tokens) > int(prefill_step):
-            raise ValueError(
-                "neural concept bridge currently requires one bounded prefill chunk"
-            )
+        if not tokens:
+            raise ValueError("neural concept bridge requires a nonempty prompt")
         import mlx.core as mx
 
         key_state = mx.array(
@@ -431,15 +429,17 @@ class Qwen359BAdapter(Qwen3827BAdapter):
                 "tokens": len(tokens),
                 "bridge": "learned-recurrent-deep-final-token-cross-attention",
                 "injection_layer": self._neural_concept_injection_layer,
+                # Serving applies the memory on the prompt-tail forward
+                # (final prompt row); a schedule starts at that same step.
                 "steered_tokens": (
-                    "prefill-final-plus-capsule-schedule"
+                    "final-prompt-row-plus-capsule-schedule"
                     if persistent is not None
                     else 1
                 ),
                 "decode_policy": (
                     "capsule-scheduled-isolated-b1"
                     if persistent is not None
-                    else "one-shot-prefill"
+                    else "one-shot-final-prompt-row"
                 ),
                 "decode_steps": (
                     int(memory["decode_values"].shape[0])
