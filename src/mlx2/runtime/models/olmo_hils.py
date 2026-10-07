@@ -1,4 +1,6 @@
-# Copyright © 2026 Apple Inc.
+# SPDX-License-Identifier: MIT
+# Adapted from the lab-owned mlx-lm feature/olmo-hils branch; see
+# provenance/hils-attention.json.
 #
 # HiLS-Attention (Hierarchical Landmark Sparse attention) on an OLMo3
 # backbone — port of tencent/HiLS-Attention-7B (arXiv:2607.02980,

@@ -8,9 +8,21 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .ordinary_artifact import inspect_indexed_artifact
 from .ordinary_text import OrdinaryTextAdapter
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
+from ..process_env import (
+    PROCESS_NUMERICS,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 
 CACHE_LAYOUT = "hy-v3-full-kv-v1"
+# Hy3 generation_config.json: do_sample true, temperature 0.9, top_p 1,
+# top_k -1 (off, the neutral 0 here).
+SAMPLING = VendorSampling.single(
+    SamplingDefaults(temperature=0.9, top_p=1.0, source=GENERATION_CONFIG,
+                     note="do_sample=true; top_k -1 (off)"),
+    model="Hy3 local artifacts",
+)
 
 
 def descriptor_for(*, reap: bool) -> ModelDescriptor:
@@ -51,6 +63,14 @@ def inspect_artifact(model_path: str | Path) -> dict:
             not isinstance(rope.get("rope_theta"), (int, float)) or
             rope["rope_theta"] <= 0):
         raise ValueError("HY V3 RoPE topology is unsupported")
+    # An omitted key takes the reference HYV3Config default (2.826 / True),
+    # which the runtime ModelArgs now share; a declared one must be sane.
+    scale = config.get("router_scaling_factor", 2.826)
+    if (isinstance(scale, bool) or not isinstance(scale, (int, float)) or scale <= 0
+            or type(config.get("enable_moe_fp32_combine", True)) is not bool):
+        raise ValueError("HY V3 router scaling or MoE combine config is unsupported")
+    if config.get("enable_attention_fp32_softmax"):
+        raise ValueError("HY V3 fp32 attention softmax is not implemented")
     n_experts = config.get("num_experts")
     reap = n_experts == 96 and config.get("mtp_num_experts") == 192
     if not reap and (n_experts != 192 or config.get("mtp_num_experts") not in (None, 192)):
@@ -113,19 +133,27 @@ def configure_environment() -> dict[str, str]:
     require_process_numerics("the Hy-V3 profile")
     profile = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
                **PROCESS_NUMERICS, "MLX_LM_COMPILED_DECODE": "0"}
-    for name in tuple(os.environ):
-        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
-            del os.environ[name]
+    clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
     return profile
 
 
 class HYV3Adapter(OrdinaryTextAdapter):
     descriptor = descriptor_for(reap=False)
+    sampling_defaults = SAMPLING
     artifact_inspector = staticmethod(inspect_artifact)
     profile = "hy-v3-apcv2-ordinary"
 
     def __init__(self, model_path: str, *, execution_policy=None):
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self, lambda: self._init_hy_v3(model_path, execution_policy=execution_policy)
+        )
+
+    def _init_hy_v3(self, model_path: str, *, execution_policy=None):
+        from .process_globals import claim_stock_moe
+
         if execution_policy:
             raise ValueError("HY V3 ordinary decode accepts no model execution policy")
         artifact = inspect_artifact(model_path)
@@ -133,6 +161,7 @@ class HYV3Adapter(OrdinaryTextAdapter):
         self.identity = artifact["identity"]
         self.layout = CACHE_LAYOUT
         self.environment = configure_environment()
+        claim_stock_moe(self, "the HY V3 adapter")
         path = Path(self.identity["path"])
         import mlx.core as mx
         from mlx import nn

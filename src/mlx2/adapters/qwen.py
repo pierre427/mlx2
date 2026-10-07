@@ -32,7 +32,10 @@ QWEN4_FLASH_NEXT = ModelDescriptor(
             Capability.LAYERED_CACHE,
             Capability.GRAMMAR,
             Capability.SEGMENTED_MTP,
-            Capability.COMPACTION,
+            # No COMPACTION: the only live path (Spomin live surgery) declines
+            # every model with recurrent state, and every Flash-Next artifact
+            # has GDN layers.  Declare it again with a recurrent-state repair
+            # or exact-rebuild backend.
         }
     ),
     cache_layout="qwen4-exp-layer-segments-v1",

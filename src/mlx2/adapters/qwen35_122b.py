@@ -183,6 +183,8 @@ class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
     default_mtp_ordinary_handoff_max_width = None
     # Declared on this class itself; never inherited from Qwen3.6.
     weight_streaming_modes = frozenset({"moe_experts"})
+    # The 35B's measured eager-dispatch stride; this constructor applies none.
+    default_eager_dispatch_stride = 0
 
     def __init__(
         self, model_path: str, *, execution_policy=None, require_mtp=False,
@@ -305,6 +307,22 @@ class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
         except BaseException:
             self.close()
             raise
+
+    def prefill_step_default(self):
+        """Decline the 35B's measured routed-MoE chunk; nothing was measured
+        on this model, so the generic prompt schedule owns it."""
+        return None
+
+    def execution_numerics_contract(self):
+        """This adapter's own target arithmetic (the inherited Qwen3.6 block
+        named the 35B family and cache layout in APCv2 and receipts)."""
+        return {
+            "qwen35_122b_target": {
+                "cache_layout": CACHE_LAYOUT,
+                "moe_nax_gather": self.moe_nax_gather,
+                "decode_kernels": dict(sorted(self._kernels.items())),
+            }
+        }
 
     def profile_name(self, mtp):
         if mtp:

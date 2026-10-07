@@ -11,7 +11,11 @@ import struct
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..process_env import (
+    PROCESS_NUMERICS,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 from ..sampling_defaults import SamplingDefaults, VendorSampling
 from .external_draft_policy import ExternalDraftAdapterMixin
 
@@ -345,9 +349,7 @@ def configure_environment() -> dict[str, str]:
         "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
         "MLX_LM_SHARED_QSA_SUFFIX": "0",
     }
-    for name in tuple(os.environ):
-        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
-            del os.environ[name]
+    clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
     return profile
 
@@ -809,17 +811,9 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
 
     def _claim_moe_globals(self):
         """Pin the shared SwitchGLU kernel choices for this live model."""
-        from ..runtime.models import moe_nax_gather, switch_layers
-        from .process_globals import MOE_NAX_GATHER, MOE_RHS_PAD_POLICY, claim
+        from .process_globals import claim_stock_moe
 
-        self._process_claim = claim(
-            self,
-            "the North Mini Code adapter",
-            {
-                MOE_NAX_GATHER: ("off", moe_nax_gather.set_mode),
-                MOE_RHS_PAD_POLICY: ("floor", switch_layers.set_pad_policy),
-            },
-        )
+        claim_stock_moe(self, "the North Mini Code adapter")
 
     def __init__(self, model_path: str, *, execution_policy=None):
         from .process_globals import guarded_construction

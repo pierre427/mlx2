@@ -149,6 +149,11 @@ class DiffusionText:
     finish_reason: str | None
     canvas_tokens: int
     denoising_steps: int
+    # The request's sampling law, so a result can be reproduced and told
+    # apart from the argmax variant.
+    temperature: float = 1.0
+    seed: int | None = 0
+    full_canvas: bool = True
 
 
 class DiffusionGemmaAdapter:
@@ -174,7 +179,18 @@ class DiffusionGemmaAdapter:
     def generate_text(self, prompt: str, *, image: str | Path | None = None,
                       video: str | Path | None = None, max_tokens: int = 256,
                       max_denoising_steps: int = 48,
-                      sampler: str = "entropy-bound") -> DiffusionText:
+                      sampler: str = "entropy-bound",
+                      temperature: float = 1.0, seed: int | None = 0,
+                      full_canvas: bool = True) -> DiffusionText:
+        """Denoise one response.
+
+        The defaults are the reference law (HF DiffusionGemmaGenerationMixin):
+        every step draws the canvas from the softmax of the schedule-scaled
+        logits (mlx-vlm ``temperature=1.0``) over a full 256-token canvas,
+        truncated afterwards.  ``temperature=0`` selects mlx-vlm's argmax
+        denoiser, a separate non-reference variant; ``full_canvas=False``
+        lets mlx-vlm shrink the last canvas below 256 tokens.
+        """
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("DiffusionGemma prompt must be nonempty")
         if image is not None and video is not None:
@@ -185,6 +201,13 @@ class DiffusionGemmaAdapter:
             raise ValueError("DiffusionGemma denoising steps must be 1..48")
         if sampler not in {"entropy-bound", "confidence-threshold"}:
             raise ValueError("unsupported DiffusionGemma sampler")
+        if (isinstance(temperature, bool) or not isinstance(temperature, (int, float))
+                or not 0 <= temperature <= 2):
+            raise ValueError("DiffusionGemma temperature must be 0..2")
+        if seed is not None and (type(seed) is not int or seed < 0):
+            raise ValueError("DiffusionGemma seed must be a nonnegative integer")
+        if type(full_canvas) is not bool:
+            raise ValueError("DiffusionGemma full_canvas must be boolean")
         media = image if image is not None else video
         if media is not None and not Path(media).expanduser().is_file():
             raise ValueError("DiffusionGemma media file is missing")
@@ -202,10 +225,15 @@ class DiffusionGemmaAdapter:
                           video=str(video) if video is not None else None,
                           verbose=False, max_tokens=max_tokens,
                           max_denoising_steps=max_denoising_steps,
-                          diffusion_sampler=sampler)
+                          diffusion_sampler=sampler,
+                          temperature=float(temperature),
+                          diffusion_full_canvas=full_canvas,
+                          **({} if seed is None else {"seed": seed}))
         return DiffusionText(result.text, self.artifact["fingerprint"],
                              result.finish_reason, result.diffusion_canvas_tokens,
-                             result.diffusion_denoising_steps)
+                             result.diffusion_denoising_steps,
+                             temperature=float(temperature), seed=seed,
+                             full_canvas=full_canvas)
 
     def close(self):
         self._backend = None

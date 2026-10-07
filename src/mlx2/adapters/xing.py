@@ -20,7 +20,11 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .mtp_depth_cap import validate_self_mtp_num_draft
 from ..sampling_defaults import XING4_SAMPLING
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..process_env import (
+    PROCESS_NUMERICS,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 
 CACHE_LAYOUT = "xing4-0-mla-latent-layer-segments-v1"
 CONVERSION_LAYOUT = "xing4_0-sanitized-v1"
@@ -247,9 +251,7 @@ def configure_environment() -> dict[str, str]:
         # Committed MTP-boundary COW snapshots, pinned so the receipt records it.
         "MLX_LM_MTP_BOUNDARY_COW": "1",
     }
-    for name in tuple(os.environ):
-        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
-            del os.environ[name]
+    clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
     return profile
 
@@ -420,6 +422,18 @@ class XingAdapter:
         )
 
     def __init__(self, model_path: str, *, require_mtp: bool = False, execution_policy=None):
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self,
+            lambda: self._init_xing(
+                model_path, require_mtp=require_mtp, execution_policy=execution_policy
+            ),
+        )
+
+    def _init_xing(self, model_path: str, *, require_mtp: bool = False, execution_policy=None):
+        from .process_globals import claim_stock_moe
+
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
@@ -439,6 +453,9 @@ class XingAdapter:
         self.descriptor = descriptor_for(has_mtp=artifact["has_mtp"])
         self.config = dict(artifact["config"])
         self.environment = configure_environment()
+        # Xing never opens the NAX forward scope, but its routed experts read
+        # the rhs pad policy on every sorted gather.
+        claim_stock_moe(self, "the Xing4.0 adapter")
         self.layout = CACHE_LAYOUT
         path = Path(self.identity["path"])
         config = dict(artifact["config"])
@@ -596,6 +613,9 @@ class XingAdapter:
 
     def close(self):
         """Release model ownership before the shared worker shuts down."""
+        from .process_globals import release
+
+        release(self)
         had_resources = any(
             getattr(self, name, None) is not None for name in ("model", "tokenizer")
         )

@@ -113,12 +113,22 @@ class LagunaS21Adapter(LagunaXS21Adapter):
         return "laguna-s21-apcv2-ordinary"
 
     def __init__(self, model_path: str, *, execution_policy=None):
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self, lambda: self._init_laguna_s(model_path, execution_policy=execution_policy)
+        )
+
+    def _init_laguna_s(self, model_path: str, *, execution_policy=None):
+        from .process_globals import claim_stock_moe
+
         if execution_policy:
             raise ValueError("Laguna S ordinary decode accepts no draft execution policy")
         artifact = inspect_artifact(model_path)
         self.identity = artifact["identity"]
         self.config = artifact["config"]
         self.environment = configure_environment()
+        claim_stock_moe(self, "the Laguna S 2.1 adapter")
         self.layout = CACHE_LAYOUT
         self.draft_model = None
         path = Path(self.identity["path"])

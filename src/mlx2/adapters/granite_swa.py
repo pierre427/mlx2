@@ -181,6 +181,15 @@ class GraniteSWAAdapter(OrdinaryTextAdapter):
         }
 
     def __init__(self, model_path: str, *, execution_policy=None):
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self, lambda: self._init_granite(model_path, execution_policy=execution_policy)
+        )
+
+    def _init_granite(self, model_path: str, *, execution_policy=None):
+        from .process_globals import claim_stock_moe
+
         if execution_policy not in (None, {}):
             raise ValueError("Granite SWA supports ordinary execution only")
         artifact = inspect_artifact(model_path)
@@ -191,6 +200,7 @@ class GraniteSWAAdapter(OrdinaryTextAdapter):
         require_process_numerics("the Granite SWA profile")
         self.environment = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", **PROCESS_NUMERICS}
         os.environ.update(self.environment)
+        claim_stock_moe(self, "the Granite SWA adapter")
         path = Path(self.identity["path"])
         import mlx.core as mx
         from mlx import nn
@@ -225,5 +235,8 @@ class GraniteSWAAdapter(OrdinaryTextAdapter):
         self.max_context = int(self.config["max_position_embeddings"])
 
     def close(self):
+        from .process_globals import release
+
+        release(self)
         self.model = None
         self.tokenizer = None

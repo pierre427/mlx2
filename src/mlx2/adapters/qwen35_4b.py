@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from .qwen35_9b import Qwen359BAdapter, _Qwen35CacheBudget, configure_environment
+from .qwen35_9b import (
+    Qwen359BAdapter,
+    _dense_qwen35_budget,
+    _Qwen35CacheBudget,
+    configure_environment,
+)
 from .qwen35_9b import inspect_artifact as inspect_dense_artifact
 
 
@@ -86,12 +91,7 @@ class Qwen354BAdapter(Qwen359BAdapter):
     def cache_budget(self, *, mtp):
         if mtp:
             raise ValueError("Qwen3.5 4B MTP is not implemented")
-        from .qwen38_memory import Qwen38CacheBudget
-
-        budget = Qwen38CacheBudget.from_config(
-            self.model.args.text_config, mtp=False
-        )
-        return _Qwen35CacheBudget(budget, family="4b")
+        return _Qwen35CacheBudget(_dense_qwen35_budget(self), family="4b")
 
     def approximate_kv_operations(self):
         return {}

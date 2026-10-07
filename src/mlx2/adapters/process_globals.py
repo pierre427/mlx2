@@ -154,6 +154,28 @@ def claim(holder, owner, selections) -> Claim:
     return Claim(holder, owner, selections).apply()
 
 
+def claim_stock_moe(holder, owner: str) -> Claim:
+    """Claim the stock sorted-MoE selections (NAX gather off, pad floor).
+
+    For adapters whose model builds mlx2 ``switch_layers`` experts but runs
+    neither the NAX gather nor a calibrated pad table: they read both globals
+    on every sorted gather (and in receipts), so another live adapter must
+    not change them underneath.  Call inside ``guarded_construction`` before
+    tensors load, and ``release`` in ``close``.
+    """
+    from ..runtime.models import moe_nax_gather, switch_layers
+
+    holder._process_claim = claim(
+        holder,
+        owner,
+        {
+            MOE_NAX_GATHER: ("off", moe_nax_gather.set_mode),
+            MOE_RHS_PAD_POLICY: ("floor", switch_layers.set_pad_policy),
+        },
+    )
+    return holder._process_claim
+
+
 def guarded_construction(holder, build: Callable[[], None]) -> None:
     """Run ``build``; on failure undo its claim and its ``os.environ`` edits.
 
@@ -201,6 +223,7 @@ __all__ = [
     "MOE_RHS_PAD_POLICY",
     "ProcessGlobalConflict",
     "claim",
+    "claim_stock_moe",
     "guarded_construction",
     "live_selections",
     "release",

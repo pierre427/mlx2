@@ -170,8 +170,15 @@ class LLaDADenoisingAdapter:
                  active_block_postprocess: bool = False,
                  active_block_head: bool = False,
                  verify_active_block_head: bool = False,
-                 require_visible_output: bool = True) -> dict:
-        """Generate one response with the source model's exact denoising loop."""
+                 require_visible_output: bool = True,
+                 seed: int | None = None) -> dict:
+        """Generate one response with the source model's exact denoising loop.
+
+        ``seed`` seeds the Gumbel draw when ``temperature > 0`` and is
+        recorded in the result (the descriptor declares an RNG plane).
+        """
+        if seed is not None and (type(seed) is not int or seed < 0):
+            raise ValueError("LLaDA seed must be a nonnegative integer")
         if (prompt is None) == (messages is None):
             raise ValueError("supply exactly one of prompt or messages")
         if messages is not None:
@@ -189,10 +196,15 @@ class LLaDADenoisingAdapter:
                 tokens = tokens["input_ids"]
         else:
             tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
+        # User text "<|mdm_mask|>" encodes to the mask id through both paths.
+        if int(self.config["mask_token_id"]) in tokens:
+            raise ValueError("LLaDA prompt must not contain the mask token")
         validate_generation(prompt_length=len(tokens), gen_length=gen_length,
                             block_length=block_length, steps=steps, temperature=temperature)
         import mlx.core as mx
         from ..runtime.models.llada import generate
+        if seed is not None:
+            mx.random.seed(seed)
         output, text, stats = generate(
             self.model, mx.array([tokens]), steps=steps, gen_length=gen_length,
             block_length=block_length, temperature=float(temperature),
@@ -220,6 +232,7 @@ class LLaDADenoisingAdapter:
         return {
             "text": text, "token_ids": visible_ids, "canvas_token_ids": canvas_ids,
             "stop_index": stop_index, "stats": stats,
+            "temperature": float(temperature), "seed": seed,
             "route": (
                 "denoising-exact-active-head"
                 if active_block_head

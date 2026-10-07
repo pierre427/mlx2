@@ -12,7 +12,11 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .external_draft_policy import ExternalDraftAdapterMixin
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..process_env import (
+    PROCESS_NUMERICS,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 
 CACHE_LAYOUT = "laguna-xs21-layer-segments-v1"
 
@@ -228,9 +232,7 @@ def configure_environment() -> dict[str, str]:
         "MLX_LAGUNA_FUSED_DOWN": "stock",
         "MLX_LAGUNA_FUSED_ROUTER": "stock",
     }
-    for name in tuple(os.environ):
-        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
-            del os.environ[name]
+    clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
     return profile
 
@@ -305,6 +307,15 @@ class LagunaXS21Adapter(ExternalDraftAdapterMixin):
         }
 
     def __init__(self, model_path: str, *, execution_policy=None):
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self, lambda: self._init_laguna_xs(model_path, execution_policy=execution_policy)
+        )
+
+    def _init_laguna_xs(self, model_path: str, *, execution_policy=None):
+        from .process_globals import claim_stock_moe
+
         external = self._parse_external_policy(execution_policy, family="Laguna")
         artifact = inspect_artifact(model_path)
         draft_record = None
@@ -319,6 +330,7 @@ class LagunaXS21Adapter(ExternalDraftAdapterMixin):
         self.identity = artifact["identity"]
         self.config = artifact["config"]
         self.environment = configure_environment()
+        claim_stock_moe(self, "the Laguna XS 2.1 adapter")
         self.layout = CACHE_LAYOUT
         path = Path(self.identity["path"])
 
@@ -448,6 +460,9 @@ class LagunaXS21Adapter(ExternalDraftAdapterMixin):
         self.model.set_fused_moe_modes(down=down, router=router)
 
     def close(self):
+        from .process_globals import release
+
+        release(self)
         had_resources = any(getattr(self, name, None) is not None for name in ("model", "tokenizer"))
         self.model = None
         self.draft_model = None

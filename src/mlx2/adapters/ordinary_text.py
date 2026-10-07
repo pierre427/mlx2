@@ -66,4 +66,7 @@ class OrdinaryTextAdapter:
         return {"route": "ordinary", "qualification": "pending"}
 
     def close(self):
-        pass
+        # A no-op unless the adapter claimed process globals at construction.
+        from .process_globals import release
+
+        release(self)

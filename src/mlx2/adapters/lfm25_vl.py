@@ -20,8 +20,13 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..multimodal import media_fingerprint, resolve_media
 from ..output import OutputParser
+from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from .mlx_vlm import MediaFeatureCache, _LogitsModel, _ids_and_kwargs, _plain_messages, _source
 
+# Not the project pin (mlx_vlm_pin.MLX_VLM_REVISION, which pyproject installs
+# and which does not descend from this revision): this adapter loads only when
+# a clean checkout of SOURCE_REVISION is first on PYTHONPATH, and fails closed
+# naming both revisions otherwise (sweep 2026-10-06 G2-04/G5-05).
 SOURCE_REVISION = "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5"
 SOURCE_PATHS = ("mlx_vlm/models/lfm2_vl", "mlx_vlm/models/lfm2/language.py",
                 "mlx_vlm/models/lfm2/speculative_verifier.py",
@@ -416,10 +421,20 @@ class _LFMLogitsModel(_LogitsModel):
         return getattr(output, "logits", output)
 
 
+# LiquidAI/LFM2.5-VL-3B generation_config.json and model card (text):
+# temperature 0.2, top_k 50, repetition_penalty 1.0.
+SAMPLING = VendorSampling.single(
+    SamplingDefaults(temperature=0.2, top_k=50, repetition_penalty=1.0,
+                     source=GENERATION_CONFIG,
+                     note="do_sample=true; also the model card's text profile"),
+    model="LiquidAI/LFM2.5-VL-3B",
+)
+
+
 class LFM25VLAdapter:
     default_route = "ordinary"
     descriptor = LFM25_VL
-    sampling_defaults = None
+    sampling_defaults = SAMPLING
 
     def prefill_step_default(self):
         """Decline a family override so the generic prompt schedule owns it."""

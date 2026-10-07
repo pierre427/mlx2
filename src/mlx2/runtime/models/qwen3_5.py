@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Adapted from mlx-lm-unified; see docs/PROVENANCE.md and provenance/flashnext.json.
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 import mlx.core as mx
 import mlx.nn as nn
@@ -48,14 +48,10 @@ class TextModelArgs(BaseModelArgs):
     shared_expert_intermediate_size: int = 0
     moe_intermediate_size: int = 0
     norm_topk_prob: bool = True
-    rope_parameters: Optional[Dict[str, Union[float, str, bool, List[int]]]] = field(
-        default_factory=lambda: {
-            "type": "default",
-            "mrope_section": [11, 11, 10],
-            "rope_theta": 100000,
-            "partial_rotary_factor": 0.25,
-        }
-    )
+    # None means the config spells its rotary geometry with the flat
+    # rope_theta / partial_rotary_factor / rope_scaling fields; a truthy
+    # default here used to overwrite those with theta 100000.
+    rope_parameters: Optional[Dict[str, Union[float, str, bool, List[int]]]] = None
     partial_rotary_factor: float = 0.25
     rope_theta: float = 100000.0
     rope_scaling: Optional[Dict[str, Union[float, str]]] = None
@@ -66,6 +62,13 @@ class TextModelArgs(BaseModelArgs):
     def __post_init__(self):
         if self.head_dim is None:
             self.head_dim = self.hidden_size // self.num_attention_heads
+        if self.rope_parameters is None:
+            rope = dict(self.rope_scaling or {})
+            if "type" not in rope:
+                rope["type"] = rope.pop("rope_type", "default")
+            rope.setdefault("rope_theta", self.rope_theta)
+            rope.setdefault("partial_rotary_factor", self.partial_rotary_factor)
+            self.rope_parameters = rope
         if self.rope_parameters:
             if (
                 "type" not in self.rope_parameters

@@ -16,7 +16,11 @@ from pathlib import Path
 from typing import ClassVar
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..process_env import (
+    PROCESS_NUMERICS,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 from .qwen38_27b import Qwen3827BAdapter
 from .qwen38_27b import inspect_artifact as inspect_dense_artifact
 
@@ -166,9 +170,7 @@ def configure_environment() -> dict[str, str]:
         "MLX_LM_SHARED_QSA_SUFFIX": "0",
         "MLX_LM_MTP_BOUNDARY_COW": "0",
     }
-    for name in tuple(os.environ):
-        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
-            del os.environ[name]
+    clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
     return profile
 

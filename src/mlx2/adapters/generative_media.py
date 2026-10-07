@@ -65,6 +65,10 @@ class GeneratedImage:
     artifact_fingerprint: str
     lora_fingerprint: str | None = None
     state_epoch: int = 0
+    # Request parameters, so the receipt reproduces the image.
+    seed: int | None = None
+    steps: int | None = None
+    reference_sha256: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +78,28 @@ class GeneratedVideo:
     artifact_fingerprint: str
     lora_fingerprint: str | None = None
     state_epoch: int = 0
+    # Request parameters, so the receipt reproduces the clip.
+    seed: int | None = None
+    width: int | None = None
+    height: int | None = None
+    frames: int | None = None
+    frame_rate: int | None = None
+
+
+# Direct-route size bounds (memory, not quality): Qwen-Image's default is
+# 1024x1024; LTX's 704x480x97.  Raise with a measured run.
+MAX_IMAGE_SIDE = 2048
+MAX_VIDEO_SIDE = 1920
+MAX_VIDEO_FRAMES = 257
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_seed(seed) -> None:
+    if not _is_int(seed) or not 0 <= seed < 2**63:
+        raise ValueError("seed must be an unsigned integer")
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -392,6 +418,7 @@ class QwenImage21Adapter(MediaLoRAControl):
         seed: int = 0,
     ) -> GeneratedImage:
         self._validate_request(prompt, width, height, steps)
+        _validate_seed(seed)
         self._verify_input_identity()
         from mlx_vlm.generate.image import ImageGenerationRequest
 
@@ -408,7 +435,7 @@ class QwenImage21Adapter(MediaLoRAControl):
                 prompt=prompt, width=width, height=height, steps=steps, seed=seed
             )
         )
-        return self._encode(result.array)
+        return self._encode(result.array, seed=seed, steps=steps)
 
     @serialized
     def edit_image(
@@ -422,6 +449,7 @@ class QwenImage21Adapter(MediaLoRAControl):
         seed: int = 0,
     ) -> GeneratedImage:
         self._validate_request(prompt, width, height, steps)
+        _validate_seed(seed)
         self._verify_input_identity()
         if not image_paths:
             raise ValueError("at least one reference image is required")
@@ -448,24 +476,33 @@ class QwenImage21Adapter(MediaLoRAControl):
                 seed=seed,
             )
         )
-        return self._encode(result.array)
+        references_sha256 = tuple(
+            hashlib.sha256(path.read_bytes()).hexdigest() for path in references
+        )
+        return self._encode(
+            result.array, seed=seed, steps=steps, references=references_sha256
+        )
 
     @staticmethod
     def _validate_request(prompt: str, width: int, height: int, steps: int) -> None:
         if (
-            not prompt.strip()
-            or width < 256
-            or height < 256
+            not isinstance(prompt, str)
+            or not prompt.strip()
+            or not _is_int(width)
+            or not _is_int(height)
+            or not 256 <= width <= MAX_IMAGE_SIDE
+            or not 256 <= height <= MAX_IMAGE_SIDE
             or width % 16
             or height % 16
         ):
             raise ValueError(
-                "prompt and 16-aligned dimensions of at least 256 are required"
+                "prompt and 16-aligned dimensions in "
+                f"256..{MAX_IMAGE_SIDE} are required"
             )
-        if not 1 <= steps <= 100:
+        if not _is_int(steps) or not 1 <= steps <= 100:
             raise ValueError("steps must be in 1..100")
 
-    def _encode(self, array: Any) -> GeneratedImage:
+    def _encode(self, array: Any, *, seed=None, steps=None, references=()) -> GeneratedImage:
         import numpy as np
         from PIL import Image
 
@@ -488,6 +525,9 @@ class QwenImage21Adapter(MediaLoRAControl):
             self.artifact.fingerprint,
             self._lora.fingerprint if self._lora else None,
             self._lora_epoch,
+            seed=seed,
+            steps=steps,
+            reference_sha256=tuple(references),
         )
 
 
@@ -754,17 +794,30 @@ class LTX25Adapter(MediaLoRAControl):
         timeout_seconds: int = 7200,
     ) -> GeneratedVideo:
         if (
-            not prompt.strip()
+            not isinstance(prompt, str)
+            or not prompt.strip()
+            or not _is_int(width)
+            or not _is_int(height)
             or width % 32
             or height % 32
-            or width < 256
-            or height < 256
+            or not 256 <= width <= MAX_VIDEO_SIDE
+            or not 256 <= height <= MAX_VIDEO_SIDE
         ):
             raise ValueError(
-                "prompt and 32-aligned dimensions of at least 256 are required"
+                "prompt and 32-aligned dimensions in "
+                f"256..{MAX_VIDEO_SIDE} are required"
             )
-        if frames < 9 or (frames - 1) % 8 or frame_rate <= 0:
-            raise ValueError("LTX frames must be 8n+1 and frame rate positive")
+        if (
+            not _is_int(frames)
+            or not _is_int(frame_rate)
+            or not 9 <= frames <= MAX_VIDEO_FRAMES
+            or (frames - 1) % 8
+            or frame_rate <= 0
+        ):
+            raise ValueError(
+                f"LTX frames must be 8n+1 in 9..{MAX_VIDEO_FRAMES} and frame rate positive"
+            )
+        _validate_seed(seed)
         self._verify_execution_identity()
         target = Path(output).expanduser().resolve()
         if target.suffix.lower() != ".mp4" or target.exists():
@@ -775,7 +828,9 @@ class LTX25Adapter(MediaLoRAControl):
         ) + (
             "import mlx.core as mx; mx.set_default_device(mx.gpu); "
             "from ltx_pipelines_mlx.cli import main; "
-            "sys.argv=['ltx-2-mlx', *sys.argv[1:], '--prompt', sys.stdin.read()]; main()"
+            # One "--prompt=" token: a prompt starting with "-" would
+            # otherwise parse as an option.
+            "sys.argv=['ltx-2-mlx', *sys.argv[1:], '--prompt=' + sys.stdin.read()]; main()"
         )
         environment = os.environ.copy()
         environment.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
@@ -840,4 +895,9 @@ class LTX25Adapter(MediaLoRAControl):
             self.artifact.fingerprint,
             self._lora.fingerprint if self._lora else None,
             self._lora_epoch,
+            seed=seed,
+            width=width,
+            height=height,
+            frames=frames,
+            frame_rate=frame_rate,
         )

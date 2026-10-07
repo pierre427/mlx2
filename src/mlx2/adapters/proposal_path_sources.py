@@ -294,14 +294,22 @@ class NativeMTPContinuationSource:
         _, hidden = _mtp_backbone(model, tokens, target_cache)
         if len(context.history) > 1:
             step(hidden[:, :-1], tokens[:, 1:], head_cache)
+        start = getattr(model, "mtp_start_cycle", None)
+        end = getattr(model, "mtp_end_cycle", None)
+        if callable(start):
+            # As native_mtp_source: the drafted steps form one head cycle.
+            start(head_cache, share_qsa_indices=False)
         hidden = hidden[:, -1:]
         beams = [(0.0, (), hidden, head_cache, ())]
-        end = getattr(model, "mtp_end_cycle", None)
+        # Every branch holds its own copy of the cycle ledger, so pruned
+        # branches are ended too, not only the surviving beams.
+        branches = [head_cache]
         try:
             for _ in range(context.depth):
                 next_beams = []
                 for score, path, hidden, cache, confidence in beams:
                     private_cache = copy.deepcopy(cache)
+                    branches.append(private_cache)
                     logits, next_hidden = step(
                         hidden,
                         mx.array([[path[-1] if path else context.anchor]], mx.uint32),
@@ -341,7 +349,7 @@ class NativeMTPContinuationSource:
             ]
         finally:
             if callable(end):
-                for _, _, _, cache, _ in beams:
+                for cache in branches:
                     end(cache)
 
 

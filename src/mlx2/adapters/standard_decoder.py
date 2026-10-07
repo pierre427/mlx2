@@ -109,6 +109,51 @@ def _generation_sampling(path: Path, family: str) -> dict | None:
     return defaults or None
 
 
+def _hybrid_thinking_template(path: Path) -> bool:
+    """Whether the artifact's chat template switches on ``enable_thinking``."""
+    texts = []
+    template = path / "chat_template.jinja"
+    if template.is_file():
+        texts.append(template.read_text())
+    tokenizer_config = path / "tokenizer_config.json"
+    if tokenizer_config.is_file():
+        declared = _json(tokenizer_config).get("chat_template")
+        if isinstance(declared, str):
+            texts.append(declared)
+        elif isinstance(declared, list):
+            texts.extend(
+                str(entry.get("template", "")) for entry in declared if isinstance(entry, dict)
+            )
+    return any("enable_thinking" in text for text in texts)
+
+
+# Qwen3 model card, "Switching Between Thinking and Non-Thinking Mode": the
+# thinking-mode values (T=0.6, top_p 0.95, top_k 20, min_p 0) are the
+# default generation_config.json; for non-thinking mode the card suggests
+# T=0.7, top_p 0.8, top_k 20, min_p 0.  This adapter renders every chat
+# non-thinking (no reasoning is declared), so a hybrid-thinking artifact
+# must not sample it at the thinking-mode values.
+def artifact_vendor_sampling(artifact: dict):
+    """The VendorSampling an inspected standard-decoder artifact declares."""
+    from ..sampling_defaults import MODEL_CARD, SamplingDefaults, VendorSampling
+
+    family = artifact["config"]["model_type"]
+    general = SamplingDefaults(
+        **artifact["sampling_defaults"], source="generation_config.json"
+    )
+    model = "artifact-bound Qwen3" if family == "qwen3" else "artifact-bound Qwen3 MoE"
+    if family in {"qwen3", "qwen3_moe"} and artifact.get("hybrid_thinking"):
+        non_thinking = SamplingDefaults(
+            temperature=0.7, top_p=0.8, top_k=20, min_p=0.0,
+            source=f"{MODEL_CARD} (Qwen/Qwen3, non-thinking mode)",
+        )
+        return VendorSampling(
+            {"general": general, "non_thinking": non_thinking},
+            thinking="general", non_thinking="non_thinking", model=model,
+        )
+    return VendorSampling.single(general, model=model)
+
+
 def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> dict:
     """Inspect topology, index closure and identity with no tensor imports."""
     path = Path(model_path).expanduser().resolve()
@@ -390,6 +435,8 @@ def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> 
     }
     if family in {"qwen3", "qwen3_moe", "qwen2"}:
         result["sampling_defaults"] = _generation_sampling(path, family)
+    if family in {"qwen3", "qwen3_moe"}:
+        result["hybrid_thinking"] = _hybrid_thinking_template(path)
     return result
 
 
@@ -561,17 +608,9 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
             self._initialize(model_path, execution_policy=execution_policy)
 
     def _claim_moe_globals(self):
-        from ..runtime.models import moe_nax_gather, switch_layers
-        from .process_globals import MOE_NAX_GATHER, MOE_RHS_PAD_POLICY, claim
+        from .process_globals import claim_stock_moe
 
-        self._process_claim = claim(
-            self,
-            "the Qwen3 MoE ordinary adapter",
-            {
-                MOE_NAX_GATHER: ("off", moe_nax_gather.set_mode),
-                MOE_RHS_PAD_POLICY: ("floor", switch_layers.set_pad_policy),
-            },
-        )
+        claim_stock_moe(self, "the Qwen3 MoE ordinary adapter")
 
     def _initialize(self, model_path: str, *, execution_policy=None):
         # Refuse an explicitly enabled TF32 switch, as every pinned
@@ -714,18 +753,7 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
             self.config["model_type"] in {"qwen3", "qwen3_moe", "qwen2"}
             and artifact["sampling_defaults"]
         ):
-            from ..sampling_defaults import SamplingDefaults, VendorSampling
-
-            self.sampling_defaults = VendorSampling.single(
-                SamplingDefaults(
-                    **artifact["sampling_defaults"], source="generation_config.json"
-                ),
-                model=(
-                    "artifact-bound Qwen3"
-                    if self.config["model_type"] == "qwen3"
-                    else "artifact-bound Qwen3 MoE"
-                ),
-            )
+            self.sampling_defaults = artifact_vendor_sampling(artifact)
         self.layout = CACHE_LAYOUT
         self.environment = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
         path = Path(self.identity["path"])

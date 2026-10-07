@@ -6,7 +6,12 @@ import os
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
+from ..process_env import (
+    PROCESS_NUMERICS,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 from .ordinary_artifact import inspect_indexed_artifact
 from .ordinary_text import OrdinaryTextAdapter
 
@@ -100,19 +105,35 @@ def configure_environment() -> dict[str, str]:
     profile = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
                **PROCESS_NUMERICS, "MLX_GDN_PACKED": "1",
                "MLX_GDN_CORE": "0", "MLX_LM_COMPILED_DECODE": "0"}
-    for name in tuple(os.environ):
-        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_", "MLX_AGNES_")):
-            del os.environ[name]
+    clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_", "MLX_AGNES_"))
     os.environ.update(profile)
     return profile
 
 
+# Agnes-3.0-Flash-Preview generation_config.json: do_sample true,
+# temperature 1.0, top_p 0.95, top_k 20.
+SAMPLING = VendorSampling.single(
+    SamplingDefaults(temperature=1.0, top_p=0.95, top_k=20, source=GENERATION_CONFIG,
+                     note="do_sample=true"),
+    model="Agnes-3.0-Flash-Preview local artifacts",
+)
+
+
 class Agnes3FlashAdapter(OrdinaryTextAdapter):
     descriptor = DESCRIPTOR
+    sampling_defaults = SAMPLING
     artifact_inspector = staticmethod(inspect_artifact)
     profile = "agnes-3-flash-6bit-apcv2-ordinary"
 
     def __init__(self, model_path: str, *, execution_policy=None):
+        # A failed load must not leave the pinned profile in os.environ.
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self, lambda: self._init_agnes(model_path, execution_policy=execution_policy)
+        )
+
+    def _init_agnes(self, model_path: str, *, execution_policy=None):
         if execution_policy:
             raise ValueError("Agnes ordinary decode accepts no model execution policy")
         artifact = inspect_artifact(model_path)

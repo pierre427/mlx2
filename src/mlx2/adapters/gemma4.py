@@ -132,6 +132,22 @@ GEMMA4_A4B = _descriptor("26b-a4b", "Gemma4A4BAdapter")
 GEMMA4_31B = _descriptor("31b", "Gemma431BAdapter")
 
 
+def _stamp_fps(timestamps) -> float:
+    """The per-video rate whose ``j / fps`` stamps the sampled frames.
+
+    The pinned mlx-vlm processor ignores ``video_metadata`` and labels frame
+    ``j`` as ``j / fps`` (its default 2.0), so a clip longer than 16 s sampled
+    to 32 frames was stamped 00:00..00:15.  Frames are sampled uniformly from
+    index 0 (multimodal.uniform_frame_indices), so the span over the frame
+    count gives each stamp to within one source frame.
+    """
+    if len(timestamps) < 2 or timestamps[-1] <= timestamps[0]:
+        return 2.0  # a single frame is stamped 00:00 at any rate
+    # The processor floors j / fps to whole seconds; shave one part in 1e9 so
+    # an exact stamp (59.0) does not round down to 58.999...
+    return (len(timestamps) - 1) / (timestamps[-1] - timestamps[0]) * (1 - 1e-9)
+
+
 class _Gemma4Adapter(_MLXVLMAdapter):
     """Shared text/image/video prefill with exact media-bound feature reuse."""
 
@@ -312,12 +328,18 @@ class _Gemma4Adapter(_MLXVLMAdapter):
         import mlx.core as mx
         import numpy as np
 
-        media, replacements, images, videos, video_metadata = [], [], [], [], []
+        media, replacements, images, videos, video_fps = [], [], [], [], []
+        markers = (self.processor.image_token, self.processor.video_token)
         for message in request["messages"]:
             content = message.get("content")
             for part in content if isinstance(content, list) else ():
                 part_type = part.get("type")
                 if part_type == "text":
+                    # The processor pairs every marker with one media item;
+                    # a literal marker in user text ran its replacement
+                    # iterator dry (StopIteration, a server error).
+                    if any(marker in str(part.get("text", "")) for marker in markers):
+                        raise ValueError("Gemma 4 text must not contain a media placeholder")
                     continue
                 kind = {
                     "image_url": "image", "input_image": "image",
@@ -337,18 +359,14 @@ class _Gemma4Adapter(_MLXVLMAdapter):
                 else:
                     frames = np.stack(value.value).transpose(0, 3, 1, 2)
                     videos.append(frames)
-                    video_metadata.append({
-                        "total_num_frames": value.metadata["source_frames"],
-                        "fps": value.metadata["source_fps"],
-                        "frames_indices": list(value.metadata["sampled_indices"]),
-                    })
+                    video_fps.append(_stamp_fps(value.metadata["timestamps_seconds"]))
                     replacements.append(self.processor.video_token)
         if not media:
             return request
         messages = _plain_messages(request["messages"], replacements)
         processed = self.processor(
             text=self._render(messages), images=images or None,
-            videos=videos or None, video_metadata=video_metadata or None,
+            videos=videos or None, fps=video_fps or None,
             return_tensors="np",
         )
         media_token_end = _media_token_end(processed)

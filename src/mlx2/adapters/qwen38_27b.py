@@ -16,7 +16,11 @@ from ..contracts import Capability, ModelDescriptor, StatePlane
 from .external_draft_policy import ExternalDraftAdapterMixin
 from .flash_next import FlashNextAdapter, gdn_state_diagnostics
 from .mtp_depth_cap import validate_self_mtp_num_draft
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..process_env import (
+    PROCESS_NUMERICS,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 
 CACHE_LAYOUT = "qwen38-27b-hybrid-layer-segments-v1"
 # Adapter-owned rather than inherited from Flash-Next: threshold four passed
@@ -571,9 +575,7 @@ def configure_environment() -> dict[str, str]:
         # receipt records it.
         "MLX_LM_MTP_BOUNDARY_COW": "1",
     }
-    for name in tuple(os.environ):
-        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
-            del os.environ[name]
+    clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
     return profile
 

@@ -227,6 +227,15 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
     think_close_separator = ""
 
     def __init__(self, model_path: str, *, execution_policy=None):
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self, lambda: self._init_lightning(model_path, execution_policy=execution_policy)
+        )
+
+    def _init_lightning(self, model_path: str, *, execution_policy=None):
+        from .process_globals import claim_stock_moe
+
         if execution_policy is not None and (
             not isinstance(execution_policy, dict) or set(execution_policy) - {"num_draft"}
         ):
@@ -244,6 +253,7 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
         self.environment["MLX_LM_MTP_BOUNDARY_COW"] = "1"
         import os
         os.environ["MLX_LM_MTP_BOUNDARY_COW"] = "1"
+        claim_stock_moe(self, "the Nemotron 3.5 Lightning adapter")
         path = Path(self.identity["path"])
         import mlx.core as mx
         from mlx import nn

@@ -338,6 +338,27 @@ class _MLXVLMAdapter:
             raise ValueError("multimodal adapters have no native MTP route")
         return "mlx-vlm-apcv2-ordinary"
 
+    # Projected-feature cache keys prepare_multimodal_request attaches
+    # (Gemma 3n / MiniCPM-o through install_media_feature_cache, Gemma 4
+    # through the pinned mlx-vlm model's own vision_cache).
+    VISION_FEATURE_CACHE_KEYS = ("_mlx2_vision_cache_key", "_image_key", "_video_key")
+
+    def validate_prefill_inputs(self, request, remaining_tokens, prefill_input):
+        """Bind the projected-feature cache to the request's LoRA.
+
+        Serving attaches ``_mlx2_lora_fingerprint`` after prepare, and
+        multi-LoRA may wrap the vision projector, so features computed under
+        one adapter must not be served to another request or to the base
+        model (sweep 2026-10-06 G5-01).  APCv2 already scopes by it.
+        """
+        lora = request.get("_mlx2_lora_fingerprint")
+        if lora is None:
+            return prefill_input
+        for name in self.VISION_FEATURE_CACHE_KEYS:
+            if prefill_input.get(name) is not None:
+                prefill_input[name] = f"{prefill_input[name]}:lora={lora}"
+        return prefill_input
+
     def execution_config(self, *, max_lanes, prefill_step):
         # The sliding-window cache bound depends on the prefill chunk size.
         self._prefill_step = int(prefill_step)

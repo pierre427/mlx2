@@ -14,7 +14,11 @@ import re
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..process_env import (
+    PROCESS_NUMERICS,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 from ..sampling_defaults import SamplingDefaults, VendorSampling
 from .muse_glimmer_config import ModelArgs
 
@@ -120,9 +124,7 @@ def configure_environment() -> dict[str, str]:
         "MLX_LM_SEGMENTED_SELF_MTP": "0",
         "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
     }
-    for name in tuple(os.environ):
-        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_")):
-            del os.environ[name]
+    clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_"))
     os.environ.update(profile)
     return profile
 
@@ -424,6 +426,14 @@ class MuseGlimmerAdapter:
         return config
 
     def __init__(self, model_path: str, *, execution_policy=None):
+        # A failed load must not leave the pinned profile in os.environ.
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self, lambda: self._init_muse(model_path, execution_policy=execution_policy)
+        )
+
+    def _init_muse(self, model_path: str, *, execution_policy=None):
         self.external_policy = dict(execution_policy or {})
         if set(self.external_policy) - {"draft_model", "num_draft", "pairwise_selection"}:
             raise ValueError("Unsupported Muse execution policy")

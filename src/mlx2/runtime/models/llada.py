@@ -650,6 +650,11 @@ def generate(
             f"block_length ({block_length})"
         )
     num_blocks = gen_length // block_length
+    # A mask id in the prompt is a denoising slot to the reference loop: it
+    # spends the block's reveal budget, leaves masks in the output and makes
+    # the active-block candidates diverge from the ordinary route.
+    if bool(mx.any(prompt == mask_id).item()):
+        raise ValueError("prompt contains the mask token id")
 
     total_len = prompt_len + gen_length
     x = mx.full((1, total_len), mask_id, dtype=prompt.dtype)
@@ -1244,11 +1249,12 @@ def generate(
     if tokenizer is not None:
         ret = ret + (tokenizer.decode(out[0].tolist()),)
     if return_stats:
-        revealed = gen_length  # every gen position ends unmasked
+        revealed = int(mx.sum(out != mask_id).item())
         stats = {
             "prefix_snapshot_used": _snapshot_used,
             "prefix_snapshot": _captured_snapshot if return_prefix_snapshot else None,
             "forwards": forwards,
+            "revealed": revealed,
             "tokens_per_step_mean": (revealed / forwards) if forwards else 0.0,
             "steps": forwards,
             "active_block_postprocess": bool(active_block_postprocess),

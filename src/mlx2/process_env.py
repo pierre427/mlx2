@@ -76,3 +76,22 @@ def require_process_numerics(owner: str, environ=None) -> None:
             f"fp32 dispatch.  Unset {TF32_ENV} or set it to \"0\" before starting the "
             f"process."
         )
+
+
+# Operator knobs mlx2 itself reads at call time, process-wide, that change
+# only how often exact hybrid state is checkpointed (memory, not numerics):
+# runtime/models/cache.py and the lane-budget estimators read them.  A
+# profile's lab-namespace wipe used to delete them silently (sweep
+# 2026-10-06 LEAD-02), so an operator's setting never reached the run.
+PRESERVED_OPERATOR_KNOBS = frozenset(
+    {"MLX_LM_STATE_CHECKPOINT_STRIDE", "MLX_LM_STATE_CHECKPOINT_MAX"}
+)
+
+
+def clear_inherited_profile(prefixes, environ=None) -> None:
+    """Delete inherited lab experiment variables under ``prefixes`` before a
+    profile is pinned, keeping ``PRESERVED_OPERATOR_KNOBS``."""
+    target = os.environ if environ is None else environ
+    for name in tuple(target):
+        if name.startswith(tuple(prefixes)) and name not in PRESERVED_OPERATOR_KNOBS:
+            del target[name]

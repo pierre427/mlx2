@@ -13,6 +13,10 @@ from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..multimodal import media_fingerprint, resolve_media
 from .mlx_vlm import MediaFeatureCache, _LogitsModel, _ids_and_kwargs, _plain_messages, _source
 
+# Not the project pin (mlx_vlm_pin.MLX_VLM_REVISION, which pyproject installs
+# and which does not descend from this revision): this adapter loads only when
+# a clean checkout of SOURCE_REVISION is first on PYTHONPATH, and fails closed
+# naming both revisions otherwise (sweep 2026-10-06 G2-04/G5-05).
 SOURCE_REVISION = "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5"
 
 TOPOLOGIES = {
@@ -163,7 +167,14 @@ class PinnedVisionCandidateAdapter:
         from .mlx_vlm_pin import mlx_vlm_runtime
         runtime = mlx_vlm_runtime()
         if runtime is None or runtime.get("revision") != SOURCE_REVISION:
-            raise RuntimeError(f"vision candidate requires mlx-vlm revision {SOURCE_REVISION}")
+            from .mlx_vlm_pin import MLX_VLM_REVISION
+
+            raise RuntimeError(
+                f"vision candidate requires mlx-vlm revision {SOURCE_REVISION}, found "
+                f"{(runtime or {}).get('revision') or 'none'}; the project pin "
+                f"installs {MLX_VLM_REVISION[:8]}, which is not it, so put a clean "
+                f"{SOURCE_REVISION[:8]} checkout first on PYTHONPATH"
+            )
         self.mlx_vlm_runtime = runtime
         self.environment = {"mlx_vlm_revision": SOURCE_REVISION}
         from mlx_vlm import load

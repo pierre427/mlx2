@@ -95,6 +95,14 @@ class OlmoHiLSAdapter(OrdinaryTextAdapter):
     profile = "olmo-hils-7b-b1-ordinary"
 
     def __init__(self, model_path: str, *, execution_policy=None):
+        # A failed load must not leave the pinned profile in os.environ.
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self, lambda: self._init_hils(model_path, execution_policy=execution_policy)
+        )
+
+    def _init_hils(self, model_path: str, *, execution_policy=None):
         if execution_policy not in (None, {}):
             raise ValueError("HiLS supports ordinary B1 execution only")
         artifact = inspect_artifact(model_path)

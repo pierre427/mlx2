@@ -104,5 +104,8 @@ class NorthCacheBudget:
             "schema": "north-mini-code-cache-geometry-v1",
             **asdict(self),
             "bound": "fp32-global-plus-window-and-restore-snapshots",
-            "workspace": "3.1-GiB-per-lane conservative static assumption; live qualification pending",
+            "workspace": (
+                f"{self.transient_gib_per_lane:g}-GiB-per-lane measured MoE bound "
+                "(provenance/lane-transient-moe.json); live qualification pending"
+            ),
         }

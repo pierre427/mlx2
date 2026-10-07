@@ -12,7 +12,11 @@ import struct
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..process_env import (
+    PROCESS_NUMERICS,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from .artifact_paths import shard_within_artifact
 from .flash_next import FlashNextAdapter
@@ -153,9 +157,7 @@ def configure_environment() -> dict[str, str]:
     profile = {
         "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
         **PROCESS_NUMERICS}
-    for name in tuple(os.environ):
-        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
-            del os.environ[name]
+    clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
     return profile
 
@@ -180,6 +182,16 @@ class Nemotron3SuperAdapter(FlashNextAdapter):
         return None
 
     def __init__(self, model_path: str, *, execution_policy=None):
+        # Overrides FlashNextAdapter.__init__, so it owns its own claim.
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self, lambda: self._init_nemotron(model_path, execution_policy=execution_policy)
+        )
+
+    def _init_nemotron(self, model_path: str, *, execution_policy=None):
+        from .process_globals import claim_stock_moe
+
         if execution_policy is not None and (
             not isinstance(execution_policy, dict)
             or set(execution_policy) - {"num_draft"}
@@ -196,6 +208,7 @@ class Nemotron3SuperAdapter(FlashNextAdapter):
         self.identity = artifact["identity"]
         self.layout = CACHE_LAYOUT
         self.environment = configure_environment()
+        claim_stock_moe(self, "the Nemotron 3 Super adapter")
         path = Path(self.identity["path"])
         import mlx.core as mx
         from mlx import nn
@@ -224,8 +237,27 @@ class Nemotron3SuperAdapter(FlashNextAdapter):
                                           eos_token_ids=[2, 11])
         self.max_context = config["max_position_embeddings"]
 
+    # The inherited Flash-Next renderer defaults thinking off; this family
+    # defaults it on, so the incremental tokenizer cache renders through the
+    # same default as render_prompt / prompt_tokens (sweep 2026-10-06 G2-01).
+    incremental_tokenizer_renderer_revision = "nemotron-h-renderer-v1"
+
+    @staticmethod
+    def _thinking_request(request):
+        return {**request, "enable_thinking": bool(request.get("enable_thinking", True))}
+
     def thinking_enabled(self, request):
-        return bool(request.get("enable_thinking", True))
+        return self._thinking_request(request)["enable_thinking"]
+
+    @staticmethod
+    def render_incremental_prompt(tokenizer, request: dict) -> str:
+        """Render against the cache's immutable tokenizer/template snapshot."""
+        if "messages" in request:
+            from .flash_next import chat_template
+            return chat_template(
+                tokenizer, Nemotron3SuperAdapter._thinking_request(request), tokenize=False
+            )
+        return request["prompt"]
 
     def prompt_tokens(self, request):
         if "messages" in request:
@@ -342,4 +374,7 @@ class Nemotron3SuperAdapter(FlashNextAdapter):
                 "mtp_head_present": True, "mtp_candidate": True}
 
     def close(self):
+        from .process_globals import release
+
+        release(self)
         self.model = None

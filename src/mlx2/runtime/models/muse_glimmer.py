@@ -18,7 +18,10 @@ class CenteredRMSNorm(nn.Module):
         self.eps = eps
 
     def __call__(self, x: mx.array) -> mx.array:
-        return mx.fast.rms_norm(x, 1.0 + self.weight, self.eps)
+        # HF and mlx-vlm apply the centered scale in fp32 and cast back; in
+        # bf16, 1 + w rounds to steps of 2^-7 and changed decode choices.
+        scale = 1.0 + self.weight.astype(mx.float32)
+        return mx.fast.rms_norm(x.astype(mx.float32), scale, self.eps).astype(x.dtype)
 
 
 class Attention(nn.Module):
@@ -55,7 +58,9 @@ class Attention(nn.Module):
         v = self.v_proj(x).reshape(B, L, self.n_kv_heads, self.head_dim)
 
         # Scaleless QK-norm over head_dim; Q additionally scaled.
-        q = mx.fast.rms_norm(q, None, self.eps) * self.qk_scale_factor
+        q = (
+            mx.fast.rms_norm(q, None, self.eps).astype(mx.float32) * self.qk_scale_factor
+        ).astype(q.dtype)
         k = mx.fast.rms_norm(k, None, self.eps)
 
         q = q.transpose(0, 2, 1, 3)

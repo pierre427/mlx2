@@ -199,6 +199,15 @@ class _GptOssOrdinaryAdapter:
     reasoning_effort_semantics = "reasoning_strength"
 
     def __init__(self, model_path: str, *, execution_policy=None):
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self, lambda: self._init_gpt_oss(model_path, execution_policy=execution_policy)
+        )
+
+    def _init_gpt_oss(self, model_path: str, *, execution_policy=None):
+        from .process_globals import claim_stock_moe
+
         if execution_policy not in (None, {}):
             raise ValueError("GPT-OSS supports only ordinary execution")
         artifact = inspect_artifact(model_path, expected=self.expected_type)
@@ -206,6 +215,9 @@ class _GptOssOrdinaryAdapter:
         self.descriptor = descriptor_for(self.expected_type)
         self.layout = self.descriptor.cache_layout
         self.environment = configure_environment()
+        # The biased experts skip the NAX gather, but every sorted gather
+        # reads the rhs pad policy.
+        claim_stock_moe(self, f"the {self.expected_type} adapter")
         config = artifact["config"]
         path = Path(self.identity["path"])
 
@@ -369,6 +381,9 @@ class _GptOssOrdinaryAdapter:
                 "qualification": "pending", "route": "ordinary"}
 
     def close(self):
+        from .process_globals import release
+
+        release(self)
         self.model = None
         self.tokenizer = None
 

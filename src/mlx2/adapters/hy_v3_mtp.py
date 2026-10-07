@@ -1,7 +1,7 @@
-"""Explicit, unqualified HY V3 embedded MTP candidate.
+"""Header-only inspection of the HY V3 embedded MTP sidecar.
 
-Ordinary serving never loads or selects this sidecar. The loader is for an
-offline parity gate with a bound HY V3 target; it does not advertise MTP.
+There is no loader: the runtime model is trunk-only and drops the sidecar's
+tensors.  Ordinary serving never calls this, and it does not advertise MTP.
 """
 
 from __future__ import annotations

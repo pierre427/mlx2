@@ -14,7 +14,18 @@ def load_backend(source_root: str | Path, revision: str, source_paths: tuple[str
     actual = subprocess.check_output(
         ["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
     if actual != revision:
-        raise RuntimeError(f"MLX-VLM source revision mismatch: {actual}")
+        from .mlx_vlm_pin import MLX_VLM_REVISION
+
+        raise RuntimeError(
+            f"MLX-VLM source revision mismatch: {root} is at {actual}, this "
+            f"candidate requires {revision}"
+            + (
+                f" (the project pin installs {MLX_VLM_REVISION[:8]}, which is not "
+                f"it; put a clean {revision[:8]} checkout first on PYTHONPATH)"
+                if revision != MLX_VLM_REVISION
+                else ""
+            )
+        )
     changed = subprocess.run(
         ["git", "-C", str(root), "diff", "--quiet", "HEAD", "--", *source_paths],
         check=False,

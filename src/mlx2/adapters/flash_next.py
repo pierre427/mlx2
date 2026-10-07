@@ -7,7 +7,11 @@ import copy
 import json
 import os
 from pathlib import Path
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..process_env import (
+    PROCESS_NUMERICS,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 
 
 # Default on at width 3 (width 4 until 2026-10-02; Qwen3.8 stays at 4 and
@@ -116,9 +120,7 @@ def configure_environment(model_path: Path, policy=None) -> dict[str, str]:
     }
     profile.update(policy.environment())
     # An inherited lab experiment must not silently change the serving profile.
-    for name in tuple(os.environ):
-        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
-            del os.environ[name]
+    clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
     return profile
 

@@ -8,7 +8,11 @@ import os
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..process_env import (
+    PROCESS_NUMERICS,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 from .mtp_depth_cap import validate_self_mtp_num_draft
 from .qwen38_27b import (
     EAGER_DISPATCH_POLICY_KEYS,
@@ -360,9 +364,7 @@ def configure_environment(kernels=None, moe_nax_gather=None) -> dict[str, str]:
         profile["MLX_QWEN36_DECODE_WINS"] = "1"
     if moe_nax_gather is not None:
         profile["MLX2_MOE_NAX_GATHER"] = moe_nax_gather
-    for name in tuple(os.environ):
-        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
-            del os.environ[name]
+    clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
     return profile
 
@@ -567,14 +569,21 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         # this profile; the decode switches are re-applied live below.
         assert_profile_applied("the Qwen3.6 35B adapter", live=LIVE_APPLIED_ENV)
         from ..runtime.models import moe_nax_gather as _moe_nax
-        from .process_globals import MOE_NAX_GATHER, claim
+        from ..runtime.models import switch_layers as _switch_layers
+        from .process_globals import MOE_NAX_GATHER, MOE_RHS_PAD_POLICY, claim
 
-        # A process global: refuse a mode a live adapter does not run, and
-        # roll it back if this load fails (process_globals).
+        # Process globals: refuse a mode a live adapter does not run, and
+        # roll it back if this load fails (process_globals).  The routed
+        # experts' sorted gathers also read the rhs pad policy, which is not
+        # bit-exact across policies; the 35B tables are uncalibrated, so
+        # Flash-Next's "adaptive" would run floor anyway.
         self._process_claim = claim(
             self,
             "the Qwen3.6 35B adapter",
-            {MOE_NAX_GATHER: (self.moe_nax_gather, _moe_nax.set_mode)},
+            {
+                MOE_NAX_GATHER: (self.moe_nax_gather, _moe_nax.set_mode),
+                MOE_RHS_PAD_POLICY: ("floor", _switch_layers.set_pad_policy),
+            },
         )
         self.layout = CACHE_LAYOUT
         self._tables = []

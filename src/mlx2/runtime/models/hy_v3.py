@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Adapted from mlx-lm-unified; see provenance/hy-v3.json.
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import mlx.core as mx
@@ -33,18 +33,20 @@ class ModelArgs(BaseModelArgs):
     first_k_dense_replace: int
     rms_norm_eps: float
     rope_parameters: Dict[str, Any]
-    router_scaling_factor: float = 1.0
+    # Reference HYV3Config defaults (the unified source had 1.0 / False, so a
+    # config omitting them ran routed experts about 2.8x weaker).
+    router_scaling_factor: float = 2.826
     qk_norm: bool = True
     route_norm: bool = True
     moe_router_use_sigmoid: bool = True
     moe_router_enable_expert_bias: bool = True
     tie_word_embeddings: bool = False
     num_nextn_predict_layers: int = 0
-    # The MTP (nextn) sidecar keeps the base model's full routed-expert set even
-    # on REAP-pruned trunks, so its expert count can differ from num_experts.
+    # Accepted from the config only: the MTP (nextn) sidecar, whose expert
+    # set can differ from a REAP-pruned trunk's, is not built here.
     mtp_num_experts: Optional[int] = None
     max_position_embeddings: int = 262144
-    enable_moe_fp32_combine: bool = False
+    enable_moe_fp32_combine: bool = True
     enable_lm_head_fp32: bool = False
 
 
@@ -267,36 +269,6 @@ class HYV3Model(PipelineMixin, nn.Module):
         return self.norm(h)
 
 
-class HYV3MTP(nn.Module):
-    """Multi-token-prediction (nextn) sidecar — mirrors the reference HYV3
-    MTP layer (vLLM hy_v3_mtp.py):
-
-        eh_proj([enorm(embed(t_{p+1})); hnorm(hidden_p)]) -> one full
-        DecoderLayer (own KV cache) -> final_layernorm -> the trunk's lm_head.
-
-    Predicts token p+2 from the trunk's post-final-norm hidden at p and the
-    committed token p+1, enabling self-speculative decoding with no external
-    draft model. Built only when args.num_nextn_predict_layers > 0. Its MoE
-    keeps the base model's full expert set (mtp_num_experts), which may exceed
-    a REAP-pruned trunk's num_experts."""
-
-    def __init__(self, args: ModelArgs):
-        super().__init__()
-        self.enorm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
-        self.hnorm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
-        self.eh_proj = nn.Linear(2 * args.hidden_size, args.hidden_size, bias=False)
-        mtp_args = replace(args, num_experts=args.mtp_num_experts or args.num_experts)
-        # layer_idx >= first_k_dense_replace so the block is MoE.
-        self.layer = DecoderLayer(mtp_args, layer_idx=args.num_hidden_layers)
-        self.final_layernorm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
-
-
-# HF/tencent checkpoints store the depth-1 MTP sidecar as an extra decoder
-# layer (index num_hidden_layers). These suffixes live at the sidecar root;
-# everything else belongs to its inner DecoderLayer.
-_MTP_ROOT_SUFFIXES = ("eh_proj.", "enorm.", "hnorm.", "final_layernorm.")
-
-
 class Model(nn.Module):
     apc_v2_layout = "hy-v3-full-kv-v1"
 
@@ -307,7 +279,8 @@ class Model(nn.Module):
         self.model = HYV3Model(args)
         if not args.tie_word_embeddings:
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
-        # Ordinary decode does not construct the unqualified MTP sidecar.
+        # Trunk only: mlx2 carries no MTP sidecar (checkpoint MTP tensors are
+        # dropped in sanitize; adapters/hy_v3_mtp.py inspects headers only).
 
     def __call__(
         self,
@@ -326,77 +299,17 @@ class Model(nn.Module):
             return self.model.embed_tokens.as_linear(hidden)
         return self.lm_head(hidden)
 
-    def make_mtp_cache(self):
-        return [KVCache()]
-
-    def mtp_step(self, hidden, tokens, mtp_cache):
-        """One MTP forward over S positions.
-
-        hidden: [B, S, H] post-final-norm trunk hiddens at positions p..p+S-1.
-        tokens: [B, S] the committed/drafted token FOLLOWING each hidden's
-        position (p+1..p+S). Returns (last_logits [B, 1, V], post_norm_hidden
-        [B, S, H]) — logits only for the final position, since drafting (and
-        teacher-forced context feeding) never consumes the earlier ones and
-        the fp32 lm_head over the full span would dominate the head's cost.
-        """
-        e = self.mtp.enorm(self.model.embed_tokens(tokens))
-        h = self.mtp.hnorm(hidden)
-        x = self.mtp.eh_proj(mx.concatenate([e, h], axis=-1))
-        mask = create_attention_mask(x, mtp_cache[0])
-        x = self.mtp.layer(x, mask=mask, cache=mtp_cache[0])
-        post = self.mtp.final_layernorm(x)
-        return self.logits(post[:, -1:, :]), post
-
-    def _remap_mtp_weights(self, weights):
-        """Remap HF-format MTP tensors (model.layers.<n_layers + i>.*) onto the
-        mtp.* module namespace. Depth-1 only: extra MTP layers are dropped."""
-        n_layers = self.args.num_hidden_layers
-        n_mtp = self.args.num_nextn_predict_layers
-        for i in range(1, n_mtp):
-            prefix = f"model.layers.{n_layers + i}."
-            weights = {k: v for k, v in weights.items() if not k.startswith(prefix)}
-
-        prefix = f"model.layers.{n_layers}."
-        remapped = {}
-        for k, v in weights.items():
-            if not k.startswith(prefix):
-                remapped[k] = v
-                continue
-            suffix = k[len(prefix) :]
-            if suffix.startswith(_MTP_ROOT_SUFFIXES):
-                remapped[f"mtp.{suffix}"] = v
-            else:
-                remapped[f"mtp.layer.{suffix}"] = v
-        return remapped
-
     def sanitize(self, weights):
         n_layers = self.args.num_hidden_layers
-        n_mtp = 0
+        # Drop the checkpoint's MTP sidecar (either spelling): trunk only.
         weights = {k: v for k, v in weights.items() if not k.startswith("mtp.") and not k.startswith(f"model.layers.{n_layers}.")}
 
-        if n_mtp > 0:
-            if any(k.startswith(f"model.layers.{n_layers}.") for k in weights):
-                weights = self._remap_mtp_weights(weights)
-            if getattr(self, "mtp", None) is not None and not any(
-                k.startswith("mtp.") for k in weights
-            ):
-                # Config declares a nextn head but this checkpoint shipped
-                # without one (the common MLX repack): drop the module so
-                # strict loading stays consistent.
-                self.mtp = None
-
-        mlp_prefixes = [f"model.layers.{l}.mlp" for l in range(n_layers)]
-        if getattr(self, "mtp", None) is not None:
-            mlp_prefixes.append("mtp.layer.mlp")
-
-        n_experts = self.args.num_experts
-        mtp_experts = self.args.mtp_num_experts or n_experts
-        for prefix in mlp_prefixes:
+        n_e = self.args.num_experts
+        for prefix in (f"model.layers.{l}.mlp" for l in range(n_layers)):
             bias_key = f"{prefix}.expert_bias"
             if bias_key in weights:
                 weights[f"{prefix}.router.expert_bias"] = weights.pop(bias_key)
 
-            n_e = mtp_experts if prefix.startswith("mtp.") else n_experts
             for m in ("gate_proj", "down_proj", "up_proj"):
                 for k in ("weight", "scales", "biases"):
                     if f"{prefix}.experts.0.{m}.{k}" in weights:

@@ -15,7 +15,11 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..process_env import (
+    PROCESS_NUMERICS,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 from ..runtime.activation_injection import (
     bind_activation_injection_bridge,
     compose_deep_concept_memory,
@@ -89,9 +93,7 @@ def configure_environment() -> dict[str, str]:
         "MLX_LM_SHARED_QSA_SUFFIX": "0",
         "MLX_LM_MTP_BOUNDARY_COW": "0",
     }
-    for name in tuple(os.environ):
-        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
-            del os.environ[name]
+    clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
     return profile
 
@@ -483,12 +485,7 @@ class Qwen359BAdapter(Qwen3827BAdapter):
     def cache_budget(self, *, mtp):
         if mtp:
             raise ValueError("Qwen3.5 9B MTP is not implemented")
-        from .qwen38_memory import Qwen38CacheBudget
-
-        budget = Qwen38CacheBudget.from_config(
-            self.model.args.text_config, mtp=False
-        )
-        return _Qwen35CacheBudget(budget, family="9b")
+        return _Qwen35CacheBudget(_dense_qwen35_budget(self), family="9b")
 
     def diagnostics(self):
         result = {
@@ -521,6 +518,38 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         return result
 
 
+# The Qwen3.8 27B workspace measurements (qwen38_memory: 3.1 GiB per lane,
+# 2.0 GiB per 2048-row prefill chunk) were taken at hidden 5120 /
+# intermediate 17408.  No 4B/9B measurement exists yet, so they are scaled by
+# the larger of the two width ratios (the forward's per-row activations and
+# MLP intermediates are what the workspace holds), never above the measured
+# 27B values.  Replace with a scripts/measure_lane_transient.py measurement
+# (provenance/lane-transient-moe.json method) when one is taken on GPU.
+_DENSE_27B_WIDTHS = {"hidden_size": 5120, "intermediate_size": 17408}
+
+
+def _dense_qwen35_budget(adapter):
+    """The shared dense hybrid cache bound at this model's own geometry."""
+    from dataclasses import replace
+
+    from .flash_next import gdn_state_bytes
+    from .qwen38_memory import Qwen38CacheBudget
+
+    text = adapter.model.args.text_config
+    budget = Qwen38CacheBudget.from_config(
+        text, mtp=False, recurrent_state_bytes=gdn_state_bytes(adapter)
+    )
+    # A width the config omits is charged at the 27B value.
+    scale = min(1.0, max(
+        int(text.get(name, width)) / width for name, width in _DENSE_27B_WIDTHS.items()
+    ))
+    return replace(
+        budget,
+        transient_gib_per_lane=round(budget.transient_gib_per_lane * scale, 2),
+        prefill_chunk_transient_gib=round(budget.prefill_chunk_transient_gib * scale, 2),
+    )
+
+
 class _Qwen35CacheBudget:
     """Family-specific receipt schema around shared dense Qwen3.5 geometry."""
 
@@ -534,4 +563,5 @@ class _Qwen35CacheBudget:
     def as_dict(self):
         value = self._budget.as_dict()
         value["schema"] = f"qwen35-{self._family}-cache-geometry-v1"
+        value["workspace_basis"] = "qwen38-27b-measurement-scaled-by-width-unmeasured"
         return value

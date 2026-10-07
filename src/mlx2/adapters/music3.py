@@ -103,6 +103,13 @@ class GeneratedMusic:
     artifact_fingerprint: str
     lora_fingerprint: str | None = None
     state_epoch: int = 0
+    # Request parameters, so the receipt reproduces the clip.
+    seed: int | None = None
+    steps: int | None = None
+    # Single-window generation seeds the DiT with mx.random.key(seed); the
+    # reference CLI's multiwindow default derives it per window
+    # (derive_dit_seed(seed, 0)), so one seed gives different audio there.
+    dit_seed_derivation: str = "single-window-mx.random.key(seed)"
 
 
 def _runtime_modules(runtime_root):
@@ -338,6 +345,8 @@ class Music3Adapter(MediaLoRAControl):
             self.artifact.fingerprint,
             self._lora.fingerprint if self._lora else None,
             self._lora_epoch,
+            seed=seed,
+            steps=steps,
         )
 
 
