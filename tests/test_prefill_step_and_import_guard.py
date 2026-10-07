@@ -285,3 +285,46 @@ def test_prefill_identity_reaches_settings_and_both_cache_namespaces(monkeypatch
 def test_prefill_candidate_fails_closed_without_qualification(monkeypatch):
     _engine_settings(monkeypatch, 512, prefill_identity={"scan": {"chunk_size": 8}},
                      expect_error="prefill candidates require qualification")
+
+
+def test_serving_reports_and_warns_on_an_unverified_mlx_build(monkeypatch, caplog):
+    """A bumped MLX is visible in status and the log, not only in QSA declines."""
+    from mlx2.runtime import mlx_build
+
+    monkeypatch.setattr(mlx_build, "installed_mlx_build", lambda: "0.32.3")
+    with caplog.at_level("WARNING", logger="mlx2.serving"):
+        _settings, _seen, engine = _engine_settings(monkeypatch, None)
+    reported = engine.status()["mlx_build"]
+    assert reported["build"] == "0.32.3"
+    assert reported["kernels_verified"] is False
+    assert "requalify" in reported["warning"]
+    assert any("0.32.3" in r.getMessage() for r in caplog.records)
+
+
+def test_mlx_build_list_is_the_one_indexed_qsa_enforces():
+    from mlx2.runtime import mlx_build
+    from mlx2.runtime.models import qwen4_qsa_indexed
+
+    assert qwen4_qsa_indexed._EXACT_MLX_BUILDS is mlx_build.VERIFIED_MLX_BUILDS
+    build = next(iter(mlx_build.VERIFIED_MLX_BUILDS))
+    assert mlx_build.status(build) == {"build": build, "kernels_verified": True}
+
+
+def test_serve_extra_caps_mlx_below_the_next_release():
+    """pip must not silently take a build the exact kernels were not verified on."""
+    import tomllib
+    from pathlib import Path
+
+    from packaging.requirements import Requirement
+
+    pyproject = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    )
+    (mlx,) = [
+        Requirement(r)
+        for r in pyproject["project"]["optional-dependencies"]["serve"]
+        if r.startswith("mlx")
+    ]
+    assert mlx.specifier.contains("0.32.2.dev20260919+39400a0d4", prereleases=True)
+    assert not mlx.specifier.contains("0.32.3", prereleases=True)
+    assert not mlx.specifier.contains("0.32.3.dev20261005", prereleases=True)

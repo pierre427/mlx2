@@ -6970,6 +6970,13 @@ class ServingEngine:
             from .runtime import weight_residency
 
             self.weight_residency = weight_residency.wire_serving_weights()
+            from .runtime import mlx_build
+
+            self.mlx_build = mlx_build.status()
+            if not self.mlx_build["kernels_verified"]:
+                log.warning(
+                    "mlx %s: %s", self.mlx_build["build"], self.mlx_build["warning"]
+                )
             preferred = getattr(adapter, "prefill_step_default", None)
             preference = preferred() if self._prefill_step_override is None and callable(preferred) else None
             if preference is not None:
@@ -8406,6 +8413,7 @@ class ServingEngine:
                     "profile": profile_name,
                     "settings": settings,
                     "weight_residency": getattr(self, "weight_residency", None),
+                    "mlx_build": getattr(self, "mlx_build", None),
                     "route_receipt": route_receipt,
                     "capabilities": sorted(
                         capability.value for capability in self.route_capabilities

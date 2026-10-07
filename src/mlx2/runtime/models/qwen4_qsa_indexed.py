@@ -24,6 +24,7 @@ from .qwen4_qsa_indexed_merge import (
 from .qwen4_qsa_nax import compact_blocks_to_kernel_inputs, compact_token_validity
 
 from .import_env import snapshot as _import_env_snapshot
+from ..mlx_build import VERIFIED_MLX_BUILDS
 
 _import_env_snapshot(__name__)
 
@@ -54,10 +55,9 @@ _HPT_ALLOWED = (12, 6, 4, 3, 2, 1)
 # served request above indexed_min_context, which is correct behaviour but also
 # made Flash-Next unqualifiable at 131k: the receipt requires observed evidence
 # of a selected feature the runtime was declining to run.
-_EXACT_MLX_BUILDS = frozenset(
-    {"0.32.2.dev20260829+334084ce9", "0.32.2.dev20260911+a0d69e543",
-     "0.32.2.dev20260915+2a817ad94", "0.32.2.dev20260919+39400a0d4"}
-)
+# The list itself lives in runtime/mlx_build.py, shared with the serving
+# status report; this module keeps its own name so tests can patch it.
+_EXACT_MLX_BUILDS = VERIFIED_MLX_BUILDS
 _SDPA_VECTOR_HEADER_SHA256 = (
     "2100a4d1eaa8a524c5147c82c771cad75197495c72daffa03e7ea4c259aebf10"
 )
