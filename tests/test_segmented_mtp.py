@@ -3364,9 +3364,12 @@ def test_prompt_lookup_round_does_not_copy_kv_buffers():
     from mlx2.runtime import pld
 
     model = _tiny_hybrid_mtp_model()
+    # Serial plain rounds: a pipelined round drops the one-round random
+    # matches this test needs to exercise verify rounds.
     generator = pld.PromptLookupBatchGenerator(
         model, prefill_step_size=512,
-        prompt_lookup={"num_draft": 2, "ngram_min": 2, "ngram_max": 2},
+        prompt_lookup={"num_draft": 2, "ngram_min": 2, "ngram_max": 2,
+                       "pipelined_plain": False},
     )
     mx.random.seed(11)
     prompt = mx.random.randint(1, 127, (1200,)).tolist()

@@ -783,7 +783,43 @@ class SegmentedBatchArraysCache(Qwen4ArraysCache):
         self.speculating = True
         # Slots written through this view since the last trim; see trim_ragged.
         self._written_slots = set()
+        # Per slot, the row arrays the joined state was last built from or
+        # split into (``resync`` reuses the joined state while they stand).
+        self._row_arrays = {}
         self._refresh_state()
+        self._note_rows()
+        self._checkpoints = [
+            list(row._checkpoints[0]) if len(row._checkpoints) == 1 else []
+            for row in self.rows
+        ]
+
+    def _note_rows(self):
+        self._row_arrays = {
+            slot: [row.cache[slot] for row in self.rows]
+            for slot in range(len(self.cache))
+        }
+
+    def resync(self, *, speculating):
+        """Make a view kept across rounds current for the next one.
+
+        The joined state stays when every row still holds exactly the arrays
+        it was joined from or split into; anything else (an abort, a release,
+        a trim replay, an outside write) re-joins from the rows.
+        """
+        current = all(
+            len(written) == len(self.rows)
+            and all(row.cache[slot] is value for row, value in zip(self.rows, written))
+            for slot, written in (
+                (slot, self._row_arrays.get(slot, ())) for slot in range(len(self.cache))
+            )
+        )
+        if not current:
+            self._refresh_state()
+            self._note_rows()
+        else:
+            self._bump("recurrent_state_rejoins_avoided")
+        self.speculating = bool(speculating)
+        self._written_slots = set()
         self._checkpoints = [
             list(row._checkpoints[0]) if len(row._checkpoints) == 1 else []
             for row in self.rows
@@ -822,11 +858,15 @@ class SegmentedBatchArraysCache(Qwen4ArraysCache):
         if value is None:
             for row in self.rows:
                 row[idx] = None
+            self._row_arrays[idx] = [None] * len(self.rows)
         else:
             if value.shape[0] != len(self.rows):
                 raise ValueError("segmented recurrent write has wrong batch size")
-            for index, row in enumerate(self.rows):
-                row[idx] = mx.contiguous(value[index : index + 1])
+            # One split call; each row is a view of the contiguous value.
+            parts = mx.split(mx.contiguous(value), len(self.rows), axis=0)
+            for row, part in zip(self.rows, parts):
+                row[idx] = part
+            self._row_arrays[idx] = parts
         self._bump("row_state_splits", len(self.rows))
 
     @property
@@ -922,6 +962,7 @@ class SegmentedBatchArraysCache(Qwen4ArraysCache):
         # last trim. Anything else re-joins from the rows.
         if any(counts) or len(self._written_slots) != len(self.cache):
             self._refresh_state()
+            self._note_rows()
         self._written_slots = set()
         return counts
 

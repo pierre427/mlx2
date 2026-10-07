@@ -278,6 +278,19 @@ _argmax_sampler.deterministic = True
 
 
 @dataclass
+class _PlainInflight:
+    """A dispatched plain round whose outputs the host has not read yet."""
+
+    lanes: list
+    steps: list
+    transaction: Any
+    logits: Any
+    prepared: list
+    # Rows rewound and dropped before the read (finished, failed, removed).
+    dropped: set = field(default_factory=set)
+
+
+@dataclass
 class _Lane:
     uid: int
     remaining: deque
@@ -315,6 +328,14 @@ class _Lane:
     # wider cohort, or a recurrent rollback epoch).  Receipts report it.
     round_target_path: str = "plain_decode"
     verify_path_rounds: int = 0
+    # Topology of the lane's planes (recurrent plus KV), fixed at arming.
+    hybrid_rows: bool = False
+    # A pipelined plain round found a proposal it could not verify: the next
+    # poll drains the pipeline so the round after it can propose.
+    pipeline_blocked: bool = False
+    # The finish reason of the round being committed (stop/length or None).
+    round_finish: Any = None
+    pipelined_rounds: int = 0
     source_scope: object = None
     source_stats: dict = field(default_factory=dict)
     apcv2_source_segments: int = 0
@@ -329,6 +350,12 @@ class PromptLookupBatchGenerator:
     one target forward per round; the others verify B1 per lane, amortizing
     multiple predicted positions into one target forward.
     """
+
+    # Set per instance; class defaults keep init-bypassing stubs serial.
+    pipelined_plain = False
+    _inflight = None
+    # The hybrid cohort's verify owner, kept while its lanes are unchanged.
+    _cohort_owner = None
 
     # Every policy key this generator reads.  ``ServingEngine`` rejects an
     # execution policy naming anything else, matching the adapters' own
@@ -372,6 +399,7 @@ class PromptLookupBatchGenerator:
             "verify_cliff_end",
             "rotating_replay",
             "batched_verify",
+            "pipelined_plain",
             "max_proposal_tokens",
             "memory_max_draft",
             "recent_committed_segments",
@@ -447,6 +475,7 @@ class PromptLookupBatchGenerator:
             "cliff_aware_span",
             "rotating_replay",
             "batched_verify",
+            "pipelined_plain",
             "recent_committed_segments",
         ):
             if name in validated and type(validated[name]) is not bool:
@@ -551,6 +580,11 @@ class PromptLookupBatchGenerator:
         # On unless disabled: verification stays target-exact either way, and
         # it only engages for lanes whose planes are all plain/rotating KV.
         self.batched_verify = bool(self.config.get("batched_verify", True))
+        # On unless disabled: a proposal-free round of a hybrid cohort is
+        # dispatched before the previous one is read, as ordinary batched
+        # decode overlaps its host work with the device (``_advance_inflight``).
+        self.pipelined_plain = bool(self.config.get("pipelined_plain", True))
+        self._inflight = None
         self.rotating_replay_policy = RotatingReplayPolicy(
             enabled=self.rotating_replay,
             max_proposal_tokens=1
@@ -592,6 +626,11 @@ class PromptLookupBatchGenerator:
             "pld_batched_rounds": 0,
             "pld_batched_lanes": 0,
             "pld_batched_max_width": 0,
+            "pld_pipelined_rounds": 0,
+            "pld_pipeline_drains": 0,
+            "pld_pipeline_dropped_proposals": 0,
+            "pld_pipeline_refuted_proposals": 0,
+            "pld_pipeline_released_rows": 0,
             "pld_parked_direct_rounds": 0,
             "pld_cost_width1_cohort_splits": 0,
             "pld_recovery_checkpoint_captures": 0,
@@ -956,6 +995,7 @@ class PromptLookupBatchGenerator:
         return restored
 
     def _arm_lane_speculation(self, lane):
+        lane.hybrid_rows = self._hybrid(lane)
         # An explicit rotating-replay policy selects that per-lane transaction.
         lane.batched = (
             self.batched_verify
@@ -963,7 +1003,7 @@ class PromptLookupBatchGenerator:
             and self._batchable(lane.cache)
             and (
                 getattr(self.model, "supports_speculative_rollback", False)
-                or not self._hybrid(lane)
+                or not lane.hybrid_rows
             )
         )
         if lane.batched:
@@ -1091,6 +1131,22 @@ class PromptLookupBatchGenerator:
             value = processor(context, value)
         row = value[0].astype(mx.float32)
         return row - mx.logsumexp(row)
+
+    @classmethod
+    def _prepare_plain_row(cls, lane, logits):
+        """Lazy row, token and finiteness of an anchor-only round.
+
+        The anchor's row is always sampled, so drawing it at dispatch takes
+        the same single draw from the lane's stream as drawing it after the
+        read; the token can then feed the next round before the host has it.
+        """
+        row = cls._processed_row(lane, logits[0])
+        token = lane.sampler(row[None])[0]
+        return {
+            "rows": [row],
+            "tokens": mx.stack([token]),
+            "finite": mx.stack([_finite_at(row, token)]),
+        }
 
     @classmethod
     def _prepare_rows(cls, lane, logits, proposal):
@@ -1287,17 +1343,25 @@ class PromptLookupBatchGenerator:
             )
         )
 
-    @staticmethod
-    def _begin_verify(lanes, lengths):
-        """Open the verify transaction chosen by cache topology, never by model."""
+    def _begin_verify(self, lanes, lengths):
+        """Open the verify transaction chosen by cache topology, never by model.
+
+        A hybrid cohort keeps its owner (and so its batched views) from round
+        to round while its lanes and their cache planes are the same objects.
+        """
         from .hybrid_verify_rows import HybridVerifyRows, is_hybrid_rows
         from .segmented_rotating_kv import SegmentedKVRows
 
         rows = [lane.cache for lane in lanes]
-        if is_hybrid_rows(rows):
+        owner = self._cohort_owner
+        if owner is None or not owner.holds(rows):
+            owner = self._cohort_owner = None
+            if is_hybrid_rows(rows):
+                owner = self._cohort_owner = HybridVerifyRows(rows)
+        if owner is not None:
             # A round of anchors only is a plain decode step: no rollback
             # epoch, no verify kernel, nothing to trim at commit.
-            return HybridVerifyRows(rows).begin(lengths, plain_single_token=True)
+            return owner.begin(lengths, plain_single_token=True)
         return SegmentedKVRows(rows).begin(lengths=lengths)
 
     def _round_batched(self, lanes):
@@ -1321,6 +1385,13 @@ class PromptLookupBatchGenerator:
         # round, for a checkpoint the batched path never restored.
         lengths = [len(inputs) for inputs, _proposal in plans]
         width = max(lengths)
+        if width == 1 and self._pipeline_eligible(lanes):
+            # A proposal-free round of a hybrid cohort: dispatch it now and
+            # read it next poll, after the round that follows is dispatched.
+            self._inflight = self._dispatch_plain(
+                lanes, steps, [inputs[0] for inputs, _proposal in plans]
+            )
+            return
         transaction = self._begin_verify(lanes, lengths)
         # One forward serves the cohort: a lane without a proposal still runs
         # as a verify row unless the whole round is one plain decode step.
@@ -1396,6 +1467,200 @@ class PromptLookupBatchGenerator:
         if failures:
             raise PromptLookupRoundFailures(failures)
 
+    def _pipeline_eligible(self, lanes):
+        """Lanes whose anchor-only round may run before the host reads them.
+
+        Hybrid planes (their plain transaction can release a finished row),
+        no processors (nothing reads host tokens or steers the forward), no
+        cost latch (it times one round at a time).
+        """
+        return self.pipelined_plain and all(
+            lane.batched
+            and lane.hybrid_rows
+            and lane.cost_latch is None
+            and not lane.processors
+            for lane in lanes
+        )
+
+    def _dispatch_plain(self, lanes, steps, anchors):
+        """Begin and dispatch one anchor-only round; nothing is read.
+
+        ``anchors`` are host tokens or the previous round's lazy tokens.
+        """
+        transaction = self._begin_verify(lanes, [1] * len(lanes))
+        try:
+            if not getattr(transaction, "plain", False):
+                raise RuntimeError("a pipelined round requires a plain transaction")
+            with mx.stream(generation_stream):
+                if isinstance(anchors, mx.array):
+                    tokens = anchors.astype(mx.uint32)[:, None]
+                else:
+                    tokens = mx.array([[int(a)] for a in anchors], dtype=mx.uint32)
+                logits = self.model(tokens, cache=transaction.caches)
+                prepared = [
+                    self._prepare_plain_row(lane, logits[row])
+                    for row, lane in enumerate(lanes)
+                ]
+                mx.async_eval(logits, self._prepared_arrays(prepared))
+        except BaseException:
+            self._recover_uncommitted_round(lanes, transaction)
+            raise
+        return _PlainInflight(
+            lanes=list(lanes),
+            steps=list(steps),
+            transaction=transaction,
+            logits=logits,
+            prepared=prepared,
+        )
+
+    def _release_inflight_row(self, inflight, row):
+        """Rewind one lane out of a dispatched plain round."""
+        if row in inflight.dropped:
+            return
+        inflight.dropped.add(row)
+        self.scheduler_stats["pld_pipeline_released_rows"] += 1
+        inflight.transaction.release_row(row)
+
+    def _advance_inflight(self, together):
+        """Dispatch the next plain round if the cohort allows, then read this one.
+
+        Returns the lanes that still need a round this poll: none when the
+        pipeline continues, else the cohort (and any newcomers) for an
+        ordinary ``_round_batched`` after the drain.
+
+        The pipelined round is committed before the next begins: a plain
+        round consumes every anchor, so its commit needs no host token.  A
+        lane that finishes (or fails) on the read round had already been fed
+        to the next one; that row is released, back to the boundary the read
+        round committed, before the finished lane's cache is frozen.
+        """
+        inflight, self._inflight = self._inflight, None
+        live = [
+            lane for row, lane in enumerate(inflight.lanes)
+            if row not in inflight.dropped
+        ]
+        proceed = (
+            self.pipelined_plain
+            and len(live) == len(inflight.lanes)
+            and {id(lane) for lane in together} == {id(lane) for lane in live}
+            and not any(lane.pipeline_blocked for lane in live)
+            # The read round must not finish a lane by length.
+            and all(lane.generated + 2 <= lane.maximum for lane in live)
+        )
+        try:
+            inflight.transaction.commit(accepted_lengths=[1] * len(inflight.lanes))
+        except BaseException:
+            # Unread, so the host never saw this round: back to before it.
+            self._recover_uncommitted_round(live, inflight.transaction)
+            raise
+        following = dispatch_error = None
+        if proceed:
+            anchors = mx.concatenate(
+                [prepared["tokens"] for prepared in inflight.prepared]
+            )
+            try:
+                following = self._dispatch_plain(
+                    live, [None] * len(live), anchors
+                )
+            except BaseException as error:  # noqa: BLE001 - read the round first
+                dispatch_error = error
+        else:
+            self.scheduler_stats["pld_pipeline_drains"] += 1
+        try:
+            self._read_inflight(inflight, following)
+        except PromptLookupLaneFailure:
+            raise
+        except BaseException:
+            # The read round is committed to the caches but not (or not for
+            # every lane) to the host: abandon the following round and
+            # rebuild each lane from its committed history.
+            self._inflight = None
+            if following is not None and not following.transaction.closed:
+                with suppress(Exception):
+                    following.transaction.abort()
+            for lane in live:
+                if lane.uid in self.lanes:
+                    self._rebuild_lane_cache(
+                        lane, [], counter="pld_failed_round_rebuilds"
+                    )
+            raise
+        if dispatch_error is not None:
+            raise dispatch_error
+        if self._inflight is not None:
+            return []
+        # A lane the drained round finished leaves this poll.
+        return [
+            lane for lane in together
+            if lane.uid in self.lanes
+            and not (lane.ready and lane.ready[-1].finish_reason)
+        ]
+
+    def _read_inflight(self, inflight, following):
+        """Deliver a dispatched plain round; start ``following``'s lane rounds."""
+        lanes = inflight.lanes
+        mx.eval(inflight.logits, self._prepared_arrays(inflight.prepared))
+        rows = [row for row in range(len(lanes)) if row not in inflight.dropped]
+        # Phase 1: sample checks and stop/length for every lane, no commit.
+        failures, sent = [], []
+        for row in rows:
+            lane = lanes[row]
+            lane.round_width = len(lanes)
+            lane.round_target_path = "plain_decode"
+            try:
+                inflight.steps[row].send(
+                    (inflight.logits[row], inflight.prepared[row])
+                )
+            except PromptLookupLaneFailure as error:
+                failures.append((row, error))
+                continue
+            sent.append(row)
+        # Phase 2: lanes that stop here leave the following round first.
+        if following is not None:
+            leaving = {row for row, _error in failures} | {
+                row for row in sent if lanes[row].round_finish is not None
+            }
+            try:
+                for row, lane in enumerate(following.lanes):
+                    if any(lane is lanes[other] for other in leaving):
+                        self._release_inflight_row(following, row)
+            except BaseException:  # noqa: BLE001 - fall back to the exact abort
+                rows_alive = list(following.lanes)
+                following.dropped.update(range(len(rows_alive)))
+                try:
+                    following.transaction.abort()
+                except BaseException:  # noqa: BLE001 - rebuild instead
+                    for lane in rows_alive:
+                        # Before its bookkeeping the lane's history lacks this
+                        # round's anchor, which its cache already holds.
+                        self._rebuild_lane_cache(
+                            lane, [lane.anchor], counter="pld_failed_round_rebuilds"
+                        )
+                following = None
+        # Phase 3: bookkeeping (and, for a finished lane, its frozen cache).
+        for row in sent:
+            lanes[row].pipelined_rounds += 1
+            with suppress(StopIteration):
+                next(inflight.steps[row])
+        self.scheduler_stats["pld_batched_rounds"] += 1
+        self.scheduler_stats["pld_batched_lanes"] += len(lanes)
+        self.scheduler_stats["pld_pipelined_rounds"] += 1
+        self.scheduler_stats["pld_batched_max_width"] = max(
+            self.scheduler_stats["pld_batched_max_width"], len(lanes)
+        )
+        # Phase 4: the following round's lanes start their own rounds.
+        if following is not None:
+            for row, lane in enumerate(following.lanes):
+                if row in following.dropped:
+                    continue
+                following.steps[row] = self._round_steps(lane, plain=True)
+                next(following.steps[row])
+            if len(following.dropped) == len(following.lanes):
+                following.transaction.abort()
+                following = None
+        self._inflight = following
+        if failures:
+            raise PromptLookupRoundFailures([error for _row, error in failures])
+
     def _recover_uncommitted_round(self, lanes, transaction):
         """Return every lane of a failed batched round to its committed boundary.
 
@@ -1405,6 +1670,7 @@ class PromptLookupBatchGenerator:
         each lane is rebuilt from its recovery checkpoint or re-prefilled
         from its committed history instead of being trusted.
         """
+        self._cohort_owner = None
         if not transaction.closed:
             try:
                 transaction.abort()
@@ -1414,8 +1680,21 @@ class PromptLookupBatchGenerator:
         for lane in lanes:
             self._rebuild_lane_cache(lane, [], counter="pld_failed_round_rebuilds")
 
-    def _round_steps(self, lane):
+    def _round_steps(self, lane, plain=False):
+        """One lane's round; ``plain`` for a round already dispatched plain.
+
+        A pipelined round's forward was built before this lane's anchor was
+        on the host, so it verifies the anchor only.  Its lookup still runs
+        (one per round, as always); a proposal it finds is dropped and blocks
+        the pipeline, so the lane proposes again next round.  The round's own
+        target token still tests the dropped proposal's first draft: a
+        mismatch is a rejection the adaptive gate and the source TTL count,
+        exactly as a verify round's first-position rejection; a match is no
+        evidence yet (the next round's proposal continues it).
+        """
         cost = lane.cost_latch
+        lane.pipeline_blocked = False
+        lane.round_finish = None
         cost_memory_cap = lane.config.get("memory_max_draft")
         cost_memory_ok = cost is None or cost_memory_cap is None or cost_memory_cap >= cost.shadow_span
         if cost is not None:
@@ -1467,6 +1746,11 @@ class PromptLookupBatchGenerator:
             min_context_match=lane.config.get("min_context_match", 0),
             max_sources=lane.config.get("max_sources", 0),
         )
+        dropped = list(proposal) if plain and proposal else None
+        if dropped:
+            lane.pipeline_blocked = True
+            self.scheduler_stats["pld_pipeline_dropped_proposals"] += 1
+            proposal = []
         proposal_source = lane.proposer.last_source_kind if proposal else None
         if proposal and len(proposal) > nominal_proposal_budget:
             lane.stats.span_extend_cycles += 1
@@ -1546,6 +1830,7 @@ class PromptLookupBatchGenerator:
                 finish_reason = finish
                 break
         consumed = len(delivered)
+        lane.round_finish = finish_reason
         # Publish exactly ``consumed`` verified inputs to the lane's cache.
         yield consumed
         lane.history.extend(inputs[:consumed])
@@ -1563,8 +1848,15 @@ class PromptLookupBatchGenerator:
         )
         feedback_proposed = len(probe_candidate) if probing else len(proposal)
         feedback_accepted = probe_matched if probing else min(accepted, len(delivered))
-        lane.lookback.observe(feedback_proposed, feedback_accepted)
-        lane.proposer.feedback(feedback_proposed, feedback_accepted)
+        refuted = bool(dropped) and delivered[0][0] != dropped[0]
+        if refuted:
+            lane.lookback.observe(len(dropped), 0)
+            lane.proposer.feedback(len(dropped), 0)
+            lane.acceptance_window.append(0.0)
+            self.scheduler_stats["pld_pipeline_refuted_proposals"] += 1
+        elif not dropped:
+            lane.lookback.observe(feedback_proposed, feedback_accepted)
+            lane.proposer.feedback(feedback_proposed, feedback_accepted)
         lane.stats.lookback_current = lane.lookback.current
         lane.stats.lookback_peak = max(lane.stats.lookback_peak, lane.lookback.current)
         lane.stats.lookback_widen_events = lane.lookback.widen_events
@@ -1585,12 +1877,13 @@ class PromptLookupBatchGenerator:
             lane.acceptance_window.append(
                 sum(item[2] for item in delivered) / max(len(proposal), 1)
             )
-            window = max(1, int(lane.config.get("admission_window", 8)))
-            while len(lane.acceptance_window) > window:
-                lane.acceptance_window.popleft()
         else:
             lane.stats.plain_cycles += 1
             lane.stats.plain_tokens += len(delivered)
+        if proposal or refuted:
+            window = max(1, int(lane.config.get("admission_window", 8)))
+            while len(lane.acceptance_window) > window:
+                lane.acceptance_window.popleft()
         for token, _row, _from_draft in delivered:
             lane.lookup_history.append(token)
             lane.proposer.observe(token)
@@ -1670,6 +1963,8 @@ class PromptLookupBatchGenerator:
             "current_execution": "prompt_lookup_verify" if verify_path else "ordinary_target",
             "current_target_path": "verify_rows" if verify_path else "plain_decode",
             "verify_path_rounds": lane.verify_path_rounds,
+            # Anchor-only rounds dispatched before the host read their anchor.
+            "pipelined_plain_rounds": lane.pipelined_rounds,
             "ordinary_fallback": lane.ordinary,
             "cycles": lane.stats.cycles,
             "retrieval_cycles": lane.stats.retrieval_cycles,
@@ -1792,11 +2087,17 @@ class PromptLookupBatchGenerator:
             lane for lane in pending
             if getattr(lane, "batched", False) and lane.cost_latch is None
         ]
-        if together:
+        if together or self._inflight is not None:
             # A lone batchable lane takes the same transactional path: it is
             # unarmed, so the snapshot/rewind driver is not its rollback.
             try:
-                self._round_batched(together)
+                remaining = together
+                if self._inflight is not None:
+                    # A pipelined plain round is in flight: read it (having
+                    # dispatched the next) or drain it into this poll's round.
+                    remaining = self._advance_inflight(together)
+                if remaining:
+                    self._round_batched(remaining)
             except PromptLookupLaneFailure as error:
                 # Healthy peers committed their rows; the failed lanes leave.
                 for failure in error.failures:
@@ -1849,6 +2150,8 @@ class PromptLookupBatchGenerator:
                 response = lane.ready.popleft()
                 responses.append(response)
                 if response.finish_reason:
+                    # The cohort owner holds this lane's planes: let go.
+                    self._cohort_owner = None
                     self._close_lane(lane)
                     del self.lanes[uid]
                     break
@@ -1877,8 +2180,26 @@ class PromptLookupBatchGenerator:
         for uid in uids:
             lane = self.lanes.pop(int(uid), None)
             if lane is not None:
+                self._leave_inflight(lane)
+                self._cohort_owner = None
                 self._close_lane(lane)
             self.boundaries.pop(int(uid), None)
+
+    def _leave_inflight(self, lane):
+        """Take a departing lane out of the dispatched plain round, if any."""
+        inflight = self._inflight
+        if inflight is None:
+            return
+        for row, member in enumerate(inflight.lanes):
+            if member is lane and row not in inflight.dropped:
+                try:
+                    self._release_inflight_row(inflight, row)
+                except Exception:  # noqa: BLE001, S110 - its cache leaves with it
+                    pass
+        if len(inflight.dropped) == len(inflight.lanes):
+            self._inflight = None
+            with suppress(Exception):
+                inflight.transaction.abort()
 
     @staticmethod
     def _close_lane(lane):
@@ -1891,4 +2212,5 @@ class PromptLookupBatchGenerator:
 
     def close(self):
         self.remove(tuple(self.lanes))
+        self._cohort_owner = None
         self.boundaries.clear()

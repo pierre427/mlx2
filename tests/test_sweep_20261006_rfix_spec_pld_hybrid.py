@@ -199,10 +199,13 @@ def test_proposal_free_lane_in_a_verify_forward_is_not_labelled_ordinary():
     begin = generator._begin_verify
 
     def recording_begin(lanes, lengths):
+        # In begin order per lane: a pipelined plain round begins before
+        # the host has booked the round it follows, so ``cycles`` lags.
         transaction = begin(lanes, lengths)
         plain = max(lengths) == 1 and getattr(transaction, "plain", True)
         for lane in lanes:
-            paths[(lane.uid, lane.stats.cycles + 1)] = plain
+            rounds = [key for key in paths if key[0] == lane.uid]
+            paths[(lane.uid, len(rounds) + 1)] = plain
         return transaction
 
     generator._begin_verify = recording_begin

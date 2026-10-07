@@ -109,6 +109,51 @@ class HybridVerifyRows:
         self.rows = rows
         self._note = note
         self._active = None
+        # Per-layer batched views, kept across this owner's rounds while
+        # every round commits (``_views``); see ``views``.
+        self._views = None
+
+    def holds(self, rows):
+        """Whether ``rows`` are exactly this owner's lanes and layers."""
+        return len(rows) == len(self.rows) and all(
+            len(row) == len(own) and all(a is b for a, b in zip(row, own))
+            for row, own in zip(rows, self.rows)
+        )
+
+    def views(self, *, plain):
+        """The batched compute views over the rows, built once per owner.
+
+        A view kept from the previous round is resynchronized instead of
+        rebuilt: KV views re-read their row offsets when prepared, and a
+        recurrent view keeps its joined state while every row still holds
+        the arrays it split into it (else it re-joins).  Only the plain KV
+        and recurrent views are kept; any other layout is rebuilt per round.
+        """
+        from .segmented_batch_cache import (
+            SegmentedBatchArraysCache,
+            build_segmented_batch_cache_group,
+        )
+        from .segmented_plain_kv import SegmentedBatchKVCache
+
+        group = self._views
+        if group is None:
+            group = build_segmented_batch_cache_group(self.rows, note=self._note)
+            if all(
+                type(view) in (SegmentedBatchArraysCache, SegmentedBatchKVCache)
+                for view in group
+            ):
+                self._views = group
+        else:
+            for view in group:
+                if type(view) is SegmentedBatchArraysCache:
+                    view.resync(speculating=not plain)
+        if plain:
+            # The batched recurrent view assumes a verify epoch; a plain
+            # step writes state through it without records.
+            for view in group:
+                if isinstance(view, ArraysCache):
+                    view.speculating = False
+        return group
 
     def begin(self, lengths, *, plain_single_token=False):
         """Lease the rows to one verify forward of ``lengths`` tokens per row.
@@ -153,6 +198,8 @@ class HybridVerifyTransaction:
             if isinstance(cache, ArraysCache)
         ]
         self.plain = bool(plain_single_token) and self.width == 1
+        # Rows of a plain round rewound and dropped before commit.
+        self._released = set()
         try:
             for row in rows:
                 for cache in row:
@@ -165,22 +212,21 @@ class HybridVerifyTransaction:
                 self.batched = False
                 self.caches = rows[0]
             else:
-                from .segmented_batch_cache import build_segmented_batch_cache_group
-
                 self.batched = True
-                self.caches = build_segmented_batch_cache_group(rows, note=owner._note)
-                if self.plain:
-                    # The batched recurrent view assumes a verify epoch; a
-                    # plain step writes state through it without records.
-                    for cache in self.caches:
-                        if isinstance(cache, ArraysCache):
-                            cache.speculating = False
+                self.caches = owner.views(plain=self.plain)
+                # A plain step's recurrent views need no row lengths: every
+                # row is one valid token, the ordinary decode geometry.
+                self._prepared = [
+                    cache for cache in self.caches
+                    if not (self.plain and isinstance(cache, ArraysCache))
+                ]
                 _prepare_self_mtp_cache_group(
-                    self.caches,
+                    self._prepared,
                     self.lengths,
                     [self.width - n for n in self.lengths],
                 )
         except BaseException:
+            owner._views = None
             self._stop()
             self.closed = True
             raise
@@ -202,7 +248,7 @@ class HybridVerifyTransaction:
             from .hybrid_speculative import _finalize_self_mtp_cache_group
 
             self._finalized = True
-            _finalize_self_mtp_cache_group(self.caches)
+            _finalize_self_mtp_cache_group(self._prepared)
 
     def _close(self):
         """Release the epoch lease and transaction-only cache references.
@@ -239,12 +285,46 @@ class HybridVerifyTransaction:
 
     def _check_advanced(self):
         """Every KV row advanced by exactly its verified length."""
-        for row, bases, length in zip(self.owner.rows, self._kv_base, self.lengths):
+        for index, (row, bases, length) in enumerate(
+            zip(self.owner.rows, self._kv_base, self.lengths)
+        ):
+            if index in self._released:
+                continue
             for cache, base in zip(row, bases):
                 if base is not None and _kv_offset(cache) != base + length:
                     raise RuntimeError(
                         "every target layer must finish verification before commit"
                     )
+
+    def release_row(self, index):
+        """Rewind row ``index`` of a plain round to its pre-round boundary.
+
+        The row leaves the transaction: commit no longer checks or trims it.
+        Only a plain round may release a row, because nothing but the
+        pre-round KV offsets and recurrent state references (both held since
+        ``begin``) describe it; a pipelined plain round uses this for a lane
+        that finished (or failed) on the round before, which it had already
+        fed one more anchor.
+        """
+        if self.closed or not self.plain:
+            raise RuntimeError("only an open plain round can release a row")
+        index = int(index)
+        if index in self._released:
+            return
+        row = self.owner.rows[index]
+        for cache, base in zip(row, self._kv_base[index]):
+            if base is not None and _kv_offset(cache) != base:
+                drop = _kv_offset(cache) - base
+                if drop < 0 or int(cache.trim(drop)) != drop:
+                    raise RuntimeError(
+                        f"hybrid release could not rewind KV to offset {base}"
+                    )
+        members = {id(cache) for cache in row}
+        for cache, state, lengths, left_padding in self._recurrent_base:
+            if id(cache) in members:
+                cache.cache = list(state)
+                cache.lengths, cache.left_padding = lengths, left_padding
+        self._released.add(index)
 
     def commit(self, accepted_lengths):
         if self.closed:
@@ -277,6 +357,9 @@ class HybridVerifyTransaction:
         if self.closed:
             return
         self.closed = True
+        # Rewound rows no longer hold what the views split into them, and a
+        # failed forward may have left a view mid-step: rebuild next round.
+        self.owner._views = None
         first = None
         try:
             self._finalize()
