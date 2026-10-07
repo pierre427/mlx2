@@ -221,6 +221,14 @@ class Sources(unittest.TestCase):
             "PROCESS_NUMERICS": {},
             "require_process_numerics": lambda _owner: None,
         }
+        # The shared profile wipe, from source as well (no package import).
+        helpers = ast.parse((ROOT / "src/mlx2/process_env.py").read_text())
+        exec(compile(ast.Module(body=[
+            n for n in helpers.body
+            if isinstance(n, ast.FunctionDef) and n.name == "clear_inherited_profile"
+            or isinstance(n, ast.Assign)
+            and any(getattr(x, "id", None) == "PRESERVED_OPERATOR_KNOBS" for x in n.targets)
+        ], type_ignores=[]), "process_env", "exec"), env)
         names = {
             "KERNEL_POLICY_ENV",
             "NEW_DECODE_KERNELS",

@@ -212,6 +212,9 @@ class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
         if execution_policy not in (None, {}):
             raise ValueError("Qwen3.5 122B has no qualified execution policy")
         self.weight_stream = None
+        # No external-draft route: inherited Qwen3.8 hooks read these.
+        self.external_policy = {}
+        self.draft_model = None
         artifact = inspect_artifact(model_path)
         self.identity = artifact["identity"]
         self.config = artifact["config"]

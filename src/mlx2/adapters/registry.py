@@ -211,7 +211,9 @@ def _qwen3_5_dense(path: Path, config: dict) -> AdapterResolution:
         artifact = qwen36.inspect_artifact(path)
         return AdapterResolution(
             qwen36.Qwen3627BAdapter,
-            qwen36.descriptor_for(has_mtp=False),
+            qwen36.descriptor_for(
+                has_mtp=False, identity_evidence=artifact["identity_evidence"]
+            ),
             artifact,
         )
     module = importlib.import_module(".qwen38_27b", __package__)

@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
@@ -815,6 +815,25 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         self, model_path: str, *, require_mtp: bool = False, execution_policy=None,
         weight_streaming=None,
     ):
+        from .process_globals import guarded_construction
+
+        # The profile edits os.environ before tensors load; a failed load
+        # (import-order conflict, weights, tokenizer, drafter) must not leave
+        # it behind.  Qwen3.6 27B and dense Qwen3.5 inherit this constructor.
+        guarded_construction(
+            self,
+            lambda: self._init_qwen38(
+                model_path,
+                require_mtp=require_mtp,
+                execution_policy=execution_policy,
+                weight_streaming=weight_streaming,
+            ),
+        )
+
+    def _init_qwen38(
+        self, model_path: str, *, require_mtp: bool = False, execution_policy=None,
+        weight_streaming=None,
+    ):
         from ..runtime.streamed_load import require_declared
 
         stream_request = require_declared(type(self), weight_streaming)
@@ -919,6 +938,16 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             raise ValueError("requested MTP requires embedded head weights")
         self.identity = artifact["identity"]
         self.descriptor = self.descriptor_builder(has_mtp=artifact["has_mtp"])
+        if artifact.get("identity_evidence") is not None:
+            # The inspector says which evidence admitted the family (Qwen3.6:
+            # config revision or chat template); keep it on the descriptor.
+            self.descriptor = replace(
+                self.descriptor,
+                metadata={
+                    **self.descriptor.metadata,
+                    "identity_evidence": artifact["identity_evidence"],
+                },
+            )
         self.environment = self.environment_configurator()
         if gdn_core is not None:
             self.environment = {
@@ -1223,9 +1252,12 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     def lane_policy_defaults(self):
         """Declare the row-stable projection geometry for packed varlen/tree."""
 
+        # Subclasses without an external-draft route (Qwen3.5 122B) never set
+        # external_policy; the serving lane hook must not crash on them.
+        policy = getattr(self, "external_policy", None) or {}
         if not (
-            self.external_policy.get("external_varlen_prefill")
-            and self.external_policy.get("batch_size_route")
+            policy.get("external_varlen_prefill")
+            and policy.get("batch_size_route")
         ):
             return None
         return {"max_rows": 128, "chunk_above_max": True}
