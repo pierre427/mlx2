@@ -1051,6 +1051,18 @@ def _table_matmul(table, x: mx.array) -> mx.array:
     )
 
 
+def _host_left_padding(cache):
+    """The cache's host mirror of ``left_padding``; ``None`` when unknown.
+
+    Never reads the device: a cache without the mirror API, or whose mirror
+    no longer describes the live array, reports unknown.
+    """
+    reader = getattr(cache, "host_left_padding", None)
+    if not callable(reader) or getattr(cache, "left_padding", None) is None:
+        return None
+    return reader()
+
+
 def _valid_span_end(mask):
     """One past each row's last valid position, as a ``[B]`` vector.
 
@@ -1972,6 +1984,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             has_cache=cache is not None,
             lengths=getattr(cache, "lengths", None),
             left_padding=getattr(cache, "left_padding", None),
+            host_left_padding=_host_left_padding(cache),
             speculating=bool(getattr(cache, "speculating", False)),
             training=bool(self.training),
             sharded=self.sharding_group is not None,

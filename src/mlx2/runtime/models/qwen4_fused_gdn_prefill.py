@@ -20,7 +20,8 @@ is untouched and still runs through the layer's own ``_gated_delta_update``.
 
 Admission (``admit_qwen4_fused_gdn_prefill``) is purely structural and fails
 closed with a reason: batch 1, rows >= 64, bf16 activations, no mask, no
-left padding / ragged lengths, not speculating, not training, not sharded,
+ragged lengths, no left padding that is pending or unknown on the host (see
+"Left padding" below), not speculating, not training, not sharded,
 sigmoid output gate, and the Flash-Next geometry (conv_dim 10240, HK 16,
 HV 48, DK = DV = 128, conv kernel 4).  The route is opt-in through
 ``MLX_QWEN4_FUSED_GDN_PREFILL`` (default ``0``) until a GPU bit/ULP gate
@@ -80,6 +81,23 @@ c. rms_norm sum: 4 fp32 products per lane then ``simd_sum``, as MLX's
 d. On CPU the eager path's reductions/exp differ from any Metal kernel, so a
    CPU comparison can only be tolerance-level; the CPU tests prove plumbing.
 
+Left padding:
+
+The eager GDN path never reads ``cache.left_padding`` itself.  Padding acts
+only through the SSM mask that ``ArraysCache.make_mask`` builds
+(``pos >= left_padding``): ``_recurrent_core`` zeroes masked qkv rows and
+hands the mask to ``gated_delta_update``, and the conv-state tail is chosen
+by ``cache.lengths``, never by padding.  A row whose padding is ``<= 0``
+(zero for an unpadded prompt, negative once ``advance`` has consumed it) has
+an all-True mask, and ``make_mask`` already returns ``None`` for it when the
+host mirror says so (``_host_all_valid``).  So host-known ``left_padding <=
+0`` on every row is exactly the unpadded computation, and admission accepts
+it; ``cache.advance`` then updates the padding the same way on both paths.
+Admission reads only ``ArraysCache.host_left_padding()``, the identity-keyed
+host mirror, so it never syncs the device.  A positive entry is refused as
+``left padding (nonzero)``; a padding array with no live mirror is refused as
+``left padding (unknown on host)`` (fail closed).
+
 Behavioural differences:
 
 * The eager path writes ``cache[0]`` before the recurrence; the fused path
@@ -95,7 +113,7 @@ Behavioural differences:
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import mlx.core as mx
 
@@ -421,6 +439,32 @@ def _shape(value: Any) -> tuple:
     return tuple(getattr(value, "shape", ()))
 
 
+LEFT_PADDING_NONZERO = "left padding (nonzero)"
+LEFT_PADDING_UNKNOWN = "left padding (unknown on host)"
+
+
+def _left_padding_refusal(
+    left_padding: Any, host_left_padding: Optional[Sequence[int]]
+) -> Optional[str]:
+    """``None`` when the padding is host-known to be consumed on every row.
+
+    Shape metadata only; the values come from the host mirror.  A mirror
+    whose length disagrees with the array is treated as unknown.
+    """
+    if host_left_padding is None:
+        return LEFT_PADDING_UNKNOWN
+    try:
+        host = [int(value) for value in host_left_padding]
+    except (TypeError, ValueError):
+        return LEFT_PADDING_UNKNOWN
+    shape = _shape(left_padding)
+    if len(shape) != 1 or shape[0] != len(host):
+        return LEFT_PADDING_UNKNOWN
+    if any(value > 0 for value in host):
+        return LEFT_PADDING_NONZERO
+    return None
+
+
 def admit_qwen4_fused_gdn_prefill(
     *,
     qkv: Any,
@@ -435,6 +479,7 @@ def admit_qwen4_fused_gdn_prefill(
     has_cache: bool,
     lengths: Any,
     left_padding: Any,
+    host_left_padding: Optional[Sequence[int]] = None,
     speculating: bool,
     training: bool,
     sharded: bool,
@@ -446,7 +491,13 @@ def admit_qwen4_fused_gdn_prefill(
     gate_activation: str,
     min_rows: int = PREFILL_MIN_ROWS,
 ) -> FusedGdnAdmission:
-    """Pure structural admission; never evaluates an array."""
+    """Pure structural admission; never evaluates an array.
+
+    ``host_left_padding`` is the cache's host mirror of ``left_padding``
+    (``ArraysCache.host_left_padding()``), or ``None`` when it is not known
+    on the host.  A padding array is admitted only when the mirror covers
+    every row and no row has padding still ahead (all ``<= 0``).
+    """
     if training:
         return FusedGdnAdmission(False, "training")
     if sharded:
@@ -460,7 +511,9 @@ def admit_qwen4_fused_gdn_prefill(
     if lengths is not None:
         return FusedGdnAdmission(False, "ragged lengths")
     if left_padding is not None:
-        return FusedGdnAdmission(False, "left padding")
+        refusal = _left_padding_refusal(left_padding, host_left_padding)
+        if refusal is not None:
+            return FusedGdnAdmission(False, refusal)
     if gate_activation != "sigmoid":
         return FusedGdnAdmission(False, f"output gate {gate_activation!r}")
     geometry = (num_key_heads, num_value_heads, key_head_dim, value_head_dim, conv_kernel)
@@ -525,6 +578,8 @@ def admit_qwen4_fused_gdn_prefill(
 
 
 __all__ = [
+    "LEFT_PADDING_NONZERO",
+    "LEFT_PADDING_UNKNOWN",
     "PREFILL_ENV",
     "PREFILL_MIN_ROWS",
     "admit_qwen4_fused_gdn_prefill",

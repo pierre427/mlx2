@@ -2352,6 +2352,21 @@ class ArraysCache(_BaseCache):
         )
         return values
 
+    def host_left_padding(self) -> Optional[List[int]]:
+        """Per-row ``left_padding`` from the host mirror, never the device.
+
+        ``None`` when there is no padding array OR when the mirror no longer
+        describes the live array (callers tell the two apart by checking
+        ``left_padding is None``).  Unlike ``_left_padding_vector`` this
+        never falls back to ``tolist()``, so a hot-path admission can ask it
+        without a device sync and treat ``None`` as unknown.
+        """
+        padding = self.left_padding
+        cached = self._host_left_padding
+        if padding is None or cached is None or cached[0] is not padding:
+            return None
+        return list(cached[1])
+
     def rollback_spans(self, length: int, mask=None):
         """Tokens this forward advances per row, host-side — or ``None``.
 

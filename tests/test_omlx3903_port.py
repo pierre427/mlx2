@@ -329,7 +329,15 @@ def test_admission_accepts_flash_next_prefill():
         (dict(speculating=True), "speculative rollback"),
         (dict(mask=mx.ones((1, 64), mx.bool_)), "masked prefill"),
         (dict(lengths=mx.array([64])), "ragged lengths"),
-        (dict(left_padding=mx.array([0])), "left padding"),
+        (dict(left_padding=mx.array([0])), "left padding (unknown on host)"),
+        (
+            dict(left_padding=mx.array([3]), host_left_padding=[3]),
+            "left padding (nonzero)",
+        ),
+        (
+            dict(left_padding=mx.array([0]), host_left_padding=[0, 0]),
+            "left padding (unknown on host)",
+        ),
         (dict(gate_activation="silu"), "output gate 'silu'"),
         (dict(num_value_heads=32), "unsupported geometry"),
         (dict(conv_kernel=3), "unsupported geometry"),
@@ -351,6 +359,29 @@ def test_admission_refuses_with_reason(overrides, reason):
     admission = gdn_prefill.admit_qwen4_fused_gdn_prefill(**kw)
     assert not admission.accepted
     assert admission.reason.startswith(reason), admission.reason
+
+
+@pytest.mark.parametrize("host", [[0], [-64], [-1]])
+def test_admission_accepts_host_known_consumed_left_padding(host):
+    """Padding the host mirror shows as <= 0 on every row is unpadded."""
+    kw = _admission_kwargs(left_padding=mx.array(host), host_left_padding=host)
+    admission = gdn_prefill.admit_qwen4_fused_gdn_prefill(**kw)
+    assert admission.accepted, admission.reason
+
+
+def test_arrays_cache_host_left_padding_is_mirror_only():
+    assert ArraysCache(2).host_left_padding() is None  # no padding at all
+    cache = ArraysCache(2, left_padding=[0])
+    assert cache.host_left_padding() == [0]
+    cache.advance(64)
+    assert cache.host_left_padding() == [-64]
+    merged = ArraysCache.merge([ArraysCache(2)])  # the ordinary admission
+    assert merged.host_left_padding() == [0]
+    # A rebound array without a mirror is unknown -- never read back.
+    merged.left_padding = mx.array([0])
+    assert merged.host_left_padding() is None
+    assert qwen4_exp._host_left_padding(merged) is None
+    assert qwen4_exp._host_left_padding(SimpleNamespace(left_padding=mx.array([0]))) is None
 
 
 def test_env_default_is_off(monkeypatch):
@@ -427,6 +458,84 @@ def test_short_or_masked_prefill_falls_back_with_reason(layer, kernels_on_cpu):
     assert layer.fused_gdn_prefill_last_fallback == "rows 8 < 64"
     assert np.array_equal(f32(outs[0]), f32(outs_eager[0]))
     assert np.array_equal(f32(cache[0]), f32(cache_eager[0]))
+
+
+def _run_cache(layer, chunks, mode, cache):
+    """Drive the layer the way ``Qwen4Model`` does: mask from ``make_mask``."""
+    layer.set_fused_gdn_prefill_mode(mode)
+    outs = []
+    for x in chunks:
+        mask = cache.make_mask(x.shape[1])
+        outs.append(layer(x, mask, cache))
+    mx.eval(outs, cache[0], cache[1])
+    return outs
+
+
+@pytest.mark.parametrize("cache_type", [ArraysCache, qwen4_exp.Qwen4ArraysCache])
+def test_zero_left_padding_takes_fused_prefill_bit_for_bit(
+    layer, kernels_on_cpu, cache_type
+):
+    """The ordinary route's merged cache carries left_padding [0].
+
+    Regression for qualify-1007 (Flash-Next ordinary: prefill_calls 0,
+    612 "left padding" fallbacks).  Zero padding must take the fused route
+    and give exactly the unpadded result on BOTH routes; the later chunk
+    runs on negative (consumed) padding.
+    """
+    chunks = [_inputs(64, seed=11), _inputs(96, seed=12)]
+    padded = {}
+    plain = {}
+    for mode in ("stock", "fused"):
+        cache = cache_type.merge([cache_type(4)])
+        assert cache.host_left_padding() == [0]
+        padded[mode] = (_run_cache(layer, chunks, mode, cache), cache)
+        plain[mode] = (_run_cache(layer, chunks, mode, cache_type(4)), None)
+    assert layer.fused_gdn_prefill_fallback_reasons == {}
+    assert kernels_on_cpu == {"prework": 4, "norm_gate": 4}
+    assert layer.fused_gdn_prefill_calls == 4
+    for mode in ("stock", "fused"):
+        cache = padded[mode][1]
+        assert cache.host_left_padding() == [-160]
+        for got, want in zip(padded[mode][0], plain[mode][0]):
+            assert np.array_equal(f32(got), f32(want)), mode
+    # Fused vs eager stays at the existing (CPU-mirror) tolerance.
+    for fused, eager in zip(padded["fused"][0], padded["stock"][0]):
+        diff = np.abs(f32(fused) - f32(eager))
+        assert diff.max() <= 0.05 * np.abs(f32(eager)).max() + 1e-3
+    assert np.array_equal(
+        f32(padded["fused"][1][0]), f32(padded["stock"][1][0])
+    )
+
+
+def test_unmirrored_left_padding_falls_back_unknown(layer, kernels_on_cpu):
+    cache = ArraysCache.merge([ArraysCache(2)])
+    cache.left_padding = mx.array([0])  # rebound: the mirror is stale
+    eager_cache = ArraysCache.merge([ArraysCache(2)])
+    eager_cache.left_padding = mx.array([0])
+    x = _inputs(64, seed=13)
+    layer.set_fused_gdn_prefill_mode("stock")
+    want = layer(x, None, eager_cache)
+    layer.set_fused_gdn_prefill_mode("fused")
+    got = layer(x, None, cache)
+    assert kernels_on_cpu["prework"] == 0
+    assert layer.fused_gdn_prefill_fallback_reasons == {
+        "left padding (unknown on host)": 1
+    }
+    assert np.array_equal(f32(got), f32(want))
+
+
+def test_pending_left_padding_is_masked_or_refused(layer, kernels_on_cpu):
+    """A row with padding ahead never reaches the kernel."""
+    layer.set_fused_gdn_prefill_mode("fused")
+    cache = ArraysCache(2, left_padding=[3])
+    layer(_inputs(64, seed=14), cache.make_mask(64), cache)
+    unmasked = ArraysCache(2, left_padding=[3])
+    layer(_inputs(64, seed=14), None, unmasked)
+    assert kernels_on_cpu["prework"] == 0
+    assert layer.fused_gdn_prefill_fallback_reasons == {
+        "masked prefill": 1,
+        "left padding (nonzero)": 1,
+    }
 
 
 def test_no_cache_prefill_falls_back(layer, kernels_on_cpu):
