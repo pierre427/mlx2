@@ -1692,6 +1692,159 @@ def _add_verify_bitexact(builder: PrometheusBuilder, engine: Any) -> None:
         )
 
 
+def _add_power(builder: PrometheusBuilder, engine: Any) -> None:
+    """Opt-in power telemetry; absent unless the server enabled the sampler."""
+
+    telemetry = getattr(engine, "power_telemetry", None)
+    if telemetry is None:
+        return
+    status = telemetry.status()
+    builder.gauge(
+        "mlx2_power_telemetry_available",
+        "Whether the unprivileged IOReport power sampler is running.",
+        int(bool(status.get("available"))),
+    )
+    if not status.get("available"):
+        return
+    from .power_telemetry import DOMAINS, GPU_STATES
+
+    domains = tuple(label for label, _channel in DOMAINS)
+    builder.counter(
+        "mlx2_power_samples_total",
+        "Power telemetry intervals closed.",
+        int(status.get("samples") or 0),
+    )
+    for domain, value in sorted((status.get("energy_joules_total") or {}).items()):
+        if domain in domains:
+            builder.counter(
+                "mlx2_energy_joules_total",
+                "Energy integrated over closed sampling intervals, by subsystem.",
+                float(value),
+                {"domain": domain},
+            )
+    for state, value in sorted(
+        (status.get("gpu_pstate_residency_seconds_total") or {}).items()
+    ):
+        if state in GPU_STATES:
+            builder.counter(
+                "mlx2_gpu_pstate_residency_seconds_total",
+                "Seconds the GPU spent in each DVFS state.",
+                float(value),
+                {"state": state},
+            )
+    last = status.get("last") or {}
+    for domain, value in sorted((last.get("watts") or {}).items()):
+        if domain in domains:
+            builder.gauge(
+                "mlx2_power_watts",
+                "Mean power over the last sampling interval, by subsystem.",
+                float(value),
+                {"domain": domain},
+            )
+    for key, metric, help_text in (
+        ("gpu_active_ratio", "mlx2_gpu_active_ratio",
+         "Fraction of the last interval the GPU spent outside the OFF/IDLE/DOWN states."),
+        ("gpu_mean_pstate", "mlx2_gpu_pstate_mean",
+         "Residency-weighted mean active GPU P-state index (P1 = 1) over the last interval."),
+    ):
+        value = last.get(key)
+        if value is not None:
+            builder.gauge(metric, help_text, float(value))
+    frequency = last.get("gpu_frequency_mean_mhz")
+    if frequency is not None:
+        builder.gauge(
+            "mlx2_gpu_frequency_mean_hertz",
+            "Residency-weighted mean active GPU clock over the last interval.",
+            float(frequency) * 1e6,
+        )
+    for stat, value in sorted((last.get("die_temperature_c") or {}).items()):
+        if stat in ("max", "mean") and value is not None:
+            builder.gauge(
+                "mlx2_die_temperature_celsius",
+                "Die temperature over the HID tdie sensors at the last sample.",
+                float(value),
+                {"stat": stat},
+            )
+    per_token = (status.get("window") or {}).get("joules_per_output_token")
+    if per_token is not None:
+        builder.gauge(
+            "mlx2_energy_per_output_token_joules",
+            "GPU+DRAM joules per output token over the rolling window.",
+            float(per_token),
+        )
+
+
+def _add_power_governor(builder: PrometheusBuilder, engine: Any) -> None:
+    """Opt-in power governor; absent unless the server enabled it."""
+
+    governor = getattr(engine, "power_governor", None)
+    if governor is None:
+        return
+    from .power_governor import MODES
+
+    status = governor.status()
+    for mode in MODES:
+        builder.gauge(
+            "mlx2_power_governor_mode",
+            "Active power governor mode (one-hot).",
+            int(status["mode"] == mode),
+            {"mode": mode},
+        )
+    if status.get("budget_watts") is not None:
+        builder.gauge(
+            "mlx2_power_governor_budget_watts",
+            "Configured GPU+DRAM power budget.",
+            float(status["budget_watts"]),
+        )
+    average = (status.get("window") or {}).get("gpu_dram_watts")
+    if average is not None:
+        builder.gauge(
+            "mlx2_power_governor_window_watts",
+            "Measured GPU+DRAM mean power over the budget window.",
+            float(average),
+        )
+    builder.gauge(
+        "mlx2_power_governor_signal_stale",
+        "1 when no power sample arrived recently; budget mode then holds.",
+        int(bool((status.get("signal") or {}).get("stale"))),
+    )
+    builder.gauge(
+        "mlx2_power_governor_throttle_ratio",
+        "Controller throttle across the actuator ladder (0 = none, 1 = all).",
+        float(status.get("throttle") or 0.0),
+    )
+    actuators = status.get("actuators") or {}
+    builder.gauge(
+        "mlx2_power_governor_duty_ratio",
+        "Busy fraction pacing allows (1 = no pacing).",
+        float(actuators.get("duty", 1.0)),
+    )
+    builder.gauge(
+        "mlx2_power_governor_lane_cap",
+        "Lanes admission may fill (max_lanes when uncapped).",
+        int(actuators.get("lane_cap") or 0),
+    )
+    builder.gauge(
+        "mlx2_power_governor_idle_hold_seconds",
+        "Idle admission window hold for wider cohorts (0 when off).",
+        float(actuators.get("idle_hold_ms") or 0.0) / 1000.0,
+    )
+    counts = status.get("counts") or {}
+    for key, metric, help_text in (
+        ("pace_seconds", "mlx2_power_governor_throttle_seconds_total",
+         "Seconds of rest the governor inserted between rounds."),
+        ("paced_rounds", "mlx2_power_governor_paced_rounds_total",
+         "Rounds preceded by a governor rest."),
+        ("capped_rounds", "mlx2_power_governor_capped_rounds_total",
+         "Rounds formed under a governor lane cap."),
+        ("held_admissions", "mlx2_power_governor_held_admissions_total",
+         "Requests admitted while the idle window was held open."),
+        ("mode_changes", "mlx2_power_governor_mode_changes_total",
+         "Runtime mode changes."),
+    ):
+        builder.counter(metric, help_text, float(counts.get(key) or 0))
+
+
 def render_engine_metrics(engine: Any) -> str:
     """Render one non-destructive scrape from host-side engine snapshots."""
 
@@ -1898,6 +2051,8 @@ def render_engine_metrics(engine: Any) -> str:
     _add_int8_prefill(builder, engine)
     _add_lane_matmul(builder, engine)
     _add_verify_bitexact(builder, engine)
+    _add_power(builder, engine)
+    _add_power_governor(builder, engine)
     builder.gauge(
         "mlx2_peak_observed_batch_width",
         "Widest ordinary compute width any completed request has observed.",

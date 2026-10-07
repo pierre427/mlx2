@@ -292,6 +292,24 @@ class BatchRuntimeMetrics:
             state.tokens += 1
             self._counters["tokens_delivered"] += 1
 
+    def token_progress(self) -> tuple[int, dict[str, tuple[int, int, bool]]]:
+        """Delivered-token total and per-active-request progress, atomically.
+
+        Maps each active request to ``(output_tokens, uncached_prompt_tokens,
+        prefilling)``; prefilling means attached to a lane with no output
+        token yet.  The power sampler diffs successive reads to attribute
+        interval energy, so the hot path pays nothing extra.
+        """
+        with self._lock:
+            return int(self._counters["tokens_delivered"]), {
+                request_id: (
+                    state.tokens,
+                    max(0, state.prompt_tokens - state.cached_tokens),
+                    state.attached_at is not None and state.first_token_at is None,
+                )
+                for request_id, state in self._active.items()
+            }
+
     def fault(self, request_id: str, kind: str) -> None:
         with self._lock:
             self._counters[f"fault_{kind}"] += 1

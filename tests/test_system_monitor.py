@@ -275,3 +275,115 @@ def test_format_bytes_uses_binary_units_and_rate_suffix():
     assert format_bytes(1536) == "1.5 KiB"
     assert format_bytes(2 << 30) == "2.0 GiB"
     assert format_bytes(3 << 20, rate=True) == "3.0 MiB/s"
+
+
+def _soc_sampler(table=(300, 600, 900)):
+    from mlx2.apple_telemetry import EnergyReading
+    from mlx2.system_monitor import SocPowerSampler
+
+    class Energy:
+        def read(self):
+            return EnergyReading(
+                seconds=1.0,
+                watts={"GPU Energy": 12.5, "DRAM": 2.0, "CPU Energy": 4.0, "ANE": 0.0},
+                gpu_states=[("OFF", 50), ("P1", 25), ("P2", 0), ("P3", 25)],
+            )
+
+    class Temperature:
+        def die_summary(self):
+            return {"die_max_c": 70.0, "die_mean_c": 60.5, "battery_c": None}
+
+    return SocPowerSampler(
+        energy_factory=Energy,
+        temperature_factory=Temperature,
+        frequency_table=lambda: list(table),
+    )
+
+
+def test_soc_power_sampler_reads_unprivileged_power_dvfs_and_temperature():
+    reading = _soc_sampler().sample()
+    assert reading.gpu_power_mw == 12500.0 and reading.dram_power_mw == 2000.0
+    assert reading.cpu_power_mw == 4000.0 and reading.ane_power_mw == 0.0
+    assert reading.gpu_active_percent == 50.0
+    assert reading.gpu_mean_pstate == 2.0
+    assert reading.gpu_frequency_mhz == 600.0
+    assert (reading.die_max_c, reading.die_mean_c) == (70.0, 60.5)
+    # A table that does not map onto the P-states yields no clock.
+    assert _soc_sampler(table=(300, 600)).sample().gpu_frequency_mhz is None
+
+
+def test_soc_power_sampler_degrades_when_ioreport_is_missing():
+    from mlx2.system_monitor import SocPowerSampler
+
+    def refuse():
+        raise RuntimeError("IOReport is unavailable on this host")
+
+    sampler = SocPowerSampler(energy_factory=refuse)
+    assert sampler.sample() is None
+    assert sampler.error == "IOReport unavailable: IOReport is unavailable on this host"
+
+
+def test_renderer_shows_ioreport_power_and_die_temperatures():
+    from dataclasses import replace
+
+    soc = _soc_sampler().sample()
+    gpu = GPUReading(name="AGX", busy_percent=50.0, power_mw=soc.gpu_power_mw,
+                     frequency_mhz=soc.gpu_frequency_mhz)
+    output = render(replace(_host_reading(), gpus=(gpu,), soc_power=soc), servers=None)
+    assert "12500 mW" in output and "600 MHz" in output
+    assert "Power (IOReport, unprivileged)" in output
+    assert "GPU 12.50 W" in output and "DRAM 2.00 W" in output
+    assert "active 50.0%" in output and "mean P2.0" in output
+    assert "die max 70.0 °C" in output and "mean 60.5 °C" in output
+    assert "power/frequency unavailable" not in output
+
+
+def test_renderer_names_why_power_is_missing():
+    from dataclasses import replace
+
+    gpu = GPUReading(name="AGX", busy_percent=50.0)
+    output = render(
+        replace(_host_reading(), gpus=(gpu,), soc_power_error="IOReport unavailable: x"),
+        servers=None,
+    )
+    assert "power/frequency unavailable — IOReport unavailable: x" in output
+    assert "die temperatures unavailable — IOReport unavailable: x" in output
+    assert "Power (IOReport" not in output
+
+
+def test_top_defaults_to_ioreport_and_keeps_powermetrics_optional():
+    from mlx2.top import build_parser
+
+    args = build_parser().parse_args([])
+    assert args.ioreport is True and args.powermetrics is False
+    args = build_parser().parse_args(["--powermetrics", "--no-ioreport"])
+    assert args.ioreport is False and args.powermetrics is True
+
+
+def test_soc_power_sampler_and_host_collector_close_the_native_samplers():
+    from mlx2.apple_telemetry import EnergyReading
+    from mlx2.system_monitor import HostCollector, SocPowerSampler
+
+    closed = []
+
+    class Energy:
+        def read(self):
+            return EnergyReading(seconds=1.0, watts={}, gpu_states=[])
+
+        def close(self):
+            closed.append("energy")
+
+    class Temperature:
+        def die_summary(self):
+            return {}
+
+        def close(self):
+            closed.append("temperature")
+
+    sampler = SocPowerSampler(energy_factory=Energy, temperature_factory=Temperature)
+    collector = HostCollector(ioreport=False)
+    collector.soc_power = sampler
+    collector.close()
+    collector.close()
+    assert sorted(closed) == ["energy", "temperature"]
+    assert sampler.sample() is None

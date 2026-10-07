@@ -524,8 +524,42 @@ def render(
                 )
     else:
         lines.append("  unavailable (no AGXAccelerator utilization counters)")
-    if reading.powermetrics_error and reading.gpus:
-        lines.append(f"       power/frequency unavailable — {reading.powermetrics_error}")
+    if reading.gpus and reading.gpus[0].power_mw is None:
+        reason = reading.soc_power_error or reading.powermetrics_error
+        if reason:
+            lines.append(f"       power/frequency unavailable — {reason}")
+
+    soc = reading.soc_power
+    if soc is not None:
+
+        def watts(value: float | None) -> str | None:
+            return None if value is None else f"{value / 1000.0:.2f} W"
+
+        lines.extend(["", "Power (IOReport, unprivileged)"])
+        lines.append(
+            "SoC       "
+            + _join_present(
+                [
+                    f"GPU {watts(soc.gpu_power_mw)}" if soc.gpu_power_mw is not None else None,
+                    f"DRAM {watts(soc.dram_power_mw)}" if soc.dram_power_mw is not None else None,
+                    f"CPU {watts(soc.cpu_power_mw)}" if soc.cpu_power_mw is not None else None,
+                    f"ANE {watts(soc.ane_power_mw)}" if soc.ane_power_mw is not None else None,
+                ],
+                "  ·  ",
+            )
+        )
+        dvfs = _join_present(
+            [
+                f"active {_percent(soc.gpu_active_percent).strip()}"
+                if soc.gpu_active_percent is not None
+                else None,
+                f"mean P{soc.gpu_mean_pstate:.1f}" if soc.gpu_mean_pstate is not None else None,
+                f"{soc.gpu_frequency_mhz:.0f} MHz" if soc.gpu_frequency_mhz is not None else None,
+            ],
+            "  ·  ",
+        )
+        if dvfs:
+            lines.append(f"GPU DVFS  {dvfs}")
 
     lines.extend(["", "Memory"])
     memory = reading.memory
@@ -589,7 +623,14 @@ def render(
                 if reading.thermal_pressure
                 else "Pressure  unavailable without a privileged powermetrics sample"
             ),
-            "Sensors   die temperatures unavailable through the public interfaces used here",
+            (
+                f"Sensors   die max {soc.die_max_c:.1f} °C  ·  mean {soc.die_mean_c:.1f} °C (HID)"
+                if soc is not None
+                and soc.die_max_c is not None
+                and soc.die_mean_c is not None
+                else "Sensors   die temperatures unavailable"
+                + (f" — {reading.soc_power_error}" if reading.soc_power_error else "")
+            ),
         ]
     )
     for warning in reading.warnings:
@@ -689,10 +730,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="print one sample and exit",
     )
     parser.add_argument(
-        "--powermetrics",
+        "--ioreport",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="use privileged GPU power/frequency and thermal sampling when sudo is cached",
+        help="read SoC power, GPU DVFS residency and die temperatures without "
+        "privilege from IOReport and the HID sensors (default: on)",
+    )
+    parser.add_argument(
+        "--powermetrics",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="also run privileged powermetrics (needs cached sudo) for GPU "
+        "busy, frequency and thermal pressure; it overrides IOReport's GPU "
+        "power and frequency when it reports them (default: off)",
     )
     parser.add_argument(
         "--mlx2",
@@ -760,6 +810,7 @@ def main(argv=None, *, environment=None) -> int:
     collector = HostCollector(
         interval_seconds=args.interval,
         powermetrics=args.powermetrics,
+        ioreport=args.ioreport,
     )
     inference = None
     if args.mlx2:

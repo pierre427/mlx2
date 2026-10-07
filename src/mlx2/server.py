@@ -32,11 +32,13 @@ from .serving import (
     APCReuseDisabled,
     AdmissionClosed,
     Overloaded,
+    PowerGovernorUnavailable,
     PromptTemplateFailure,
     ServingEngine,
     SuspendUnavailable,
     take_prompt_progress,
 )
+from .power_governor import PowerSignalUnavailable
 from .batch_metrics import http_metric_route
 # The --cache-bytes default and its post-load clamp live in cache_sizing: pure
 # arithmetic with no MLX import, so the parser stays GPU-free.
@@ -215,6 +217,31 @@ def validate_quiesce_body(body):
     if not isinstance(suspend, bool):
         raise ValueError("suspend must be boolean")
     return {"drain_timeout_seconds": timeout, "suspend": suspend}
+
+
+def validate_power_body(body):
+    """``POST /v1/admin/power``: ``{"mode": ..., "watts": ...}``, both optional."""
+    from .power_governor import MODES
+
+    if not isinstance(body, dict):
+        raise ValueError("power request must be a JSON object")
+    unknown = set(body) - {"mode", "watts"}
+    if unknown:
+        raise ValueError("unsupported power fields: " + ", ".join(sorted(unknown)))
+    if not body:
+        raise ValueError("power request needs mode and/or watts")
+    mode = body.get("mode")
+    if mode is not None and mode not in MODES:
+        raise ValueError("mode must be one of " + ", ".join(MODES))
+    watts = body.get("watts")
+    if watts is not None and (
+        isinstance(watts, bool)
+        or not isinstance(watts, (int, float))
+        or not math.isfinite(watts)
+        or not 1 <= watts <= 1000
+    ):
+        raise ValueError("watts must be a number from 1 to 1000")
+    return {"mode": mode, "watts": None if watts is None else float(watts)}
 
 
 def validate_resume_body(body):
@@ -2363,6 +2390,15 @@ def handler_for(
                     return
                 self.send_json(200, engine.service_state())
                 return
+            if path == "/v1/admin/power":
+                if not self._authorize_admin():
+                    return
+                state = getattr(engine, "power_governor_state", lambda: None)()
+                if state is None:
+                    self.api_error(409, "power governor is not enabled")
+                else:
+                    self.send_json(200, state)
+                return
             if not self._authenticate_tenant(path):
                 return
             try:
@@ -2724,6 +2760,22 @@ def handler_for(
                         value = engine.resume(prefetch_sessions=sessions)
                     self.send_json(202, value)
                 except (APCReuseDisabled, SuspendUnavailable) as error:
+                    self.api_error(409, str(error))
+                except (ValueError, json.JSONDecodeError) as error:
+                    self.api_error(400, str(error))
+                return
+            if path == "/v1/admin/power":
+                if not self._authorize_admin():
+                    return
+                try:
+                    options = validate_power_body(
+                        self._read_json_body(max_bytes=4096)
+                    )
+                    setter = getattr(engine, "set_power_governor", None)
+                    if setter is None:
+                        raise PowerGovernorUnavailable("power governor is not enabled")
+                    self.send_json(200, setter(**options))
+                except (PowerGovernorUnavailable, PowerSignalUnavailable) as error:
                     self.api_error(409, str(error))
                 except (ValueError, json.JSONDecodeError) as error:
                     self.api_error(400, str(error))
@@ -4707,6 +4759,71 @@ def build_parser():
         help="seconds between keep-warm ticks (default: %(default)s)",
     )
     parser.add_argument(
+        "--power-telemetry",
+        action="store_true",
+        help=(
+            "sample GPU/DRAM/CPU/ANE power, GPU P-state residency and die "
+            "temperatures without privilege (IOReport) on a host thread; "
+            "publishes /metrics power families, /v1/status.power and a "
+            "per-request receipt energy estimate (default: off)"
+        ),
+    )
+    parser.add_argument(
+        "--power-telemetry-interval",
+        type=float,
+        default=1.0,
+        metavar="SECONDS",
+        help="seconds between power samples (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--power-telemetry-window",
+        type=float,
+        default=60.0,
+        metavar="SECONDS",
+        help=(
+            "rolling window for joules per output token and tokens/s "
+            "(default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--power-governor",
+        choices=("off", "max_throughput", "efficient", "budget"),
+        default="off",
+        help=(
+            "steer GPU+DRAM power by shaping work (requires --power-telemetry): "
+            "max_throughput changes nothing but enables the runtime control "
+            "endpoint POST /v1/admin/power; efficient holds the idle admission "
+            "window for wider cohorts; budget holds rolling power under "
+            "--power-budget-watts by pacing rounds, then capping lanes "
+            "(default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--power-budget-watts",
+        type=float,
+        default=None,
+        metavar="WATTS",
+        help="GPU+DRAM average power cap for --power-governor budget",
+    )
+    parser.add_argument(
+        "--power-budget-window",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="window the power budget is averaged over (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--power-governor-hold-ms",
+        type=float,
+        default=50.0,
+        metavar="MS",
+        help=(
+            "efficient/budget modes: hold the idle admission window this long "
+            "so near-simultaneous arrivals start as one cohort; 0 disables "
+            "(default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
         "--batch-cohort-timeout-ms",
         type=float,
         default=1000.0,
@@ -5392,6 +5509,28 @@ def serving_engine_kwargs(
             if getattr(args, "gpu_keep_warm_seconds", 0)
             else None
         ),
+        "power_telemetry": (
+            {
+                "interval_seconds": getattr(args, "power_telemetry_interval", 1.0),
+                "window_seconds": getattr(args, "power_telemetry_window", 60.0),
+            }
+            if getattr(args, "power_telemetry", False)
+            else None
+        ),
+        "power_governor": power_governor_policy_value(args),
+    }
+
+
+def power_governor_policy_value(args):
+    """The engine's ``power_governor`` value; None when the flag is off."""
+    mode = getattr(args, "power_governor", "off")
+    if mode in (None, "off"):
+        return None
+    return {
+        "mode": mode,
+        "budget_watts": getattr(args, "power_budget_watts", None),
+        "window_seconds": getattr(args, "power_budget_window", 30.0),
+        "efficient_hold_ms": getattr(args, "power_governor_hold_ms", 50.0),
     }
 
 
@@ -5527,6 +5666,17 @@ def main():
         tenant_authenticator = build_tenant_authenticator(args)
     except (OSError, ValueError) as error:
         parser.error(str(error))
+    if args.power_governor != "off" and not args.power_telemetry:
+        parser.error("--power-governor requires --power-telemetry (its power signal)")
+    if args.power_budget_watts is not None and args.power_governor != "budget":
+        parser.error("--power-budget-watts requires --power-governor budget")
+    if args.power_governor != "off":
+        from .power_governor import PowerGovernorPolicy
+
+        try:
+            PowerGovernorPolicy.from_value(power_governor_policy_value(args))
+        except ValueError as error:
+            parser.error(str(error))
     policy = json.loads(args.execution_policy.read_text()) if args.execution_policy else None
     try:
         from .adapters.registry import inspect_model
@@ -5578,6 +5728,18 @@ def main():
         approximate_kv = approximate_kv_mode(args, native_mtp)
     except ValueError as error:
         parser.error(str(error))
+    if args.power_telemetry:
+        from .power_telemetry import PowerTelemetryPolicy
+
+        try:
+            PowerTelemetryPolicy.from_value(
+                {
+                    "interval_seconds": args.power_telemetry_interval,
+                    "window_seconds": args.power_telemetry_window,
+                }
+            )
+        except ValueError as error:
+            parser.error(str(error))
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )

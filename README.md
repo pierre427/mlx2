@@ -114,13 +114,15 @@ TTFT/ITL/queue/prefill/decode/TPOT/E2E percentiles over the lifetime and the
 last 30 seconds; speculative-decode acceptance; APCv2 hit rate, token reuse and
 residency; Metal memory and headroom; HTTP errors and fail-closed counts; the
 busiest mechanism counters; and live and recent requests. Below that it shows
-per-logical-CPU busy time, AGX GPU counters, memory and swap activity, load
-averages, and thermal pressure.
+per-logical-CPU busy time, AGX GPU counters, SoC power (GPU, DRAM, CPU, ANE),
+GPU DVFS residency, die temperatures, memory and swap activity, and load
+averages. Power, DVFS and temperatures come from IOReport and the HID sensors
+without privilege.
 
 ```bash
-.venv/bin/mlx2-top --once --no-powermetrics
+.venv/bin/mlx2-top --once
 sudo -v
-.venv/bin/mlx2-top
+.venv/bin/mlx2-top --powermetrics   # optional: adds thermal pressure
 ```
 
 The monitor only issues GET requests to `/metrics`, `/v1/status/batching`, and
@@ -128,7 +130,8 @@ The monitor only issues GET requests to `/metrics`, `/v1/status/batching`, and
 model or GPU work. Percentiles marked `~` are interpolated from histogram
 buckets; the others come from the server's raw samples. In the interactive
 view, `j`/`k` scroll, space/`b` page, and `q` quits. Privileged `powermetrics`
-sampling uses cached sudo credentials and never prompts from the monitor.
+sampling is off by default; with `--powermetrics` it uses cached sudo
+credentials and never prompts from the monitor.
 
 ## Development and reproduction
 

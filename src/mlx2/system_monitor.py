@@ -1,8 +1,10 @@
 """Read-only macOS host telemetry for :mod:`mlx2.top`.
 
 The collectors deliberately distinguish public host counters from optional
-privileged ``powermetrics`` samples.  Inference-server telemetry lives in
-:mod:`mlx2.inference_monitor`.
+privileged ``powermetrics`` samples.  SoC power, GPU DVFS residency and die
+temperatures come unprivileged from IOReport and the HID sensors
+(:mod:`mlx2.apple_telemetry`); ``powermetrics`` remains an opt-in source.
+Inference-server telemetry lives in :mod:`mlx2.inference_monitor`.
 """
 
 from __future__ import annotations
@@ -134,6 +136,21 @@ class PowermetricsReading:
 
 
 @dataclass(frozen=True)
+class SocPowerReading:
+    """One unprivileged IOReport/HID interval (power in mW, as powermetrics)."""
+
+    gpu_power_mw: float | None = None
+    dram_power_mw: float | None = None
+    cpu_power_mw: float | None = None
+    ane_power_mw: float | None = None
+    gpu_active_percent: float | None = None
+    gpu_mean_pstate: float | None = None
+    gpu_frequency_mhz: float | None = None
+    die_max_c: float | None = None
+    die_mean_c: float | None = None
+
+
+@dataclass(frozen=True)
 class HostReading:
     sampled_at: float
     interval_seconds: float
@@ -146,6 +163,8 @@ class HostReading:
     thermal_pressure: str | None
     powermetrics_error: str | None = None
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    soc_power: SocPowerReading | None = None
+    soc_power_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -557,6 +576,81 @@ class PowermetricsSampler:
             self._thread.join(timeout=2)
 
 
+class SocPowerSampler:
+    """Unprivileged SoC power, GPU DVFS and die temperature between samples."""
+
+    def __init__(
+        self,
+        *,
+        energy_factory=None,
+        temperature_factory=None,
+        frequency_table=None,
+    ):
+        from . import apple_telemetry
+
+        self.error = None
+        self._energy = self._temperature = None
+        self._table = None
+        self._table_fn = frequency_table or apple_telemetry.gpu_frequency_table_mhz
+        try:
+            self._energy = (energy_factory or apple_telemetry.EnergySampler)()
+        except Exception as error:  # noqa: BLE001 - optional source
+            self.error = f"IOReport unavailable: {error}"
+            return
+        try:
+            self._temperature = (
+                temperature_factory or apple_telemetry.TemperatureSampler
+            )()
+        except Exception:  # noqa: BLE001 - temperatures are optional
+            self._temperature = None
+
+    def close(self) -> None:
+        """Release the native samplers; safe to call twice."""
+        samplers = (self._temperature, self._energy)
+        self._temperature = self._energy = None
+        for sampler in samplers:
+            close = getattr(sampler, "close", None)
+            if close is not None:
+                close()
+
+    def sample(self) -> SocPowerReading | None:
+        if self._energy is None:
+            return None
+        from .power_telemetry import frequency_mapping, gpu_state_means
+
+        try:
+            reading = self._energy.read()
+        except Exception as error:  # noqa: BLE001 - keep the panel running
+            self.error = f"IOReport read failed: {error}"
+            return None
+        if self._table is None:
+            self._table, _reason = frequency_mapping(self._table_fn, reading.gpu_states)
+        mean_pstate, mean_mhz = gpu_state_means(reading.gpu_states, self._table or ())
+        temperatures = {}
+        if self._temperature is not None:
+            try:
+                temperatures = self._temperature.die_summary()
+            except Exception:  # noqa: BLE001 - temperatures are optional
+                temperatures = {}
+        active = reading.gpu_active_fraction()
+
+        def milliwatts(channel):
+            value = reading.watts.get(channel)
+            return None if value is None else value * 1000.0
+
+        return SocPowerReading(
+            gpu_power_mw=milliwatts("GPU Energy"),
+            dram_power_mw=milliwatts("DRAM"),
+            cpu_power_mw=milliwatts("CPU Energy"),
+            ane_power_mw=milliwatts("ANE"),
+            gpu_active_percent=None if active is None else active * 100.0,
+            gpu_mean_pstate=mean_pstate,
+            gpu_frequency_mhz=mean_mhz,
+            die_max_c=temperatures.get("die_max_c"),
+            die_mean_c=temperatures.get("die_mean_c"),
+        )
+
+
 class HostCollector:
     """Stateful sampler that turns cumulative host counters into rates."""
 
@@ -564,13 +658,15 @@ class HostCollector:
         self,
         *,
         interval_seconds: float = 1.0,
-        powermetrics: bool = True,
+        powermetrics: bool = False,
+        ioreport: bool = True,
     ):
         self.interval_seconds = float(interval_seconds)
         self.mach = DarwinMach()
         self._last_time = time.monotonic()
         self._last_cpu = self.mach.cpu_ticks()
         self._last_vm = self.mach.vm()
+        self.soc_power = SocPowerSampler() if ioreport else None
         self.powermetrics = (
             PowermetricsSampler(interval_seconds) if powermetrics else None
         )
@@ -580,6 +676,8 @@ class HostCollector:
     def close(self) -> None:
         if self.powermetrics is not None:
             self.powermetrics.close()
+        if self.soc_power is not None:
+            self.soc_power.close()
 
     def _gpus(self) -> tuple[GPUReading, ...]:
         if platform.system() != "Darwin":
@@ -662,6 +760,20 @@ class HostCollector:
         memory = self._memory(vm, seconds)
         swap = self._swap(vm, seconds)
         gpus = self._gpus()
+        soc = self.soc_power.sample() if self.soc_power is not None else None
+        if soc is not None and gpus:
+            # IOReport is the unprivileged default for power and clock; the
+            # busy figure stays ioreg's device utilization.
+            gpus = (
+                GPUReading(
+                    **{
+                        **gpus[0].__dict__,
+                        "frequency_mhz": soc.gpu_frequency_mhz,
+                        "power_mw": soc.gpu_power_mw,
+                    }
+                ),
+                *gpus[1:],
+            )
         power = self.powermetrics.latest if self.powermetrics is not None else None
         if power is not None and gpus:
             first = gpus[0]
@@ -672,8 +784,12 @@ class HostCollector:
                         "busy_percent": power.gpu_busy_percent
                         if power.gpu_busy_percent is not None
                         else first.busy_percent,
-                        "frequency_mhz": power.gpu_frequency_mhz,
-                        "power_mw": power.gpu_power_mw,
+                        "frequency_mhz": power.gpu_frequency_mhz
+                        if power.gpu_frequency_mhz is not None
+                        else first.frequency_mhz,
+                        "power_mw": power.gpu_power_mw
+                        if power.gpu_power_mw is not None
+                        else first.power_mw,
                         "source": "powermetrics"
                         if power.gpu_busy_percent is not None
                         else first.source,
@@ -700,6 +816,10 @@ class HostCollector:
                 else "powermetrics disabled"
             ),
             warnings=() if self.mach.available else ("Mach host counters unavailable",),
+            soc_power=soc,
+            soc_power_error=(
+                self.soc_power.error if self.soc_power is not None else "IOReport disabled"
+            ),
         )
 
 
@@ -710,6 +830,8 @@ __all__ = [
     "HostReading",
     "MemoryReading",
     "PowermetricsReading",
+    "SocPowerReading",
+    "SocPowerSampler",
     "SwapReading",
     "cpu_busy_percent",
     "parse_ioreg_gpus",

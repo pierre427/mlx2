@@ -35,6 +35,8 @@ from .sampling_defaults import (
     vendor_sampling,
 )
 from .batch_metrics import BatchFaultSpec, BatchRuntimeMetrics, HttpRuntimeMetrics
+from .power_governor import PowerGovernor, PowerGovernorPolicy
+from .power_telemetry import PowerTelemetry, PowerTelemetryPolicy
 from .runtime.apc_numerics import MOE_RHS_PAD_DEFAULT as _MOE_RHS_PAD_DEFAULT
 from .runtime.apc_numerics import moe_rhs_pad_identity as _moe_rhs_pad_identity
 from .runtime.gpu_keep_warm import GpuKeepWarm, GpuKeepWarmPolicy
@@ -2980,6 +2982,10 @@ class SuspendUnavailable(RuntimeError):
     """Cache suspension was requested without an APCv2 disk tier."""
 
 
+class PowerGovernorUnavailable(RuntimeError):
+    """A power-governor control request reached a server without one."""
+
+
 class APCReuseDisabled(RuntimeError):
     """The selected execution route cannot safely load reusable APCv2 state."""
 
@@ -3211,6 +3217,8 @@ class ServingEngine:
         prefill_depth_budget=None,
         recurrent_state_codec=None,
         gpu_keep_warm=None,
+        power_telemetry=None,
+        power_governor=None,
         _validate_only=False,
     ):
         self.default_max_tokens = validate_default_max_tokens(default_max_tokens)
@@ -3697,6 +3705,15 @@ class ServingEngine:
         self.tenant_scoped_cache = bool(tenant_scoped_cache)
         # Off by default: idle-loop GPU keep-warm ticks (omlx #3974).
         self.gpu_keep_warm_policy = GpuKeepWarmPolicy.from_value(gpu_keep_warm)
+        # Off by default: host-side power/thermal sampler (mlx2.power_telemetry).
+        self.power_telemetry_policy = PowerTelemetryPolicy.from_value(power_telemetry)
+        self.power_telemetry = None
+        # Off by default: work-shaping power governor (mlx2.power_governor).
+        # Its only measurement source is the power telemetry above.
+        self.power_governor_policy = PowerGovernorPolicy.from_value(power_governor)
+        self.power_governor = None
+        if self.power_governor_policy.enabled and not self.power_telemetry_policy.enabled:
+            raise ValueError("power_governor requires power_telemetry")
         if _validate_only:
             return
         from .reasoning_signatures import ReasoningSigner
@@ -3810,6 +3827,26 @@ class ServingEngine:
         self.receipt_log = deque(maxlen=128)
         self.batch_metrics = BatchRuntimeMetrics()
         self.http_metrics = HttpRuntimeMetrics()
+        if self.power_telemetry_policy.enabled:
+            self.power_telemetry = PowerTelemetry(
+                self.power_telemetry_policy, self.batch_metrics.token_progress
+            )
+            if self.power_governor_policy.enabled:
+                self.power_governor = PowerGovernor(
+                    self.power_governor_policy,
+                    max_lanes=self.max_lanes,
+                    signal_interval_seconds=self.power_telemetry_policy.interval_seconds,
+                )
+                if not self.power_telemetry.available:
+                    self.power_governor.signal_reason = self.power_telemetry.reason
+                    if self.power_governor_policy.mode == "budget":
+                        # A cap that cannot be measured cannot be held.
+                        raise RuntimeError(
+                            "power governor budget mode needs a power signal: "
+                            f"{self.power_telemetry.reason}"
+                        )
+                self.power_telemetry.add_listener(self.power_governor.observe)
+            self.power_telemetry.start()
         self.snapshot = {"state": "loading"}
         self.adapter = None
         self.apc = None
@@ -3942,6 +3979,26 @@ class ServingEngine:
                 return
             self.counts[f"admissions_rejected_{endpoint_class}"] += 1
         raise AdmissionClosed(state, endpoint_class)
+
+    def power_governor_state(self):
+        """Governor status for ``GET /v1/admin/power``; None when not enabled."""
+        governor = getattr(self, "power_governor", None)
+        return governor.status() if governor is not None else None
+
+    def set_power_governor(self, *, mode=None, watts=None):
+        """Runtime mode/budget change (``POST /v1/admin/power``)."""
+        governor = getattr(self, "power_governor", None)
+        if governor is None:
+            raise PowerGovernorUnavailable(
+                "power governor is not enabled; start with --power-telemetry "
+                "and --power-governor"
+            )
+        value = governor.configure(mode=mode, budget_watts=watts, source="admin")
+        log.info(
+            "power governor set to %s (budget %s W) by admin request",
+            value["mode"], value["budget_watts"],
+        )
+        return value
 
     def quiesce(self, *, drain_timeout_seconds=600.0, suspend=True):
         if isinstance(drain_timeout_seconds, bool) or not isinstance(
@@ -5250,6 +5307,20 @@ class ServingEngine:
                 **(
                     {"gpu_keep_warm": self.gpu_keep_warm.status()}
                     if self.gpu_keep_warm_policy.enabled
+                    else {}
+                ),
+                **(
+                    {
+                        "power": {
+                            **self.power_telemetry.status(),
+                            **(
+                                {"governor": self.power_governor.status()}
+                                if self.power_governor is not None
+                                else {}
+                            ),
+                        }
+                    }
+                    if self.power_telemetry is not None
                     else {}
                 ),
                 "quiesce": quiesce,
@@ -8512,12 +8583,33 @@ class ServingEngine:
                         self._finish(waiting, {"error": "cancelled"})
                     else:
                         prefix_waiting.append(waiting)
+                # The power governor's one hook per round: rest before the
+                # round, cap how many lanes admission may fill (never evicts),
+                # or hold the idle admission window open for a wider cohort.
+                governor_hint = (
+                    self.power_governor.round_hint(
+                        [lane.id for lane in active.values()]
+                    )
+                    if self.power_governor is not None
+                    else None
+                )
+                lane_limit = self.max_lanes
+                if governor_hint is not None:
+                    if governor_hint.pace_seconds:
+                        self.stop_event.wait(governor_hint.pace_seconds)
+                    if governor_hint.lane_cap is not None:
+                        lane_limit = min(self.max_lanes, governor_hint.lane_cap)
                 # Admission is bounded before prompt caches are allocated.
                 coalescer = IdleAdmissionCoalescer(
-                    self.coalesce_window_seconds,
+                    self.coalesce_window_seconds
+                    if governor_hint is None or governor_hint.coalesce_seconds is None
+                    else max(self.coalesce_window_seconds, governor_hint.coalesce_seconds),
                 )
                 retry_budget = len(deferred)
-                while len(active) < self.max_lanes:
+                # A declared cohort attaches whole; a lane cap never splits it.
+                while len(active) < (
+                    lane_limit if attaching_cohort is None else self.max_lanes
+                ):
                     if (
                         coalescer.mechanism != "ordinary"
                         and (
@@ -11271,6 +11363,24 @@ class ServingEngine:
                                     "completion_tokens": job.completion_tokens,
                                     "ttft_seconds": job.first_token - job.started,
                                     "elapsed_seconds": time.monotonic() - job.started,
+                                    **(
+                                        {
+                                            "energy": self.power_telemetry.request_energy(
+                                                job.id, job.completion_tokens
+                                            )
+                                        }
+                                        if self.power_telemetry is not None
+                                        else {}
+                                    ),
+                                    **(
+                                        {
+                                            "power_governor": self.power_governor.request_receipt(
+                                                job.id
+                                            )
+                                        }
+                                        if self.power_governor is not None
+                                        else {}
+                                    ),
                                 }
                             except Exception:  # noqa: BLE001 - one lane, not the worker
                                 # A defect in receipt assembly must fail only
@@ -11449,6 +11559,8 @@ class ServingEngine:
     def close(self):
         self.stop_event.set()
         self.thread.join(timeout=30)
+        if getattr(self, "power_telemetry", None) is not None:
+            self.power_telemetry.close()
         from .structured_output import shutdown_scanner_pools
 
         shutdown_scanner_pools()
