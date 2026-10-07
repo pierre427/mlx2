@@ -25,8 +25,11 @@ Placements (all content-independent except the adapter/tokenizer turn marker):
            ``s = min_stride * 4^k``: dense near the prompt end, identical for
            requests sharing a prefix (omlx#3456 nesting argument).
 ``auto``   preamble boundary, penultimate turn boundary (branch point), then
-           tail points spaced at least ``min_stride`` apart, then remaining
-           turn boundaries deepest-first.
+           tail points at least ``min_stride`` above any shallower picked
+           point; a picked point less than ``min_stride`` above a tail point
+           suppresses it unless dropping it would lose at least
+           ``4 * min_stride`` tokens of reuse; then remaining turn boundaries
+           deepest-first.
 
 Design references: omlx#3456 (budgeted nested boundary retention),
 vllm#45238 (K checkpoints spread across the prompt).
@@ -112,11 +115,34 @@ def plan_interior_positions(
 
     picked: dict[int, str] = {}
 
-    def take(position, source, *, spacing=0):
+    def take(position, source, *, spacing=0, fallback=None):
         if len(picked) >= count or position in picked or not usable(position):
             return
-        if spacing and any(abs(position - other) < spacing for other in picked):
-            return
+        if spacing:
+            # A hit resumes from the deepest checkpoint at or below the
+            # divergence.  A picked point at most ``spacing`` *below* the
+            # candidate makes it redundant: falling back costs < spacing
+            # tokens.
+            if any(0 <= position - other < spacing for other in picked):
+                return
+            # A picked point just *above* it (the request's own
+            # generation-prompt marker at P-k) does not make it redundant: a
+            # request that diverges between them (same document, new
+            # question) falls back to the next shallower point.  Rescue the
+            # candidate only when that fallback would lose at least one
+            # coarse stride (4 * spacing).  The finest lattice point always
+            # sits in the last ``spacing`` tokens, so rescuing it would add
+            # a snapshot plus a tiny final prefill slice to every cold chat
+            # request for < 4 * spacing tokens of reuse (27B MTP batch:4:
+            # -8..10% aggregate, 4 extra stores spilling at the 8 GiB cap);
+            # rescuing a coarse point that coincides with it keeps the warm
+            # hit at 7168 instead of 4096 (27B warm:8000, P=7405).
+            if any(0 < other - position < spacing for other in picked):
+                below = [other for other in picked if other < position]
+                if fallback is not None:
+                    below.append(fallback)
+                if position - max(below, default=low) < 4 * spacing:
+                    return
         picked[position] = source
 
     if placement == "pow2":
@@ -137,8 +163,15 @@ def plan_interior_positions(
                 take(turns[0], "turn")
             if len(turns) >= 2:
                 take(turns[-2], "turn")
-            for position in tail_positions(total, min_stride=min_stride):
-                take(position, "tail", spacing=min_stride)
+            tails = tail_positions(total, min_stride=min_stride)
+            for index, position in enumerate(tails):
+                shallower = [point for point in tails[index + 1:] if usable(point)]
+                take(
+                    position,
+                    "tail",
+                    spacing=min_stride,
+                    fallback=max(shallower, default=None),
+                )
             for position in reversed(turns):
                 take(position, "turn")
     positions = tuple(sorted(picked))

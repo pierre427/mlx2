@@ -146,7 +146,9 @@ def test_cold_prefill_cuts_at_the_10_02_geometry():
     cuts = cold_prefill_cuts(
         tokens, policy=dict(APC_INTERIOR_AUTO_POLICY), marker_ids=(mark,)
     )
-    assert cuts == (4096, 5301, 5386)
+    # 5120 sits below the 5301 turn point: since 2026-10-07 a picked point
+    # above a tail point no longer suppresses it (warm hit depth fix).
+    assert cuts == (4096, 5120, 5301, 5386)
     # The cached offset of the warm follow-up (5301) is a cold cut, so the
     # warm request cut at 5386 only slices exactly as cold.
     assert [c for c in cuts if c > 5301] == [5386]

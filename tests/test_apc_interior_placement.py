@@ -245,7 +245,7 @@ class _TinyCacheBudget:
         return {"schema": "tiny-test-budget"}
 
 
-def _engine(model, vocab, marker, policy, *, mtp=True):
+def _engine(model, vocab, marker, policy, *, mtp=True, max_lanes=1):
     base = make_adapter(model, vocab)
 
     class Adapter(base):
@@ -266,7 +266,7 @@ def _engine(model, vocab, marker, policy, *, mtp=True):
         adapter_factory=Adapter,
         qualification_mode=True,
         mtp=mtp,
-        max_lanes=1,
+        max_lanes=max_lanes,
         prefill_step=16,
         execution_policy={"apc_interior_checkpoints": policy},
     )
@@ -663,3 +663,212 @@ def test_template_that_keeps_the_generation_prompt_adds_no_boundary(host):
     assert int(job.cached_tokens) >= len(first) - 1
     assert counts.get("apc_interior_positions_planned_generation_prompt", 0) == 0
     assert counts.get("apc_interior_checkpoints_published", 0) == 0
+
+
+# ------------------------------------------- warm hit depth (2026-10-07)
+#
+# GPU (Qwen3.8-27B native MTP, profile_features ``warm:8000``): a warm request
+# sharing a ~7.4K document hit 7168 cached tokens on most prompts but only
+# 4096 when (P-2) mod 1024 fell below ~250 (rep0, P=7405/7408).  ``auto``
+# takes the current request's generation-prompt marker (P-5) as a turn point
+# first, then rejected every tail lattice point within ``min_stride`` of *any*
+# picked point -- including the 7168 point *below* the marker.  A checkpoint
+# only makes a *deeper* neighbour redundant (a hit falls back at most
+# ``min_stride`` tokens); dropping the shallower one loses the whole gap down
+# to the next lattice point (3072 tokens here), for every request that
+# diverges inside that gap -- i.e. any request with a different question.
+
+
+def _single_turn(prompt_tokens, *, question_at, gen_tail=4):
+    """[doc ...][question ...][M][gen_tail-1 tokens]: one user turn whose
+    only interior marker is the generation-prompt start at P-gen_tail."""
+    tokens = [1 + (i % 97) for i in range(question_at)]
+    tokens += [200 + i for i in range(prompt_tokens - question_at - gen_tail)]
+    tokens += [M] + [3] * (gen_tail - 1)
+    assert len(tokens) == prompt_tokens
+    return tokens
+
+
+@pytest.mark.parametrize("prompt_tokens", [7405, 7408, 7444, 7476, 7479, 15127, 16993])
+def test_auto_generation_marker_never_suppresses_a_shallower_tail_point(prompt_tokens):
+    tokens = _single_turn(prompt_tokens, question_at=prompt_tokens - 20, gen_tail=5)
+    positions, sources = plan_interior_positions(
+        tokens, count=4, min_stride=256, placement="auto", marker_ids=(M,)
+    )
+    marker = prompt_tokens - 5
+    assert marker in positions
+    # Every tail lattice point below the marker's spacing window that fits the
+    # count is planned, whatever P mod 1024 is: the deepest 1024-stride point
+    # is never traded for the 4096-stride one.
+    deep_1024 = ((prompt_tokens - 2) // 1024) * 1024
+    assert deep_1024 in positions, (prompt_tokens, positions)
+    # Spacing still holds in its sound direction: no planned point sits less
+    # than min_stride above a shallower planned point except a turn point.
+    ordered = sorted(positions)
+    for lower, upper in zip(ordered, ordered[1:]):
+        assert upper - lower >= 256 or upper == marker
+
+
+def test_auto_warm_hit_depth_does_not_depend_on_prompt_length_mod_lattice():
+    """Same document, different question: the deepest reusable planned point
+    of the producer is the same lattice point for every P in a window."""
+    depths = set()
+    for prompt_tokens in range(7300, 7700, 7):
+        question_at = 7290  # shared document length, fixed across P
+        producer = _single_turn(prompt_tokens, question_at=question_at, gen_tail=5)
+        positions, _ = plan_interior_positions(
+            producer, count=4, min_stride=256, placement="auto", marker_ids=(M,)
+        )
+        depths.add(max(p for p in positions if p <= question_at))
+    assert depths == {7168}
+
+
+def _doc_question_prompts(vocab):
+    """P=332: tail lattice (stride 16) = (320, 256); the generation marker at
+    P-3 = 329 sits within 16 above 320.  Prompts share 325 tokens."""
+    marker = vocab - 1
+    doc = [(7 * i + 3) % (vocab - 2) + 1 for i in range(325)]
+    qa = [(5 * i + 1) % (vocab - 2) + 1 for i in range(4)]
+    qb = [(11 * i + 2) % (vocab - 2) + 1 for i in range(4)]
+    assert qa[0] != qb[0]
+    a = doc + qa + [marker, 3, 4]
+    b = doc + qb + [marker, 3, 4]
+    assert len(a) == len(b) == 332
+    return marker, a, b
+
+
+@pytest.mark.parametrize("mtp", [True, False], ids=["mtp", "ordinary"])
+def test_warm_hit_resumes_from_the_tail_point_below_the_generation_marker(host, mtp):
+    model, vocab = tiny_qwen38_mtp()
+    marker, a, b = _doc_question_prompts(vocab)
+    policy = {"count": 4, "min_stride": 16, "placement": "auto"}
+    warm = _engine(model, vocab, marker, policy, mtp=mtp)
+    try:
+        run(warm, a)
+        out_warm, receipt, job = run(warm, b)
+        counts = dict(warm.counts)
+    finally:
+        warm.close()
+    # Before the fix: 256 (the 64/256-stride point), 64 tokens short.
+    assert int(job.cached_tokens) == 320
+    assert receipt.get("cache_checkpoint_role") == "interior_checkpoint"
+    assert counts["apc_interior_hits"] > 0
+
+    cold = _engine(model, vocab, marker, {"count": 0, "min_stride": 1}, mtp=mtp)
+    try:
+        out_cold, _, cold_job = run(cold, b)
+        assert int(cold_job.cached_tokens or 0) == 0
+    finally:
+        cold.close()
+    assert out_warm == out_cold
+
+
+# ------------------------- cold cohort cost of rescued tail points (2026-10-07)
+#
+# Equal-heat GPU A/B (27B native MTP, 4 lanes, 8 GiB APCv2): rescuing *every*
+# tail point below the generation marker added a cut and a snapshot to every
+# cold chat prompt -- batch:4 prompts P=667..889 were cut at 768 (slices
+# 512/256/44..114), interior stores 4 -> 8 with 3 pressure spills, aggregate
+# -8..10%.  The finest lattice point always sits in the last min_stride
+# tokens; rescuing it buys < 4*min_stride tokens of reuse.  Only a rescue that
+# bridges at least one coarse stride (P=7405: 7168 vs 4096) is planned.
+
+
+def _main_rule(tokens, *, count=4, min_stride=256, marker_ids=(M,)):
+    """The pre-2026-10-07 auto plan (a picked point suppresses any tail point
+    within min_stride, in either direction) for comparison."""
+    turns = turn_boundary_positions(tokens, marker_ids)
+    picked = {}
+
+    def take(position, spacing=0):
+        if len(picked) >= count or position in picked or not 0 < position < len(tokens) - 1:
+            return
+        if spacing and any(abs(position - other) < spacing for other in picked):
+            return
+        picked[position] = True
+
+    if turns:
+        take(turns[0])
+    if len(turns) >= 2:
+        take(turns[-2])
+    for position in tail_positions(len(tokens), min_stride=min_stride):
+        take(position, spacing=min_stride)
+    for position in reversed(turns):
+        take(position)
+    return tuple(sorted(picked))
+
+
+# batch:4 prompt lengths of the equal-heat run, then a 2-4K cohort.
+@pytest.mark.parametrize(
+    "prompt_tokens", [667, 678, 689, 819, 840, 860, 889, 2400, 2500, 3000, 3500, 4000]
+)
+def test_cold_chat_prompt_gets_no_finest_tail_cut_below_its_marker(prompt_tokens):
+    from mlx2.runtime.interior_placement import cold_prefill_cuts
+
+    tokens = _single_turn(prompt_tokens, question_at=prompt_tokens - 20, gen_tail=7)
+    cuts = cold_prefill_cuts(
+        tokens, policy=dict(APC_INTERIOR_AUTO_POLICY), marker_ids=(M,)
+    )
+    marker = prompt_tokens - 7
+    # No cut inside the last min_stride tokens other than the marker itself,
+    # so no tiny prefill slice and no extra snapshot for these prompts...
+    assert [c for c in cuts if marker - 256 < c < marker] == []
+    # ...and the plan is exactly main's (no new checkpoints at all).
+    assert cuts == _main_rule(tokens)
+
+
+def test_rescue_only_where_it_bridges_a_coarse_stride():
+    # (P-2) mod 1024 < 250: the deepest 1024-lattice point sits just under the
+    # marker.  Main dropped it (hit 4096 / nothing); it is kept now.
+    for prompt_tokens, rescued in ((7405, 7168), (3080, 3072), (1100, 1024)):
+        tokens = _single_turn(prompt_tokens, question_at=prompt_tokens - 20, gen_tail=7)
+        positions, _ = plan_interior_positions(
+            tokens, count=4, min_stride=256, placement="auto", marker_ids=(M,)
+        )
+        assert set(positions) - set(_main_rule(tokens)) == {rescued}
+    # Elsewhere the plan is main's: the finest 256-point under the marker is
+    # never added (7476 -> 7168, not 7424).
+    for prompt_tokens in (7444, 7476, 7663, 9200, 16993):
+        tokens = _single_turn(prompt_tokens, question_at=prompt_tokens - 20, gen_tail=7)
+        positions, _ = plan_interior_positions(
+            tokens, count=4, min_stride=256, placement="auto", marker_ids=(M,)
+        )
+        assert positions == _main_rule(tokens), prompt_tokens
+
+
+def _cohort_prompts(vocab, lengths):
+    marker = vocab - 1
+    out = []
+    for index, length in enumerate(lengths):
+        body = [((index + 3) * i + 5) % (vocab - 2) + 1 for i in range(length - 3)]
+        out.append(body + [marker, 3, 4])
+    return marker, out
+
+
+def test_cold_b4_cohort_plans_no_small_tail_cuts(host):
+    """Served analog of batch:4 (stride 16 ~ 256/16): four co-arriving cold
+    prompts P=51..56 whose finest tail point (48) sits 0-5 rows under the
+    marker.  None is planned: no extra snapshot, no tiny prefill slice."""
+    model, vocab = tiny_qwen38_mtp()
+    marker, prompts = _cohort_prompts(vocab, (51, 53, 54, 56))
+    policy = {"count": 4, "min_stride": 16, "placement": "auto"}
+    engine = _engine(model, vocab, marker, policy, mtp=True, max_lanes=4)
+    try:
+        jobs = [
+            engine.submit({"tokens": list(p), "max_tokens": 8, "temperature": 0})
+            for p in prompts
+        ]
+        for job in jobs:
+            while True:
+                event = job.events.get(timeout=120)
+                assert "error" not in event, event
+                if "finish_reason" in event:
+                    break
+        counts = dict(engine.counts)
+    finally:
+        engine.close()
+    assert counts["apc_interior_positions_planned_turn"] == 4
+    assert counts.get("apc_interior_positions_planned_tail", 0) == 0
+    assert counts["apc_interior_checkpoints_published"] == 4
+    for job, prompt in zip(jobs, prompts):
+        assert tuple(job.prefill_cold_cuts) == (len(prompt) - 3,)
