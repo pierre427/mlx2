@@ -13,6 +13,15 @@ from dataclasses import asdict, replace
 
 from ..contracts import Capability, StatePlane
 
+DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION = {
+    "prompt_lookup": True,
+    "ngram_min": 3,
+    "ngram_max": 6,
+    "lookback": 256,
+    "min_context_match": 4,
+    "max_sources": 8,
+}
+
 
 class ExternalDraftAdapterMixin:
     EXTERNAL_DEFAULT_NUM_DRAFT = 3
@@ -48,17 +57,25 @@ class ExternalDraftAdapterMixin:
             from ..runtime.acceptance_estimator import AdaptiveVerificationPolicy
 
             AdaptiveVerificationPolicy.from_value(adaptive, count)
-        if "proposal_composition" in self.external_policy:
+        if self.external_policy.get("proposal_composition") is not False and (
+            "proposal_composition" in self.external_policy
+        ):
             from ..runtime.proposal_composition import ProposalCompositionPolicy
 
-            ProposalCompositionPolicy.from_value(
+            composition = ProposalCompositionPolicy.from_value(
                 self.external_policy["proposal_composition"]
             )
+            if composition.trusted_pld and adaptive is not None:
+                raise ValueError(
+                    "trusted PLD cannot combine with adaptive verification"
+                )
         if "continuation_pool" in self.external_policy:
             from ..runtime.proposal_providers import ContinuationPoolPolicy
 
             ContinuationPoolPolicy.from_value(self.external_policy["continuation_pool"])
-            if "proposal_composition" in self.external_policy:
+            if self.external_policy.get("proposal_composition") is not False and (
+                "proposal_composition" in self.external_policy
+            ):
                 raise ValueError(
                     "continuation_pool already arbitrates proposal sources"
                 )
@@ -86,6 +103,18 @@ class ExternalDraftAdapterMixin:
 
     def _bind_external_drafter(self, record, loader, base_descriptor):
         self.draft_model = loader(record, self.model)
+        if (
+            "proposal_composition" not in self.external_policy
+            and "continuation_pool" not in self.external_policy
+            # Composition verifies chains; a tree route (e.g. the pinned
+            # Qwen3.8 pair's tree15 batch-size route) keeps its own drafts.
+            and self.external_policy.get("batch_size_route") is None
+            and not bool(getattr(self.draft_model, "requires_context_tokens", False))
+            and callable(getattr(self.draft_model, "draft_distributions", None))
+        ):
+            self.external_policy["proposal_composition"] = dict(
+                DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION
+            )
         # Capture effective head geometry before wrappers add policy receipts.
         # Artifact bytes alone do not pin refinement passes or retained context.
         effective_draft_settings = (
@@ -127,7 +156,9 @@ class ExternalDraftAdapterMixin:
                 "lilicorr_feedback requires an actual resident LiLiCoRR head"
             )
         composition_identity = ""
-        if "proposal_composition" in self.external_policy:
+        if self.external_policy.get("proposal_composition") is not False and (
+            "proposal_composition" in self.external_policy
+        ):
             from ..runtime.proposal_composition import ComposedDraftModel
             from .proposal_sources import native_mtp_source
 

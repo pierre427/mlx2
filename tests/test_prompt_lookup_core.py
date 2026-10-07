@@ -7,6 +7,7 @@ from mlx2.runtime.prompt_lookup import (
     AdaptiveLookback,
     CostAwarePLDLatch,
     IndexedPromptLookup,
+    RecentCommittedSegmentStore,
     plan_proposal_around_verify_cliff,
     verify_prompt_lookup,
 )
@@ -183,6 +184,203 @@ def test_hot_segments_use_the_index_and_preserve_target_tie_priority():
     assert receipt["hot_key_lookups"] == 1
     assert receipt["hot_starts_avoided"] > 50
     assert receipt["hot_segments_indexed"] == 1
+
+
+def test_hot_segment_reports_cross_request_source_kind():
+    lookup = IndexedPromptLookup([9, 1, 2], ngram_min=2, ngram_max=2)
+    lookup.add_hot_segment(
+        [7, 1, 2, 3, 4], source_kind="recent_committed"
+    )
+    assert lookup.propose(2) == [3, 4]
+    assert lookup.last_source_kind == "recent_committed"
+
+
+def test_recent_committed_store_is_scope_capacity_tail_and_age_bounded():
+    now = [100.0]
+    store = RecentCommittedSegmentStore(
+        max_responses=2,
+        max_tokens=5,
+        max_response_tokens=3,
+        max_age_seconds=10,
+        clock=lambda: now[0],
+    )
+    first = store.publish("scope-a", [1, 2, 3, 4], segment_id="first")
+    assert first.tokens == (2, 3, 4)
+    store.publish("scope-b", [5, 6], segment_id="other")
+    assert [entry.segment_id for entry in store.snapshot("scope-a")] == ["first"]
+    scoped = store.status("scope-a")
+    assert scoped["responses"] == 1
+    assert scoped["tokens"] == 3
+    assert "published" not in scoped
+    store.publish("scope-a", [7, 8], segment_id="newest")
+    assert [entry.segment_id for entry in store.snapshot("scope-a")] == ["newest"]
+    assert store.status()["capacity_evictions"] == 1
+    now[0] = 111.0
+    assert store.snapshot("scope-a") == ()
+    assert store.status()["responses"] == 0
+    assert store.status()["age_evictions"] == 2
+
+
+def test_recent_committed_store_clamps_one_response_to_total_budget():
+    store = RecentCommittedSegmentStore(
+        max_responses=4,
+        max_tokens=3,
+        max_response_tokens=8,
+    )
+    entry = store.publish("scope", [1, 2, 3, 4, 5], segment_id="wide")
+    assert entry.tokens == (3, 4, 5)
+    assert store.snapshot("scope") == (entry,)
+    assert store.status()["tokens"] == 3
+    assert store.status().get("capacity_evictions", 0) == 0
+
+
+def test_recent_committed_store_refreshes_exact_scope_duplicates():
+    now = [1.0]
+    store = RecentCommittedSegmentStore(clock=lambda: now[0])
+    first = store.publish("scope", [1, 2, 3], segment_id="first")
+    indexed = store.indexed_segment(
+        first.scope,
+        first.tokens,
+        source_kind="recent_committed",
+        source_id=first.cache_id,
+        ngram_min=2,
+        ngram_max=2,
+    )
+    now[0] = 2.0
+    newest = store.publish("scope", [1, 2, 3], segment_id="newest")
+    assert newest != first
+    assert store.snapshot("scope") == (newest,)
+    status = store.status()
+    assert status["responses"] == 1
+    assert status["tokens"] == 3
+    assert status["published"] == 2
+    assert status["duplicate_refreshes"] == 1
+    assert newest.cache_id == first.cache_id
+    assert store.indexed_segment(
+        newest.scope,
+        newest.tokens,
+        source_kind="recent_committed",
+        source_id=newest.cache_id,
+        ngram_min=2,
+        ngram_max=2,
+    ) is indexed
+
+
+def test_recent_store_shared_indexes_are_immutable_scoped_and_reused():
+    store = RecentCommittedSegmentStore(max_responses=2)
+    first = store.indexed_segment(
+        "scope-a",
+        (1, 2, 3, 1, 2, 4),
+        source_kind="recent_committed",
+        source_id="one",
+        ngram_min=2,
+        ngram_max=3,
+        index_window=16,
+    )
+    reused = store.indexed_segment(
+        "scope-a",
+        first.tokens,
+        source_kind="recent_committed",
+        source_id="one",
+        ngram_min=2,
+        ngram_max=3,
+        index_window=16,
+    )
+    other_scope = store.indexed_segment(
+        "scope-b",
+        first.tokens,
+        source_kind="recent_committed",
+        source_id="one",
+        ngram_min=2,
+        ngram_max=3,
+        index_window=16,
+    )
+    assert reused is first
+    assert other_scope is not first
+    assert isinstance(first.index[2][(1, 2)], tuple)
+    with pytest.raises(TypeError):
+        first.index[2][(1, 2)] = (99,)
+    with pytest.raises(TypeError):
+        first.index[2] = {}
+    assert store.status("scope-a")["shared_index_entries"] == 1
+    assert store.status("scope-a")["shared_index_hits"] == 1
+    status = store.status()
+    assert status["shared_index_entries"] == 2
+    assert status["shared_index_hits"] == 1
+    assert status["shared_index_builds"] == 2
+
+
+def test_recent_store_expiry_removes_its_shared_index():
+    now = [1.0]
+    store = RecentCommittedSegmentStore(
+        max_responses=2, max_age_seconds=2, clock=lambda: now[0]
+    )
+    entry = store.publish("scope", [1, 2, 3, 4], segment_id="response")
+    store.indexed_segment(
+        entry.scope,
+        entry.tokens,
+        source_kind="recent_committed",
+        source_id=entry.cache_id,
+        ngram_min=2,
+        ngram_max=3,
+        index_window=16,
+    )
+    assert store.status()["shared_index_entries"] == 1
+    now[0] = 4.0
+    assert store.snapshot("scope") == ()
+    status = store.status()
+    assert status["shared_index_entries"] == 0
+    assert status["shared_index_lifecycle_evictions"] == 1
+
+
+def test_recent_store_shared_index_obeys_total_token_budget():
+    store = RecentCommittedSegmentStore(
+        max_responses=4, max_tokens=5, max_response_tokens=5
+    )
+    first = store.indexed_segment(
+        "scope",
+        (1, 2, 3),
+        source_kind="apcv2_transcript",
+        source_id="first",
+        ngram_min=2,
+        ngram_max=2,
+    )
+    second = store.indexed_segment(
+        "scope",
+        (4, 5, 6),
+        source_kind="apcv2_transcript",
+        source_id="second",
+        ngram_min=2,
+        ngram_max=2,
+    )
+    assert first is not second
+    status = store.status()
+    assert status["shared_index_entries"] == 1
+    assert status["shared_index_tokens"] == 3
+    assert status["shared_index_capacity_evictions"] == 1
+
+
+def test_recent_store_concurrent_shared_index_build_converges():
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = RecentCommittedSegmentStore(max_responses=4)
+    tokens = tuple(range(512))
+
+    def build(_index):
+        return store.indexed_segment(
+            "scope",
+            tokens,
+            source_kind="apcv2_transcript",
+            source_id="shared",
+            ngram_min=3,
+            ngram_max=6,
+            index_window=1024,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = tuple(pool.map(build, range(16)))
+    assert len({id(result) for result in results}) == 1
+    assert store.status()["shared_index_entries"] == 1
 
 
 def test_context_match_screens_ambiguous_recent_copy_source():
@@ -484,6 +682,144 @@ def test_prompt_lookup_lane_bounds_default_index_to_the_configured_ladder():
         assert proposer.index_receipt()["index_window"] == 32
     finally:
         generator.remove([uid])
+
+
+def test_pld_recent_segments_share_apcv2_scope_and_transcript_segments():
+    from mlx2.runtime.cache_planes import (
+        TranscriptLedgerPlane,
+        TranscriptLedgerSegment,
+    )
+    from mlx2.runtime.models.cache import KVCache
+    from mlx2.runtime.pld import PromptLookupBatchGenerator
+
+    scope = ("apcv2-key", "tenant-a")
+    store = RecentCommittedSegmentStore()
+    store.publish(scope, [8, 1, 2, 6], segment_id="recent")
+    ledger = TranscriptLedgerPlane(
+        tokenizer_identity="tok",
+        tokenizer_version="v1",
+        revision="rev",
+        segments=(TranscriptLedgerSegment("prior", 0, 5, (9, 1, 2, 7, 5)),),
+    )
+    generator = PromptLookupBatchGenerator(
+        object(),
+        prompt_lookup={
+            "recent_committed_segments": True,
+            "ngram_min": 2,
+            "ngram_max": 2,
+        },
+        recent_source_store=store,
+    )
+    uid = generator.insert(
+        [[1, 2]],
+        caches=[[KVCache()]],
+        pld_source_scopes=[scope],
+        apc_transcript_ledgers=[ledger],
+    )[0]
+    try:
+        lane = generator.lanes[uid]
+        assert lane.apcv2_source_segments == 1
+        assert lane.recent_source_segments == 1
+        assert lane.proposer.propose(2) == [7, 5]
+        assert lane.proposer.last_source_kind == "apcv2_transcript"
+    finally:
+        generator.remove([uid])
+
+
+def test_pld_lanes_share_engine_owned_recent_postings():
+    from mlx2.runtime.models.cache import KVCache
+    from mlx2.runtime.pld import PromptLookupBatchGenerator
+
+    scope = ("apcv2-key", "tenant-a")
+    store = RecentCommittedSegmentStore()
+    store.publish(scope, [8, 1, 2, 6], segment_id="recent")
+    generator = PromptLookupBatchGenerator(
+        object(),
+        completion_batch_size=2,
+        prompt_lookup={
+            "recent_committed_segments": True,
+            "ngram_min": 2,
+            "ngram_max": 2,
+        },
+        recent_source_store=store,
+    )
+    first, second = generator.insert(
+        [[1, 2], [1, 2]],
+        caches=[[KVCache()], [KVCache()]],
+        pld_source_scopes=[scope, scope],
+    )
+    try:
+        first_hot = generator.lanes[first].proposer.hot[0]
+        second_hot = generator.lanes[second].proposer.hot[0]
+        assert first_hot is second_hot
+        assert first_hot.index is second_hot.index
+        assert store.status()["shared_index_builds"] == 1
+        assert store.status()["shared_index_hits"] == 1
+    finally:
+        generator.remove([first, second])
+
+
+def test_pld_apcv2_transcript_sources_obey_response_and_total_bounds():
+    from mlx2.runtime.cache_planes import (
+        TranscriptLedgerPlane,
+        TranscriptLedgerSegment,
+    )
+    from mlx2.runtime.models.cache import KVCache
+    from mlx2.runtime.pld import PromptLookupBatchGenerator
+
+    scope = ("apcv2-key", "tenant-a")
+    ledger = TranscriptLedgerPlane(
+        tokenizer_identity="tok",
+        tokenizer_version="v1",
+        revision="rev",
+        segments=(
+            TranscriptLedgerSegment("older", 0, 5, (1, 2, 3, 4, 5)),
+            TranscriptLedgerSegment("newer", 5, 10, (6, 7, 8, 9, 10)),
+        ),
+    )
+    generator = PromptLookupBatchGenerator(
+        object(),
+        prompt_lookup={
+            "recent_committed_segments": True,
+            "recent_committed_max_responses": 2,
+            "recent_committed_max_tokens": 5,
+            "recent_committed_response_tokens": 3,
+        },
+        recent_source_store=RecentCommittedSegmentStore(
+            max_responses=2,
+            max_tokens=5,
+            max_response_tokens=3,
+        ),
+    )
+    uid = generator.insert(
+        [[8, 9]],
+        caches=[[KVCache()]],
+        pld_source_scopes=[scope],
+        apc_transcript_ledgers=[ledger],
+    )[0]
+    try:
+        hot = list(generator.lanes[uid].proposer.hot)
+        assert [segment.tokens for segment in hot] == [(8, 9, 10), (4, 5)]
+        assert sum(len(segment.tokens) for segment in hot) == 5
+    finally:
+        generator.remove([uid])
+
+
+def test_pld_recent_segments_fail_closed_without_engine_store_or_scope():
+    from mlx2.runtime.models.cache import KVCache
+    from mlx2.runtime.pld import PromptLookupBatchGenerator
+
+    with pytest.raises(ValueError, match="engine-owned source store"):
+        PromptLookupBatchGenerator(
+            object(), prompt_lookup={"recent_committed_segments": True}
+        )
+    generator = PromptLookupBatchGenerator(
+        object(),
+        prompt_lookup={"recent_committed_segments": True},
+        recent_source_store=RecentCommittedSegmentStore(),
+    )
+    with pytest.raises(ValueError, match="APCv2-bound source scope"):
+        generator.insert([[1]], caches=[[KVCache()]])
 
 
 def test_prompt_lookup_policy_allowlist_covers_every_key_the_generator_reads():

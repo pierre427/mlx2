@@ -159,6 +159,33 @@ def test_target_taps_are_post_block_residuals_and_logits_unchanged():
         target.forward_with_taps(x, target.make_cache(), [8])
 
 
+def test_target_last_logit_projection_preserves_full_taps_and_cache():
+    target = tiny_target()
+    x = mx.array([[1, 2, 3, 4, 5]])
+    full_cache, last_cache = target.make_cache(), target.make_cache()
+    full_logits, full_taps = target.forward_with_taps(x, full_cache, [1, 6])
+    last_logits, last_taps = target.forward_with_taps(
+        x, last_cache, [1, 6], last_logits_only=True
+    )
+    mx.eval(full_logits, full_taps, last_logits, last_taps)
+    np.testing.assert_allclose(
+        np.asarray(last_logits), np.asarray(full_logits[:, -1:]), atol=1e-5
+    )
+    np.testing.assert_allclose(np.asarray(last_taps), np.asarray(full_taps), atol=1e-5)
+    for full, last in zip(full_cache, last_cache):
+        if hasattr(full, "offset"):
+            assert full.offset == last.offset
+        else:
+            for full_state, last_state in zip(full.cache, last.cache):
+                np.testing.assert_allclose(
+                    np.asarray(full_state), np.asarray(last_state), atol=1e-5
+                )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        target.forward_with_taps(
+            x, target.make_cache(), [1, 6], body_only=True, last_logits_only=True
+        )
+
+
 def test_split_prefill_taps_match_one_shot():
     target = tiny_target()
     x = mx.array([[1, 2, 3, 4, 5, 6, 7]])
@@ -422,7 +449,6 @@ def test_ready_drain_rejects_unknown_mode():
 
 
 def _serving_adapter(target, draft, *, external, vocab=VOCAB):
-    from mlx2.contracts import Capability
 
     class Detok:
         def __init__(self):

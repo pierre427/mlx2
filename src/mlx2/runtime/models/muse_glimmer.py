@@ -4,6 +4,7 @@
 
 import mlx.core as mx
 import mlx.nn as nn
+
 from ...adapters.muse_glimmer_config import ModelArgs
 from .base import create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache, RotatingKVCache
@@ -183,6 +184,8 @@ class MuseGlimmerModel(nn.Module):
 
 
 class Model(nn.Module):
+    supports_trusted_pld = True
+
     @property
     def apc_v2_layout(self):
         return self.args.cache_layout
@@ -206,7 +209,15 @@ class Model(nn.Module):
         cap = self.args.final_logit_softcapping
         return mx.tanh(out / cap) * cap
 
-    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+    def forward_with_taps(
+        self,
+        inputs,
+        cache,
+        capture_layers,
+        *,
+        body_only=False,
+        last_logits_only=False,
+    ):
         """Post-block target taps in ascending layer order, before final norm.
 
         Body-only prefill avoids the expensive vocabulary projection. Tap
@@ -216,11 +227,14 @@ class Model(nn.Module):
         if not capture_layers or tuple(sorted(set(capture_layers))) != capture_layers or capture_layers[-1] >= len(self.layers) or capture_layers[0] < 0:
             raise ValueError("Invalid target capture layers")
         taps = []
+        if body_only and last_logits_only:
+            raise ValueError("body-only forward cannot request last-row logits")
         hidden = self.model(inputs, cache=cache, capture_layers=capture_layers, hidden_sink=taps)
         features = mx.concatenate(taps, axis=-1)
         if body_only:
             return None, features
-        logits = self.model.embed_tokens.as_linear(hidden) if self.tie_word_embeddings else self.lm_head(hidden)
+        projected = hidden[:, -1:] if last_logits_only else hidden
+        logits = self.model.embed_tokens.as_linear(projected) if self.tie_word_embeddings else self.lm_head(projected)
         logits = logits * self.args.output_multiplier
         cap = self.args.final_logit_softcapping
         return mx.tanh(logits / cap) * cap, features

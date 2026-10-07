@@ -235,11 +235,29 @@ def test_flash_next_native_mtp_defaults_match_gated_copy_drafts():
         (XingAdapter, xing(has_mtp=True)),
     ],
 )
-def test_copy_drafts_stay_off_where_unproven(adapter_type, descriptor):
+def test_native_mtp_routes_default_tuned_local_copy_drafts(adapter_type, descriptor):
+    from mlx2.runtime.copy_draft import CopyDraftPolicy
+
     policy = resolve_execution_policy_defaults(
         None, MTP, _resolution(adapter_type, descriptor)
     ) or {}
-    assert "self_mtp_copy_draft" not in policy
+    parsed = CopyDraftPolicy.from_value(policy["self_mtp_copy_draft"])
+    assert parsed.enabled is True
+    assert (
+        parsed.ngram_min,
+        parsed.ngram_max,
+        parsed.lookback,
+        parsed.min_match,
+        parsed.batched_max_span,
+    ) == (3, 6, 256, 4, 0)
+    ordinary = resolve_execution_policy_defaults(
+        None, ORDINARY, _resolution(adapter_type, descriptor)
+    ) or {}
+    assert "self_mtp_copy_draft" not in ordinary
+    explicit = {"self_mtp_copy_draft": {"enabled": False}}
+    assert resolve_execution_policy_defaults(
+        explicit, MTP, _resolution(adapter_type, descriptor)
+    )["self_mtp_copy_draft"] == {"enabled": False}
 
 
 ALL_MTP = HYBRID_MTP + [
@@ -251,9 +269,12 @@ ALL_MTP = HYBRID_MTP + [
 @pytest.mark.parametrize(("adapter_type", "descriptor"), ALL_MTP)
 def test_native_mtp_routes_default_srpt_prefill_scheduling(adapter_type, descriptor):
     from mlx2.runtime.adaptive_policy import PrefillOrder
+    from mlx2.runtime.copy_draft import CopyDraftPolicy
 
     resolution = _resolution(adapter_type, descriptor)
     policy = resolve_execution_policy_defaults(None, MTP, resolution, max_lanes=16)
+    copy_draft = CopyDraftPolicy.from_value(policy["self_mtp_copy_draft"])
+    assert copy_draft.enabled is True and copy_draft.batched_max_span == 0
     order = PrefillOrder.from_value(policy["prefill_scheduling"])
     assert order.enabled and order.order == "srpt"
     assert order.max_bypass == 3 and order.one_slice_contention is True
@@ -748,7 +769,6 @@ def test_nemotron_environment_strips_inherited_lab_switches(monkeypatch):
     for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "MLX_ENABLE_TF32"):
         monkeypatch.delenv(name, raising=False)  # restored after the test
     profile = nemotron3_super.configure_environment()
-    import os
 
     for name in ("MLX_LM_BATCH_ATTENTION_BACKEND", "MLX_QWEN4_MEGAKERNEL",
                  "MLXUAG_EXPERIMENT", "MLX_GDN_CORE"):
@@ -778,7 +798,6 @@ def test_qwen36_kernel_switches_default_to_stock_and_toggle_by_policy(monkeypatc
     fused = qwen36_35b.configure_environment(
         {"fused_gdn_decode": True, "moe_fused_gate_up": True, "gdn_core": True}
     )
-    import os
 
     assert fused["MLX_QWEN36_FUSED_GDN_DECODE"] == "1"
     assert os.environ["MLX_QWEN36_FUSED_GDN_DECODE"] == "1"

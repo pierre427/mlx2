@@ -125,6 +125,26 @@ def test_muse_family_keeps_stock_default_and_allows_explicit_opt_in():
         assert other["sources"]["mode"] == "builtin"
 
 
+def test_muse_simd_opt_in_is_zero_copy_by_default():
+    detected = {
+        "moe": False,
+        "formats": {"q4": 417},
+        "backend": "simd",
+    }
+    opted = policy.resolve(detected, family="muse-glimmer", mode="crossover")
+    assert opted["mode"] == "crossover"
+    assert opted["grouping"] is False
+    assert opted["sources"]["grouping"] == "family:muse-glimmer+backend:simd"
+    grouped = policy.resolve(
+        detected,
+        family="muse-glimmer",
+        mode="crossover",
+        overrides={"grouping": True},
+    )
+    assert grouped["grouping"] is True
+    assert grouped["sources"]["grouping"] == "override"
+
+
 @pytest.mark.parametrize(
     ("override", "message"),
     [

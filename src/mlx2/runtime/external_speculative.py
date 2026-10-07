@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from ..thinking_guard import stack_block_steer, verify_block_steer
 from .committed_recovery import CommittedRecoverySlot
 from .processor_probe import VerifyWindow, copy_sharing, rollback_shared_memo
 from .cow_cache import (
@@ -46,7 +47,6 @@ from .speculative_sampling import (
     verify_greedy_proposals,
     verify_proposals,
 )
-from ..thinking_guard import stack_block_steer, verify_block_steer
 
 _COUNTER_MAX = (1 << 63) - 1
 
@@ -295,6 +295,10 @@ class HostDraftRow:
     width: int = 1
     confidence_features: object = None
     proposal_source: str | None = None
+    proposal_score_key: str | None = None
+    proposal_score: float | None = None
+    proposal_trusted: bool = False
+    proposal_audit: bool = False
     continuation_selection: object = None
     feedback_payload: object = None
 
@@ -314,6 +318,10 @@ class CompactDraftRow:
     candidate_probs: np.ndarray
     width: int
     proposal_source: str | None = None
+    proposal_score_key: str | None = None
+    proposal_score: float | None = None
+    proposal_trusted: bool = False
+    proposal_audit: bool = False
 
     @property
     def lengths(self):
@@ -1196,6 +1204,17 @@ class ExternalDraftBatchGenerator:
             "verify_accept_hist": dict(lane.verify_accept_hist),
             "verify_accept_span_hist": dict(lane.verify_accept_span_hist),
         }
+        if getattr(lane, "trusted_pld_rounds", 0):
+            return {
+                "verification": "mixed_exact_and_trusted_pld",
+                "approximate": True,
+                "trusted_pld_rounds": lane.trusted_pld_rounds,
+                "trusted_pld_tokens": getattr(lane, "trusted_pld_tokens", 0),
+                "copied_row_target_draws": 0,
+                "bonus_row_target_draws": 1,
+                "relaxed_accepts": lane.relaxed_accepts,
+                **hists,
+            }
         if self.fly_verification.enabled and not lane.processors:
             return {
                 "verification": "fly",
@@ -1731,6 +1750,11 @@ class ExternalDraftBatchGenerator:
                 if confidence is not None and len(confidence) != len(lanes):
                     raise ValueError("deterministic drafter confidence rows mismatch")
             sources = getattr(self.draft, "last_proposal_sources", None)
+            scored_composition = hasattr(self.draft, "last_proposal_score_keys")
+            score_keys = getattr(self.draft, "last_proposal_score_keys", None)
+            scores = getattr(self.draft, "last_proposal_scores", None)
+            trusted_rows = getattr(self.draft, "last_proposal_trusted", None)
+            audit_rows = getattr(self.draft, "last_proposal_audits", None)
             selections = getattr(self.draft, "last_continuation_selections", None) if self.continuation_policy is not None else None
             payloads = getattr(self.draft, "draft_feedback_payloads", None)
             if selections is not None and len(selections) != len(lanes):
@@ -1744,6 +1768,22 @@ class ExternalDraftBatchGenerator:
                     or any(type(source) is not str or source not in {"prompt_lookup", "native_mtp", "external"}
                            for source in sources)):
                 raise ValueError("invalid composed proposal source rows")
+            if scored_composition and (
+                score_keys is None
+                or scores is None
+                or len(score_keys) != len(lanes)
+                or len(scores) != len(lanes)
+                or trusted_rows is None
+                or audit_rows is None
+                or len(trusted_rows) != len(lanes)
+                or len(audit_rows) != len(lanes)
+                or any(type(key) is not str or not key for key in score_keys)
+                or any(not np.isfinite(score) for score in scores)
+                or any(type(value) is not bool for value in trusted_rows)
+                or any(type(value) is not bool for value in audit_rows)
+                or any(audit and trusted for audit, trusted in zip(audit_rows, trusted_rows))
+            ):
+                raise ValueError("invalid composed proposal score rows")
             for j,row in enumerate(indices):
                 feature_row = None
                 if deterministic_admission:
@@ -1780,6 +1820,11 @@ class ExternalDraftBatchGenerator:
                     if not isinstance(blocks[row], (HostDraftRow, CompactDraftRow)):
                         raise ValueError("composition requires supported chain proposal blocks")
                     blocks[row].proposal_source = sources[j]
+                    if scored_composition:
+                        blocks[row].proposal_score_key = score_keys[j]
+                        blocks[row].proposal_score = float(scores[j])
+                        blocks[row].proposal_trusted = trusted_rows[j]
+                        blocks[row].proposal_audit = audit_rows[j]
                 if selections is not None:
                     if not isinstance(blocks[row], HostDraftRow) or selections[j] is None:
                         raise ValueError("continuation requires host complete-path selections")
@@ -1883,6 +1928,47 @@ class ExternalDraftBatchGenerator:
                 )
             )
         return decisions
+
+    def _verify_trusted_pld(self, lane, block, logits):
+        """Approximate PLD: trust copied rows and sample only the target bonus."""
+        if (
+            not isinstance(block, HostDraftRow)
+            or block.proposal_source != "prompt_lookup"
+            or not block.proposal_trusted
+            or block.proposal_audit
+            or lane.processors
+            or logits.shape[0] != 1
+            or logits.shape[1] != 1
+        ):
+            raise ValueError("trusted PLD requires one unprocessed host copy row")
+        drafts = list(block.tokens)
+        response_rows = [] if lane.sampling.get("emit_logprobs", True) else None
+        law = self._target_law(
+            lane,
+            logits[0, 0],
+            lane.history + [lane.anchor, *drafts],
+            True,
+            response_rows,
+        )
+        bonus = lane.rng.sample(law)
+        emitted = [*drafts, bonus]
+        for index, token in enumerate(emitted):
+            if token in self.stops:
+                emitted = emitted[: index + 1]
+                break
+        laws = [None] * len(drafts) + [law]
+        rows = (
+            None
+            if response_rows is None
+            else [None] * len(drafts) + list(response_rows)
+        )
+        return RoundDecision(
+            len(drafts),
+            emitted,
+            laws[: len(emitted)],
+            response_logprobs=(None if rows is None else rows[: len(emitted)]),
+            verify_window=VerifyWindow(()),
+        )
 
     @staticmethod
     def _target_tree_parents(block):
@@ -2455,6 +2541,18 @@ class ExternalDraftBatchGenerator:
             source = getattr(blocks[row], "proposal_source", None)
             if hasattr(self.draft, "last_proposal_sources"):
                 lane.proposal_composition_current_source = source if count else "ordinary"
+                lane.proposal_composition_current_score_key = (
+                    blocks[row].proposal_score_key if count else None
+                )
+                lane.proposal_composition_current_score = (
+                    blocks[row].proposal_score if count else None
+                )
+                lane.proposal_composition_current_trusted = bool(
+                    count and getattr(blocks[row], "proposal_trusted", False)
+                )
+                lane.proposal_composition_current_audit = bool(
+                    count and getattr(blocks[row], "proposal_audit", False)
+                )
                 if source is not None and count:
                     counters = getattr(lane, "proposal_composition_counts", {})
                     record = counters.setdefault(source, {"verified_rounds": 0, "proposed_tokens": 0, "accepted_tokens": 0})
@@ -2463,6 +2561,20 @@ class ExternalDraftBatchGenerator:
                     record["accepted_tokens"] += round_accepted
                     lane.proposal_composition_counts = counters
                     _bump(self.scheduler_stats, "external_composed_" + source + "_rounds")
+                    if getattr(blocks[row], "proposal_trusted", False):
+                        lane.trusted_pld_rounds = getattr(lane, "trusted_pld_rounds", 0) + 1
+                        lane.trusted_pld_tokens = getattr(lane, "trusted_pld_tokens", 0) + count
+                        _bump(self.scheduler_stats, "external_composed_trusted_pld_rounds")
+                        _bump(
+                            self.scheduler_stats,
+                            "external_composed_trusted_pld_tokens",
+                            count,
+                        )
+                    elif getattr(blocks[row], "proposal_audit", False):
+                        _bump(
+                            self.scheduler_stats,
+                            "external_composed_trusted_pld_audit_rounds",
+                        )
             if count:
                 # Two host dict bumps on ints already in hand: no device work,
                 # no eval, no per-round allocation beyond the at-most-(K+1)
@@ -2517,7 +2629,8 @@ class ExternalDraftBatchGenerator:
             if self._feedback_outbox is not None:
                 payload = getattr(blocks[row], "feedback_payload", None)
                 selection = getattr(blocks[row], "continuation_selection", None)
-                if payload is not None or selection is not None:
+                score_key = getattr(blocks[row], "proposal_score_key", None)
+                if payload is not None or selection is not None or score_key is not None:
                     self._feedback_outbox.append((lane, blocks[row], decision, lane.external_rounds - 1))
             if count:
                 lane.draft_max_width = max(lane.draft_max_width, getattr(blocks[row], "width", 1))
@@ -2534,9 +2647,12 @@ class ExternalDraftBatchGenerator:
                         and decision.response_logprobs[j] is not None
                     ):
                         logp = decision.response_logprobs[j]
-                    elif decision.target_laws is not None:
+                    elif (
+                        decision.target_laws is not None
+                        and decision.target_laws[j] is not None
+                    ):
                         logp = self.mx.log(self.mx.array(decision.target_laws[j].astype(np.float32)))
-                lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=(decision.continuation_outcome.physical_width if decision.continuation_outcome is not None else len(cohort)), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._target_execution_receipt(lane), **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt(), **self._proposal_composition_receipt(lane), **self._continuation_receipt(lane)}))
+                lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=(decision.continuation_outcome.physical_width if decision.continuation_outcome is not None else len(cohort)), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "trusted_pld_teacher_force" if getattr(blocks[row], "proposal_trusted", False) else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._target_execution_receipt(lane), **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt(), **self._proposal_composition_receipt(lane), **self._continuation_receipt(lane)}))
         if clock is not None:
             self._mark("emit", clock)
         self.scheduler_stats[
@@ -2661,11 +2777,30 @@ class ExternalDraftBatchGenerator:
         if not hasattr(self.draft, "last_proposal_sources"):
             return {}
         counters = getattr(lane, "proposal_composition_counts", {})
+        scoring = getattr(self.draft, "proposal_composition_receipt", {})
         return {"proposal_composition": {
             "selected": True, "qualified": False,
             "observed_used": any(counters.get(source, {}).get("verified_rounds", 0)
                                  for source in ("prompt_lookup", "native_mtp")),
             "current_source": current_source or getattr(lane, "proposal_composition_current_source", "not_executed"),
+            "current_score_key": getattr(
+                lane, "proposal_composition_current_score_key", None
+            ),
+            "current_score": getattr(
+                lane, "proposal_composition_current_score", None
+            ),
+            "current_trusted": getattr(
+                lane, "proposal_composition_current_trusted", False
+            ),
+            "current_audit": getattr(
+                lane, "proposal_composition_current_audit", False
+            ),
+            "ranking": {
+                "order": "score_then_span_then_source",
+                "authority": "lagged_committed_verification_only",
+                "score_counts": copy.deepcopy(scoring.get("score_counts", {})),
+            },
+            "trusted_pld": copy.deepcopy(scoring.get("trusted_pld", {})),
             "committed_verification": copy.deepcopy(counters),
         }}
 
@@ -2759,12 +2894,23 @@ class ExternalDraftBatchGenerator:
             return None
         if isinstance(block, CompactDraftRow):
             return CompactDraftRow(block.tokens[:depth], block.candidate_ids[:depth],
-                                   block.candidate_probs[:depth], block.width, block.proposal_source)
+                                   block.candidate_probs[:depth], block.width,
+                                   proposal_source=block.proposal_source,
+                                   proposal_score_key=block.proposal_score_key,
+                                   proposal_score=block.proposal_score,
+                                   proposal_trusted=block.proposal_trusted,
+                                   proposal_audit=block.proposal_audit)
         if isinstance(block, HostDraftRow):
             confidence = block.confidence_features
             return HostDraftRow(block.tokens[:depth], block.laws[:depth], block.width,
-                                None if confidence is None else confidence[:depth], block.proposal_source,
-                                block.continuation_selection, block.feedback_payload)
+                                None if confidence is None else confidence[:depth],
+                                proposal_source=block.proposal_source,
+                                proposal_score_key=block.proposal_score_key,
+                                proposal_score=block.proposal_score,
+                                proposal_trusted=block.proposal_trusted,
+                                proposal_audit=block.proposal_audit,
+                                continuation_selection=block.continuation_selection,
+                                feedback_payload=block.feedback_payload)
         raise ValueError("adaptive chain trimming requires a supported proposal block")
 
     def _adaptive_physical_groups(self, blocks):
@@ -2922,6 +3068,31 @@ class ExternalDraftBatchGenerator:
             for lane, block, decision, round_id in self._feedback_outbox:
                 selection = block.continuation_selection
                 try:
+                    observer = getattr(
+                        self.draft, "observe_proposal_feedback", None
+                    )
+                    trusted_observer = getattr(
+                        self.draft, "observe_trusted_pld", None
+                    )
+                    accepted = min(decision.accepted, len(decision.emitted) - 1)
+                    if (
+                        callable(observer)
+                        and block.proposal_score_key is not None
+                        and not block.proposal_trusted
+                    ):
+                        observer(
+                            block.proposal_score_key,
+                            len(block.tokens),
+                            accepted,
+                        )
+                    if callable(trusted_observer) and (
+                        block.proposal_trusted or block.proposal_audit
+                    ):
+                        trusted_observer(
+                            proposed=len(block.tokens),
+                            audited=bool(block.proposal_audit),
+                            accepted=accepted if block.proposal_audit else 0,
+                        )
                     if selection is not None:
                         coverage = getattr(lane, "continuation_coverage", {})
                         # Each top-W subset is ranked before target draws. A
@@ -3362,6 +3533,35 @@ class ExternalDraftBatchGenerator:
                 clock = self._mark("draft", clock)
             proposal_counts = [0 if block is None else int(block.lengths[0]) for block in blocks]
             verify_width = max(proposal_counts, default=0) + 1
+            for block in blocks:
+                if (
+                    bool(getattr(block, "proposal_trusted", False))
+                    and any(int(token) in self.stops for token in block.tokens)
+                ):
+                    # Blindly copying a role/end marker can terminate a chat
+                    # with a previous assistant turn. Keep the candidate, but
+                    # obtain an exact committed label for this round.
+                    block.proposal_trusted = False
+                    block.proposal_audit = True
+                    _bump(
+                        self.scheduler_stats,
+                        "external_composed_trusted_pld_stop_guard_rounds",
+                    )
+            trusted_round = any(
+                bool(getattr(block, "proposal_trusted", False))
+                for block in blocks
+                if block is not None
+            )
+            if trusted_round and (
+                len(cohort) != 1
+                or len(blocks) != 1
+                or self.target_execution != "reference"
+                or not bool(getattr(self.model, "supports_trusted_pld", False))
+                or self.fly_verification.enabled
+            ):
+                raise ValueError(
+                    "trusted PLD requires a supported B1 reference target"
+                )
             if self.adaptive_policy is not None:
                 effective_depth = max(proposal_counts, default=0)
                 _bump(self.scheduler_stats, "external_adaptive_rounds")
@@ -3399,7 +3599,10 @@ class ExternalDraftBatchGenerator:
                         lengths=[count + 1 for count in proposal_counts]
                     )
                     logits, features = self.model.forward_with_taps(
-                        self.mx.array(inputs), transaction.caches, self.layers
+                        self.mx.array(inputs),
+                        transaction.caches,
+                        self.layers,
+                        **({"last_logits_only": True} if trusted_round else {}),
                     )
                 self.mx.eval(logits, features)
             finally:
@@ -3407,7 +3610,11 @@ class ExternalDraftBatchGenerator:
                     taps.steer = None
             if clock is not None:
                 clock = self._mark("verify_forward", clock)
-            decisions = self._verify(cohort, blocks, logits)
+            decisions = (
+                [self._verify_trusted_pld(cohort[0], blocks[0], logits)]
+                if trusted_round
+                else self._verify(cohort, blocks, logits)
+            )
             if clock is not None:
                 self._mark("verify_laws", clock)
             self._commit(

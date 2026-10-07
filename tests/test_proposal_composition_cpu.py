@@ -26,10 +26,115 @@ from mlx2.runtime.proposal_composition import (
 )
 
 
+def test_composition_ranks_committed_score_first_and_span_second():
+    _model, draft = tiny()
+    wrapper = ComposedDraftModel(
+        draft, {"ngram_min": 1, "ngram_max": 1}
+    )
+    short_pld = ("prompt_lookup", [7, 8], "prompt_lookup:match_4")
+    full_external = ("external", None, "external")
+
+    # Cold scores tie, so the longer usable chain wins.
+    assert wrapper._select_candidate([short_pld, full_external], 4)[0] == "external"
+
+    # Only committed labels move scores. A stronger PLD score beats length.
+    wrapper.observe_proposal_feedback("prompt_lookup:match_4", 8, 8)
+    wrapper.observe_proposal_feedback("external", 8, 0)
+    selected = wrapper._select_candidate([short_pld, full_external], 4)
+    assert selected[0] == "prompt_lookup"
+    assert wrapper._proposal_score(selected[2]) > wrapper._proposal_score("external")
+
+
+def test_composition_equal_score_and_span_has_stable_source_order():
+    _model, draft = tiny()
+    wrapper = ComposedDraftModel(
+        draft,
+        {"ngram_min": 1, "ngram_max": 1, "native_mtp": False},
+    )
+    selected = wrapper._select_candidate(
+        [
+            ("external", None, "external"),
+            ("prompt_lookup", [4, 5], "prompt_lookup:match_3"),
+        ],
+        2,
+    )
+    assert selected[0] == "prompt_lookup"
+
+
+def test_stochastic_safe_source_choice_is_frozen_before_backend_call(monkeypatch):
+    model, draft = tiny()
+    wrapper = ComposedDraftModel(
+        draft, {"ngram_min": 1, "ngram_max": 1, "min_context_match": 0}
+    )
+    original = draft.draft_distributions
+
+    def mutate_lagged_score_after_selection(*args, **kwargs):
+        wrapper.observe_proposal_feedback("external", 100, 100)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(draft, "draft_distributions", mutate_lagged_score_after_selection)
+    history, anchor = [1, 2, 1], 2
+    hidden = model.prefill_body(
+        mx.array([[1, 2]]), model.make_cache(), [0, 2]
+    )
+    wrapper.draft_distributions(
+        [anchor],
+        hidden,
+        wrapper.make_cache(),
+        2,
+        [None],
+        [0],
+        processor_histories=[history],
+    )
+    assert wrapper.last_proposal_sources == ("prompt_lookup",)
+    assert wrapper.last_proposal_score_keys == ("prompt_lookup:match_1",)
+
+
+def test_trusted_pld_calibrates_cold_bucket_then_returns_to_score_order():
+    model, draft = tiny()
+    wrapper = ComposedDraftModel(
+        draft,
+        {
+            "ngram_min": 1,
+            "ngram_max": 1,
+            "min_context_match": 0,
+            "trusted_pld": True,
+            "trusted_pld_min_verified_tokens": 32,
+        },
+    )
+    wrapper.observe_proposal_feedback("external", 100, 100)
+    history, anchor = [1, 2, 1], 2
+    hidden = model.prefill_body(
+        mx.array([[1, 2]]), model.make_cache(), [0, 2]
+    )
+
+    def propose():
+        wrapper.draft_distributions(
+            [anchor],
+            hidden,
+            wrapper.make_cache(),
+            2,
+            [None],
+            [0],
+            processor_histories=[history],
+        )
+
+    propose()
+    assert wrapper.last_proposal_sources == ("prompt_lookup",)
+    assert wrapper.last_proposal_audits == (True,)
+    wrapper.observe_proposal_feedback("prompt_lookup:match_1", 32, 32)
+    propose()
+    assert wrapper.last_proposal_sources == ("external",)
+    assert wrapper.last_proposal_audits == (False,)
+
+
 @pytest.mark.parametrize("kind", ["xpress", "lilicorr"])
 def test_copy_rows_exact_q_committed_index_and_backend_cache(kind):
     model, draft = pair(kind, [2])
-    wrapped = ComposedDraftModel(draft, {"ngram_min": 1, "ngram_max": 1})
+    wrapped = ComposedDraftModel(
+        draft,
+        {"ngram_min": 1, "ngram_max": 1, "min_context_match": 0},
+    )
     histories, anchors = [[1, 2, 3, 1], [4, 5]], [2, 6]
     hidden = model.prefill_body(mx.array([[1, 2], [4, 5]]), model.make_cache(), [0, 2])
     caches = [wrapped.make_cache(), wrapped.make_cache()]
@@ -58,7 +163,10 @@ def test_copy_rows_exact_q_committed_index_and_backend_cache(kind):
 @pytest.mark.parametrize("kind", ["xpress", "lilicorr"])
 def test_real_serving_copy_cold_warm_apcv2_window_and_greedy(kind, monkeypatch):
     model, draft = pair(kind, [2])
-    wrapped = ComposedDraftModel(draft, {"ngram_min": 1, "ngram_max": 1})
+    wrapped = ComposedDraftModel(
+        draft,
+        {"ngram_min": 1, "ngram_max": 1, "min_context_match": 0},
+    )
     engine, _ = serving_engine(monkeypatch, kind, model, wrapped)
     prompt = [1, 2, 3, 1, 2, 3, 1, 2]
     try:
@@ -271,6 +379,9 @@ def test_native_source_failure_restores_external_transaction_and_retry(monkeypat
         {"native_mtp": 1},
         {"lookback": 0},
         {"ngram_min": 4, "ngram_max": 3},
+        {"min_context_match": -1},
+        {"min_context_match": 65},
+        {"max_sources": -1},
         {"prompt_lookup": False},
         {"mystery": True},
     ],
@@ -297,7 +408,10 @@ def test_dflash_exact_laws_compose_with_pld_without_draft_cache_desync():
     from mlx2.runtime.speculative_sampling import RequestRNG
 
     model, draft = tiny_dflash()
-    wrapped = ComposedDraftModel(draft, {"ngram_min": 1, "ngram_max": 1})
+    wrapped = ComposedDraftModel(
+        draft,
+        {"ngram_min": 1, "ngram_max": 1, "min_context_match": 0},
+    )
     histories, anchors = [[1, 2, 3, 1], [4, 5]], [2, 6]
     hidden = model.prefill_body(
         mx.array([[1, 2], [4, 5]]), model.make_cache(), [0, 3]
@@ -398,13 +512,29 @@ def test_shared_adapter_binding_selects_reachable_wrapper_and_revision_policy():
     assert fingerprints[0] != fingerprints[1]
 
 
-def test_copy_index_covers_only_the_lookback_window(monkeypatch):
-    """SPEC-04: the per-round index is bounded by lookback, not history."""
+@pytest.mark.parametrize(
+    ("min_context_match", "window"),
+    [(0, 8 + 2), (5, 8 + 5)],
+)
+def test_copy_index_covers_only_the_lookback_window(
+    monkeypatch, min_context_match, window
+):
+    """SPEC-04: the per-round index is bounded by lookback, not history.
+
+    The window is ``lookback + max(ngram_max, min_context_match)``: the
+    context check reads up to ``min_context_match`` tokens before a source.
+    """
     import mlx2.runtime.proposal_composition as composition
 
     model, draft = pair("xpress", [2])
     wrapped = ComposedDraftModel(
-        draft, {"ngram_min": 1, "ngram_max": 2, "lookback": 8}
+        draft,
+        {
+            "ngram_min": 1,
+            "ngram_max": 2,
+            "lookback": 8,
+            "min_context_match": min_context_match,
+        },
     )
     built = []
     real = composition.IndexedPromptLookup
@@ -421,7 +551,7 @@ def test_copy_index_covers_only_the_lookback_window(monkeypatch):
         [1, 6], hidden, wrapped.batch_caches(caches), 2, [None, None], [0, 0],
         processor_histories=[history, [4, 5]],
     )
-    assert built == [(history + [1])[-10:], [4, 5, 6]]
+    assert built == [(history + [1])[-window:], [4, 5, 6]]
     assert tokens[0] == [2, 3]
 
 
@@ -437,10 +567,202 @@ def test_windowed_lookup_proposes_exactly_what_the_full_index_proposes():
         span = int(rng.integers(1, 9))
         ngram_max = int(rng.integers(1, 7))
         ngram_min = int(rng.integers(1, ngram_max + 1))
+        # Main's composition defaults add a context check and a source cap;
+        # the window must stay exact for both.
+        min_context_match = int(rng.choice([0, 0, *range(1, 12)]))
+        max_sources = int(rng.choice([0, 0, *range(1, 10)]))
+        window = lookback + max(ngram_max, min_context_match)
         full = IndexedPromptLookup(history, ngram_min=ngram_min, ngram_max=ngram_max)
         windowed = IndexedPromptLookup(
-            history[-(lookback + ngram_max):], ngram_min=ngram_min, ngram_max=ngram_max
+            history[-window:], ngram_min=ngram_min, ngram_max=ngram_max
         )
-        assert full.propose(span, lookback=lookback) == windowed.propose(
-            span, lookback=lookback
+        options = dict(
+            lookback=lookback,
+            min_context_match=min_context_match,
+            max_sources=max_sources,
         )
+        assert full.propose(span, **options) == windowed.propose(span, **options)
+        # The score key reads the matched n-gram size, which must agree too.
+        assert (full.last_source is None) == (windowed.last_source is None)
+        if full.last_source is not None:
+            assert full.last_source[1] == windowed.last_source[1]
+
+
+def test_shared_adapter_binding_defaults_local_pld_and_allows_explicit_opt_out():
+    from mlx2.contracts import Capability, ModelDescriptor
+
+    model, draft = tiny()
+    descriptor = ModelDescriptor(
+        model_type="qwen3",
+        family="qwen3",
+        variant="tiny",
+        cache_layout="tiny",
+        capabilities=frozenset({Capability.TEXT}),
+        state_planes=frozenset(),
+    )
+    adapter = ExternalDraftAdapterMixin()
+    adapter.model = model
+    adapter.identity = {"fingerprint": "target-revision"}
+    adapter.layout = "target-layout"
+    adapter.external_policy = {"draft_model": "tiny", "num_draft": 2}
+    adapter._bind_external_drafter(
+        {"fingerprint": "head-revision"}, lambda record, target: draft, descriptor
+    )
+    assert isinstance(adapter.draft_model, ComposedDraftModel)
+    assert adapter.draft_model.policy.as_dict() == {
+        "prompt_lookup": True,
+        "ngram_min": 3,
+        "ngram_max": 6,
+        "lookback": 256,
+        "min_context_match": 4,
+        "max_sources": 8,
+        "native_mtp": False,
+        "mtp_max_history": 4096,
+        "trusted_pld": False,
+        "trusted_pld_min_score": 0.9,
+        "trusted_pld_min_verified_tokens": 32,
+        "trusted_pld_min_match": 4,
+        "trusted_pld_max_span": 8,
+        "trusted_pld_audit_interval": 0,
+    }
+
+    disabled = ExternalDraftAdapterMixin()
+    disabled.model = model
+    disabled.identity = {"fingerprint": "target-revision"}
+    disabled.layout = "target-layout"
+    disabled.external_policy = {
+        "draft_model": "tiny",
+        "num_draft": 2,
+        "proposal_composition": False,
+    }
+    disabled._bind_external_drafter(
+        {"fingerprint": "head-revision"}, lambda record, target: draft, descriptor
+    )
+    assert disabled.draft_model is draft
+
+
+def _enable_tiny_trusted_pld(monkeypatch, model):
+    original = model.forward_with_taps
+
+    def forward(*args, last_logits_only=False, **kwargs):
+        logits, features = original(*args, **kwargs)
+        if last_logits_only:
+            logits = logits[:, -1:]
+        return logits, features
+
+    monkeypatch.setattr(model, "supports_trusted_pld", True, raising=False)
+    monkeypatch.setattr(model, "forward_with_taps", forward)
+
+
+def test_trusted_pld_blindly_commits_copy_and_projects_only_bonus_row(monkeypatch):
+    model, draft = tiny()
+    _enable_tiny_trusted_pld(monkeypatch, model)
+    wrapper = ComposedDraftModel(
+        draft,
+        {
+            "ngram_min": 1,
+            "ngram_max": 1,
+            "min_context_match": 0,
+            "trusted_pld": True,
+            "trusted_pld_min_score": 0.5,
+            "trusted_pld_min_verified_tokens": 0,
+            "trusted_pld_min_match": 1,
+            "trusted_pld_max_span": 2,
+        },
+    )
+    engine = generator(model, wrapper)
+    prompt = [1, 2, 3, 1, 2, 3, 1, 2]
+    uid = engine.insert([prompt], max_tokens=[8])[0]
+    outputs, finishes = drain(engine)
+    assert len(outputs[uid]) == 8 and finishes[uid].finish_reason == "length"
+    assert engine.scheduler_stats["external_composed_trusted_pld_rounds"] > 0
+    assert wrapper._trusted_stats["blind_rounds"] > 0
+    assert wrapper._trusted_stats["blind_tokens"] >= 2
+    assert not any(key.startswith("prompt_lookup") for key in wrapper._score_counts)
+    receipt = finishes[uid].speculative_receipt["proposal_composition"]
+    assert receipt["trusted_pld"]["blind_rounds"] > 0
+
+
+def test_trusted_pld_audit_uses_exact_verifier_and_updates_score():
+    model, draft = tiny()
+    wrapper = ComposedDraftModel(
+        draft,
+        {
+            "ngram_min": 1,
+            "ngram_max": 1,
+            "min_context_match": 0,
+            "trusted_pld": True,
+            "trusted_pld_min_score": 0.5,
+            "trusted_pld_min_verified_tokens": 0,
+            "trusted_pld_min_match": 1,
+            "trusted_pld_max_span": 2,
+            "trusted_pld_audit_interval": 1,
+        },
+    )
+    engine = generator(model, wrapper)
+    prompt = [1, 2, 3, 1, 2, 3, 1, 2]
+    uid = engine.insert([prompt], max_tokens=[8])[0]
+    outputs, _ = drain(engine)
+    assert outputs[uid] == reference(model, prompt, 8)
+    assert wrapper._trusted_stats["blind_rounds"] == 0
+    assert wrapper._trusted_stats["audit_rounds"] > 0
+    assert any(key.startswith("prompt_lookup") for key in wrapper._score_counts)
+
+
+def test_trusted_pld_span_with_stop_token_is_forced_through_exact_audit(monkeypatch):
+    model, draft = tiny()
+    _enable_tiny_trusted_pld(monkeypatch, model)
+    wrapper = ComposedDraftModel(
+        draft,
+        {
+            "ngram_min": 1,
+            "ngram_max": 1,
+            "min_context_match": 0,
+            "trusted_pld": True,
+            "trusted_pld_min_score": 0.5,
+            "trusted_pld_min_verified_tokens": 0,
+            "trusted_pld_min_match": 1,
+            "trusted_pld_max_span": 2,
+        },
+    )
+    engine = generator(model, wrapper, stop_tokens=[(3,)])
+    uid = engine.insert([[1, 2, 3, 1, 2, 3, 1, 2]], max_tokens=[6])[0]
+    outputs, finishes = drain(engine)
+    assert outputs[uid] and uid in finishes
+    assert engine.scheduler_stats[
+        "external_composed_trusted_pld_stop_guard_rounds"
+    ] > 0
+    assert wrapper._trusted_stats["audit_rounds"] > 0
+    assert any(key.startswith("prompt_lookup") for key in wrapper._score_counts)
+
+
+def test_default_composition_skips_tree_batch_routes():
+    """The pinned Qwen3.8 DFlash2 pair defaults to a tree batch-size route;
+    composition verifies chains only, so the default must not attach (the
+    combination refused at startup: "proposal composition requires chain
+    verification")."""
+    from mlx2.contracts import Capability, ModelDescriptor
+
+    model, draft = tiny()
+    descriptor = ModelDescriptor(
+        model_type="qwen3",
+        family="qwen3",
+        variant="tiny",
+        cache_layout="tiny",
+        capabilities=frozenset({Capability.TEXT}),
+        state_planes=frozenset(),
+    )
+    adapter = ExternalDraftAdapterMixin()
+    adapter.model = model
+    adapter.identity = {"fingerprint": "target-revision"}
+    adapter.layout = "target-layout"
+    adapter.external_policy = {
+        "draft_model": "tiny",
+        "num_draft": 2,
+        "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
+    }
+    adapter._bind_external_drafter(
+        {"fingerprint": "head-revision"}, lambda record, target: draft, descriptor
+    )
+    assert adapter.draft_model is draft
+    assert "proposal_composition" not in adapter.external_policy

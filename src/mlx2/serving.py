@@ -7302,6 +7302,7 @@ class ServingEngine:
                     )
                 settings["batch_geometry"] = dict(self.batch_geometry_policy)
             prompt_lookup_policy = {}
+            pld_recent_source_store = None
             if "prompt_lookup" in (self.execution_policy or {}):
                 # This block is carved out of the adapter's unknown-key check
                 # above, so it needs its own: a policy that configures a route
@@ -7318,6 +7319,23 @@ class ServingEngine:
                 prompt_lookup_policy = PromptLookupBatchGenerator.validate_policy(
                     self.execution_policy["prompt_lookup"]
                 )
+                if prompt_lookup_policy.get("recent_committed_segments", False):
+                    from .runtime.prompt_lookup import RecentCommittedSegmentStore
+
+                    pld_recent_source_store = RecentCommittedSegmentStore(
+                        max_responses=prompt_lookup_policy.get(
+                            "recent_committed_max_responses", 64
+                        ),
+                        max_tokens=prompt_lookup_policy.get(
+                            "recent_committed_max_tokens", 131072
+                        ),
+                        max_response_tokens=prompt_lookup_policy.get(
+                            "recent_committed_response_tokens", 2048
+                        ),
+                        max_age_seconds=prompt_lookup_policy.get(
+                            "recent_committed_max_age_seconds", 1800.0
+                        ),
+                    )
             settings["prompt_lookup"] = dict(prompt_lookup_policy)
             settings["decode_time_fairness"] = decode_time_fairness_policy(
                 external_draft=external_draft,
@@ -8068,6 +8086,7 @@ class ServingEngine:
                         prefill_step_size=self.prefill_step,
                         prefill_step_autoscale=self.prefill_step_autoscale,
                         prompt_lookup=prompt_lookup_policy,
+                        recent_source_store=pld_recent_source_store,
                         stop_tokens=[[token] for token in stop_token_ids],
                         decode_time_fairness=settings["decode_time_fairness"],
                     )
@@ -9686,6 +9705,24 @@ class ServingEngine:
                             ),
                             **state_options,
                             prefill_inputs=[prefill_input],
+                            **(
+                                {
+                                    "pld_source_scopes": [
+                                        cache_key_for(
+                                            job.tenant_id,
+                                            request_apc_scope(job.request),
+                                        )
+                                    ],
+                                    "apc_transcript_ledgers": [
+                                        hit.transcript_ledger
+                                    ],
+                                }
+                                if prompt_lookup
+                                and prompt_lookup_policy.get(
+                                    "recent_committed_segments", False
+                                )
+                                else {}
+                            ),
                         )[0]
                         if job.activation_capsule_receipt is not None:
                             job.activation_capsule_receipt = {
@@ -10723,6 +10760,39 @@ class ServingEngine:
                                     settle = getattr(processor, "settle", None)
                                     if callable(settle):
                                         settle(job.receipt_token_ids)
+                            committed_segment = tuple(
+                                getattr(
+                                    response,
+                                    "pld_committed_response_tokens",
+                                    (),
+                                )
+                            )
+                            committed_segment = committed_segment[
+                                -prompt_lookup_policy.get(
+                                    "recent_committed_response_tokens", 2048
+                                ) :
+                            ]
+                            if (
+                                (response.finish_reason or stopped)
+                                and pld_recent_source_store is not None
+                                and committed_segment
+                                and not job.cancelled.is_set()
+                            ):
+                                try:
+                                    pld_recent_source_store.publish(
+                                        getattr(
+                                            response, "pld_source_scope", None
+                                        ),
+                                        committed_segment,
+                                        segment_id=f"response:{job.id}",
+                                    )
+                                except Exception:  # noqa: BLE001 - optional reuse
+                                    self.counts[
+                                        "pld_recent_segment_publish_failures"
+                                    ] += 1
+                                    log.exception(
+                                        "PLD recent segment publication failed"
+                                    )
                             sidecar = getattr(response, "cache_sidecar", None) or (
                                 MTPAPCSidecar(
                                     response.mtp_state, len(response.all_tokens)
@@ -10750,6 +10820,41 @@ class ServingEngine:
                             elif response.finish_reason and not job.request.get(
                                 "skip_writing_prefix_cache", False
                             ):
+                                transcript_ledger = None
+                                if (
+                                    prompt_lookup
+                                    and prompt_lookup_policy.get(
+                                        "recent_committed_segments", False
+                                    )
+                                    and committed_segment
+                                ):
+                                    from .runtime.cache_planes import (
+                                        TranscriptLedgerPlane,
+                                        TranscriptLedgerSegment,
+                                    )
+
+                                    segment_digest = hashlib.sha256(
+                                        repr(committed_segment).encode()
+                                    ).hexdigest()
+                                    adapter_fingerprint = str(
+                                        adapter.identity["fingerprint"]
+                                    )
+                                    transcript_ledger = TranscriptLedgerPlane(
+                                        tokenizer_identity=adapter_fingerprint,
+                                        tokenizer_version=adapter_fingerprint,
+                                        revision=(
+                                            "pld-recent-committed-v1:"
+                                            + adapter_fingerprint
+                                        ),
+                                        segments=(
+                                            TranscriptLedgerSegment(
+                                                "completion:" + segment_digest[:24],
+                                                0,
+                                                len(committed_segment),
+                                                committed_segment,
+                                            ),
+                                        ),
+                                    )
                                 self._publish_checkpoint(
                                     apc,
                                     cache_key_for(
@@ -10759,6 +10864,7 @@ class ServingEngine:
                                     response.all_tokens,
                                     response.prompt_cache,
                                     sidecar=sidecar,
+                                    transcript_ledger=transcript_ledger,
                                     approximate=job.approximate_kv_applied,
                                     session_tag=session_tag_for(job),
                                 )

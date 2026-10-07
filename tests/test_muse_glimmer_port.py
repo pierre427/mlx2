@@ -3,24 +3,23 @@
 import ast
 import copy
 import json
-from pathlib import Path
-import re
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from mlx2.adapters.muse_glimmer import (
     MUSE_GLIMMER,
-    MuseRecipientProcessor,
     MuseGlimmerAdapter,
+    MuseRecipientProcessor,
     inspect_artifact,
+    normalize_external_policy,
     normalize_messages,
 )
 from mlx2.adapters.muse_glimmer_config import ModelArgs
 from mlx2.adapters.muse_glimmer_output import MuseOutputParser, parse_atem
 from mlx2.contracts import Capability
-
 
 TOOLS = [
     {
@@ -196,6 +195,33 @@ def test_execution_policy_is_ordinary_and_no_speculation():
 def test_execution_policy_rejected_before_artifact_or_tensor_loading():
     with pytest.raises(ValueError, match="policy overrides"):
         MuseGlimmerAdapter("/not/a/model", execution_policy={"num_draft": 2})
+
+
+def test_external_policy_defaults_pld_and_allows_explicit_opt_out():
+    base = {"draft_model": "/draft", "num_draft": 4}
+    defaulted = normalize_external_policy(base)
+    assert defaulted["proposal_composition"] == {
+        "prompt_lookup": True,
+        "ngram_min": 3,
+        "ngram_max": 6,
+        "lookback": 256,
+        "min_context_match": 4,
+        "max_sources": 8,
+    }
+    disabled = normalize_external_policy({**base, "proposal_composition": False})
+    assert disabled["proposal_composition"] is False
+    pairwise = normalize_external_policy(
+        {**base, "pairwise_selection": "batched"}
+    )
+    assert "proposal_composition" not in pairwise
+    with pytest.raises(ValueError, match="cannot combine"):
+        normalize_external_policy(
+            {
+                **base,
+                "pairwise_selection": "batched",
+                "proposal_composition": {"prompt_lookup": True},
+            }
+        )
 
 
 def test_tool_history_is_normalized_without_mutation():

@@ -52,6 +52,16 @@ BUILTIN = {
 # grouping was disabled. Other Muse formats were not in this qualification.
 FAMILY_DEFAULTS: dict[str, dict] = {"muse-glimmer": {"mode": "off"}}
 
+# Muse's q4 sibling stacks duplicate large projection tensors transiently
+# while the concatenated backing arrays are materialized.  On the 36 GB M3
+# this can force swap before serving starts.  The SIMD kernels already reuse
+# each projection's weights across all rows, so keep the TensorFold-derived
+# backend zero-copy for this family and leave sibling grouping to roomier
+# backends or an explicit operator override.
+FAMILY_BACKEND_DEFAULTS: dict[tuple[str, str], dict] = {
+    ("muse-glimmer", "simd"): {"grouping": False},
+}
+
 # The M1-M4 backend (simd.py) is a separate numerical law.  Its kernels pass
 # the row-invariance gate and cost about stock at one row on an M3 Pro, but no
 # serving route has been qualified under it, so ``auto`` keeps M1-M4 hosts on
@@ -201,6 +211,14 @@ def resolve(detected: dict, *, family: str | None = None, adapter=None, override
         fam = {}
     _validate(fam, f"family {family}")
     policy = _merge(policy, fam, f"family:{family}", sources)
+    family_backend = FAMILY_BACKEND_DEFAULTS.get((family or "", name or ""), {})
+    _validate(family_backend, f"family/backend {family}/{name}")
+    policy = _merge(
+        policy,
+        family_backend,
+        f"family:{family}+backend:{name}",
+        sources,
+    )
     adapter = load_overrides(adapter)
     _validate(adapter, f"adapter {family}")
     policy = _merge(policy, adapter, f"adapter:{family}", sources)

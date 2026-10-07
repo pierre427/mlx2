@@ -305,6 +305,38 @@ MUSE_GLIMMER_SAMPLING = VendorSampling.single(
 # default only.
 DFLASH2_DEFAULT_NUM_DRAFT = 3
 
+
+def normalize_external_policy(value):
+    from ..runtime.proposal_composition import ProposalCompositionPolicy
+    from .external_draft_policy import DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION
+
+    policy = dict(value or {})
+    allowed = {
+        "draft_model",
+        "num_draft",
+        "pairwise_selection",
+        "proposal_composition",
+    }
+    if set(policy) - allowed:
+        raise ValueError("Unsupported Muse execution policy")
+    if policy and not policy.get("draft_model"):
+        raise ValueError("Muse policy overrides require draft_model")
+    pairwise = policy.get("pairwise_selection", "host")
+    if pairwise not in ("host", "batched"):
+        raise ValueError("pairwise_selection must be 'host' or 'batched'")
+    if policy and "proposal_composition" not in policy and pairwise == "host":
+        policy["proposal_composition"] = dict(
+            DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION
+        )
+    composition = policy.get("proposal_composition")
+    if "proposal_composition" in policy and composition is not False:
+        if pairwise != "host":
+            raise ValueError(
+                "proposal_composition cannot combine with batched pairwise selection"
+            )
+        ProposalCompositionPolicy.from_value(composition)
+    return policy
+
 class MuseGlimmerAdapter:
     default_route = "ordinary"
     descriptor = MUSE_GLIMMER
@@ -434,13 +466,7 @@ class MuseGlimmerAdapter:
         )
 
     def _init_muse(self, model_path: str, *, execution_policy=None):
-        self.external_policy = dict(execution_policy or {})
-        if set(self.external_policy) - {"draft_model", "num_draft", "pairwise_selection"}:
-            raise ValueError("Unsupported Muse execution policy")
-        if self.external_policy and not self.external_policy.get("draft_model"):
-            raise ValueError("Muse policy overrides require draft_model")
-        if self.external_policy.get("pairwise_selection", "host") not in ("host", "batched"):
-            raise ValueError("pairwise_selection must be 'host' or 'batched'")
+        self.external_policy = normalize_external_policy(execution_policy)
         self.draft_model = None
         draft_record = None
         if self.external_policy:
@@ -512,8 +538,21 @@ class MuseGlimmerAdapter:
 
             from .dflash2 import load_drafter
             self.draft_model = load_drafter(draft_record, self.model)
+            composition_identity = ""
+            composition = self.external_policy.get("proposal_composition")
+            if composition is not False:
+                from ..runtime.proposal_composition import ComposedDraftModel
+
+                self.draft_model = ComposedDraftModel(
+                    self.draft_model, composition
+                )
+                composition_identity = json.dumps(
+                    self.draft_model.policy.as_dict(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
             self.profile_name = self.external_profile_name
-            digest = hashlib.sha256((self.identity["fingerprint"] + draft_record["fingerprint"] + "external-dflash2-v1").encode()).hexdigest()
+            digest = hashlib.sha256((self.identity["fingerprint"] + draft_record["fingerprint"] + "external-dflash2-v1" + composition_identity).encode()).hexdigest()
             self.identity = {**self.identity, "target_fingerprint": self.identity["fingerprint"], "draft_fingerprint": draft_record["fingerprint"], "fingerprint": digest}
             self.layout += ":external-dflash2-v1:" + digest
             self.descriptor = replace(MUSE_GLIMMER, capabilities=MUSE_GLIMMER.capabilities | {Capability.EXTERNAL_DRAFT}, state_planes=MUSE_GLIMMER.state_planes | {StatePlane.DRAFT}, cache_layout=self.layout)

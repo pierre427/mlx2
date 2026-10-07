@@ -58,6 +58,28 @@ def generator(m,d,**kwargs):
     return ExternalDraftBatchGenerator(m,draft_model=d,binding='test',num_draft=2,prefill_step_size=3,**kwargs)
 
 
+def test_muse_last_logit_projection_preserves_full_features_and_cache():
+    model, _draft = tiny()
+    inputs = mx.array([[1, 2, 3, 4]])
+    full_cache, last_cache = model.make_cache(), model.make_cache()
+    full_logits, full_features = model.forward_with_taps(
+        inputs, full_cache, [0, 3]
+    )
+    last_logits, last_features = model.forward_with_taps(
+        inputs, last_cache, [0, 3], last_logits_only=True
+    )
+    mx.eval(full_logits, full_features, last_logits, last_features)
+    np.testing.assert_allclose(
+        np.asarray(last_logits), np.asarray(full_logits[:, -1:]), atol=1e-6
+    )
+    np.testing.assert_allclose(
+        np.asarray(last_features), np.asarray(full_features), atol=1e-6
+    )
+    assert [cache.offset for cache in full_cache] == [
+        cache.offset for cache in last_cache
+    ]
+
+
 def test_external_insert_accepts_shared_serving_seam_and_rejects_unsupported_inputs():
     m, d = tiny()
     compatible = generator(m, d)

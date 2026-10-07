@@ -3,10 +3,15 @@
 """Dense Qwen3.8 27B text and embedded MTP model; no qualified routes yet."""
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any, Optional
+
 import mlx.core as mx
 import mlx.nn as nn
+
+from .. import round_levers as _lv
+from . import invariant_prefill as _invariant
 from .base import (
     BaseModelArgs,
     create_attention_mask,
@@ -20,8 +25,6 @@ from .qwen38_fused_gdn import GatedDeltaNet
 from .qwen3_next import Qwen3NextMLP as MLP
 from .precise_ops import gate_sigmoid
 from .rope_utils import initialize_rope
-from .. import round_levers as _lv
-from . import invariant_prefill as _invariant
 from ..ragged_verify_observation import current_observer, observed_stage
 
 
@@ -534,7 +537,15 @@ class TextModel(nn.Module):
     def layers(self):
         return self.model.pipeline_layers
 
-    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+    def forward_with_taps(
+        self,
+        inputs,
+        cache,
+        capture_layers,
+        *,
+        body_only=False,
+        last_logits_only=False,
+    ):
         """Logits plus post-block target taps in ascending layer order.
 
         Taps are the residual stream after each listed decoder layer, before
@@ -559,9 +570,12 @@ class TextModel(nn.Module):
         if len(taps) != len(capture_layers):
             raise RuntimeError("target tap count does not match capture layers")
         features = mx.concatenate(taps, axis=-1)
+        if body_only and last_logits_only:
+            raise ValueError("body_only and last_logits_only are mutually exclusive")
         if body_only:
             return None, features
-        return self.logits(hidden), features
+        projected = hidden[:, -1:] if last_logits_only else hidden
+        return self.logits(projected), features
 
     def prefill_body(self, inputs, cache, capture_layers):
         return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
@@ -703,6 +717,7 @@ class ModelArgs(BaseModelArgs):
 class Model(nn.Module):
     apc_v2_layout = "qwen38-27b-hybrid-layer-segments-v1"
     supports_speculative_rollback = True
+    supports_trusted_pld = True
 
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -775,9 +790,21 @@ class Model(nn.Module):
         """Text geometry for external draft executors (hidden size, heads)."""
         return self.language_model.args
 
-    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+    def forward_with_taps(
+        self,
+        inputs,
+        cache,
+        capture_layers,
+        *,
+        body_only=False,
+        last_logits_only=False,
+    ):
         return self.language_model.forward_with_taps(
-            inputs, cache, capture_layers, body_only=body_only
+            inputs,
+            cache,
+            capture_layers,
+            body_only=body_only,
+            last_logits_only=last_logits_only,
         )
 
     def prefill_body(self, inputs, cache, capture_layers):

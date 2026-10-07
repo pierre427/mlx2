@@ -7,8 +7,12 @@ import mlx.core as mx
 import pytest
 from test_parallel_draft_apcv2_batching_cpu import pair
 
-from mlx2.adapters.external_draft_policy import ExternalDraftAdapterMixin
+from mlx2.adapters.external_draft_policy import (
+    DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION,
+    ExternalDraftAdapterMixin,
+)
 from mlx2.contracts import Capability, ModelDescriptor
+from mlx2.runtime.proposal_composition import ProposalCompositionPolicy
 from mlx2.runtime.proposal_pool import ProposalRankingRegistry
 from mlx2.runtime.proposal_providers import ContinuationPoolPolicy
 
@@ -127,7 +131,7 @@ def test_raw_receipt_changes_are_bound_before_wrapper_construction(monkeypatch):
 
 
 @pytest.mark.parametrize("pool", [False, True])
-def test_existing_final_route_fingerprint_formula_remains_unchanged(pool):
+def test_final_route_fingerprint_binds_selected_proposal_arbitration(pool):
     adapter = bind(pool=pool, passes=2, windows=[2])
     composition = (
         json.dumps(
@@ -136,7 +140,13 @@ def test_existing_final_route_fingerprint_formula_remains_unchanged(pool):
             separators=(",", ":"),
         )
         if pool
-        else ""
+        else json.dumps(
+            ProposalCompositionPolicy.from_value(
+                DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION
+            ).as_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     )
     expected = hashlib.sha256(
         (TARGET + DRAFT + adapter.EXTERNAL_ROUTE_TAG + composition).encode()

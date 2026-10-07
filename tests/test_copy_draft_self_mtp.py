@@ -952,11 +952,14 @@ def test_ab_harness_verdict_enforces_go_no_go():
 
 
 def test_ab_harness_ordinary_arm_and_native_mtp_flag():
-    from scripts.ab_copy_mtp import server_route_args, verdict
+    from scripts.ab_copy_mtp import arm_policies, server_route_args, verdict
 
     assert server_route_args("ord", None, True) == ["--ordinary"]
     assert server_route_args("on", "p.json", True) == ["--native-mtp", "--execution-policy", "p.json"]
     assert server_route_args("off", "p.json", False) == ["--execution-policy", "p.json"]
+    policies = arm_policies(2, {"enabled": True, "lookback": 256})
+    assert policies["off"]["self_mtp_copy_draft"] == {"enabled": False}
+    assert policies["on"]["self_mtp_copy_draft"]["lookback"] == 256
 
     def cell(arm, corpus, rate, sha="x"):
         return {"arm": arm, "corpus": corpus, "width": 1, "temperature": 0.0,

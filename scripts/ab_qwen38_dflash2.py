@@ -91,12 +91,28 @@ CHAT = [
         {"role": "user", "content": "Top 5 customers by total spend in 2025, with their order count. Then explain the query."},
     ],
 ]
-WORKLOADS = {"code": CODE, "prose": PROSE, "chat": CHAT}
+REPETITIVE = [
+    "Write exactly 80 Markdown checklist lines using this template: "
+    "- [ ] Review item N: owner=ops status=pending. Replace only N with the "
+    "line number. Output only the checklist.",
+    "Write exactly 80 CSV data rows after the header id,region,status. Use "
+    "successive integer ids, alternate region between east and west, and keep "
+    "status=pending. Output only CSV.",
+    "Write exactly 60 SQL INSERT statements for audit_events(id, actor, action). "
+    "Use successive ids, actor 'worker', and action 'heartbeat'. Output only SQL.",
+]
+WORKLOADS = {
+    "code": CODE,
+    "prose": PROSE,
+    "chat": CHAT,
+    "repetitive": REPETITIVE,
+}
+DEFAULT_WORKLOADS = ("code", "prose", "chat")
 POLICIES = ROOT / "qualification/policies"
 INGRESS_COALESCE_MS = 250
 INGRESS_MIN_PROMPT_TOKENS = 1
 INGRESS_TARGET_LANES = 4
-MAX_B1_PROMPTS = min(len(items) for items in WORKLOADS.values())
+MAX_B1_PROMPTS = min(len(WORKLOADS[name]) for name in DEFAULT_WORKLOADS)
 
 # Qwen3.8's model-card non-thinking profile.  ``temperature`` is supplied by
 # the campaign cell so an explicit override remains visible and truthful.
@@ -162,7 +178,7 @@ def request_nonce(nonce_salt, rep, workload, width, temperature, index):
     return hashlib.sha256(f"{cell}:{index}".encode()).hexdigest()[:16]
 
 
-def arm_route_args(arm):
+def arm_route_args(arm, external_policy=None):
     if arm == "ord":
         return ["--ordinary"]
     if arm == "ordv":
@@ -190,12 +206,16 @@ def arm_route_args(arm):
                 f"qwen38-27b-dflash2-k{depth}-varlen-ingress.json"
             )
         else:
-            policy = RUN / f"policy-k{depth}.json"
+            policy = (
+                Path(external_policy)
+                if external_policy
+                else RUN / f"policy-k{depth}.json"
+            )
         return ["--external-draft", "--execution-policy", str(policy)]
     raise ValueError(f"unknown arm {arm}")
 
 
-def parse_arms(value):
+def parse_arms(value, external_policy=None):
     """Return a nonempty, unique, validated campaign arm sequence."""
     arms = [item.strip() for item in value.split(",")]
     if not arms or any(not arm for arm in arms):
@@ -203,7 +223,7 @@ def parse_arms(value):
     if len(arms) != len(set(arms)):
         raise ValueError("arms must be unique within a campaign repetition")
     for arm in arms:
-        arm_route_args(arm)
+        arm_route_args(arm, external_policy)
     return arms
 
 
@@ -222,15 +242,17 @@ def server_command(args, arm, port):
         "--max-context",
         str(args.max_context),
         "--max-lanes",
-        "4",
+        str(args.max_lanes),
         "--max-inflight",
-        "8",
+        str(args.max_inflight),
         "--host-prompt-cache-entries",
         "0",
         "--host-prompt-cache-tokens",
         "0",
         "--qualification-mode",
-        *arm_route_args(arm),
+        "--lane-matmul",
+        args.lane_matmul,
+        *arm_route_args(arm, args.external_policy),
     ]
 
 
@@ -944,11 +966,18 @@ def run_arm(args, arm, rep, *, port=None):
         status = _wait_ready(url, process, args.startup_timeout, guard)
         validate_served_model(status, args.model)
         route = validate_startup_route(arm, status)
+        lane = status.get("lane_matmul") or {}
+        if args.require_simd_lane and (
+            lane.get("backend") != "simd" or not lane.get("installed")
+        ):
+            raise RuntimeError(
+                "refusing: SIMD lane matmul is not installed: " + json.dumps(lane)
+            )
         # Discarded warm-up: every workload, both temperatures, B1 and B4.
         warmup_baseline = _status(url)
         warmup_cells = []
         for temperature in args.temperatures:
-            for workload in WORKLOADS:
+            for workload in args.workloads:
                 for width in args.widths:
                     guard.check()
                     items = workload_batch(
@@ -984,7 +1013,7 @@ def run_arm(args, arm, rep, *, port=None):
         guard.arm_timed()
         seed_base = 1000
         for temperature in args.temperatures:
-            for workload in WORKLOADS:
+            for workload in args.workloads:
                 for width in args.widths:
                     status_before = _status(url)
                     cell = run_cell(url, arm, workload, width, temperature, args, seed_base, rep)
@@ -1015,6 +1044,17 @@ def run_arm(args, arm, rep, *, port=None):
                                       "aggregate_tok_s": round(cell["aggregate_tok_s"], 2),
                                       "swap_peak_mib": guard.peak >> 20}), flush=True)
         final_status = _status(url)
+        final_lane = final_status.get("lane_matmul") or {}
+        lane_counts = final_lane.get("counts") or {}
+        if args.require_simd_lane and not any(
+            int(value) > 0
+            for key, value in lane_counts.items()
+            if "lane" in key or "simd" in key
+        ):
+            raise RuntimeError(
+                "refusing: SIMD lane matmul installed but no lane calls observed: "
+                + json.dumps(final_lane)
+            )
         varlen_timed = varlen_timed_observation(
             arm, timed_baseline, final_status
         )
@@ -1040,6 +1080,7 @@ def run_arm(args, arm, rep, *, port=None):
                    "ingress_timed": ingress_timed if cells else None,
                    "warmup_evidence": warmup_evidence if cells else None,
                    "varlen_timed": varlen_timed if cells else None,
+                   "lane_matmul": final_status.get("lane_matmul") if cells else None,
                    "metal_peak_bytes": final_status.get("metal_peak_bytes") if cells else None}
 
 
@@ -1069,11 +1110,24 @@ def main():
     parser.add_argument("--rep", type=int, required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--model", default=MODEL)
+    parser.add_argument(
+        "--external-policy",
+        help="override the pinned policy path for dkN compatibility arms",
+    )
     parser.add_argument("--port", type=int, default=18731)
+    parser.add_argument(
+        "--lane-matmul",
+        choices=("auto", "off", "crossover", "exact"),
+        default="auto",
+    )
+    parser.add_argument("--require-simd-lane", action="store_true")
     parser.add_argument("--max-context", type=int, default=32768)
+    parser.add_argument("--max-lanes", type=int, default=4)
+    parser.add_argument("--max-inflight", type=int, default=8)
     parser.add_argument("--max-tokens", type=int, default=384)
     parser.add_argument("--warmup-tokens", type=int, default=48)
     parser.add_argument("--b1-prompts", type=int, default=MAX_B1_PROMPTS)
+    parser.add_argument("--workloads", default="code,prose,chat")
     parser.add_argument("--widths", default="1,4")
     parser.add_argument("--temperatures", default="0,0.7")
     parser.add_argument("--timeout", type=float, default=900)
@@ -1085,14 +1139,43 @@ def main():
     args = parser.parse_args()
     args.widths = [int(v) for v in args.widths.split(",")]
     args.temperatures = [float(v) for v in args.temperatures.split(",")]
+    args.workloads = [value for value in args.workloads.split(",") if value]
+    unknown_workloads = set(args.workloads) - set(WORKLOADS)
+    if not args.workloads or unknown_workloads:
+        parser.error(f"unknown workloads: {sorted(unknown_workloads)}")
+    custom_shape = (
+        args.workloads != list(DEFAULT_WORKLOADS)
+        or args.widths != [1, 4]
+        or args.b1_prompts != MAX_B1_PROMPTS
+        or args.max_lanes != 4
+        or args.max_inflight != 8
+        or args.external_policy is not None
+        or args.lane_matmul != "auto"
+    )
+    if custom_shape:
+        if (
+            not args.widths
+            or any(width < 1 for width in args.widths)
+            or not 1 <= args.b1_prompts <= min(
+                len(WORKLOADS[name]) for name in args.workloads
+            )
+            or not args.temperatures
+            or any(
+                not math.isfinite(value) or value < 0
+                for value in args.temperatures
+            )
+            or len(args.temperatures) != len(set(args.temperatures))
+        ):
+            parser.error("invalid custom campaign shape")
+    else:
+        try:
+            validate_campaign_shape(
+                args.widths, args.b1_prompts, args.temperatures
+            )
+        except ValueError as error:
+            parser.error(str(error))
     try:
-        validate_campaign_shape(
-            args.widths, args.b1_prompts, args.temperatures
-        )
-    except ValueError as error:
-        parser.error(str(error))
-    try:
-        arms = parse_arms(args.arms)
+        arms = parse_arms(args.arms, args.external_policy)
     except ValueError as error:
         parser.error(str(error))
     if args.dry_run:

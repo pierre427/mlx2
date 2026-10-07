@@ -5166,6 +5166,16 @@ NATIVE_MTP_PREFILL_SCHEDULING = {
     "one_slice_contention": True,
 }
 
+NATIVE_MTP_COPY_DRAFT_DEFAULT = {
+    "enabled": True,
+    "ngram_min": 3,
+    "ngram_max": 6,
+    "lookback": 256,
+    "min_match": 4,
+    # The existing cross-model safety gate: do not widen a physical cohort.
+    "batched_max_span": 0,
+}
+
 
 def resolve_execution_policy_defaults(
     policy,
@@ -5227,6 +5237,11 @@ def resolve_execution_policy_defaults(
             if approximate_kv and key in STATE_CHECKPOINT_POLICY_KEYS:
                 continue
             resolved[key] = value
+    if (
+        route_selection.native_mtp
+        and "self_mtp_copy_draft" not in resolved
+    ):
+        resolved["self_mtp_copy_draft"] = dict(NATIVE_MTP_COPY_DRAFT_DEFAULT)
     if (
         route_selection.native_mtp
         and "prefill_scheduling" not in resolved

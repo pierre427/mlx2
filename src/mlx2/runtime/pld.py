@@ -36,6 +36,7 @@ from .prompt_lookup import (
     CostAwarePLDLatch,
     HybridStats,
     IndexedPromptLookup,
+    RecentCommittedSegmentStore,
     plan_proposal_around_verify_cliff,
 )
 from .rotating_replay import (
@@ -139,6 +140,33 @@ def _ordinary_b1_mask_calls(caches):
         elif type(entry) is KVCache:
             count += getattr(entry, "_pld_ordinary_mask_calls", 0)
     return count
+
+
+def _append_source_segment(
+    source_segments,
+    seen_segments,
+    tokens,
+    source_kind,
+    source_id,
+    *,
+    source_limit,
+    token_limit,
+    response_limit,
+    source_tokens,
+):
+    """Append one bounded, deduplicated hot source and return token usage."""
+    if len(source_segments) >= source_limit:
+        return source_tokens
+    remaining = token_limit - source_tokens
+    if remaining <= 0:
+        return source_tokens
+    values = tuple(int(token) for token in tokens)
+    values = values[-min(response_limit, remaining) :]
+    if values and values not in seen_segments:
+        source_segments.append((values, source_kind, str(source_id)))
+        seen_segments.add(values)
+        source_tokens += len(values)
+    return source_tokens
 
 
 def _rotating_leaves(caches):
@@ -287,6 +315,10 @@ class _Lane:
     # wider cohort, or a recurrent rollback epoch).  Receipts report it.
     round_target_path: str = "plain_decode"
     verify_path_rounds: int = 0
+    source_scope: object = None
+    source_stats: dict = field(default_factory=dict)
+    apcv2_source_segments: int = 0
+    recent_source_segments: int = 0
 
 
 class PromptLookupBatchGenerator:
@@ -342,6 +374,11 @@ class PromptLookupBatchGenerator:
             "batched_verify",
             "max_proposal_tokens",
             "memory_max_draft",
+            "recent_committed_segments",
+            "recent_committed_max_responses",
+            "recent_committed_max_tokens",
+            "recent_committed_response_tokens",
+            "recent_committed_max_age_seconds",
         }
     )
 
@@ -383,6 +420,9 @@ class PromptLookupBatchGenerator:
             "verify_cliff_end": 1,
             "max_proposal_tokens": 1,
             "memory_max_draft": 0,
+            "recent_committed_max_responses": 1,
+            "recent_committed_max_tokens": 1,
+            "recent_committed_response_tokens": 1,
         }
         for name, minimum in integer_bounds.items():
             if name not in validated:
@@ -407,9 +447,22 @@ class PromptLookupBatchGenerator:
             "cliff_aware_span",
             "rotating_replay",
             "batched_verify",
+            "recent_committed_segments",
         ):
             if name in validated and type(validated[name]) is not bool:
                 raise ValueError(f"prompt_lookup {name} must be a boolean")
+        if "recent_committed_max_age_seconds" in validated:
+            age = validated["recent_committed_max_age_seconds"]
+            if (
+                isinstance(age, bool)
+                or not isinstance(age, (int, float))
+                or not math.isfinite(float(age))
+                or age <= 0
+            ):
+                raise ValueError(
+                    "prompt_lookup recent_committed_max_age_seconds must be finite and positive"
+                )
+            validated["recent_committed_max_age_seconds"] = float(age)
         for name in ("adaptive_gate", "admission_gate", "cost_shadow_gate", "cost_margin"):
             if name not in validated:
                 continue
@@ -470,6 +523,7 @@ class PromptLookupBatchGenerator:
         stop_tokens=(),
         prompt_lookup=None,
         decode_time_fairness=None,
+        recent_source_store=None,
         **_kwargs,
     ):
         self.model = model
@@ -482,6 +536,13 @@ class PromptLookupBatchGenerator:
             raise ValueError("prefill_step_autoscale must be boolean")
         self.prefill_step_autoscale = prefill_step_autoscale
         self.config = self.validate_policy(prompt_lookup or {})
+        self.recent_source_store = recent_source_store
+        if self.config.get("recent_committed_segments", False) and not isinstance(
+            recent_source_store, RecentCommittedSegmentStore
+        ):
+            raise ValueError(
+                "recent committed PLD segments require an engine-owned source store"
+            )
         self.num_draft = self.config.get("num_draft", 8)
         # Default-off and generator-scoped: a per-request override never selects
         # the rotating replay transaction.  The bound counts proposed tokens;
@@ -580,12 +641,31 @@ class PromptLookupBatchGenerator:
         apc_interior_positions=None,
         state_boundaries=None,
         prefill_inputs=None,
+        pld_source_scopes=None,
+        apc_transcript_ledgers=None,
     ):
-        # The serving seam passes these to every route.  ``lane_rngs`` is
+        count = len(prompts)
+
+        def aligned(name, values, default):
+            values = default if values is None else values
+            if len(values) != count:
+                raise ValueError(
+                    f"prompt lookup {name} length {len(values)} does not match "
+                    f"prompt batch length {count}"
+                )
+            return values
+
+        # The serving seam passes these to every route. ``lane_rngs`` is
         # unused here because each sampler already carries its lane's RNG;
-        # the others would be dropped, so a non-neutral value is refused
-        # rather than reported as applied.
-        del lane_rngs
+        # validate its shape nevertheless so request metadata cannot drift.
+        aligned("lane_rngs", lane_rngs, [None] * count)
+        prefill_inputs = aligned("prefill_inputs", prefill_inputs, [None] * count)
+        apc_interior_positions = aligned(
+            "apc_interior_positions", apc_interior_positions, [()] * count
+        )
+        state_boundaries = aligned(
+            "state_boundaries", state_boundaries, [()] * count
+        )
         if any(value is not None for value in prefill_inputs or ()):
             raise ValueError(
                 "multimodal and neural-concept prefill are unavailable on prompt lookup"
@@ -596,16 +676,28 @@ class PromptLookupBatchGenerator:
             raise ValueError("state checkpoints are unavailable on prompt lookup")
         if len(self.lanes) + len(prompts) > self.capacity:
             raise ValueError("prompt-lookup lane capacity exceeded")
-        count = len(prompts)
-        max_tokens = max_tokens or [128] * count
-        caches = caches or [None] * count
-        all_tokens = all_tokens or [[] for _ in prompts]
-        samplers = samplers or [None] * count
-        logits_processors = logits_processors or [[] for _ in prompts]
-        stop_matchers = stop_matchers or [self.default_matcher] * count
-        prompt_lookup_configs = prompt_lookup_configs or [{} for _ in prompts]
-        uids = []
-        for prompt, maximum, prompt_cache, prefix, sampler, processors, matcher, overrides in zip(
+        max_tokens = aligned("max_tokens", max_tokens, [128] * count)
+        caches = aligned("caches", caches, [None] * count)
+        all_tokens = aligned("all_tokens", all_tokens, [[] for _ in prompts])
+        samplers = aligned("samplers", samplers, [None] * count)
+        logits_processors = aligned(
+            "logits_processors", logits_processors, [[] for _ in prompts]
+        )
+        stop_matchers = aligned(
+            "stop_matchers", stop_matchers, [self.default_matcher] * count
+        )
+        prompt_lookup_configs = aligned(
+            "prompt_lookup_configs", prompt_lookup_configs, [{} for _ in prompts]
+        )
+        pld_source_scopes = aligned(
+            "pld_source_scopes", pld_source_scopes, [None] * count
+        )
+        apc_transcript_ledgers = aligned(
+            "apc_transcript_ledgers", apc_transcript_ledgers, [None] * count
+        )
+        staged = []
+        next_uid = self.next_uid
+        for prompt, maximum, prompt_cache, prefix, sampler, processors, matcher, overrides, source_scope, apc_ledger in zip(
             prompts,
             max_tokens,
             caches,
@@ -614,6 +706,9 @@ class PromptLookupBatchGenerator:
             logits_processors,
             stop_matchers,
             prompt_lookup_configs,
+            pld_source_scopes,
+            apc_transcript_ledgers,
+            strict=True,
         ):
             prompt = [int(token) for token in prompt]
             prefix = [int(token) for token in prefix]
@@ -635,6 +730,43 @@ class PromptLookupBatchGenerator:
                 "lookback_ladder", (256, 1024, 4096, 16384)
             )
             recent_prompt_segments = config.get("recent_prompt_segments", 0)
+            source_segments = []
+            seen_segments = set()
+            if config.get("recent_committed_segments", False):
+                if source_scope is None:
+                    raise ValueError(
+                        "recent committed PLD segments require an APCv2-bound source scope"
+                    )
+                source_limit = config.get("recent_committed_max_responses", 64)
+                token_limit = config.get("recent_committed_max_tokens", 131072)
+                response_limit = config.get("recent_committed_response_tokens", 2048)
+                source_tokens = 0
+
+                if apc_ledger is not None:
+                    for segment in reversed(tuple(getattr(apc_ledger, "segments", ()))):
+                        source_tokens = _append_source_segment(
+                            source_segments,
+                            seen_segments,
+                            segment.token_ids,
+                            "apcv2_transcript",
+                            segment.segment_id,
+                            source_limit=source_limit,
+                            token_limit=token_limit,
+                            response_limit=response_limit,
+                            source_tokens=source_tokens,
+                        )
+                for entry in self.recent_source_store.snapshot(source_scope):
+                    source_tokens = _append_source_segment(
+                        source_segments,
+                        seen_segments,
+                        entry.tokens,
+                        "recent_committed",
+                        entry.cache_id,
+                        source_limit=source_limit,
+                        token_limit=token_limit,
+                        response_limit=response_limit,
+                        source_tokens=source_tokens,
+                    )
             _set_ordinary_b1_mask(
                 prompt_cache, bool(config.get("cost_aware_admission", False))
             )
@@ -642,7 +774,10 @@ class PromptLookupBatchGenerator:
                 prefix + prompt,
                 ngram_min=config.get("ngram_min", 3),
                 ngram_max=config.get("ngram_max", 6),
-                hot_segments=config.get("hot_segments", 4),
+                hot_segments=max(
+                    config.get("hot_segments", 4),
+                    len(config.get("retrieval_segments", ())) + len(source_segments),
+                ),
                 reject_ttl=config.get("reject_ttl", 8),
                 recent_prompt_segments=recent_prompt_segments,
                 prompt_segment_tokens=config.get("prompt_segment_tokens", 1024),
@@ -650,13 +785,25 @@ class PromptLookupBatchGenerator:
             )
             for segment in config.get("retrieval_segments", ()):
                 proposer.add_hot_segment(segment)
+            for segment, source_kind, source_id in source_segments:
+                proposer.add_indexed_hot_segment(
+                    self.recent_source_store.indexed_segment(
+                        source_scope,
+                        segment,
+                        source_kind=source_kind,
+                        source_id=source_id,
+                        ngram_min=proposer.ngram_min,
+                        ngram_max=proposer.ngram_max,
+                        index_window=proposer.index_window,
+                    )
+                )
             lookback = AdaptiveLookback(
                 lookback_ladder,
                 misses=config.get("lookback_misses", 4),
                 rejects=config.get("lookback_rejects", 2),
             )
-            uid = self.next_uid
-            self.next_uid += 1
+            uid = next_uid
+            next_uid += 1
             lane = _Lane(
                 uid=uid,
                 remaining=deque(prompt),
@@ -682,13 +829,34 @@ class PromptLookupBatchGenerator:
                     reprobe_interval=config.get("cost_reprobe_interval", 32),
                     park_rounds=config.get("cost_park_rounds", 4),
                 ) if config.get("cost_aware_admission", False) else None),
+                source_scope=source_scope,
+                source_stats={
+                    kind: {"cycles": 0, "proposed": 0, "accepted": 0}
+                    for kind in (
+                        "local",
+                        "retrieval",
+                        "apcv2_transcript",
+                        "recent_committed",
+                    )
+                },
+                apcv2_source_segments=sum(
+                    source_kind == "apcv2_transcript"
+                    for _segment, source_kind, _source_id in source_segments
+                ),
+                recent_source_segments=sum(
+                    source_kind == "recent_committed"
+                    for _segment, source_kind, _source_id in source_segments
+                ),
             )
             if lane.cost_latch is not None:
                 lane.ordinary = True
             lane.matcher_state = matcher.make_state()
-            self.lanes[uid] = lane
-            uids.append(uid)
-        return uids
+            staged.append(lane)
+        # Batch admission is atomic: no lane becomes schedulable until every
+        # lane has passed validation and construction.
+        self.lanes.update((lane.uid, lane) for lane in staged)
+        self.next_uid = next_uid
+        return [lane.uid for lane in staged]
 
     def _prefill(self, lane, *, contended=False):
         if len(lane.remaining) > 1:
@@ -1299,6 +1467,7 @@ class PromptLookupBatchGenerator:
             min_context_match=lane.config.get("min_context_match", 0),
             max_sources=lane.config.get("max_sources", 0),
         )
+        proposal_source = lane.proposer.last_source_kind if proposal else None
         if proposal and len(proposal) > nominal_proposal_budget:
             lane.stats.span_extend_cycles += 1
             lane.stats.span_extend_tokens += len(proposal) - nominal_proposal_budget
@@ -1403,7 +1572,15 @@ class PromptLookupBatchGenerator:
         if proposal:
             lane.stats.retrieval_cycles += 1
             lane.stats.retrieval_proposed += len(proposal)
-            lane.stats.retrieval_accepted += sum(item[2] for item in delivered)
+            round_accepted = sum(item[2] for item in delivered)
+            lane.stats.retrieval_accepted += round_accepted
+            source_stats = lane.source_stats.setdefault(
+                proposal_source or "unknown",
+                {"cycles": 0, "proposed": 0, "accepted": 0},
+            )
+            source_stats["cycles"] += 1
+            source_stats["proposed"] += len(proposal)
+            source_stats["accepted"] += round_accepted
             lane.stats.bonus_tokens += sum(not item[2] for item in delivered)
             lane.acceptance_window.append(
                 sum(item[2] for item in delivered) / max(len(proposal), 1)
@@ -1525,6 +1702,21 @@ class PromptLookupBatchGenerator:
             "memory_max_draft": lane.config.get("memory_max_draft"),
             "qualification_authority": "serving_route",
         }
+        if lane.config.get("recent_committed_segments", False):
+            receipt.update(
+                {
+                    "proposal_sources": {
+                        name: dict(values)
+                        for name, values in lane.source_stats.items()
+                    },
+                    "apcv2_source_segments": lane.apcv2_source_segments,
+                    "recent_committed_source_segments": lane.recent_source_segments,
+                    "recent_committed_segments_enabled": True,
+                    "recent_committed_store": self.recent_source_store.status(
+                        lane.source_scope
+                    ),
+                }
+            )
         if cost is not None:
             receipt["cost_latch"] = cost.receipt()
             receipt["cost_width1_cohort_splits"] = lane.cost_width1_cohort_splits
@@ -1533,7 +1725,16 @@ class PromptLookupBatchGenerator:
         if finish_reason and lane.speculation_started:
             _stop_speculation(lane.cache)
             lane.speculation_started = False
+        committed_response_tokens = tuple(
+            lane.lookup_history[-lane.generated :]
+        ) if lane.generated else ()
+        prior_response_tokens = committed_response_tokens[: -len(delivered)]
+        delivered_response_tokens = []
+        response_token_limit = int(
+            lane.config.get("recent_committed_response_tokens", 2048)
+        )
         for index, (token, row, from_draft) in enumerate(delivered):
+            delivered_response_tokens.append(token)
             final = index == len(delivered) - 1
             response = GenerationBatch.Response(
                 uid=lane.uid,
@@ -1548,6 +1749,17 @@ class PromptLookupBatchGenerator:
                 execution_width=getattr(lane, "round_width", 1),
             )
             response.speculative_receipt = receipt
+            if lane.config.get("recent_committed_segments", False):
+                # Attach exactly the prefix delivered through this response,
+                # not the rest of a multi-token verify round. The serving
+                # parser may stop between responses and publish only what the
+                # client actually consumed.
+                response.pld_committed_response_tokens = tuple(
+                    (prior_response_tokens + tuple(delivered_response_tokens))[
+                        -response_token_limit:
+                    ]
+                )
+                response.pld_source_scope = lane.source_scope
             lane.ready.append(response)
 
     def next(self):

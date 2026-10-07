@@ -488,7 +488,9 @@ def inspect_external_policy(
     if batch_route is not None:
         if type(batch_route) is not str or batch_route not in _TREE_BATCH_ROUTES:
             raise ValueError("unsupported Qwen3.8 external batch_size_route")
-        if any(key in policy for key in (
+        # An explicit ``"proposal_composition": false`` opts out; it is not
+        # a chain-only policy.
+        if any(policy.get(key) not in (None, False) for key in (
             "adaptive_verification", "proposal_composition", "continuation_pool",
         )):
             raise ValueError("tree15 bounded route conflicts with chain-only proposal policy")

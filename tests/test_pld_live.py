@@ -2,6 +2,7 @@ import mlx.core as mx
 
 from mlx2.runtime.models.cache import BatchKVCache, KVCache
 from mlx2.runtime.pld import PromptLookupBatchGenerator
+from mlx2.runtime.prompt_lookup import RecentCommittedSegmentStore
 
 
 class _PatternModel:
@@ -54,7 +55,67 @@ def test_live_prompt_lookup_accepts_exact_indexed_continuation():
     assert final.speculative_receipt["execution"] == "prompt_lookup_verify"
     assert final.speculative_receipt["accepted"] == 2
     assert final.speculative_receipt["proposed"] == 2
+    assert "recent_committed_segments_enabled" not in final.speculative_receipt
+    assert "proposal_sources" not in final.speculative_receipt
     assert final.prompt_cache[0].offset == len(final.all_tokens) == 6
+
+
+def test_recent_committed_response_becomes_later_pld_source_on_same_apcv2_scope():
+    scope = ("model-revision", "tenant-a")
+    store = RecentCommittedSegmentStore()
+    generator = PromptLookupBatchGenerator(
+        _PatternModel(),
+        prefill_step_size=16,
+        prompt_lookup={
+            "num_draft": 2,
+            "ngram_min": 2,
+            "ngram_max": 2,
+            "adaptive": False,
+            "recent_committed_segments": True,
+        },
+        recent_source_store=store,
+    )
+
+    def run(prompt, maximum):
+        uid = generator.insert(
+            [prompt],
+            max_tokens=[maximum],
+            caches=[[KVCache()]],
+            pld_source_scopes=[scope],
+        )[0]
+        final = None
+        emitted = []
+        while final is None:
+            _prompts, responses = generator.next()
+            for response in responses:
+                emitted.append(response.token)
+                assert response.pld_committed_response_tokens == tuple(emitted)
+                assert response.pld_source_scope == scope
+            final = next(
+                (response for response in responses if response.finish_reason), None
+            )
+        assert final.uid == uid
+        store.publish(
+            final.pld_source_scope,
+            final.pld_committed_response_tokens,
+            segment_id=f"response:{uid}",
+        )
+        return emitted, final
+
+    first, _first_final = run([3, 4], 3)
+    assert first == [1, 2, 1]
+    assert store.status()["responses"] == 1
+
+    second, second_final = run([5, 1, 2], 2)
+    assert second == [1, 2]
+    source = second_final.speculative_receipt["proposal_sources"][
+        "recent_committed"
+    ]
+    assert source["cycles"] >= 1
+    assert source["proposed"] >= 1
+    assert source["accepted"] >= 1
+    assert second_final.speculative_receipt["recent_committed_source_segments"] == 1
+    assert store.status()["responses"] == 2
 
 
 def test_recent_prompt_segments_include_exact_apcv2_prefix_tokens():
@@ -434,3 +495,42 @@ def test_prompt_lookup_insert_refuses_inputs_it_cannot_apply():
         prefill_inputs=[None], apc_interior_positions=[()],
     )
     assert uid in generator.lanes
+
+
+def test_prompt_lookup_insert_requires_exact_request_metadata_lengths():
+    import pytest
+
+    generator = PromptLookupBatchGenerator(
+        _PatternModel(),
+        prompt_lookup={"num_draft": 2, "ngram_min": 2, "ngram_max": 2},
+    )
+    with pytest.raises(ValueError, match="max_tokens length 1"):
+        generator.insert(
+            [[1, 2], [3, 4]], max_tokens=[4], caches=[[KVCache()], [KVCache()]]
+        )
+    with pytest.raises(ValueError, match="pld_source_scopes length 1"):
+        generator.insert(
+            [[1, 2], [3, 4]],
+            max_tokens=[4, 4],
+            caches=[[KVCache()], [KVCache()]],
+            pld_source_scopes=[None],
+        )
+    assert not generator.lanes
+    assert generator.next_uid == 0
+
+
+def test_prompt_lookup_insert_is_atomic_when_a_later_lane_is_invalid():
+    import pytest
+
+    generator = PromptLookupBatchGenerator(
+        _PatternModel(),
+        prompt_lookup={"num_draft": 2, "ngram_min": 2, "ngram_max": 2},
+    )
+    with pytest.raises(ValueError, match="nonempty tail"):
+        generator.insert(
+            [[1, 2], []],
+            max_tokens=[4, 4],
+            caches=[[KVCache()], [KVCache()]],
+        )
+    assert not generator.lanes
+    assert generator.next_uid == 0

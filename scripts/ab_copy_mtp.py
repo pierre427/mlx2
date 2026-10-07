@@ -6,7 +6,7 @@ GPU-only (starts real model servers).  Refuses to run without
 
 Arms (same model, same flags, only the execution policy differs):
 
-* ``off``: ``{"num_draft": N}``
+* ``off``: ``{"num_draft": N, "self_mtp_copy_draft": {"enabled": false}}``
 * ``on``:  ``{"num_draft": N, "self_mtp_copy_draft": {"enabled": true, ...}}``
 * ``ord`` (``--ordinary-arm``): the ``--ordinary`` route, no execution policy.
   Informational baseline (main made ordinary the Qwen3.6-35B default in
@@ -197,6 +197,21 @@ def server_route_args(arm, policy_path, native_mtp_flag):
     return route + ["--execution-policy", str(policy_path)]
 
 
+def arm_policies(num_draft, copy_policy):
+    return {
+        # Copy drafting is now a native-MTP route default. The control must
+        # explicitly disable it or both arms silently exercise the candidate.
+        "off": {
+            "num_draft": num_draft,
+            "self_mtp_copy_draft": {"enabled": False},
+        },
+        "on": {
+            "num_draft": num_draft,
+            "self_mtp_copy_draft": copy_policy,
+        },
+    }
+
+
 def run_arm(args, arm, rep, policy_path):
     port = args.port
     url = f"http://127.0.0.1:{port}"
@@ -376,10 +391,7 @@ def main():
     parser.add_argument("--i-own-the-gpu", action="store_true")
     args = parser.parse_args()
     copy_policy = json.loads(args.copy_policy)
-    policies = {
-        "off": {"num_draft": args.num_draft},
-        "on": {"num_draft": args.num_draft, "self_mtp_copy_draft": copy_policy},
-    }
+    policies = arm_policies(args.num_draft, copy_policy)
     if args.ordinary_arm:
         base = ("off", "on", "ord")
         order = [base[rep % 3:] + base[:rep % 3] for rep in range(args.reps)]

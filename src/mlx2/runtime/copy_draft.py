@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Copy-drafts inside the self-MTP verify transaction (default off).
+"""Copy-drafts inside the self-MTP verify transaction.
 
 Original mlx2 code.  Design ideas (congestion-window span sizing, a windowed
 ratio-of-sums gate, point-mass verification under sampling, indexing the full

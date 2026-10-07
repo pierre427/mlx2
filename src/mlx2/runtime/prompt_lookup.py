@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: MIT
 # Adapted from mlx-lm-unified; see docs/PROVENANCE.md and provenance/flashnext.json.
-from collections import defaultdict, deque
-from collections.abc import Sequence
+import math
+import threading
+import time
+from collections import Counter, OrderedDict, defaultdict, deque
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 
 @dataclass
@@ -343,7 +347,337 @@ class PromptLookupIndexStats:
 @dataclass(frozen=True)
 class _IndexedSegment:
     tokens: tuple[int, ...]
-    index: dict[int, dict[tuple[int, ...], list[int]]]
+    index: Mapping[int, Mapping[tuple[int, ...], tuple[int, ...]]]
+    source_kind: str = "retrieval"
+    ngram_min: int = 3
+    ngram_max: int = 6
+    index_window: int | None = None
+
+
+def _immutable_segment_index(
+    tokens, *, ngram_min, ngram_max, index_window=None
+):
+    """Build read-only postings that can be shared safely across PLD lanes."""
+    buckets_by_size = {}
+    length = len(tokens)
+    for size in range(ngram_min, ngram_max + 1):
+        buckets = defaultdict(list)
+        first_start = 0
+        if index_window:
+            first_start = max(0, length - index_window - size)
+        for start in range(first_start, length - size + 1):
+            buckets[tuple(tokens[start : start + size])].append(start)
+        buckets_by_size[size] = MappingProxyType(
+            {key: tuple(positions) for key, positions in buckets.items()}
+        )
+    return MappingProxyType(buckets_by_size)
+
+
+@dataclass(frozen=True)
+class RecentCommittedSegment:
+    """One completed-response token span available to later PLD lanes."""
+
+    scope: object
+    segment_id: str
+    cache_id: int
+    tokens: tuple[int, ...]
+    completed_at: float
+
+
+class RecentCommittedSegmentStore:
+    """Bounded, engine-owned source segments for cross-request PLD.
+
+    The store owns token IDs only, never target or APCv2 state.  Callers bind
+    ``scope`` to the same exact identity used for APCv2, so model, tokenizer,
+    adapter, numerical and (when selected) tenant boundaries cannot mix.
+    Snapshots are immutable and completed responses are published atomically.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_responses=64,
+        max_tokens=131072,
+        max_response_tokens=2048,
+        max_age_seconds=1800.0,
+        clock=time.monotonic,
+    ):
+        for name, value in (
+            ("max_responses", max_responses),
+            ("max_tokens", max_tokens),
+            ("max_response_tokens", max_response_tokens),
+        ):
+            if type(value) is not int or value < 1:
+                raise ValueError(
+                    f"PLD recent segment {name} must be a positive integer"
+                )
+        if isinstance(max_age_seconds, bool) or not isinstance(
+            max_age_seconds, (int, float)
+        ) or not math.isfinite(float(max_age_seconds)) or max_age_seconds <= 0:
+            raise ValueError(
+                "PLD recent segment max_age_seconds must be finite and positive"
+            )
+        self.max_responses = max_responses
+        self.max_tokens = max_tokens
+        self.max_response_tokens = max_response_tokens
+        self.max_age_seconds = float(max_age_seconds)
+        self._clock = clock
+        self._entries = deque()
+        self._tokens = 0
+        self._serial = 0
+        self._stats = Counter()
+        self._lock = threading.Lock()
+        # One immutable index can serve every lane admitted against the same
+        # exact APCv2 scope and source. Keep the cache no larger than the raw
+        # response store; transcript entries share this same LRU budget.
+        self._index_cache = OrderedDict()
+        self._index_cache_limit = max_responses
+        self._index_cache_tokens = 0
+        self._index_scope_stats = defaultdict(Counter)
+
+    @staticmethod
+    def _index_key(
+        scope,
+        source_kind,
+        source_id,
+        tokens,
+        ngram_min,
+        ngram_max,
+        index_window,
+    ):
+        try:
+            hash(scope)
+        except TypeError as error:
+            raise ValueError(
+                "PLD shared index scope must be an exact hashable APCv2 key"
+            ) from error
+        return (
+            scope,
+            str(source_kind),
+            str(source_id),
+            hash(tokens),
+            len(tokens),
+            int(ngram_min),
+            int(ngram_max),
+            index_window,
+        )
+
+    def _drop_indexes_locked(self, scope, source_kind, source_id):
+        doomed = [
+            key
+            for key in self._index_cache
+            if key[0] == scope and key[1] == source_kind and key[2] == str(source_id)
+        ]
+        for key in doomed:
+            indexed = self._index_cache.pop(key, None)
+            if indexed is not None:
+                self._index_cache_tokens -= len(indexed.tokens)
+            self._stats["shared_index_lifecycle_evictions"] += 1
+            self._index_scope_stats[key[0]][
+                "shared_index_lifecycle_evictions"
+            ] += 1
+
+    def _expire_locked(self, now):
+        boundary = now - self.max_age_seconds
+        while self._entries and self._entries[0].completed_at < boundary:
+            entry = self._entries.popleft()
+            self._tokens -= len(entry.tokens)
+            self._drop_indexes_locked(
+                entry.scope, "recent_committed", entry.cache_id
+            )
+            self._stats["age_evictions"] += 1
+
+    def publish(self, scope, tokens, *, segment_id=None):
+        """Publish one successfully completed response tail."""
+        if scope is None:
+            raise ValueError("PLD recent segment scope is required")
+        values = tuple(tokens)
+        if not values:
+            with self._lock:
+                self._stats["empty_skips"] += 1
+            return None
+        if any(type(token) is not int or token < 0 for token in values):
+            raise ValueError("PLD recent segment tokens must be nonnegative")
+        # A configured per-response limit can be wider than the store's total
+        # token budget.  Clamp to both limits so a single valid publication
+        # cannot immediately evict itself from an otherwise empty store.
+        values = values[-min(self.max_response_tokens, self.max_tokens) :]
+        now = float(self._clock())
+        with self._lock:
+            self._expire_locked(now)
+            # Repeated deterministic responses are common in serving.  Keep
+            # one newest copy per exact scope instead of letting duplicates
+            # consume the global response and token budgets.
+            duplicate = next(
+                (
+                    entry
+                    for entry in reversed(self._entries)
+                    if entry.scope == scope and entry.tokens == values
+                ),
+                None,
+            )
+            if duplicate is not None:
+                self._entries.remove(duplicate)
+                self._tokens -= len(duplicate.tokens)
+                self._stats["duplicate_refreshes"] += 1
+            self._serial += 1
+            entry = RecentCommittedSegment(
+                scope=scope,
+                segment_id=(
+                    str(segment_id)
+                    if segment_id is not None
+                    else f"completion:{self._serial}"
+                ),
+                # Exact same-scope tokens keep their immutable posting cache;
+                # only freshness and the user-visible segment id change.
+                cache_id=(duplicate.cache_id if duplicate is not None else self._serial),
+                tokens=values,
+                completed_at=now,
+            )
+            self._entries.append(entry)
+            self._tokens += len(values)
+            self._stats["published"] += 1
+            while (
+                len(self._entries) > self.max_responses
+                or self._tokens > self.max_tokens
+            ):
+                evicted = self._entries.popleft()
+                self._tokens -= len(evicted.tokens)
+                self._drop_indexes_locked(
+                    evicted.scope, "recent_committed", evicted.cache_id
+                )
+                self._stats["capacity_evictions"] += 1
+            return entry
+
+    def indexed_segment(
+        self,
+        scope,
+        tokens,
+        *,
+        source_kind,
+        source_id,
+        ngram_min,
+        ngram_max,
+        index_window=None,
+    ):
+        """Return one bounded engine-owned immutable hot-source index."""
+        values = tuple(tokens)
+        if not values:
+            raise ValueError("PLD shared index segment must be nonempty")
+        if any(type(token) is not int or token < 0 for token in values):
+            raise ValueError("PLD shared index tokens must be nonnegative integers")
+        if source_kind not in {"apcv2_transcript", "recent_committed"}:
+            raise ValueError("PLD shared index source kind is unsupported")
+        if ngram_min < 1 or ngram_max < ngram_min:
+            raise ValueError("invalid shared PLD ngram bounds")
+        if index_window is not None and (
+            type(index_window) is not int or index_window < 1
+        ):
+            raise ValueError("shared PLD index window must be a positive integer")
+        key = self._index_key(
+            scope,
+            source_kind,
+            source_id,
+            values,
+            ngram_min,
+            ngram_max,
+            index_window,
+        )
+        with self._lock:
+            indexed = self._index_cache.get(key)
+            if indexed is not None and indexed.tokens == values:
+                self._index_cache.move_to_end(key)
+                self._stats["shared_index_hits"] += 1
+                self._index_scope_stats[scope]["shared_index_hits"] += 1
+                return indexed
+            self._stats["shared_index_misses"] += 1
+            self._index_scope_stats[scope]["shared_index_misses"] += 1
+        built = _IndexedSegment(
+            values,
+            _immutable_segment_index(
+                values,
+                ngram_min=ngram_min,
+                ngram_max=ngram_max,
+                index_window=index_window,
+            ),
+            source_kind=source_kind,
+            ngram_min=ngram_min,
+            ngram_max=ngram_max,
+            index_window=index_window,
+        )
+        with self._lock:
+            indexed = self._index_cache.get(key)
+            if indexed is not None and indexed.tokens == values:
+                self._index_cache.move_to_end(key)
+                self._stats["shared_index_race_reuses"] += 1
+                self._index_scope_stats[scope]["shared_index_race_reuses"] += 1
+                return indexed
+            replaced = self._index_cache.pop(key, None)
+            if replaced is not None:
+                self._index_cache_tokens -= len(replaced.tokens)
+            self._index_cache[key] = built
+            self._index_cache_tokens += len(built.tokens)
+            self._index_cache.move_to_end(key)
+            self._stats["shared_index_builds"] += 1
+            self._index_scope_stats[scope]["shared_index_builds"] += 1
+            while (
+                len(self._index_cache) > self._index_cache_limit
+                or self._index_cache_tokens > self.max_tokens
+            ):
+                evicted_key, evicted = self._index_cache.popitem(last=False)
+                self._index_cache_tokens -= len(evicted.tokens)
+                self._stats["shared_index_capacity_evictions"] += 1
+                self._index_scope_stats[evicted_key[0]][
+                    "shared_index_capacity_evictions"
+                ] += 1
+            return built
+
+    def snapshot(self, scope):
+        """Return newest-first immutable source spans for one APCv2 scope."""
+        now = float(self._clock())
+        with self._lock:
+            self._expire_locked(now)
+            entries = tuple(
+                entry for entry in reversed(self._entries) if entry.scope == scope
+            )
+            self._stats["snapshots"] += 1
+            self._stats["snapshot_segments"] += len(entries)
+            return entries
+
+    def status(self, scope=None):
+        now = float(self._clock())
+        with self._lock:
+            self._expire_locked(now)
+            if scope is None:
+                entries = tuple(self._entries)
+                stats = dict(self._stats)
+            else:
+                entries = tuple(
+                    entry for entry in self._entries if entry.scope == scope
+                )
+                # Per-request receipts must not disclose activity in another
+                # exact APCv2 scope through global cumulative counters.
+                stats = dict(self._index_scope_stats.get(scope, ()))
+            shared_indexes = tuple(
+                indexed
+                for key, indexed in self._index_cache.items()
+                if scope is None or key[0] == scope
+            )
+            return {
+                "schema": "mlx2.pld-recent-committed-segments.v1",
+                "responses": len(entries),
+                "tokens": sum(len(entry.tokens) for entry in entries),
+                "max_responses": self.max_responses,
+                "max_tokens": self.max_tokens,
+                "max_response_tokens": self.max_response_tokens,
+                "max_age_seconds": self.max_age_seconds,
+                "shared_index_entries": len(shared_indexes),
+                "shared_index_tokens": sum(
+                    len(indexed.tokens) for indexed in shared_indexes
+                ),
+                "shared_index_limit": self._index_cache_limit,
+                **stats,
+            }
 
 
 class IndexedPromptLookup:
@@ -388,18 +722,12 @@ class IndexedPromptLookup:
         self.index_stats.target_occurrences_indexed = self.index_entries
 
     def _build_hot_index(self, tokens):
-        index = {
-            size: defaultdict(list)
-            for size in range(self.ngram_min, self.ngram_max + 1)
-        }
-        length = len(tokens)
-        for size, buckets in index.items():
-            first_start = 0
-            if self.index_window:
-                first_start = max(0, length - self.index_window - size)
-            for start in range(first_start, length - size + 1):
-                buckets[tuple(tokens[start : start + size])].append(start)
-        return index
+        return _immutable_segment_index(
+            tokens,
+            ngram_min=self.ngram_min,
+            ngram_max=self.ngram_max,
+            index_window=self.index_window,
+        )
 
     def observe(self, token):
         self.tokens.append(int(token))
@@ -425,13 +753,45 @@ class IndexedPromptLookup:
                 self.indexed_start = expired + 1
         self.index_stats.target_occurrences_indexed = self.index_entries
 
-    def add_hot_segment(self, tokens):
+    def add_hot_segment(self, tokens, *, source_kind="retrieval"):
         segment = tuple(int(token) for token in tokens)
         if not segment:
             raise ValueError("hot segment must be nonempty")
+        if source_kind not in {"retrieval", "apcv2_transcript", "recent_committed"}:
+            raise ValueError("unknown prompt-lookup hot segment source")
         if self.hot.maxlen == 0:
             return
-        indexed = _IndexedSegment(segment, self._build_hot_index(segment))
+        indexed = _IndexedSegment(
+            segment,
+            self._build_hot_index(segment),
+            source_kind=source_kind,
+            ngram_min=self.ngram_min,
+            ngram_max=self.ngram_max,
+            index_window=self.index_window,
+        )
+        self.add_indexed_hot_segment(indexed)
+
+    def add_indexed_hot_segment(self, indexed):
+        """Attach a compatible immutable segment without rebuilding postings."""
+        if self.hot.maxlen == 0:
+            return
+        if not isinstance(indexed, _IndexedSegment):
+            raise TypeError("indexed hot segment must be an _IndexedSegment")
+        if (
+            indexed.ngram_min != self.ngram_min
+            or indexed.ngram_max != self.ngram_max
+            or indexed.index_window != self.index_window
+        ):
+            raise ValueError("indexed hot segment geometry does not match proposer")
+        if indexed.source_kind not in {
+            "retrieval",
+            "apcv2_transcript",
+            "recent_committed",
+        }:
+            raise ValueError("unknown prompt-lookup hot segment source")
+        segment = indexed.tokens
+        if not segment:
+            raise ValueError("hot segment must be nonempty")
         if self.hot.maxlen is not None and len(self.hot) == self.hot.maxlen:
             evicted = self.hot[0]
             self.index_stats.hot_tokens_indexed -= len(evicted.tokens)
@@ -604,6 +964,17 @@ class IndexedPromptLookup:
         if self.last_source is not None and proposed and not accepted and self.reject_ttl:
             self.rejected_until[self.last_source] = self.clock + self.reject_ttl
             self.index_stats.sources_rejected += 1
+
+    @property
+    def last_source_kind(self):
+        if self.last_source is None:
+            return None
+        if self.last_source[0] == "target":
+            return "local"
+        segment_id = self.last_source[1]
+        if 0 <= segment_id < len(self.hot):
+            return self.hot[segment_id].source_kind
+        return "unknown"
 
     def index_receipt(self):
         self.index_stats.target_occurrences_indexed = self.index_entries

@@ -164,7 +164,13 @@ def composed_engine(monkeypatch, *, sampled=False, pairwise_selection="host"):
 
     monkeypatch.setattr(backend, "draft_distributions", confidence)
     wrapper = ComposedDraftModel(
-        backend, {"ngram_min": 2, "ngram_max": 2, "lookback": 128}
+        backend,
+        {
+            "ngram_min": 2,
+            "ngram_max": 2,
+            "lookback": 128,
+            "min_context_match": 0,
+        },
     )
     policy = {
         "verification_costs": [0.5, 1, 1.4],
@@ -305,10 +311,11 @@ def test_actual_pld_head_arbitration_adaptive_groups_have_request_private_source
 def test_composed_late_group_failure_rolls_back_request_source_counts_and_q_calibration(
     monkeypatch,
 ):
-    target, _, e, _ = composed_engine(monkeypatch, sampled=True)
+    target, wrapper, e, _ = composed_engine(monkeypatch, sampled=True)
     lanes = list(e.lanes.values())
     before = copy.deepcopy([l.__dict__ for l in lanes])
     fit = copy.deepcopy(e.acceptance_estimator)
+    score_counts = copy.deepcopy(wrapper._score_counts)
     original = target.forward_with_taps
     calls = [0]
 
@@ -339,8 +346,10 @@ def test_composed_late_group_failure_rolls_back_request_source_counts_and_q_cali
     np.testing.assert_array_equal(
         e.acceptance_estimator.observed_counts, fit.observed_counts
     )
+    assert wrapper._score_counts == score_counts
     monkeypatch.setattr(target, "forward_with_taps", original)
     e._round(lanes)
+    assert wrapper._score_counts != score_counts
     assert lanes[0].proposal_composition_counts["prompt_lookup"]["verified_rounds"] == 1
 
 
