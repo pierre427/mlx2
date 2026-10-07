@@ -1,11 +1,12 @@
-"""Opt-in GPU keep-warm ticker (omlx #3974), CPU.
+"""GPU keep-warm ticker (omlx #3974; CLI default on since 2026-10-07), CPU.
 
 Apple GPUs park after ~1.5 s without work and stall the next command buffer
 on wake.  With ``--gpu-keep-warm-seconds`` the serving worker submits a
 one-element kernel from its idle branch while it has served a request within
 the window.  These tests pin the scheduling with an injected clock and op,
 and the plumbing from the CLI through settings, ``/v1/status`` and
-``/metrics``.  The GPU effect itself needs a Metal measurement.
+``/metrics``.  The GPU effect was measured in
+qualification/runs/intake-probes-20261007 (keepwarm-*).
 """
 
 import time
@@ -133,11 +134,17 @@ def test_cli_maps_to_engine_policy_and_is_provenance_only():
     assert "gpu_keep_warm" in PROVENANCE_ONLY_SETTINGS
     parser = build_parser()
     default = parser.parse_args(["--model", "m"])
+    off = parser.parse_args(["--model", "m", "--gpu-keep-warm-seconds", "0"])
     on = parser.parse_args(
         ["--model", "m", "--gpu-keep-warm-seconds", "120", "--gpu-keep-warm-interval", "1"]
     )
     kw = dict(native_mtp=False, approximate_kv=None, max_request_bytes=1 << 20)
-    assert serving_engine_kwargs(default, None, **kw)["gpu_keep_warm"] is None
+    assert serving_engine_kwargs(off, None, **kw)["gpu_keep_warm"] is None
+    # Default on since 2026-10-07 (intake-probes-20261007/keepwarm-*): the
+    # CLI turns it on; an engine built directly still defaults to off.
+    assert GpuKeepWarmPolicy.from_value(
+        serving_engine_kwargs(default, None, **kw)["gpu_keep_warm"]
+    ).as_dict() == {"enabled": True, "window_seconds": 60.0, "interval_seconds": 0.5}
     value = serving_engine_kwargs(on, None, **kw)["gpu_keep_warm"]
     assert GpuKeepWarmPolicy.from_value(value).as_dict() == {
         "enabled": True, "window_seconds": 120.0, "interval_seconds": 1.0,

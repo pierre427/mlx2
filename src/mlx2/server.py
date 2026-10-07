@@ -4742,13 +4742,13 @@ def build_parser():
     parser.add_argument(
         "--gpu-keep-warm-seconds",
         type=float,
-        default=0.0,
+        default=60.0,
         metavar="SECONDS",
         help=(
             "after a request, keep the GPU out of its idle power state for "
             "this long by submitting a one-element kernel from the idle "
             "worker loop, so the next request skips the wake-up stall "
-            "(default: 0, disabled)"
+            "(default: %(default)s; 0 disables)"
         ),
     )
     parser.add_argument(
