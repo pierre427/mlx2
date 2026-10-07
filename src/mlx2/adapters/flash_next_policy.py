@@ -21,6 +21,10 @@ _OPTIONAL_KERNEL_ENV = {
     # (provenance/tensorfold-0.6.1-flashnext-longctx.json).
     "qsa_fused_scores": "MLX_QWEN4_QSA_FUSED_SCORES",
     "ple_early_dispatch": "MLX_QWEN4_PLE_EARLY_DISPATCH",
+    # QSA stage-one selection instrumentation (opt-in, syncs the GPU around
+    # each selection, so TTFT measured with it on is not comparable).
+    "qsa_stage1_select_timing": "MLX_QWEN4_QSA_STAGE1_SELECT_TIMING",
+    "qsa_stage1_gvr_count_paths": "MLX_QWEN4_QSA_STAGE1_GVR_COUNT_PATHS",
 }
 
 
@@ -96,6 +100,15 @@ class FlashNextPolicy:
     # async_eval boundary).  Opt-in; enters the environment and receipts
     # only when enabled.
     ple_early_dispatch: bool = False
+    qsa_stage1_select_timing: bool = False
+    qsa_stage1_gvr_count_paths: bool = False
+    # Exact QSA stage-one selector (runtime/models/qwen4_qsa_stage1.py):
+    # "off" keeps the default radix selector; direct8/direct4 are qualified
+    # default-off, gvr is an unqualified research candidate.  configure_
+    # environment() clears inherited MLX_QWEN* variables, so this key is the
+    # only way to select one on the served route.  Enters the environment
+    # and receipts only when not "off".
+    qsa_stage1_direct_selector: str = "off"
     # mlx-serve #687 adaptive serial/pooled PLE reads.  The Flash-Next
     # profile strips inherited MLX_QWEN* variables, so these choices must be
     # carried by the explicit execution policy (and therefore its receipt).
@@ -351,6 +364,10 @@ class FlashNextPolicy:
                 "moe_routed_decode must be off, gate_up, gate_up_down, "
                 "gate_up_down_shared, or two_launch"
             )
+        if self.qsa_stage1_direct_selector not in {"off", "direct8", "direct4", "gvr"}:
+            raise ValueError(
+                "qsa_stage1_direct_selector must be off, direct8, direct4, or gvr"
+            )
         if self.moe_topk_fold not in {"off", "launch", "fold"}:
             raise ValueError("moe_topk_fold must be off, launch, or fold")
         if self.moe_router_kernel and self.moe_topk_fold != "off":
@@ -572,6 +589,8 @@ class FlashNextPolicy:
             del values["fused_gdn_verify_max_steps"]
         if self.moe_routed_decode == _DEFAULTS["moe_routed_decode"]:
             del values["moe_routed_decode"]
+        if self.qsa_stage1_direct_selector == "off":
+            del values["qsa_stage1_direct_selector"]
         if self.hc_decode_kernels == _DEFAULTS["hc_decode_kernels"]:
             del values["hc_decode_kernels"]
         if self.hc_decode_multi_row == "auto":
@@ -642,6 +661,10 @@ class FlashNextPolicy:
             )
         if self.moe_routed_decode != "off":
             environment["MLX_QWEN4_MOE_ROUTED_DECODE"] = self.moe_routed_decode
+        if self.qsa_stage1_direct_selector != "off":
+            environment["MLX_QWEN4_QSA_STAGE1_DIRECT_SELECTOR"] = (
+                self.qsa_stage1_direct_selector
+            )
         if self.hc_decode_kernels:
             environment["MLX_QWEN4_HC_DECODE"] = "1"
         if self.hc_decode_multi_row != "auto":

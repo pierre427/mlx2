@@ -70,6 +70,19 @@ _GVR_PATH_COUNTERS = (
     "gvr_sampled_rows",
     "gvr_fallback_rows",
 )
+# Opt-in selection timing (benchmarks only): synchronize before and after
+# every stage-one selector dispatch and histogram the wall time per producer,
+# so a served A/B can report P50/P99 selection time.  The two device syncs per
+# dispatch change the timing of the request around them: never read
+# whole-request latency from a timed run.
+_SELECT_TIMING = os.environ.get(
+    "MLX_QWEN4_QSA_STAGE1_SELECT_TIMING", "0"
+).strip().lower() in {"1", "true", "on", "yes"}
+# Bucket upper edges in microseconds, ~19% apart (2**0.25) from 10 us to ~10 s.
+SELECT_TIMING_EDGES_US = tuple(
+    int(round(10 * 2 ** (i / 4))) for i in range(0, 81)
+)
+_SELECT_TIMING_STATS: dict = {}
 _DIRECT_SELECTOR_MIN_BLOCKS = max(
     1,
     int(os.environ.get("MLX_QWEN4_QSA_STAGE1_DIRECT_SELECTOR_MIN_BLOCKS", "1")),
@@ -119,8 +132,28 @@ def qsa_stage1_candidate_status(*, reset: bool = False) -> dict:
             "default_selector": "radix_exact",
             "runtime_counts": dict(_CANDIDATE_STATS),
         }
+        if _SELECT_TIMING or _SELECT_TIMING_STATS:
+            report["select_timing"] = {
+                "enabled": bool(_SELECT_TIMING),
+                "unit": "microseconds",
+                "producers": {
+                    producer: {
+                        "count": stats["count"],
+                        "total_us": stats["total_us"],
+                        "max_us": stats["max_us"],
+                        # Non-cumulative counts per upper edge; deltas of
+                        # two snapshots give one workload's histogram.
+                        "buckets": {
+                            f"le_{edge}": count
+                            for edge, count in sorted(stats["buckets"].items())
+                        },
+                    }
+                    for producer, stats in sorted(_SELECT_TIMING_STATS.items())
+                },
+            }
         if reset:
             _CANDIDATE_STATS.clear()
+            _SELECT_TIMING_STATS.clear()
     return report
 
 
@@ -732,10 +765,47 @@ def _stage1_kernel(
     )
 
 
+def _record_select_time(producer: str, seconds: float) -> None:
+    micros = max(0, int(round(seconds * 1e6)))
+    edge = next(
+        (e for e in SELECT_TIMING_EDGES_US if micros <= e),
+        SELECT_TIMING_EDGES_US[-1] * 2,
+    )
+    with _CANDIDATE_STATS_LOCK:
+        stats = _SELECT_TIMING_STATS.setdefault(
+            producer, {"count": 0, "total_us": 0, "max_us": 0, "buckets": Counter()}
+        )
+        stats["count"] += 1
+        stats["total_us"] += micros
+        stats["max_us"] = max(stats["max_us"], micros)
+        stats["buckets"][edge] += 1
+
+
 def _select_scores(
     scores: mx.array, q_positions: mx.array, *, topk: int, compress_ratio: int
 ) -> mx.array:
     """Select score-column IDs with the configured exact selector."""
+    if not _SELECT_TIMING:
+        return _select_scores_untimed(
+            scores, q_positions, topk=topk, compress_ratio=compress_ratio
+        )
+    import time
+
+    (_, blocks) = map(int, scores.shape)
+    producer = qsa_stage1_selector_producer(blocks=blocks, block_topk=topk)
+    mx.eval(scores, q_positions)
+    tic = time.perf_counter()
+    selected = _select_scores_untimed(
+        scores, q_positions, topk=topk, compress_ratio=compress_ratio
+    )
+    mx.eval(selected)
+    _record_select_time(producer, time.perf_counter() - tic)
+    return selected
+
+
+def _select_scores_untimed(
+    scores: mx.array, q_positions: mx.array, *, topk: int, compress_ratio: int
+) -> mx.array:
     (rows, blocks) = map(int, scores.shape)
     producer = qsa_stage1_selector_producer(blocks=blocks, block_topk=topk)
     if producer == "direct8_exact":
