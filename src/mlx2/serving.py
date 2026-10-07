@@ -49,6 +49,37 @@ _GATED_DELTA_MODULE = "mlx2.runtime.models.gated_delta"
 _MOE_RHS_PAD_DEFAULT_FLOOR = _MOE_RHS_PAD_DEFAULT["min_rows_per_expert"]
 
 
+# Execution-policy keys the serving engine owns; every other key is passed to
+# the adapter factory, which validates it.  One list so offline tools (the
+# profiler's --dry-run) split a policy exactly as the engine does.
+SERVER_OWNED_EXECUTION_POLICY_KEYS = frozenset(
+    {
+        "prompt_lookup",
+        "fly_verification",
+        "self_mtp_copy_draft",
+        "apc_interior_checkpoints",
+        "adaptive_mtp_depth",
+        "mtp_ordinary_handoff",
+        "memory_preemption",
+        "apc_junction_checkpoints",
+        "apc_retention_policy",
+        "apc_rolling_checkpoints",
+        "host_memory_signals",
+        "moe_expert_streaming",
+        "dense_weight_streaming",
+        "prefill_scheduling",
+        "decode_first",
+        "batch_geometry",
+        "decode_fairness",
+        "constrained_tool_grammar",
+        "tolerant_tool_markers",
+        "constrained_tool_grammar_auto",
+        "tool_grammar_streaming",
+        "sp_qmm",
+    }
+)
+
+
 def _moe_nax_gather_mode() -> str:
     """The NAX MoE gather mode in force (the module's, else the environment)."""
     import sys
@@ -6802,30 +6833,7 @@ class ServingEngine:
                 {
                     key: value
                     for key, value in self.execution_policy.items()
-                    if key not in {
-                        "prompt_lookup",
-                        "fly_verification",
-                        "self_mtp_copy_draft",
-                        "apc_interior_checkpoints",
-                        "adaptive_mtp_depth",
-                        "mtp_ordinary_handoff",
-                        "memory_preemption",
-                        "apc_junction_checkpoints",
-                        "apc_retention_policy",
-                        "apc_rolling_checkpoints",
-                        "host_memory_signals",
-                        "moe_expert_streaming",
-                        "dense_weight_streaming",
-                        "prefill_scheduling",
-                        "decode_first",
-                        "batch_geometry",
-                        "decode_fairness",
-                        "constrained_tool_grammar",
-                        "tolerant_tool_markers",
-                        "constrained_tool_grammar_auto",
-                        "tool_grammar_streaming",
-                        "sp_qmm",
-                    }
+                    if key not in SERVER_OWNED_EXECUTION_POLICY_KEYS
                 }
                 if self.execution_policy is not None
                 else None
