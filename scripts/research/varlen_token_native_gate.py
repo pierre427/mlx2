@@ -31,7 +31,12 @@ EXPECTED_NATIVE_SOURCE_SHA256 = {
 }
 ROOT = Path(__file__).resolve().parents[2]
 LOCKS = (Path("/Users/Shared/mlxuag/gpu.lock"), Path("/tmp/gpu.lock"))
-BINARY = Path("/tmp/mlx2-varlen-binding-build-215/_paged_kv_native.cpython-312-darwin.so")
+# The reviewed build lives in /tmp, which macOS may clear; MLX2_VARLEN_BINDING_SO
+# points the gate at another copy (the hash check still has to match).
+BINARY = Path(os.environ.get(
+    "MLX2_VARLEN_BINDING_SO",
+    "/tmp/mlx2-varlen-binding-build-215/_paged_kv_native.cpython-312-darwin.so",
+))
 STAGE = "not-started"
 
 

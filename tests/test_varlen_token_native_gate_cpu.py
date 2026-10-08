@@ -91,6 +91,11 @@ def test_failed_gpu_preflight_writes_failure_receipt_without_mlx_import(tmp_path
     receipt = tmp_path / "failure.json"
     env = {key: value for key, value in os.environ.items()
            if key not in ("GPUQ_SESSION", "GPUQ_LEASE")}
+    # The default binary sits in /tmp and can be cleared by macOS; the receipt
+    # must still hash whatever binary the gate was pointed at.
+    binary = tmp_path / "_paged_kv_native.so"
+    binary.write_bytes(b"stand-in build")
+    env["MLX2_VARLEN_BINDING_SO"] = str(binary)
     command = [sys.executable, str(SCRIPT), "--execute-gpu", "--receipt", str(receipt)]
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode != 0
