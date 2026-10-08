@@ -40,6 +40,7 @@ QUALIFICATION_COVERAGE = {
 }
 LONG_CONTEXT_HEADROOM = 256
 LONG_CONTEXT_COMPLETION_TOKENS = 64
+CANCELLATION_PROBE_MAX_TOKENS = 8192
 REASONING_PROBE_TOKEN_BUDGETS = (512, 1024, 2048)
 # Keep enough room for a final answer even when a model ignores the request for
 # short reasoning.  This is sent only when the adapter declares state-aware
@@ -156,6 +157,17 @@ def near_limit_prompt_floor(context_cap):
     if context_cap <= LONG_CONTEXT_HEADROOM:
         raise ValueError("context cap must exceed near-limit headroom")
     return context_cap - LONG_CONTEXT_HEADROOM
+
+
+def cancellation_probe_budget(context_cap):
+    """Long cancellation budget that remains legal for the served context."""
+    budget = min(
+        CANCELLATION_PROBE_MAX_TOKENS,
+        int(context_cap) - LONG_CONTEXT_HEADROOM,
+    )
+    if budget < LONG_CONTEXT_COMPLETION_TOKENS:
+        raise ValueError("context cap is too small for the cancellation probe")
+    return budget
 
 
 # Exactly one token each, with a leading space, in every supported tokenizer
@@ -1001,6 +1013,11 @@ def read_streamed_chat(lines, clock):
         "usage": final.get("usage"),
         "mlx2": final["mlx2"],
     }, arrivals
+
+
+def normalize_chat_content(value):
+    """Normalize only outer whitespace, identically for stream and non-stream."""
+    return (value or "").strip()
 
 
 def observed_compute_widths(receipt):
@@ -2346,7 +2363,7 @@ def main():
         return {"messages": [{"role": "user", "content": text}], **kw}
 
     def content(response):
-        return response["choices"][0]["message"]["content"].strip()
+        return normalize_chat_content(response["choices"][0]["message"]["content"])
 
     initial = get("/v1/status")
     # Explicit raises, not assert: under python -O an assert is skipped, a
@@ -2691,7 +2708,8 @@ def main():
         )
         check(
             "stream",
-            text == (content(cold) if source_cases is not None else "MLX2_READY")
+            normalize_chat_content(text)
+            == (content(cold) if source_cases is not None else "MLX2_READY")
             and wire.endswith("data: [DONE]\n\n")
             and "mlx2" in chunks[-1],
             chunks,
@@ -3016,7 +3034,10 @@ def main():
         before = get("/v1/status")["counts"].get("cancelled", 0)
         response = post(
             prompt(
-                "Write a very long guide to compiler optimization.", max_tokens=8192
+                "Write a very long guide to compiler optimization.",
+                max_tokens=cancellation_probe_budget(initial["max_context"]),
+                reasoning_effort="none",
+                think=False,
             ),
             stream=True,
         )

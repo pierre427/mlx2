@@ -33,8 +33,9 @@ def _runner():
 
 def test_runner_pins_the_bounded_b1_m3_profile():
     runner = _runner()
+    assert runner.ROOT == Path(__file__).parents[1]
     command = runner.server_command("candidate")
-    assert command[command.index("--max-context") + 1] == "4096"
+    assert command[command.index("--max-context") + 1] == "1024"
     assert command[command.index("--cache-bytes") + 1] == "2147483648"
     assert command[command.index("--max-lanes") + 1] == "1"
     assert command[command.index("--max-inflight") + 1] == "1"

@@ -73,6 +73,18 @@ def required_generic_checks(descriptor, *, capabilities=None):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
+    # Re-pinned 2026-10-08 (stream normalization): streamed and non-streamed
+    # chat content now receive the same outer-whitespace normalization before
+    # equivalence is checked. Receipts from 15cee377... must be regenerated.
+    # Re-pinned 2026-10-08: e242b0ab added the APCv2 in-flight-prefix-wait
+    # observation and matching route feature gate but did not update this
+    # independent trust anchor. Receipts from c341a792... must be regenerated.
+    # Re-pinned 2026-10-08 (cross-host preflight): v3 receipts bind separate
+    # reviewed source and M3 target proofs while retaining the v2 path.
+    # Receipts from 0a9bae1c... must be regenerated.
+    # Re-pinned 2026-10-08 (bounded cancellation): the cancellation probe now
+    # derives a long legal output budget from max_context instead of requesting
+    # 8192 tokens unconditionally. Receipts from 9a8b210e... must be regenerated.
     # Re-pinned 2026-10-08 (progressive width law): a selected multi-lane
     # draft cap now requires run-local capped-round and capped-lane evidence.
     # Receipts from c40aedf3... must be regenerated.
@@ -141,7 +153,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # (8a2ced1d..., NAX gather default) must be regenerated.
     # Re-pinned 2026-10-02 (flip integrate): benchmark_adaptive_mtp.py model
     # defaults now use Path.home(), so APPROVED_ADAPTIVE_BENCHMARK_SHA256 moved.
-    "sha256": "9a8b210e7b0ad3081bb3bea7089aa816ccf1bc443118992cd4d7940c0cc78271",
+    "sha256": "a12f213a4af6985992ed84f6a0cb02ce4a58373c9067987df5b925f2330ca810",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A

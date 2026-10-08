@@ -447,6 +447,19 @@ def test_long_context_probe_uses_one_consistent_safe_headroom():
         qualify.long_context_prompt(qualify.LONG_CONTEXT_HEADROOM)
 
 
+def test_cancellation_probe_budget_is_long_but_context_bounded():
+    assert qualify.cancellation_probe_budget(1024) == 768
+    assert qualify.cancellation_probe_budget(16384) == 8192
+    request = {
+        "max_tokens": qualify.cancellation_probe_budget(1024),
+        "reasoning_effort": "none",
+        "think": False,
+    }
+    assert qualify.with_thinking_budget(request, True)["max_tokens"] == 768
+    with pytest.raises(ValueError, match="too small"):
+        qualify.cancellation_probe_budget(qualify.LONG_CONTEXT_HEADROOM)
+
+
 def test_long_context_delegation_requires_generated_thermal_near_limit_matrix(tmp_path):
     prompt = tmp_path / "prompt.json"
     prompt.write_text("{}")
@@ -975,6 +988,12 @@ def test_streamed_chat_is_rebuilt_with_its_receipt_and_token_arrivals():
     # A stream cut off before its receipt chunk is not a response.
     with pytest.raises(AssertionError):
         qualify.read_streamed_chat(wire[:4], lambda: 0.0)
+
+
+def test_stream_and_nonstream_content_use_symmetric_outer_whitespace_normalization():
+    assert qualify.normalize_chat_content("\n\nMLX2_READY") == "MLX2_READY"
+    assert qualify.normalize_chat_content("MLX2_READY") == "MLX2_READY"
+    assert qualify.normalize_chat_content("MLX2_READY extra") != "MLX2_READY"
 
 
 def test_mixed_warm_pair_is_streamed_and_judged_on_token_arrivals():
