@@ -205,6 +205,10 @@ def test_dry_run_rejects_unknown_sampling_and_missing_model(tmp_path):
 @pytest.mark.parametrize("path", sorted(AB_DIR.glob("*-spec.json")), ids=lambda p: p.name)
 def test_ab_20261007_specs_validate(path):
     report = pf.dry_run(json.loads(path.read_text()))
+    if report["spec_errors"] and all(
+        "has no config.json" in error for error in report["spec_errors"]
+    ):
+        pytest.skip("requires the model artifacts bound by the retained A/B spec")
     assert report["ok"], json.dumps(report, indent=1, default=str)
 
 

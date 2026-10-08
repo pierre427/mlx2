@@ -2,7 +2,10 @@
 import ast,importlib.abc,json,sys,unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
+import pytest
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'src'))
+INPUTS=Path('/tmp/mlx2-spomin400-nativeN-inputs.json')
+DEVICE=Path('/tmp/mlx2-n20-large-plane-463e-device.json')
 class Guard(importlib.abc.MetaPathFinder):
  def find_spec(self,name,path=None,target=None):
   if name=='mlx' or name.startswith('mlx.') or name=='_paged_kv_native':raise RuntimeError('runtime import forbidden')
@@ -11,6 +14,7 @@ from mlx2.runtime.paged_native_arena_geometry import require_arena_storage,MAX_H
 CAP=dict(version=1,layout='contiguous_uint8_2d_large',large_plane_threshold_bytes=SHAPE_DIM_MAX,large_plane_alignment_bytes=4096,max_plane_bytes=MAX_HOST_PLANE_BYTES,exact_byte_allocation=True)
 def native(cap=CAP):return NS(arena_storage_capability=lambda:dict(cap))
 class Tests(unittest.TestCase):
+ @pytest.mark.skipif(not DEVICE.is_file(),reason='requires retained packed-N20 device evidence')
  def test_actual_gpu_provider_receipt_and_cpp_schema(self):
   receipt=json.loads(Path('/tmp/mlx2-n20-large-plane-463e-device.json').read_text())
   cap=receipt['capability']
@@ -22,6 +26,7 @@ class Tests(unittest.TestCase):
   import re
   self.assertEqual(set(re.findall(r'result\["([^"\n]+)"\]',provider)),set(cap))
   self.assertIn('result["exact_byte_allocation"] = true;',provider)
+ @pytest.mark.skipif(not INPUTS.is_file() or not DEVICE.is_file(),reason='requires retained packed-N20 device evidence')
  def test_preload_real_raw_contract_precedes_model_imports(self):
   from mlx2.runtime import hybrid_packed_prefill_n as factory
   data=json.loads(Path('/tmp/mlx2-spomin400-nativeN-inputs.json').read_text())
@@ -37,6 +42,7 @@ class Tests(unittest.TestCase):
   check=next(n for n in ast.walk(init) if isinstance(n,ast.Call) and ast.unparse(n.func)=='factory.preflight_native_inputs')
   imports=[n for n in ast.walk(init) if isinstance(n,ast.ImportFrom) and n.module=='mlx2.adapters.qwen38_27b']
   self.assertTrue(imports and all(n.lineno>check.lineno for n in imports))
+ @pytest.mark.skipif(not INPUTS.is_file(),reason='requires retained packed-N20 input evidence')
  def test_all_actual_domains_exact_plane_allocation_no_padding(self):
   data=json.loads(Path('/tmp/mlx2-spomin400-nativeN-inputs.json').read_text())
   for domain in data['domain_order']:

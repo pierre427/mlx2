@@ -4,15 +4,17 @@ from collections import defaultdict
 from pathlib import Path
 from threading import RLock
 from types import SimpleNamespace as NS
+import pytest
 ROOT=Path(__file__).resolve().parents[1];sys.path[:0]=[str(ROOT/'src'),str(ROOT/'scripts/research')]
+INPUTS=Path('/tmp/mlx2-spomin400-nativeN-inputs.json')
 class Guard(importlib.abc.MetaPathFinder):
  def find_spec(self,name,path=None,target=None):
   if name=='mlx' or name.startswith('mlx.') or name=='_paged_kv_native':raise RuntimeError('runtime import forbidden')
 sys.meta_path.insert(0,Guard())
 import spomin_400case_native_suite as S
 import spomin_400case_phased_http_bench as B
-from mlx2.runtime import hybrid_packed_prefill_n as N
 class Tests(unittest.TestCase):
+ @pytest.mark.skipif(not INPUTS.is_file(),reason='requires retained spomin400 native input evidence')
  def test_original400_body_fields_preserved_ordinary_has_no_atomic_cohort(self):
   data=S.validate_inputs(json.loads(Path('/tmp/mlx2-spomin400-nativeN-inputs.json').read_text()))
   for row in data['rows']:

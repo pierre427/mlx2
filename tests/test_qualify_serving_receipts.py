@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import hashlib
 import math
@@ -173,6 +174,30 @@ def test_preflight_guard_manifest_partitions_the_test_tree():
     assert guarded[1:] == ["scripts/qualify_serving.py", "--run-import-guards", *guards]
     assert all((ROOT / module).is_file() for module in guards)
     assert "tests/test_qualify_serving_receipts.py" not in guards
+    discovered = set()
+    for path in (ROOT / "tests").glob("test*.py"):
+        tree = ast.parse(path.read_text())
+        for index, node in enumerate(tree.body):
+            if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+                continue
+            function = node.value.func
+            if (
+                isinstance(function, ast.Attribute)
+                and function.attr == "insert"
+                and isinstance(function.value, ast.Attribute)
+                and function.value.attr == "meta_path"
+            ):
+                # A few source-only test programs raise SkipTest before their
+                # blocker when pytest imports them; they cannot poison the
+                # shared interpreter and intentionally run only as scripts.
+                if any(
+                    isinstance(earlier, ast.Raise)
+                    for previous in tree.body[:index]
+                    for earlier in ast.walk(previous)
+                ):
+                    continue
+                discovered.add(str(path.relative_to(ROOT)))
+    assert discovered <= set(guards)
 
 
 @pytest.mark.parametrize("mutation", ["ordinary_failed", "guard_failed", "guard_missing",

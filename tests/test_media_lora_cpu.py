@@ -29,6 +29,24 @@ from mlx2.runtime.media_lora_training import (
 BASE, REV = "a" * 64, "b" * 40
 
 
+def _stub_qwen_request_type(monkeypatch):
+    import sys
+    import types
+
+    image = types.ModuleType("mlx_vlm.generate.image")
+    image.ImageGenerationRequest = lambda **kw: SimpleNamespace(**kw)
+    generate = types.ModuleType("mlx_vlm.generate")
+    generate.image = image
+    package = types.ModuleType("mlx_vlm")
+    package.generate = generate
+    for name, module in (
+        ("mlx_vlm", package),
+        ("mlx_vlm.generate", generate),
+        ("mlx_vlm.generate.image", image),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+
+
 @pytest.fixture(autouse=True)
 def cpu():
     previous = mx.default_device()
@@ -824,6 +842,8 @@ def test_trained_requires_complete_loss_evidence(tmp_path):
 def test_editor_only_lora_load_and_lazy_generator(tmp_path, monkeypatch):
     from mlx2.adapters import generative_media as media
 
+    _stub_qwen_request_type(monkeypatch)
+
     monkeypatch.setattr(media, "_qwen_bound_inputs", lambda path: {})
     monkeypatch.setattr(
         media,
@@ -908,6 +928,8 @@ def test_generation_and_unload_serialize(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
 
     from mlx2.adapters import generative_media as media
+
+    _stub_qwen_request_type(monkeypatch)
 
     monkeypatch.setattr(media, "_qwen_bound_inputs", lambda path: {})
     monkeypatch.setattr(
@@ -1300,6 +1322,8 @@ def test_qwen_lazy_load_binds_identity_and_inventory(tmp_path, monkeypatch, chan
     import hashlib
 
     from mlx2.adapters import generative_media as media
+
+    _stub_qwen_request_type(monkeypatch)
 
     values = {
         "model_index.json": json.dumps({"_class_name": "QwenImage21Pipeline"}).encode(),

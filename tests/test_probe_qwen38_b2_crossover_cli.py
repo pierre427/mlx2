@@ -8,21 +8,24 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/probe_qwen38_b2_crossover.py"
+PLAN_ONLY = ("--dry-run", "--allow-unprovisioned-plan")
 
 
 def test_default_remains_b2(tmp_path):
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--output-dir", str(tmp_path / "out"), "--dry-run"],
+        [sys.executable, str(SCRIPT), "--output-dir", str(tmp_path / "out"), *PLAN_ONLY],
         check=True, capture_output=True, text=True,
     )
     plan = json.loads(result.stdout)
     assert (plan["concurrency"], plan["cohort_limit"], plan["max_lanes"], plan["max_inflight"]) == (2, 2, 2, 2)
+    assert isinstance(plan["input_readiness"]["ready"], bool)
+    assert plan["input_readiness"]["ready"] or plan["input_readiness"]["failures"]
 
 
 @pytest.mark.parametrize("width", (2, 3, 4))
 def test_dry_run_bounds_server_and_client_to_requested_width(tmp_path, width):
     command = [sys.executable, str(SCRIPT), "--output-dir", str(tmp_path / "out"),
-               "--dry-run", "--concurrency", str(width)]
+               *PLAN_ONLY, "--concurrency", str(width)]
     result = subprocess.run(command, check=True, capture_output=True, text=True)
     plan = json.loads(result.stdout)
     assert plan["concurrency"] == plan["cohort_limit"] == width
@@ -41,7 +44,7 @@ def test_dry_run_bounds_server_and_client_to_requested_width(tmp_path, width):
 def test_explicit_server_capacity_can_exceed_b3_without_changing_cohort(tmp_path):
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "--output-dir", str(tmp_path / "out"),
-         "--dry-run", "--concurrency", "3", "--cohort-limit", "3",
+         *PLAN_ONLY, "--concurrency", "3", "--cohort-limit", "3",
          "--max-lanes", "4", "--max-inflight", "4"],
         check=True, capture_output=True, text=True,
     )
@@ -59,7 +62,7 @@ def test_explicit_server_capacity_can_exceed_b3_without_changing_cohort(tmp_path
 def test_cli_refuses_unbounded_or_nonphysical_cell(tmp_path, args):
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "--output-dir", str(tmp_path / "out"),
-         "--dry-run", *args], check=False, capture_output=True, text=True,
+         *PLAN_ONLY, *args], check=False, capture_output=True, text=True,
     )
     assert result.returncode != 0
     assert not (tmp_path / "out").exists()

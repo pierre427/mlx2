@@ -6,7 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 from urllib.error import HTTPError
+import pytest
 ROOT=Path(__file__).resolve().parents[1]
+INPUTS=Path('/tmp/mlx2-spomin400-nativeN-inputs.json')
 sys.path[:0]=[str(ROOT/'src'),str(ROOT/'scripts/research')]
 class Guard(importlib.abc.MetaPathFinder):
  def find_spec(self,name,path=None,target=None):
@@ -23,6 +25,7 @@ def parser():
  env={'__package__':'mlx2','math':math,'Mapping':Mapping,'MAX_TOP_LOGPROBS':20,'MAX_OUTPUT_TOKENS':2_097_152}
  exec(compile(ast.Module(body=nodes,type_ignores=[]),'actual server validator','exec'),env)
  return env['validate_request']
+@pytest.mark.skipif(not INPUTS.is_file(),reason='requires retained spomin400 native input evidence')
 class Tests(unittest.TestCase):
  def setUp(self):
   self.validate=parser();self.inputs=S.validate_inputs(json.loads(Path('/tmp/mlx2-spomin400-nativeN-inputs.json').read_text()));self.rows=S.domain_rows(self.inputs,0)

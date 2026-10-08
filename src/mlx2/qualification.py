@@ -56,6 +56,11 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
+    # Re-pinned 2026-10-08 (portable full preflight): every test module that
+    # deliberately installs an MLX-refusing import guard now runs in its own
+    # interpreter, while retained external-evidence checks cleanly skip when
+    # their bound artifacts are not provisioned on the qualification host.
+    # Receipts from cd4b8898... must be regenerated.
     # Re-pinned 2026-10-08 (progressive external verify): a selected B1
     # progressive route now runs a receipt-bearing HTTP probe and must show
     # stable-tile, run-local evidence of a completed nonfinal tile, multiple
@@ -116,7 +121,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # (8a2ced1d..., NAX gather default) must be regenerated.
     # Re-pinned 2026-10-02 (flip integrate): benchmark_adaptive_mtp.py model
     # defaults now use Path.home(), so APPROVED_ADAPTIVE_BENCHMARK_SHA256 moved.
-    "sha256": "cd4b8898519f5908ea6a96d806899d24d88e9c948eb109306db4403766ac1541",
+    "sha256": "c40aedf3cab30e89282ba575aea8f40e46b85c56b4e2f2acf416793f311b6453",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A

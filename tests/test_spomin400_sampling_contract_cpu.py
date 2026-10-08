@@ -6,7 +6,9 @@ from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace as NS
 import numpy as np
+import pytest
 ROOT=Path(__file__).resolve().parents[1]
+INPUTS=Path('/tmp/mlx2-spomin400-nativeN-inputs.json')
 sys.path[:0]=[str(ROOT/'src'),str(ROOT/'scripts/research')]
 class Guard(importlib.abc.MetaPathFinder):
  def find_spec(self,name,path=None,target=None):
@@ -38,6 +40,7 @@ exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.ImportFrom(module='_
 reply=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='_response_from_sample')
 RE={'StopSequenceMatcher':T['StopSequenceMatcher'],'GenerationBatch':NS(Response=R['Response']),'_invalid_output_reason':lambda *a:None}
 exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.ImportFrom(module='__future__',names=[ast.alias(name='annotations')],level=0),reply],type_ignores=[])),'actual native Response construction','exec'),RE)
+@pytest.mark.skipif(not INPUTS.is_file(),reason='requires retained spomin400 native input evidence')
 class Tests(unittest.TestCase):
  def setUp(self):
   inputs=S.validate_inputs(json.loads(Path('/tmp/mlx2-spomin400-nativeN-inputs.json').read_text()));self.rows=S.domain_rows(inputs,0);self.inputs=inputs

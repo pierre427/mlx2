@@ -69,6 +69,11 @@ def main() -> int:
     parser.add_argument("--max-inflight", type=int, choices=(2, 3, 4))
     parser.add_argument("--timeout-seconds", type=int, default=480)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--allow-unprovisioned-plan",
+        action="store_true",
+        help="allow dry-run plan output while recording missing bound inputs",
+    )
     args = parser.parse_args()
     if not 32 <= args.tokens <= 256 or not 1 <= args.reps <= 2:
         parser.error("bounded cell requires tokens 32..256 and reps 1..2")
@@ -84,18 +89,44 @@ def main() -> int:
     if max_lanes < args.concurrency or max_inflight < args.concurrency:
         parser.error("max lanes and max inflight must admit all concurrent requests")
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    source_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=SOURCE, text=True).strip()
-    if source_head != PIN:
-        raise SystemExit(f"TensorFold source revision mismatch: {source_head}")
-    policy = json.loads(POLICY.read_text())
-    if Path(policy["draft_model"]).resolve() != DRAFT.resolve():
-        raise SystemExit("policy draft path mismatch")
-    if not all(path.exists() for path in (PYTHON, MODEL / "config.json", DRAFT / "config.json")):
-        raise SystemExit("required Python/model/draft input missing")
+    input_failures = []
+    source_head = None
+    if (SOURCE / ".git").exists() or (SOURCE / "HEAD").exists():
+        source_head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=SOURCE, text=True
+        ).strip()
+        if source_head != PIN:
+            input_failures.append(
+                f"TensorFold source revision mismatch: {source_head}"
+            )
+    else:
+        input_failures.append("TensorFold source checkout missing")
+    try:
+        policy = json.loads(POLICY.read_text())
+    except (OSError, ValueError) as error:
+        policy = {"draft_model": str(DRAFT)}
+        input_failures.append(f"policy unavailable: {type(error).__name__}")
+    if Path(policy.get("draft_model", "")).resolve() != DRAFT.resolve():
+        input_failures.append("policy draft path mismatch")
+    for label, path in (
+        ("python", PYTHON),
+        ("model", MODEL / "config.json"),
+        ("draft", DRAFT / "config.json"),
+    ):
+        if not path.exists():
+            input_failures.append(f"required {label} input missing")
+    if input_failures and not (args.dry_run and args.allow_unprovisioned_plan):
+        raise SystemExit("; ".join(input_failures))
+
+    def optional_sha256(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
     plan = {"schema": "mlx2.qwen38-tree15-b2-b4-crossover.v1", "created_at": datetime.now(UTC).isoformat(),
-            "source_head": head, "tensorfold_head": source_head, "policy_sha256": hashlib.sha256(POLICY.read_bytes()).hexdigest(),
-            "model_config_sha256": hashlib.sha256((MODEL / "config.json").read_bytes()).hexdigest(),
-            "draft_config_sha256": hashlib.sha256((DRAFT / "config.json").read_bytes()).hexdigest(),
+            "source_head": head, "tensorfold_head": source_head,
+            "policy_sha256": optional_sha256(POLICY),
+            "model_config_sha256": optional_sha256(MODEL / "config.json"),
+            "draft_config_sha256": optional_sha256(DRAFT / "config.json"),
+            "input_readiness": {"ready": not input_failures, "failures": input_failures},
             "order": args.order, "concurrency": args.concurrency,
             "cohort_limit": cohort_limit, "max_lanes": max_lanes,
             "max_inflight": max_inflight, "tokens": args.tokens, "reps": args.reps,

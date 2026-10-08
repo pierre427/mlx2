@@ -51,7 +51,9 @@ runpy.run_path(sys.argv[0],run_name='__main__')
             self.assertFalse(data['gpu_executed'])
 
     def test_deadline_and_rss_guards(self):
-        with patch.object(oracle.time, 'monotonic', return_value=61):
+        class NominalUsage: ru_maxrss = 0
+        with (patch.object(oracle.time, 'monotonic', return_value=61),
+              patch.object(oracle.resource, 'getrusage', return_value=NominalUsage())):
             with self.assertRaises(TimeoutError): oracle.check_bounds(0)
         class Usage: ru_maxrss = oracle.MAX_RSS + 1
         with patch.object(oracle.resource, 'getrusage', return_value=Usage()):
