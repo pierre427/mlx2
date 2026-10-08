@@ -30,12 +30,17 @@ class BoundaryPurpose(IntEnum):
     ROLLING = 0
     INTERIOR = 1
     JUNCTION = 2
+    # A concurrent follower requested this exact shared-prefix boundary from
+    # its still-prefilling leader.  It has the same APCv2 retention semantics
+    # as a learned junction, but separate capture/publication telemetry.
+    INFLIGHT = 3
 
 
 RETENTION_ROLE = {
     BoundaryPurpose.ROLLING: "prefill_rolling",
     BoundaryPurpose.INTERIOR: "interior_checkpoint",
     BoundaryPurpose.JUNCTION: "junction",
+    BoundaryPurpose.INFLIGHT: "junction",
 }
 
 
@@ -134,7 +139,7 @@ def budget_state_boundaries(
     selected = []
     charged = 0
     for bound in bounds:
-        if bound.purpose == BoundaryPurpose.JUNCTION:
+        if bound.purpose in (BoundaryPurpose.JUNCTION, BoundaryPurpose.INFLIGHT):
             projected = project(bound.position)
             if charged + projected <= available_bytes:
                 selected.append(bound)

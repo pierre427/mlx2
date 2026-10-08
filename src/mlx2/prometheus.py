@@ -276,6 +276,47 @@ _ENGINE_EVENTS = {
     "apc_junction_checkpoints_skipped_publish_failed": (
         "apcv2_junction", "skipped_publish_failed"
     ),
+    "apc_inflight_checkpoints_planned": ("apcv2_inflight", "planned"),
+    "apc_inflight_checkpoints_existing_plan": (
+        "apcv2_inflight", "existing_plan"
+    ),
+    "apc_inflight_checkpoints_published": ("apcv2_inflight", "published"),
+    "apc_inflight_checkpoints_skipped_write_suppressed": (
+        "apcv2_inflight", "skipped_write_suppressed"
+    ),
+    "apc_inflight_checkpoints_skipped_publish_failed": (
+        "apcv2_inflight", "skipped_publish_failed"
+    ),
+    "apc_inflight_prefix_waits": ("apcv2_inflight", "wait"),
+    "apc_inflight_prefix_wait_tokens": ("apcv2_inflight", "wait_tokens"),
+    "apc_inflight_prefix_waits_checkpoint_published": (
+        "apcv2_inflight", "checkpoint_published"
+    ),
+    "apc_inflight_prefix_waits_checkpoint_publish_failed": (
+        "apcv2_inflight", "checkpoint_publish_failed"
+    ),
+    "apc_inflight_prefix_waits_leader_ended": (
+        "apcv2_inflight", "leader_ended"
+    ),
+    "apc_inflight_prefix_waits_leader_entered_decode": (
+        "apcv2_inflight", "leader_entered_decode"
+    ),
+    "apc_inflight_prefix_waits_timeout": ("apcv2_inflight", "timeout"),
+    "apc_inflight_prefix_waits_cancelled": ("apcv2_inflight", "cancelled"),
+    "apc_inflight_prefix_waits_checkpoint_capture_failed": (
+        "apcv2_inflight", "checkpoint_capture_failed"
+    ),
+    "apc_inflight_prefix_hits": ("apcv2_inflight", "hit"),
+    "apc_inflight_prefix_misses": ("apcv2_inflight", "miss"),
+    "apc_inflight_prefix_waits_skipped_projection": (
+        "apcv2_inflight", "skipped_projection"
+    ),
+    "apc_inflight_prefix_waits_skipped_headroom": (
+        "apcv2_inflight", "skipped_headroom"
+    ),
+    "apc_inflight_prefix_waits_skipped_frontier": (
+        "apcv2_inflight", "skipped_frontier"
+    ),
     "apc_interior_positions_planned_turn": ("apcv2_interior", "planned_turn"),
     "apc_interior_positions_planned_tail": ("apcv2_interior", "planned_tail"),
     "apc_interior_positions_planned_lattice": (
@@ -430,7 +471,7 @@ _ENGINE_EVENTS.update(
 # once the engine actually holds the key.
 _OPTIONAL_COMPONENTS = frozenset(
     {
-        "apcv2_rolling", "apcv2_junction", "memory_preemption",
+        "apcv2_rolling", "apcv2_junction", "apcv2_inflight", "memory_preemption",
         "expert_stream_load", "dense_stream", "dense_stream_load",
         "gpu_keep_warm",
     }
@@ -649,6 +690,8 @@ _SCHEDULER_EVENTS = frozenset(
         "apc_rolling_checkpoints_skipped_pressure",
         "apc_junction_checkpoints_captured",
         "apc_junction_checkpoints_skipped_inexact",
+        "apc_inflight_checkpoints_captured",
+        "apc_inflight_checkpoints_skipped_inexact",
     }
 )
 _PREFILL_CHUNK_LABELS = frozenset(

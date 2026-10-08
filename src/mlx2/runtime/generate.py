@@ -3675,6 +3675,9 @@ class BatchGenerator:
         self._state_boundary_purposes = {}
         # Rolling/junction snapshots awaiting immediate publication.
         self._state_checkpoints = []
+        # Exact boundaries that could not be snapshotted.  Serving consumes
+        # these immediately so a parked follower need not wait until decode.
+        self._state_checkpoint_declines = []
         self._cache_capsule_pending = {}
         self._cache_capsule_by_uid = {}
         self._cache_capsule_receipts = {}
@@ -3755,6 +3758,7 @@ class BatchGenerator:
         getattr(self, "_interior_checkpoints", {}).clear()
         getattr(self, "_state_boundary_purposes", {}).clear()
         getattr(self, "_state_checkpoints", []).clear()
+        getattr(self, "_state_checkpoint_declines", []).clear()
         getattr(self, "_post_prefill_receipts", {}).clear()
         getattr(self, "_prefill_chunk_trace", {}).clear()
         getattr(self, "_mtp_prefill_resident", set()).clear()
@@ -5121,8 +5125,14 @@ class BatchGenerator:
             self.scheduler_stats, self._boundary_counter(purpose, "captured")
         )
 
+    def _decline_state_checkpoint(self, uid: int, position: int) -> None:
+        purpose = self._boundary_purpose(uid, position)
+        if purpose == BoundaryPurpose.INFLIGHT:
+            self._state_checkpoint_declines.append((int(uid), int(position)))
+        self._consume_state_boundary(uid, position)
+
     def drain_state_checkpoints(self):
-        """Transfer rolling/junction snapshots for immediate publication.
+        """Transfer rolling/junction/in-flight snapshots for publication.
 
         Called once per serving loop after ``next``.  Interior snapshots stay
         with ``pop_interior_checkpoints`` and publish when the prompt ends.
@@ -5130,6 +5140,59 @@ class BatchGenerator:
         drained = getattr(self, "_state_checkpoints", [])
         self._state_checkpoints = []
         return drained
+
+    def drain_state_checkpoint_declines(self):
+        """Transfer exact in-flight boundaries that capture could not satisfy."""
+        drained = getattr(self, "_state_checkpoint_declines", [])
+        self._state_checkpoint_declines = []
+        return drained
+
+    def add_state_boundary(self, uid: int, boundary: StateBoundary, prompt_tokens: int) -> bool:
+        """Add an exact boundary to a resident prefill before it passes it.
+
+        Admission uses this for APCv2 leader/follower sharing.  The scheduler
+        thread is the sole caller and the sole driver of ``next()``, so the
+        frontier cannot advance while this method inspects and updates the
+        plan.  Returns false once the lane is decoding, gone, or already at
+        the requested position.
+        """
+        if not isinstance(boundary, StateBoundary):
+            raise TypeError("boundary must be a StateBoundary")
+        if isinstance(prompt_tokens, bool) or not isinstance(prompt_tokens, int):
+            raise TypeError("prompt_tokens must be an integer")
+        position = boundary.position
+        if (
+            isinstance(position, bool)
+            or not isinstance(position, int)
+            or not 0 < position < prompt_tokens - 1
+        ):
+            return False
+        found = self._find_uids((int(uid),)).get(int(uid))
+        if found is None or found[0] not in (0, 1):
+            return False
+        stage, index = found
+        covered = (
+            len(self._unprocessed_sequences[index][4])
+            if stage == 0
+            else len(self._prompt_batch.tokens[index])
+        )
+        if position <= covered:
+            return False
+        positions = self._interior_checkpoint_positions.setdefault(int(uid), deque())
+        existed = position in positions
+        merged = tuple(sorted({*positions, position}))
+        self._interior_checkpoint_positions[int(uid)] = deque(merged)
+        purposes = self._state_boundary_purposes.setdefault(int(uid), {})
+        existing = purposes.get(position, BoundaryPurpose.INTERIOR)
+        # A rolling boundary may be retired after the next rolling snapshot,
+        # so promote it (like INTERIOR) to the follower-pinned junction role.
+        # Junction already has that lifetime and keeps its own counters.
+        if not existed or existing in (
+            BoundaryPurpose.INTERIOR,
+            BoundaryPurpose.ROLLING,
+        ):
+            purposes[position] = BoundaryPurpose(boundary.purpose)
+        return True
 
     def _capture_mtp_interior_checkpoint(
         self, uid: int, history, prompt_cache, mtp_state
@@ -5155,6 +5218,7 @@ class BatchGenerator:
                     self._boundary_purpose(uid, position), "skipped_inexact"
                 ),
             )
+            self._decline_state_checkpoint(uid, position)
             return False
         checkpoint["tokens"] = list(history)
         checkpoint["interior"] = True
@@ -5691,6 +5755,13 @@ class BatchGenerator:
             removed = set(uids)
             self._state_checkpoints = [
                 item for item in self._state_checkpoints if item[0] not in removed
+            ]
+        if getattr(self, "_state_checkpoint_declines", None):
+            removed = set(uids)
+            self._state_checkpoint_declines = [
+                item
+                for item in self._state_checkpoint_declines
+                if item[0] not in removed
             ]
         for uid in uids:
             self._prompt_boundaries.pop(uid, None)
@@ -7282,7 +7353,7 @@ class BatchGenerator:
                         self._boundary_purpose(uid, position), "skipped_inexact"
                     ),
                 )
-                self._consume_state_boundary(uid, position)
+                self._decline_state_checkpoint(uid, position)
                 continue
             mx.eval([cache.state for cache in saved_target])
             checkpoint = {

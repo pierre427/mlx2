@@ -1136,6 +1136,10 @@ def _route_feature_checks(settings):
         # A junction must be captured and published at an observed branch
         # point, then serve a later request that diverges there.
         features.add("apc_junction_checkpoints")
+    if (settings.get("apc_inflight_prefix_wait") or {}).get("enabled") is True:
+        # Selection requires an actual parked follower that later consumed the
+        # exact APCv2 boundary; planning or publication alone is not use.
+        features.add("apc_inflight_prefix_wait")
     if settings.get("prefill_scheduling"):
         # Present only when the server-owned policy is selected; the harness
         # must observe an SRPT reorder or bypass-capped service to qualify it.

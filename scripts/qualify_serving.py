@@ -1877,6 +1877,10 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
             counts.get("apc_junction_checkpoints_published", 0),
             apc_lifetime.get("junction_hits", 0),
         ),
+        "apc_inflight_prefix_wait": min(
+            counts.get("apc_inflight_checkpoints_published", 0),
+            counts.get("apc_inflight_prefix_hits", 0),
+        ),
         # A bypass is an SRPT reorder (an older prompt was overtaken); a
         # forced bypass is bypass-capped service.  Slice clamps are neither.
         "prefill_scheduling": (

@@ -63,6 +63,7 @@ SERVER_OWNED_EXECUTION_POLICY_KEYS = frozenset(
         "mtp_ordinary_handoff",
         "memory_preemption",
         "apc_junction_checkpoints",
+        "apc_inflight_prefix_wait",
         "apc_retention_policy",
         "apc_rolling_checkpoints",
         "host_memory_signals",
@@ -834,6 +835,53 @@ def apc_rolling_checkpoint_policy(value) -> dict:
             "APC rolling checkpoint interval_tokens must be 0 or an integer >= 16"
         )
     return {"interval_tokens": interval}
+
+
+def apc_inflight_prefix_policy(value) -> dict:
+    """Validate the default-off APCv2 leader/follower policy."""
+    defaults = {
+        "enabled": False,
+        "min_shared_tokens": 1024,
+        "max_wait_ms": 300_000,
+    }
+    if value is None:
+        return defaults
+    if type(value) is bool:
+        return {**defaults, "enabled": value}
+    if not isinstance(value, dict):
+        raise ValueError("apc_inflight_prefix_wait must be boolean or an object")
+    unknown = set(value) - set(defaults)
+    if unknown:
+        raise ValueError(
+            f"unknown APC in-flight prefix wait settings: {sorted(unknown)}"
+        )
+    policy = {**defaults, **value}
+    if type(policy["enabled"]) is not bool:
+        raise ValueError("APC in-flight prefix wait enabled must be boolean")
+    threshold = policy["min_shared_tokens"]
+    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 16:
+        raise ValueError(
+            "APC in-flight prefix wait min_shared_tokens must be an integer >= 16"
+        )
+    maximum_wait = policy["max_wait_ms"]
+    if (
+        isinstance(maximum_wait, bool)
+        or not isinstance(maximum_wait, int)
+        or not 1 <= maximum_wait <= 300_000
+    ):
+        raise ValueError(
+            "APC in-flight prefix wait max_wait_ms must be an integer from 1 to 300000"
+        )
+    return policy
+
+
+def common_prefix_tokens(left, right) -> int:
+    """Return the exact common token prefix length without materializing it."""
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return index
 
 
 def budget_interior_checkpoint_positions(
@@ -3074,6 +3122,15 @@ class Job:
     # Only independent, exact APCv2-compatible requests use this admission key.
     apc_sequence_key: object = None
     apc_sequence_waited: bool = False
+    apc_prefix_wait_done: bool = False
+    apc_prefix_wait_leader_uid: int | None = None
+    apc_prefix_wait_leader_request_id: str | None = None
+    apc_prefix_wait_tokens: int = 0
+    apc_prefix_wait_started: float = 0.0
+    apc_prefix_wait_ms: float = 0.0
+    apc_prefix_wait_release: str | None = None
+    apc_prefix_wait_reuse: str | None = None
+    apc_inflight_planned_bytes: dict = field(default_factory=dict)
     admission_retry_at: float = 0
     admission_deadline: float = 0
     admission_defer_reason: str | None = None
@@ -3124,6 +3181,7 @@ class Job:
     # Budgeted P1 plan when rolling checkpoints are enabled (else empty), and
     # the (key, tokens) of this lane's latest disposable rolling checkpoint.
     state_boundaries: tuple = ()
+    state_boundary_planned_bytes: int = 0
     rolling_checkpoint: tuple | None = None
     state_boundaries_published: dict = field(default_factory=dict)
     effective_sampling: dict | None = None
@@ -3343,6 +3401,14 @@ class ServingEngine:
         if type(junction_policy) is not bool:
             raise ValueError("apc_junction_checkpoints must be boolean")
         self.apc_junction_checkpoints = junction_policy
+        self.apc_inflight_prefix_policy = apc_inflight_prefix_policy(
+            (execution_policy or {}).get("apc_inflight_prefix_wait")
+        )
+        self.apc_inflight_route = None
+        # Worker-thread-only rendezvous state.  Resolutions outlive their
+        # leader row until every parked follower has consumed the result.
+        self.apc_inflight_resolutions = {}
+        self.apc_inflight_waiters = Counter()
         # Default-off: evict by saved prefill per resident byte instead of
         # rank-then-recency (runtime/apc_v2.py ``apc_retention_policy``).
         from .runtime.apc_retention import apc_retention_policy
@@ -6464,7 +6530,9 @@ class ServingEngine:
                 "plane_reasons": sorted({reason for _supported, reason in inspections}),
                 "plane_types": sorted({type(plane).__name__ for plane in capsule_hit.cache})}
 
-    def _select_rolling_route(self, adapter, *, external_draft, prompt_lookup, inspect):
+    def _select_rolling_route(
+        self, adapter, *, external_draft, prompt_lookup, inspect, feature="rolling"
+    ):
         """Choose how rolling prefill checkpoints work on this route, or fail closed."""
         if external_draft or prompt_lookup or self.approximate_kv_policy.enabled:
             route = (
@@ -6475,7 +6543,7 @@ class ServingEngine:
                 else "approximate KV"
             )
             raise ValueError(
-                f"APCv2 rolling checkpoints cannot capture on the selected {route} route"
+                f"APCv2 {feature} checkpoints cannot capture on the selected {route} route"
             )
         from .runtime.models.cache import make_prompt_cache
 
@@ -6493,8 +6561,138 @@ class ServingEngine:
             # partial cache is worth publishing.
             return "kv"
         raise ValueError(
-            "APCv2 rolling checkpoints cannot capture on the selected adapter cache route"
+            f"APCv2 {feature} checkpoints cannot capture on the selected adapter cache route"
         )
+
+    def _select_inflight_prefix_leader(
+        self,
+        batch,
+        active,
+        follower,
+        tokens,
+        hit,
+        *,
+        available_checkpoint_bytes,
+        cache_projection,
+    ):
+        """Park ``follower`` only behind an exact, useful APCv2 leader."""
+        policy = self.apc_inflight_prefix_policy
+        sequence = follower.apc_sequence_key
+        if (
+            not policy["enabled"]
+            or self.apc_inflight_route != "hybrid"
+            or follower.apc_prefix_wait_done
+            or follower.apc_sequence_waited
+            or sequence is None
+            or hit.cached_tokens >= len(tokens) - 1
+        ):
+            return None
+        namespace, _follower_tokens, session = sequence
+        candidates = []
+        for leader in active.values():
+            leader_sequence = leader.apc_sequence_key
+            if (
+                leader_sequence is None
+                or leader.uid is None
+                or leader.cached_tokens != 0
+                or leader.completion_tokens
+                or leader_sequence[0] != namespace
+                or leader_sequence[2] != session
+            ):
+                continue
+            leader_tokens = leader_sequence[1]
+            threshold = policy["min_shared_tokens"]
+            if (
+                min(len(tokens), len(leader_tokens)) < threshold
+                or tokens[threshold - 1] != leader_tokens[threshold - 1]
+            ):
+                continue
+            shared = common_prefix_tokens(tokens, leader_tokens)
+            gain = shared - int(hit.cached_tokens)
+            own_work = len(tokens) - int(hit.cached_tokens)
+            leader_work = len(leader_tokens) - int(leader.cached_tokens)
+            if (
+                gain < threshold
+                or gain <= leader_work - own_work
+                or not shared < min(len(tokens), len(leader_tokens)) - 1
+            ):
+                continue
+            candidates.append((shared, leader))
+        for shared, leader in sorted(candidates, key=lambda item: item[0], reverse=True):
+            if not callable(cache_projection):
+                self.counts["apc_inflight_prefix_waits_skipped_projection"] += 1
+                continue
+            from .runtime.state_boundaries import BoundaryPurpose, StateBoundary
+
+            by_position = {
+                bound.position: bound for bound in leader.state_boundaries
+            }
+            prior = by_position.get(shared)
+            if prior is None and shared in leader.apc_interior_positions:
+                prior = StateBoundary(shared, BoundaryPurpose.INTERIOR)
+            projected = 0 if prior is not None else int(cache_projection(shared))
+            pending = sum(
+                int(lane.state_boundary_planned_bytes)
+                + sum(int(value) for value in lane.apc_inflight_planned_bytes.values())
+                for lane in active.values()
+            )
+            if pending + projected > int(available_checkpoint_bytes):
+                self.counts["apc_inflight_prefix_waits_skipped_headroom"] += 1
+                continue
+            if not batch.add_state_boundary(
+                leader.uid,
+                StateBoundary(shared, BoundaryPurpose.INFLIGHT),
+                len(leader.apc_sequence_key[1]),
+            ):
+                self.counts["apc_inflight_prefix_waits_skipped_frontier"] += 1
+                continue
+            if prior is None or prior.purpose in (
+                BoundaryPurpose.INTERIOR,
+                BoundaryPurpose.ROLLING,
+            ):
+                by_position[shared] = StateBoundary(shared, BoundaryPurpose.INFLIGHT)
+                leader.state_boundaries = tuple(
+                    by_position[position] for position in sorted(by_position)
+                )
+                if prior is not None and prior.purpose == BoundaryPurpose.INTERIOR:
+                    leader.apc_interior_positions = tuple(
+                        position
+                        for position in leader.apc_interior_positions
+                        if position != shared
+                    )
+                self.counts["apc_inflight_checkpoints_planned"] += 1
+            else:
+                self.counts["apc_inflight_checkpoints_existing_plan"] += 1
+            leader.apc_inflight_planned_bytes.setdefault(shared, projected)
+            follower.apc_prefix_wait_done = True
+            follower.apc_prefix_wait_leader_uid = leader.uid
+            follower.apc_prefix_wait_leader_request_id = leader.id
+            follower.apc_prefix_wait_tokens = shared
+            follower.apc_prefix_wait_started = time.monotonic()
+            resolution_key = (leader.uid, shared)
+            waiters = getattr(self, "apc_inflight_waiters", None)
+            if waiters is None:
+                self.apc_inflight_waiters = waiters = Counter()
+            waiters[resolution_key] += 1
+            self.counts["apc_inflight_prefix_waits"] += 1
+            self.counts["apc_inflight_prefix_wait_tokens"] += shared
+            return leader
+        return None
+
+    def _select_inflight_route(self, adapter, *, external_draft, prompt_lookup, inspect):
+        route = self._select_rolling_route(
+            adapter,
+            external_draft=external_draft,
+            prompt_lookup=prompt_lookup,
+            inspect=inspect,
+            feature="in-flight prefix",
+        )
+        if route != "hybrid":
+            raise ValueError(
+                "APCv2 in-flight prefix wait currently requires an exact "
+                "checkpointed-hybrid cache route"
+            )
+        return route
 
     def _publish_state_checkpoints(
         self, batch, apc, active, cache_key_for, session_tag_for, sidecar_type
@@ -6551,9 +6749,43 @@ class ServingEngine:
                 owner.state_boundaries_published[name] = (
                     owner.state_boundaries_published.get(name, 0) + 1
                 )
+            inflight_requested = len(tokens) in owner.apc_inflight_planned_bytes
+            if inflight_requested:
+                resolution_key = (owner.uid, len(tokens))
+                waiters = getattr(self, "apc_inflight_waiters", {})
+                if waiters.get(resolution_key, 0):
+                    resolutions = getattr(self, "apc_inflight_resolutions", None)
+                    if resolutions is None:
+                        self.apc_inflight_resolutions = resolutions = {}
+                    resolutions[resolution_key] = (
+                        "checkpoint_published"
+                        if stored
+                        else "checkpoint_publish_failed"
+                    )
+                owner.apc_inflight_planned_bytes.pop(len(tokens), None)
+                if purpose != BoundaryPurpose.INFLIGHT:
+                    self.counts[
+                        "apc_inflight_checkpoints_published"
+                        if stored
+                        else "apc_inflight_checkpoints_skipped_publish_failed"
+                    ] += 1
             if stored and purpose == BoundaryPurpose.ROLLING:
                 self._retire_rolling_checkpoint(apc, active, owner)
                 owner.rolling_checkpoint = (key, tokens)
+        drain_declines = getattr(batch, "drain_state_checkpoint_declines", None)
+        if callable(drain_declines):
+            for uid, position in drain_declines():
+                owner = active.get(uid)
+                if owner is None:
+                    continue
+                resolution_key = (uid, position)
+                if position not in owner.apc_inflight_planned_bytes:
+                    continue
+                owner.apc_inflight_planned_bytes.pop(position, None)
+                if self.apc_inflight_waiters.get(resolution_key, 0):
+                    self.apc_inflight_resolutions[resolution_key] = (
+                        "checkpoint_capture_failed"
+                    )
 
     def _publish_cancelled_prefills(
         self, caches, apc, active, cache_key_for, session_tag_for
@@ -6845,6 +7077,56 @@ class ServingEngine:
         deferred = deque()
         published = deque()
         prefix_waiting = deque()
+
+        def settle_prefix_wait(waiting):
+            leader_uid = waiting.apc_prefix_wait_leader_uid
+            if leader_uid is None:
+                return
+            resolution_key = (leader_uid, waiting.apc_prefix_wait_tokens)
+            waiters = self.apc_inflight_waiters
+            remaining = int(waiters.get(resolution_key, 0)) - 1
+            if remaining > 0:
+                waiters[resolution_key] = remaining
+            else:
+                waiters.pop(resolution_key, None)
+                self.apc_inflight_resolutions.pop(resolution_key, None)
+
+        def prefix_wait_ready(waiting):
+            leader_uid = waiting.apc_prefix_wait_leader_uid
+            if leader_uid is None:
+                return not any(
+                    lane.apc_sequence_key == waiting.apc_sequence_key
+                    and lane.cached_tokens == 0
+                    for lane in active.values()
+                )
+            resolution_key = (leader_uid, waiting.apc_prefix_wait_tokens)
+            leader = active.get(leader_uid)
+            elapsed_ms = max(
+                0.0, (time.monotonic() - waiting.apc_prefix_wait_started) * 1000.0
+            )
+            if resolution_key in self.apc_inflight_resolutions:
+                waiting.apc_prefix_wait_release = self.apc_inflight_resolutions[
+                    resolution_key
+                ]
+            elif leader is None:
+                waiting.apc_prefix_wait_release = "leader_ended"
+            elif leader.completion_tokens:
+                waiting.apc_prefix_wait_release = "leader_entered_decode"
+                leader.apc_inflight_planned_bytes.pop(
+                    waiting.apc_prefix_wait_tokens, None
+                )
+            elif elapsed_ms >= self.apc_inflight_prefix_policy["max_wait_ms"]:
+                waiting.apc_prefix_wait_release = "timeout"
+            else:
+                return False
+            waiting.apc_prefix_wait_ms = elapsed_ms
+            settle_prefix_wait(waiting)
+            waiting.apc_prefix_wait_leader_uid = None
+            self.counts[
+                "apc_inflight_prefix_waits_" + waiting.apc_prefix_wait_release
+            ] += 1
+            return True
+
         held_cohort = None
         attaching_cohort = None
         try:
@@ -7221,6 +7503,10 @@ class ServingEngine:
             if self.apc_junction_checkpoints:
                 # Present only when enabled so default receipts stay identical.
                 settings["apc_junction_checkpoints"] = True
+            if self.apc_inflight_prefix_policy["enabled"]:
+                settings["apc_inflight_prefix_wait"] = dict(
+                    self.apc_inflight_prefix_policy
+                )
             if self.apc_retention_policy is not None:
                 # Present only when selected so default receipts stay identical.
                 settings["apc_retention_policy"] = dict(self.apc_retention_policy)
@@ -7454,12 +7740,21 @@ class ServingEngine:
                         "interior"
                         if self.apc_interior_checkpoint_policy["count"]
                         else "junction"
+                        if self.apc_junction_checkpoints
+                        else "in-flight prefix"
                     )
                     + " checkpoints cannot capture on the selected "
                     f"{route} route"
                 )
             if self.apc_rolling_checkpoint_policy["interval_tokens"]:
                 self.apc_rolling_route = self._select_rolling_route(
+                    adapter,
+                    external_draft=external_draft,
+                    prompt_lookup=prompt_lookup,
+                    inspect=inspect_apc_capabilities,
+                )
+            if self.apc_inflight_prefix_policy["enabled"]:
+                self.apc_inflight_route = self._select_inflight_route(
                     adapter,
                     external_draft=external_draft,
                     prompt_lookup=prompt_lookup,
@@ -9044,6 +9339,21 @@ class ServingEngine:
                 for _ in range(len(prefix_waiting)):
                     waiting = prefix_waiting.popleft()
                     if waiting.cancelled.is_set():
+                        if waiting.apc_prefix_wait_leader_uid is not None:
+                            waiting.apc_prefix_wait_release = "cancelled"
+                            waiting.apc_prefix_wait_ms = max(
+                                0.0,
+                                (
+                                    time.monotonic()
+                                    - waiting.apc_prefix_wait_started
+                                )
+                                * 1000.0,
+                            )
+                            settle_prefix_wait(waiting)
+                            waiting.apc_prefix_wait_leader_uid = None
+                            self.counts[
+                                "apc_inflight_prefix_waits_cancelled"
+                            ] += 1
                         self._finish(waiting, {"error": "cancelled"})
                     else:
                         prefix_waiting.append(waiting)
@@ -9135,11 +9445,7 @@ class ServingEngine:
                         elif prefix_waiting and (ready_index := next(
                             (
                                 index for index, waiting in enumerate(prefix_waiting)
-                                if not any(
-                                    lane.apc_sequence_key == waiting.apc_sequence_key
-                                    and lane.cached_tokens == 0
-                                    for lane in active.values()
-                                )
+                                if prefix_wait_ready(waiting)
                             ),
                             None,
                         )) is not None:
@@ -9283,6 +9589,7 @@ class ServingEngine:
                         # peers can independently reuse and need not serialize.
                         sequence_eligible = (
                             attaching_cohort is None
+                            and not job.apc_prefix_wait_done
                             and not job.parallel_sample
                             and not job.preempted
                             and not job.request.get("skip_writing_prefix_cache", False)
@@ -9488,6 +9795,29 @@ class ServingEngine:
                                 deferred.appendleft(job)
                             else:
                                 deferred.append(job)
+                            continue
+                        if self._select_inflight_prefix_leader(
+                            batch,
+                            active,
+                            job,
+                            tokens,
+                            hit,
+                            available_checkpoint_bytes=max(
+                                0,
+                                int(admission_headroom())
+                                - int(float(required) * (1 << 30)),
+                            ),
+                            cache_projection=(
+                                None if cache_budget is None else cache_budget.project
+                            ),
+                        ) is not None:
+                            job.admission_deadline = 0
+                            branch = job.cache_branch
+                            discard_lookup(hit, "inflight_prefix_wait")
+                            job.cache_branch = job.admission_hit = None
+                            if branch is not None and hasattr(branch, "close"):
+                                branch.close()
+                            prefix_waiting.append(job)
                             continue
                         if job.lora_name is not None and job.lora_slot is None:
                             from .runtime.multi_lora import SlotUnavailable
@@ -9748,6 +10078,7 @@ class ServingEngine:
                                     cache_projection=checkpoint_projection,
                                 )
                             )
+                            job.state_boundary_planned_bytes = int(_checkpoint_bytes)
                             job.apc_interior_positions = tuple(
                                 bound.position
                                 for bound in job.state_boundaries
@@ -9783,6 +10114,7 @@ class ServingEngine:
                                     cache_projection=checkpoint_projection,
                                 )
                             )
+                            job.state_boundary_planned_bytes = int(_checkpoint_bytes)
                         if checkpoint_candidates:
                             # Why a plan degraded is otherwise unreadable from
                             # outside: host integers, no device sync.  Last
@@ -9843,6 +10175,23 @@ class ServingEngine:
                         else:
                             job.cached_tokens = hit.cached_tokens
                             cached = int(hit.cached_tokens or 0)
+                            if (
+                                job.apc_prefix_wait_done
+                                and job.apc_prefix_wait_reuse is None
+                            ):
+                                # Exact equality deliberately avoids claiming
+                                # this requested boundary when a deeper entry
+                                # happened to win the retry lookup.
+                                if (
+                                    job.apc_prefix_wait_release
+                                    == "checkpoint_published"
+                                    and cached == job.apc_prefix_wait_tokens
+                                ):
+                                    job.apc_prefix_wait_reuse = "checkpoint_reused"
+                                    self.counts["apc_inflight_prefix_hits"] += 1
+                                else:
+                                    job.apc_prefix_wait_reuse = "not_reused"
+                                    self.counts["apc_inflight_prefix_misses"] += 1
                             job.slice_aligned = (
                                 cached in (0, len(tokens) - 1)
                                 or cached in job.prefill_cold_cuts
@@ -10767,6 +11116,7 @@ class ServingEngine:
                     if (
                         self.apc_rolling_route == "hybrid"
                         or self.apc_junction_checkpoints
+                        or self.apc_inflight_route == "hybrid"
                     ):
                         # P1's generic publisher: rolling and junction
                         # snapshots both go out as soon as they are captured.
@@ -10985,6 +11335,13 @@ class ServingEngine:
                         if job.first_token is None:
                             job.first_token = time.monotonic()
                         job.completion_tokens += 1
+                        if job.completion_tokens == 1:
+                            # The prompt frontier can no longer satisfy any
+                            # unresolved dynamic boundary.  Waiting followers
+                            # observe ``leader_entered_decode`` next poll; if
+                            # they already timed out, this still releases the
+                            # conservative headroom ledger.
+                            job.apc_inflight_planned_bytes.clear()
                         job.admission_reserved_gib = 0.0
                         job.replaying = False
                         if job.generated_token_ids is not None:
@@ -11263,6 +11620,25 @@ class ServingEngine:
                                         else {}
                                     ),
                                     "apcv2_same_prefix_waited": job.apc_sequence_waited,
+                                    **(
+                                        {
+                                            "apcv2_inflight_prefix_wait": {
+                                                "enabled": True,
+                                                "waited": job.apc_prefix_wait_done,
+                                                "shared_tokens": job.apc_prefix_wait_tokens,
+                                                "leader_request_id": (
+                                                    job.apc_prefix_wait_leader_request_id
+                                                    if self.tenant_scoped_cache
+                                                    else None
+                                                ),
+                                                "release": job.apc_prefix_wait_release,
+                                                "reuse": job.apc_prefix_wait_reuse,
+                                                "wait_ms": job.apc_prefix_wait_ms,
+                                            }
+                                        }
+                                        if self.apc_inflight_prefix_policy["enabled"]
+                                        else {}
+                                    ),
                                     "cache_checkpoint_role": job.cache_retention_role,
                                     "stop_sequence": getattr(
                                         job.output_parser, "stop_sequence", None
@@ -11470,7 +11846,10 @@ class ServingEngine:
                                                 ),
                                             }
                                         }
-                                        if self.apc_rolling_route is not None
+                                        if (
+                                            self.apc_rolling_route is not None
+                                            or self.apc_inflight_route == "hybrid"
+                                        )
                                         else {}
                                     ),
                                     **(

@@ -1005,6 +1005,7 @@ def test_every_selectable_feature_has_a_harness_observation():
     # The source scan must itself see the whole family, or it proves nothing.
     assert {
         "apc_junction_checkpoints", "apc_rolling_checkpoints",
+        "apc_inflight_prefix_wait",
         "external_pairwise_selection", "fused_gdn_dynamic_accept",
         "host_memory_signals", "memory_preemption", "moe_expert_streaming",
         "prefill_scheduling", "tool_grammar_auto", "tool_grammar_streaming",
@@ -1043,6 +1044,13 @@ def test_every_selectable_feature_has_a_harness_observation():
             {"counts": {"apc_junction_checkpoints_planned": 3,
                         "apc_junction_checkpoints_published": 1},
              "apcv2": {"lifetime": {"junction_hits": 0}}},
+        ),
+        (
+            "apc_inflight_prefix_wait",
+            {"counts": {"apc_inflight_checkpoints_published": 1,
+                         "apc_inflight_prefix_hits": 3}},
+            {"counts": {"apc_inflight_checkpoints_published": 1,
+                         "apc_inflight_prefix_hits": 0}},
         ),
         (
             "external_pairwise_selection",
