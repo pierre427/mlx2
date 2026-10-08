@@ -423,6 +423,104 @@ def run_structured_thinking_probe(post, status):
     }
 
 
+TOOLS_PROBE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "weather",
+            "description": "Get weather for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+]
+TOOLS_PROBE_REQUEST = {
+    "messages": [{
+        "role": "user",
+        "content": "Use the weather tool to get the weather in Toronto.",
+    }],
+    "tools": TOOLS_PROBE_TOOLS,
+    "max_tokens": 128,
+}
+
+
+class ToolsProbe:
+    """Outcome of the ``tools`` check.
+
+    ``status`` is "passed", "failed" or ``known_model_behaviour``;
+    ``call_response`` is the response whose tool call the round trip
+    continues from (the enforced re-ask under a known behaviour).
+    """
+
+    def __init__(self, status, evidence, request, call_response, known=None):
+        self.status = status
+        self.evidence = evidence
+        self.request = request
+        self.call_response = call_response
+        self.known = known
+
+
+def run_tools_probe(post, artifact):
+    """Run the ``tools`` check (tool_choice auto).
+
+    On failure, and only when this artifact declares a known model behaviour
+    for ``tools`` (mlx2.known_model_behaviour), re-ask with an enforced tool
+    choice and accept the result as known behaviour only if the pair matches
+    the declared failure shape exactly.  Anything else fails as before.
+    """
+    from mlx2.known_model_behaviour import (
+        KNOWN_MODEL_BEHAVIOUR_STATUS,
+        TOOLS_FORCED_CHOICE,
+        known_model_behaviour_for,
+        match_shape,
+        tools_check_passes,
+    )
+
+    request = json.loads(json.dumps(TOOLS_PROBE_REQUEST))
+    response = post(request)
+    if tools_check_passes(response):
+        return ToolsProbe("passed", response, request, response)
+    entry = known_model_behaviour_for("tools", artifact)
+    if entry is None:
+        return ToolsProbe("failed", response, request, response)
+    forced = post({**json.loads(json.dumps(request)), "tool_choice": TOOLS_FORCED_CHOICE})
+    evidence = {"auto": response, "forced": forced}
+    matched, reasons = match_shape(entry.shape, evidence)
+    if not matched:
+        evidence["known_model_behaviour_rejected"] = {"id": entry.id, "reasons": reasons}
+        return ToolsProbe("failed", evidence, request, response)
+    return ToolsProbe(
+        KNOWN_MODEL_BEHAVIOUR_STATUS, evidence, request, forced,
+        known=entry.record(artifact),
+    )
+
+
+def record_tools_probe(report, probe):
+    """Record the ``tools`` check; raise (stop the run) unless it passed or
+    matched its declared known model behaviour.  A known behaviour is never
+    recorded as passed; the receipt names the exception it relied on."""
+    from mlx2.known_model_behaviour import KNOWN_MODEL_BEHAVIOUR_STATUS
+
+    if probe.status == KNOWN_MODEL_BEHAVIOUR_STATUS:
+        report["checks"]["tools"] = {
+            "passed": False,
+            "status": KNOWN_MODEL_BEHAVIOUR_STATUS,
+            "known_model_behaviour": probe.known,
+            "evidence": probe.evidence,
+        }
+        report.setdefault("known_model_behaviour", {})["tools"] = probe.known
+        print(f"tools: KNOWN MODEL BEHAVIOUR ({probe.known['id']})", flush=True)
+        return
+    passed = probe.status == "passed"
+    report["checks"]["tools"] = {"passed": passed, "evidence": probe.evidence}
+    print(f"tools: {'PASS' if passed else 'FAIL'}", flush=True)
+    if not passed:
+        raise AssertionError("tools")
+
+
 def selected_capability_scope(status):
     """Trust only the selected route's capabilities, cross-checked at status."""
     selected = status.get("selected_capabilities")
@@ -2715,36 +2813,14 @@ def main():
             chunks,
         )
         if "tools" in selected_capabilities:
-            tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "weather",
-                        "description": "Get weather for a city",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                            "required": ["city"],
-                        },
-                    },
-                }
-            ]
-            tool_request = prompt(
-                "Use the weather tool to get the weather in Toronto.",
-                tools=tools,
-                max_tokens=128,
-            )
-            tool_response = post(tool_request)
-            choice = tool_response["choices"][0]
+            # A declared known model behaviour (artifact-scoped, exact failure
+            # shape) is recorded as such, never as a pass, and the run goes on.
+            tools_probe = run_tools_probe(post, initial["artifact"])
+            record_tools_probe(report, tools_probe)
+            tools = TOOLS_PROBE_TOOLS
+            tool_request = tools_probe.request
+            choice = tools_probe.call_response["choices"][0]
             calls = choice["message"].get("tool_calls", [])
-            check(
-                "tools",
-                choice["finish_reason"] == "tool_calls"
-                and len(calls) == 1
-                and calls[0]["function"]["name"] == "weather"
-                and json.loads(calls[0]["function"]["arguments"]).get("city") == "Toronto",
-                tool_response,
-            )
             followup = post(
                 {
                     "tools": tools,

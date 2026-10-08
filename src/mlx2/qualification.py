@@ -73,6 +73,15 @@ def required_generic_checks(descriptor, *, capabilities=None):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
+    # Re-pinned 2026-10-08 (known model behaviour): the ``tools`` check now
+    # consults mlx2.known_model_behaviour; a declared, artifact-scoped failure
+    # of the exact declared shape is recorded as known_model_behaviour (not
+    # passed) and the run continues.  Receipts from a12f213a... must be
+    # regenerated.
+    # Re-pinned 2026-10-08 (mainline integration): the reviewed cross-host,
+    # bounded-cancellation and progressive-verification producer changes are
+    # combined with symmetric streamed/non-streamed outer-whitespace
+    # normalization. Receipts from either parent harness must be regenerated.
     # Re-pinned 2026-10-08 (stream normalization): streamed and non-streamed
     # chat content now receive the same outer-whitespace normalization before
     # equivalence is checked. Receipts from 15cee377... must be regenerated.
@@ -96,8 +105,8 @@ APPROVED_QUALIFICATION_HARNESS = {
     # Re-pinned 2026-10-08 (progressive external verify): a selected B1
     # progressive route now runs a receipt-bearing HTTP probe and must show
     # stable-tile, run-local evidence of a completed nonfinal tile, multiple
-    # target launches, and target rows.  Receipts from 4948b246... must be
-    # regenerated.
+    # target launches, and target rows.  This includes the treecount changes
+    # described below; receipts from c341a792... must be regenerated.
     # Re-pinned 2026-10-07 (treecount): qwen38_fused_gdn engagement adds the
     # 27B's owned tree-kernel launches (execution.fused_gdn.tree_calls), so
     # the external DFlash2 tree route, whose GDN layers never reach the step
@@ -153,7 +162,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # (8a2ced1d..., NAX gather default) must be regenerated.
     # Re-pinned 2026-10-02 (flip integrate): benchmark_adaptive_mtp.py model
     # defaults now use Path.home(), so APPROVED_ADAPTIVE_BENCHMARK_SHA256 moved.
-    "sha256": "a12f213a4af6985992ed84f6a0cb02ce4a58373c9067987df5b925f2330ca810",
+    "sha256": "99a9ea186a9132132221f7cb98060bdac298f52a29c10b936390484569ce5b2c",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -1360,8 +1369,22 @@ def load_qualified_route(
             record.get("adapter_qualification"), runtime=runtime,
             artifact=artifact, settings=settings, descriptor=descriptor,
         )
+    # A declared, artifact-scoped known model behaviour (never a pass) stands
+    # in for its check only when the receipt's entry still names that exact
+    # declaration and its evidence still matches the declared failure shape.
+    from .known_model_behaviour import validate_known_check
+
+    known = {
+        name: accepted
+        for name, value in checks.items()
+        if (accepted := validate_known_check(name, value, artifact)) is not None
+    }
+
+    def check_ok(name):
+        return checks.get(name, {}).get("passed") is True or name in known
+
     if record.get("passed") is not True or any(
-        checks.get(c, {}).get("passed") is not True for c in required
+        not check_ok(c) for c in required
     ):
         raise ValueError("qualification checks are missing or failed")
     # Every recorded gate, not only the required and feature ones: the loader
@@ -1372,6 +1395,7 @@ def load_qualified_route(
     failed = sorted(
         name for name, value in checks.items()
         if not (isinstance(value, dict) and value.get("passed") is True)
+        and name not in known
     )
     if failed:
         raise ValueError("qualification records failed checks: " + ", ".join(failed))
@@ -1447,7 +1471,7 @@ def load_qualified_route(
             implementation=descriptor.metadata["execution"],
         ),
     )
-    return planner.decide(
+    decision = planner.decide(
         RouteRequest(
             descriptor.model_type,
             descriptor.variant,
@@ -1455,3 +1479,15 @@ def load_qualified_route(
             minimum_fidelity=fidelity,
         )
     )
+    if known:
+        # Every receipt of this route names the exception it was qualified
+        # under, so a known model behaviour is never silently a pass.
+        from dataclasses import replace
+
+        decision = replace(
+            decision,
+            receipt=decision.receipt + ";known_model_behaviour=" + ",".join(
+                f"{name}:{known[name]['id']}" for name in sorted(known)
+            ),
+        )
+    return decision
