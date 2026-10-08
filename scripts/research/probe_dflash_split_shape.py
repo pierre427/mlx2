@@ -189,6 +189,8 @@ def _load(args):
             )
         ).bind(target)
         target.eval()
+        if args.target_verify_row_exact:
+            target.configure_target_verify_row_exact(True)
         mx.eval(target.parameters(), draft.parameters())
         prompts = [[1 + (index * 7 + step) % 120 for step in range(12)] for index in range(2)]
         return target, draft, "tiny", prompts, {
@@ -207,6 +209,7 @@ def _load(args):
             "draft_model": args.draft,
             "num_draft": args.num_draft,
             "proposal_composition": False,
+            "target_verify_row_exact": args.target_verify_row_exact,
         },
     )
     prompts = [
@@ -311,6 +314,124 @@ def _public_arm(arm: dict) -> dict:
     return {key: value for key, value in arm.items() if key not in {"logits", "features"}}
 
 
+def _verification_arm(batch, lane, base_cache, proposals, proposal_laws, rng_state, tile):
+    import mlx.core as mx
+    from paired_direct_ab import state_digest
+    from research.progressive_dflash_verify import (
+        PreparedStage,
+        fixed_verify,
+        progressive_verify,
+    )
+
+    from mlx2.runtime.speculative_sampling import RequestRNG
+
+    def prepare_stage(cache, inputs, history):
+        owner = batch._target_owner([cache])
+        transaction = owner.begin(lengths=[len(inputs)])
+        try:
+            logits, features = batch.model.forward_with_taps(
+                mx.array([inputs], dtype=mx.int32), transaction.caches, batch.layers
+            )
+            mx.eval(logits, features)
+            target_laws = tuple(
+                batch._target_law(
+                    lane,
+                    logits[0, position],
+                    [*history, *inputs[: position + 1]],
+                    True,
+                    None,
+                )
+                for position in range(len(inputs))
+            )
+            return PreparedStage(target_laws, features, transaction)
+        except BaseException:
+            if not transaction.closed:
+                transaction.abort()
+            raise
+
+    cache = batch._copy_reference_cache(base_cache)
+    started = time.perf_counter()
+    if tile is None:
+        result = fixed_verify(
+            proposals,
+            proposal_laws,
+            cache=cache,
+            anchor=int(lane.anchor),
+            history=tuple(lane.history),
+            rng=RequestRNG(state=rng_state),
+            prepare_stage=prepare_stage,
+        )
+    else:
+        result = progressive_verify(
+            proposals,
+            proposal_laws,
+            cache=cache,
+            anchor=int(lane.anchor),
+            history=tuple(lane.history),
+            rng=RequestRNG(state=rng_state),
+            verification_tile=tile,
+            prepare_stage=prepare_stage,
+        )
+    elapsed = time.perf_counter() - started
+    features = (
+        result.feature_parts[0]
+        if len(result.feature_parts) == 1
+        else mx.concatenate(result.feature_parts, axis=1)
+    )
+    next_cache = batch._copy_reference_cache(result.cache)
+    next_logits, next_features = batch.model.forward_with_taps(
+        mx.array([[result.emitted[-1]]], dtype=mx.int32), next_cache, batch.layers
+    )
+    mx.eval(features, next_logits, next_features)
+    return {
+        "emitted": list(result.emitted),
+        "accepted": result.accepted,
+        "committed_inputs": list(result.committed_inputs),
+        "rng_state": result.rng_state,
+        "target_rows": result.target_rows,
+        "target_launches": result.target_launches,
+        "rejected": result.rejected,
+        "diagnostic_forward_s": elapsed,
+        "features_digest": _array_digest(mx, features),
+        "raw_cache_digest": state_digest(result.cache),
+        "logical_cache_digest": state_digest(_logical_cache_payload(result.cache)),
+        "cache_offsets": [int(entry.offset) for entry in result.cache],
+        "next_target_logits_digest": _array_digest(mx, next_logits),
+        "next_target_features_digest": _array_digest(mx, next_features),
+        "next_target_raw_cache_digest": state_digest(next_cache),
+        "next_target_logical_cache_digest": state_digest(
+            _logical_cache_payload(next_cache)
+        ),
+    }
+
+
+def _verification_comparison(reference, candidate):
+    # A rejected transaction may leave different bytes above the authoritative
+    # offset in an append-only allocation. Logical K/V plus the next-target
+    # oracle are the revision-bound state; keep the raw digest as a diagnostic.
+    exact_fields = (
+        "emitted",
+        "accepted",
+        "committed_inputs",
+        "rng_state",
+        "features_digest",
+        "logical_cache_digest",
+        "cache_offsets",
+        "next_target_logits_digest",
+        "next_target_features_digest",
+        "next_target_raw_cache_digest",
+        "next_target_logical_cache_digest",
+    )
+    equality = {f"{name}_equal": reference[name] == candidate[name] for name in exact_fields}
+    equality["raw_cache_digest_equal"] = (
+        reference["raw_cache_digest"] == candidate["raw_cache_digest"]
+    )
+    equality["strict_equal"] = all(
+        equality[f"{name}_equal"] for name in exact_fields
+    )
+    return equality
+
+
 def _run_prompt(target, draft, binding, prompt, args, tiles):
     import mlx.core as mx
 
@@ -340,7 +461,7 @@ def _run_prompt(target, draft, binding, prompt, args, tiles):
         while lane.anchor is None:
             batch._prefill(lane)
         block = batch._propose([lane])[0]
-        proposals, _laws = _block_row(block, int(target.args.vocab_size))
+        proposals, proposal_laws = _block_row(block, int(target.args.vocab_size))
         if len(proposals) != args.num_draft:
             raise RuntimeError("DFlash did not produce the requested proposal length")
         fixed_inputs = (int(lane.anchor), *map(int, proposals))
@@ -363,12 +484,45 @@ def _run_prompt(target, draft, binding, prompt, args, tiles):
             for name, arm in arms.items()
             if name != "ordinary_rows"
         }
+        verification = None
+        if args.verify_proposal:
+            rng_state = lane.rng.snapshot()
+            verification_arms = {
+                "fixed": _verification_arm(
+                    batch,
+                    lane,
+                    base_cache,
+                    tuple(map(int, proposals)),
+                    proposal_laws,
+                    rng_state,
+                    None,
+                )
+            }
+            for tile in tiles:
+                verification_arms[f"tile_{tile}"] = _verification_arm(
+                    batch,
+                    lane,
+                    base_cache,
+                    tuple(map(int, proposals)),
+                    proposal_laws,
+                    rng_state,
+                    tile,
+                )
+            verification = {
+                "arms": verification_arms,
+                "comparisons_vs_fixed": {
+                    name: _verification_comparison(verification_arms["fixed"], arm)
+                    for name, arm in verification_arms.items()
+                    if name != "fixed"
+                },
+            }
         return {
             "prompt_tokens": len(prompt),
             "anchor": int(lane.anchor),
             "proposal_tokens": list(map(int, proposals)),
             "arms": {name: _public_arm(arm) for name, arm in arms.items()},
             "comparisons_vs_ordinary_rows": comparisons,
+            "proposal_verification": verification,
         }
     finally:
         batch.close()
@@ -390,6 +544,8 @@ def main(argv=None) -> int:
     parser.add_argument("--prefill-step", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=919)
     parser.add_argument("--tiny", action="store_true")
+    parser.add_argument("--target-verify-row-exact", action="store_true")
+    parser.add_argument("--verify-proposal", action="store_true")
     parser.add_argument("--i-own-the-gpu", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -419,6 +575,8 @@ def main(argv=None) -> int:
             "prompts": len(selected),
             "seed": args.seed,
             "tiny": args.tiny,
+            "target_verify_row_exact": args.target_verify_row_exact,
+            "verify_proposal": args.verify_proposal,
         },
         "state": {
             "probe_implemented": True,
@@ -435,8 +593,23 @@ def main(argv=None) -> int:
         for result in results
         for comparison in result["comparisons_vs_ordinary_rows"].values()
     ]
+    verification_comparisons = [
+        comparison
+        for result in results
+        if result["proposal_verification"] is not None
+        for comparison in result["proposal_verification"][
+            "comparisons_vs_fixed"
+        ].values()
+    ]
     payload["verdict"] = (
-        "strict_equal" if comparisons and all(row["strict_equal"] for row in comparisons)
+        "strict_equal"
+        if comparisons
+        and all(row["strict_equal"] for row in comparisons)
+        and (
+            not args.verify_proposal
+            or verification_comparisons
+            and all(row["strict_equal"] for row in verification_comparisons)
+        )
         else "counterexample"
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)

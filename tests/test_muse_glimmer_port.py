@@ -73,6 +73,45 @@ def test_default_topology_and_layout():
     assert ModelArgs(sliding_window=1024).cache_layout != args.cache_layout
 
 
+def test_row_exact_external_policy_is_explicit_and_boolean():
+    base = {"draft_model": "/draft", "proposal_composition": False}
+    assert "target_verify_row_exact" not in normalize_external_policy(base)
+    selected = normalize_external_policy(
+        {**base, "target_verify_row_exact": True}
+    )
+    assert selected["target_verify_row_exact"] is True
+    with pytest.raises(ValueError, match="must be a boolean"):
+        normalize_external_policy({**base, "target_verify_row_exact": 1})
+
+
+def test_progressive_external_policy_requires_row_exact_host_chain():
+    base = {"draft_model": "/draft", "target_verify_row_exact": True}
+    selected = normalize_external_policy(
+        {**base, "progressive_verification_tile": 3}
+    )
+    assert selected["progressive_verification_tile"] == 3
+    assert selected["proposal_composition"] is False
+    with pytest.raises(ValueError, match="positive integer"):
+        normalize_external_policy(
+            {**base, "progressive_verification_tile": True}
+        )
+    with pytest.raises(ValueError, match="requires target_verify_row_exact"):
+        normalize_external_policy(
+            {
+                "draft_model": "/draft",
+                "progressive_verification_tile": 3,
+            }
+        )
+    with pytest.raises(ValueError, match="cannot combine"):
+        normalize_external_policy(
+            {
+                **base,
+                "progressive_verification_tile": 3,
+                "proposal_composition": {},
+            }
+        )
+
+
 def test_muse_cache_projection_keeps_rolling_boundaries():
     from mlx2.runtime.state_boundaries import (
         BoundaryPurpose,

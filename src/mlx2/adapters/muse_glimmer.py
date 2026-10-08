@@ -22,7 +22,6 @@ from ..process_env import (
 from ..sampling_defaults import SamplingDefaults, VendorSampling
 from .muse_glimmer_config import ModelArgs
 
-
 MUSE_GLIMMER = ModelDescriptor(
     model_type="muse_glimmer",
     family="muse-glimmer",
@@ -320,15 +319,42 @@ def normalize_external_policy(value):
         "num_draft",
         "pairwise_selection",
         "proposal_composition",
+        "target_verify_row_exact",
+        "progressive_verification_tile",
     }
     if set(policy) - allowed:
         raise ValueError("Unsupported Muse execution policy")
     if policy and not policy.get("draft_model"):
         raise ValueError("Muse policy overrides require draft_model")
+    row_exact = policy.get("target_verify_row_exact", False)
+    if type(row_exact) is not bool:
+        raise ValueError("target_verify_row_exact must be a boolean")
+    if not row_exact:
+        policy.pop("target_verify_row_exact", None)
+    progressive_tile = policy.get("progressive_verification_tile")
+    if progressive_tile is not None and (
+        type(progressive_tile) is not int or progressive_tile < 1
+    ):
+        raise ValueError("progressive_verification_tile must be a positive integer")
     pairwise = policy.get("pairwise_selection", "host")
     if pairwise not in ("host", "batched"):
         raise ValueError("pairwise_selection must be 'host' or 'batched'")
-    if policy and "proposal_composition" not in policy and pairwise == "host":
+    if progressive_tile is not None:
+        if not row_exact or pairwise != "host":
+            raise ValueError(
+                "progressive_verification_tile requires target_verify_row_exact "
+                "and host pairwise selection"
+            )
+        if policy.get("proposal_composition") not in (None, False):
+            raise ValueError(
+                "progressive_verification_tile cannot combine with proposal composition"
+            )
+        policy["proposal_composition"] = False
+    if (
+        policy
+        and "proposal_composition" not in policy
+        and pairwise == "host"
+    ):
         policy["proposal_composition"] = dict(
             DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION
         )
@@ -459,6 +485,15 @@ class MuseGlimmerAdapter:
         if (getattr(self, "external_policy", None) or {}).get("pairwise_selection") == "batched":
             # Only a selected non-default policy enters settings/receipts.
             config["pairwise_selection"] = "batched"
+        if (getattr(self, "external_policy", None) or {}).get(
+            "target_verify_row_exact"
+        ):
+            config["target_verify_row_exact"] = True
+        progressive_tile = (getattr(self, "external_policy", None) or {}).get(
+            "progressive_verification_tile"
+        )
+        if progressive_tile is not None:
+            config["progressive_verification_tile"] = progressive_tile
         return config
 
     def __init__(self, model_path: str, *, execution_policy=None):
@@ -514,6 +549,27 @@ class MuseGlimmerAdapter:
                 class_predicate=predicate,
             )
         self.model.load_weights(list(weights.items()), strict=True)
+        if self.external_policy.get("target_verify_row_exact", False):
+            from ..runtime.models.muse_glimmer import (
+                TARGET_VERIFY_ROW_EXACT_VERSION,
+            )
+
+            self.model.configure_target_verify_row_exact(True)
+            digest = hashlib.sha256(
+                (
+                    self.identity["fingerprint"]
+                    + json.dumps(
+                        {"algorithm": TARGET_VERIFY_ROW_EXACT_VERSION},
+                        sort_keys=True,
+                    )
+                ).encode()
+            ).hexdigest()
+            self.identity = {
+                **self.identity,
+                "artifact_fingerprint": self.identity["fingerprint"],
+                "fingerprint": digest,
+            }
+            self.layout += ":target-verify-row-exact:" + digest
         self.model.eval()
         mx.eval(self.model.parameters())
         weights.clear()
@@ -556,10 +612,62 @@ class MuseGlimmerAdapter:
                     separators=(",", ":"),
                 )
             self.profile_name = self.external_profile_name
-            digest = hashlib.sha256((self.identity["fingerprint"] + draft_record["fingerprint"] + "external-dflash2-v1" + composition_identity).encode()).hexdigest()
+            progressive_identity = ""
+            progressive_tile = self.external_policy.get(
+                "progressive_verification_tile"
+            )
+            if progressive_tile is not None:
+                from ..runtime.progressive_external_verify import (
+                    PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
+                )
+
+                progressive_identity = json.dumps(
+                    {
+                        "algorithm": PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
+                        "verification_tile": progressive_tile,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            digest = hashlib.sha256((self.identity["fingerprint"] + draft_record["fingerprint"] + "external-dflash2-v1" + composition_identity + progressive_identity).encode()).hexdigest()
             self.identity = {**self.identity, "target_fingerprint": self.identity["fingerprint"], "draft_fingerprint": draft_record["fingerprint"], "fingerprint": digest}
             self.layout += ":external-dflash2-v1:" + digest
-            self.descriptor = replace(MUSE_GLIMMER, capabilities=MUSE_GLIMMER.capabilities | {Capability.EXTERNAL_DRAFT}, state_planes=MUSE_GLIMMER.state_planes | {StatePlane.DRAFT}, cache_layout=self.layout)
+            metadata = {
+                **MUSE_GLIMMER.metadata,
+                "qualification": "unqualified",
+                "implemented": True,
+            }
+            if self.external_policy.get("target_verify_row_exact", False):
+                from ..runtime.models.muse_glimmer import (
+                    TARGET_VERIFY_ROW_EXACT_VERSION,
+                )
+
+                metadata["target_verify_row_exact"] = {
+                    "algorithm": TARGET_VERIFY_ROW_EXACT_VERSION,
+                    "implemented": True,
+                    "qualified": False,
+                    "selected": True,
+                    "performance_claim": False,
+                }
+            if progressive_tile is not None:
+                metadata["progressive_verification"] = {
+                    "algorithm": PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
+                    "implemented": True,
+                    "qualified": False,
+                    "selected": True,
+                    "verification_tile": progressive_tile,
+                    "state_promotion": "request_private_then_atomic_lane_publish",
+                    "execution_scope": "b1",
+                    "fixed_fallbacks": ["multi_lane", "logits_processors", "stop_proposal", "short_proposal"],
+                    "performance_claim": False,
+                }
+            self.descriptor = replace(
+                MUSE_GLIMMER,
+                capabilities=MUSE_GLIMMER.capabilities | {Capability.EXTERNAL_DRAFT},
+                state_planes=MUSE_GLIMMER.state_planes | {StatePlane.DRAFT},
+                cache_layout=self.layout,
+                metadata=metadata,
+            )
 
     @staticmethod
     def external_profile_name(mtp):
@@ -570,7 +678,7 @@ class MuseGlimmerAdapter:
         if self.draft_model is None:
             raise ValueError("No external draft model bound")
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
-        return ExternalDraftBatchGenerator(self.model, draft_model=self.draft_model, binding=self.identity["fingerprint"], num_draft=self.external_policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT), pairwise_selection=self.external_policy.get("pairwise_selection","host"), **kwargs)
+        return ExternalDraftBatchGenerator(self.model, draft_model=self.draft_model, binding=self.identity["fingerprint"], num_draft=self.external_policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT), pairwise_selection=self.external_policy.get("pairwise_selection","host"), progressive_verification_tile=self.external_policy.get("progressive_verification_tile"), **kwargs)
 
     def prompt_tokens(self, request: dict) -> list[int]:
         return self.tokenizer.encode(
@@ -707,13 +815,20 @@ class MuseGlimmerAdapter:
         return (int(ids[0]),) if len(ids) == 1 else ()
 
     def diagnostics(self):
-        return {
+        result = {
             "architecture": "muse_glimmer",
             "cache_layout": self.layout,
             "sliding_layers": self.identity["sliding_layers"],
             "global_layers": self.identity["global_layers"],
             "speculation": "external-dflash2-implemented-unqualified" if self.draft_model is not None else "ordinary",
         }
+        if self.external_policy.get("target_verify_row_exact", False):
+            result["target_protocol"] = self.model.external_execution_receipt
+        if self.external_policy.get("progressive_verification_tile") is not None:
+            result["progressive_verification"] = self.descriptor.metadata[
+                "progressive_verification"
+            ]
+        return result
 
     def close(self):
         pass

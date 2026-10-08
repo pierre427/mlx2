@@ -1576,6 +1576,48 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
                 value = value.get(key, 0)
             return value if type(value) is int and value >= 0 else 0
         return max(0, read(after) - read(before))
+
+    # Progressive verification is stateful across target launches, so its
+    # engagement gate is intentionally stronger than a single counter bump.
+    # Bind both snapshots to the same selected tile and require a successfully
+    # published round that crossed a nonfinal tile boundary.  The round's
+    # counters are restored on failure by ExternalDraftBatchGenerator.
+    initial_policy = ((initial or {}).get("settings") or {}).get(
+        "execution_policy"
+    ) or {}
+    final_policy = (final.get("settings") or {}).get("execution_policy") or {}
+    initial_tile = initial_policy.get("progressive_verification_tile")
+    final_tile = final_policy.get("progressive_verification_tile")
+    scheduler_tile_before = initial_scheduler.get(
+        "external_progressive_verify_tile"
+    )
+    scheduler_tile_after = scheduler.get("external_progressive_verify_tile")
+    progressive_rounds = run_delta(
+        scheduler, initial_scheduler, "external_progressive_verify_rounds"
+    )
+    progressive_launches = run_delta(
+        scheduler, initial_scheduler, "external_progressive_verify_launches"
+    )
+    progressive_rows = run_delta(
+        scheduler, initial_scheduler, "external_progressive_verify_target_rows"
+    )
+    progressive_full_tiles = run_delta(
+        scheduler, initial_scheduler, "external_progressive_verify_full_tiles"
+    )
+    progressive_observed = 0
+    if (
+        type(initial_tile) is int
+        and initial_tile > 0
+        and final_tile == initial_tile
+        and scheduler_tile_before == initial_tile
+        and scheduler_tile_after == initial_tile
+    ):
+        progressive_observed = min(
+            progressive_rounds,
+            progressive_full_tiles,
+            max(0, progressive_launches - progressive_rounds),
+            progressive_rows,
+        )
     fly_receipt_relaxed = 0
     initial_receipts = (initial or {}).get("recent_receipts") or ()
     for receipt in final.get("recent_receipts", ()):
@@ -1816,6 +1858,7 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
             run_delta(scheduler, initial_scheduler, "external_tree_rounds"),
             run_delta(scheduler, initial_scheduler, "external_tensorfold_target_rounds"),
         ),
+        "progressive_verification": progressive_observed,
         "fused_gdn_dynamic_accept": fused_gdn.get(
             "replay_dynamic_rollback_calls", 0
         ),
@@ -2426,6 +2469,44 @@ def main():
             and bool(content(defaults_a)),
             {"declared": declared, "a": defaults_a["mlx2"], "b": defaults_b["mlx2"]},
         )
+        progressive_tile = (
+            initial["settings"].get("execution_policy") or {}
+        ).get("progressive_verification_tile")
+        if type(progressive_tile) is int:
+            # This prompt produced a stable, tile-spanning Muse/DFlash chain
+            # in the integrated M3 parity run.  Its request receipt is an
+            # immediate product-level assertion; the final run-local counter
+            # delta below remains the qualification authority.
+            num_draft = int(
+                (initial["settings"].get("execution_policy") or {}).get(
+                    "num_draft", progressive_tile + 1
+                )
+            )
+            progressive_probe = post(
+                prompt(
+                    "Explain why a bounded dataflow scheduler should preserve causal state.",
+                    max_tokens=num_draft + 2,
+                    seed=919,
+                    temperature=0,
+                )
+            )
+            report["responses"]["progressive_verification"] = progressive_probe
+            progressive_receipt = (
+                progressive_probe.get("mlx2", {}).get("speculation", {}).get(
+                    "progressive_verification"
+                ) or {}
+            )
+            check(
+                "progressive_verification_probe",
+                bool(content(progressive_probe))
+                and progressive_receipt.get("selected") is True
+                and progressive_receipt.get("observed_used") is True
+                and progressive_receipt.get("verification_tile") == progressive_tile
+                and progressive_receipt.get("full_nonfinal_tiles", 0) > 0
+                and progressive_receipt.get("state_promotion")
+                == "request_private_then_atomic_lane_publish",
+                progressive_probe.get("mlx2"),
+            )
         cold_text_prompt = "Reply with exactly MLX2_READY"
         request = prompt(cold_text_prompt)
         if source_cases is not None:
@@ -3057,6 +3138,32 @@ def main():
                 evidence = {
                     "counters": prefill_scheduling_counters(final),
                     "forcing_load": report.get("prefill_scheduling_forcing"),
+                }
+            elif feature == "progressive_verification":
+                keys = (
+                    "external_progressive_verify_tile",
+                    "external_progressive_verify_rounds",
+                    "external_progressive_verify_launches",
+                    "external_progressive_verify_target_rows",
+                    "external_progressive_verify_rejections",
+                    "external_progressive_verify_full_tiles",
+                )
+                evidence = {
+                    "selected_tile": (
+                        initial["settings"].get("execution_policy") or {}
+                    ).get("progressive_verification_tile"),
+                    "before": {
+                        key: (initial.get("scheduler") or {}).get(key)
+                        for key in keys
+                    },
+                    "after": {
+                        key: (final.get("scheduler") or {}).get(key)
+                        for key in keys
+                    },
+                    "observation": observed.get(feature, 0),
+                    "probe": report["checks"].get(
+                        "progressive_verification_probe"
+                    ),
                 }
             elif feature in {"decode_first", "decode_fairness_slice_floor"}:
                 prefix = "decode_first_" if feature == "decode_first" else "decode_fairness_"

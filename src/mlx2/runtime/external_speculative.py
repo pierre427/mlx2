@@ -20,7 +20,6 @@ import numpy as np
 
 from ..thinking_guard import stack_block_steer, verify_block_steer
 from .committed_recovery import CommittedRecoverySlot
-from .processor_probe import VerifyWindow, copy_sharing, rollback_shared_memo
 from .cow_cache import (
     COWCacheUnsupported,
     restore_recovery_descriptors,
@@ -35,15 +34,21 @@ from .generate import (
     _right_pad_prompts,
 )
 from .prefill_plan import prompt_length_prefill_step
+from .processor_probe import VerifyWindow, copy_sharing, rollback_shared_memo
+from .progressive_external_verify import (
+    PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
+    PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    verify_proposal_tile,
+)
 from .speculative_sampling import (
     FLyVerificationPolicy,
     RequestRNG,
     probability,
+    validate_compact_proposal_laws,
+    validate_proposal_laws,
     verify_block_proposals,
     verify_compact_block_proposals,
     verify_compact_proposals,
-    validate_compact_proposal_laws,
-    validate_proposal_laws,
     verify_greedy_proposals,
     verify_proposals,
 )
@@ -460,6 +465,7 @@ class ExternalDraftBatchGenerator:
                  external_prefill_coalesce_ms=0,
                  external_prefill_coalesce_min_tokens=1,
                  exact_verification="token",
+                 progressive_verification_tile=None,
                  decode_time_fairness=None,
                  **kwargs):
         import mlx.core as mx
@@ -672,6 +678,33 @@ class ExternalDraftBatchGenerator:
                 "adaptive verification"
             )
         self.exact_verification = exact_verification
+        if progressive_verification_tile is not None and (
+            type(progressive_verification_tile) is not int
+            or not 1 <= progressive_verification_tile < self.num_draft
+        ):
+            raise ValueError(
+                "progressive_verification_tile must be an integer from 1 below num_draft"
+            )
+        if progressive_verification_tile is not None and (
+            self.target_execution != "reference"
+            or self.draft_topology != "chain"
+            or self.pairwise_selection != "host"
+            or self.fly_verification.enabled
+            or self.exact_verification != "token"
+            or self.continuation_policy is not None
+            or self.adaptive_policy is not None
+            or dynamic_singleton_tree
+            or hasattr(draft_model, "last_proposal_sources")
+            or getattr(model, "progressive_external_verify_protocol", None)
+            != PROGRESSIVE_TARGET_PROTOCOL_VERSION
+        ):
+            raise ValueError(
+                "progressive verification requires an exact reference chain "
+                "with host proposals, a row-exact progressive target protocol, "
+                "and no FLy, tree, continuation, composition, or adaptive route; "
+                "only B1 cohorts use the progressive transaction"
+            )
+        self.progressive_verification_tile = progressive_verification_tile
         # "one" (default, unchanged): one ready token per lane per poll.  A
         # lane still draining a multi-token round sits out the next cohort,
         # so at B>1 a lane that accepted more waits one round of the others
@@ -694,6 +727,15 @@ class ExternalDraftBatchGenerator:
             external_minimum_draft_proposals=self.minimum_draft_proposals,
             external_proposal_floor_raises=0,
         )
+        if self.progressive_verification_tile is not None:
+            self.scheduler_stats.update(
+                external_progressive_verify_rounds=0,
+                external_progressive_verify_launches=0,
+                external_progressive_verify_target_rows=0,
+                external_progressive_verify_rejections=0,
+                external_progressive_verify_full_tiles=0,
+                external_progressive_verify_tile=self.progressive_verification_tile,
+            )
         if getattr(self, "external_varlen_prefill", False):
             self.scheduler_stats.update(
                 external_batched_prefill_rounds=0,
@@ -1227,6 +1269,32 @@ class ExternalDraftBatchGenerator:
             "relaxed_accepts": lane.relaxed_accepts,
             **hists,
         }
+        if self.progressive_verification_tile is not None:
+            result["progressive_verification"] = {
+                "algorithm": PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
+                "implemented": True,
+                "qualified": False,
+                "selected": True,
+                "observed_used": (
+                    getattr(lane, "progressive_verify_rounds", 0) > 0
+                ),
+                "verification_tile": self.progressive_verification_tile,
+                "rounds": getattr(lane, "progressive_verify_rounds", 0),
+                "target_launches": getattr(
+                    lane, "progressive_verify_launches", 0
+                ),
+                "target_rows": getattr(
+                    lane, "progressive_verify_target_rows", 0
+                ),
+                "rejections": getattr(
+                    lane, "progressive_verify_rejections", 0
+                ),
+                "full_nonfinal_tiles": getattr(
+                    lane, "progressive_verify_full_tiles", 0
+                ),
+                "state_promotion": "request_private_then_atomic_lane_publish",
+                "performance_claim": False,
+            }
         if getattr(self, "exact_verification", "token") == "block":
             # Greedy rows verify by token compare under either rule (block
             # and token-wise decisions coincide for one-hot targets).
@@ -1841,6 +1909,160 @@ class ExternalDraftBatchGenerator:
         if requested < floor:
             _bump(self.scheduler_stats, "external_proposal_floor_raises")
         return max(floor, requested)
+
+    def _progressive_verify(self, lane, block):
+        """Verify one complete B1 proposal on private target state.
+
+        Every tile commits only to ``private_cache``.  The caller promotes the
+        final cache and concatenated committed taps through ``_commit`` after
+        this method has produced a complete decision.  The enclosing round
+        snapshot restores proposal state and RNG if any stage fails.
+        """
+
+        if self.progressive_verification_tile is None:
+            raise RuntimeError("progressive verification is not selected")
+        if lane.processors:
+            raise LaneFailure(
+                lane.uid,
+                "progressive verification does not support logits processors",
+            )
+        if not isinstance(block, HostDraftRow):
+            raise LaneFailure(
+                lane.uid,
+                "progressive verification requires dense host proposal laws",
+            )
+        drafts = list(block.tokens)
+        laws = list(block.laws)
+        if not drafts or len(laws) != len(drafts):
+            raise LaneFailure(
+                lane.uid,
+                "progressive verification requires one law per proposal token",
+            )
+        vocab = int(self.model.args.vocab_size)
+        validate_proposal_laws(drafts, laws, vocab)
+
+        private_cache = self._copy_reference_cache(lane.cache)
+        private_rng = RequestRNG(state=lane.rng.snapshot())
+        local_history = list(lane.history)
+        anchor = int(lane.anchor)
+        offset = 0
+        accepted = 0
+        emitted = []
+        committed_inputs = []
+        feature_parts = []
+        target_laws = []
+        response_rows = [] if lane.sampling.get("emit_logprobs", True) else None
+        window = VerifyWindow(())
+        launches = 0
+        target_rows = 0
+        rejected = False
+        full_tiles = 0
+
+        while offset < len(drafts):
+            remaining = len(drafts) - offset
+            final = remaining <= self.progressive_verification_tile
+            count = remaining if final else self.progressive_verification_tile
+            stage_tokens = drafts[offset : offset + count]
+            stage_laws = laws[offset : offset + count]
+            inputs = (
+                [anchor, *stage_tokens]
+                if final
+                else [anchor, *stage_tokens[:-1]]
+            )
+            owner = self._target_owner([private_cache])
+            transaction = owner.begin(lengths=[len(inputs)])
+            try:
+                logits, features = self.model.forward_with_taps(
+                    self.mx.array([inputs]),
+                    transaction.caches,
+                    self.layers,
+                )
+                self.mx.eval(logits, features)
+                expected = count + int(final)
+                if int(logits.shape[1]) != expected:
+                    raise RuntimeError(
+                        "progressive target stage returned the wrong row count"
+                    )
+                if int(features.shape[1]) != len(inputs):
+                    raise RuntimeError(
+                        "progressive target stage returned the wrong feature count"
+                    )
+                stage_response_rows = [] if response_rows is not None else None
+                stage_target_laws = []
+                for row in range(expected):
+                    stage_target_laws.append(
+                        self._target_law(
+                            lane,
+                            logits[0, row],
+                            local_history + inputs[: row + 1],
+                            True,
+                            stage_response_rows,
+                        )
+                    )
+                    window.mark()
+                outcome = verify_proposal_tile(
+                    stage_tokens,
+                    stage_laws,
+                    stage_target_laws,
+                    private_rng,
+                    final=final,
+                )
+                stage_emitted = list(outcome.emitted)
+                stopped = False
+                for index, token in enumerate(stage_emitted):
+                    if token in self.stops:
+                        stage_emitted = stage_emitted[: index + 1]
+                        stopped = True
+                        break
+                consumed = min(outcome.accepted + 1, len(stage_emitted))
+                private_cache = transaction.commit(
+                    accepted_lengths=[consumed]
+                )[0]
+            except BaseException:
+                if not transaction.closed:
+                    transaction.abort()
+                raise
+
+            launches += 1
+            target_rows += len(inputs)
+            feature_parts.append(features[:, :consumed])
+            committed = inputs[:consumed]
+            committed_inputs.extend(committed)
+            local_history.extend(committed)
+            emitted.extend(stage_emitted)
+            accepted += outcome.accepted
+            target_laws.extend(outcome.target_probabilities[: len(stage_emitted)])
+            if response_rows is not None:
+                response_rows.extend(stage_response_rows[: len(stage_emitted)])
+            anchor = int(stage_emitted[-1])
+            if outcome.rejected or stopped:
+                rejected = bool(outcome.rejected)
+                break
+            offset += count
+            if final:
+                break
+            full_tiles += 1
+
+        return (
+            RoundDecision(
+                accepted=accepted,
+                emitted=emitted,
+                target_laws=target_laws,
+                response_logprobs=response_rows,
+                verify_window=window,
+                commit_count=len(committed_inputs),
+                committed_inputs=committed_inputs,
+            ),
+            self.mx.concatenate(feature_parts, axis=1),
+            private_cache,
+            private_rng,
+            {
+                "launches": launches,
+                "target_rows": target_rows,
+                "rejected": int(rejected),
+                "full_tiles": full_tiles,
+            },
+        )
 
     def _verify(self, cohort, blocks, logits):
         """Accept phase over the target logits of one verify forward."""
@@ -2469,7 +2691,17 @@ class ExternalDraftBatchGenerator:
             commit_rows=commit_rows,
         )
 
-    def _commit(self, cohort, decisions, features, *, blocks, transaction):
+    def _commit(
+        self,
+        cohort,
+        decisions,
+        features,
+        *,
+        blocks,
+        transaction,
+        committed_rows=None,
+        committed_rngs=None,
+    ):
         """Commit accepted prefixes, then publish responses for every row."""
         proposal_counts = [
             0 if block is None else int(block.lengths[0]) for block in blocks
@@ -2491,7 +2723,37 @@ class ExternalDraftBatchGenerator:
             )
             for decision, used in zip(decisions, consumed)
         ]
-        if any(decision.commit_rows is not None for decision in decisions):
+        if committed_rows is not None:
+            if transaction is not None or len(committed_rows) != len(cohort):
+                raise RuntimeError("invalid private-cache promotion")
+            if committed_rngs is None or len(committed_rngs) != len(cohort):
+                raise RuntimeError("private-cache promotion requires private RNG state")
+            if any(decision.commit_rows is not None for decision in decisions):
+                raise RuntimeError("private-cache promotion cannot commit tree paths")
+            for lane, promoted, used in zip(
+                cohort, committed_rows, consumed, strict=True
+            ):
+                if len(promoted) != len(lane.cache):
+                    raise RuntimeError("private-cache promotion changed cache geometry")
+                for current, candidate in zip(
+                    lane.cache, promoted, strict=True
+                ):
+                    if type(current) is not type(candidate):
+                        raise RuntimeError(
+                            "private-cache promotion changed cache type"
+                        )
+                    old_offset = getattr(current, "offset", None)
+                    new_offset = getattr(candidate, "offset", None)
+                    if (
+                        isinstance(old_offset, int)
+                        and isinstance(new_offset, int)
+                        and new_offset - old_offset != used
+                    ):
+                        raise RuntimeError(
+                            "private-cache promotion advanced the wrong boundary"
+                        )
+            rows = list(committed_rows)
+        elif any(decision.commit_rows is not None for decision in decisions):
             rows = transaction.commit_paths(paths)
         else:
             rows = transaction.commit(accepted_lengths=consumed)
@@ -2522,6 +2784,8 @@ class ExternalDraftBatchGenerator:
                         "continuation committed-input count differs from transaction"
                     )
             lane.cache = rows[row]
+            if committed_rngs is not None:
+                lane.rng = committed_rngs[row]
             if decision.commit_rows is None:
                 lane.tail = features[row:row+1,:consumed[row]]
             else:
@@ -3562,6 +3826,81 @@ class ExternalDraftBatchGenerator:
                 raise ValueError(
                     "trusted PLD requires a supported B1 reference target"
                 )
+            if (
+                self.progressive_verification_tile is not None
+                and len(cohort) == 1
+                and len(blocks) == 1
+                and blocks[0] is not None
+                and proposal_counts[0] > self.progressive_verification_tile
+                and not cohort[0].processors
+                and not any(
+                    int(token) in self.stops for token in blocks[0].tokens
+                )
+            ):
+                if len(cohort) != 1 or len(blocks) != 1:
+                    raise RuntimeError(
+                        "progressive verification escaped its B1 constructor gate"
+                    )
+                (
+                    decision,
+                    features,
+                    committed_cache,
+                    committed_rng,
+                    progressive_stats,
+                ) = self._progressive_verify(cohort[0], blocks[0])
+                lane = cohort[0]
+                lane.progressive_verify_rounds = (
+                    getattr(lane, "progressive_verify_rounds", 0) + 1
+                )
+                lane.progressive_verify_launches = (
+                    getattr(lane, "progressive_verify_launches", 0)
+                    + progressive_stats["launches"]
+                )
+                lane.progressive_verify_target_rows = (
+                    getattr(lane, "progressive_verify_target_rows", 0)
+                    + progressive_stats["target_rows"]
+                )
+                lane.progressive_verify_rejections = (
+                    getattr(lane, "progressive_verify_rejections", 0)
+                    + progressive_stats["rejected"]
+                )
+                lane.progressive_verify_full_tiles = (
+                    getattr(lane, "progressive_verify_full_tiles", 0)
+                    + progressive_stats["full_tiles"]
+                )
+                _bump(self.scheduler_stats, "external_progressive_verify_rounds")
+                _bump(
+                    self.scheduler_stats,
+                    "external_progressive_verify_launches",
+                    progressive_stats["launches"],
+                )
+                _bump(
+                    self.scheduler_stats,
+                    "external_progressive_verify_target_rows",
+                    progressive_stats["target_rows"],
+                )
+                _bump(
+                    self.scheduler_stats,
+                    "external_progressive_verify_rejections",
+                    progressive_stats["rejected"],
+                )
+                _bump(
+                    self.scheduler_stats,
+                    "external_progressive_verify_full_tiles",
+                    progressive_stats["full_tiles"],
+                )
+                if clock is not None:
+                    clock = self._mark("progressive_verify", clock)
+                self._commit(
+                    cohort,
+                    [decision],
+                    features,
+                    blocks=blocks,
+                    transaction=None,
+                    committed_rows=[committed_cache],
+                    committed_rngs=[committed_rng],
+                )
+                return
             if self.adaptive_policy is not None:
                 effective_depth = max(proposal_counts, default=0)
                 _bump(self.scheduler_stats, "external_adaptive_rounds")

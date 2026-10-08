@@ -23,11 +23,10 @@ from typing import Any
 
 import numpy as np
 
+from mlx2.runtime.progressive_external_verify import verify_proposal_tile
 from mlx2.runtime.speculative_sampling import (
     RequestRNG,
-    VerifiedBlock,
     probability,
-    verify_proposals,
 )
 
 
@@ -69,61 +68,6 @@ def _validate_proposal(tokens: Sequence[int], laws: Sequence[np.ndarray]) -> Non
     for token, law in zip(tokens, normalized):
         if type(token) is not int or not 0 <= token < vocab or law[token] <= 0:
             raise ValueError("proposed token has zero proposal probability")
-
-
-def verify_proposal_tile(
-    tokens: Sequence[int],
-    proposal_laws: Sequence[np.ndarray],
-    target_laws: Sequence[np.ndarray],
-    rng: RequestRNG,
-    *,
-    final: bool,
-) -> VerifiedBlock:
-    """Verify one proposal slice without an intermediate bonus draw.
-
-    The final form delegates to the ordinary exact verifier.  The non-final
-    form has one target law per proposal token.  It consumes the same ordered
-    acceptance uniforms and residual draw as token-wise verification, but a
-    full accept returns only the proposals and leaves the next proposal row to
-    the following target stage.
-    """
-
-    tokens = tuple(tokens)
-    q = tuple(probability(law) for law in proposal_laws)
-    p = tuple(probability(law) for law in target_laws)
-    if final:
-        return verify_proposals(tokens, q, p, rng)
-    if not tokens or len(q) != len(tokens) or len(p) != len(tokens):
-        raise ValueError("non-final tile needs one target law per proposal token")
-    if any(law.shape != p[0].shape for law in (*q, *p)):
-        raise ValueError("tile vocabulary mismatch")
-    for token, law in zip(tokens, q):
-        if not 0 <= token < len(law) or law[token] <= 0:
-            raise ValueError("proposed token has zero proposal probability")
-
-    emitted: list[int] = []
-    target_rows: list[np.ndarray] = []
-    for index, token in enumerate(tokens):
-        if rng.uniform() < min(1.0, p[index][token] / q[index][token]):
-            emitted.append(token)
-            target_rows.append(p[index])
-            continue
-        residual = np.maximum(p[index] - q[index], 0)
-        correction = rng.sample(residual if residual.sum() > 0 else p[index])
-        emitted.append(correction)
-        target_rows.append(p[index])
-        return VerifiedBlock(
-            index,
-            tuple(emitted),
-            tuple(target_rows),
-            True,
-        )
-    return VerifiedBlock(
-        len(tokens),
-        tuple(emitted),
-        tuple(target_rows),
-        False,
-    )
 
 
 def progressive_verify(

@@ -56,6 +56,11 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
+    # Re-pinned 2026-10-08 (progressive external verify): a selected B1
+    # progressive route now runs a receipt-bearing HTTP probe and must show
+    # stable-tile, run-local evidence of a completed nonfinal tile, multiple
+    # target launches, and target rows.  Receipts from 4948b246... must be
+    # regenerated.
     # Re-pinned 2026-10-07 (treecount): qwen38_fused_gdn engagement adds the
     # 27B's owned tree-kernel launches (execution.fused_gdn.tree_calls), so
     # the external DFlash2 tree route, whose GDN layers never reach the step
@@ -111,7 +116,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # (8a2ced1d..., NAX gather default) must be regenerated.
     # Re-pinned 2026-10-02 (flip integrate): benchmark_adaptive_mtp.py model
     # defaults now use Path.home(), so APPROVED_ADAPTIVE_BENCHMARK_SHA256 moved.
-    "sha256": "c341a792f9b571adf6096903b0d92dfb977ddc1c90a782cbed800facce816864",
+    "sha256": "cd4b8898519f5908ea6a96d806899d24d88e9c948eb109306db4403766ac1541",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -1018,6 +1023,14 @@ def _route_feature_checks(settings):
     features = set(_default_on_mechanisms(settings)[0])
     if settings.get("speculation") == "external_draft":
         features.update({"external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction"})
+        if type((settings.get("execution_policy") or {}).get(
+            "progressive_verification_tile"
+        )) is int:
+            # A selected progressive verifier must complete at least one
+            # run-local, tile-spanning round.  Merely constructing the route
+            # or executing only its fixed-verifier fallbacks proves neither
+            # private target state nor atomic publication.
+            features.add("progressive_verification")
         if (settings.get("fly_verification") or {}).get("enabled") is True:
             features.add("fly_verification")
         if (settings.get("execution_policy") or {}).get("pairwise_selection") == "batched":

@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 from collections import deque
 from numbers import Integral
+
 import mlx.core as mx
 
 from .models.cache import KVCache, RotatingKVCache
@@ -276,8 +277,16 @@ class SegmentedKVTransaction:
                     self._restore(lane, layer)
                     if count:
                         keys, values = view._appends[lane]
-                        self._rows[lane][layer].update_and_fetch(
-                            keys[..., :count, :], values[..., :count, :])
+                        if view._row_exact:
+                            for position in range(count):
+                                self._rows[lane][layer].update_and_fetch(
+                                    keys[..., position : position + 1, :],
+                                    values[..., position : position + 1, :],
+                                )
+                        else:
+                            self._rows[lane][layer].update_and_fetch(
+                                keys[..., :count, :], values[..., :count, :]
+                            )
                     self._expected[lane][layer] = _stamp(self._rows[lane][layer])
         except BaseException:
             for lane in range(len(self._rows)):
@@ -328,6 +337,7 @@ class SegmentedKVView:
         self._appends = [None] * len(self.rows)
         self._fetched = [None] * len(self.rows)
         self._updated = False
+        self._row_exact = False
         self.keys = self.values = None
 
     @property
@@ -377,6 +387,89 @@ class SegmentedKVView:
         self._value_dim = values.shape[-1]
         self.offset = mx.array([row.offset for row in self.rows])
         return None, None
+
+    def row_exact_attention(self, queries, keys, values, *, scale, window_size):
+        """Append and attend with each lane's ordinary one-token arithmetic.
+
+        A speculative verify window normally appends all rows at once. That
+        changes both rotating-cache mutation and Metal SDPA geometry versus
+        ordinary decode. This opt-in seam keeps the transaction and rollback
+        contract, while advancing each authoritative row one token at a time.
+        """
+        from .models.base import scaled_dot_product_attention
+
+        self._check()
+        if self._updated:
+            raise RuntimeError("a transaction layer can append only once")
+        if (
+            queries.ndim != 4
+            or keys.ndim != 4
+            or values.ndim != 4
+            or queries.shape[0] != len(self.rows)
+            or keys.shape[:3] != values.shape[:3]
+            or keys.shape[0] != len(self.rows)
+            or keys.shape[2] != self.width
+            or queries.shape[2] != self.width
+        ):
+            raise ValueError("row-exact segmented attention geometry mismatch")
+        outputs = []
+        try:
+            for index, (row, count) in enumerate(zip(self.rows, self.lengths)):
+                if not count:
+                    outputs.append(
+                        mx.zeros(
+                            (1, queries.shape[1], self.width, values.shape[-1]),
+                            dtype=queries.dtype,
+                        )
+                    )
+                    continue
+                pair = (
+                    mx.array(keys[index : index + 1, :, :count]),
+                    mx.array(values[index : index + 1, :, :count]),
+                )
+                self._appends[index] = pair
+                lane_outputs = []
+                fetched = None
+                for position in range(count):
+                    row_mask = row.make_mask(
+                        1, window_size=window_size, return_array=True
+                    )
+                    fetched = row.update_and_fetch(
+                        pair[0][..., position : position + 1, :],
+                        pair[1][..., position : position + 1, :],
+                    )
+                    lane_outputs.append(
+                        scaled_dot_product_attention(
+                            queries[index : index + 1, :, position : position + 1],
+                            fetched[0],
+                            fetched[1],
+                            cache=row,
+                            scale=scale,
+                            mask=row_mask,
+                        )
+                    )
+                self._fetched[index] = fetched
+                result = mx.concatenate(lane_outputs, axis=2)
+                if count < self.width:
+                    result = mx.pad(
+                        result,
+                        [(0, 0), (0, 0), (0, self.width - count), (0, 0)],
+                    )
+                outputs.append(result)
+                self.transaction._expected[index][self.layer] = _stamp(row)
+        except BaseException:
+            for index in range(len(self.rows)):
+                self.transaction._restore(index, self.layer)
+            self._appends = [None] * len(self.rows)
+            self._fetched = [None] * len(self.rows)
+            raise
+        self._updated = True
+        self._row_exact = True
+        self._value_dim = values.shape[-1]
+        self.offset = mx.array([row.offset for row in self.rows])
+        if self.transaction.owner.note is not None:
+            self.transaction.owner.note("independent_attention_rows", len(self.rows))
+        return mx.concatenate(outputs, axis=0)
 
     @property
     def step_width(self):

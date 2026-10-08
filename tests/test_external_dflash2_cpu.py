@@ -18,6 +18,7 @@ from mlx2.runtime.external_speculative import (
     ExternalDraftState,
 )
 from mlx2.runtime.models.muse_glimmer import Model
+from mlx2.runtime.sample_utils import LaneRNG
 from mlx2.runtime.speculative_sampling import RequestRNG, verify_proposals
 
 
@@ -141,6 +142,386 @@ def test_external_draft_proposal_floor_defaults_to_available_three_or_two():
     assert settings["tree_max_nodes"] == 15
     with pytest.raises(ValueError, match="minimum_draft_proposals"):
         generator(m, d, minimum_draft_proposals=3)
+
+
+def _progressive_candidate(m, d, tile=None):
+    m.configure_target_verify_row_exact(True)
+    return ExternalDraftBatchGenerator(
+        m,
+        draft_model=d,
+        binding="progressive-test",
+        num_draft=3,
+        completion_batch_size=1,
+        prefill_step_size=8,
+        progressive_verification_tile=tile,
+    )
+
+
+def _forced_target_proposal(model, prompt, count, reject_at):
+    cache = model.make_cache()
+    model(mx.array([prompt[:-1]]), cache=cache)
+    anchor = int(prompt[-1])
+    expected = []
+    token = anchor
+    for _ in range(count):
+        logits = model(mx.array([[token]]), cache=cache)
+        token = int(mx.argmax(logits[0, -1]).item())
+        expected.append(token)
+    proposal = list(expected)
+    if reject_at is not None:
+        proposal[reject_at] = (proposal[reject_at] + 1) % model.args.vocab_size
+    laws = []
+    for token in proposal:
+        law = np.zeros(model.args.vocab_size, dtype=np.float64)
+        law[token] = 1.0
+        laws.append(law)
+    return anchor, expected, proposal, laws
+
+
+def _run_forced_progressive_round(
+    tile, reject_at, *, stop_index=None, sampling_temp=0, processor=False
+):
+    model, draft = tiny()
+    prompt = [1, 2, 3, 4]
+    expected_anchor, _expected, proposal, laws = _forced_target_proposal(
+        model, prompt, 3, reject_at
+    )
+    model.configure_target_verify_row_exact(True)
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=draft,
+        binding="progressive-test",
+        num_draft=3,
+        completion_batch_size=1,
+        prefill_step_size=8,
+        stop_tokens=(
+            [] if stop_index is None else [[proposal[stop_index]]]
+        ),
+        progressive_verification_tile=tile,
+    )
+    real = draft.draft_distributions
+
+    def forced(anchors, hidden, caches, count, rngs, temps, **kwargs):
+        real(anchors, hidden, caches, count, rngs, temps, **kwargs)
+        assert count == 3 and anchors == [expected_anchor]
+        return [proposal[:count]], [laws[:count]]
+
+    draft.draft_distributions = forced
+    uid = batch.insert(
+        [prompt],
+        max_tokens=[8],
+        lane_rngs=[LaneRNG(919)],
+        sampling_configs=[{"sampling_temp": sampling_temp}],
+        logits_processors=(
+            [[lambda _tokens, value: value]] if processor else None
+        ),
+    )[0]
+    lane = batch.lanes[uid]
+    while lane.anchor is None:
+        batch._prefill(lane)
+    batch._round([lane])
+    return batch, lane
+
+
+def _assert_lane_target_state_equal(left, right):
+    assert left.history == right.history
+    assert left.anchor == right.anchor
+    assert left.generated == right.generated
+    assert left.accepted == right.accepted
+    assert left.proposed == right.proposed
+    assert left.rng.snapshot() == right.rng.snapshot()
+    assert [item.token for item in left.ready] == [item.token for item in right.ready]
+    assert mx.array_equal(left.tail, right.tail)
+    assert len(left.cache) == len(right.cache)
+    for actual, expected in zip(left.cache, right.cache, strict=True):
+        assert actual.offset == expected.offset
+        assert actual.meta_state == expected.meta_state
+        for got, want in zip(
+            committed_state(actual), committed_state(expected), strict=True
+        ):
+            assert mx.array_equal(got, want)
+    assert len(left.draft_cache) == len(right.draft_cache)
+    for actual, expected in zip(
+        left.draft_cache, right.draft_cache, strict=True
+    ):
+        assert actual.offset == expected.offset
+        for got, want in zip(
+            committed_state(actual), committed_state(expected), strict=True
+        ):
+            assert mx.array_equal(got, want)
+
+
+@pytest.mark.parametrize("reject_at", [None, 0, 1, 2])
+def test_progressive_private_promotion_matches_fixed_verification(reject_at):
+    fixed_batch, fixed = _run_forced_progressive_round(None, reject_at)
+    progressive_batch, progressive = _run_forced_progressive_round(2, reject_at)
+    _assert_lane_target_state_equal(progressive, fixed)
+    next_fixed = fixed_batch.model(
+        mx.array([[fixed.anchor]]), cache=copy.deepcopy(fixed.cache)
+    )
+    next_progressive = progressive_batch.model(
+        mx.array([[progressive.anchor]]),
+        cache=copy.deepcopy(progressive.cache),
+    )
+    assert mx.array_equal(next_progressive, next_fixed)
+    launches = progressive_batch.scheduler_stats[
+        "external_progressive_verify_launches"
+    ]
+    assert launches == (1 if reject_at in (0, 1) else 2)
+    receipt = progressive.ready[-1].speculative_receipt[
+        "progressive_verification"
+    ]
+    assert receipt["implemented"] and receipt["selected"]
+    assert receipt["observed_used"]
+    assert not receipt["qualified"]
+    assert receipt["verification_tile"] == 2
+    assert receipt["state_promotion"] == (
+        "request_private_then_atomic_lane_publish"
+    )
+
+
+def test_progressive_tile_one_spans_entire_long_proposal_without_bonus_draws():
+    batch, lane = _run_forced_progressive_round(1, None)
+    assert batch.scheduler_stats["external_progressive_verify_launches"] == 3
+    assert batch.scheduler_stats["external_progressive_verify_full_tiles"] == 2
+    assert len(lane.ready) == 4
+
+
+def test_progressive_stop_proposal_uses_fixed_verifier_and_preserves_rng():
+    fixed_batch, fixed = _run_forced_progressive_round(
+        None, None, stop_index=0
+    )
+    progressive_batch, progressive = _run_forced_progressive_round(
+        2, None, stop_index=0
+    )
+    _assert_lane_target_state_equal(progressive, fixed)
+    assert progressive_batch.scheduler_stats[
+        "external_progressive_verify_rounds"
+    ] == 0
+    receipt = progressive.ready[-1].speculative_receipt[
+        "progressive_verification"
+    ]
+    assert receipt["selected"] and not receipt["observed_used"]
+    assert receipt["rounds"] == 0
+
+
+def test_progressive_processor_request_uses_exact_fixed_verifier():
+    fixed_batch, fixed = _run_forced_progressive_round(
+        None, None, processor=True
+    )
+    progressive_batch, progressive = _run_forced_progressive_round(
+        2, None, processor=True
+    )
+    _assert_lane_target_state_equal(progressive, fixed)
+    assert progressive_batch.scheduler_stats[
+        "external_progressive_verify_rounds"
+    ] == 0
+    receipt = progressive.ready[-1].speculative_receipt[
+        "progressive_verification"
+    ]
+    assert receipt["selected"] and not receipt["observed_used"]
+
+
+def test_progressive_sampled_round_matches_fixed_rng_and_state():
+    fixed_batch, fixed = _run_forced_progressive_round(
+        None, None, sampling_temp=0.8
+    )
+    progressive_batch, progressive = _run_forced_progressive_round(
+        2, None, sampling_temp=0.8
+    )
+    _assert_lane_target_state_equal(progressive, fixed)
+    assert progressive_batch.scheduler_stats[
+        "external_progressive_verify_rounds"
+    ] == 1
+
+
+def test_progressive_constructor_and_request_gates_fail_closed():
+    model, draft = tiny()
+    with pytest.raises(ValueError, match="row-exact progressive target protocol"):
+        ExternalDraftBatchGenerator(
+            model,
+            draft_model=draft,
+            binding="bad",
+            num_draft=3,
+            completion_batch_size=1,
+            progressive_verification_tile=2,
+        )
+    model.configure_target_verify_row_exact(True)
+    with pytest.raises(ValueError, match="integer from 1 below num_draft"):
+        ExternalDraftBatchGenerator(
+            model,
+            draft_model=draft,
+            binding="bad",
+            num_draft=3,
+            completion_batch_size=1,
+            progressive_verification_tile=4,
+        )
+    batched = ExternalDraftBatchGenerator(
+        model,
+        draft_model=draft,
+        binding="batched-fallback",
+        num_draft=3,
+        completion_batch_size=2,
+        progressive_verification_tile=2,
+    )
+    uids = batched.insert(
+        [[1, 2, 3], [4, 5, 6]], max_tokens=[4, 4]
+    )
+    lanes = [batched.lanes[uid] for uid in uids]
+    for lane in lanes:
+        while lane.anchor is None:
+            batched._prefill(lane)
+    batched._round(lanes)
+    assert batched.scheduler_stats["external_rounds"] == 1
+    assert batched.scheduler_stats["external_progressive_verify_rounds"] == 0
+    for kwargs in (
+        {"pairwise_selection": "batched"},
+        {"fly_verification": True},
+        {"exact_verification": "block"},
+    ):
+        with pytest.raises(ValueError, match="exact reference chain"):
+            ExternalDraftBatchGenerator(
+                model,
+                draft_model=draft,
+                binding="bad",
+                num_draft=3,
+                completion_batch_size=1,
+                progressive_verification_tile=2,
+                **kwargs,
+            )
+
+
+def test_progressive_second_tile_failure_restores_whole_round(monkeypatch):
+    model, draft = tiny()
+    batch = _progressive_candidate(model, draft, 1)
+    prompt = [1, 2, 3, 4]
+    expected_anchor, _expected, proposal, laws = _forced_target_proposal(
+        model, prompt, 3, None
+    )
+    real_draft = draft.draft_distributions
+
+    def forced(anchors, hidden, caches, count, rngs, temps, **kwargs):
+        real_draft(anchors, hidden, caches, count, rngs, temps, **kwargs)
+        assert anchors == [expected_anchor]
+        return [proposal], [laws]
+
+    monkeypatch.setattr(draft, "draft_distributions", forced)
+    uid = batch.insert(
+        [prompt], max_tokens=[8], lane_rngs=[LaneRNG(919)]
+    )[0]
+    lane = batch.lanes[uid]
+    while lane.anchor is None:
+        batch._prefill(lane)
+    before = copy.deepcopy(lane.__dict__)
+    before_stats = copy.deepcopy(batch.scheduler_stats)
+    before_boundaries = copy.deepcopy(batch.boundaries)
+    real_forward = model.forward_with_taps
+    calls = 0
+
+    def fail_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("injected progressive tile failure")
+        return real_forward(*args, **kwargs)
+
+    monkeypatch.setattr(model, "forward_with_taps", fail_second)
+    with pytest.raises(RuntimeError, match="injected progressive tile failure"):
+        batch._round([lane])
+    assert not batch._open
+    assert lane.history == before["history"]
+    assert lane.anchor == before["anchor"]
+    assert lane.generated == before["generated"]
+    assert lane.rng.snapshot() == before["rng"].snapshot()
+    assert not lane.ready
+    assert batch.boundaries.keys() == before_boundaries.keys()
+    for uid, boundary in batch.boundaries.items():
+        expected_boundary = before_boundaries[uid]
+        assert boundary["tokens"] == expected_boundary["tokens"]
+        assert boundary["covered_tokens"] == expected_boundary["covered_tokens"]
+        assert [cache.offset for cache in boundary["target_cache"]] == [
+            cache.offset for cache in expected_boundary["target_cache"]
+        ]
+    ignored = {
+        "external_cow_snapshots",
+        "external_cow_fallbacks",
+        "recovery_checkpoint_captures",
+        "recovery_checkpoint_restores",
+    }
+    assert {
+        key: value
+        for key, value in batch.scheduler_stats.items()
+        if key not in ignored
+    } == {
+        key: value
+        for key, value in before_stats.items()
+        if key not in ignored
+    }
+    assert batch.scheduler_stats["recovery_checkpoint_captures"] == 1
+    assert batch.scheduler_stats["recovery_checkpoint_restores"] == 1
+    for actual, expected in zip(lane.cache, before["cache"], strict=True):
+        assert actual.offset == expected.offset
+        for got, want in zip(
+            committed_state(actual), committed_state(expected), strict=True
+        ):
+            assert mx.array_equal(got, want)
+    for actual, expected in zip(
+        lane.draft_cache, before["draft_cache"], strict=True
+    ):
+        assert actual.offset == expected.offset
+        for got, want in zip(
+            committed_state(actual), committed_state(expected), strict=True
+        ):
+            assert mx.array_equal(got, want)
+    assert mx.array_equal(lane.tail, before["tail"])
+
+
+def test_progressive_failure_after_private_promotion_restores_cache_rng_and_stats(
+    monkeypatch,
+):
+    model, draft = tiny()
+    batch = _progressive_candidate(model, draft, 1)
+    prompt = [1, 2, 3, 4]
+    expected_anchor, _expected, proposal, laws = _forced_target_proposal(
+        model, prompt, 3, None
+    )
+    real_draft = draft.draft_distributions
+
+    def forced(anchors, hidden, caches, count, rngs, temps, **kwargs):
+        real_draft(anchors, hidden, caches, count, rngs, temps, **kwargs)
+        assert anchors == [expected_anchor]
+        return [proposal], [laws]
+
+    monkeypatch.setattr(draft, "draft_distributions", forced)
+    uid = batch.insert(
+        [prompt], max_tokens=[8], lane_rngs=[LaneRNG(919)]
+    )[0]
+    lane = batch.lanes[uid]
+    while lane.anchor is None:
+        batch._prefill(lane)
+    before = copy.deepcopy(lane.__dict__)
+    real_commit = batch._commit
+
+    def fail_after_commit(*args, **kwargs):
+        real_commit(*args, **kwargs)
+        raise RuntimeError("injected progressive publication failure")
+
+    monkeypatch.setattr(batch, "_commit", fail_after_commit)
+    with pytest.raises(RuntimeError, match="publication failure"):
+        batch._round([lane])
+    assert not batch._open
+    assert lane.history == before["history"]
+    assert lane.anchor == before["anchor"]
+    assert lane.generated == before["generated"]
+    assert lane.rng.snapshot() == before["rng"].snapshot()
+    assert not lane.ready
+    assert not hasattr(lane, "progressive_verify_rounds")
+    for actual, expected in zip(lane.cache, before["cache"], strict=True):
+        assert actual.offset == expected.offset
+        for got, want in zip(
+            committed_state(actual), committed_state(expected), strict=True
+        ):
+            assert mx.array_equal(got, want)
 
 
 def test_external_dflash_adaptive_depth_cannot_trim_below_declared_floor(

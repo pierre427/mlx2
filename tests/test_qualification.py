@@ -1290,6 +1290,131 @@ def test_external_adaptive_verification_is_serialized_but_unqualifiable():
     assert "cannot observe" in reason
 
 
+def test_progressive_verification_requires_run_local_spanning_observation():
+    from mlx2.qualification import required_feature_checks, unqualifiable_candidate
+    from scripts.qualify_serving import feature_observations
+
+    settings = {
+        "speculation": "external_draft",
+        "execution_policy": {"progressive_verification_tile": 3},
+    }
+    assert unqualifiable_candidate(settings) is None
+    assert "feature_progressive_verification" in required_feature_checks(settings)
+
+    initial = {
+        "settings": settings,
+        "scheduler": {
+            "external_progressive_verify_tile": 3,
+            "external_progressive_verify_rounds": 7,
+            "external_progressive_verify_launches": 13,
+            "external_progressive_verify_target_rows": 35,
+            "external_progressive_verify_full_tiles": 6,
+        },
+    }
+    final = {
+        "settings": settings,
+        "scheduler": {
+            "external_progressive_verify_tile": 3,
+            "external_progressive_verify_rounds": 8,
+            "external_progressive_verify_launches": 15,
+            "external_progressive_verify_target_rows": 41,
+            "external_progressive_verify_full_tiles": 7,
+        },
+    }
+    assert feature_observations(final, initial=initial)[
+        "progressive_verification"
+    ] == 1
+
+    idle = {**final, "scheduler": dict(initial["scheduler"])}
+    assert feature_observations(idle, initial=initial)[
+        "progressive_verification"
+    ] == 0
+    no_span = {**final, "scheduler": {
+        **final["scheduler"],
+        "external_progressive_verify_full_tiles": 6,
+    }}
+    assert feature_observations(no_span, initial=initial)[
+        "progressive_verification"
+    ] == 0
+    one_launch = {**final, "scheduler": {
+        **final["scheduler"],
+        "external_progressive_verify_launches": 14,
+    }}
+    assert feature_observations(one_launch, initial=initial)[
+        "progressive_verification"
+    ] == 0
+    changed_tile = {**final, "settings": {
+        **settings,
+        "execution_policy": {"progressive_verification_tile": 4},
+    }}
+    assert feature_observations(changed_tile, initial=initial)[
+        "progressive_verification"
+    ] == 0
+    mismatched_status = {**final, "scheduler": {
+        **final["scheduler"],
+        "external_progressive_verify_tile": 4,
+    }}
+    assert feature_observations(mismatched_status, initial=initial)[
+        "progressive_verification"
+    ] == 0
+
+
+def test_loader_requires_progressive_verification_feature(tmp_path):
+    from dataclasses import replace
+
+    from mlx2.adapters.muse_glimmer import MUSE_GLIMMER
+    from mlx2.contracts import Capability
+    from mlx2.qualification import required_feature_checks
+
+    descriptor = replace(
+        MUSE_GLIMMER,
+        capabilities=MUSE_GLIMMER.capabilities | {Capability.EXTERNAL_DRAFT},
+    )
+    settings = {
+        "mtp": False,
+        "speculation": "external_draft",
+        "max_context": 131072,
+        "max_lanes": 1,
+        "execution_policy": {"progressive_verification_tile": 3},
+    }
+    checks = {
+        name: {"passed": True}
+        for name in REQUIRED_CHECKS
+        | {"structured_output"}
+        | required_feature_checks(settings)
+    }
+    checks.pop("feature_progressive_verification")
+    record = {
+        "passed": True,
+        "runtime": {"source": "abc"},
+        "artifact": "weights",
+        "settings": settings,
+        "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "checks": checks,
+    }
+    path = tmp_path / "qualification.json"
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="feature_progressive_verification"):
+        load_qualified_route(
+            path,
+            runtime=record["runtime"],
+            artifact="weights",
+            settings=settings,
+            descriptor=descriptor,
+            name="muse-progressive",
+        )
+    checks["feature_progressive_verification"] = {"passed": True}
+    path.write_text(json.dumps(record))
+    assert load_qualified_route(
+        path,
+        runtime=record["runtime"],
+        artifact="weights",
+        settings=settings,
+        descriptor=descriptor,
+        name="muse-progressive",
+    ).profile.name == "muse-progressive"
+
+
 def test_external_tree_batch_size_route_is_unqualifiable():
     # The artifact-bound default tree route is qualifiable (it needs
     # feature_external_tree); any other tree route stays a candidate.
