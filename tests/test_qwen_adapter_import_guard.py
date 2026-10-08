@@ -323,7 +323,7 @@ def test_qwen36_routed_decode_and_topk_applied_live(monkeypatch, latched, kernel
 
 PROFILE_MODULES = [
     "agnes_3_flash", "flash_next", "gpt_oss", "hy_v3", "laguna_xs21",
-    "muse_glimmer", "nemotron3_super", "north_mini_code", "qwen35_9b",
+    "mellum21", "muse_glimmer", "nemotron3_super", "north_mini_code", "qwen35_9b",
     "qwen36_27b", "qwen36_35b", "qwen38_27b", "xing",
 ]
 

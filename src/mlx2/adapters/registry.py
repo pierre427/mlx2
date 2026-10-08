@@ -326,6 +326,14 @@ def _standard_decoder(path: Path, config: dict) -> AdapterResolution:
     )
 
 
+def _mellum(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".mellum21", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(
+        module.Mellum21ThinkingAdapter, module.MELLUM21_THINKING, artifact
+    )
+
+
 def _agnes(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".agnes_3_flash", __package__)
     artifact = module.inspect_artifact(path)
@@ -391,6 +399,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "qwen3_moe": _standard_decoder,
     "qwen2": _standard_decoder,
     "llama": _standard_decoder,
+    "mellum": _mellum,
     "agnes": _agnes,
     "hy_v3": _hy_v3,
     "gpt_oss": _gpt_oss,

@@ -39,6 +39,7 @@ def _adapter_classes():
     from mlx2.adapters.qwen36_35b import Qwen3635BA3BAdapter
     from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
     from mlx2.adapters.laguna_xs21 import LagunaXS21Adapter
+    from mlx2.adapters.mellum21 import Mellum21ThinkingAdapter
     from mlx2.adapters.mlx_vlm import Gemma3nAdapter, MiniCPMOAdapter
     from mlx2.adapters.gemma4 import Gemma4A4BAdapter
     from mlx2.adapters.nemotron3_super import Nemotron3SuperAdapter
@@ -54,6 +55,7 @@ def _adapter_classes():
         "cohere2_moe": NorthMiniCodeAdapter,
         "xing4_0": XingAdapter,
         "laguna": LagunaXS21Adapter,
+        "mellum": Mellum21ThinkingAdapter,
         "gemma3n": Gemma3nAdapter,
         "gemma4": Gemma4A4BAdapter,
         "minicpmo": MiniCPMOAdapter,
@@ -207,6 +209,9 @@ EXPECTED = {
     "muse_glimmer": {"general": dict(temperature=1.0, top_p=0.95, top_k=64)},
     "cohere2_moe": {"general": dict(temperature=1.0, top_p=0.95)},
     "laguna": {"general": dict(temperature=1.0, top_p=1.0, top_k=20, min_p=0.0)},
+    "mellum": {
+        "general": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0}
+    },
     "xing4_0": {
         "general": dict(temperature=1.0, top_p=0.95, repetition_penalty=1.05),
         "coding": dict(temperature=0.8, top_p=0.95, repetition_penalty=1.05),

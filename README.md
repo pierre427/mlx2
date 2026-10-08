@@ -66,7 +66,7 @@ enabled by default. See the [mechanism matrix](docs/FLASHNEXT-PARITY.md).
 About twenty model adapters are registered (`src/mlx2/adapters/registry.py`):
 Qwen4 Flash-Next, Qwen3.8 27B, Qwen3.6 27B and 35B-A3B, Qwen3.5 4B/9B/122B,
 Nemotron 3 Super and 3.5 Lightning, gpt-oss (and Puzzle), Gemma 4 31B/A4B,
-Gemma3n, MiniCPM-o, Xing4.0, Muse Glimmer, North Mini Code, Laguna XS/S,
+Gemma3n, MiniCPM-o, Xing4.0, Mellum 2.1 Thinking, Muse Glimmer, North Mini Code, Laguna XS/S,
 Granite SWA, Agnes, Hy-V3, LFM2.5-VL and the SmolVLM2/Qwen2.5-VL vision candidates.
 Each declares its default route and per-model defaults; see
 [SERVING.md](docs/SERVING.md) for what each selects.
