@@ -173,6 +173,10 @@ def _recipient_header(name: str) -> str:
     return f" to={name}<|message|>"
 
 
+# The template's switch from a reasoning message to the user's answer.
+_THINKING_RELEASE = "<|eom|><|start|>assistant" + _recipient_header("user")
+
+
 def render_prompt_text(tokenizer, request: dict) -> str:
     """Muse prompt text; ``prompt_tokens`` is its special-token-free encoding."""
     if "messages" not in request:
@@ -608,6 +612,31 @@ class MuseGlimmerAdapter:
         return tuple(
             self.tokenizer.encode(_recipient_header("user"), add_special_tokens=False)
         )
+
+    def thinking_release_token_ids(self):
+        """``<|eom|><|start|>assistant to=user<|message|>``, or None.
+
+        Muse reasons in a ``to=self`` message the template closes with
+        ``<|eom|>``; the answer is the next message, addressed to the user.  A
+        thinking budget forces this switch token by token, so the model
+        leaves reasoning straight into its answer (a bare ``<|eom|>`` would
+        let it open another ``to=self`` message).  It is deliberately not a
+        ``thinking_close_token_ids``: grammars defer to the answer header
+        (``structured_answer_token_ids``), and a tool call never writes it.
+        Declared only when it decodes back exactly.
+        """
+        try:
+            ids = [
+                int(token)
+                for token in self.tokenizer.encode(
+                    _THINKING_RELEASE, add_special_tokens=False
+                )
+            ]
+            if not ids or self.tokenizer.decode(ids) != _THINKING_RELEASE:
+                return None
+        except Exception:  # noqa: BLE001 - undeclared marker, not a load failure
+            return None
+        return tuple(ids)
 
     def request_logits_processors(self, request, *, prompt_length):
         """Return the request-scoped Muse recipient policy, if one is needed."""

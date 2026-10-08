@@ -1802,6 +1802,24 @@ def thinking_close_token_ids(adapter):
     return tuple(int(token) for token in ids) if ids else None
 
 
+def thinking_release_token_ids(adapter):
+    """The ids a thinking budget forces to end reasoning, or None (fail closed).
+
+    The thinking-close marker by default.  An adapter whose grammars defer to
+    an answer header instead (``structured_answer_token_ids``, Muse) declares
+    no close marker -- one would also defer its tool grammars to a switch a
+    call never writes -- but can still end reasoning with a forced switch to
+    the user's answer: it declares that switch as ``thinking_release_token_ids``.
+    Only the thinking guard and the history-mode budget read it.
+    """
+    close = thinking_close_token_ids(adapter)
+    if close is not None:
+        return close
+    accessor = getattr(adapter, "thinking_release_token_ids", None)
+    ids = accessor() if callable(accessor) else None
+    return tuple(int(token) for token in ids) if ids else None
+
+
 def structured_answer_token_ids(adapter, request):
     """The ids opening the answer a client grammar constrains, or None.
 
@@ -10019,7 +10037,7 @@ class ServingEngine:
                             if hidden_reasoning
                             else job.request.get("thinking_budget_mode", "state_aware")
                         )
-                        close_ids = thinking_close_token_ids(adapter) if think_budget else None
+                        close_ids = thinking_release_token_ids(adapter) if think_budget else None
                         if think_budget and close_ids is None:
                             if job.request.get("thinking_budget"):
                                 raise ValueError(
@@ -10041,7 +10059,7 @@ class ServingEngine:
                                     "this exact artifact; none is available"
                                 )
                             if direction is not None and close_ids is None:
-                                close_ids = thinking_close_token_ids(adapter)
+                                close_ids = thinking_release_token_ids(adapter)
                             if direction is not None and len(close_ids or ()) != 1:
                                 # Residual steering reads a single close token.
                                 if job.request.get("thinking_steer_alpha"):
@@ -10107,12 +10125,13 @@ class ServingEngine:
                             and thinking_budget_mode == "history"
                             and thinking_enabled(adapter, job.request)
                         ):
-                            if defer_until is None:
+                            release_ids = thinking_release_token_ids(adapter)
+                            if release_ids is None:
                                 raise ValueError(
                                     "thinking_budget requires an adapter thinking-close marker"
                                 )
                             budget_processor = ThinkingBudgetProcessor(
-                                prompt_len, budget, defer_until
+                                prompt_len, budget, release_ids
                             )
                             processors.append(budget_processor)
                         job.thinking_budget = budget_processor
