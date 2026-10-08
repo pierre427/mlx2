@@ -245,3 +245,316 @@ def test_close_stops_the_writer_thread(tmp_path):
     assert writer is not None
     apc.close()
     assert not writer._thread.is_alive()
+
+
+class _OpenGateOnWait(threading.Event):
+    """job.done whose first wait() releases the held writer, so the victim's
+    write lands exactly inside the waiting collect (the reservation's)."""
+
+    def __init__(self, gate):
+        super().__init__()
+        self._gate = gate
+
+    def wait(self, timeout=None):
+        self._gate.set()
+        return super().wait(timeout)
+
+
+def test_a_restore_replaces_a_kept_hot_victim_synchronously(tmp_path, monkeypatch):
+    """A victim kept hot inside a restore's reservation must not turn the
+    reservation's room-making into background spills under the lowered limit
+    (they stay in _n_bytes, so a restore that fits was deferred)."""
+    gate = threading.Event()
+    real = apc_v2._write_spill_job
+
+    def held_first_write(job):
+        assert gate.wait(10), "the reservation never waited for the write"
+        real(job)
+
+    now = [0.0]
+    apc = _apc(tmp_path, now)
+    key = APCKey("bg-restore")
+    # D: a healthy disk checkpoint.
+    now[0] = 1.0
+    apc.store(key, [5] * 8, _state(8, seed=5))
+    with apc._apc_lock:
+        entry = apc._trie.get(key, [5] * 8)
+        assert apc._spill_entry_locked(key, [5] * 8, entry, reason="idle")
+    monkeypatch.setattr(apc_v2, "_write_spill_job", held_first_write)
+    # A and B resident; storing C evicts A on the writer thread (held).
+    for t, first in ((3.0, 10), (4.0, 20), (5.0, 30)):
+        now[0] = t
+        apc.store(key, [first] * 8, _state(8, seed=first))
+    assert len(apc._spill_jobs) == 1
+    victim_job = apc._spill_jobs[0]
+    victim_job.done = _OpenGateOnWait(gate)
+    # A is reused while its write is in flight, so it will be kept hot.
+    now[0] = 6.0
+    reuse = apc.lookup(key, [10] * 8 + [1], allow_disk_restore=True)
+    assert reuse.hit and reuse.cached_tokens == 8
+    reuse.cache.close()
+    assert not victim_job.done.is_set()
+    # Later writes are not held.
+    monkeypatch.setattr(apc_v2, "_write_spill_job", real)
+
+    now[0] = 7.0
+    hit = apc.lookup(key, [5] * 8 + [1], allow_disk_restore=True)
+    stats = apc.apc_stats["idle_disk"]
+    assert stats["background_spills_kept_hot"] == 1
+    try:
+        # The restore fits once the other residents leave; it must not be
+        # deferred because their bytes were sent to the background writer.
+        assert hit.hit and hit.cached_tokens == 8, hit.miss_reason
+        assert stats["restore_budget_deferrals"] == 0
+        # Only the original store-time spill went to the writer thread.
+        assert stats["background_spills_submitted"] == 1
+        with apc._apc_lock:
+            assert apc._n_bytes <= apc.max_bytes
+    finally:
+        if hit.cache is not None:
+            hit.cache.close()
+        gate.set()
+        apc.close()
+
+
+def _held_payload_bytes(apc):
+    """Evaluated spill payload bytes still referenced by unfinished jobs."""
+    held = 0
+    for job in list(apc._spill_jobs):
+        if job.done.is_set():
+            continue
+        for spill in job.files:
+            for source in (spill.arrays, spill.cache):
+                if isinstance(source, dict):
+                    held += sum(int(a.nbytes) for a in source.values())
+                elif source:
+                    held += sum(int(getattr(c, "nbytes", 0)) for c in source)
+    return held
+
+
+def test_cancelled_in_flight_payloads_count_against_the_cap(tmp_path, monkeypatch):
+    """A cancelled job's evaluated payload stays queued until the writer
+    reaches it; it must keep counting against background_spill_max_bytes, or
+    every cancellation admits another spill while the writer is busy."""
+    gate = threading.Event()
+    started = threading.Event()
+    real = apc_v2._write_spill_job
+
+    def write(job):
+        if threading.current_thread().name == "apcv2-spill-writer":
+            started.set()
+            assert gate.wait(10), "test never released the writer"
+        real(job)
+
+    monkeypatch.setattr(apc_v2, "_write_spill_job", write)
+    now = [0.0]
+    # One entry's payload in flight.
+    apc = _apc(tmp_path, now, background_spill_max_bytes=_entry_bytes())
+    key = APCKey("bg-payload-cap")
+    try:
+        _fill(apc, key, now)
+        assert started.wait(5)  # the writer is busy with the first victim
+        assert _held_payload_bytes(apc) <= apc._background_spill_max_bytes
+        republished = 0
+        for round_ in range(3):
+            victim = next(
+                (job for job in reversed(apc._spill_jobs) if not job.cancelled), None
+            )
+            if victim is None:  # later victims were written synchronously
+                break
+            now[0] += 1.0
+            # Republish the victim's tokens: the replacement cancels its job.
+            apc.store(key, list(victim.tokens), _state(8, seed=100 + round_))
+            assert victim.cancelled
+            republished += 1
+            assert _held_payload_bytes(apc) <= apc._background_spill_max_bytes, (
+                f"round {round_}: writer queue holds {_held_payload_bytes(apc)} "
+                f"payload bytes, cap {apc._background_spill_max_bytes}"
+            )
+        assert republished >= 1  # the first victim was always in flight
+    finally:
+        gate.set()
+        for job in list(apc._spill_jobs):
+            job.done.wait(5)
+        apc.clear(release_memory=False)
+        apc.close()
+
+
+@pytest.mark.parametrize("mode", ["replace", "drop"])
+def test_cancelled_spills_keep_memory_within_budget_and_cap(tmp_path, monkeypatch, mode):
+    """While the writer is stalled, republishing or dropping in-flight
+    victims must not grow live memory past the resident budget plus the
+    in-flight cap (a replaced victim keeps its state through its job)."""
+    import gc
+
+    gate = threading.Event()
+    started = threading.Event()
+    real = apc_v2._write_spill_job
+
+    def write(job):
+        if threading.current_thread().name == "apcv2-spill-writer":
+            started.set()
+            assert gate.wait(10), "test never released the writer"
+        real(job)
+
+    def wide(seed):
+        cache = KVCache()
+        values = mx.full((1, 1, 8, 1024), float(seed), dtype=mx.float32)
+        cache.update_and_fetch(values, values)
+        mx.eval(cache.state)
+        return [cache]
+
+    monkeypatch.setattr(apc_v2, "_write_spill_job", write)
+    probe = APCv2(max_size=8, layout_name="bg-spill-probe")
+    probe.store(APCKey("probe"), [1] * 8, wide(1))
+    entry = int(probe.nbytes)
+    probe.clear(release_memory=False)
+    now = [0.0]
+    apc = APCv2(
+        max_size=64,
+        max_bytes=2 * entry,
+        layout_name="bg-spill-v1",
+        idle_disk_seconds=3600,
+        idle_disk_dir=str(tmp_path),
+        now_fn=lambda: now[0],
+        background_spill=True,
+        background_spill_max_bytes=2 * entry,
+    )
+    key = APCKey(f"bg-cancel-{mode}")
+    try:
+        for t, first in ((1.0, 10), (2.0, 20), (3.0, 30)):
+            now[0] = t
+            apc.store(key, [first] * 8, wide(first))
+        assert started.wait(5)
+        gc.collect()
+        base = mx.get_active_memory()
+        for round_ in range(8):
+            victim = next(
+                (job for job in reversed(apc._spill_jobs) if not job.cancelled), None
+            )
+            if victim is None:  # later victims were written synchronously
+                break
+            now[0] += 1.0
+            if mode == "replace":
+                apc.store(key, list(victim.tokens), wide(100 + round_))
+            else:
+                with apc._apc_lock:
+                    apc._drop_entry_locked(key, list(victim.tokens), victim.entry)
+                apc.store(key, [100 + round_] * 8, wide(100 + round_))
+            assert victim.cancelled
+            del victim
+        gc.collect()
+        grown = mx.get_active_memory() - base
+        assert grown <= apc._background_spill_max_bytes, (
+            f"{grown / entry:.1f} entries of live memory beyond the fill"
+        )
+    finally:
+        gate.set()
+        for job in list(apc._spill_jobs):
+            job.done.wait(5)
+        apc.clear(release_memory=False)
+        apc.close()
+
+
+def _shared_checkpoint_pair(apc, key):
+    """A prompt boundary (8 tokens) and its finished lane (12 tokens) that
+    alias the lane's two recurrent checkpoint snapshots: the boundary pays
+    for them and the finished lane is charged only its increment."""
+    from mlx2.runtime.models.cache import ArraysCache
+
+    kv, gdn = KVCache(), ArraysCache(1)
+    for position, seed in ((4, 1), (8, 2)):
+        values = mx.zeros((1, 1, 4, 64))
+        kv.update_and_fetch(values, values)
+        gdn[0] = mx.full((1, 8, 128, 128), float(seed))  # 0.5 MiB fp32
+        mx.eval(kv.state, gdn[0])
+        gdn.state_checkpoint([position], force=True)
+    mx.eval(gdn._checkpoints)
+    assert apc.store(key, list(range(8)), [kv, gdn]).stored
+    values = mx.zeros((1, 1, 4, 64))
+    kv.update_and_fetch(values, values)
+    gdn[0] = mx.full((1, 8, 128, 128), 3.0)
+    mx.eval(kv.state, gdn[0])
+    assert apc.store(key, list(range(12)), [kv, gdn]).stored
+
+
+def test_a_cancelled_child_spill_charges_the_shared_checkpoints_it_keeps(
+    tmp_path, monkeypatch
+):
+    """Codex review: a COW child's charge excludes the checkpoint snapshots
+    its boundary pays for, but its queued payload holds them.  Cancelled
+    while the writer is stalled, and with the paying boundary gone, the
+    queue alone keeps them alive: the in-flight cap must count them, or
+    further spills are admitted past background_spill_max_bytes.  While the
+    boundary still holds them they are counted once, in its resident
+    charge."""
+    import gc
+
+    gate = threading.Event()
+    started = threading.Event()
+    real = apc_v2._write_spill_job
+
+    def write(job):
+        if threading.current_thread().name == "apcv2-spill-writer":
+            started.set()
+            assert gate.wait(10), "test never released the writer"
+        real(job)
+
+    monkeypatch.setattr(apc_v2, "_write_spill_job", write)
+    small = _entry_bytes()
+    gc.collect()
+    base = mx.get_active_memory()
+    apc = APCv2(
+        max_size=8,
+        layout_name="bg-spill-cow",
+        idle_disk_seconds=3600,
+        idle_disk_dir=str(tmp_path),
+        background_spill=True,
+    )
+    key = APCKey("bg-cow")
+    try:
+        _shared_checkpoint_pair(apc, key)
+        with apc._apc_lock:
+            payer = apc._trie.get(key, list(range(8)))
+            child = apc._trie.get(key, list(range(12)))
+            shared = int(child._apc_unpaid_nbytes)
+            assert shared >= 1 << 20  # both snapshots are charged to the payer
+            # Room for the child's charge plus one small spill, not for the
+            # snapshots as well.
+            apc._background_spill_max_bytes = int(child.nbytes) + small
+            job = apc._prepare_spill_job_locked(key, list(range(12)), child)
+            assert apc._submit_background_spill_locked(job)
+        assert started.wait(5)  # the writer holds the child's whole payload
+        with apc._apc_lock:
+            apc._drop_entry_locked(key, list(range(12)), child)
+            assert job.cancelled
+        gc.collect()
+        held = mx.get_active_memory() - base
+        with apc._apc_lock:
+            accounted = apc.nbytes + apc._queued_spill_nbytes_locked()
+        # The payer still holds and pays for the snapshots: counted once.
+        assert abs(held - accounted) <= 256 << 10, (held, accounted)
+        with apc._apc_lock:
+            apc._drop_entry_locked(key, list(range(8)), payer)
+            assert apc.nbytes == 0 and not apc._shared_buffers
+        del payer, child
+        gc.collect()
+        held = mx.get_active_memory() - base
+        with apc._apc_lock:
+            queued = apc._queued_spill_nbytes_locked()
+        assert held <= apc.nbytes + queued + (256 << 10), (
+            f"queue keeps {held} bytes alive, ledger counts {queued}"
+        )
+        apc.store(key, [70] * 8, _state(8, seed=70))
+        with apc._apc_lock:
+            entry = apc._trie.get(key, [70] * 8)
+            further = apc._prepare_spill_job_locked(key, [70] * 8, entry)
+            assert not apc._submit_background_spill_locked(further), (
+                "a spill was admitted past the in-flight cap"
+            )
+    finally:
+        gate.set()
+        for pending in list(apc._spill_jobs):
+            pending.done.wait(5)
+        apc.clear(release_memory=False)
+        apc.close()

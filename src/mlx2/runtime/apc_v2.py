@@ -18,6 +18,7 @@ import stat
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Hashable, Iterable, List, Optional
@@ -599,6 +600,14 @@ class _SpillJob:
     # Set (with cancelled) when the APC stops waiting for this job; the
     # writer then removes whatever it wrote.
     abandoned: bool = False
+    # Set by the writer (under ``handoff``) when it starts writing; until
+    # then a cancellation releases the payload at once.
+    started: bool = False
+    # The victim's checkpoint snapshot buffers (token -> bytes) at
+    # submission.  ``resident_nbytes`` includes them, but other resident
+    # entries may hold (and pay for) them; the in-flight cap counts a
+    # cancelled job's share only once no resident entry holds it.
+    snapshot_buffers: dict = None
     finished: bool = False
     done: Any = None
     handoff: Any = None
@@ -610,6 +619,20 @@ class _SpillJob:
         # Orders "writer finished" against "APC abandoned the job", so
         # exactly one side removes an abandoned job's files.
         self.handoff = threading.Lock()
+
+    def cancel(self) -> None:
+        """Stop waiting for this job; release its payload if not yet started."""
+        with self.handoff:
+            self.cancelled = True
+            if not self.started:
+                for spill in self.files:
+                    spill.arrays = spill.cache = None
+
+    def payload_held(self) -> bool:
+        return any(
+            spill.arrays is not None or spill.cache is not None
+            for spill in self.files
+        )
 
     def abandon(self) -> bool:
         """Mark abandoned; True if the writer already finished (caller cleans)."""
@@ -710,7 +733,9 @@ class _SpillWriter:
             if job is None:
                 return
             try:
-                if not job.cancelled:
+                with job.handoff:
+                    job.started = not job.cancelled
+                if job.started:
                     _write_spill_job(job)
             except BaseException as exc:  # noqa: BLE001 - reported at publication
                 job.error = exc
@@ -882,7 +907,9 @@ class APCv2(PrefixIndex):
         self._background_spill_max_bytes = int(background_spill_max_bytes)
         self._spill_jobs = []
         self._spill_writer = None
-        # (key, prompt-boundary tokens) -> {finished-turn tokens: entry}.
+        # (key, prompt-boundary tokens) -> {finished-turn tokens: weak ref to
+        # the entry}.  Value retention only; a turn that leaves the trie must
+        # not stay alive (its frozen KV outside the byte count) through it.
         self._turn_supersessions = {}
         self._retention_policy = apc_retention_policy(retention_policy)
         self._retention_stats = {
@@ -1885,7 +1912,8 @@ class APCv2(PrefixIndex):
         deepest prompt boundary; an earlier finished turn on the way means the
         boundary belongs to that turn instead.  Recorded by the boundary's
         tokens, so a republished boundary stays superseded; liveness is
-        checked when the boundary is valued.
+        checked when the boundary is valued, and turns that left the trie are
+        pruned here so a hot boundary's record stays bounded by its live turns.
         """
         probe = list(tokens)[:-1]
         for _ in range(self._SUPERSESSION_WALK_LIMIT):
@@ -1901,34 +1929,48 @@ class APCv2(PrefixIndex):
                 return
             role = getattr(holder, "_apc_retention_role", self._RETENTION_DEFAULT)
             if role == self._RETENTION_PROMPT_BOUNDARY:
-                self._turn_supersessions.setdefault((key, tuple(path)), {})[
+                index = (key, tuple(path))
+                self._live_turn_supersessions_locked(index)
+                self._turn_supersessions.setdefault(index, {})[
                     tuple(tokens)
-                ] = turn
+                ] = weakref.ref(turn)
                 return
             if role == self._RETENTION_DEFAULT:
                 return
             probe = list(path)[:-1]
 
-    def _boundary_superseded_locked(self, key, tokens, entry) -> bool:
-        """True while a stored finished turn above this boundary covers every
-        session the boundary serves (an unowned boundary needs any turn)."""
-        index = (key, tuple(tokens))
+    def _live_turn_supersessions_locked(self, index) -> list:
+        """The finished turns recorded above boundary ``index`` that the trie
+        still holds; records of rejected, dropped, pruned or replaced turns
+        are removed."""
         turns = self._turn_supersessions.get(index)
         if not turns:
-            return False
-        covered = set()
-        for turn_tokens, turn in list(turns.items()):
+            return []
+        key = index[0]
+        live = []
+        for turn_tokens, turn_ref in list(turns.items()):
+            turn = turn_ref()
             try:
                 current = self._trie.get(key, list(turn_tokens))
             except KeyError:
                 current = None
-            if current is not turn:
-                del turns[turn_tokens]  # rejected, dropped or replaced
+            if turn is None or current is not turn:
+                del turns[turn_tokens]
                 continue
-            covered |= set(getattr(turn, "_apc_session_tags", ()))
+            live.append(turn)
         if not turns:
             del self._turn_supersessions[index]
+        return live
+
+    def _boundary_superseded_locked(self, key, tokens, entry) -> bool:
+        """True while a stored finished turn above this boundary covers every
+        session the boundary serves (an unowned boundary needs any turn)."""
+        turns = self._live_turn_supersessions_locked((key, tuple(tokens)))
+        if not turns:
             return False
+        covered = set()
+        for turn in turns:
+            covered |= set(getattr(turn, "_apc_session_tags", ()))
         return set(getattr(entry, "_apc_session_tags", ())) <= covered
 
     def _resident_pin_live(self, entry, now_wall: float) -> bool:
@@ -2184,13 +2226,16 @@ class APCv2(PrefixIndex):
         return int(entry.nbytes) + int(getattr(entry, "_apc_unpaid_nbytes", 0))
 
     def _drop_entry_locked(self, key, tokens, entry) -> None:
-        current = self._trie.pop(key, tokens)
+        try:
+            current = self._trie.pop(key, tokens)
+        except KeyError:
+            return  # already gone (pop raises before changing the trie)
         if current is None:
             return
         job = self._spill_job_of(current)
         if job is not None:
             # Its files are removed when the write is collected.
-            job.cancelled = True
+            job.cancel()
         if self._turn_supersessions:
             self._turn_supersessions.pop((key, tuple(tokens)), None)
         self._ledger_detach_locked(current)
@@ -2471,7 +2516,7 @@ class APCv2(PrefixIndex):
         entry = job.entry
         if getattr(entry, "_apc_background_spill_failed", False):
             return False
-        if self._inflight_spill_nbytes_locked() + int(entry.nbytes) > int(
+        if self._queued_spill_nbytes_locked() + int(entry.nbytes) > int(
             self._background_spill_max_bytes
         ):
             self._disk_stats["background_spill_sync_fallbacks"] += 1
@@ -2488,6 +2533,11 @@ class APCv2(PrefixIndex):
         except Exception:  # noqa: BLE001 - any failure here: write synchronously
             self._disk_stats["background_spill_sync_fallbacks"] += 1
             return False
+        job.snapshot_buffers = {
+            token: self._shared_buffers[token][0]
+            for token in getattr(entry, "_apc_buffer_keys", ())
+            if token in self._shared_buffers
+        }
         entry._apc_spill_job = job
         self._spill_jobs.append(job)
         self._disk_stats["background_spills_submitted"] += 1
@@ -2518,15 +2568,47 @@ class APCv2(PrefixIndex):
             if self._job_entry_current_locked(job)
         )
 
+    def _queued_spill_nbytes_locked(self) -> int:
+        """Bytes the writer queue keeps alive, the in-flight cap's measure.
+
+        A job that stopped counting as reclaim (cancelled, replaced or
+        pruned) left ``_n_bytes`` but still holds its evaluated payload until
+        the writer reaches it, and its victim's state for as long as the
+        victim keeps it (a replaced or pruned entry is closed, not emptied).
+        That is the victim's whole snapshot: its own bytes, plus each shared
+        checkpoint buffer once no resident entry holds (and pays for) it.
+        """
+        total = 0
+        counted = set()
+        for job in self._spill_jobs:
+            if self._job_entry_current_locked(job):
+                total += self._entry_unique_nbytes_locked(job.entry)
+            elif job.payload_held() or job.entry.prompt_cache:
+                shared = job.snapshot_buffers or {}
+                total += max(0, int(job.resident_nbytes) - sum(shared.values()))
+                for token, nbytes in shared.items():
+                    if token not in self._shared_buffers and token not in counted:
+                        counted.add(token)
+                        total += int(nbytes)
+        return total
+
     def _budget_nbytes_locked(self) -> int:
         """Resident bytes for store-time budget checks: in-flight spills are
         already leaving, so they no longer count against the budget."""
         return max(0, int(self._n_bytes) - self._inflight_spill_nbytes_locked())
 
-    def _collect_spills_locked(self, *, wait: bool = False) -> None:
-        """Publish background spills whose writes have finished (all, if wait)."""
+    def _collect_spills_locked(
+        self, *, wait: bool = False, exclude=None, reenforce: bool = True
+    ) -> bool:
+        """Publish background spills whose writes have finished (all, if wait).
+
+        Returns True when a victim stayed resident.  ``exclude`` is a
+        disk-only placeholder a restore is publishing, which disk-limit
+        enforcement must keep; ``reenforce=False`` leaves replacing a victim
+        that stayed resident to the caller.
+        """
         if not self._spill_jobs:
-            return
+            return False
         jobs, self._spill_jobs = self._spill_jobs, []
         pending = []
         unmet = False
@@ -2534,15 +2616,16 @@ class APCv2(PrefixIndex):
             if wait:
                 job.done.wait()
             if job.done.is_set():
-                unmet |= self._publish_spill_job_locked(job)
+                unmet |= self._publish_spill_job_locked(job, exclude=exclude)
             else:
                 pending.append(job)
         self._spill_jobs = pending + self._spill_jobs
-        if unmet and not self._closed:
+        if unmet and reenforce and not self._closed:
             # A victim stayed resident (reused, pinned, or its write failed):
             # the store that chose it was admitted on the assumption it would
             # leave, so pick another victim now.
             self._enforce_entry_limits_locked()
+        return unmet
 
     def _settle_spill_locked(self, entry) -> None:
         """Wait for an entry's in-flight spill and publish it."""
@@ -2552,7 +2635,7 @@ class APCv2(PrefixIndex):
         job.done.wait()
         self._collect_spills_locked()
 
-    def _publish_spill_job_locked(self, job: _SpillJob) -> bool:
+    def _publish_spill_job_locked(self, job: _SpillJob, *, exclude=None) -> bool:
         """Publish one finished job; True if its victim is still resident."""
         entry = job.entry
         entry._apc_spill_job = None
@@ -2589,13 +2672,13 @@ class APCv2(PrefixIndex):
             # write was in flight: keep it resident.  The disk record stays,
             # so a later spill only drops the resident copy.
             self._disk_stats["background_spills_kept_hot"] += 1
-            self._enforce_disk_limit_locked()
+            self._enforce_disk_limit_locked(exclude=exclude)
             return True
         self._finish_spill_locked(
             job.key, job.tokens, entry, reason="pressure", keep_resident=False
         )
         self._disk_stats["background_spills_published"] += 1
-        self._enforce_disk_limit_locked()
+        self._enforce_disk_limit_locked(exclude=exclude)
         return False
 
     @staticmethod
@@ -2755,6 +2838,13 @@ class APCv2(PrefixIndex):
                 published_nbytes, entry=entry
             ):
                 raise _RestoreBudgetUnavailable("frozen APCv2 snapshot exceeds resident byte cap")
+            try:
+                attached = self._trie.get(key, tokens) is entry
+            except KeyError:
+                attached = False
+            if not attached:
+                # Never charge _n_bytes for an entry no lookup can reach.
+                raise FileNotFoundError("APCv2 placeholder left the trie during its restore")
             restored_disk_bytes = sum(
                 (path.stat().st_size for path in self._disk_paths(entry))
             )
@@ -2845,8 +2935,23 @@ class APCv2(PrefixIndex):
     ) -> int:
         if not background:
             # Callers that need the bytes actually free (restore and capsule
-            # reservations) wait for in-flight writes first.
-            self._collect_spills_locked(wait=True)
+            # reservations) wait for in-flight writes first.  A victim that
+            # stays resident is replaced here, synchronously: store-time
+            # re-enforcement would act on this caller's lowered limit, hand
+            # the room to the writer thread (still in _n_bytes, so the
+            # reservation fails) and could evict the placeholder a restore is
+            # publishing.  The byte loop below then counts every victim.
+            if self._collect_spills_locked(
+                wait=True, exclude=exclude, reenforce=False
+            ) and not self._closed:
+                self._enforce_count_pool_locked(
+                    interior=False, limit=self.max_size, hard_cap=hard_cap
+                )
+                self._enforce_count_pool_locked(
+                    interior=True, limit=self.max_interior_entries,
+                    hard_cap=hard_cap,
+                )
+                self._enforce_disk_limit_locked(exclude=exclude)
         if (
             self._idle_disk_dir is None
             or self._budget_nbytes_locked() <= self._resident_entry_budget
@@ -2914,7 +3019,8 @@ class APCv2(PrefixIndex):
         )
 
     def _enforce_count_pool_locked(
-        self, *, interior: bool, limit: int, background: bool = False
+        self, *, interior: bool, limit: int, background: bool = False,
+        hard_cap: Optional[int] = None,
     ) -> None:
         """Spill or drop within one count pool, in retention order."""
         while self._resident_entry_count_locked(interior=interior) > limit:
@@ -2935,7 +3041,8 @@ class APCv2(PrefixIndex):
             progressed = False
             for _rank, _last_access, key, tokens, entry in records:
                 if self._idle_disk_dir is not None and self._spill_entry_locked(
-                    key, tokens, entry, reason="pressure", background=background
+                    key, tokens, entry, reason="pressure", hard_cap=hard_cap,
+                    background=background,
                 ):
                     progressed = True
                     break
@@ -4568,7 +4675,7 @@ class APCv2(PrefixIndex):
         for reason, _removed_key, _removed_tokens, entry in removed_entries:
             job = self._spill_job_of(entry)
             if job is not None:
-                job.cancelled = True  # files removed when collected
+                job.cancel()  # files removed when collected
             if reason != "replaced":
                 self._record_entry_eviction_locked(entry)
             if not (
@@ -4635,7 +4742,12 @@ class APCv2(PrefixIndex):
             )
             stored_entry._apc_disk_pin_expiries = existing_disk_pins
             stored_entry._apc_resident_pin_expiries = existing_resident_pins
-            if retention_role == self._RETENTION_DEFAULT:
+            if (
+                retention_role == self._RETENTION_DEFAULT
+                and self._retention_policy is not None
+            ):
+                # Only value retention reads the index (a superseded
+                # boundary's prior); LRU order never consults it.
                 self._record_turn_supersession_locked(
                     key, list(survivor.exact), stored_entry
                 )
