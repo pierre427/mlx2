@@ -589,6 +589,11 @@ def _default_on_mechanisms(settings):
     if env.get("MLX2_QWEN38_FUSED_GDN") == "1":
         # Qwen3.8-27B: decode and admitted bounded multi-token blocks.
         required.add("qwen38_fused_gdn")
+    if env.get("MLX2_QWEN38_FUSED_GDN_PREFILL") == "1":
+        # Qwen3.8-27B fused GDN prefill prework/norm-gate: B=1 unmasked
+        # prefill chunks of at least 64 rows; every qualifier route prefills
+        # one (diagnostics()["fused_gdn"]["prefill_chunk_calls"]).
+        required.add("qwen38_fused_gdn_prefill")
     invariant = bool((settings.get("prefill_execution") or {}).get("invariant"))
     if moe_nax_gather_selection(settings) in {"gather", "fused"}:
         # Any model whose route settings select it: the Flash-Next profile

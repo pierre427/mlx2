@@ -352,6 +352,9 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "exact_verification",
     }
 )
+# Target-wide keys the adapter consumes before an external policy is split
+# off; they are valid beside an external draft but not part of its receipt.
+TARGET_POLICY_KEYS = frozenset({"fused_gdn", "fused_gdn_prefill", "gdn_state_dtype"})
 _TREE_BATCH_ROUTES = {
     "tree15_b1_chain_b2plus_v1": 1,
     "tree15_b1_b4_chain_b5plus_v1": 4,
@@ -608,6 +611,18 @@ def fused_gdn_policy(policy: dict, default: bool = False) -> bool:
     return enabled
 
 
+def fused_gdn_prefill_policy(policy: dict, default: bool = False) -> bool:
+    """27B fused GDN prefill switch (qwen38_fused_gdn); false kills it.
+
+    Independent of ``fused_gdn`` (decode/verify).  ``default`` is the
+    adapter's own preference (``default_fused_gdn_prefill``).
+    """
+    enabled = policy.get("fused_gdn_prefill", default)
+    if type(enabled) is not bool:
+        raise ValueError("fused_gdn_prefill must be boolean")
+    return enabled
+
+
 def _validate_tree_gdn_state_dtype(external_policy: dict, value: str) -> None:
     """The owned topology kernel currently preserves exact fp32 recurrence."""
 
@@ -821,6 +836,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     # from this class's own __dict__: the Qwen3.5 9B and Qwen3.6 subclasses
     # carry no measurement and keep it off.
     default_fused_gdn = True
+    # Fused GDN prefill prework + swish norm-gate (omlx #3903 kernels in their
+    # Qwen3.5-numerics variant, provenance/qwen38-fused-gdn-prefill.json).
+    # Opt-in through {"fused_gdn_prefill": true} until its GPU gate and A/B
+    # say otherwise.  Own __dict__ only, like default_fused_gdn.
+    default_fused_gdn_prefill = False
     fused_gdn_architecture = "qwen38"
     # Self-MTP draft depth on the native-MTP route when the policy names no
     # num_draft: 3 since 2026-10-02 (Pierre): in-process mtp:2 +30.7%, mtp:3
@@ -862,6 +882,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             policy, vars(type(self)).get("default_fused_gdn", False)
         )
         policy.pop("fused_gdn", None)
+        self.fused_gdn_prefill = fused_gdn_prefill_policy(
+            policy, vars(type(self)).get("default_fused_gdn_prefill", False)
+        )
+        policy.pop("fused_gdn_prefill", None)
         if stream_request is not None:
             if "draft_model" in policy:
                 raise ValueError(
@@ -976,6 +1000,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if self.fused_gdn:
             # Receipt identity only; no runtime module reads this variable.
             self.environment = {**self.environment, "MLX2_QWEN38_FUSED_GDN": "1"}
+        if self.fused_gdn_prefill:
+            # Receipt identity only; no runtime module reads this variable.
+            self.environment = {
+                **self.environment, "MLX2_QWEN38_FUSED_GDN_PREFILL": "1"
+            }
         from ..runtime.models.import_env import assert_profile_applied
 
         # Model modules read GDN/QSDPA selections at import: one imported
@@ -1119,7 +1148,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         from ..runtime.models.qwen38_fused_gdn import configure as configure_fused_gdn
 
         configure_fused_gdn(
-            self.model, self.fused_gdn, architecture=self.fused_gdn_architecture
+            self.model, self.fused_gdn, architecture=self.fused_gdn_architecture,
+            prefill=self.fused_gdn_prefill,
         )
         mx.eval(self.model.parameters())
         if eager_dispatch[0]:
@@ -1510,7 +1540,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             ),
             **(
                 {"fused_gdn": self._fused_gdn_diagnostics()}
-                if getattr(self, "fused_gdn", False) else {}
+                if getattr(self, "fused_gdn", False)
+                or getattr(self, "fused_gdn_prefill", False) else {}
             ),
         }
 
@@ -1533,6 +1564,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             module.fused_gdn_enabled is not enabled for module in layers
         ):
             raise ValueError("selected fused_gdn policy disagrees with live target layers")
+        prefill = bool(getattr(self, "fused_gdn_prefill", False))
+        if (prefill and not layers) or any(
+            module.fused_gdn_prefill_enabled is not prefill for module in layers
+        ):
+            raise ValueError(
+                "selected fused_gdn_prefill policy disagrees with live target layers"
+            )
         contract = self._external_execution_numerics()
         if enabled:
             architecture = getattr(self, "fused_gdn_architecture", "qwen38")
@@ -1542,6 +1580,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 "scope": "initialized-single-token-or-b1-unmasked-width-2-to-17",
                 "verify_prefill": "fused-when-admitted-reference-otherwise",
                 "speculative_rollback": "exact-snapshots",
+            }
+        if prefill:
+            contract["fused_gdn_prefill"] = {
+                "algorithm": "omlx3903-prework-norm-gate-qwen35-numerics-v1",
+                "architecture": getattr(self, "fused_gdn_architecture", "qwen38"),
+                "scope": "b1-unmasked-non-speculative-rows-at-least-64",
+                "recurrence": "reference-gated-delta-update",
             }
         state_receipt = getattr(self, "gdn_state", None)
         state_layers = [module for _, module in modules if is_gdn_layer(module)]

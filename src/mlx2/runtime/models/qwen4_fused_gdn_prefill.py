@@ -81,6 +81,27 @@ c. rms_norm sum: 4 fp32 products per lane then ``simd_sum``, as MLX's
 d. On CPU the eager path's reductions/exp differ from any Metal kernel, so a
    CPU comparison can only be tolerance-level; the CPU tests prove plumbing.
 
+Qwen3.8 27B variant (``architecture="qwen38"``)
+----------------------------------------------
+The 27B shares Flash-Next's GDN geometry exactly (HK 16, HV 48, DK = DV =
+128, conv kernel 4, conv_dim 10240, bf16 conv/norm weights) and the same
+eager conv + SiLU (both inherit ``qwen3_5.GatedDeltaNet._recurrent_core``).
+It differs in two numerics contracts, each already reproduced bit-exactly by
+the qualified 27B decode kernel (``qwen4_fused_gdn`` ``AGNES_NUMERICS``):
+
+* q/k normalization is ``gated_delta.normalize_gdn_qk``: ``mx.fast.rms_norm``
+  (fp32 lane sums of exact squares, one ``simd_sum``, ``rsqrt(sum / DK +
+  1e-6 / DK)``, one bf16 rounding) then ``q * bf16((DK**-0.5)**2)`` and
+  ``k * bf16(DK**-0.5)``.  That is the donor prework's non-L2 branch
+  (``L2 = 0``) with the epsilon corrected from ``1e-6`` to ``1e-6 / DK``.
+* the output gate is ``Qwen3NextRMSNormGated`` -> compiled
+  ``_precise_swiglu``: ``bf16(fp32(rms_norm(y, w)) * (z * sigmoid(z)))``
+  with the runtime-compiled (``metal::exp``) sigmoid, instead of Qwen4's
+  precise sigmoid.
+
+The recurrence stays the layer's own ``_gated_delta_update`` (the 27B's has
+no ``beta_input_dtype``).  The 27B wiring lives in ``qwen38_fused_gdn``.
+
 Left padding:
 
 The eager GDN path never reads ``cache.left_padding`` itself.  Padding acts
@@ -306,55 +327,121 @@ _DECODE_NORM_GATE_SOURCE = """
 """
 
 
-def prefill_prework_source() -> str:
-    """The verify L2 prework with the row count read at run time."""
+#: q/k normalization contracts the prework kernel can reproduce.
+#: ``qwen4``: Flash-Next's direct L2 chain (``qwen4_exp._normalize_qk``).
+#: ``qwen35``: the shared Qwen3.5 chain (``gated_delta.normalize_gdn_qk``,
+#: used by the Qwen3.8 27B): fast RMSNorm with ``eps = 1e-6 / DK`` on the mean,
+#: then ``q * (DK**-0.5)**2`` and ``k * DK**-0.5`` in the activation dtype.
+PREWORK_NUMERICS = ("qwen4", "qwen35")
+#: Output-gate contracts the norm-gate kernel can reproduce.  ``sigmoid`` is
+#: Qwen4's ``RMSNormGated`` (precise fp32 sigmoid); ``swish`` is the Qwen3.5
+#: ``Qwen3NextRMSNormGated`` (compiled ``_precise_swiglu``: fp32 ``nn.silu``,
+#: whose runtime-compiled sigmoid uses ``metal::exp``).
+NORM_GATES = ("sigmoid", "swish")
+
+# Qwen3.5 RMS-normalization epsilon on the mean of squares, spelled exactly as
+# the qualified 27B decode kernel (qwen4_fused_gdn ``AGNES_NUMERICS``) spells
+# it.  float32(1e-6) / 128 is exact and equals float32(1e-06 * (128**-0.5)**2),
+# the value ``normalize_gdn_qk`` hands ``mx.fast.rms_norm``.
+_QWEN35_RMS_EPS = "1.0e-6f / float(DK)"
+
+
+def prefill_prework_source(numerics: str = "qwen4") -> str:
+    """The verify prework with the row count read at run time.
+
+    ``numerics="qwen4"`` is the L2 variant Flash-Next qualified (unchanged).
+    ``numerics="qwen35"`` is the donor's RMS branch (``L2 = 0``) with the
+    Qwen3.5 epsilon; the template ``L2`` selects the branch.
+    """
+    if numerics not in PREWORK_NUMERICS:
+        raise ValueError(f"unsupported GDN prework numerics {numerics!r}")
     source = _VERIFY_PREWORK_SOURCE
-    for old, new in (
+    substitutions = [
         ("uint(NKEEP - S)", "uint(NKEEP) - S_rt"),
         ("S < NKEEP", "S_rt < uint(NKEEP)"),
         ("uint(S)", "S_rt"),
-    ):
+    ]
+    if numerics == "qwen35":
+        substitutions.append(
+            (
+                "rsqrt(sumsq / float(DK) + 1e-6f)",
+                f"rsqrt(sumsq / float(DK) + {_QWEN35_RMS_EPS})",
+            )
+        )
+    for old, new in substitutions:
         if old not in source:
             raise RuntimeError(f"GDN prework source changed: {old!r} missing")
         source = source.replace(old, new)
     return "    const uint S_rt = uint(s_len);\n" + source
 
 
-def prefill_norm_gate_source() -> str:
-    """The decode norm-gate addressed by (row, head) instead of head only."""
+def prefill_norm_gate_source(gate: str = "sigmoid") -> str:
+    """The decode norm-gate addressed by (row, head) instead of head only.
+
+    ``gate="swish"`` replaces the precise sigmoid gate with the Qwen3.5
+    ``zv * sigmoid_fast(zv)`` gate, the form the qualified 27B decode kernel
+    uses for the compiled ``_precise_swiglu``.
+    """
+    if gate not in NORM_GATES:
+        raise ValueError(f"unsupported GDN output gate {gate!r}")
     old = "uint base = head * uint(DV) + lane * 4;"
     if old not in _DECODE_NORM_GATE_SOURCE:
         raise RuntimeError("GDN norm-gate source changed")
-    return _DECODE_NORM_GATE_SOURCE.replace(
+    source = _DECODE_NORM_GATE_SOURCE.replace(
         old,
         "uint base = (threadgroup_position_in_grid.y * uint(HV) + head) * uint(DV)"
         " + lane * 4;",
     )
+    if gate == "swish":
+        for old, new in (
+            (
+                "float sy = 1.0f / (1.0f + metal::precise::exp(metal::abs(zv)));",
+                "float sy = 1.0f / (1.0f + metal::exp(metal::abs(zv)));",
+            ),
+            (
+                "float sig = zv < 0.0f ? sy : 1.0f - sy;",
+                "float sig = zv * (zv < 0.0f ? sy : 1.0f - sy);",
+            ),
+        ):
+            if old not in source:
+                raise RuntimeError(f"GDN norm-gate source changed: {old!r} missing")
+            source = source.replace(old, new)
+    return source
 
 
-_KERNELS = None
+_KERNELS: dict = {}
+
+# Kernel names per variant; the Flash-Next names are the historical ones.
+_PREWORK_NAMES = {
+    "qwen4": "mlx2_qwen4_gdn_prefill_prework",
+    "qwen35": "mlx2_qwen35_gdn_prefill_prework",
+}
+_NORM_GATE_NAMES = {
+    "sigmoid": "mlx2_qwen4_gdn_prefill_norm_gate",
+    "swish": "mlx2_qwen35_gdn_prefill_norm_gate",
+}
 
 
-def _kernels():
-    global _KERNELS
-    if _KERNELS is None:
-        _KERNELS = (
+def _kernels(numerics: str = "qwen4", gate: str = "sigmoid"):
+    key = (numerics, gate)
+    if key not in _KERNELS:
+        _KERNELS[key] = (
             mx.fast.metal_kernel(
-                name="mlx2_qwen4_gdn_prefill_prework",
+                name=_PREWORK_NAMES[numerics],
                 input_names=["qkv", "conv_state", "conv_w", "q_scale", "k_scale", "s_len"],
                 output_names=["q_out", "k_out", "v_out", "conv_out"],
-                source=prefill_prework_source(),
+                source=prefill_prework_source(numerics),
                 ensure_row_contiguous=True,
             ),
             mx.fast.metal_kernel(
-                name="mlx2_qwen4_gdn_prefill_norm_gate",
+                name=_NORM_GATE_NAMES[gate],
                 input_names=["y", "z", "norm_w", "eps"],
                 output_names=["out"],
-                source=prefill_norm_gate_source(),
+                source=prefill_norm_gate_source(gate),
                 ensure_row_contiguous=True,
             ),
         )
-    return _KERNELS
+    return _KERNELS[key]
 
 
 def qwen4_gdn_prefill_prework(
@@ -366,27 +453,39 @@ def qwen4_gdn_prefill_prework(
     num_value_heads: int = NUM_VALUE_HEADS,
     key_head_dim: int = KEY_HEAD_DIM,
     value_head_dim: int = VALUE_HEAD_DIM,
+    numerics: str = "qwen4",
 ):
     """``(q, k, v, next_conv_state)``; callers must run admission first.
 
     ``qkv`` is the raw ``in_proj_qkv`` output ``(1, S, C)``; ``conv_state``
     ``(1, 3, C)`` or ``None`` (zeros, as the eager path).  Shapes out:
     q/k ``(1, S, HK, DK)``, v ``(1, S, HV, DV)``, conv ``(1, 3, C)``.
+    ``numerics`` picks the q/k normalization contract (``PREWORK_NUMERICS``).
     """
+    if numerics not in PREWORK_NUMERICS:
+        raise ValueError(f"unsupported GDN prework numerics {numerics!r}")
     length = int(qkv.shape[1])
     conv_dim = int(qkv.shape[2])
     if conv_state is None:
         conv_state = mx.zeros((1, NKEEP, conv_dim), dtype=qkv.dtype)
-    prework, _ = _kernels()
+    prework, _ = _kernels(numerics, "sigmoid" if numerics == "qwen4" else "swish")
     hk, hv, dk, dv = num_key_heads, num_value_heads, key_head_dim, value_head_dim
+    if numerics == "qwen4":
+        # q_l2 * k.shape[-1] ** -0.5 (qwen4_exp._normalize_qk); k unscaled.
+        q_scale, k_scale = dk**-0.5, 1.0
+    else:
+        # normalize_gdn_qk: the same Python expressions, so the weak scalars
+        # round to the activation dtype exactly as the eager multiplies do.
+        inv_scale = dk ** (-0.5)
+        q_scale, k_scale = inv_scale**2, inv_scale
     return tuple(
         prework(
             inputs=[
                 qkv,
                 conv_state,
                 conv_weight,
-                mx.array(dk**-0.5, dtype=qkv.dtype),
-                mx.array(1.0, dtype=qkv.dtype),
+                mx.array(q_scale, dtype=qkv.dtype),
+                mx.array(k_scale, dtype=qkv.dtype),
                 mx.array(length, dtype=mx.int32),
             ],
             template=[
@@ -397,7 +496,7 @@ def qwen4_gdn_prefill_prework(
                 ("DV", dv),
                 ("NKEEP", NKEEP),
                 ("C", conv_dim),
-                ("L2", 1),
+                ("L2", 1 if numerics == "qwen4" else 0),
             ],
             grid=(32, length, 2 * hk + hv),
             threadgroup=(32, 1, 1),
@@ -420,11 +519,17 @@ def qwen4_gdn_prefill_norm_gate(
     *,
     num_value_heads: int = NUM_VALUE_HEADS,
     value_head_dim: int = VALUE_HEAD_DIM,
+    gate: str = "sigmoid",
 ) -> mx.array:
-    """``RMSNormGated(y, z)`` flattened to ``(1, S, HV*DV)``."""
+    """``RMSNormGated(y, z)`` flattened to ``(1, S, HV*DV)``.
+
+    ``gate`` picks the output-gate contract (``NORM_GATES``).
+    """
+    if gate not in NORM_GATES:
+        raise ValueError(f"unsupported GDN output gate {gate!r}")
     length = int(y.shape[1])
     hv, dv = num_value_heads, value_head_dim
-    _, norm_gate = _kernels()
+    _, norm_gate = _kernels("qwen4" if gate == "sigmoid" else "qwen35", gate)
     return norm_gate(
         inputs=[y, z, norm_weight, mx.array(eps, dtype=mx.float32)],
         template=[("T", y.dtype), ("HV", hv), ("DV", dv)],
@@ -437,6 +542,15 @@ def qwen4_gdn_prefill_norm_gate(
 
 def _shape(value: Any) -> tuple:
     return tuple(getattr(value, "shape", ()))
+
+
+#: architecture -> (prework numerics, output gate).  Only the Qwen3.8 27B
+#: selects ``qwen38``; Qwen3.5 checkpoints with this geometry are not
+#: qualified on this route and stay refused.
+ARCHITECTURE_CONTRACTS = {
+    "qwen4": ("qwen4", "sigmoid"),
+    "qwen38": ("qwen35", "swish"),
+}
 
 
 LEFT_PADDING_NONZERO = "left padding (nonzero)"
@@ -490,6 +604,7 @@ def admit_qwen4_fused_gdn_prefill(
     conv_kernel: int,
     gate_activation: str,
     min_rows: int = PREFILL_MIN_ROWS,
+    architecture: str = "qwen4",
 ) -> FusedGdnAdmission:
     """Pure structural admission; never evaluates an array.
 
@@ -497,7 +612,14 @@ def admit_qwen4_fused_gdn_prefill(
     (``ArraysCache.host_left_padding()``), or ``None`` when it is not known
     on the host.  A padding array is admitted only when the mirror covers
     every row and no row has padding still ahead (all ``<= 0``).
+
+    ``architecture`` names the numerics contract: ``qwen4`` (Flash-Next:
+    direct L2 q/k, sigmoid gate) or ``qwen38`` (Qwen3.8 27B: Qwen3.5 RMS q/k,
+    swish gate, see ``ARCHITECTURE_CONTRACTS``).  Both share one geometry.
     """
+    contract = ARCHITECTURE_CONTRACTS.get(architecture)
+    if contract is None:
+        return FusedGdnAdmission(False, f"unsupported architecture {architecture!r}")
     if training:
         return FusedGdnAdmission(False, "training")
     if sharded:
@@ -514,7 +636,7 @@ def admit_qwen4_fused_gdn_prefill(
         refusal = _left_padding_refusal(left_padding, host_left_padding)
         if refusal is not None:
             return FusedGdnAdmission(False, refusal)
-    if gate_activation != "sigmoid":
+    if gate_activation != contract[1]:
         return FusedGdnAdmission(False, f"output gate {gate_activation!r}")
     geometry = (num_key_heads, num_value_heads, key_head_dim, value_head_dim, conv_kernel)
     expected_geometry = (
@@ -578,10 +700,13 @@ def admit_qwen4_fused_gdn_prefill(
 
 
 __all__ = [
+    "ARCHITECTURE_CONTRACTS",
     "LEFT_PADDING_NONZERO",
     "LEFT_PADDING_UNKNOWN",
+    "NORM_GATES",
     "PREFILL_ENV",
     "PREFILL_MIN_ROWS",
+    "PREWORK_NUMERICS",
     "admit_qwen4_fused_gdn_prefill",
     "prefill_enabled_from_env",
     "prefill_norm_gate_source",

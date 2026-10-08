@@ -1952,6 +1952,13 @@ def default_on_observations(final, initial=None):
             if qwen38.get("enabled") is True
             else 0
         ),
+        # Qwen3.8-27B fused GDN prefill chunks (independent of the decode
+        # switch; "prefill_calls" above also counts bounded catch-up blocks).
+        "qwen38_fused_gdn_prefill": (
+            delta("fused_gdn", "prefill_chunk_calls")
+            if qwen38.get("prefill_enabled") is True
+            else 0
+        ),
         # NAX segmented MoE gather (prefill); "fused" needs gate/up and down.
         "moe_nax_gather": moe_nax_gather_engagement(execution, initial_execution),
         # Qwen3.6 decode slices: one-row fused GDN decode (its own

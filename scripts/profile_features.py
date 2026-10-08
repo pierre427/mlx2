@@ -979,6 +979,13 @@ def _validate_adapter_policy(resolution, route, policy, model, deep):
                 if unknown:
                     raise ValueError(f"Qwen3.6 external draft policy has unknown keys: {sorted(unknown)}")
             allow = module == "qwen36_35b"
+            if module == "qwen38_27b":
+                # The adapter consumes its target-wide keys before it splits
+                # the external policy off (adapters/qwen38_27b.py).
+                policy = {
+                    key: value for key, value in policy.items()
+                    if key not in qwen38_27b.TARGET_POLICY_KEYS
+                }
             if deep:
                 qwen38_27b.inspect_external_policy(policy, model, allow_continuation_strategy=allow)
                 return "qwen38 inspect_external_policy (deep: revision pins hashed)"
