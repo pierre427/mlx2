@@ -130,3 +130,93 @@ def test_optional_tracer_initializes_async_otlp_processor_when_installed():
         assert tracer.enabled is True
     finally:
         tracer.close()
+
+
+def _jittered_clock(seed=0):
+    import random
+
+    rng = random.Random(seed)
+    now = [0.0]
+
+    def clock():
+        now[0] += rng.uniform(0.010, 0.030)
+        return now[0]
+
+    return clock
+
+
+def test_inter_token_samples_stay_bounded_for_long_outputs():
+    # history_size bounds the completed rows; the per-row ITL samples must be
+    # bounded too, or 512 long reasoning outputs pin ~128 MiB of floats and
+    # every /v1/status/batching read sorts millions of them.
+    import gc
+    import tracemalloc
+
+    metrics = BatchRuntimeMetrics(history_size=2, clock=_jittered_clock())
+    gc.collect()
+    tracemalloc.start()
+    try:
+        baseline, _ = tracemalloc.get_traced_memory()
+        for index in range(2):
+            request_id = f"long-{index}"
+            metrics.admitted(request_id, "tenant", 0)
+            metrics.dequeued(request_id, 0)
+            metrics.lane_attached(request_id, 1, "ordinary")
+            for _ in range(50_000):
+                metrics.token(request_id)
+            metrics.terminal(request_id, "completed", "length")
+        gc.collect()
+        retained, _ = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # 100K unbounded float samples cost ~3.2 MB; a bounded sample is far less.
+    assert retained - baseline < 512 * 1024
+    snapshot = metrics.snapshot()
+    assert snapshot["latency_ms"]["itl"]["p50"] is not None
+    assert 0 < snapshot["latency_ms"]["itl"]["count"] <= 2 * 256
+    assert snapshot["counters"]["tokens_delivered"] == 100_000
+
+
+def test_bounded_inter_token_sample_covers_the_whole_decode():
+    # A slow start and a fast tail: the bounded sample must still see both,
+    # not just the most recent gaps.
+    ticks = [0.0]
+    gaps = [0.100] * 1000 + [0.010] * 1000
+
+    def clock():
+        return ticks[0]
+
+    metrics = BatchRuntimeMetrics(history_size=1, clock=clock)
+    metrics.admitted("r", "t", 0)
+    metrics.dequeued("r", 0)
+    metrics.lane_attached("r", 1, "ordinary")
+    metrics.token("r")
+    for gap in gaps:
+        ticks[0] += gap
+        metrics.token("r")
+    metrics.terminal("r", "completed", "length")
+    itl = metrics.snapshot()["latency_ms"]["itl"]
+    assert itl["p95"] == pytest.approx(100.0)
+    assert itl["p50"] < 100.0
+
+
+def test_batching_status_computes_distributions_outside_engine_lock():
+    import threading
+    from types import SimpleNamespace as NS
+
+    from mlx2.serving import ServingEngine
+
+    lock = threading.Lock()
+    seen = {}
+
+    class Metrics:
+        def snapshot(self, **kwargs):
+            seen["engine_lock_held"] = lock.locked()
+            return {"gauges": {}, **kwargs}
+
+    engine = NS(lock=lock, snapshot={}, queued_jobs=3, batch_metrics=Metrics())
+    status = ServingEngine.batching_status(engine)
+    assert status["queue_depth"] == 3
+    # Sorting the ITL history under engine.lock blocks dequeue, submit and the
+    # worker's 1 Hz snapshot publish for the whole computation.
+    assert seen["engine_lock_held"] is False

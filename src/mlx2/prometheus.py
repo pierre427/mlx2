@@ -126,6 +126,16 @@ def _number(value: int | float) -> str:
     return format(value, ".17g")
 
 
+def _label_number(value: int | float) -> str:
+    """A bucket boundary in the shortest round-trip form ("0.1", not
+    "0.10000000000000001"), as the Go and Python clients emit it: Prometheus
+    2.x matches ``le`` as an opaque string."""
+    if isinstance(value, int) or not math.isfinite(value):
+        return _number(value)
+    text = repr(float(value))
+    return text[:-2] if text.endswith(".0") else text
+
+
 class PrometheusBuilder:
     """Deterministic Prometheus text-format builder with family validation."""
 
@@ -199,7 +209,7 @@ class PrometheusBuilder:
         base_labels = dict(labels or {})
         lines = []
         for boundary, count in zip(snapshot.buckets, snapshot.bucket_counts):
-            bucket_labels = {**base_labels, "le": _number(boundary)}
+            bucket_labels = {**base_labels, "le": _label_number(boundary)}
             lines.append(f"{name}_bucket{self._labels(bucket_labels)} {count}")
         lines.append(
             f"{name}_bucket{self._labels({**base_labels, 'le': '+Inf'})} {snapshot.count}"

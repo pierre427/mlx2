@@ -62,7 +62,7 @@ def test_ioreg_parser_uses_per_device_performance_statistics():
 def test_powermetrics_parser_keeps_gpu_and_thermal_fields():
     parsed = parse_powermetrics_plist(
         {
-            "gpu": {"idle_ratio": 0.25, "freq_hz": 1_200_000_000},
+            "gpu": {"idle_ratio": 0.25, "freq_hz": 1200.0},
             "processor": {"gpu_power": 2500},
             "thermal_pressure": "Nominal",
         }
@@ -387,3 +387,50 @@ def test_soc_power_sampler_and_host_collector_close_the_native_samplers():
     collector.close()
     assert sorted(closed) == ["energy", "temperature"]
     assert sampler.sample() is None
+
+
+def test_powermetrics_gpu_freq_hz_is_already_mhz():
+    # /usr/bin/powermetrics prints the plist "gpu" freq_hz from the same double
+    # as "GPU HW active frequency: %0.0f MHz" (unscaled); only the CPU cluster
+    # freq_hz is multiplied by 1e6.
+    parsed = parse_powermetrics_plist(
+        {
+            "gpu": {
+                "freq_hz": 1398.0,
+                "idle_ratio": 0.2,
+                "dvfm_states": [{"freq": 1398, "used_ratio": 0.8}],
+            },
+            "processor": {"gpu_power": 31000.0},
+        }
+    )
+    assert parsed.gpu_frequency_mhz == 1398.0
+
+
+def test_powermetrics_gpu_clock_does_not_replace_ioreport_with_a_scaled_value():
+    from types import SimpleNamespace
+
+    from mlx2.system_monitor import HostCollector, SocPowerReading
+
+    collector = HostCollector(ioreport=False)
+    try:
+        collector._gpus = lambda: (GPUReading(name="AGX", busy_percent=80.0),)
+        collector.soc_power = SimpleNamespace(
+            sample=lambda: SocPowerReading(gpu_frequency_mhz=1400.0),
+            error=None,
+            close=lambda: None,
+        )
+        collector.powermetrics = SimpleNamespace(
+            latest=parse_powermetrics_plist(
+                {"gpu": {"freq_hz": 1398.0, "idle_ratio": 0.2}}
+            ),
+            error=None,
+            close=lambda: None,
+        )
+        reading = collector.sample()
+    finally:
+        collector.powermetrics = None
+        collector.soc_power = None
+        collector.close()
+    # mlx2-top renders this as f"{frequency_mhz:.0f} MHz"; a 1e6-scaled value
+    # printed as "0 MHz" and hid IOReport's correct clock.
+    assert reading.gpus[0].frequency_mhz == 1398.0

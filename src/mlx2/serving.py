@@ -5846,9 +5846,13 @@ class ServingEngine:
                     "memory_waiting",
                 )
             }
-            return self.batch_metrics.snapshot(
-                queue_depth=self.queued_jobs, memory=memory, tenant_id=tenant_id
-            )
+            queue_depth = self.queued_jobs
+        # The metrics copy their history under their own lock; sorting the
+        # latency distributions must not hold engine.lock, which dequeue,
+        # submit and the worker's snapshot publish all take.
+        return self.batch_metrics.snapshot(
+            queue_depth=queue_depth, memory=memory, tenant_id=tenant_id
+        )
 
     def prometheus_metrics(self):
         """Return a non-destructive host-only Prometheus scrape."""

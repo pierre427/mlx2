@@ -715,3 +715,36 @@ def test_http_metrics_endpoint_returns_503_when_export_fails():
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def _shortest(text):
+    value = float(text)
+    shortest = repr(value)
+    return shortest[:-2] if shortest.endswith(".0") else shortest
+
+
+def test_histogram_le_labels_use_shortest_round_trip_form():
+    # Prometheus 2.x stores le verbatim, so le="0.10000000000000001" never
+    # matches a selector, recording rule or alert written as le="0.1".
+    from mlx2.prometheus import (
+        BATCH_SIZE_BUCKETS,
+        REQUEST_DURATION_BUCKETS,
+        TOKEN_COUNT_BUCKETS,
+        TOKEN_LATENCY_BUCKETS,
+    )
+
+    builder = PrometheusBuilder()
+    for name, buckets in (
+        ("mlx2_inter_token_latency_seconds", TOKEN_LATENCY_BUCKETS),
+        ("mlx2_e2e_request_latency_seconds", REQUEST_DURATION_BUCKETS),
+        ("mlx2_request_prompt_tokens", TOKEN_COUNT_BUCKETS),
+        ("mlx2_batch_size", BATCH_SIZE_BUCKETS),
+    ):
+        builder.histogram(name, "latency", CumulativeHistogram(buckets).snapshot())
+    rendered = builder.render()
+    labels = [le for le in re.findall(r'le="([^"]*)"', rendered) if le != "+Inf"]
+    assert labels
+    assert [le for le in labels if le != _shortest(le)] == []
+    assert 'mlx2_inter_token_latency_seconds_bucket{le="0.1"} 0' in rendered
+    assert 'mlx2_inter_token_latency_seconds_bucket{le="0.075"} 0' in rendered
+    assert 'mlx2_e2e_request_latency_seconds_bucket{le="0.32"} 0' in rendered

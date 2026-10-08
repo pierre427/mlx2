@@ -273,10 +273,13 @@ def parse_powermetrics_plist(document: Any) -> PowermetricsReading:
     gpu_power = _optional_float(processor.get("gpu_power"))
     if gpu_power is None:
         gpu_power = _optional_float(gpu.get("gpu_power"))
+    # Despite its name, the gpu dict's freq_hz is in MHz: powermetrics prints
+    # it from the same value as "GPU HW active frequency: N MHz". Only the CPU
+    # clusters' freq_hz is scaled to Hz.
     frequency = _optional_float(gpu.get("freq_hz"))
     return PowermetricsReading(
         gpu_busy_percent=_ratio_to_busy(gpu.get("idle_ratio")),
-        gpu_frequency_mhz=None if frequency is None else frequency / 1_000_000.0,
+        gpu_frequency_mhz=frequency,
         gpu_power_mw=gpu_power,
         thermal_pressure=(
             str(document["thermal_pressure"])

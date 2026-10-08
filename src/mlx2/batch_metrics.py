@@ -84,10 +84,15 @@ def http_metric_route(path: str) -> str:
     return _HTTP_EXACT_ROUTES.get(path, "other")
 
 
-def _percentile(values: list[float], fraction: float) -> float | None:
-    if not values:
+# Per-request inter-token gaps kept for the /v1/status/batching percentiles;
+# the cumulative ITL histogram still observes every gap.
+_ITL_SAMPLES_PER_REQUEST = 256
+
+
+def _percentile(ordered: list[float], fraction: float) -> float | None:
+    """Interpolated percentile of an already sorted list."""
+    if not ordered:
         return None
-    ordered = sorted(values)
     position = (len(ordered) - 1) * fraction
     lower = math.floor(position)
     upper = math.ceil(position)
@@ -98,11 +103,12 @@ def _percentile(values: list[float], fraction: float) -> float | None:
 
 
 def _distribution(values: list[float]) -> dict[str, float | int | None]:
+    ordered = sorted(values)
     return {
-        "count": len(values),
-        "p50": _percentile(values, 0.50),
-        "p95": _percentile(values, 0.95),
-        "p99": _percentile(values, 0.99),
+        "count": len(ordered),
+        "p50": _percentile(ordered, 0.50),
+        "p95": _percentile(ordered, 0.95),
+        "p99": _percentile(ordered, 0.99),
     }
 
 
@@ -114,6 +120,28 @@ def _jain(values: list[float]) -> float | None:
     if square_total <= 0:
         return None
     return total * total / (len(values) * square_total)
+
+
+@dataclass
+class _GapSample:
+    """A bounded, evenly strided sample of one request's inter-token gaps.
+
+    Every gap is kept until the sample fills; then every other kept gap is
+    dropped and the stride doubles, so at most ``_ITL_SAMPLES_PER_REQUEST``
+    gaps cover the whole decode rather than only its tail.
+    """
+
+    values: list[float] = field(default_factory=list)
+    stride: int = 1
+    seen: int = 0
+
+    def add(self, value: float) -> None:
+        if self.seen % self.stride == 0:
+            self.values.append(value)
+            if len(self.values) >= _ITL_SAMPLES_PER_REQUEST:
+                del self.values[1::2]
+                self.stride *= 2
+        self.seen += 1
 
 
 @dataclass
@@ -130,7 +158,7 @@ class _RequestState:
     cached_tokens: int = 0
     prompt_recorded: bool = False
     finish_reason: str | None = None
-    inter_token_ms: list[float] = field(default_factory=list)
+    inter_token_ms: _GapSample = field(default_factory=_GapSample)
     mechanism: str = "pending"
 
 
@@ -285,7 +313,7 @@ class BatchRuntimeMetrics:
                 self._event("first_token", request_id)
             if state.last_token_at is not None:
                 interval = now - state.last_token_at
-                state.inter_token_ms.append(interval * 1000.0)
+                state.inter_token_ms.add(interval * 1000.0)
                 self._histograms["mlx2_inter_token_latency_seconds"].observe(
                     interval
                 )
@@ -377,7 +405,7 @@ class BatchRuntimeMetrics:
                     "ttft_ms": ttft_ms,
                     "service_ms": service_ms,
                     "tokens": state.tokens,
-                    "itl_ms": list(state.inter_token_ms),
+                    "itl_ms": list(state.inter_token_ms.values),
                     "mechanism": state.mechanism,
                 }
             )
