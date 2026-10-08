@@ -56,6 +56,12 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
+    # Re-pinned 2026-10-07 (treecount): qwen38_fused_gdn engagement adds the
+    # 27B's owned tree-kernel launches (execution.fused_gdn.tree_calls), so
+    # the external DFlash2 tree route, whose GDN layers never reach the step
+    # kernel, can pass; this also covers the qwen38_fused_gdn_prefill
+    # observation added by the 27B fused prefill port (b1e53f8b), which had
+    # not re-pinned.  Receipts from 4948b246... must be regenerated.
     # Re-pinned 2026-10-07 (rfix-kad): external-draft observations
     # (external_draft and its draft_fallbacks gate, proposal_distribution,
     # paired_draft_cache, segmented transaction/rollback in both the
@@ -105,7 +111,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # (8a2ced1d..., NAX gather default) must be regenerated.
     # Re-pinned 2026-10-02 (flip integrate): benchmark_adaptive_mtp.py model
     # defaults now use Path.home(), so APPROVED_ADAPTIVE_BENCHMARK_SHA256 moved.
-    "sha256": "4948b246e0f3bda45479953787ff84c9d5f412d2dcd2dd683eed8eb8531815f0",
+    "sha256": "c341a792f9b571adf6096903b0d92dfb977ddc1c90a782cbed800facce816864",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A

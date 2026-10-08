@@ -110,6 +110,34 @@ def test_27b_fused_gdn_is_required_when_selected(qualify):
     assert qualify.feature_observations(final, initial=stale)["qwen38_fused_gdn"] == 0
 
 
+def _q38_gdn(tree_calls, tree_rows, fallbacks=0):
+    return {"execution": {"fused_gdn": {
+        "enabled": True, "decode_calls": 0, "batch_decode_calls": 0,
+        "verify_calls": 0, "prefill_calls": 0, "fallbacks": fallbacks,
+        "tree_calls": tree_calls, "tree_rows": tree_rows,
+    }}}
+
+
+def test_27b_fused_gdn_counts_tree_kernel_engagement(qualify):
+    """qualify-1007 smoke-qwen38-dflash2: tree verify fused, check failed.
+
+    On the external DFlash2 tree route every target GDN layer runs the owned
+    tree kernel (12,720 tree_calls in that smoke) and the step kernel never
+    runs, so a step-only sum read zero and failed the selected feature.
+    """
+    initial = _q38_gdn(0, 0)
+    final = _q38_gdn(12720, 176352, fallbacks=3984)
+    assert qualify.feature_observations(final, initial=initial)["qwen38_fused_gdn"] == 12720
+    # Neither kernel ran during the run: still a failure, tree counters included.
+    idle = _q38_gdn(12720, 176352)
+    assert qualify.feature_observations(idle, initial=idle)["qwen38_fused_gdn"] == 0
+    assert qualify.feature_observations(_q38_gdn(0, 0), initial=initial)["qwen38_fused_gdn"] == 0
+    # A disabled route reports no engagement even when tree counters moved.
+    off = _q38_gdn(5, 50)
+    off["execution"]["fused_gdn"]["enabled"] = False
+    assert qualify.feature_observations(off, initial=initial)["qwen38_fused_gdn"] == 0
+
+
 def test_every_required_default_on_feature_is_observable(qualify):
     for settings in (_settings(), _settings(mtp=True, speculation="self_mtp",
                      mtp_ordinary_handoff={"enabled": True, "max_mtp_width": 3})):

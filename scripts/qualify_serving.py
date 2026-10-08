@@ -1942,13 +1942,16 @@ def default_on_observations(final, initial=None):
             if scores.get("enabled") is True
             else 0
         ),
-        # Qwen3.8-27B reports every admitted fused GDN form. A route passes
-        # this feature only from calls observed after the initial snapshot.
+        # Qwen3.8-27B reports every admitted fused GDN form, including the
+        # owned tree kernel that serves TensorFold tree verify (tree_calls).
+        # A route passes this feature only from calls observed after the
+        # initial snapshot.
         "qwen38_fused_gdn": (
             delta("fused_gdn", "decode_calls")
             + delta("fused_gdn", "batch_decode_calls")
             + delta("fused_gdn", "verify_calls")
             + delta("fused_gdn", "prefill_calls")
+            + delta("fused_gdn", "tree_calls")
             if qwen38.get("enabled") is True
             else 0
         ),

@@ -1641,5 +1641,16 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
 
     def _fused_gdn_diagnostics(self):
         from ..runtime.models.qwen38_fused_gdn import stats
+        from ..runtime.models.qwen38_tree_gdn import stats as tree_stats
 
-        return {"architecture": self.fused_gdn_architecture, **stats(self.model)}
+        # TensorFold tree verify (external DFlash2) runs every GDN layer
+        # through the owned tree kernel and never reaches the step kernel
+        # above, so its launches are reported beside the step counters.  The
+        # tree counters are process-wide (one served model per process).
+        tree = tree_stats()
+        return {
+            "architecture": self.fused_gdn_architecture,
+            **stats(self.model),
+            "tree_calls": int(tree["tree_calls"]),
+            "tree_rows": int(tree["tree_rows"]),
+        }

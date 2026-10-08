@@ -1,5 +1,6 @@
 """27B policy and fused routing regressions; no Metal or artifact loads."""
 import mlx.core as mx
+import mlx.nn as nn
 import pytest
 from mlx2.runtime.models import qwen38_27b
 from mlx2.runtime.models.cache import ArraysCache
@@ -255,3 +256,24 @@ def test_prefill_and_one_token_speculation_are_counted_reference_fallbacks():
     c.start_speculation()
     assert obj._try_fused_decode(*operands(obj), None, c) is None
     assert obj.fused_gdn_counters['last_fallback'] == 'speculative rollback'
+
+
+def test_fused_gdn_diagnostics_export_tree_kernel_engagement(monkeypatch):
+    """Tree verify bypasses the step kernel; its launches must still show.
+
+    The DFlash2 tree route runs every target GDN layer through the owned tree
+    kernel (lane_multi._gdn), never through GatedDeltaNet.__call__, so the
+    step-kernel counters stay zero on that route.
+    """
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
+    from mlx2.runtime.models import qwen38_tree_gdn as tree
+
+    adapter = object.__new__(Qwen3827BAdapter)
+    adapter.model = nn.Module()
+    adapter.fused_gdn_architecture = 'qwen38'
+    monkeypatch.setitem(tree._COUNTERS, 'tree_calls', 7)
+    monkeypatch.setitem(tree._COUNTERS, 'tree_rows', 91)
+    report = adapter._fused_gdn_diagnostics()
+    assert report['tree_calls'] == 7
+    assert report['tree_rows'] == 91
+    assert report['decode_calls'] == report['verify_calls'] == 0
