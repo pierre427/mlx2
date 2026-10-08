@@ -40,7 +40,14 @@ def load(model, draft, num_draft):
 
     adapter = MuseGlimmerAdapter(
         str(Path(model).expanduser()),
-        execution_policy={"draft_model": str(Path(draft).expanduser()), "num_draft": num_draft},
+        # This benchmark compares the DFlash selector implementations
+        # directly.  Keep proposal composition out of both arms; its
+        # request-bound histories are intentionally unavailable here.
+        execution_policy={
+            "draft_model": str(Path(draft).expanduser()),
+            "num_draft": num_draft,
+            "proposal_composition": False,
+        },
     )
     return adapter
 

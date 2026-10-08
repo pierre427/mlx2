@@ -91,7 +91,14 @@ def load(args):
 
     adapter = MuseGlimmerAdapter(
         args.target,
-        execution_policy={"draft_model": args.draft, "num_draft": 4},
+        # This sweep measures raw DFlash block geometry. Proposal composition
+        # has its own request-bound histories and would make this a different
+        # mechanism rather than a block-width comparison.
+        execution_policy={
+            "draft_model": args.draft,
+            "num_draft": 4,
+            "proposal_composition": False,
+        },
     )
     prompts = [
         adapter.prompt_tokens({"messages": [{"role": "user", "content": text}]})
@@ -170,7 +177,7 @@ def summarize(outputs, rounds, elapsed, stats, num_draft):
     accepted = sum(a for _, a in per_round)
     histogram = Counter(a for _, a in per_round)
     verify_tokens = sum(a + 1 for _, a in per_round)
-    return {
+    summary = {
         "tokens": emitted,
         "decode_s": elapsed,
         "tok_s": emitted / elapsed if elapsed else 0.0,
@@ -185,6 +192,16 @@ def summarize(outputs, rounds, elapsed, stats, num_draft):
         "target_max_width": stats.get("target_max_width", 0),
         "draft_max_width": stats.get("draft_max_width", 0),
     }
+    external_rounds = int(stats.get("external_rounds", 0))
+    if external_rounds:
+        summary["phase_ms_per_round"] = {
+            key.removeprefix("external_phase_").removesuffix("_ns"): (
+                float(value) / external_rounds / 1e6
+            )
+            for key, value in sorted(stats.items())
+            if key.startswith("external_phase_") and key.endswith("_ns")
+        }
+    return summary
 
 
 def first_divergence(got, want):
@@ -251,7 +268,12 @@ def main():
         stats = {
             "target_max_width": max(s.get("target_max_width", 0) for s in stats_list),
             "draft_max_width": max(s.get("draft_max_width", 0) for s in stats_list),
+            "external_rounds": sum(s.get("external_rounds", 0) for s in stats_list),
         }
+        for sample in stats_list:
+            for key, value in sample.items():
+                if key.startswith("external_phase_") and key.endswith("_ns"):
+                    stats[key] = stats.get(key, 0) + int(value)
         row = summarize(outputs, rounds, elapsed / args.repeats, stats, num_draft)
         row["tok_s_samples"] = samples
         row["tok_s_median"] = statistics.median(samples)
