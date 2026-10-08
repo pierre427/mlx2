@@ -112,11 +112,21 @@ class ComposedDraftModel:
         {"deterministic_point_mass", "stochastic_exact_law"}
     )
 
+    @classmethod
+    def supports_backend(cls, backend):
+        """Whether ``backend`` publishes a proposal law composition can verify
+        exactly.  Callers deciding a *default* consult this before wrapping;
+        an explicit request is left to fail closed in ``__init__``."""
+        return (
+            getattr(backend, "proposal_distribution", None)
+            in cls._supported_proposal_distributions
+        )
+
     def __init__(self, backend, policy, *, native_mtp_source=None):
         self.backend = backend
         self.policy = ProposalCompositionPolicy.from_value(policy)
         proposal_distribution = getattr(backend, "proposal_distribution", None)
-        if proposal_distribution not in self._supported_proposal_distributions:
+        if not self.supports_backend(backend):
             raise ValueError(
                 "proposal composition requires a backend with exact proposal-law support"
             )

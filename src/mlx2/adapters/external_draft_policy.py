@@ -22,6 +22,10 @@ DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION = {
     "max_sources": 8,
 }
 
+COMPOSITION_DEFAULT_SKIPPED_NO_EXACT_LAW = (
+    "composition default skipped: backend lacks exact proposal-law support"
+)
+
 
 class ExternalDraftAdapterMixin:
     EXTERNAL_DEFAULT_NUM_DRAFT = 3
@@ -112,9 +116,22 @@ class ExternalDraftAdapterMixin:
             and not bool(getattr(self.draft_model, "requires_context_tokens", False))
             and callable(getattr(self.draft_model, "draft_distributions", None))
         ):
-            self.external_policy["proposal_composition"] = dict(
-                DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION
-            )
+            from ..runtime.proposal_composition import ComposedDraftModel
+
+            if ComposedDraftModel.supports_backend(self.draft_model):
+                self.external_policy["proposal_composition"] = dict(
+                    DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION
+                )
+            else:
+                # A default must never turn a servable route into a startup
+                # crash (Laguna's DFlash head publishes no exact law).  An
+                # explicit request still reaches ComposedDraftModel below and
+                # fails closed there.
+                skipped = dict(getattr(self, "skipped_route_defaults", None) or {})
+                skipped["proposal_composition"] = (
+                    COMPOSITION_DEFAULT_SKIPPED_NO_EXACT_LAW
+                )
+                self.skipped_route_defaults = skipped
         # Capture effective head geometry before wrappers add policy receipts.
         # Artifact bytes alone do not pin refinement passes or retained context.
         effective_draft_settings = (

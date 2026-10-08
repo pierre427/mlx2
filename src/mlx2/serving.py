@@ -7599,8 +7599,14 @@ class ServingEngine:
             if process_env:
                 # Behaviour-changing MLX2_* switches no adapter profile pins.
                 settings["process_env"] = process_env
-            if self.skipped_route_defaults:
-                settings["skipped_route_defaults"] = dict(self.skipped_route_defaults)
+            # Server-resolved skips plus any the adapter made at bind time
+            # (e.g. a composition default its drafter cannot run exactly).
+            skipped_route_defaults = {
+                **self.skipped_route_defaults,
+                **dict(getattr(adapter, "skipped_route_defaults", None) or {}),
+            }
+            if skipped_route_defaults:
+                settings["skipped_route_defaults"] = skipped_route_defaults
             if self.verify_bitexact_policy.enabled:
                 # Fails closed on an mlx without the mode.  Recorded in
                 # settings only when enabled so default-off records match.
