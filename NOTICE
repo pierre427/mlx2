@@ -568,3 +568,37 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+------------------------------------------------------------------------------
+
+src/mlx2/runtime/models/granitemoe_swa.py (Granite MoE with sliding-window
+attention) is adapted from mlx-lm-unified revision
+a1fe2bb5056858bc8285b605ebee6b0276c7ea7b, where the lab derived it from
+mlx-lm's mlx_lm/models/granitemoe.py.
+src/mlx2/runtime/models/gpt_oss_puzzle.py is adapted from mlx-lm-unified
+revision 1104ced19ed98800bdaf4ebcdca14bbdeb597c23, where the lab wrote it on
+top of mlx-lm's GPT-OSS blocks; mlx2 keeps those blocks in
+src/mlx2/runtime/models/gpt_oss.py under mlx-lm's own header.
+Neither file is Apple's own, so each carries an attribution line instead of
+an Apple copyright header. The mlx-lm code they build on is licensed under
+the MIT License:
+
+Copyright © 2023 Apple Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

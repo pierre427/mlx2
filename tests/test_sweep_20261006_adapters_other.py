@@ -356,6 +356,15 @@ def test_lab_written_hils_port_has_no_apple_copyright_header():
     assert [name for name in vars(olmo3) if name.startswith("Olmo3")] == ["Olmo3MLP"]
 
 
+@pytest.mark.parametrize("name", ["gpt_oss_puzzle.py", "granitemoe_swa.py"])
+def test_lab_written_model_ports_have_no_apple_copyright_header(name):
+    """The lab wrote these in mlx-lm-unified; NOTICE carries the mlx-lm notice."""
+    root = Path(__file__).resolve().parents[1] / "src" / "mlx2" / "runtime" / "models"
+    head = (root / name).read_text().splitlines()[:5]
+    assert not any("Apple" in line for line in head)
+    assert head[0] == "# SPDX-License-Identifier: MIT"
+
+
 def _diffusion_gemma(monkeypatch, tmp_path, captured):
     import sys
     import types

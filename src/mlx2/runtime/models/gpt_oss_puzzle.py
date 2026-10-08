@@ -1,4 +1,6 @@
-# Copyright © 2026 Apple Inc.
+# SPDX-License-Identifier: MIT
+# Adapted from the lab-written gpt_oss_puzzle.py in mlx-lm-unified; see
+# provenance/gpt-oss-ordinary.json and NOTICE.
 
 """NVIDIA gpt-oss-puzzle: a NAS-pruned ("Puzzle") gpt-oss variant whose
 layers are heterogeneous — per-layer expert count (64 or 128) and per-layer

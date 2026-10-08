@@ -1,4 +1,7 @@
-# Copyright © 2025 Apple Inc.
+# SPDX-License-Identifier: MIT
+# Adapted from the lab-written granitemoe_swa.py in mlx-lm-unified, which
+# derives from mlx-lm's granitemoe.py; see provenance/granite-swa.json and
+# NOTICE.
 
 from dataclasses import dataclass
 from typing import List, Optional
