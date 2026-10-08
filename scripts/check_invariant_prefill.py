@@ -22,6 +22,7 @@ execution order, whose rows differ -- the component that breaks invariance.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -29,6 +30,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+
+
+def array_sha256(array):
+    """Hash the concrete array bytes for a cross-revision bit reference."""
+    return hashlib.sha256(bytes(memoryview(array))).hexdigest()
+
+
+def state_sha256(arrays):
+    digest = hashlib.sha256()
+    for array in arrays:
+        metadata = f"{array.dtype}:{tuple(array.shape)}".encode()
+        digest.update(len(metadata).to_bytes(8, "little"))
+        digest.update(metadata)
+        digest.update(bytes(memoryview(array)))
+    return digest.hexdigest()
 
 
 class Recorder:
@@ -183,6 +199,12 @@ def main():
             except Exception:  # noqa: BLE001 - a cache without a state view
                 pass
         mx.eval(last_hidden, logits, rows, state)
+        bit_reference = {
+            "last_hidden_sha256": array_sha256(last_hidden),
+            "logits_sha256": array_sha256(logits),
+            "rows_sha256": array_sha256(rows),
+            "state_sha256": state_sha256(state),
+        }
         out = []
         nxt = int(mx.argmax(logits, -1).item())
         for _ in range(a.decode):
@@ -194,7 +216,8 @@ def main():
         mx.clear_cache()
         return {"last_hidden": last_hidden, "logits": logits, "rows": rows,
                 "state": state, "tokens": out, "slices": slices,
-                "prefill_s": prefill_s, "components": components}
+                "prefill_s": prefill_s, "components": components,
+                "bit_reference": bit_reference}
 
     def common(x, y):
         """Both arrays cut to their common extent (step-grown KV buffers
@@ -239,7 +262,7 @@ def main():
         for schedule in a.schedules:
             r = run(schedule)
             entry = {"slices": len(r["slices"]), "prefill_s": round(r["prefill_s"], 3),
-                     "tokens": r["tokens"]}
+                     "tokens": r["tokens"], **r["bit_reference"]}
             if ref is None:
                 ref = (schedule, r)
             else:
