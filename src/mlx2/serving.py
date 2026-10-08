@@ -7748,16 +7748,15 @@ class ServingEngine:
                 # speculation route the server did not select is not on this
                 # route.  Mirror the qualified derivation so ``--ordinary``
                 # candidates do not list ``mtp``/``segmented_mtp``.
-                from .contracts import Capability
+                from .qualification import effective_route_capabilities
 
-                unselected = set()
-                if not self.mtp:
-                    unselected |= {Capability.MTP, Capability.SEGMENTED_MTP}
-                if not external_draft:
-                    unselected.add(Capability.EXTERNAL_DRAFT)
-                if not prompt_lookup:
-                    unselected.add(Capability.PROMPT_LOOKUP)
-                route_capabilities = frozenset(route_capabilities) - unselected
+                route_capabilities = effective_route_capabilities(
+                    route_capabilities,
+                    mtp=self.mtp,
+                    external_draft=external_draft,
+                    prompt_lookup=prompt_lookup,
+                    max_lanes=self.max_lanes,
+                )
             else:
                 from .qualification import load_qualified_route
 

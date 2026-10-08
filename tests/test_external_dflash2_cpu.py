@@ -363,6 +363,8 @@ def test_progressive_constructor_and_request_gates_fail_closed():
         num_draft=3,
         completion_batch_size=2,
         progressive_verification_tile=2,
+        minimum_draft_proposals=2,
+        multilane_draft_cap=2,
     )
     uids = batched.insert(
         [[1, 2, 3], [4, 5, 6]], max_tokens=[4, 4]
@@ -374,6 +376,21 @@ def test_progressive_constructor_and_request_gates_fail_closed():
     batched._round(lanes)
     assert batched.scheduler_stats["external_rounds"] == 1
     assert batched.scheduler_stats["external_progressive_verify_rounds"] == 0
+    assert batched.scheduler_stats["external_multilane_draft_cap_rounds"] == 1
+    assert batched.scheduler_stats["external_multilane_draft_cap_lanes"] == 2
+    settings = batched._draft_settings_receipt()["draft_settings"]
+    assert settings["multilane_draft_cap"] == 2
+    assert settings["multilane_draft_cap_rounds"] == 1
+    with pytest.raises(ValueError, match="minimum_draft_proposals"):
+        ExternalDraftBatchGenerator(
+            model,
+            draft_model=draft,
+            binding="bad-cap",
+            num_draft=3,
+            completion_batch_size=2,
+            progressive_verification_tile=2,
+            multilane_draft_cap=1,
+        )
     for kwargs in (
         {"pairwise_selection": "batched"},
         {"fly_verification": True},

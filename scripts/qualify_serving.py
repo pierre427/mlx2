@@ -1640,6 +1640,36 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
             max(0, progressive_launches - progressive_rounds),
             progressive_rows,
         )
+    initial_multilane_cap = initial_policy.get(
+        "progressive_multilane_draft_cap"
+    )
+    final_multilane_cap = final_policy.get(
+        "progressive_multilane_draft_cap"
+    )
+    scheduler_multilane_cap_before = initial_scheduler.get(
+        "external_multilane_draft_cap"
+    )
+    scheduler_multilane_cap_after = scheduler.get(
+        "external_multilane_draft_cap"
+    )
+    multilane_cap_rounds = run_delta(
+        scheduler, initial_scheduler, "external_multilane_draft_cap_rounds"
+    )
+    multilane_cap_lanes = run_delta(
+        scheduler, initial_scheduler, "external_multilane_draft_cap_lanes"
+    )
+    multilane_cap_observed = 0
+    if (
+        type(initial_multilane_cap) is int
+        and initial_multilane_cap > 0
+        and final_multilane_cap == initial_multilane_cap
+        and scheduler_multilane_cap_before == initial_multilane_cap
+        and scheduler_multilane_cap_after == initial_multilane_cap
+    ):
+        multilane_cap_observed = min(
+            multilane_cap_rounds,
+            max(0, multilane_cap_lanes - multilane_cap_rounds),
+        )
     fly_receipt_relaxed = 0
     initial_receipts = (initial or {}).get("recent_receipts") or ()
     for receipt in final.get("recent_receipts", ()):
@@ -1881,6 +1911,7 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
             run_delta(scheduler, initial_scheduler, "external_tensorfold_target_rounds"),
         ),
         "progressive_verification": progressive_observed,
+        "progressive_multilane_draft_cap": multilane_cap_observed,
         "fused_gdn_dynamic_accept": fused_gdn.get(
             "replay_dynamic_rollback_calls", 0
         ),
@@ -3186,6 +3217,26 @@ def main():
                     "probe": report["checks"].get(
                         "progressive_verification_probe"
                     ),
+                }
+            elif feature == "progressive_multilane_draft_cap":
+                keys = (
+                    "external_multilane_draft_cap",
+                    "external_multilane_draft_cap_rounds",
+                    "external_multilane_draft_cap_lanes",
+                )
+                evidence = {
+                    "selected_cap": (
+                        initial["settings"].get("execution_policy") or {}
+                    ).get("progressive_multilane_draft_cap"),
+                    "before": {
+                        key: (initial.get("scheduler") or {}).get(key)
+                        for key in keys
+                    },
+                    "after": {
+                        key: (final.get("scheduler") or {}).get(key)
+                        for key in keys
+                    },
+                    "observation": observed.get(feature, 0),
                 }
             elif feature in {"decode_first", "decode_fairness_slice_floor"}:
                 prefix = "decode_first_" if feature == "decode_first" else "decode_fairness_"

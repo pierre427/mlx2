@@ -321,6 +321,7 @@ def normalize_external_policy(value):
         "proposal_composition",
         "target_verify_row_exact",
         "progressive_verification_tile",
+        "progressive_multilane_draft_cap",
     }
     if set(policy) - allowed:
         raise ValueError("Unsupported Muse execution policy")
@@ -350,6 +351,18 @@ def normalize_external_policy(value):
                 "progressive_verification_tile cannot combine with proposal composition"
             )
         policy["proposal_composition"] = False
+    multilane_cap = policy.get("progressive_multilane_draft_cap")
+    if multilane_cap is not None:
+        num_draft = policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT)
+        if (
+            progressive_tile is None
+            or type(multilane_cap) is not int
+            or not 1 <= multilane_cap <= num_draft
+        ):
+            raise ValueError(
+                "progressive_multilane_draft_cap requires progressive verification "
+                "and must be an integer from 1 to num_draft"
+            )
     if (
         policy
         and "proposal_composition" not in policy
@@ -494,6 +507,11 @@ class MuseGlimmerAdapter:
         )
         if progressive_tile is not None:
             config["progressive_verification_tile"] = progressive_tile
+        multilane_cap = (getattr(self, "external_policy", None) or {}).get(
+            "progressive_multilane_draft_cap"
+        )
+        if multilane_cap is not None:
+            config["progressive_multilane_draft_cap"] = multilane_cap
         return config
 
     def __init__(self, model_path: str, *, execution_policy=None):
@@ -625,6 +643,9 @@ class MuseGlimmerAdapter:
                     {
                         "algorithm": PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
                         "verification_tile": progressive_tile,
+                        "multilane_draft_cap": self.external_policy.get(
+                            "progressive_multilane_draft_cap"
+                        ),
                     },
                     sort_keys=True,
                     separators=(",", ":"),
@@ -659,6 +680,9 @@ class MuseGlimmerAdapter:
                     "state_promotion": "request_private_then_atomic_lane_publish",
                     "execution_scope": "b1",
                     "fixed_fallbacks": ["multi_lane", "logits_processors", "stop_proposal", "short_proposal"],
+                    "multilane_draft_cap": self.external_policy.get(
+                        "progressive_multilane_draft_cap"
+                    ),
                     "performance_claim": False,
                 }
             self.descriptor = replace(
@@ -678,7 +702,7 @@ class MuseGlimmerAdapter:
         if self.draft_model is None:
             raise ValueError("No external draft model bound")
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
-        return ExternalDraftBatchGenerator(self.model, draft_model=self.draft_model, binding=self.identity["fingerprint"], num_draft=self.external_policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT), pairwise_selection=self.external_policy.get("pairwise_selection","host"), progressive_verification_tile=self.external_policy.get("progressive_verification_tile"), **kwargs)
+        return ExternalDraftBatchGenerator(self.model, draft_model=self.draft_model, binding=self.identity["fingerprint"], num_draft=self.external_policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT), pairwise_selection=self.external_policy.get("pairwise_selection","host"), progressive_verification_tile=self.external_policy.get("progressive_verification_tile"), multilane_draft_cap=self.external_policy.get("progressive_multilane_draft_cap"), **kwargs)
 
     def prompt_tokens(self, request: dict) -> list[int]:
         return self.tokenizer.encode(

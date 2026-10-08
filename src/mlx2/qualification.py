@@ -33,19 +33,36 @@ REQUIRED_CHECKS = frozenset(
 )
 
 
-def required_generic_checks(descriptor):
+def effective_route_capabilities(
+    implemented, *, mtp, external_draft, prompt_lookup, max_lanes
+):
+    """Capabilities selected by the bound execution shape."""
+    selected = set(implemented)
+    if not mtp:
+        selected -= {Capability.MTP, Capability.SEGMENTED_MTP}
+    if not external_draft:
+        selected.discard(Capability.EXTERNAL_DRAFT)
+    if not prompt_lookup:
+        selected.discard(Capability.PROMPT_LOOKUP)
+    if int(max_lanes) < 2:
+        selected.discard(Capability.CONTINUOUS_BATCH)
+    return frozenset(selected)
+
+
+def required_generic_checks(descriptor, *, capabilities=None):
     """Require only generic probes the selected adapter can actually serve.
 
     The approved harness uses the route's selected capabilities for the same
     decision. Adapter-owned media checks remain separate and fail closed until
     a reviewed media producer exists.
     """
+    capabilities = descriptor.capabilities if capabilities is None else capabilities
     required = set(REQUIRED_CHECKS)
-    if Capability.TOOLS not in descriptor.capabilities:
+    if Capability.TOOLS not in capabilities:
         required.discard("tools")
-    if Capability.REASONING not in descriptor.capabilities:
+    if Capability.REASONING not in capabilities:
         required.discard("reasoning")
-    if Capability.CONTINUOUS_BATCH not in descriptor.capabilities:
+    if Capability.CONTINUOUS_BATCH not in capabilities:
         required.difference_update({"batch", "mixed_warm"})
     return required
 
@@ -56,6 +73,9 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
+    # Re-pinned 2026-10-08 (progressive width law): a selected multi-lane
+    # draft cap now requires run-local capped-round and capped-lane evidence.
+    # Receipts from c40aedf3... must be regenerated.
     # Re-pinned 2026-10-08 (portable full preflight): every test module that
     # deliberately installs an MLX-refusing import guard now runs in its own
     # interpreter, while retained external-evidence checks cleanly skip when
@@ -121,7 +141,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # (8a2ced1d..., NAX gather default) must be regenerated.
     # Re-pinned 2026-10-02 (flip integrate): benchmark_adaptive_mtp.py model
     # defaults now use Path.home(), so APPROVED_ADAPTIVE_BENCHMARK_SHA256 moved.
-    "sha256": "c40aedf3cab30e89282ba575aea8f40e46b85c56b4e2f2acf416793f311b6453",
+    "sha256": "9a8b210e7b0ad3081bb3bea7089aa816ccf1bc443118992cd4d7940c0cc78271",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -1036,6 +1056,13 @@ def _route_feature_checks(settings):
             # or executing only its fixed-verifier fallbacks proves neither
             # private target state nor atomic publication.
             features.add("progressive_verification")
+        if type((settings.get("execution_policy") or {}).get(
+            "progressive_multilane_draft_cap"
+        )) is int:
+            # The width-aware cap is selected to preserve a physical cohort,
+            # so it needs run-local capped-round evidence in addition to the
+            # generic batch check's observed width.
+            features.add("progressive_multilane_draft_cap")
         if (settings.get("fly_verification") or {}).get("enabled") is True:
             features.add("fly_verification")
         if (settings.get("execution_policy") or {}).get("pairwise_selection") == "batched":
@@ -1293,9 +1320,16 @@ def load_qualified_route(
     if qualified_settings != serving_settings:
         raise ValueError("qualification does not match serving settings")
     checks = record.get("checks", {})
-    required = required_generic_checks(descriptor) | (
-        {"mtp_execution"} if settings["mtp"] else set()
+    selected_for_checks = effective_route_capabilities(
+        descriptor.capabilities,
+        mtp=settings["mtp"],
+        external_draft=settings.get("speculation") == "external_draft",
+        prompt_lookup=settings.get("speculation") == "prompt_lookup",
+        max_lanes=settings.get("max_lanes", 2),
     )
+    required = required_generic_checks(
+        descriptor, capabilities=selected_for_checks
+    ) | ({"mtp_execution"} if settings["mtp"] else set())
     if Capability.GRAMMAR in descriptor.capabilities:
         required.add("structured_output")
     descriptor_checks = required_descriptor_checks(descriptor)
@@ -1367,6 +1401,13 @@ def load_qualified_route(
         capabilities.update({Capability.MTP, Capability.SEGMENTED_MTP})
     if Capability.GRAMMAR in descriptor.capabilities:
         capabilities.add(Capability.GRAMMAR)
+    capabilities = effective_route_capabilities(
+        capabilities,
+        mtp=settings["mtp"],
+        external_draft=settings.get("speculation") == "external_draft",
+        prompt_lookup=settings.get("speculation") == "prompt_lookup",
+        max_lanes=settings.get("max_lanes", 2),
+    )
     # A route that serves quantized KV is approximate by construction; never
     # let its receipt claim the numerically bounded tier.
     # Int8 (W8A8) prefill changes prefill numerics; same tier as quantized KV.

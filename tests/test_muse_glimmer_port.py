@@ -87,9 +87,15 @@ def test_row_exact_external_policy_is_explicit_and_boolean():
 def test_progressive_external_policy_requires_row_exact_host_chain():
     base = {"draft_model": "/draft", "target_verify_row_exact": True}
     selected = normalize_external_policy(
-        {**base, "progressive_verification_tile": 3}
+        {
+            **base,
+            "num_draft": 15,
+            "progressive_verification_tile": 3,
+            "progressive_multilane_draft_cap": 3,
+        }
     )
     assert selected["progressive_verification_tile"] == 3
+    assert selected["progressive_multilane_draft_cap"] == 3
     assert selected["proposal_composition"] is False
     with pytest.raises(ValueError, match="positive integer"):
         normalize_external_policy(
@@ -108,6 +114,19 @@ def test_progressive_external_policy_requires_row_exact_host_chain():
                 **base,
                 "progressive_verification_tile": 3,
                 "proposal_composition": {},
+            }
+        )
+    with pytest.raises(ValueError, match="requires progressive verification"):
+        normalize_external_policy(
+            {**base, "progressive_multilane_draft_cap": 3}
+        )
+    with pytest.raises(ValueError, match="requires progressive verification"):
+        normalize_external_policy(
+            {
+                **base,
+                "num_draft": 15,
+                "progressive_verification_tile": 3,
+                "progressive_multilane_draft_cap": 16,
             }
         )
 

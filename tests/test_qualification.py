@@ -1359,6 +1359,65 @@ def test_progressive_verification_requires_run_local_spanning_observation():
     ] == 0
 
 
+def test_progressive_multilane_cap_requires_run_local_engagement():
+    from mlx2.qualification import required_feature_checks
+    from scripts.qualify_serving import feature_observations
+
+    settings = {
+        "speculation": "external_draft",
+        "execution_policy": {
+            "progressive_verification_tile": 3,
+            "progressive_multilane_draft_cap": 3,
+        },
+    }
+    assert (
+        "feature_progressive_multilane_draft_cap"
+        in required_feature_checks(settings)
+    )
+    initial = {
+        "settings": settings,
+        "scheduler": {
+            "external_multilane_draft_cap": 3,
+            "external_multilane_draft_cap_rounds": 4,
+            "external_multilane_draft_cap_lanes": 8,
+        },
+    }
+    final = {
+        "settings": settings,
+        "scheduler": {
+            "external_multilane_draft_cap": 3,
+            "external_multilane_draft_cap_rounds": 5,
+            "external_multilane_draft_cap_lanes": 10,
+        },
+    }
+    assert feature_observations(final, initial=initial)[
+        "progressive_multilane_draft_cap"
+    ] == 1
+    singleton_only = {
+        **final,
+        "scheduler": {
+            **final["scheduler"],
+            "external_multilane_draft_cap_lanes": 9,
+        },
+    }
+    assert feature_observations(singleton_only, initial=initial)[
+        "progressive_multilane_draft_cap"
+    ] == 0
+    drifted = {
+        **final,
+        "settings": {
+            **settings,
+            "execution_policy": {
+                **settings["execution_policy"],
+                "progressive_multilane_draft_cap": 4,
+            },
+        },
+    }
+    assert feature_observations(drifted, initial=initial)[
+        "progressive_multilane_draft_cap"
+    ] == 0
+
+
 def test_loader_requires_progressive_verification_feature(tmp_path):
     from dataclasses import replace
 
@@ -1379,7 +1438,7 @@ def test_loader_requires_progressive_verification_feature(tmp_path):
     }
     checks = {
         name: {"passed": True}
-        for name in REQUIRED_CHECKS
+        for name in (REQUIRED_CHECKS - {"batch", "mixed_warm"})
         | {"structured_output"}
         | required_feature_checks(settings)
     }
@@ -1405,14 +1464,67 @@ def test_loader_requires_progressive_verification_feature(tmp_path):
         )
     checks["feature_progressive_verification"] = {"passed": True}
     path.write_text(json.dumps(record))
-    assert load_qualified_route(
+    decision = load_qualified_route(
         path,
         runtime=record["runtime"],
         artifact="weights",
         settings=settings,
         descriptor=descriptor,
         name="muse-progressive",
-    ).profile.name == "muse-progressive"
+    )
+    assert decision.profile.name == "muse-progressive"
+    assert Capability.EXTERNAL_DRAFT in decision.profile.capabilities
+    assert Capability.CONTINUOUS_BATCH not in decision.profile.capabilities
+
+
+def test_two_lane_loader_requires_and_selects_continuous_batch(tmp_path):
+    from dataclasses import replace
+
+    from mlx2.adapters.muse_glimmer import MUSE_GLIMMER
+    from mlx2.contracts import Capability
+    from mlx2.qualification import required_feature_checks
+
+    descriptor = replace(
+        MUSE_GLIMMER,
+        capabilities=MUSE_GLIMMER.capabilities | {Capability.EXTERNAL_DRAFT},
+    )
+    settings = {
+        "mtp": False,
+        "speculation": "external_draft",
+        "max_context": 4096,
+        "max_lanes": 2,
+        "execution_policy": {},
+    }
+    checks = {
+        name: {"passed": True}
+        for name in REQUIRED_CHECKS
+        | {"structured_output"}
+        | required_feature_checks(settings)
+    }
+    checks.pop("batch")
+    record = {
+        "passed": True,
+        "runtime": {"source": "abc"},
+        "artifact": "weights",
+        "settings": settings,
+        "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "checks": checks,
+    }
+    path = tmp_path / "qualification.json"
+    path.write_text(json.dumps(record))
+    args = {
+        "runtime": record["runtime"],
+        "artifact": "weights",
+        "settings": settings,
+        "descriptor": descriptor,
+        "name": "muse-b2",
+    }
+    with pytest.raises(ValueError, match="missing or failed"):
+        load_qualified_route(path, **args)
+    checks["batch"] = {"passed": True}
+    path.write_text(json.dumps(record))
+    decision = load_qualified_route(path, **args)
+    assert Capability.CONTINUOUS_BATCH in decision.profile.capabilities
 
 
 def test_external_tree_batch_size_route_is_unqualifiable():

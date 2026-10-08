@@ -449,6 +449,7 @@ class ExternalDraftBatchGenerator:
     prefill_allocator_reclaim = False
     external_varlen_prefill = False
     adaptive_policy = None
+    multilane_draft_cap = None
 
     def __init__(self, model, *, draft_model, binding, completion_batch_size=4,
                  prefill_step_size=2048, prefill_step_autoscale=False,
@@ -466,6 +467,7 @@ class ExternalDraftBatchGenerator:
                  external_prefill_coalesce_min_tokens=1,
                  exact_verification="token",
                  progressive_verification_tile=None,
+                 multilane_draft_cap=None,
                  decode_time_fairness=None,
                  **kwargs):
         import mlx.core as mx
@@ -705,6 +707,17 @@ class ExternalDraftBatchGenerator:
                 "only B1 cohorts use the progressive transaction"
             )
         self.progressive_verification_tile = progressive_verification_tile
+        if multilane_draft_cap is not None and (
+            type(multilane_draft_cap) is not int
+            or not self.minimum_draft_proposals
+            <= multilane_draft_cap
+            <= self.num_draft
+        ):
+            raise ValueError(
+                "multilane_draft_cap must be an integer from "
+                "minimum_draft_proposals to num_draft"
+            )
+        self.multilane_draft_cap = multilane_draft_cap
         # "one" (default, unchanged): one ready token per lane per poll.  A
         # lane still draining a multi-token round sits out the next cohort,
         # so at B>1 a lane that accepted more waits one round of the others
@@ -735,6 +748,9 @@ class ExternalDraftBatchGenerator:
                 external_progressive_verify_rejections=0,
                 external_progressive_verify_full_tiles=0,
                 external_progressive_verify_tile=self.progressive_verification_tile,
+                external_multilane_draft_cap=self.multilane_draft_cap,
+                external_multilane_draft_cap_rounds=0,
+                external_multilane_draft_cap_lanes=0,
             )
         if getattr(self, "external_varlen_prefill", False):
             self.scheduler_stats.update(
@@ -1651,6 +1667,30 @@ class ExternalDraftBatchGenerator:
             else min(self.num_draft, chain_cap),
             min(l.maximum-l.generated-1 for l in cohort),
         )
+        multilane_draft_cap = getattr(self, "multilane_draft_cap", None)
+        active_width = 1
+        if multilane_draft_cap is not None:
+            lanes = getattr(self, "lanes", None)
+            active_width = (
+                sum(not lane.cancelled for lane in lanes.values())
+                if lanes is not None
+                else len(cohort)
+            )
+        # Preserve the long B1 chain, but reduce the fixed-verifier row slab
+        # while multiple lanes compete for the same bounded headroom.  The
+        # explicit policy is identity-bound and this branch is receipt-counted.
+        if (
+            multilane_draft_cap is not None
+            and active_width > 1
+            and requested_count > multilane_draft_cap
+        ):
+            requested_count = multilane_draft_cap
+            _bump(self.scheduler_stats, "external_multilane_draft_cap_rounds")
+            _bump(
+                self.scheduler_stats,
+                "external_multilane_draft_cap_lanes",
+                len(cohort),
+            )
         if tree_budget is not None:
             self.scheduler_stats["external_tree_node_budget_last"] = requested_count
             histogram = self.scheduler_stats["external_tree_node_budget_histogram"]
@@ -3085,6 +3125,13 @@ class ExternalDraftBatchGenerator:
                     "external_proposal_floor_raises"
                 ],
                 "terminal_exhaustion_may_shorten": True,
+                "multilane_draft_cap": self.multilane_draft_cap,
+                "multilane_draft_cap_rounds": self.scheduler_stats.get(
+                    "external_multilane_draft_cap_rounds", 0
+                ),
+                "multilane_draft_cap_lanes": self.scheduler_stats.get(
+                    "external_multilane_draft_cap_lanes", 0
+                ),
             }
         }
 
@@ -4513,6 +4560,11 @@ class ExternalDraftBatchGenerator:
         concurrent = self.dynamic_singleton_tree and active_width > self.dynamic_tree_max_width
         chain_cap = self._chain_draft_cap(active_width) if concurrent else None
         depth = self.num_draft if chain_cap is None else min(self.num_draft, chain_cap)
+        multilane_draft_cap = getattr(self, "multilane_draft_cap", None)
+        if multilane_draft_cap is not None and active_width > 1:
+            # Match the grouping key to the count _propose will actually ask
+            # for, so capped lanes can form one physical target cohort.
+            depth = min(depth, multilane_draft_cap)
         groups = {}
         for lane in ready:
             # Another lane's token budget must not change this lane's proposal

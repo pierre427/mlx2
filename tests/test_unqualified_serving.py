@@ -61,8 +61,11 @@ def test_mtp_ordinary_handoff_runs_unqualified(monkeypatch):
 def test_candidate_mode_still_reports_candidate(monkeypatch):
     engine = _engine(monkeypatch, mtp=False, qualification_mode=True)
     try:
-        assert engine.status()["qualification"] == "candidate"
-        assert engine.status()["route_receipt"] == "candidate_validation"
+        status = engine.status()
+        assert status["qualification"] == "candidate"
+        assert status["route_receipt"] == "candidate_validation"
+        assert "continuous_batch" in status["implemented_capabilities"]
+        assert "continuous_batch" not in status["selected_capabilities"]
     finally:
         engine.close()
 
