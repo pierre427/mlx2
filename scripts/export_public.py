@@ -29,6 +29,40 @@ from pathlib import Path
 
 CODE_ROOTS = {"src", "scripts", "tests"}
 ROOT_FILES = {".gitignore", "LICENSE", "NOTICE", "README.md", "pyproject.toml"}
+# Never published, whatever the allowlist says (Pierre, 2026-10-08): MCP
+# servers and their tests stay private.  A path is private when any of its
+# components names an MCP (``example_mcp/``, ``test_example_mcp.py``, ...).
+PRIVATE_PATH_RE = re.compile(r"(?:^|/)[^/]*mcp[^/]*(?:/|$)", re.IGNORECASE)
+# pyproject.toml is published; lines that declare an MCP extra or console
+# entry point are removed from the public copy so it never points at an
+# excluded module.
+PRIVATE_PYPROJECT_LINE_RE = re.compile(r"^\s*[\"']?[\w.-]*mcp[\w.-]*[\"']?\s*=", re.IGNORECASE)
+
+
+def is_private_path(name: str) -> bool:
+    """True for paths that are never publication inputs (see PRIVATE_PATH_RE)."""
+    return bool(PRIVATE_PATH_RE.search(name))
+
+
+def is_public_code_path(name: str) -> bool:
+    """The publication allowlist minus the private exclusions."""
+    path = Path(name)
+    allowed = name in ROOT_FILES or (
+        len(path.parts) > 1 and path.parts[0] in CODE_ROOTS
+        and path.suffix == ".py"
+        and all(not part.startswith(".") for part in path.parts)
+    )
+    return allowed and not is_private_path(name)
+
+
+def public_text(name: str, text: str) -> str:
+    """The public form of an exported file: MCP declarations dropped from pyproject."""
+    if name != "pyproject.toml":
+        return text
+    return "".join(
+        line for line in text.splitlines(keepends=True)
+        if not PRIVATE_PYPROJECT_LINE_RE.match(line)
+    )
 CREDENTIAL_PATTERNS = [
     r"ghp_[A-Za-z0-9]{20,}",
     r"github_pat_[A-Za-z0-9_]{20,}",
@@ -92,11 +126,7 @@ def _selected_paths(repo: Path, sha: str, include) -> tuple[str, ...]:
             path.is_absolute()
             or path.as_posix() != name or ".." in path.parts
             or any(c in name for c in "\n\r\0*?[")
-            or not (name in ROOT_FILES or (
-                len(path.parts) > 1 and path.parts[0] in CODE_ROOTS
-                and path.suffix == ".py"
-                and all(not part.startswith(".") for part in path.parts)
-            ))
+            or not is_public_code_path(name)
         ):
             raise ValueError(f"not an approved code export path: {name!r}")
         record = run("git", "-C", str(repo), "ls-tree", sha, "--", name)
@@ -131,7 +161,7 @@ def export(repo: Path, ref: str, out: Path, *, include=()) -> tuple[str, int]:
                 text = data.decode("utf-8")
             except UnicodeDecodeError as error:
                 raise ValueError(f"non-UTF-8 payload is not a code export: {member.name}") from error
-            new = text
+            new = public_text(member.name, text)
             for pattern, replacement in subs:
                 new = pattern.sub(replacement, new)
             if new != text:

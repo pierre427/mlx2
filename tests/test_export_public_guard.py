@@ -1,7 +1,7 @@
 """Publication boundary tests: only temporary Git repositories, no network."""
 import importlib.util
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -85,3 +85,32 @@ def test_output_must_be_empty(private_repo, tmp_path):
 def test_reject_binary_payload_disguised_as_code(private_repo, tmp_path):
     with pytest.raises(ValueError, match="binary payload"):
         exporter.export(private_repo, "HEAD", tmp_path / "out", include=["src/mlx2/binary.py"])
+
+
+def test_mcp_code_is_never_a_publication_input():
+    # Pierre, 2026-10-08: MCP servers stay private.
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "export_public.py"
+    spec = importlib.util.spec_from_file_location("export_public_mcp", path)
+    ex = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ex)
+    for private in ("src/mlx2/example_mcp/server.py", "src/mlx2/example_mcp/__init__.py",
+                    "tests/test_example_mcp_cpu.py", "scripts/run_mcp_server.py",
+                    "src/mlx2/MCP/tool.py"):
+        assert not ex.is_public_code_path(private), private
+    for public in ("src/mlx2/server.py", "src/mlx2/compact.py", "pyproject.toml"):
+        assert ex.is_public_code_path(public), public
+    pyproject = (
+        '[project.optional-dependencies]\n'
+        'radio = ["mlx>=0.32"]\n'
+        'example-mcp = ["fastmcp>=2.2,<3"]\n'
+        '[project.scripts]\n'
+        'mlx2-serve = "mlx2.server:main"\n'
+        'mlx2-example-mcp = "mlx2.example_mcp.server:main"\n'
+    )
+    public_text = ex.public_text("pyproject.toml", pyproject)
+    assert "mcp" not in public_text.lower()
+    assert 'radio = ["mlx>=0.32"]' in public_text and "mlx2-serve" in public_text
+    assert ex.public_text("src/mlx2/server.py", "x = 'mcp'\n") == "x = 'mcp'\n"
