@@ -104,7 +104,7 @@ def configure_environment(model_path: Path, policy=None) -> dict[str, str]:
         # them triggered swap under the feature workload on M5; the split
         # projection route remains the ordinary reference and avoids it.
         "MLX_QWEN4_MOE_FUSED_GATE_UP": "0",
-        "MLX_QWEN4_FUSED_EXPERT_KERNEL": "auto",
+        "MLX_QWEN4_FUSED_EXPERT_KERNEL": policy.fused_expert_kernel,
         "MLX_QWEN4_MEGAKERNEL": "0",
         "MLX_LM_COMPILED_DECODE": "0",
         "MLX_LM_SEGMENTED_SELF_MTP": "1",
@@ -955,6 +955,50 @@ class FlashNextAdapter:
                 if getattr(self, "mtp_draft_vocab", None)
                 else {}
             ),
+        }
+
+    def execution_numerics_contract(self):
+        """Bind reusable state to the live expert arithmetic on every block."""
+        # Nemotron reuses prompt/rendering helpers from this adapter but owns
+        # neither the Flash-Next policy nor its Qwen4 expert blocks.
+        if getattr(self, "policy", None) is None:
+            return None
+        modules = getattr(self, "_diagnostic_modules", None)
+        if modules is None:
+            modules = self._snapshot_diagnostic_modules(self.model)
+        blocks = [
+            module
+            for module in modules
+            if hasattr(module, "fused_expert_kernel_mode")
+        ]
+        if not blocks:
+            raise ValueError("Flash-Next expert arithmetic contract found no MoE blocks")
+        switches = [getattr(block, "switch_mlp", None) for block in blocks]
+        return {
+            "flash_next_expert_arithmetic_v1": {
+                "fused_expert_kernel": sorted(
+                    {str(block.fused_expert_kernel_mode) for block in blocks}
+                ),
+                "routed_decode": sorted(
+                    {
+                        str(getattr(switch, "routed_decode_mode", "off"))
+                        for switch in switches
+                    }
+                ),
+                "window_consumers": sorted(
+                    {
+                        str(consumer)
+                        for block in blocks
+                        for consumer in getattr(block, "moe_window_consumers", ())
+                    }
+                ),
+                "routed_candidate": sorted(
+                    {
+                        str(getattr(switch, "routed_candidate_mode", "off"))
+                        for switch in switches
+                    }
+                ),
+            }
         }
 
     def close(self):

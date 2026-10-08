@@ -65,6 +65,82 @@ def test_flash_next_profile_pins_the_nax_gather_at_every_value(tmp_path, monkeyp
     assert os.environ["MLX2_MOE_NAX_GATHER"] == "off"
 
 
+def test_flash_next_profile_exposes_a_bound_stock_expert_reference(tmp_path):
+    from mlx2.adapters.flash_next import configure_environment
+
+    default = FlashNextPolicy()
+    assert "fused_expert_kernel" not in default.as_dict()
+    assert configure_environment(tmp_path, default)[
+        "MLX_QWEN4_FUSED_EXPERT_KERNEL"
+    ] == "auto"
+
+    stock = FlashNextPolicy.from_mapping(
+        {"fused_expert_kernel": "stock", "moe_routed_decode": "off"}
+    )
+    assert stock.as_dict()["fused_expert_kernel"] == "stock"
+    assert configure_environment(tmp_path, stock)[
+        "MLX_QWEN4_FUSED_EXPERT_KERNEL"
+    ] == "stock"
+    with pytest.raises(ValueError, match="fused_expert_kernel"):
+        FlashNextPolicy.from_mapping({"fused_expert_kernel": "tile4"})
+    with pytest.raises(ValueError, match="requires moe_routed_decode off"):
+        FlashNextPolicy.from_mapping({"fused_expert_kernel": "stock"})
+
+
+def test_flash_next_expert_arithmetic_contract_splits_auto_from_stock():
+    from mlx2.adapters.flash_next import FlashNextAdapter
+    from mlx2.runtime.streamed_load import force_stock_expert_arithmetic
+
+    class Block:
+        def __init__(self):
+            self.fused_expert_kernel_mode = "auto"
+            self.moe_window_consumers = {"verify"}
+            self.switch_mlp = SimpleNamespace(
+                routed_decode_mode="gate_up_down_shared",
+                routed_candidate_mode="gate_up_down",
+            )
+
+        def set_moe_routed_decode_mode(self, value):
+            self.switch_mlp.routed_decode_mode = value
+
+        def set_moe_window_consumers(self, value):
+            self.moe_window_consumers = set(value)
+
+        def set_fused_expert_kernel_mode(self, value):
+            self.fused_expert_kernel_mode = value
+
+        def set_moe_routed_candidate_mode(self, value):
+            self.switch_mlp.routed_candidate_mode = value
+
+    streamed = Block()
+    force_stock_expert_arithmetic(
+        SimpleNamespace(named_modules=lambda: (("layer", streamed),))
+    )
+    adapter = SimpleNamespace(policy=object(), _diagnostic_modules=(streamed,))
+    stock = FlashNextAdapter.execution_numerics_contract(adapter)
+    assert stock == {
+        "flash_next_expert_arithmetic_v1": {
+            "fused_expert_kernel": ["stock"],
+            "routed_decode": ["off"],
+            "window_consumers": [],
+            "routed_candidate": ["off"],
+        }
+    }
+
+    automatic = Block()
+    adapter._diagnostic_modules = (automatic,)
+    auto = FlashNextAdapter.execution_numerics_contract(adapter)
+    assert auto != stock
+    assert auto["flash_next_expert_arithmetic_v1"] == {
+        "fused_expert_kernel": ["auto"],
+        "routed_decode": ["gate_up_down_shared"],
+        "window_consumers": ["verify"],
+        "routed_candidate": ["gate_up_down"],
+    }
+
+    assert FlashNextAdapter.execution_numerics_contract(SimpleNamespace()) is None
+
+
 @pytest.mark.parametrize("settings", [{"num_draft": 0}, {"num_draft": True},
     {"shared_qsa_suffix": "yes"}, {"async_qsa_promotion": 1},
     {"private_delta_min_context": -1}, {"eager_dispatch": 1},

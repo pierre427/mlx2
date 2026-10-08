@@ -446,7 +446,10 @@ def replay_counterfactual(
     """
     import numpy as np
 
+    if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
+        raise ValueError("counterfactual capacity must be a positive integer")
     (layers, units, records) = read_trace(trace_path)
+    effective_capacity = min(capacity, int(units))
     counts = None
     if atlas is not None:
         counts = np.asarray(atlas.counts if isinstance(atlas, Atlas) else atlas)
@@ -454,10 +457,16 @@ def replay_counterfactual(
             counts = None
     per_layer = [records[records[:, 0] == layer][:, 1] for layer in range(layers)]
 
+    # The actual plain-LRU policy is the comparison baseline even when a
+    # caller requests only hypothetical pin fractions.
+    fractions = [float(max(0.0, min(0.5, value))) for value in pin_fractions]
+    if 0.0 not in fractions:
+        fractions.insert(0, 0.0)
+    fractions = list(dict.fromkeys(fractions))
+
     rows = []
-    for fraction in pin_fractions:
-        fraction = float(max(0.0, min(0.5, fraction)))
-        pin_budget = int(capacity * fraction)
+    for fraction in fractions:
+        pin_budget = int(effective_capacity * fraction)
         hits = 0
         total = 0
         layer_rows = []
@@ -465,14 +474,13 @@ def replay_counterfactual(
             pinned = frozenset()
             if counts is not None and pin_budget > 0:
                 eligible = np.where(counts[layer] >= min_samples)[0]
-                if eligible.size == 0:
-                    # Nothing has enough observations behind it to be trusted;
-                    # the honest counterfactual is "no pinning happened".
-                    eligible = np.argsort(counts[layer])[::-1][:pin_budget]
-                    eligible = eligible[counts[layer][eligible] > 0]
-                order = eligible[np.argsort(counts[layer][eligible])[::-1]]
+                order = eligible[
+                    np.argsort(counts[layer][eligible], kind="stable")[::-1]
+                ]
                 pinned = frozenset(int(unit) for unit in order[:pin_budget])
-            (layer_hits, layer_total) = _lru_hit_rate(sequence, capacity, pinned)
+            (layer_hits, layer_total) = _lru_hit_rate(
+                sequence, effective_capacity, pinned
+            )
             hits += layer_hits
             total += layer_total
             layer_rows.append(
@@ -507,7 +515,8 @@ def replay_counterfactual(
             "atlas is collect-only and never influenced residency. Wall-clock "
             "numbers from a streamed run are not benchmarks."
         ),
-        "capacity_experts": int(capacity),
+        "capacity_experts": effective_capacity,
+        "requested_capacity_experts": capacity,
         "layers": layers,
         "units_per_layer": units,
         "actual_policy": "lru",

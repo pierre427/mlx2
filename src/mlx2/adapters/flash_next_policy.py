@@ -140,6 +140,9 @@ class FlashNextPolicy:
     # neutral (qualification/runs/omlx-l2-routed-reach-20260930). "off"
     # restores the composed block.
     moe_routed_decode: str = "gate_up_down_shared"
+    # Explicit resident reference for routes that use stock switch arithmetic.
+    # It is execution-policy bound and never selected as a fallback.
+    fused_expert_kernel: str = "auto"
     # omlx #4038 two-launch hyper-connection decode (MLX_QWEN4_HC_DECODE):
     # GatedResidual calls of 1..8 folded rows (decode, verify windows) run in
     # two launches instead of 13-17, bit-identical to the composed ops on
@@ -364,6 +367,17 @@ class FlashNextPolicy:
                 "moe_routed_decode must be off, gate_up, gate_up_down, "
                 "gate_up_down_shared, or two_launch"
             )
+        if self.fused_expert_kernel not in {"auto", "stock"}:
+            raise ValueError("fused_expert_kernel must be auto or stock")
+        if self.fused_expert_kernel == "stock":
+            if self.moe_routed_decode != "off":
+                raise ValueError(
+                    "fused_expert_kernel stock requires moe_routed_decode off"
+                )
+            if self.moe_window_consumers():
+                raise ValueError(
+                    "fused_expert_kernel stock requires every moe_window consumer off"
+                )
         if self.qsa_stage1_direct_selector not in {"off", "direct8", "direct4", "gvr"}:
             raise ValueError(
                 "qsa_stage1_direct_selector must be off, direct8, direct4, or gvr"
@@ -589,6 +603,8 @@ class FlashNextPolicy:
             del values["fused_gdn_verify_max_steps"]
         if self.moe_routed_decode == _DEFAULTS["moe_routed_decode"]:
             del values["moe_routed_decode"]
+        if self.fused_expert_kernel == _DEFAULTS["fused_expert_kernel"]:
+            del values["fused_expert_kernel"]
         if self.qsa_stage1_direct_selector == "off":
             del values["qsa_stage1_direct_selector"]
         if self.hc_decode_kernels == _DEFAULTS["hc_decode_kernels"]:

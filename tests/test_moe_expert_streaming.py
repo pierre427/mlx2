@@ -854,9 +854,27 @@ def test_counterfactual_ignores_units_below_the_trust_floor(tmp_path):
     report = expert_atlas.replay_counterfactual(
         trace, capacity=4, atlas=counts, pin_fractions=(0.5,), min_samples=1_000_000
     )
-    # Every unit is below min_samples; the fallback pins only units that were
-    # actually observed, and never invents one with a zero count.
-    assert report["rows"][0]["layers"][0]["pinned_units"] <= 2
+    rows = {row["pin_fraction"]: row for row in report["rows"]}
+    assert rows[0.0]["page_ins_vs_lru"] == 0
+    assert rows[0.5]["layers"][0]["pinned_units"] == 0
+
+
+def test_counterfactual_clamps_requested_capacity_to_expert_count(tmp_path):
+    trace = tmp_path / "trace.bin"
+    records = np.array([[0, 0], [0, 1], [0, 2], [0, 3]], dtype=np.uint32)
+    trace.write_bytes(
+        expert_atlas.TRACE_MAGIC + struct.pack("<II", 1, 4) + records.tobytes()
+    )
+    report = expert_atlas.replay_counterfactual(
+        trace,
+        capacity=100,
+        atlas=np.ones((1, 4), dtype=np.uint64),
+        pin_fractions=(0.5,),
+        min_samples=1,
+    )
+    assert report["requested_capacity_experts"] == 100
+    assert report["capacity_experts"] == 4
+    assert report["rows"][1]["pinned_per_layer"] == 2
 
 
 # ---------------------------------------------------------------------------
