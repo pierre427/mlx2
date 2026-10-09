@@ -829,3 +829,55 @@ checks do not qualify Muse GPU execution or select its external route.
   ordinary candidate route; because that artifact uses Transformers' already
   sandboxed renderer, it is compatibility evidence rather than execution of
   one of the six replaced custom renderers.
+
+## 2026-10-08 — Clef joint-schema decision adapter (mlx-vlm #2459)
+
+- Source: `Blaizzy/mlx-vlm` PR #2459, merged commit
+  `01d6ebaeaa4f2dc2394204798a2032e38d8a2841` (MIT), primarily
+  `mlx_vlm/models/clef/clef.py`.
+- mlx2 adapts the Clef prompt, span pooling, evidence-routing layers, and joint
+  field decoder into the standalone `mlx2-decisions` service. The adapter
+  reuses mlx2's ordinary Qwen forward path, excludes the vision tower from
+  materialization, and does not enter the causal-LM scheduler, APCv2, or the
+  generation lifecycle.
+- Current scope is text-only `noul`, `choice`, and `score` decisions for the
+  published Qwen3.5 9B and Qwen3.8 27B Clef topologies. Images, video,
+  generation, unknown model families, and incompatible artifacts fail closed.
+- Full source/artifact revisions, file hashes, license text, modifications, and
+  validation boundaries are recorded in
+  [`provenance/clef-decision.json`](../provenance/clef-decision.json) and
+  [`provenance/clef-decision.NOTICE`](../provenance/clef-decision.NOTICE).
+- State on this public source: implemented and selectable by the dedicated
+  service, but unqualified. A different, private-main source identity passed
+  13/13 production gates for the pinned Clef-Flash 9B artifact; the public-safe
+  aggregate and bounded Prometheus observations are retained under
+  `qualification/runs/decision-model-full-qualification-20261009/`. No private
+  receipt is included, and no performance or persistent-deployment claim is
+  made.
+
+## 2026-10-08 — Candidate-scoring decision families
+
+- Decision 2.0 Lux 9B: prompt, package validation, and F32 shared
+  candidate/query head adapted from `ggml-org/llama.cpp` PR #30158 at
+  `3c64a581d4f95bb2de409d383741fa5b18d84345` (MIT; open at intake).
+- pplx-decider v1 27B: trained System One prompt, code-token mapping, calibrated
+  temperature, and separate 255-row readout adapted from
+  `sgl-project/sglang` PR #42183 at
+  `6d7712222798f9728eba8bd603afe50a037e063c` (Apache-2.0; merged).
+- JEV 9B: prompt, verbalizers, bias, and per-type calibration adapted from
+  `Blaizzy/mlx-vlm` PR #2466 at
+  `681af1cc55bea1acd1d4d2b5ce1f530ce8e232d1` (MIT; open at intake).
+- The families share a decision-only Qwen trunk owner, serialization, request
+  surface, and evidence-state receipts. Their trained prompt and tensor math
+  remain separate under `src/mlx2/decisions/candidates/`; none enters the LM
+  scheduler, generation lifecycle, or APCv2.
+- Exact source and artifact revisions, hashes, license attribution,
+  modifications, and validation boundaries are in
+  [`provenance/candidate-decisions.json`](../provenance/candidate-decisions.json)
+  and
+  [`provenance/candidate-decisions.NOTICE`](../provenance/candidate-decisions.NOTICE).
+- State on this public source: implemented and selectable only through
+  `mlx2-decisions`, but unqualified. A different, private-main source identity
+  passed 13/13 production gates per pinned family. The public projection keeps
+  aggregate statistics and bounded Prometheus observations, not source-bound
+  receipts. Those observations are not performance tests.

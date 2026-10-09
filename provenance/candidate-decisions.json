@@ -1,0 +1,122 @@
+{
+  "notice": "provenance/candidate-decisions.NOTICE",
+  "sources": {
+    "decision2": {
+      "repository": "https://github.com/ggml-org/llama.cpp",
+      "pull_request": "https://github.com/ggml-org/llama.cpp/pull/30158",
+      "revision": "3c64a581d4f95bb2de409d383741fa5b18d84345",
+      "state_at_intake": "open",
+      "license": "MIT",
+      "license_sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+      "files": {
+        "conversion/decision2.py": "7575180de1192f8ada501dd94513fe99ec42dc6085561f9f10ecd5c10ad3a910",
+        "tools/server/server-decision.cpp": "0b9ef91fe0d7f14f7c9d53ec839c998c359138462500a0ca7d2f2e0f90bf9f53",
+        "src/llama-graph.cpp": "7cbf8835dfefce8de8f67e161eb7b809b6ce1d26ba2376224e224fdc147aa120"
+      }
+    },
+    "pplx_decider": {
+      "repository": "https://github.com/sgl-project/sglang",
+      "pull_request": "https://github.com/sgl-project/sglang/pull/42183",
+      "revision": "6d7712222798f9728eba8bd603afe50a037e063c",
+      "state_at_intake": "merged",
+      "license": "Apache-2.0",
+      "license_sha256": "1495e1e757ef4d0925a2350563cf5754bb23c51701a8ec4fb3c5cdcbedae6747",
+      "files": {
+        "python/sglang/srt/entrypoints/systemone/serving.py": "4acef7a496288c68fe5d6debd0201d1bec515e8881a84a0b6dc7a4d0b5b1d0f1",
+        "python/sglang/srt/models/qwen3_5.py": "8432120d4a2ccc2bff2e17862e82cd6336f49c5d940f14a9f1305de9710b7da3",
+        "python/sglang/srt/configs/model_config.py": "af064a66ff1b0aafc349c847a2d4b4d10056be57d820a18d72466c490384ee86"
+      }
+    },
+    "jev": {
+      "repository": "https://github.com/Blaizzy/mlx-vlm",
+      "pull_request": "https://github.com/Blaizzy/mlx-vlm/pull/2466",
+      "revision": "681af1cc55bea1acd1d4d2b5ce1f530ce8e232d1",
+      "state_at_intake": "open",
+      "license": "MIT",
+      "license_sha256": "f74c448746be3376e27dee43e2be9ec9d55f4820cd7466c603a6c7d1fd2d25b8",
+      "files": {
+        "mlx_vlm/models/jev/jev.py": "1ac07c2d3dc0e8f66987150eb813369ff517f4fea0773e0b7814f2fcd208355d",
+        "mlx_vlm/models/jev/config.py": "5b8aaf43017239fb3f418d510cf6436d17ef95a4e3b162ac67065c63f6a61a08",
+        "mlx_vlm/models/jev_text/jev_text.py": "a4485bab96b873ee65aa3c232267f7f58883c429536fb2148f409f5f645f7c68",
+        "mlx_vlm/models/jev_text/config.py": "660a9f6b0d21a033e5a49ba3904ddba4b6e7df981808a49b25ce1f241778a6bd"
+      }
+    }
+  },
+  "reference_artifacts": {
+    "decision2_lux_9b": {
+      "repository": "vllm-sr/Decision-2.0-Lux-9B",
+      "revision": "e0cd13890ba2995c8ad1a464ff0cbd817f1aed7a",
+      "license": "Apache-2.0",
+      "hashes": {
+        "config.json": "31d19d0b9ea246729c9b2964b219728ac0c51714b8c3bb231d757bef2d1cda2c",
+        "decision_config.json": "f274ab0841577c46c746321a2f238e15087d5c44d3aeb32b447aedfb9c47e313",
+        "backbone/config.json": "fe4a44abcba0abed76d80f4840b761704a29236113cafd9cd7c84c6435f511c6",
+        "backbone/model.safetensors.index.json": "d6cee5639ed3cacfdfc0f76d5810e08da55f349a2879656675356cd7b2550d5c",
+        "decision_head.safetensors": "47f7b4d7e781b1648bdedcd176175889d284d5e982a3be6e70281fddb144d102"
+      }
+    },
+    "pplx_decider_27b": {
+      "repository": "perplexity-ai/pplx-decider-v1-27b",
+      "revision": "b01a5cbaca5391f73bd55103d4f27e8982cd5e60",
+      "license": "Apache-2.0",
+      "hashes": {
+        "config.json": "687f20bf493b8ee787dadaf338cf6df644dad44e32bcd2c3677a47c6c213d8b3",
+        "decision_config.json": "bacbcbb281a53af5ef5cc6c9028601097d155bf981129f18a727219517921dcd",
+        "model.safetensors.index.json": "dc39d771cb240f775399e1845b11d081d8e007f14eecae3b780bc6272b128a46",
+        "readout.safetensors": "5b397c635e8677de8fcc971fcd33b9c6d2ecfe2b0e5690d4fc49c6cc0b78fd92"
+      }
+    },
+    "jev_9b_mlx_8bit": {
+      "repository": "nativ-community/JEV-9B-MLX-8bit",
+      "revision": "c0eafb30e090cb94cff6a762bd2c67baba29f131",
+      "license": "Apache-2.0",
+      "hashes": {
+        "config.json": "d4ee18dac3d269149a80920c7fa6e4b8c34fec03d995ed69c7c616a4137bfeb9",
+        "model.safetensors.index.json": "da59c5f2030a287f117de855d5bfee4de7bc1e188e7012c0434189a4dd55a452"
+      }
+    }
+  },
+  "destination": [
+    "src/mlx2/decisions/candidates/base.py",
+    "src/mlx2/decisions/candidates/decision2.py",
+    "src/mlx2/decisions/candidates/pplx.py",
+    "src/mlx2/decisions/candidates/jev.py",
+    "src/mlx2/decisions/metrics.py",
+    "src/mlx2/decisions/qualification.py",
+    "qualification/decision_reference.py",
+    "qualification/run_decision_qualification.py",
+    "tests/test_candidate_decisions_cpu.py",
+    "docs/DECISION-MODELS.md"
+  ],
+  "modifications": [
+    "Shared only Qwen trunk loading, serialization, typed answer formatting, status, and route receipts across candidate scorers",
+    "Kept Decision 2.0 candidate-head math, pplx readout math, and JEV verbalizer math in separate family modules",
+    "Restricted Decision 2.0 to the full Lux 9B package and rejected unmerged LoRA and calibrated package variants",
+    "Restricted pplx-decider to its bare 27B backbone plus exact 255-row readout and trained code-token mapping",
+    "Restricted JEV to the prepared text-only 9B MLX layout with embedded calibration metadata",
+    "Rejected media, generation, MTP tensors, unsupported geometries, and malformed package paths before execution",
+    "Preserved Hugging Face snapshot filenames while validating symlink targets inside the repository blob store",
+    "Applied mlx2 tokenizer-integrity repair after local tokenizer loading; did not use Transformers' incompatible Mistral-regex rewrite",
+    "Preserved Decision 2.0 request order for choice and fully-described noul options to match the reference causal prompt",
+    "Validated the official BF16 pplx readout with MLX because the safetensors NumPy backend cannot materialize BF16",
+    "Normalized family outputs to a shared mlx2 response: noul naming, maximum-probability confidence, legends, and metadata differ from upstream wire formats",
+    "Kept explicit truncate=true support as an mlx2 service extension and documented that smoke evidence does not establish reference parity",
+    "Added finite JSON/probability validation, recursive media refusal, Unicode and nesting checks, absolute HTTP deadlines, and pre-forward validation of every question",
+    "Bound Hub-cache route receipts to detected 40-hex revisions and declared Hub blob filename identities without claiming payload re-hashing; labelled non-Hub fingerprints as layout metadata",
+    "Bound each request to at most 64 questions and candidate aggregate prompts to eight times the per-question context",
+    "Capped rendered state at 1 MiB, choices at 255, and score levels at 10; refused reserved model-control tokens and truncation that would erase the entire nonempty state",
+    "Validated JEV verbalizers against vocabulary size and moved tokenizer-dependent validation before weight materialization",
+    "Kept all routes outside the causal-LM registry, scheduler, generation lifecycle, and APCv2",
+    "Added revision-bound production qualification receipts that fail startup closed on source, producer, runtime, artifact, or serving-setting drift",
+    "Added bounded Prometheus request, refusal, failure, token, latency, load, inflight, CPU, memory, route, and qualification telemetry"
+  ],
+  "validation": {
+    "cpu_contracts": "prompt, candidate positions, code order, family constraints, answer shape, artifact shape, and fail-closed tests",
+    "mlx_head": "tiny Decision 2.0 candidate-head finite-output and shape test",
+    "pinned_tokenizers": "pplx 255/255 code-token ids matched; JEV found 256/256 distinct contextual label tokens",
+    "real_model": "private-main smoke passed one pinned request per family for Decision 2.0 Lux 9B, pplx-decider 27B, and JEV 9B; source-bound receipts omitted from the public projection",
+    "basic_candidate_qualification": "private-main candidate runs passed 34/34 HTTP functional checks per family; source-bound evidence omitted from the public projection",
+    "qualification": "private-main source 07178885cc7bd8f52fe7a93682528c32a0e9953f8ff7172b3bedb89b1aeadf0b passed 13/13 production gates per family; this public projection has a different source identity, includes no receipts, and is unqualified until independently rerun",
+    "performance": "not measured; recorded Prometheus values are uncontrolled qualification observations"
+  }
+}

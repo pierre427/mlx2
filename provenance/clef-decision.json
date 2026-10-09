@@ -1,0 +1,63 @@
+{
+  "source_repository": "https://github.com/Blaizzy/mlx-vlm",
+  "source_revision": "01d6ebaeaa4f2dc2394204798a2032e38d8a2841",
+  "source_pull_request": "https://github.com/Blaizzy/mlx-vlm/pull/2459",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "license_sha256": "f74c448746be3376e27dee43e2be9ec9d55f4820cd7466c603a6c7d1fd2d25b8",
+  "notice": "provenance/clef-decision.NOTICE",
+  "source_files": {
+    "mlx_vlm/models/clef/clef.py": {
+      "sha256": "2a21346024251085512a7fe2c68c0c0660e04d9e6abadc9f950ba635751911cd"
+    },
+    "mlx_vlm/decision.py": {
+      "sha256": "4093ddf697ba389132ef6bba58ecb50f46db12a0828044f0c910c377b377eb20"
+    }
+  },
+  "reference_artifact": {
+    "repository": "nativ-community/clef-flash-MLX-8bit",
+    "revision": "8f9beb2e63474d547c70810b41b468d3b4a84932",
+    "config_sha256": "f2cc7a76db868db8eff675c40aae3fe82696e3519405211c9bcb81a20e583271",
+    "index_sha256": "ad7d1e9008ffc190be5924080e996e657fc2efd28ea43087334cbc7fd71b8aaa"
+  },
+  "destination": [
+    "src/mlx2/decisions/schema.py",
+    "src/mlx2/decisions/clef.py",
+    "src/mlx2/decisions/clef_head.py",
+    "src/mlx2/decisions/runtime.py",
+    "src/mlx2/decisions/server.py",
+    "src/mlx2/decisions/metrics.py",
+    "src/mlx2/decisions/qualification.py",
+    "qualification/decision_reference.py",
+    "qualification/run_decision_qualification.py",
+    "tests/test_clef_decisions_cpu.py",
+    "docs/CLEF-DECISIONS.md"
+  ],
+  "modifications": [
+    "Separated decision serving from the causal LM adapter registry, scheduler, and request lifecycle",
+    "Reused mlx2's existing Qwen3.5/Qwen3.8 text trunk and strict indexed-artifact loading instead of copying the upstream backbone or vision implementation",
+    "Preserved the published joint-schema prompt, question and option spans, lexical projection, evidence routing, joint field decoder, and score mapping",
+    "Added a backend-neutral typed decision request contract and an expandable decision runtime registry",
+    "Added a standalone /v1/systemone service with Host, Origin, and optional API-key gates",
+    "Added implemented, qualified, selected, and observed-used route fields; qualification is installed only from an exact validated receipt",
+    "Rejected images, videos, generation, non-unit temperature, unknown artifact keys, unsupported topology, and incomplete head geometry",
+    "Applied mlx2 tokenizer-integrity repair after local tokenizer loading and exposed its receipt in status",
+    "Added absolute HTTP header/body deadlines and strict finite JSON, Unicode, nesting, and question-count validation",
+    "Bound Hub-cache route receipts to detected 40-hex revisions and declared Hub blob filename identities without claiming payload re-hashing; labelled non-Hub fingerprints as layout metadata",
+    "Required the trained lexical LM head and rejected both configured and indexed MTP state before loading",
+    "Capped rendered state at 1 MiB, choices at 255, score levels at 10, and questions at 64; refused reserved model-control tokens and truncation that would erase the entire nonempty state",
+    "Dropped the artifact vision tower before materialization; the first slice is text-only Clef-Flash 9B and Clef 27B",
+    "Added revision-bound production qualification receipts that fail startup closed on source, producer, runtime, artifact, or serving-setting drift",
+    "Added bounded Prometheus request, refusal, failure, token, latency, load, inflight, CPU, memory, route, and qualification telemetry"
+  ],
+  "validation": {
+    "artifact_validation": "CPU synthetic indexed-artifact and fail-closed topology tests",
+    "prompt_validation": "CPU exact schema layout, canonical JSON, span, option ordering, truncation, and refusal tests",
+    "head_validation": "Tiny MLX finite-output and shape test",
+    "transport_validation": "Transport-neutral /v1/systemone dispatch and route-receipt tests",
+    "real_model": "private-main smoke passed one pinned Clef-Flash 9B MLX 8-bit request covering choice, noul, and score; source-bound receipt omitted from the public projection",
+    "basic_candidate_qualification": "private-main candidate run passed 34/34 HTTP functional checks; source-bound evidence omitted from the public projection",
+    "qualification": "private-main source 07178885cc7bd8f52fe7a93682528c32a0e9953f8ff7172b3bedb89b1aeadf0b passed 13/13 production gates for Clef-Flash 9B revision 8f9beb2e63474d547c70810b41b468d3b4a84932; this public projection has a different source identity, includes no receipt, and is unqualified until independently rerun",
+    "performance": "not measured; recorded Prometheus values are uncontrolled qualification observations"
+  }
+}
