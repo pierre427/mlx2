@@ -1696,8 +1696,6 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
             return 0
         return after - before
 
-    segmented = execution.get("segmented_mtp", {})
-    indexed = execution.get("indexed_qsa", {}).get("counts", {})
     scheduler = final.get("scheduler", {})
     initial_scheduler = (initial or {}).get("scheduler") or {}
 
@@ -1713,6 +1711,10 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
                 value = value.get(key, 0)
             return value if type(value) is int and value >= 0 else 0
         return max(0, read(after) - read(before))
+
+    def count_delta(*path):
+        """``run_delta`` of a status counter addressed from the snapshot root."""
+        return run_delta(final, initial or {}, *path)
 
     # Progressive verification is stateful across target launches, so its
     # engagement gate is intentionally stronger than a single counter bump.
@@ -1798,19 +1800,30 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
                     int(verification.get("relaxed_accepts", 0)),
                 )
     settings = final.get("settings", {})
-    levers = execution.get("round_levers", {})
     ple_tables = execution.get("ple_tables", [])
+    initial_ple_tables = initial_execution.get("ple_tables") or []
     ple_compile = execution.get("ple_compile", {})
     ple_compile_counts = ple_compile.get("counts", {})
     fused_gdn = execution.get("fused_gdn", {})
     moe = execution.get("moe", {})
+    # A fallback demotes its signature to the eager chain for the life of
+    # the process, so the health guard stays lifetime; only hits are the run's.
     compiled_ple_healthy = (
         ple_compile.get("enabled") is True
         and ple_compile_counts.get("builds", 0) > 0
-        and ple_compile_counts.get("hits", 0) > 0
         and all(ple_compile_counts.get(name, 0) == 0
                 for name in ("fallbacks", "overflow", "skips"))
     )
+    latched = latched_before_run(initial)
+
+    def latch_observation(feature):
+        """A latch with no run counter counts only if it was clear initially."""
+        if feature in latched:
+            return 0
+        value = final
+        for key in LATCHED_FEATURE_GATES[feature]:
+            value = value.get(key) if isinstance(value, dict) else None
+        return int(bool(value))
     # External-draft transactions publish their counters through the scheduler.
     # Native self-MTP publishes the same logical evidence through its segmented
     # execution counters instead.  A zero/partial accepted draft is a real
@@ -1833,9 +1846,7 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
             scheduler, initial_scheduler, "segmented_transactions"
         )
         segmented_rollbacks = run_delta(scheduler, initial_scheduler, "segmented_rollbacks")
-    counts = final.get("counts", {})
     apcv2 = final.get("apcv2", {})
-    apc_lifetime = apcv2.get("lifetime", {})
     idle_disk = apcv2.get("idle_disk", {})
     rescan = apcv2.get("persistence", {}).get("rescan", {})
     host_available = final.get("host_memory_available_bytes")
@@ -1864,18 +1875,45 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
         )
     )
     return {
-        "indexed_fused_merge": int(execution.get("indexed_qsa", {}).get("fused_merge", {}).get("engaged", False)),
-        "indexed_output_gate": int(execution.get("indexed_qsa", {}).get("fused_merge", {}).get("gate_engaged", False)),
-        "shared_qsa": segmented.get("shared_qsa_batched_selections", 0),
-        "async_promotion": segmented.get("async_qsa_promotion_engaged", 0),
-        "indexed_qsa": indexed.get("engaged", 0),
-        "private_delta": segmented.get("private_delta_attention_calls", 0),
-        "known_tail_prefetch": levers.get("ple_tail_prefetch_tables", 0),
-        "file_backed_ple": sum(table.get("lookups", 0) for table in ple_tables),
-        "compiled_ple": ple_compile_counts.get("hits", 0) if compiled_ple_healthy else 0,
-        "pooled_qsa": levers.get("qsa_pooled_key_cache_hits", 0),
-        "scatter_qsa": levers.get("qsa_scatter_chosen_calls", 0),
-        "fused_gdn_decode": fused_gdn_decode_observation(fused_gdn),
+        "indexed_fused_merge": latch_observation("indexed_fused_merge"),
+        "indexed_output_gate": latch_observation("indexed_output_gate"),
+        "shared_qsa": run_delta(
+            execution, initial_execution, "segmented_mtp", "shared_qsa_batched_selections"
+        ),
+        "async_promotion": run_delta(
+            execution, initial_execution, "segmented_mtp", "async_qsa_promotion_engaged"
+        ),
+        "indexed_qsa": run_delta(execution, initial_execution, "indexed_qsa", "counts", "engaged"),
+        "private_delta": run_delta(
+            execution, initial_execution, "segmented_mtp", "private_delta_attention_calls"
+        ),
+        "known_tail_prefetch": run_delta(
+            execution, initial_execution, "round_levers", "ple_tail_prefetch_tables"
+        ),
+        # Tables are fixed at load, so the same index is the same table.
+        "file_backed_ple": sum(
+            run_delta(
+                table,
+                initial_ple_tables[index] if index < len(initial_ple_tables) else {},
+                "lookups",
+            )
+            for index, table in enumerate(ple_tables)
+        ),
+        "compiled_ple": (
+            run_delta(execution, initial_execution, "ple_compile", "counts", "hits")
+            if compiled_ple_healthy
+            else 0
+        ),
+        "pooled_qsa": run_delta(
+            execution, initial_execution, "round_levers", "qsa_pooled_key_cache_hits"
+        ),
+        "scatter_qsa": run_delta(
+            execution, initial_execution, "round_levers", "qsa_scatter_chosen_calls"
+        ),
+        "fused_gdn_decode": fused_gdn_decode_observation(
+            fused_gdn,
+            None if initial is None else initial_execution.get("fused_gdn") or {},
+        ),
         "fused_gdn_verify": run_delta(execution, initial_execution, "fused_gdn", "verify_calls"),
         "fused_gdn_replay_rollback": run_delta(
             execution, initial_execution, "fused_gdn", "replay_rollback_calls"
@@ -1883,8 +1921,14 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
         "eager_dispatch": run_delta(
             execution, initial_execution, "round_levers", "eager_async_evals"
         ),
-        "fused_moe": (sum(moe.get("dispatches", {}).values())
-                      if moe.get("fused_gate_up_layers", 0) > 0 else 0),
+        "fused_moe": (
+            sum(
+                run_delta(execution, initial_execution, "moe", "dispatches", mode)
+                for mode in moe.get("dispatches", {})
+            )
+            if moe.get("fused_gate_up_layers", 0) > 0
+            else 0
+        ),
         # A fallback during this run voids its external evidence; one from
         # an earlier run does not.
         "external_draft": (
@@ -1918,12 +1962,12 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
             run_delta(scheduler, initial_scheduler, "fly_relaxed_accepts"),
             fly_receipt_relaxed,
         ),
-        "spomin_surgery": final.get("spomin_live_surgery", {}).get("counts", {}).get("applied", 0),
-        "approximate_kv": final.get("approximate_kv", {}).get("applied", 0),
+        "spomin_surgery": count_delta("spomin_live_surgery", "counts", "applied"),
+        "approximate_kv": count_delta("approximate_kv", "applied"),
         # Int8 NAX prefill: engaged GEMMs.  required_feature_checks demands
         # feature_int8_prefill whenever the policy is enabled, so the
         # observation key must exist or the qualifier raises KeyError.
-        "int8_prefill": final.get("int8_prefill", {}).get("counts", {}).get("engaged_calls", 0),
+        "int8_prefill": count_delta("int8_prefill", "counts", "engaged_calls"),
         "prefill_projection": prefill_delta(
             "tensorfold_prefill", ("projection_calls", "grouped_calls", "swiglu_calls")
         ),
@@ -1950,17 +1994,17 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
         "sp_qmm": sp_qmm_routed_observation(initial, final),
         "qsdpa_verify_kernel": qsdpa_verify_observation(initial, final),
         "verify_bitexact": (
-            (final.get("verify_bitexact") or {}).get("dispatches", 0)
+            count_delta("verify_bitexact", "dispatches")
             if (final.get("verify_bitexact") or {}).get("active") is True
             else 0
         ),
-        "approximate_kv_mtp": final.get("approximate_kv", {}).get("mtp_lanes", 0),
+        "approximate_kv_mtp": count_delta("approximate_kv", "mtp_lanes"),
         # Offline measurement (scripts/measure_kv_quant_fidelity.py) judged by
         # runtime/kv_quant_fidelity.py; 1 only when that verdict passed.
         "approximate_kv_fidelity": int(bool((kv_fidelity or {}).get("passed"))),
         "apc_interior_checkpoints": min(
-            counts.get("apc_interior_checkpoints_captured", 0),
-            counts.get("apc_interior_checkpoints_published", 0),
+            count_delta("counts", "apc_interior_checkpoints_captured"),
+            count_delta("counts", "apc_interior_checkpoints_published"),
         ),
         # Persistence qualification is deliberately restart-bound: one run
         # must have written the snapshot, and this process must have rescanned
@@ -1971,10 +2015,8 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
             idle_disk.get("restores", 0),
         ),
         "apc_sessions": min(
-            idle_disk.get("parks", 0),
-            idle_disk.get("resumes", 0),
-            idle_disk.get("prefetch_restores_ok", 0),
-            idle_disk.get("prefetch_hits", 0),
+            count_delta("apcv2", "idle_disk", key)
+            for key in ("parks", "resumes", "prefetch_restores_ok", "prefetch_hits")
         ),
         # Each observation below counts the mechanism engaging, never the
         # policy being selected.  A hybrid rolling checkpoint must have been
@@ -1982,25 +2024,25 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
         # is a cancelled prefill's partial cache, which is its evidence.
         "apc_rolling_checkpoints": max(
             min(
-                counts.get("apc_rolling_checkpoints_published", 0),
-                apc_lifetime.get("rolling_hits", 0),
+                count_delta("counts", "apc_rolling_checkpoints_published"),
+                count_delta("apcv2", "lifetime", "rolling_hits"),
             ),
-            counts.get("apc_rolling_checkpoints_cancel_published", 0),
+            count_delta("counts", "apc_rolling_checkpoints_cancel_published"),
         ),
         # A junction is useful only when a later diverging request hit it.
         "apc_junction_checkpoints": min(
-            counts.get("apc_junction_checkpoints_published", 0),
-            apc_lifetime.get("junction_hits", 0),
+            count_delta("counts", "apc_junction_checkpoints_published"),
+            count_delta("apcv2", "lifetime", "junction_hits"),
         ),
         "apc_inflight_prefix_wait": min(
-            counts.get("apc_inflight_checkpoints_published", 0),
-            counts.get("apc_inflight_prefix_hits", 0),
+            count_delta("counts", "apc_inflight_checkpoints_published"),
+            count_delta("counts", "apc_inflight_prefix_hits"),
         ),
         # A bypass is an SRPT reorder (an older prompt was overtaken); a
         # forced bypass is bypass-capped service.  Slice clamps are neither.
         "prefill_scheduling": (
-            scheduler.get("prefill_scheduling_bypasses", 0)
-            + scheduler.get("prefill_scheduling_bypass_forced", 0)
+            count_delta("scheduler", "prefill_scheduling_bypasses")
+            + count_delta("scheduler", "prefill_scheduling_bypass_forced")
         ),
         # The status snapshot carries a host reading only when the policy is
         # on and the Mach probe answered; psutil fallback leaves it absent.
@@ -2009,17 +2051,17 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
         ),
         # A streamed model that never paged an expert in was fully resident.
         # Serving-phase counter: load-time probe page-ins are counted apart.
-        "moe_expert_streaming": counts.get("stream_page_ins_total", 0),
-        "dense_weight_streaming": counts.get("dense_stream_page_ins_total", 0),
+        "moe_expert_streaming": count_delta("counts", "stream_page_ins_total"),
+        "dense_weight_streaming": count_delta("counts", "dense_stream_page_ins_total"),
         # Preemption proves nothing unless the parked lane was replayed.
         "memory_preemption": min(
-            counts.get("memory_preemptions", 0),
-            counts.get("preempted_replays", 0),
+            count_delta("counts", "memory_preemptions"),
+            count_delta("counts", "preempted_replays"),
         ),
-        "tool_grammar_auto": counts.get(
-            "constrained_tool_grammar_auto_engagements", 0
+        "tool_grammar_auto": count_delta(
+            "counts", "constrained_tool_grammar_auto_engagements"
         ),
-        "tool_grammar_streaming": counts.get("constrained_tool_grammar_streams", 0),
+        "tool_grammar_streaming": count_delta("counts", "constrained_tool_grammar_streams"),
         "external_pairwise_selection": run_delta(
             scheduler, initial_scheduler, "external_pairwise_selection_groups"
         ),
@@ -2031,8 +2073,8 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
         ),
         "progressive_verification": progressive_observed,
         "progressive_multilane_draft_cap": multilane_cap_observed,
-        "fused_gdn_dynamic_accept": fused_gdn.get(
-            "replay_dynamic_rollback_calls", 0
+        "fused_gdn_dynamic_accept": run_delta(
+            execution, initial_execution, "fused_gdn", "replay_dynamic_rollback_calls"
         ),
         **default_on_observations(final, initial),
     }
@@ -2160,12 +2202,15 @@ def default_on_observations(final, initial=None):
         # Qwen3.8-27B reports every admitted fused GDN form, including the
         # owned tree kernel that serves TensorFold tree verify (tree_calls).
         # A route passes this feature only from calls observed after the
-        # initial snapshot.
+        # initial snapshot.  prefill_calls also books the fused prefill
+        # chunks of the separate fused_gdn_prefill switch; only the bounded
+        # catch-up blocks left after subtracting them are this switch's.
         "qwen38_fused_gdn": (
             delta("fused_gdn", "decode_calls")
             + delta("fused_gdn", "batch_decode_calls")
             + delta("fused_gdn", "verify_calls")
-            + delta("fused_gdn", "prefill_calls")
+            + max(0, delta("fused_gdn", "prefill_calls")
+                  - delta("fused_gdn", "prefill_chunk_calls"))
             + delta("fused_gdn", "tree_calls")
             if qwen38.get("enabled") is True
             else 0
@@ -2235,19 +2280,58 @@ FUSED_GDN_DECODE_GEOMETRY_REFUSALS = (
 )
 
 
-def fused_gdn_decode_observation(fused_gdn):
+def fused_gdn_decode_observation(fused_gdn, initial_fused_gdn=None):
     """Fused B1/T1 GDN decode calls, or 0 when any decode was refused on geometry.
 
     ``fused_calls > 0`` alone passed a route whose decode was refused on 70%
     of its B=1 layer-calls (10,224 fused against 24,012 "rollback geometry not
     describable"): an all-True GDN mask hid a fully valid slab.  The mechanism
     is engaged only if it ran and no single-token decode was declined for
-    geometry.
+    geometry.  With the initial snapshot's ``fused_gdn`` both are run deltas:
+    calls and refusals before the run neither pass it nor void it.
     """
+    before = initial_fused_gdn or {}
     reasons = fused_gdn.get("decode_fallback_reasons") or {}
-    if any(reasons.get(reason, 0) for reason in FUSED_GDN_DECODE_GEOMETRY_REFUSALS):
+    reasons_before = before.get("decode_fallback_reasons") or {}
+
+    def grown(after, start):
+        after = after if type(after) is int and after >= 0 else 0
+        start = start if type(start) is int and start >= 0 else 0
+        return max(0, after - start)
+
+    if any(
+        grown(reasons.get(reason, 0), reasons_before.get(reason, 0))
+        for reason in FUSED_GDN_DECODE_GEOMETRY_REFUSALS
+    ):
         return 0
-    return fused_gdn.get("fused_calls", 0)
+    return grown(fused_gdn.get("fused_calls", 0), before.get("fused_calls", 0))
+
+
+# Feature gates whose only status evidence is a latched boolean with no run
+# counter (path from the snapshot root).  A latch the initial snapshot already
+# shows set cannot be attributed to this run, so the gate fails closed.
+LATCHED_FEATURE_GATES = {
+    "indexed_fused_merge": ("execution", "indexed_qsa", "fused_merge", "engaged"),
+    "indexed_output_gate": ("execution", "indexed_qsa", "fused_merge", "gate_engaged"),
+}
+
+
+def latched_before_run(initial):
+    """``{feature: reason}`` for latched gates already set in ``initial``."""
+    if initial is None:
+        return {}
+    reasons = {}
+    for feature, path in LATCHED_FEATURE_GATES.items():
+        value = initial
+        for key in path:
+            value = value.get(key) if isinstance(value, dict) else None
+        if value:
+            reasons[feature] = (
+                f"{'.'.join(path)} was already set in the initial status and has "
+                "no run counter, so this run's engagement cannot be attributed; "
+                "qualify on a freshly started server"
+            )
+    return reasons
 
 
 def unobservable_features(features):
@@ -3239,6 +3323,7 @@ def main():
             initial=initial,
         )
         report["feature_observations"] = observed
+        latched = latched_before_run(initial)
         if forced is not None:
             check(
                 "prefill_scheduling_forced_reorder",
@@ -3348,6 +3433,8 @@ def main():
                               if k.startswith(prefix)},
                     "delta": observed.get(feature, 0),
                 }
+            elif feature in latched:
+                evidence = {"reason": latched[feature], "execution": execution}
             else:
                 evidence = execution
             # A feature without an observation is a failed check, never a

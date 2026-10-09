@@ -37,10 +37,11 @@ def load_source(path, names, namespace, *, class_name=None):
                     and node.name == class_name).body
     nodes = [node for node in body if isinstance(node, ast.FunctionDef) and node.name in names]
     assert len(nodes) == len(names)
-    # The source function's relative mx import is replaced with our fake mx.
+    # The source function's relative mx import is replaced with our fake mx;
+    # the bootstrap receipt import runs only for bootstrap_generation == 0.
     class FakeImports(ast.NodeTransformer):
         def visit_ImportFrom(self, node):
-            assert node.module == "paged_native_continuation"
+            assert node.module in ("paged_native_continuation", "packed_prefill_receipt")
             return ast.Pass()
     module = ast.Module(body=nodes, type_ignores=[])
     module = FakeImports().visit(module)
@@ -117,6 +118,7 @@ class SourceSamplingContracts(unittest.TestCase):
               "NativeQwen3Continuation": Continuation,
               "can_run_research_graph_b2": lambda lanes: not any(lane.closed for lane in lanes),
               "CandidateRequest": lambda *args: args, "PackedLane": lambda *args: args}
+        load_source("src/mlx2/runtime/paged_native_contract.py", {"native_layer_count"}, ns)
         load_source("src/mlx2/runtime/paged_native_graph_group.py", {"run_research_graph_b2"}, ns)
         self.run_group = ns["run_research_graph_b2"]
         def forward(*args, **kw):
@@ -231,6 +233,8 @@ class SourceSamplingContracts(unittest.TestCase):
         backend = SimpleNamespace(host_profile_ns={"graph_eval": 5}, read_work=History([{"rows": 2}]),
                                   profiling_enabled=True, writer=SimpleNamespace(
                                       backend=SimpleNamespace(q1_tile_dispatch_count=lambda: 4,
+                                                              q1_split_partial_dispatch_count=lambda: 0,
+                                                              q1_split_reduce_dispatch_count=lambda: 0,
                                                               grouped_q1_write_count=lambda: 4,
                                                               write_dispatch_count=lambda: 0),
                                       ledger=SimpleNamespace(completed_epoch=9)))

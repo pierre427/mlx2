@@ -73,6 +73,26 @@ def required_generic_checks(descriptor, *, capabilities=None):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
+    # Re-pinned 2026-10-08 (sweep g11 review round 1): the adapter-diagnostic
+    # gates (shared/indexed/pooled/scatter QSA, async promotion, private
+    # delta, known-tail and file-backed PLE, compiled PLE hits, Flash-Next
+    # fused GDN decode calls and refusals, fused MoE, APC sessions) are run
+    # deltas, and the indexed fused-merge / output-gate latches fail closed
+    # when the initial status already shows them set.  Receipts from
+    # 9b76c3a8... must be regenerated.
+    # Re-pinned 2026-10-08 (sweep g11 qwen38 prefill chunks): the decode
+    # switch's qwen38_fused_gdn engagement no longer counts the fused
+    # prefill chunks (prefill_chunk_calls) that prefill_calls also books;
+    # they belong to the separate fused_gdn_prefill switch, so a route whose
+    # decode/verify/tree kernels never ran fails closed.  Receipts from
+    # 8860803e... must be regenerated.
+    # Re-pinned 2026-10-08 (sweep g11 run deltas): the verify_bitexact,
+    # apc_inflight_prefix_wait and memory_preemption gates and the older
+    # lifetime-read observations (APCv2 interior/rolling/junction, SRPT
+    # prefill scheduling, tool grammar, weight streaming, approximate KV,
+    # int8 prefill, SPOMIN surgery, Flash-Next dynamic accept) are now run
+    # deltas, so engagement before the run cannot pass for it.  Receipts
+    # from 99a9ea18... must be regenerated.
     # Re-pinned 2026-10-08 (known model behaviour): the ``tools`` check now
     # consults mlx2.known_model_behaviour; a declared, artifact-scoped failure
     # of the exact declared shape is recorded as known_model_behaviour (not
@@ -162,7 +182,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # (8a2ced1d..., NAX gather default) must be regenerated.
     # Re-pinned 2026-10-02 (flip integrate): benchmark_adaptive_mtp.py model
     # defaults now use Path.home(), so APPROVED_ADAPTIVE_BENCHMARK_SHA256 moved.
-    "sha256": "99a9ea186a9132132221f7cb98060bdac298f52a29c10b936390484569ce5b2c",
+    "sha256": "815f6e0ea58473e68bcdfd0804c036157d4547090581b8284a8896769720a966",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A

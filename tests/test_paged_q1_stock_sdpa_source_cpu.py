@@ -80,7 +80,7 @@ class StockSDPASourceContracts(unittest.TestCase):
                 retained_start=retained, first_block=retained//64, table_begin=0,
                 table_count=1, window=window, visible_bounds=lambda _: (lower, upper))
         self.spans = (span(33), span(97))
-        self.plan = SimpleNamespace(dtype="float16", total_rows=2, query_heads=16,
+        self.plan = SimpleNamespace(profile="dense_vector_v1", dtype="float16", total_rows=2, query_heads=16,
             kv_heads=8, head_dim=128, spans=self.spans,
             page_table=(SimpleNamespace(page_id=2), SimpleNamespace(page_id=3)))
         self.packed = Packed()
@@ -159,6 +159,8 @@ class StockSDPASourceContracts(unittest.TestCase):
         with self.assertRaises(ValueError): self.run_read()
         self.assertEqual(self.events,["abort"])
     def test_native_gather_compiles_and_registers_one_exact_terminal(self):
+        if subprocess.run(["xcrun","--find","metal"],capture_output=True).returncode:
+            self.skipTest("offline Metal compiler unavailable")
         source=(ROOT/"native/paged_kv/arena.cpp").read_text()
         shader=re.search(r'constexpr const char\* kQ1GatherSource = R"metal\((.*?)\)metal";',source,re.S).group(1)
         with tempfile.TemporaryDirectory(prefix="q1-gather-source-") as folder:

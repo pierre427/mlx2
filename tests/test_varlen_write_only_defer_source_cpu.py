@@ -57,7 +57,7 @@ class WriteOnlyContracts(unittest.TestCase):
         load('src/mlx2/runtime/paged_attention_native.py',{'native_paged_attention_read_fp16'},self.ns)
         span=SimpleNamespace(row_count=1,query_start=32,kv_end=33,retained_start=0,first_block=0,table_begin=0,table_count=1,window=None)
         self.use=Packed(); self.use.state='prepared'; self.use.events=[]; self.use.writer=self.writer; self.use.lease=SimpleNamespace(epoch=27)
-        self.use.plan=SimpleNamespace(dtype='float16',head_dim=128,total_rows=2,query_heads=4,kv_heads=2,spans=(span,span),page_table=(SimpleNamespace(page_id=0),))
+        self.use.plan=SimpleNamespace(profile='dense_vector_v1',dtype='float16',head_dim=128,total_rows=2,query_heads=4,kv_heads=2,spans=(span,span),page_table=(SimpleNamespace(page_id=0),))
         backend_ns={'mx':self.mx,'time':time,'poll_native_paged_read_events':lambda a:((27,True),),'wait_native_paged_read_events':lambda *a:(), 'complete_staged_read_after_event':lambda u,e:setattr(u,'state','closed')}
         B=load('src/mlx2/runtime/qwen3_paged_native_backend.py',{'abort_deferred_q1','retain_deferred_q1_roots'},backend_ns,cls='NativeQwen3PagedBackend')
         self.owner=B(); self.owner.writer=self.writer; self.owner.timeout_s=.01; self.owner._failed=False; self.owner._orphaned_reads={}; self.owner.terminal_successes=0

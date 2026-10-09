@@ -263,7 +263,8 @@ class ServingCompletionContracts(unittest.TestCase):
                                     'native_prefill_observed_used':False,'native_prefill_attention_calls':0})
             env={'serving':True,'candidate':candidate,'response':response,'physical':None,
                  'combined_counts':None,'grouped_sampling':False,'backend':NS(),
-                 'graph_receipt':{'q1_simd_stripes':32,'native_stock_reduction_dispatches':16}}
+                 'graph_receipt':{'q1_simd_stripes':32,'native_stock_reduction_dispatches':16},
+                 '__name__':'mlx2.runtime.paged_native_graph_group','__package__':'mlx2.runtime'}
             exec(compile(ast.Module(body=[block],type_ignores=[]),'grouped receipt','exec'),env)
             self.assertEqual(response.mtp_receipt['prefill_mode'],'ordinary_completed_import' if hybrid else 'serial_native')
             self.assertEqual(response.mtp_receipt['q1_simd_stripes'],32 if hybrid else 4)
@@ -272,12 +273,13 @@ class ServingCompletionContracts(unittest.TestCase):
     def test_singleton_receipt_uses_completed_singleton_physical_proof(self):
         tree=ast.parse((ROOT/'src/mlx2/runtime/paged_native_continuation.py').read_text())
         block=next(node for node in ast.walk(tree) if isinstance(node,ast.If) and
-            'bootstrap_generation' in ast.unparse(node.test) and 'ordinary_completed_import' in ast.unparse(node))
+            'bootstrap_generation' in ast.unparse(node.test) and 'survivor_q1_stripes' in ast.unparse(node))
         proof={'q1_simd_stripes':16,'native_stock_reduction_dispatches':0,'packed_lanes':1}
         lane=NS(candidate=NS(bootstrap_generation=0,native_layer_count=16,logical_layer_count=64,
                            q1_stripes=16,_serving_stock_reduction=True),
                 _last_native_graph_proof=proof,research_only=False,terminal_successes=16)
-        receipt={};exec(compile(ast.Module(body=[block],type_ignores=[]),'singleton receipt','exec'),{'self':lane,'receipt':receipt})
+        receipt={};exec(compile(ast.Module(body=[block],type_ignores=[]),'singleton receipt','exec'),{'self':lane,'receipt':receipt,
+            '__name__':'mlx2.runtime.paged_native_continuation','__package__':'mlx2.runtime'})
         self.assertEqual(receipt['prefill_mode'],'ordinary_completed_import')
         self.assertEqual(receipt['q1_simd_stripes'],16)
         self.assertEqual(receipt['hybrid_graph_proof']['native_stock_reduction_dispatches'],0)
@@ -286,13 +288,14 @@ class ServingCompletionContracts(unittest.TestCase):
     def test_opt_in_singleton_receipt_preserves_actual_stock32_proof(self):
         tree=ast.parse((ROOT/'src/mlx2/runtime/paged_native_continuation.py').read_text())
         block=next(node for node in ast.walk(tree) if isinstance(node,ast.If) and
-            'bootstrap_generation' in ast.unparse(node.test) and 'ordinary_completed_import' in ast.unparse(node))
+            'bootstrap_generation' in ast.unparse(node.test) and 'survivor_q1_stripes' in ast.unparse(node))
         proof={'q1_simd_stripes':32,'native_stock_reduction_dispatches':16,
             'native_stock_singleton_dispatches':16,'packed_lanes':1}
         lane=NS(candidate=NS(bootstrap_generation=0,native_layer_count=16,logical_layer_count=64,
             q1_stripes=16,_serving_stock_reduction=True,_serving_stock_singleton=True),
             _last_native_graph_proof=proof,research_only=False,terminal_successes=16)
-        receipt={};exec(compile(ast.Module(body=[block],type_ignores=[]),'actual stock singleton receipt','exec'),{'self':lane,'receipt':receipt})
+        receipt={};exec(compile(ast.Module(body=[block],type_ignores=[]),'actual stock singleton receipt','exec'),{'self':lane,'receipt':receipt,
+            '__name__':'mlx2.runtime.paged_native_continuation','__package__':'mlx2.runtime'})
         self.assertEqual(receipt['q1_simd_stripes'],32);self.assertEqual(receipt['survivor_q1_stripes'],32)
         self.assertEqual(receipt['survivor_fallback_q1_stripes'],16)
         self.assertTrue(receipt['stock_singleton_selected']);self.assertTrue(receipt['stock_singleton_observed_used'])

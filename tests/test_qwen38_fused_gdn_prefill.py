@@ -556,3 +556,64 @@ def test_qualification_requires_prefill_engagement_when_selected():
     assert "feature_qwen38_fused_gdn_prefill" not in required_feature_checks(
         {"environment": {}, "max_context": 32768, "max_lanes": 4}
     )
+
+
+# --------------------------------------------------------------------------
+# qualification: fused prefill chunks are not decode-switch engagement
+# --------------------------------------------------------------------------
+
+
+def _route_diagnostics(layer):
+    # Qwen3827BAdapter._fused_gdn_diagnostics on a linear (non-tree) route.
+    return {"architecture": "qwen38", **route.stats(_Model(layer)),
+            "tree_calls": 0, "tree_rows": 0}
+
+
+def test_fused_prefill_chunks_are_not_decode_switch_engagement(
+    layer, kernels_on_cpu, monkeypatch
+):
+    """qwen3x-gdn#0 (sweep 2026-10-08): the decode step kernel declines every
+    call and only prefill chunks fuse.  feature_qwen38_fused_gdn (the decode
+    switch, MLX2_QWEN38_FUSED_GDN=1) must read 0; the prefill feature reads 1.
+    """
+    from scripts.qualify_serving import default_on_observations
+
+    monkeypatch.setattr(route.kernels, "fused_gdn_runtime_supported", lambda: True)
+    monkeypatch.setattr(route.kernels, "probe_qwen4_fused_gdn_decode",
+                        lambda *a, **k: None)
+    layer.set_fused_gdn_enabled(True)
+    layer.set_fused_gdn_prefill_enabled(True)
+    initial = {"execution": {"fused_gdn": _route_diagnostics(layer)}}
+
+    cache = ArraysCache(2)
+    mx.eval(layer(_inputs(64, seed=1), cache.make_mask(64), cache))
+    for step in range(4):
+        mx.eval(layer(_inputs(1, seed=10 + step), cache.make_mask(1), cache))
+
+    diag = _route_diagnostics(layer)
+    assert diag["prefill_calls"] == diag["prefill_chunk_calls"] == 1
+    assert diag["decode_calls"] == diag["verify_calls"] == 0
+    assert diag["reasons"] == {"Metal kernel probe declined": 4}
+    observed = default_on_observations({"execution": {"fused_gdn": diag}}, initial)
+    assert observed["qwen38_fused_gdn_prefill"] == 1
+    # The decode switch's kernels never ran: its feature must fail closed.
+    assert observed["qwen38_fused_gdn"] == 0
+
+
+def test_catch_up_blocks_and_tree_launches_still_count_for_the_decode_switch():
+    """Bounded catch-up blocks (prefill_calls without a fused chunk) and the
+    owned tree kernel (tree_calls, 1324fd63) are the decode switch's own."""
+    from scripts.qualify_serving import default_on_observations
+
+    base = {"enabled": True, "prefill_enabled": True, "decode_calls": 0,
+            "batch_decode_calls": 0, "verify_calls": 0, "prefill_calls": 0,
+            "prefill_chunk_calls": 0, "tree_calls": 0}
+    initial = {"execution": {"fused_gdn": dict(base)}}
+
+    def observed(**counts):
+        final = {"execution": {"fused_gdn": {**base, **counts}}}
+        return default_on_observations(final, initial)["qwen38_fused_gdn"]
+
+    assert observed(prefill_calls=2) == 2
+    assert observed(prefill_calls=5, prefill_chunk_calls=3) == 2
+    assert observed(prefill_calls=3, prefill_chunk_calls=3, tree_calls=7) == 7
