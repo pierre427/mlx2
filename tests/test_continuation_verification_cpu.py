@@ -119,6 +119,26 @@ def test_sampled_target_law_is_ordinary_at_each_actual_prefix_and_drawn_once(
     assert all(c.offset == len(prompt) - 1 for c in cache)
 
 
+@pytest.mark.parametrize("terminal", ["stop", "budget"])
+def test_terminal_draw_selects_highest_ranked_path_containing_emitted(terminal):
+    # The draw at position 1 matches only the lower-ranked path, then ends the
+    # walk.  The outcome must name that path, not the rank-0 path whose token
+    # there differs: receipts credit the selected path's sources.
+    paths = ((5, 6, 7), (5, 9, 10))
+    draws = (5, 9, 10, 11)
+    kwargs = (
+        {"maximum": 8, "stop_tokens": (9,)} if terminal == "stop" else {"maximum": 2}
+    )
+    outcome = sample_continuations(
+        paths, mx.zeros((2, 4, 4)), lambda row, prefix: draws[len(prefix)], **kwargs
+    )
+    assert outcome.emitted == (5, 9) and outcome.accepted == 2
+    selected = paths[outcome.selected_index]
+    assert selected[: outcome.accepted] == outcome.emitted[: outcome.accepted]
+    assert outcome.selected_index == 1
+    assert outcome.selected_index in outcome.matched_indices
+
+
 def test_stop_and_single_remaining_token_do_not_commit_unreached_branch_tokens(
     monkeypatch,
 ):

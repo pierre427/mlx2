@@ -131,6 +131,54 @@ def test_progressive_external_policy_requires_row_exact_host_chain():
         )
 
 
+_PROGRESSIVE_BASE = {"draft_model": "/draft", "target_verify_row_exact": True}
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        # The default num_draft is 3: a tile of 3 can never split a proposal.
+        {**_PROGRESSIVE_BASE, "progressive_verification_tile": 3},
+        {**_PROGRESSIVE_BASE, "num_draft": 4, "progressive_verification_tile": 4},
+        {**_PROGRESSIVE_BASE, "num_draft": 4, "progressive_verification_tile": 9},
+        {**_PROGRESSIVE_BASE, "num_draft": "15", "progressive_verification_tile": 3},
+    ],
+)
+def test_progressive_tile_must_be_below_num_draft(policy):
+    # ExternalDraftBatchGenerator requires 1 <= tile < num_draft; the adapter
+    # must refuse the policy before the target and drafter weights load.
+    with pytest.raises(ValueError, match="below num_draft"):
+        normalize_external_policy(policy)
+
+
+@pytest.mark.parametrize("cap", [1, 2])
+def test_multilane_cap_respects_dflash2_proposal_floor(cap):
+    # The generator floors the cap at DFlash2's minimum proposal length (3).
+    with pytest.raises(ValueError, match="requires progressive verification"):
+        normalize_external_policy(
+            {
+                **_PROGRESSIVE_BASE,
+                "num_draft": 15,
+                "progressive_verification_tile": 3,
+                "progressive_multilane_draft_cap": cap,
+            }
+        )
+
+
+def test_shipped_progressive_profiles_still_accepted():
+    root = Path(__file__).resolve().parents[1] / "qualification/policies"
+    for name in (
+        "muse-dflash2-progressive.json",
+        "muse-dflash2-progressive-b1-m3.json",
+    ):
+        policy = normalize_external_policy(json.loads((root / name).read_text()))
+        assert policy["progressive_verification_tile"] == 3
+    accepted = normalize_external_policy(
+        {**_PROGRESSIVE_BASE, "progressive_verification_tile": 2}
+    )
+    assert accepted["progressive_verification_tile"] == 2
+
+
 def test_muse_cache_projection_keeps_rolling_boundaries():
     from mlx2.runtime.state_boundaries import (
         BoundaryPurpose,

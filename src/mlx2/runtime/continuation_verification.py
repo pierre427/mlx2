@@ -285,6 +285,11 @@ def sample_continuations(paths, logits, sample_row, *, maximum, stop_tokens=()):
         if token in stops or not survivors or len(emitted) >= maximum:
             break
         active = survivors
+    if matched:
+        # A stop or the budget can end the walk on a draw only a lower-ranked
+        # survivor proposed.  Name the highest-ranked path that contains the
+        # emitted tokens; its branch holds the same committed prefix rows.
+        selected = matched[0]
     return ContinuationOutcome(
         selected,
         accepted,

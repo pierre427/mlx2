@@ -37,6 +37,7 @@ from .prompt_lookup import (
     HybridStats,
     IndexedPromptLookup,
     RecentCommittedSegmentStore,
+    max_proposal_span,
     plan_proposal_around_verify_cliff,
 )
 from .rotating_replay import (
@@ -542,6 +543,40 @@ class PromptLookupBatchGenerator:
             raise ValueError("prompt_lookup verify cliff start must not exceed end")
         return validated
 
+    @classmethod
+    def validate_lane_policy(cls, config, overrides):
+        """One lane's policy: the generator ``config`` with its overrides.
+
+        Rounds run at the generator's num_draft, so a lane may not change it.
+        Admission and the int8 verify-row bound charge the generator's widest
+        round, so a lane's cliff keys may narrow that span but never widen it.
+        """
+        validated = cls.validate_policy(
+            {
+                **config,
+                **{
+                    name: value
+                    for name, value in overrides.items()
+                    if name in cls.POLICY_KEYS
+                },
+            }
+        )
+        num_draft = config.get("num_draft", 8)
+        lane_num_draft = validated.get("num_draft", 8)
+        if lane_num_draft != num_draft:
+            raise ValueError(
+                f"prompt_lookup lane num_draft {lane_num_draft} must equal the "
+                f"generator's num_draft {num_draft}"
+            )
+        lane_span = max_proposal_span(validated)
+        charged = max_proposal_span(config)
+        if lane_span > charged:
+            raise ValueError(
+                f"prompt_lookup lane span {lane_span} exceeds the "
+                f"generator's charged span {charged}"
+            )
+        return validated
+
     def __init__(
         self,
         model,
@@ -573,6 +608,9 @@ class PromptLookupBatchGenerator:
                 "recent committed PLD segments require an engine-owned source store"
             )
         self.num_draft = self.config.get("num_draft", 8)
+        # Widest proposal a round can carry: the cliff-aware span can exceed
+        # num_draft.  Serving admission charges this many verify rows.
+        self.max_proposal_span = max_proposal_span(self.config)
         # Default-off and generator-scoped: a per-request override never selects
         # the rotating replay transaction.  The bound counts proposed tokens;
         # the transaction also declares the anchor, hence the extra row.
@@ -734,19 +772,16 @@ class PromptLookupBatchGenerator:
         apc_transcript_ledgers = aligned(
             "apc_transcript_ledgers", apc_transcript_ledgers, [None] * count
         )
-        staged = []
-        next_uid = self.next_uid
-        for prompt, maximum, prompt_cache, prefix, sampler, processors, matcher, overrides, source_scope, apc_ledger in zip(
+        # Every lane's refusals run before any lane is built or any caller
+        # cache is touched, so a refused batch leaves those caches as given.
+        admitted = []
+        for prompt, maximum, prompt_cache, prefix, overrides, source_scope in zip(
             prompts,
             max_tokens,
             caches,
             all_tokens,
-            samplers,
-            logits_processors,
-            stop_matchers,
             prompt_lookup_configs,
             pld_source_scopes,
-            apc_transcript_ledgers,
             strict=True,
         ):
             prompt = [int(token) for token in prompt]
@@ -756,15 +791,24 @@ class PromptLookupBatchGenerator:
             prompt_cache = prompt_cache or cache_module.make_prompt_cache(self.model)
             _validate_cache(prompt_cache)
             overrides = dict(overrides)
-            policy = {
-                **self.config,
-                **{
-                    name: value
-                    for name, value in overrides.items()
-                    if name in self.POLICY_KEYS
-                },
-            }
-            config = {**overrides, **self.validate_policy(policy)}
+            config = {**overrides, **self.validate_lane_policy(self.config, overrides)}
+            if config.get("recent_committed_segments", False) and source_scope is None:
+                raise ValueError(
+                    "recent committed PLD segments require an APCv2-bound source scope"
+                )
+            admitted.append((prompt, prefix, prompt_cache, config))
+        staged = []
+        next_uid = self.next_uid
+        for (prompt, prefix, prompt_cache, config), maximum, sampler, processors, matcher, source_scope, apc_ledger in zip(
+            admitted,
+            max_tokens,
+            samplers,
+            logits_processors,
+            stop_matchers,
+            pld_source_scopes,
+            apc_transcript_ledgers,
+            strict=True,
+        ):
             lookback_ladder = config.get(
                 "lookback_ladder", (256, 1024, 4096, 16384)
             )
@@ -772,10 +816,6 @@ class PromptLookupBatchGenerator:
             source_segments = []
             seen_segments = set()
             if config.get("recent_committed_segments", False):
-                if source_scope is None:
-                    raise ValueError(
-                        "recent committed PLD segments require an APCv2-bound source scope"
-                    )
                 source_limit = config.get("recent_committed_max_responses", 64)
                 token_limit = config.get("recent_committed_max_tokens", 131072)
                 response_limit = config.get("recent_committed_response_tokens", 2048)
@@ -806,9 +846,6 @@ class PromptLookupBatchGenerator:
                         response_limit=response_limit,
                         source_tokens=source_tokens,
                     )
-            _set_ordinary_b1_mask(
-                prompt_cache, bool(config.get("cost_aware_admission", False))
-            )
             proposer = IndexedPromptLookup(
                 prefix + prompt,
                 ngram_min=config.get("ngram_min", 3),
@@ -891,8 +928,11 @@ class PromptLookupBatchGenerator:
                 lane.ordinary = True
             lane.matcher_state = matcher.make_state()
             staged.append(lane)
-        # Batch admission is atomic: no lane becomes schedulable until every
-        # lane has passed validation and construction.
+        # Batch admission is atomic: no lane becomes schedulable, and no
+        # caller cache is armed, until every lane has passed validation and
+        # construction.
+        for lane in staged:
+            _set_ordinary_b1_mask(lane.cache, lane.cost_latch is not None)
         self.lanes.update((lane.uid, lane) for lane in staged)
         self.next_uid = next_uid
         return [lane.uid for lane in staged]
@@ -1715,9 +1755,14 @@ class PromptLookupBatchGenerator:
         nominal_proposal_budget = max(0, min(self.num_draft, remaining_budget - 1))
         proposal_budget = nominal_proposal_budget
         if lane.config.get("cliff_aware_span", False) and proposal_budget:
+            # A memory cap bounds the span the far side of the cliff may use,
+            # so a capped lane stays below the cliff rather than inside it.
+            available_span = max(remaining_budget - 1, 0)
+            if cost_memory_cap is not None:
+                available_span = min(available_span, cost_memory_cap)
             proposal_budget = plan_proposal_around_verify_cliff(
                 proposal_budget,
-                max(remaining_budget - 1, 0),
+                available_span,
                 1,
                 cliff_start=int(lane.config.get("verify_cliff_start", 9)),
                 cliff_end=int(lane.config.get("verify_cliff_end", 15)),

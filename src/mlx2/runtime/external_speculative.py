@@ -60,6 +60,13 @@ def _bump(stats, key, amount=1):
     stats[key] = min(_COUNTER_MAX, int(stats.get(key, 0)) + int(amount))
 
 
+def _delivered_accepts(decision):
+    """Accepted proposals that were delivered.  ``emitted`` normally ends
+    with the target's correction or bonus token, but a stop can cut delivery
+    on an accepted draft, and then every emitted token is an accepted one."""
+    return min(int(decision.accepted), len(decision.emitted))
+
+
 # Tree15 round-cost gates (TensorFold parity bridge).  Off on an explicit
 # tree15 topology unless set; on by default for a selected bounded tree route
 # (``dynamic_singleton_tree``, the Qwen3.8 DFlash2 default policy since
@@ -1765,6 +1772,10 @@ class ExternalDraftBatchGenerator:
                 needs_histories = bool(getattr(self.draft, "requires_processor_histories", False))
                 if needs_histories:
                     extra["processor_histories"] = [list(l.history) for l in lanes]
+                if getattr(self.draft, "requires_cohort_width", False):
+                    # Draft groups split a cohort by tail length; B1-only
+                    # proposal modes must see the verify cohort's width.
+                    extra["cohort_width"] = len(cohort)
                 if self.draft_topology == "tree15":
                     if self.pair_context_tokens:
                         raise ValueError("tree15 is unavailable for paired-context drafters")
@@ -2837,7 +2848,7 @@ class ExternalDraftBatchGenerator:
                 )
             lane.history.extend(committed_inputs)
             lane.anchor = emitted[-1]
-            round_accepted = min(decision.accepted, len(emitted)-1)
+            round_accepted = _delivered_accepts(decision)
             self.scheduler_stats["accepted_proposals"] += round_accepted
             self.scheduler_stats["proposed_tokens"] += count
             lane.external_rounds += int(count > 0)
@@ -3195,7 +3206,7 @@ class ExternalDraftBatchGenerator:
                 lane.adaptive_feature_counts = counts.tolist()
             # A stop can cut an accepted sequence. Only delivered accepts and
             # the first rejection reached before that stop are labeled.
-            accepted = min(decision.accepted, len(decision.emitted))
+            accepted = _delivered_accepts(decision)
             rejected = decision.accepted < len(tokens) and decision.accepted < len(decision.emitted)
             self.acceptance_estimator.observe(features, accepted, rejected=rejected)
         self.acceptance_estimator.finish_round()
@@ -3386,7 +3397,7 @@ class ExternalDraftBatchGenerator:
                     trusted_observer = getattr(
                         self.draft, "observe_trusted_pld", None
                     )
-                    accepted = min(decision.accepted, len(decision.emitted) - 1)
+                    accepted = _delivered_accepts(decision)
                     if (
                         callable(observer)
                         and block.proposal_score_key is not None
@@ -3424,7 +3435,15 @@ class ExternalDraftBatchGenerator:
                         lane.continuation_coverage = coverage
                         self.draft.proposal_pool.commit_feedback(selection, decision.emitted)
                     if manager is not None and block.feedback_payload is not None:
-                        first_rejected = decision.accepted if decision.accepted < len(decision.emitted) else None
+                        # ``emitted`` ends with the bonus token on a full
+                        # acceptance; only a draft rejected before any stop
+                        # cut is a rejection boundary inside the lattice.
+                        first_rejected = (
+                            decision.accepted
+                            if decision.accepted
+                            < min(len(block.tokens), len(decision.emitted))
+                            else None
+                        )
                         manager.submit_verified(block.feedback_payload, decision.emitted,
                             first_rejected_position=first_rejected,
                             request_id=lane.proposal_request_id, round_id=round_id)
@@ -3871,9 +3890,20 @@ class ExternalDraftBatchGenerator:
                 or not bool(getattr(self.model, "supports_trusted_pld", False))
                 or self.fly_verification.enabled
             ):
-                raise ValueError(
-                    "trusted PLD requires a supported B1 reference target"
+                # Trusted PLD needs a supported B1 reference target. A row
+                # that reaches any other round is verified exactly instead:
+                # raising here escaped next() and stopped the serving worker.
+                for block in blocks:
+                    if block is not None and bool(
+                        getattr(block, "proposal_trusted", False)
+                    ):
+                        block.proposal_trusted = False
+                        block.proposal_audit = True
+                _bump(
+                    self.scheduler_stats,
+                    "external_composed_trusted_pld_b1_guard_rounds",
                 )
+                trusted_round = False
             if (
                 self.progressive_verification_tile is not None
                 and len(cohort) == 1

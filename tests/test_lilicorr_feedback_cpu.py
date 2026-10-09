@@ -233,3 +233,75 @@ def test_serialization_failures_bound_artifacts_while_manager_stays_open(
     assert len(jobs) == 2
     assert all((job / "result.json").is_file() for job in jobs)
     value.close()
+
+
+@pytest.mark.parametrize("num_draft", [2, 3])
+def test_full_acceptance_commits_feedback_at_every_depth(tmp_path, num_draft):
+    """A fully accepted round is a positive LiLiCoRR label, not a failure.
+
+    The caller passed ``first_rejected_position = accepted`` whenever
+    ``accepted < len(emitted)``, which a full acceptance satisfies because
+    ``emitted`` ends with the bonus token.  At num_draft == block_size - 1
+    that position equals the lattice's slot count, the buffer refused it, and
+    every fully accepted round was counted as a feedback failure.
+    """
+    from test_lilicorr_serving_cpu import pair
+    from test_standard_xpress_serving_cpu import reference
+
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    model, draft = pair()
+    slots = draft.config.block_size - 1
+    assert num_draft <= slots
+    feedback = LiLiCorrFeedbackManager(
+        draft,
+        # Bounds keep the shadow trainer from launching in this test.
+        {"directory": str(tmp_path), "min_examples": 128, "max_examples": 128,
+         "train_every": 1024},
+        target_revision="a" * 40,
+        draft_revision="b" * 64,
+        binding="c" * 64,
+    )
+    draft.feedback_manager = feedback
+    boundaries = []
+    submit = feedback.submit_verified
+
+    def spy(payload, teacher_tokens, **kwargs):
+        boundaries.append(kwargs["first_rejected_position"])
+        return submit(payload, teacher_tokens, **kwargs)
+
+    feedback.submit_verified = spy
+    generator = ExternalDraftBatchGenerator(
+        model, draft_model=draft, binding="tiny-lilicorr-v1",
+        num_draft=num_draft, prefill_step_size=32,
+    )
+    prompt = [1, 2, 3, 4, 5]
+    expected = reference(model, prompt, 12)
+    original = draft.draft_distributions
+
+    def target_greedy(anchors, hidden, cache, proposal_length, *args, **kwargs):
+        # Keep the real lattice capture; propose the target's own continuation
+        # so the target accepts every drafted token.
+        original(anchors, hidden, cache, proposal_length, *args, **kwargs)
+        start = len(generator.lanes[0].history) + 1 - len(prompt)
+        want = expected[start : start + proposal_length]
+        eye = np.eye(draft.config.vocab_size)
+        return [list(want)], [[eye[token] for token in want]]
+
+    draft.draft_distributions = target_greedy
+    try:
+        generator.insert([prompt], max_tokens=[12])
+        lane = generator.lanes[0]
+        while lane.anchor is None:
+            generator._prefill(lane)
+        generator._round([lane])
+        assert [response.token for response in lane.ready] == expected[: num_draft + 1]
+        assert generator.scheduler_stats.get("external_feedback_failures", 0) == 0, (
+            generator.last_feedback_error
+        )
+        assert feedback.stats["committed"] == 1
+        assert not feedback._issued  # the capture ticket was consumed
+        # No draft was rejected, so no boundary inside the lattice is claimed.
+        assert boundaries == [None]
+    finally:
+        feedback.close()

@@ -1143,7 +1143,10 @@ CHANGED = {"artifact_family", "artifact_manifest", "adapter_identity_snapshot", 
            "run_all",
            # Path-length-independent diagnostics reserve space for fixed refusal reasons.
            "module_path_refusals", "adapter_source_refusals", "build_identity_refusals",
-           "row_evidence_refusal", "source_identity_refusals"}
+           "row_evidence_refusal", "source_identity_refusals",
+           # 2026-10-08: lane policies are checked with the generator's lane
+           # rule, which refuses a lane num_draft the rounds would not honour.
+           "Driver.check_lane_policies"}
 
 
 def test_every_other_baseline_definition_is_unchanged():

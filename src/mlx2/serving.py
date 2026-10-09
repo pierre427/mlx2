@@ -9809,7 +9809,9 @@ class ServingEngine:
                                 controller,
                                 context_tokens=len(tokens) + maximum,
                                 cache_gib=cache_copy,
-                                num_draft=batch.num_draft,
+                                # The cliff-aware span can verify more than
+                                # num_draft rows; charge the widest round.
+                                num_draft=batch.max_proposal_span,
                                 prefill_gib=prefill_gib,
                                 headroom=admission_headroom,
                                 reclaim=reclaim_allocator,
@@ -9818,7 +9820,7 @@ class ServingEngine:
                                 evictable=getattr(apc, "unleased_resident_nbytes", None),
                             )
                             depth_floor = False
-                            if admitted and span < batch.num_draft:
+                            if admitted and span < batch.max_proposal_span:
                                 job.prompt_lookup_span = span
                                 self.counts["prompt_lookup_admission_span_capped"] += 1
                         else:

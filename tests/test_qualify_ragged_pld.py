@@ -255,7 +255,8 @@ def test_lane_policies_reach_pld_arms_only(monkeypatch):
 
     monkeypatch.setattr(PromptLookupBatchGenerator, "insert", spy_pld)
     monkeypatch.setattr(BatchGenerator, "insert", spy_ord)
-    policies = [{"num_draft": 2}, {"deferred_admission": True}]
+    # Lane overrides the generator honours; a lane num_draft is refused (below).
+    policies = [{"ngram_max": 4}, {"deferred_admission": True}]
     record = Q.run_all(_args("--lanes", "2", "--lane-policies", json.dumps(policies)))
     assert record["lane_policies"] == policies
     assert seen["pld"] and all(configs == policies for configs in seen["pld"])
@@ -268,14 +269,30 @@ def test_lane_policies_reach_pld_arms_only(monkeypatch):
 
 
 @pytest.mark.parametrize("policies,message", [
-    ([{"num_draft": 2}], "one object per lane"),
-    ({"num_draft": 2}, "one object per lane"),
-    ([{"num_draft": 2}, 5], "lane 1 policy must be an object"),
-    ([{"num_draft": 2}, {"batched_verify": False}], "batched_verify is fixed per arm"),
-    ([{"num_draft": 2}, {"proposer": "fake"}], "unknown policy keys"),
+    ([{"ngram_max": 4}], "one object per lane"),
+    ({"ngram_max": 4}, "one object per lane"),
+    ([{"ngram_max": 4}, 5], "lane 1 policy must be an object"),
+    ([{"ngram_max": 4}, {"batched_verify": False}], "batched_verify is fixed per arm"),
+    ([{"ngram_max": 4}, {"proposer": "fake"}], "unknown policy keys"),
     ([{"num_draft": 0}, {}], "lane 0 policy"),
+    # PLD rounds run at the arm's num_draft; a lane value was recorded but
+    # never honoured, so a "K2" lane ran at K8.
+    ([{"num_draft": 2}, {"deferred_admission": True}], "lane 0 policy: .*num_draft 2 must equal"),
+    ([{}, {"num_draft": 16}], "lane 1 policy: .*num_draft 16 must equal"),
+    ([{"cliff_aware_span": True}, {}], "lane 0 policy: .*exceeds the generator's charged span"),
 ])
 def test_invalid_lane_policies_fail_closed(policies, message):
     driver = Q.Driver(_args("--lanes", "2", "--lane-policies", json.dumps(policies)))
     with pytest.raises(SystemExit, match=message):
         driver.check_geometry()
+
+
+@pytest.mark.parametrize("pld_policy,policies", [
+    ({}, [{"num_draft": 8}, {"deferred_admission": True}]),
+    ({"num_draft": 4}, [{"num_draft": 4}, {"ngram_max": 4}]),
+])
+def test_lane_num_draft_equal_to_the_arm_policy_is_admitted(pld_policy, policies):
+    driver = Q.Driver(_args("--lanes", "2", "--pld-policy", json.dumps(pld_policy),
+                            "--lane-policies", json.dumps(policies)))
+    driver.check_geometry()
+    assert driver.lane_policies == policies

@@ -879,3 +879,43 @@ def test_prompt_lookup_policy_null_is_still_a_misplaced_key(monkeypatch):
             engine.submit({"prompt": "hi"})
     finally:
         engine.close()
+
+
+@pytest.mark.parametrize(
+    "source_kind", ["retrieval", "apcv2_transcript", "recent_committed"]
+)
+def test_hot_source_context_match_beyond_ngram_max(source_kind):
+    # Hot segments hold their tokens as a tuple while local history is a
+    # list, and a tuple never equals a list: every hot candidate failed a
+    # min_context_match above the matched n-gram size.  The hot source agrees
+    # with the live context for all 20 tokens, so a context requirement of 8
+    # (> ngram_max=6) must admit it, exactly as it does from local history.
+    context = list(range(100, 120))
+    source = context + [700, 701, 702, 703]
+    local = IndexedPromptLookup([1, 2, *source, 5, 6, *context], index_window=4096)
+    assert local.propose(4, min_context_match=8, max_sources=8) == [700, 701, 702, 703]
+
+    hot = IndexedPromptLookup(context, index_window=4096)
+    if source_kind == "retrieval":
+        hot.add_hot_segment(source)
+    else:
+        store = RecentCommittedSegmentStore()
+        hot.add_indexed_hot_segment(
+            store.indexed_segment(
+                ("scope",),
+                source,
+                source_kind=source_kind,
+                source_id="s",
+                ngram_min=hot.ngram_min,
+                ngram_max=hot.ngram_max,
+                index_window=hot.index_window,
+            )
+        )
+    assert hot.propose(4, min_context_match=8, max_sources=8) == [700, 701, 702, 703]
+    assert hot.last_source_kind == source_kind
+    assert hot.context_mismatch_sites == 0
+    # A real disagreement before the n-gram is still screened out.
+    screened = IndexedPromptLookup(context, index_window=4096)
+    screened.add_hot_segment([999, *context[-7:], 700, 701])
+    assert screened.propose(2, min_context_match=8, max_sources=8) == []
+    assert screened.context_mismatch_sites > 0

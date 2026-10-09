@@ -180,6 +180,22 @@ def test_real_bf16_target_dedups_after_depth_choice_and_keeps_semantic_credit(
     )
 
 
+def test_stop_on_lower_ranked_proposal_credits_that_semantic_path(monkeypatch):
+    model, _base, _draft, engine, lanes, calls, _original = setup(monkeypatch)
+    lane = lanes[0]
+    expected = int(mx.argmax(oracle(model, [1, 2, 3])).item())
+    # Only semantic paths 2/3 propose ``expected``; it is also a stop token,
+    # so the walk ends on a draw only the lower-ranked physical path holds.
+    engine.stops = {expected}
+    engine._round(lanes)
+    assert calls == [(2, 2)]
+    assert [r.token for r in lane.ready] == [expected]
+    assert lane.ready[-1].finish_reason == "stop"
+    receipt = lane.ready[-1].speculative_receipt["continuation_pool"]
+    assert receipt["physical_to_semantic"] == [0, 2]
+    assert receipt["selected_path"] == 2 and receipt["selected_physical_path"] == 1
+
+
 @pytest.mark.parametrize(
     "dtype,selected,capability",
     [

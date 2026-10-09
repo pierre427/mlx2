@@ -311,6 +311,10 @@ MUSE_GLIMMER_SAMPLING = VendorSampling.single(
 # pins num_draft 4 explicitly and is unchanged; this is the unqualified
 # default only.
 DFLASH2_DEFAULT_NUM_DRAFT = 3
+# ``DFlash2DraftModel.minimum_proposal_length``, kept here so policy parsing
+# need not import the drafter (MLX).  ExternalDraftBatchGenerator floors the
+# multi-lane draft cap at min(this, num_draft).
+DFLASH2_MINIMUM_PROPOSAL_LENGTH = 3
 
 
 def normalize_external_policy(value):
@@ -354,6 +358,13 @@ def normalize_external_policy(value):
             raise ValueError(
                 "progressive_verification_tile cannot combine with proposal composition"
             )
+        # Mirror ExternalDraftBatchGenerator's bounds so a profile it would
+        # refuse fails here, before the target and drafter weights load.
+        num_draft = policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT)
+        if type(num_draft) is not int or not progressive_tile < num_draft:
+            raise ValueError(
+                "progressive_verification_tile must be below num_draft"
+            )
         policy["proposal_composition"] = False
     multilane_cap = policy.get("progressive_multilane_draft_cap")
     if multilane_cap is not None:
@@ -361,11 +372,14 @@ def normalize_external_policy(value):
         if (
             progressive_tile is None
             or type(multilane_cap) is not int
-            or not 1 <= multilane_cap <= num_draft
+            or not min(DFLASH2_MINIMUM_PROPOSAL_LENGTH, num_draft)
+            <= multilane_cap
+            <= num_draft
         ):
             raise ValueError(
                 "progressive_multilane_draft_cap requires progressive verification "
-                "and must be an integer from 1 to num_draft"
+                "and must be an integer from the DFlash2 minimum proposal length "
+                "to num_draft"
             )
     if (
         policy

@@ -1103,7 +1103,10 @@ class Driver:
             if unknown:
                 raise SystemExit(f"refused: lane {index} unknown policy keys {sorted(unknown)}")
             try:
-                PromptLookupBatchGenerator.validate_policy({**self.args.pld_policy, **policy})
+                # The generator's own lane rule, before any arm runs: rounds
+                # run at the arm's num_draft, so a lane may not change it.
+                PromptLookupBatchGenerator.validate_lane_policy(
+                    PromptLookupBatchGenerator.validate_policy(self.args.pld_policy), policy)
             except ValueError as error:
                 raise SystemExit(f"refused: lane {index} policy: {error}") from None
             validated.append(dict(policy))

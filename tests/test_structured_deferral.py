@@ -271,6 +271,7 @@ def scripted_engine(monkeypatch):
             self.lanes = {}
             self.uid = 0
             self.num_draft = 1
+            self.max_proposal_span = 1
 
         def insert(self, prompts, max_tokens=None, logits_processors=None, **kw):
             uid = self.uid

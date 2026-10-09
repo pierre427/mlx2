@@ -99,10 +99,35 @@ class PrefillCostModel:
     _ceiling: dict = field(default_factory=dict, repr=False)
     _errors: deque = field(default_factory=lambda: deque(maxlen=64), repr=False)
     _overheads: dict = field(default_factory=dict, repr=False)
+    _pending_overheads: dict = field(default_factory=dict, repr=False)
     _seq: int = field(default=0, repr=False)
+
+    def _settle_overheads(self, kind) -> None:
+        """Charge preparations measured before any base sample existed.
+
+        Without a base the prediction is the decode-seeded fixed cost alone,
+        so a whole one-call prefill would be stored as per-call overhead.
+        Such samples wait here and are charged against the base model once it
+        has an estimate, keeping their timestamps for age-out.
+        """
+        pending = self._pending_overheads.get(kind)
+        if not pending:
+            return
+        settled = []
+        for (rows, seconds, depth, ts) in pending:
+            base = self.estimate(PREFILL_COST_OVERHEAD_KINDS[kind], depth)
+            if base is None:
+                return
+            settled.append((max(0.0, seconds - (base[0] + base[1] * rows)), ts))
+        pending.clear()
+        ring = self._overheads.setdefault(kind, deque(maxlen=self.window))
+        merged = sorted([*ring, *settled], key=lambda sample: sample[1])
+        ring.clear()
+        ring.extend(merged[-self.window :])
 
     def overhead(self, kind: str) -> float:
         """Conservative per-call overhead of an overhead kind (0 if unseen)."""
+        self._settle_overheads(kind)
         ring = self._overheads.get(kind)
         if not ring:
             return 0.0
@@ -117,11 +142,19 @@ class PrefillCostModel:
 
     def _observe_overhead(self, kind, rows, seconds, depth) -> None:
         base = self.estimate(PREFILL_COST_OVERHEAD_KINDS[kind], depth)
-        predicted = (
-            self.fixed_cost() if base is None else base[0] + base[1] * rows
-        )
-        ring = self._overheads.setdefault(kind, deque(maxlen=self.window))
-        ring.append((max(0.0, seconds - predicted), time.monotonic()))
+        if base is None:
+            # Overhead is measured over the base kind's prediction; with no
+            # base yet, keep the sample until one exists.
+            pending = self._pending_overheads.setdefault(
+                kind, deque(maxlen=self.window)
+            )
+            pending.append((rows, seconds, depth, time.monotonic()))
+        else:
+            self._settle_overheads(kind)
+            ring = self._overheads.setdefault(kind, deque(maxlen=self.window))
+            ring.append(
+                (max(0.0, seconds - (base[0] + base[1] * rows)), time.monotonic())
+            )
         _bump(self.counters, "cost_overhead_samples")
         self.counters["cost_prepare_overhead_us"] = int(self.overhead(kind) * 1e6)
 

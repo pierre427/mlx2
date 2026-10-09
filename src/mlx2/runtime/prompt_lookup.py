@@ -253,6 +253,27 @@ def plan_proposal_around_verify_cliff(
     return span
 
 
+def max_proposal_span(policy) -> int:
+    """Widest proposal one prompt-lookup verify round can carry.
+
+    ``cliff_aware_span`` moves a nominal span whose verify width lands inside
+    the cliff to its far side (``verify_cliff_end`` proposals), which can
+    exceed ``num_draft``.  Admission and verify-row bounds charge this width.
+    """
+    policy = policy or {}
+    num_draft = int(policy.get("num_draft", 8))
+    if not policy.get("cliff_aware_span", False):
+        return num_draft
+    cliff_end = int(policy.get("verify_cliff_end", 15))
+    return plan_proposal_around_verify_cliff(
+        num_draft,
+        max(num_draft, cliff_end),
+        1,
+        cliff_start=int(policy.get("verify_cliff_start", 9)),
+        cliff_end=cliff_end,
+    )
+
+
 class AdaptiveLookback:
     """Miss-driven lookback with rejection backoff inside a scheduler cap."""
 
@@ -958,7 +979,11 @@ class IndexedPromptLookup:
         extra = minimum - size
         if start < extra or len(self.tokens) - size < extra:
             return False
-        return source[start - extra : start] == self.tokens[-size - extra : -size]
+        # Hot segments are tuples and local history a list; a tuple never
+        # equals a list, so compare like types.
+        return tuple(source[start - extra : start]) == tuple(
+            self.tokens[-size - extra : -size]
+        )
 
     def feedback(self, proposed, accepted):
         if self.last_source is not None and proposed and not accepted and self.reject_ttl:

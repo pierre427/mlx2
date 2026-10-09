@@ -1071,6 +1071,8 @@ def max_decode_rows(
 
     Verify blocks carry at most ``num_draft + 1`` rows per lane; one extra row
     of slack covers bonus/rollback tokens.  Ordinary decode is one row/lane.
+    A cliff-aware prompt-lookup span can exceed ``num_draft``
+    (``prompt_lookup.max_proposal_span``).
 
     A self-MTP copy round verifies a copied span in place of the head drafts,
     and its width depends on the cohort: ``max_span`` for a solo lane, the
@@ -1080,7 +1082,11 @@ def max_decode_rows(
     if speculation in ("self_mtp", "external_draft"):
         draft = int((config or {}).get("num_draft", 0) or 0)
     elif speculation == "prompt_lookup":
-        draft = int((prompt_lookup_policy or {}).get("num_draft", 8) or 8)
+        from .prompt_lookup import max_proposal_span
+
+        policy = dict(prompt_lookup_policy or {})
+        policy["num_draft"] = int(policy.get("num_draft", 8) or 8)
+        draft = max_proposal_span(policy)
     bound = int(max_lanes) * (draft + 2)
     if copy_draft_policy is not None and copy_draft_policy.enabled:
         from .copy_draft import cohort_copy_cap

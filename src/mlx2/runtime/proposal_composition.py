@@ -108,6 +108,10 @@ class ComposedDraftModel:
 
     requires_processor_histories = True
     supports_logits_processors = True
+    # Trusted PLD is B1-only.  The executor may split one cohort into several
+    # draft groups (by pending-tail length), so ``len(anchors)`` is not the
+    # verify width; the executor passes the physical cohort width.
+    requires_cohort_width = True
     _supported_proposal_distributions = frozenset(
         {"deterministic_point_mass", "stochastic_exact_law"}
     )
@@ -297,6 +301,7 @@ class ComposedDraftModel:
         *,
         logits_processors=None,
         processor_histories=None,
+        cohort_width=None,
         **kwargs,
     ):
         if processor_histories is None or len(processor_histories) != len(anchors):
@@ -392,6 +397,8 @@ class ComposedDraftModel:
         confidence = (
             list(confidence) if confidence is not None else [None] * len(anchors)
         )
+        if cohort_width is None:
+            cohort_width = len(anchors)
         sources = []
         score_keys, scores, trusted_rows, audit_rows = [], [], [], []
         for row, (source, copied, score_key) in enumerate(candidates):
@@ -403,7 +410,7 @@ class ComposedDraftModel:
                 _accepted, verified = self._score_counts.get(score_key, (0, 0))
                 calibrating = verified < self.policy.trusted_pld_min_verified_tokens
                 eligible = (
-                    len(anchors) == 1
+                    cohort_width == 1
                     and not (logits_processors or [[]])[row]
                     and score >= self.policy.trusted_pld_min_score
                     and verified >= self.policy.trusted_pld_min_verified_tokens

@@ -593,3 +593,47 @@ def test_prompt_lookup_insert_is_atomic_when_a_later_lane_is_invalid():
         )
     assert not generator.lanes
     assert generator.next_uid == 0
+
+
+class _SuccessorModel:
+    """Greedy target: the next token is the current token plus one."""
+
+    def __call__(self, tokens, *, cache):
+        values = tokens.astype(mx.float32)[:, None, :, None]
+        cache[0].update_and_fetch(values, values)
+        predicted = (tokens.astype(mx.int32) + 1) % 128
+        return mx.where(
+            mx.arange(128)[None, None, :] == predicted[..., None], 20.0, -20.0
+        )
+
+
+def test_live_retrieval_segment_proposes_under_documented_context_match():
+    # docs/PLD-POLICY.md documents min_context_match 8 with ngram_max 6; a
+    # retrieval segment agreeing with the live context must still propose.
+    generator = PromptLookupBatchGenerator(
+        _SuccessorModel(),
+        prefill_step_size=64,
+        prompt_lookup={
+            "num_draft": 4,
+            "adaptive": False,
+            "min_context_match": 8,
+            "max_sources": 8,
+            "retrieval_segments": [list(range(5, 90))],
+        },
+    )
+    generator.insert([list(range(10, 30))], max_tokens=[16], caches=[[KVCache()]])
+    tokens, final = [], None
+    for _ in range(200):
+        _, responses = generator.next()
+        for response in responses:
+            tokens.append(response.token)
+            if response.finish_reason:
+                final = response
+        if final is not None:
+            break
+    assert tokens == list(range(30, 46))
+    receipt = final.speculative_receipt
+    assert receipt["execution"] == "prompt_lookup_verify"
+    assert receipt["retrieval_cycles"] > 0
+    assert receipt["accepted"] > 0
+    assert receipt["context_mismatch_sites"] == 0

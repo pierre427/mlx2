@@ -305,6 +305,69 @@ def test_progressive_stop_proposal_uses_fixed_verifier_and_preserves_rng():
     assert receipt["rounds"] == 0
 
 
+@pytest.mark.parametrize("stop_index", [None, 0, 1])
+def test_accepted_stop_draft_is_counted_as_accepted(stop_index):
+    # A stop can cut delivery on an accepted draft token: then every delivered
+    # token is an accepted proposal and the round has no correction or bonus.
+    batch, lane = _run_forced_progressive_round(None, None, stop_index=stop_index)
+    try:
+        delivered = [item.token for item in lane.ready]
+        last = lane.ready[-1]
+        receipt = last.speculative_receipt
+        assert receipt["round_proposed"] == 3
+        if stop_index is None:
+            assert last.finish_reason is None
+            assert len(delivered) == 4
+            expected = 3
+        else:
+            assert last.finish_reason == "stop"
+            assert len(delivered) == stop_index + 1
+            expected = len(delivered)
+        assert receipt["round_accepted"] == expected
+        assert receipt["accepted"] == expected
+        assert lane.accepted == expected
+        assert batch.scheduler_stats["accepted_proposals"] == expected
+        assert lane.verify_accept_hist == {expected: 1}
+    finally:
+        batch.close()
+
+
+@pytest.mark.parametrize("stop_index", [None, 1])
+def test_composed_feedback_counts_an_accepted_stop_draft(stop_index):
+    from mlx2.runtime.proposal_composition import ComposedDraftModel
+
+    model, draft = tiny()
+    prompt = [1, 2, 3, 4]
+    _anchor, _expected, proposal, laws = _forced_target_proposal(model, prompt, 3, None)
+    assert proposal[0] != proposal[1]
+    real = draft.draft_distributions
+
+    def forced(anchors, hidden, caches, count, rngs, temps, **kwargs):
+        real(anchors, hidden, caches, count, rngs, temps, **kwargs)
+        return [proposal[:count]], [laws[:count]]
+
+    draft.draft_distributions = forced
+    # The prompt repeats no n-gram, so the external chain is the only source.
+    wrapper = ComposedDraftModel(draft, {"prompt_lookup": True})
+    batch = ExternalDraftBatchGenerator(
+        model, draft_model=wrapper, binding="composed-stop", num_draft=3,
+        completion_batch_size=1, prefill_step_size=8,
+        stop_tokens=[] if stop_index is None else [[proposal[stop_index]]],
+    )
+    try:
+        uid = batch.insert([prompt], max_tokens=[8], lane_rngs=[LaneRNG(919)])[0]
+        lane = batch.lanes[uid]
+        while lane.anchor is None:
+            batch._prefill(lane)
+        batch._round([lane])
+        assert lane.proposal_composition_current_source == "external"
+        expected = 3 if stop_index is None else len(lane.ready)
+        # The lagged source scorer learns every delivered accepted proposal.
+        assert wrapper._score_counts["external"] == (expected, 3)
+    finally:
+        batch.close()
+
+
 def test_progressive_processor_request_uses_exact_fixed_verifier():
     fixed_batch, fixed = _run_forced_progressive_round(
         None, None, processor=True
@@ -406,6 +469,56 @@ def test_progressive_constructor_and_request_gates_fail_closed():
                 progressive_verification_tile=2,
                 **kwargs,
             )
+
+
+def test_muse_progressive_policy_parse_matches_generator_bounds():
+    """Every progressive tile/cap the Muse policy parser accepts must build
+    the generator, and every one it refuses must be refused there too: a
+    policy refused only by the generator fails after the weights loaded."""
+    from dataclasses import replace
+
+    from mlx2.adapters.muse_glimmer import (
+        DFLASH2_DEFAULT_NUM_DRAFT,
+        DFLASH2_MINIMUM_PROPOSAL_LENGTH,
+        normalize_external_policy,
+    )
+
+    assert DFLASH2_MINIMUM_PROPOSAL_LENGTH == DFlash2DraftModel.minimum_proposal_length
+    mx.random.seed(8)
+    model = Model(ModelArgs(hidden_size=8, intermediate_size=16, num_hidden_layers=4,
+                            num_attention_heads=2, num_key_value_heads=1, head_dim=4,
+                            vocab_size=32, sliding_window=3, max_position_embeddings=128))
+    draft = DFlash2DraftModel(
+        replace(_tiny_dflash_args(), block_size=16)
+    ).bind(model)
+    model.configure_target_verify_row_exact(True)
+    base = {"draft_model": "/draft", "target_verify_row_exact": True}
+    for num_draft in (None, 2, 3, 4, 15):
+        for tile in (1, 2, 3, 4, 15, 16):
+            for cap in (None, 1, 2, 3, 4, 15, 16):
+                raw = {**base, "progressive_verification_tile": tile}
+                if num_draft is not None:
+                    raw["num_draft"] = num_draft
+                if cap is not None:
+                    raw["progressive_multilane_draft_cap"] = cap
+                try:
+                    policy = normalize_external_policy(raw)
+                except ValueError:
+                    policy = None
+                try:
+                    ExternalDraftBatchGenerator(
+                        model,
+                        draft_model=draft,
+                        binding="bounds",
+                        num_draft=raw.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT),
+                        completion_batch_size=2,
+                        progressive_verification_tile=tile,
+                        multilane_draft_cap=cap,
+                    ).close()
+                    built = True
+                except ValueError:
+                    built = False
+                assert (policy is not None) == built, (num_draft, tile, cap)
 
 
 def test_progressive_second_tile_failure_restores_whole_round(monkeypatch):

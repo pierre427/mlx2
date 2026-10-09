@@ -736,6 +736,117 @@ def test_trusted_pld_span_with_stop_token_is_forced_through_exact_audit(monkeypa
     assert any(key.startswith("prompt_lookup") for key in wrapper._score_counts)
 
 
+def test_trusted_pld_in_split_b2_cohort_completes_both_lanes():
+    """Trusted PLD is B1-only, judged by the physical cohort width.
+
+    ``_propose`` splits a cohort into draft groups by pending-tail length, so
+    a B2 cohort whose lanes committed different counts last round offers the
+    composition two singleton groups.  Eligibility judged from one group's
+    ``len(anchors)`` marked such a row trusted, and ``_run_round`` raised a
+    ValueError out of ``next()``, killing the serving worker.
+    """
+    from test_external_dflash2_cpu import tiny as tiny_dflash
+
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.sample_utils import LaneRNG
+
+    model, draft = tiny_dflash(sliding_window=64)
+    assert model.supports_trusted_pld
+    wrapper = ComposedDraftModel(
+        draft,
+        {
+            "prompt_lookup": True,
+            "ngram_min": 1,
+            "min_context_match": 0,
+            "trusted_pld": True,
+            "trusted_pld_min_score": 0.0,
+            "trusted_pld_min_verified_tokens": 0,
+            "trusted_pld_min_match": 1,
+        },
+    )
+    engine = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="trusted-split-b2",
+        num_draft=3,
+        completion_batch_size=2,
+        prefill_step_size=64,
+    )
+    split_b2 = []
+    blind_in_b2 = []
+    run_round = engine._run_round
+
+    def observe(cohort):
+        tails = {int(lane.tail.shape[1]) for lane in cohort}
+        before = engine.scheduler_stats.get(
+            "external_composed_trusted_pld_rounds", 0
+        )
+        result = run_round(cohort)
+        if len(cohort) == 2:
+            if len(tails) == 2:
+                split_b2.append(sorted(tails))
+            blind_in_b2.append(
+                engine.scheduler_stats.get("external_composed_trusted_pld_rounds", 0)
+                - before
+            )
+        return result
+
+    engine._run_round = observe
+    uids = engine.insert(
+        [[1, 2, 3, 4, 5, 6] * 4, [9, 10, 11, 12, 13, 9, 10, 11]],
+        max_tokens=[40, 40],
+        lane_rngs=[LaneRNG(1), LaneRNG(2)],
+    )
+    outputs, finishes = {}, {}
+    try:
+        for _ in range(200):
+            _, responses = engine.next()
+            for response in responses:
+                outputs.setdefault(response.uid, []).append(response.token)
+                if response.finish_reason:
+                    finishes[response.uid] = response
+            if not engine.lanes:
+                break
+    finally:
+        engine.close()
+    # The trigger really happened: a B2 cohort split into two draft groups.
+    assert split_b2
+    assert set(finishes) == set(uids)
+    assert all(len(outputs[uid]) == 40 for uid in uids)
+    assert all(finishes[uid].finish_reason == "length" for uid in uids)
+    # No B2 cohort ever committed a blind (unverified) trusted span.
+    assert not any(blind_in_b2)
+
+
+def test_trusted_pld_on_unsupported_target_is_verified_exactly():
+    """A trusted row on a target without trusted-PLD support runs an exact
+    audit instead of raising out of ``next()``."""
+    model, draft = tiny()
+    assert not getattr(model, "supports_trusted_pld", False)
+    wrapper = ComposedDraftModel(
+        draft,
+        {
+            "ngram_min": 1,
+            "ngram_max": 1,
+            "min_context_match": 0,
+            "trusted_pld": True,
+            "trusted_pld_min_score": 0.5,
+            "trusted_pld_min_verified_tokens": 0,
+            "trusted_pld_min_match": 1,
+            "trusted_pld_max_span": 2,
+        },
+    )
+    engine = generator(model, wrapper)
+    prompt = [1, 2, 3, 1, 2, 3, 1, 2]
+    uid = engine.insert([prompt], max_tokens=[8])[0]
+    outputs, finishes = drain(engine)
+    assert outputs[uid] == reference(model, prompt, 8)
+    assert finishes[uid].finish_reason == "length"
+    assert engine.scheduler_stats["external_composed_trusted_pld_b1_guard_rounds"] > 0
+    assert wrapper._trusted_stats["blind_rounds"] == 0
+    assert wrapper._trusted_stats["audit_rounds"] > 0
+
+
 def test_default_composition_skips_tree_batch_routes():
     """The pinned Qwen3.8 DFlash2 pair defaults to a tree batch-size route;
     composition verifies chains only, so the default must not attach (the
