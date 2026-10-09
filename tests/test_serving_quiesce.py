@@ -410,7 +410,10 @@ def test_slow_media_preparation_does_not_stall_an_unrelated_lane(scripted_engine
     def media():
         try:
             engine.submit(
-                {"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}
+                # A media part reaches the hook; an all-text part array is text.
+                {"messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+                ]}]}
             )
         except ValueError as exc:
             failures.append(str(exc))

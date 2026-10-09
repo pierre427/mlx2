@@ -239,8 +239,9 @@ def _submit(engine, tokens, max_tokens=6):
 
 def _media_request(tokens, end, seed=1, max_tokens=6):
     return {
+        # A media part (an all-text part array would be served as text).
         "messages": [{"role": "user", "content": [{
-            "type": "text", "text": "x",
+            "type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="},
             "media": {"tokens": list(tokens), "end": end, "seed": seed},
         }]}],
         "max_tokens": max_tokens,

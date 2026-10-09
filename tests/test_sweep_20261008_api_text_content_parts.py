@@ -136,3 +136,90 @@ def test_engine_serves_a_text_part_array_without_a_media_hook(scripted_engine):
     _, _, final = _collect(job)
     assert "error" not in final, final
     assert seen and seen[-1] == [{"role": "user", "content": "hi"}]
+
+
+def test_engine_renders_a_text_part_array_like_http_with_a_media_hook(scripted_engine):
+    # A media adapter's own text-only fallback joined parts with "\n" while
+    # the HTTP validator joins them with "": one request, two prompts and two
+    # APCv2 prefixes depending on whether it arrived over HTTP.
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+    hooked, seen = [], []
+
+    def prepare_multimodal_request(request, **_kwargs):
+        hooked.append(request["messages"])
+        return {
+            **request,
+            "messages": [
+                {**message, "content": "\n".join(part["text"] for part in message["content"])}
+                if isinstance(message.get("content"), list)
+                else message
+                for message in request["messages"]
+            ],
+        }
+
+    engine.adapter.prepare_multimodal_request = prepare_multimodal_request
+    assert engine.supports_multimodal()
+    render = engine.adapter.prompt_tokens
+
+    def prompt_tokens(request):
+        seen.append(request["messages"])
+        return render(request)
+
+    engine.adapter.prompt_tokens = prompt_tokens
+    state["script"] = []
+    messages = [{"role": "user", "content": _parts("Describe it.", "Be brief.")}]
+    job = engine.submit({"messages": messages, "temperature": 0, "max_tokens": 2})
+    _, _, final = _collect(job)
+    assert "error" not in final, final
+    http = validate_request({"messages": messages})["messages"]
+    assert seen and seen[-1] == http == [{"role": "user", "content": "Describe it.Be brief."}]
+    assert hooked == []
+
+
+def test_engine_direct_explicit_null_fields_finish_like_omitted_ones(scripted_engine):
+    # HTTP drops a recognised null before the engine sees it; an engine-direct
+    # {"tools": None} reached the terminal receipt, which iterated None and
+    # finished a fully decoded request as a 500.
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+    finals = []
+    for extra in ({"tools": None, "tool_choice": None, "stop": None}, {}):
+        state["script"] = []
+        job = engine.submit(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "temperature": 0,
+                "max_tokens": 2,
+                **extra,
+            }
+        )
+        _, _, final = _collect(job)
+        finals.append(final)
+    for final in finals:
+        assert "error" not in final, final
+    assert finals[0]["finish_reason"] == finals[1]["finish_reason"]
+
+
+def test_prompt_inspection_renders_text_parts_like_admission(scripted_engine):
+    # render_prompt promises the prompt admission will use; count_tokens and
+    # apply_template derive from the same request.  With a media hook they
+    # passed an all-text part array straight to the adapter.
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+    engine.adapter.prepare_multimodal_request = lambda request, **_kwargs: request
+    rendered = []
+    render = engine.adapter.prompt_tokens
+
+    def prompt_tokens(request):
+        rendered.append(request["messages"])
+        return render(request)
+
+    engine.adapter.prompt_tokens = prompt_tokens
+    engine.adapter.render_prompt = lambda request: repr(request["messages"])
+    parts = {"messages": [{"role": "user", "content": _parts("Describe it.", "Be brief.")}]}
+    text = {"messages": [{"role": "user", "content": "Describe it.Be brief."}]}
+    assert engine.render_prompt(parts) == engine.render_prompt(text)
+    assert engine.count_tokens(parts) == engine.count_tokens(text)
+    assert engine.apply_template(parts) == engine.apply_template(text)
+    assert all(messages == text["messages"] for messages in rendered)

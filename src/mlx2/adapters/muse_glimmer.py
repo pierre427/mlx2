@@ -185,7 +185,7 @@ def _refuse_reserved_recipients(request: dict) -> None:
     if request.get("tool_choice") == "none":
         # No tool reaches the template, so none can be addressed.
         return
-    for tool in request.get("tools", ()):
+    for tool in request.get("tools") or ():
         name = tool["function"]["name"]
         if name in _RESERVED_RECIPIENTS:
             raise ValueError(
@@ -196,7 +196,7 @@ def _refuse_reserved_recipients(request: dict) -> None:
 
 def _tool_names(request: dict) -> tuple[str, ...]:
     _refuse_reserved_recipients(request)
-    names = tuple(tool["function"]["name"] for tool in request.get("tools", ()))
+    names = tuple(tool["function"]["name"] for tool in request.get("tools") or ())
     if any(_MUSE_TOOL_NAME.fullmatch(name) is None for name in names):
         raise ValueError(
             "Muse tool names may contain only letters, digits, '_', '-', and '.'"

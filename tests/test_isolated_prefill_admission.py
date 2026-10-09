@@ -224,7 +224,11 @@ def host(monkeypatch):
 
 LONG_TEXT = [(i % 30) + 1 for i in range(1200)]
 IMAGE_REQUEST = {
-    "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    # A real media part: an all-text part array is a text request (HTTP and
+    # the engine both flatten it), so it would never reach the media hook.
+    "messages": [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+    ]}],
     "max_tokens": 4,
     "temperature": 0,
 }

@@ -776,3 +776,25 @@ def test_client_stop_string_inside_an_atem_call_drops_the_partial_call():
     parser, events = collect(text, tools=TOOLS, stops=["count"])
     assert parser.stopped and parser.tool_count == 0
     assert not any("tool_calls" in event for event in events)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"reasoning_effort": "high"}, {"enable_thinking": True}, {}],
+)
+def test_explicit_null_tools_render_like_absent_tools(extra):
+    # Engine-direct callers bypass the HTTP null strip, and the adapter reads
+    # an explicit null as absent; the reserved-recipient check must too.
+    class _Tok:
+        def apply_chat_template(self, messages, **_kwargs):
+            return "<|start|>assistant"
+
+        def encode(self, prompt, **_kwargs):
+            return [1, 2]
+
+    adapter = MuseGlimmerAdapter.__new__(MuseGlimmerAdapter)
+    adapter.tokenizer = _Tok()
+    messages = [{"role": "user", "content": "hi"}]
+    assert adapter.prompt_tokens({"messages": messages, "tools": None, **extra}) == (
+        adapter.prompt_tokens({"messages": messages, **extra})
+    )

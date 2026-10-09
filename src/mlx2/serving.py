@@ -3035,6 +3035,27 @@ def install_explicit_native_qwen3_b2_cohort(
                 _NATIVE_ADMISSION_ORPHANS.remove((owner, writer, backend))
 
 
+def engine_request(request):
+    """``request`` as the HTTP validator would hand it to the engine.
+
+    An explicit null on a public field is an unset field (``_mlx2`` private
+    keys are left alone), and an all-text content-part array is its text.
+    Admission and the prompt-inspection APIs read requests through this, so
+    an engine-direct caller is checked, rendered, keyed in APCv2 and finished
+    exactly like the same request over HTTP.
+    """
+    from .openai_compat import flatten_text_messages
+
+    view = {
+        key: value
+        for key, value in request.items()
+        if value is not None or key.startswith("_")
+    }
+    if isinstance(view.get("messages"), list):
+        view["messages"] = flatten_text_messages(view["messages"])
+    return view
+
+
 def render_prompt_tokens(adapter, request):
     """Render one request to prompt tokens, shaping template failures.
 
@@ -4446,7 +4467,10 @@ class ServingEngine:
             adapter = self.adapter
             if adapter is None:
                 raise RuntimeError("model adapter is not ready")
-            return [int(token) for token in render_prompt_tokens(adapter, request)]
+            return [
+                int(token)
+                for token in render_prompt_tokens(adapter, engine_request(request))
+            ]
 
     def apply_template(self, request):
         """Rendered prompt text, or None when the adapter cannot render text.
@@ -4463,13 +4487,14 @@ class ServingEngine:
             render = getattr(adapter, "render_prompt", None)
             if not callable(render):
                 return None
-            return render(request)
+            return render(engine_request(request))
 
     def _prepare_job(self, request, *, tenant_id):
         from .contracts import Capability
         from .output import constrained_tool_choice
         from .runtime.verify_bitexact import check_request as check_verify_bitexact
 
+        request = engine_request(request)
         handle = getattr(self, "verify_bitexact_handle", None)
         check_verify_bitexact(request, handle)
         if (
@@ -4506,18 +4531,9 @@ class ServingEngine:
             if vendor is None:
                 raise ValueError("this model declares no sampling profiles")
             vendor.select(thinking=None, requested=profile)
+        # ``engine_request`` already flattened all-text part arrays, so they
+        # never reach a media hook's own join.
         public_request = {key: value for key, value in request.items() if key != "mlx_fault"}
-        if not callable(
-            getattr(getattr(self, "adapter", None), "prepare_multimodal_request", None)
-        ) and isinstance(public_request.get("messages"), list):
-            # Without a media hook an all-text part array asks for no media
-            # capability; render it as its text (the HTTP validator already
-            # does, for every route).
-            from .openai_compat import flatten_text_messages
-
-            public_request["messages"] = flatten_text_messages(
-                public_request["messages"]
-            )
         activation = activation_capsule_request(public_request)
         has_media = any(
             isinstance(message.get("content"), list)
