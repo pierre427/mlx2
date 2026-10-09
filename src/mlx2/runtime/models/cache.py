@@ -4696,7 +4696,12 @@ class BatchRotatingKVCache(_BaseCache):
         rinds = rinds[None]
         mask = linds >= rinds
         mask &= linds < rinds + window_size
-        if (trim_size := (self._idx - self.max_size + int(N > 1))) > 0:
+        # A multi-token update first restores temporal order, which moves a
+        # rotated ring's write cursor to its width, then trims from there.
+        idx = self._idx
+        if N > 1 and self.rotated and self.keys is not None:
+            idx = self.keys.shape[2]
+        if (trim_size := (idx - self.max_size + int(N > 1))) > 0:
             left_padding = left_padding - trim_size
         rotated = N == 1 and (self.rotated or self._idx >= self.max_size)
         if rotated:
@@ -5163,7 +5168,12 @@ class BatchRotatingQuantizedKVCache(_BaseCache):
         rinds = rinds[None]
         mask = linds >= rinds
         mask &= linds < rinds + window_size
-        if (trim_size := (self._idx - self.max_size + int(N > 1))) > 0:
+        # A multi-token update first restores temporal order, which moves a
+        # rotated ring's write cursor to its width, then trims from there.
+        idx = self._idx
+        if N > 1 and self.rotated and self.keys is not None:
+            idx = self.keys[0].shape[2]
+        if (trim_size := (idx - self.max_size + int(N > 1))) > 0:
             left_padding = left_padding - trim_size
         rotated = N == 1 and (self.rotated or self._idx >= self.max_size)
         if rotated:

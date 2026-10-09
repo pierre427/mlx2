@@ -883,7 +883,9 @@ class PromptProcessingBatch:
             self.stop_matchers,
             self.max_tokens,
             persistent_inputs=self.persistent_inputs,
+            processor_tokens=getattr(self, "processor_tokens", None),
         )
+        self.processor_tokens = None
         self.uids = []
         self.prompt_cache = []
         self.tokens = []
@@ -958,6 +960,7 @@ class GenerationBatch:
         persistent_inputs: Optional[List[Optional[dict]]] = None,
         route_receipts: Optional[List[Optional[dict]]] = None,
         lane_rngs: Optional[List[Optional[LaneRNG]]] = None,
+        processor_tokens: Optional[List[List[int]]] = None,
     ):
         self.model = model
         self.uids = uids
@@ -1003,7 +1006,13 @@ class GenerationBatch:
         self._decode_steps = 0
         self._next_tokens = inputs
         self._next_logprobs = []
-        self._token_context = [TokenBuffer(t) for t in tokens]
+        # Logits processors were built for the request's prompt length, so
+        # their history stays the full prompt even when a post-prefill
+        # transform compacted the cache-aligned ``tokens``.
+        self._token_context = [
+            TokenBuffer(t)
+            for t in (tokens if processor_tokens is None else processor_tokens)
+        ]
         self._num_tokens = [0] * len(self.uids)
         self._matcher_states = [m.make_state() for m in stop_matchers]
         self._lane_failures = []
@@ -1193,7 +1202,9 @@ class GenerationBatch:
             if steer is not None:
                 taps.steer = None
         trace_t1b = time.perf_counter() if STEP_TRACE is not None else None
-        logits = logits[:, -1, :]
+        # Processors (penalties, logit_bias) compute in float32: on bf16
+        # logits a sub-ulp penalty rounds away or ties the leader.
+        logits = logits[:, -1, :].astype(mx.float32)
         token_context = []
         if any(self.logits_processors):
             token_context = [
@@ -7404,6 +7415,10 @@ class BatchGenerator:
                             raise RuntimeError(
                                 "post-prefill state transform removed the entire cached prefix"
                             )
+                        # Only the cache-aligned bookkeeping is compacted;
+                        # processors keep indexing the generated span from
+                        # the original prompt length.
+                        ready.processor_tokens = [list(ready.tokens[0])]
                         ready.tokens[0] = retained
                     replacement_cache = result.get("prompt_cache")
                     if replacement_cache is not None:

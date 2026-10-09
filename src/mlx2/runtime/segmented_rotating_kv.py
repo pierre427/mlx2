@@ -354,6 +354,18 @@ class SegmentedKVView:
         self._check()
         if N != self.width:
             raise ValueError("mask width must match the verification block")
+        if window_size is None:
+            # A one-token lane's attention builds the ordinary B=1 mask from
+            # its pre-round twin (``_mask_state``), whose counter is thrown
+            # away.  Count it on the live row, once per model-level mask as
+            # the direct path does, so the PLD receipt sees it.
+            for row, count in zip(self.rows, self.lengths):
+                if (
+                    count == 1
+                    and type(row) is KVCache
+                    and getattr(row, "_pld_ordinary_mask_padding", None) is not None
+                ):
+                    row._pld_ordinary_mask_calls += 1
         return _RowMask(self._geometry, window_size)
 
     def update_and_fetch(self, keys, values):

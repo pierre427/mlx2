@@ -153,7 +153,7 @@ class NativeQwen3Continuation:
         """Build one lane's existing processor and sampler graph in lane order."""
         # Keep this ordinary implementation self-contained: source-contract
         # tests execute the method body against the existing lane seam.
-        sample_logits = logits[None]
+        sample_logits = logits[None].astype(mx.float32)
         if self.processors:
             context = mx.array(self.tokens, dtype=mx.uint32)
             for processor in self.processors:
@@ -174,7 +174,7 @@ class NativeQwen3Continuation:
         """
         # GenerationBatch applies processors to a one-row logits tensor after
         # the input token is in its token context. Match that order here.
-        sample_logits = logits[None]
+        sample_logits = logits[None].astype(mx.float32)
         if self.processors:
             context = mx.array(tokens, dtype=mx.uint32)
             for processor in self.processors:

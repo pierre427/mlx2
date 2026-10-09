@@ -81,10 +81,15 @@ def _linear_dims(linear):
 
 
 def _default_lora_dtype(linear):
+    import mlx.core as mx
     from mlx import nn
 
     if isinstance(linear, nn.QuantizedLinear):
-        return linear.scales.dtype
+        dtype = linear.scales.dtype
+        # mxfp4/mxfp8/nvfp4 scales are uint8 exponent codes, not multipliers
+        # (the same trap fp32_head.py guards); use float32, as install_lora
+        # does and as CPU gather_mm requires.
+        return dtype if mx.issubdtype(dtype, mx.floating) else mx.float32
     return linear.weight.dtype
 
 
@@ -185,6 +190,11 @@ class MultiLoRAManager:
             raise ValueError("max_lora_rank must be an integer from 1 to 1024")
         if multi_lora_manager(model) is not None:
             raise ValueError("model already carries a multi-LoRA manager")
+        if dtype is not None:
+            import mlx.core as mx
+
+            if not mx.issubdtype(dtype, mx.floating):
+                raise ValueError("multi-LoRA slot dtype must be floating point")
         self.model = model
         self.max_loras = max_loras
         self.max_lora_rank = max_lora_rank

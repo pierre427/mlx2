@@ -388,3 +388,159 @@ def test_parallel_sample_final_check_settles_before_refusing(metal, monkeypatch)
     receipt = engine.admit_parallel_samples(2)
     assert receipt["required_headroom_bytes"] == required
     assert engine.counts["memory_footprint_settles"] == 1
+
+
+# A persistent, unchanged shortfall must not block every decode round.  The
+# self-MTP admission callback runs at every cycle boundary; its synchronized
+# reclaim and footprint settle exist so that an inflated post-clear reading
+# cannot drive an irreversible migration.  Repeating them each round for the
+# same rows only stalls the lanes that are decoding.
+
+
+def _round_callback(free, calls, clock=None):
+    def reclaim():
+        calls.append("reclaim")
+        free[0] = free[1]
+
+    return _make_self_mtp_admission_callback(
+        SelfMTPLaneAdmissionController(host_memory_gib=36, advisory_gib=28.08),
+        free_memory=lambda: free[0],
+        reclaim_memory=reclaim,
+        settle_memory=lambda timeout=None: calls.append("settle"),
+        evict_unused_cache=lambda: False,
+        max_draft=2,
+        **({} if clock is None else {"clock": clock}),
+    )
+
+
+def test_ordinary_handoff_rows_that_fit_never_reclaim_or_settle():
+    calls = []
+    admit = _round_callback([100.0, 100.0], calls)
+    rows = ((1, 4096, 0, True, 1.76, 0.0), (2, 4096, 0, True, 1.76, 0.0))
+    assert admit.at_depth(0)(rows) == {1: "plain", 2: "plain"}
+    assert calls == []
+
+
+def test_unchanged_lower_k_shortfall_does_not_settle_every_round():
+    controller = SelfMTPLaneAdmissionController(host_memory_gib=36, advisory_gib=28.08)
+    cache = 1.76
+    need = lambda k: controller.hard_reserve_gib + controller.lane_gib(
+        4096, k, cache, resident_cache=True
+    )
+    calls = []
+    free = (need(1) + need(2)) / 2
+    admit = _round_callback([free, free], calls)
+    rows = ((0, 4096, 1, True, cache, 0.0),)
+    for _ in range(5):
+        assert admit(rows) == {0: 1}
+    assert calls == ["reclaim", "settle"]
+
+
+def test_unchanged_queued_lane_does_not_settle_every_round():
+    controller = SelfMTPLaneAdmissionController(host_memory_gib=36, advisory_gib=28.08)
+    cache = 1.76
+    lane = controller.lane_gib(4096, 2, cache, resident_cache=True)
+    calls = []
+    free = controller.hard_reserve_gib + 3.5 * lane
+    admit = _round_callback([free, free], calls)
+    rows = tuple((uid, 4096, 2, True, cache, 0.0) for uid in range(4))
+    for _ in range(5):
+        assert admit(rows) == {0: 2, 1: 2, 2: 2, 3: "queue"}
+    assert calls == ["reclaim", "settle"]
+
+
+def test_held_shortfall_is_rechecked_after_the_interval_or_a_row_change():
+    controller = SelfMTPLaneAdmissionController(host_memory_gib=36, advisory_gib=28.08)
+    cache = 1.76
+    lane = controller.lane_gib(4096, 2, cache, resident_cache=True)
+    short = controller.hard_reserve_gib + 3.5 * lane
+    roomy = controller.hard_reserve_gib + 6.5 * lane
+    clock, calls = Clock(), []
+    # ``free[0]`` is the reading before a reclaim (the decode round's pool
+    # still charged); a reclaim makes it ``free[1]``.
+    free = [short, short]
+    admit = _round_callback(free, calls, clock=clock)
+    rows = tuple((uid, 4096, 2, True, cache, 0.0) for uid in range(4))
+    assert admit(rows)[3] == "queue"
+    # Memory frees elsewhere, but the round's own pool keeps the first
+    # reading short: inside the interval the settled outcome holds.
+    free[:] = [short, roomy]
+    clock.t += 0.5
+    assert admit(rows)[3] == "queue"
+    assert calls == ["reclaim", "settle"]
+    # Past the interval the queued lane gets a fresh reclaimed re-check.
+    clock.t += 0.6
+    assert admit(rows) == {uid: 2 for uid in range(4)}
+    assert calls == ["reclaim", "settle", "reclaim"]
+    # A changed row set is re-checked at once.
+    free[0] = short
+    joined = rows + ((4, 4096, 2, True, cache, 0.0),)
+    assert admit(joined) == {uid: 2 for uid in range(5)}
+    assert calls == ["reclaim", "settle", "reclaim", "reclaim"]
+
+
+# The hold may only spare the reclaim and the settle.  Admission stays fail
+# closed: every round is planned from its own reading, and a held outcome
+# that this reading no longer supports is measured afresh, never replayed.
+
+
+def _fresh_actions(rows, free_gib):
+    return _round_callback([free_gib, free_gib], [])(rows)
+
+
+def _rank(action):
+    # queue < plain < self-MTP at k=1 < k=2
+    return {"queue": 0, "plain": 1}.get(action, 1 + action if isinstance(action, int) else -1)
+
+
+@pytest.mark.parametrize("change", ["fit_then_collapse", "fewer_lanes", "pending_growth"])
+def test_held_shortfall_never_admits_more_than_the_current_reading(change):
+    controller = SelfMTPLaneAdmissionController(host_memory_gib=36, advisory_gib=28.08)
+    cache = 1.76
+    lane = controller.lane_gib(4096, 2, cache, resident_cache=True)
+    reserve = controller.hard_reserve_gib
+    clock, calls = Clock(), []
+    rows = tuple((uid, 4096, 2, True, cache, 0.0) for uid in range(4))
+    if change == "fit_then_collapse":
+        # The first reclaim lifts headroom to four k=2 lanes, then it is gone.
+        free = [reserve + 3.5 * lane, reserve + 4.5 * lane]
+        later, later_rows = 0.0, rows
+    elif change == "fewer_lanes":
+        free = [reserve + 3.5 * lane] * 2
+        later, later_rows = reserve + 1.5 * lane, rows
+    else:
+        # Same reading, but a lane now reports a large pending merge copy.
+        free = [reserve + 3.5 * lane] * 2
+        later = free[0]
+        later_rows = ((0, 4096, 2, True, cache, 3 * lane),) + rows[1:]
+    admit = _round_callback(free, calls, clock=clock)
+    settled = admit(rows)
+    assert calls.count("reclaim") == 1
+    free[:] = [later, later]
+    clock.t += 0.5
+    supported = _fresh_actions(later_rows, later)
+    assert supported != settled
+    actions = admit(later_rows)
+    assert sorted(actions) == sorted(supported)
+    assert [
+        uid for uid in actions if _rank(actions[uid]) > _rank(supported[uid])
+    ] == []
+    assert calls.count("reclaim") == 2
+
+
+def test_hold_survives_decode_growth_while_the_reading_supports_it():
+    controller = SelfMTPLaneAdmissionController(host_memory_gib=36, advisory_gib=28.08)
+    cache = 1.76
+    lane = controller.lane_gib(4096, 2, cache, resident_cache=True)
+    clock, calls = Clock(), []
+    free = [controller.hard_reserve_gib + 3.5 * lane] * 2
+    admit = _round_callback(free, calls, clock=clock)
+    for step in range(5):
+        # Every decode round grows each lane's context and cache a little.
+        rows = tuple(
+            (uid, 4096 + 3 * step, 2, True, cache + 0.001 * step, 0.0)
+            for uid in range(4)
+        )
+        assert admit(rows) == {0: 2, 1: 2, 2: 2, 3: "queue"}
+        clock.t += 0.1
+    assert calls == ["reclaim", "settle"]

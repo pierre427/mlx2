@@ -1,5 +1,6 @@
 import mlx.core as mx
 
+from mlx2.runtime.models.base import scaled_dot_product_attention
 from mlx2.runtime.models.cache import BatchKVCache, KVCache
 from mlx2.runtime.pld import PromptLookupBatchGenerator
 from mlx2.runtime.prompt_lookup import RecentCommittedSegmentStore
@@ -303,6 +304,64 @@ def test_cost_latch_uses_ordinary_b1_full_attention_mask():
     assert tokens == [2, 2]
     assert final.speculative_receipt["proposed"] == 0
     assert final.speculative_receipt["ordinary_b1_mask_calls"] >= 2
+
+
+def test_cost_latch_receipt_counts_ordinary_b1_masks_of_segmented_rounds():
+    """A cost-latched lane out of ``parked`` runs its zero-proposal rounds as
+    one-lane segmented transactions.  Their attention still builds the
+    ordinary B=1 mask (from the transaction's pre-round twin of the row), and
+    the receipt must count those like the direct path's, once per forward."""
+    vocabulary = 64
+
+    class AttentionModel:
+        one_token_forwards = 0
+
+        def __call__(self, tokens, *, cache):
+            row = cache[0]
+            width = tokens.shape[1]
+            mask = row.make_mask(width, return_array=False, window_size=None)
+            x = tokens.astype(mx.float32)[:, None, :, None]
+            keys, values = row.update_and_fetch(x, x)
+            out = scaled_dot_product_attention(
+                x, keys, values, cache=row, scale=1.0, mask=mask
+            )
+            if width == 1:
+                self.one_token_forwards += 1
+            # Strictly novel continuation: the lookup never proposes.
+            predicted = (tokens + 1) % vocabulary
+            logits = mx.where(
+                mx.arange(vocabulary)[None, None, :] == predicted[..., None],
+                20.0, -20.0,
+            )
+            return logits + 0.0 * out.sum()
+
+    model = AttentionModel()
+    generator = PromptLookupBatchGenerator(
+        model, prefill_step_size=16,
+        prompt_lookup={
+            "num_draft": 2, "ngram_min": 2, "ngram_max": 2,
+            "cost_aware_admission": True, "cost_shadow_span": 2,
+            "cost_reprobe_interval": 1000,
+        },
+    )
+    uid = generator.insert([list(range(1, 9))], max_tokens=[8],
+                           caches=[[KVCache()]])[0]
+    generator.next()  # prefill
+    lane = generator.lanes[uid]
+    assert lane.batched
+    # The latch left ``parked`` (as after a matched shadow and explore phase).
+    lane.cost_latch.state = "active"
+    lane.ordinary = False
+    final = None
+    while final is None:
+        _, responses = generator.next()
+        final = next((r for r in responses if r.finish_reason), None)
+    receipt = final.speculative_receipt
+    assert receipt["proposed"] == 0
+    # Some one-token rounds ran through the segmented transaction ...
+    assert generator.scheduler_stats["pld_batched_rounds"] >= 1
+    # ... and every one-token forward used the ordinary B=1 mask.
+    assert receipt["ordinary_b1_mask_calls"] == model.one_token_forwards
 
 
 def test_cost_latch_does_not_activate_when_admission_cannot_fit_shadow_span():

@@ -3,6 +3,7 @@
 import math
 import os
 import platform
+import time
 from dataclasses import dataclass, replace
 from typing import (
     Callable,
@@ -772,6 +773,13 @@ def _current_self_mtp_free_memory_gib() -> Optional[float]:
     return available / float(1 << 30)
 
 
+def _admission_rank(mode: str, depth: Optional[int]) -> int:
+    """Order admission outcomes: queue < plain < self-MTP at rising k."""
+    if mode == "self_mtp":
+        return 2 + int(depth)
+    return 1 if mode == "plain" else 0
+
+
 def _make_self_mtp_admission_callback(
     controller: Optional[SelfMTPLaneAdmissionController] = None,
     free_memory: Callable[[], Optional[float]] = _current_self_mtp_free_memory_gib,
@@ -781,6 +789,8 @@ def _make_self_mtp_admission_callback(
     reclaim_memory: Optional[Callable[[], None]] = None,
     evict_unused_cache: Optional[Callable[[], bool]] = None,
     settle_memory: Optional[Callable[[], object]] = None,
+    shortfall_recheck_seconds: float = 1.0,
+    clock: Callable[[], float] = time.monotonic,
 ) -> Callable[
     [Sequence[Tuple[int, int, int, bool, float]]], Mapping[int, Union[int, str]]
 ]:
@@ -796,6 +806,17 @@ def _make_self_mtp_admission_callback(
     free-memory reading. A paused row reports its merge copy as pending, and a
     prefill continuation reports its remaining projected growth as pending.
     Fresh and APC joining rows pay their cache in full.
+
+    A shortfall that went through the synchronized reclaim is held for
+    ``shortfall_recheck_seconds``: the generator calls this every decode
+    round, and repeating the reclaim and footprint settle for an unchanged
+    shortfall stalls every lane that fits.  The hold only skips the reclaim,
+    the settle and the eviction.  Every round is still planned from its own
+    reading, and the hold applies only while that plan admits each of the
+    held rows (same uid, depth and residency; none joining) at least as far
+    as the settled outcome did.  A lower reading or a larger row that would
+    demote a lane, a joining row, a plan that fits or an expired hold is
+    measured afresh.
     """
     controller = controller or SelfMTPLaneAdmissionController()
     native_demoted: Dict[int, int] = {}
@@ -804,6 +825,10 @@ def _make_self_mtp_admission_callback(
     # READMIT hysteresis, because every cycle boundary replaces the state of
     # the rows it was given and would otherwise erase the other set's holds.
     ordinary_demoted: Dict[int, int] = {}
+    # The last reclaimed shortfall of each row set: cohort key, each row's
+    # (depth, residency, admitted rank) and when it was settled.
+    native_shortfall: Dict[str, object] = {}
+    ordinary_shortfall: Dict[str, object] = {}
 
     def preview(
         rows,
@@ -849,11 +874,14 @@ def _make_self_mtp_admission_callback(
         max_draft_override=None,
         observer_stage_override=None,
         hysteresis=None,
+        shortfall=None,
     ):
         demoted = hysteresis if hysteresis is not None else native_demoted
+        held_shortfall = shortfall if shortfall is not None else native_shortfall
         rows = tuple(rows)
         if not rows:
             demoted.clear()
+            held_shortfall.clear()
             return {}
         current_free = free_memory()
         free = math.nan if current_free is None else current_free
@@ -882,6 +910,50 @@ def _make_self_mtp_admission_callback(
 
         decision = plan(free)
 
+        def fits(decision):
+            # Depth 0 admits handed-off ordinary rows: all plain is its full
+            # plan, and the controller never calls that stage "full".
+            return decision.stage == "full" or (
+                depth_cap == 0
+                and all(mode == "plain" for mode in decision.modes)
+            )
+
+        shortfall_key = (bool(atomic_cohort), depth_cap)
+        row_states = [(int(row[2]), bool(row[3])) for row in rows]
+
+        def hold_covers(decision):
+            # These rows reclaimed and settled a shortfall less than an
+            # interval ago.  Skip the reclaim and settle only while this
+            # reading still admits every row at least as far as the settled
+            # outcome did; anything less must not be decided from a reading
+            # the reclaim could still raise.
+            if (
+                held_shortfall.get("key") != shortfall_key
+                or clock() - held_shortfall["at"] >= shortfall_recheck_seconds
+            ):
+                return False
+            settled_rows = held_shortfall["rows"]
+            for row, state, mode, depth in zip(
+                rows, row_states, decision.modes, decision.draft_depths
+            ):
+                settled_row = settled_rows.get(int(row[0]))
+                if (
+                    settled_row is None
+                    or settled_row[:2] != state
+                    or _admission_rank(mode, depth) < settled_row[2]
+                ):
+                    return False
+            return True
+
+        if fits(decision):
+            held_shortfall.clear()
+        shortfall_held = not fits(decision) and hold_covers(decision)
+        reclaimed = (
+            not fits(decision)
+            and not shortfall_held
+            and reclaim_memory is not None
+        )
+
         def remeasure():
             current_free = free_memory()
             return math.nan if current_free is None else current_free
@@ -905,20 +977,22 @@ def _make_self_mtp_admission_callback(
         # Cached allocator scratch is reclaimable. Recheck measured headroom
         # before an irreversible migration to ordinary decoding or queueing.
         # This does not credit hypothetical bytes or spend the hard reserve.
-        if decision.stage != "full" and reclaim_memory is not None:
+        if reclaimed:
             reclaim_memory()
             free = remeasure()
             decision = plan(free)
-            (decision, free) = settled(
-                decision, free, lambda d: d.stage == "full"
-            )
+            (decision, free) = settled(decision, free, fits)
         # Idle APC checkpoints compete with the next active cohort. Reclaim
         # only unleased checkpoints before splitting/demoting that cohort;
         # preserve the immutable owners currently borrowed by its warm rows.
         # The ceiling plan retains lane/verification caps, so capacity-only
         # limits never flush a useful cache. Admission still uses observed
         # headroom after every eviction, never estimated reclaimed bytes.
-        if decision.stage != "full" and evict_unused_cache is not None:
+        if (
+            not fits(decision)
+            and not shortfall_held
+            and evict_unused_cache is not None
+        ):
             try:
                 ceiling_free = controller.hard_reserve_gib + 1.0 + sum(
                     controller.lane_gib(context, depth_cap, cache,
@@ -1004,6 +1078,17 @@ def _make_self_mtp_admission_callback(
                     if action == "queue"
                 )
             )
+        if reclaimed:
+            held_shortfall.update(
+                key=shortfall_key,
+                rows={
+                    uid: state + (_admission_rank(mode, depth),)
+                    for uid, state, mode, depth in zip(
+                        uids, row_states, decision.modes, decision.draft_depths
+                    )
+                },
+                at=clock(),
+            )
         return actions
 
     def admit(rows):
@@ -1060,7 +1145,10 @@ def _make_self_mtp_admission_callback(
 
         def bounded(rows):
             return _admit(
-                rows, max_draft_override=depth, hysteresis=ordinary_demoted
+                rows,
+                max_draft_override=depth,
+                hysteresis=ordinary_demoted,
+                shortfall=ordinary_shortfall,
             )
 
         bounded.preview = lambda rows: preview(

@@ -1216,7 +1216,8 @@ class ExternalDraftBatchGenerator:
         one-hot law (``verify_greedy_proposals``).
         """
         from .sample_utils import make_transformed_logprobs
-        value = logits[None]
+        # Processors compute in float32, as ordinary decode applies them.
+        value = logits[None].astype(self.mx.float32)
         tokens = self.mx.array(history, dtype=self.mx.int32)
         # A row that follows a draft token the target gives zero probability is
         # never used by verification.  Its history can already be outside a
@@ -2574,7 +2575,7 @@ class ExternalDraftBatchGenerator:
         parents = self._target_tree_parents(block)
         paths = self._tree_paths(parents)
         width = len(paths)
-        rows = logits[0, :width]
+        rows = logits[0, :width].astype(mx.float32)
         vocab = int(rows.shape[-1])
         inputs = [lane.anchor] + list(block.tokens)
         histories = [

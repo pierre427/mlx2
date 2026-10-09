@@ -348,10 +348,13 @@ def _temperature_logprobs(logits, sampling_temp: float = 0.0):
 
 
 def _apply_logits_processors(logits_processors, y, logits):
-    """Apply processors with the same rank convention as ``generate_step``."""
+    """Apply processors with the same rank convention as ``generate_step``.
+
+    Processors run on float32 rows, as ordinary decode applies them.
+    """
     if not logits_processors:
         return logits
-    batched = logits[None] if logits.ndim == 1 else logits
+    batched = (logits[None] if logits.ndim == 1 else logits).astype(mx.float32)
     for processor in logits_processors:
         batched = processor(y, batched)
     return batched[0] if logits.ndim == 1 else batched
@@ -363,7 +366,7 @@ def _probe_logits_processors(logits_processors, y, logits):
 
     if not logits_processors:
         return logits
-    batched = logits[None] if logits.ndim == 1 else logits
+    batched = (logits[None] if logits.ndim == 1 else logits).astype(mx.float32)
     batched = probe_logits_processors(logits_processors, y, batched)
     return batched[0] if logits.ndim == 1 else batched
 

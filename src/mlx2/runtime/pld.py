@@ -1126,7 +1126,7 @@ class PromptLookupBatchGenerator:
         ``context`` is the token array the processors see (lookup history and
         the row's tentative drafts); unused without processors.
         """
-        value = logits[None]
+        value = logits[None].astype(mx.float32)
         for processor in lane.processors:
             value = processor(context, value)
         row = value[0].astype(mx.float32)

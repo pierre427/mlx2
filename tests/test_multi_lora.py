@@ -278,6 +278,67 @@ def test_quantized_base_is_supported(adapters):
     assert manager.status()["counts"]["delta_applications"] > 0
 
 
+def _fp_quantized_tiny(mode):
+    model = tiny_model()
+    nn.quantize(
+        model,
+        mode=mode,
+        class_predicate=lambda p, m: isinstance(m, nn.Linear)
+        and m.weight.shape[1] % 32 == 0
+        and p.endswith("down_proj"),
+    )
+    mx.eval(model.parameters())
+    return model
+
+
+@pytest.mark.parametrize("mode", ["mxfp4", "mxfp8", "nvfp4"])
+def test_floating_point_quantized_base_is_supported(mode, tmp_path):
+    # mxfp4/mxfp8/nvfp4 scales are uint8 exponent codes, not multipliers:
+    # slot tensors in that dtype truncated the adapter and made gather_mm
+    # raise inside the serving forward, which stopped the generation worker.
+    model = _fp_quantized_tiny(mode)
+    modules = dict(model.named_modules())
+    keys = tuple(
+        key for key, module in modules.items()
+        if key.endswith("down_proj") and isinstance(module, nn.QuantizedLinear)
+    )
+    assert keys and modules[keys[0]].scales.dtype == mx.uint8
+    dims = {
+        key: (modules[key].weight.shape[1] * 32 // modules[key].bits,
+              modules[key].weight.shape[0])
+        for key in keys
+    }
+    path = write_adapter(tmp_path / "a", keys=keys, dims=dims, rank=4, scale=2.0, seed=1)
+
+    reference = _fp_quantized_tiny(mode)
+    base = reference(mx.array(PROMPTS[:2]))
+    install_lora(reference, name="ref", path=path)
+    expected = reference(mx.array(PROMPTS[:1]))[0]
+
+    manager = MultiLoRAManager(model, max_loras=1, max_lora_rank=8)
+    manager.register("a", path)
+    slot, _ = manager.acquire("a")
+    manager.bind_uid(1, slot)
+    bound = bind_lora_rows(model, [1, 2])  # row 0 adapter, row 1 base
+    try:
+        out = model(mx.array(PROMPTS[:2]))
+    finally:
+        clear_lora_rows(bound)
+    mx.eval(out)
+    assert manager.status()["counts"]["delta_applications"] > 0
+    assert mx.allclose(out[0], expected, atol=5e-2, rtol=5e-2)
+    assert mx.array_equal(out[1], base[1])
+    # Residency accounting charges the float32 slot bytes (rank 4).
+    assert manager.registry["a"].nbytes == sum(
+        4 * 4 * (dims[key][0] + dims[key][1]) for key in keys
+    )
+
+
+def test_non_floating_slot_dtype_is_refused():
+    with pytest.raises(ValueError, match="floating"):
+        MultiLoRAManager(tiny_model(), max_loras=1, max_lora_rank=8, dtype=mx.uint8)
+
+
 def test_checkpoint_lora_keys_map_to_loaded_modules(tmp_path):
     model = tiny_model()
     module_key = KEYS_A[0]
