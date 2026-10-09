@@ -126,7 +126,7 @@ def test_prepared_image_sets_media_floor_for_apcv2_replay(monkeypatch, ids, reje
         image_token = "<image>"
 
         def apply_chat_template(self, *_args, **_kwargs):
-            return "prompt"
+            return "prompt <image>"
 
         def __call__(self, **_kwargs):
             return {"input_ids": [ids], "pixel_values": "pixels"}
@@ -179,7 +179,7 @@ def test_media_request_refuses_processor_output_without_pixels(monkeypatch):
         image_token = "<image>"
 
         def apply_chat_template(self, *_args, **_kwargs):
-            return "prompt"
+            return "prompt <image>"
 
         def __call__(self, **_kwargs):
             return {"input_ids": [[1, 42, 2]]}
@@ -307,7 +307,7 @@ def test_indexed_image_positions_come_from_processed_prompt(monkeypatch):
         image_token = "<image>"
 
         def apply_chat_template(self, *_args, **_kwargs):
-            return "prompt"
+            return "prompt <image>"
 
         def __call__(self, **_kwargs):
             return {"input_ids": [[7, 42, 9, 42, 42, 11]], "pixel_values": "pixels"}
@@ -404,10 +404,10 @@ def test_prepared_video_frames_follow_still_image_in_processor_order(monkeypatch
 
         def apply_chat_template(self, messages, **_kwargs):
             seen["content"] = messages[0]["content"]
-            return "prompt-with-three-markers"
+            return "prompt <image> <image> <image>"
 
         def __call__(self, *, text, images, videos):
-            assert text == "prompt-with-three-markers"
+            assert text == "prompt <image> <image> <image>"
             assert videos is None
             seen["images"] = images
             return {

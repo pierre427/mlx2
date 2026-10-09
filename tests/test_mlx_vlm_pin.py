@@ -74,3 +74,77 @@ def test_pyproject_pin_matches_adapter_pin():
 
     text = (Path(__file__).parents[1] / "pyproject.toml").read_text()
     assert f"mlx-vlm.git@{MLX_VLM_REVISION}" in text
+
+
+# ---- an editable checkout at the pinned HEAD must also be unmodified ----
+# The revision of an editable install came from ``git rev-parse HEAD`` alone,
+# so a local edit to the executed model code passed the gate and receipts
+# still recorded the pinned revision (sweep 2026-10-08).
+
+
+def _git(root, *args):
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+         "-C", str(root), *args],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+@pytest.fixture
+def editable_checkout(tmp_path, monkeypatch):
+    """An editable mlx-vlm install whose checkout HEAD is the pinned revision."""
+    import importlib.metadata
+    import importlib.util
+    import json
+    from types import SimpleNamespace
+
+    root = tmp_path / "mlx-vlm"
+    package = root / "mlx_vlm"
+    (package / "models").mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "models" / "gemma3n.py").write_text("WEIGHT = 1\n")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "pin")
+    monkeypatch.setattr(mlx_vlm_pin, "MLX_VLM_REVISION", _git(root, "rev-parse", "HEAD"))
+
+    direct = json.dumps({"url": root.as_uri(), "dir_info": {"editable": True}})
+    dist = SimpleNamespace(
+        version="0.7.3",
+        read_text=lambda name: direct if name == "direct_url.json" else None,
+    )
+    real_distribution = importlib.metadata.distribution
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.metadata, "distribution",
+        lambda name: dist if name == "mlx-vlm" else real_distribution(name),
+    )
+    monkeypatch.setattr(
+        importlib.util, "find_spec",
+        lambda name, *a: SimpleNamespace(origin=str(package / "__init__.py"))
+        if name == "mlx_vlm" else real_find_spec(name, *a),
+    )
+    return root
+
+
+def test_clean_editable_checkout_at_pin_is_accepted(editable_checkout):
+    runtime = mlx_vlm_pin.require_pinned_mlx_vlm()
+    assert runtime["editable"] is True
+    assert runtime["revision"] == mlx_vlm_pin.MLX_VLM_REVISION
+
+
+def test_modified_editable_checkout_at_pin_fails_closed(editable_checkout):
+    # HEAD is still the pin, but the model code that would execute is not.
+    (editable_checkout / "mlx_vlm" / "models" / "gemma3n.py").write_text("WEIGHT = 2\n")
+    assert mlx_vlm_pin.mlx_vlm_runtime()["revision"].endswith("+dirty")
+    with pytest.raises(RuntimeError, match="not the pinned revision"):
+        mlx_vlm_pin.require_pinned_mlx_vlm()
+
+
+def test_untracked_module_in_editable_checkout_fails_closed(editable_checkout):
+    (editable_checkout / "mlx_vlm" / "models" / "extra.py").write_text("X = 1\n")
+    with pytest.raises(RuntimeError, match="not the pinned revision"):
+        mlx_vlm_pin.require_pinned_mlx_vlm()

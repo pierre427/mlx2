@@ -128,6 +128,19 @@ def _plain_messages(messages, replacements):
     return converted
 
 
+def _require_media_markers(prompt, family, expected):
+    """Refuse a rendered prompt whose media markers do not pair with the media.
+
+    Processors pair every marker in the rendered prompt with one media input,
+    so a marker typed in any message (system or assistant strings, earlier
+    turns, tool arguments) exhausts their replacement iterator or shifts the
+    later media; that is a client error, not a processor fault.
+    """
+    for marker, count in expected:
+        if marker and prompt.count(marker) != count:
+            raise ValueError(f"{family} text must not contain a media placeholder")
+
+
 def _ids_and_kwargs(processed):
     data = dict(processed)
     ids = data.pop("input_ids")
@@ -577,10 +590,35 @@ class Gemma3nAdapter(_MLXVLMAdapter):
                         len(inputs["images"]) / self.video_policy.frame_batch_size
                     )
         messages = _plain_messages(request["messages"], replacements)
+        if not media:
+            # A content list of text parts only is a text request: no prefill
+            # payload, which serving would run as an isolated media prefill.
+            return {**request, "messages": messages}
         prompt = self._render(messages)
-        processed = self.processor(text=prompt, images=images or None, audio=audios or None, sampling_rate=audio_sample_rate)
+        # The Gemma 3n template emits <bos>; the tokenizer would add a second.
+        bos = getattr(self.processor.tokenizer, "bos_token", None)
+        processed = self.processor(
+            text=prompt, images=images or None, audio=audios or None,
+            sampling_rate=audio_sample_rate,
+            add_special_tokens=not (bos and prompt.startswith(bos)),
+        )
         media_token_end = _media_token_end(processed)
         ids, kwargs = _ids_and_kwargs(processed)
+        # The processor expands every placeholder in the rendered prompt,
+        # typed text and string messages included, and the model's merge
+        # raises in the generation worker unless the count equals the soft
+        # tokens it scatters (config.*_soft_tokens_per_image per input).
+        config = self.identity.get("config") or {}
+        tokenizer = self.processor.tokenizer
+        for name, token_id, per_input, inputs in (
+            ("image", tokenizer.image_token_id, config.get("vision_soft_tokens_per_image", 256), images),
+            ("audio", tokenizer.audio_token_id, config.get("audio_soft_tokens_per_image", 188), audios),
+        ):
+            if sum(1 for token in ids if token == token_id) != int(per_input) * len(inputs):
+                raise ValueError(
+                    f"Gemma 3n {name} placeholders do not match its {name} inputs; "
+                    "request text must not contain a media placeholder"
+                )
         if images:
             kwargs["_mlx2_vision_cache_key"] = f"{self.identity['fingerprint']}:{media_fingerprint([value for value in media if value.kind in {'image', 'video'}], policy=asdict(self.video_policy))}"
         return {**request, "messages": messages, "_mlx2_prompt_tokens": ids, "_mlx2_prefill_inputs": kwargs, "_mlx2_media_token_end": media_token_end, "_mlx2_media_fingerprint": media_fingerprint(media, policy={"family": "gemma3n", "video": asdict(self.video_policy), **({"audio_frontend": audio_frontend_identity(self.processor)} if audios else {})}), "_mlx2_multimodal_stats": {"gemma3n_video_requests": video_requests, "gemma3n_video_frames": video_frames, "gemma3n_video_frame_batches": video_frame_batches}}
@@ -650,6 +688,8 @@ class MiniCPMOAdapter(_MLXVLMAdapter):
                     replacements.append("".join("<audio>" for _ in chunks))
                     audio_chunks += len(chunks)
         messages = _plain_messages(request["messages"], replacements)
+        if not media:
+            return {**request, "messages": messages}
         processed = self.processor(text=self._render(messages), images=images or None, audios=audios or None)
         media_token_end = _media_token_end(processed)
         ids, kwargs = _ids_and_kwargs(processed)

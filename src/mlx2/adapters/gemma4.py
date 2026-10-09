@@ -19,6 +19,7 @@ from .mlx_vlm import (
     _media_token_end,
     _MLXVLMAdapter,
     _plain_messages,
+    _require_media_markers,
     _source,
     inspect_artifact,
 )
@@ -364,8 +365,14 @@ class _Gemma4Adapter(_MLXVLMAdapter):
         if not media:
             return request
         messages = _plain_messages(request["messages"], replacements)
+        prompt = self._render(messages)
+        # Markers in string-content messages reach the processor too.
+        _require_media_markers(prompt, "Gemma 4", (
+            (self.processor.image_token, len(images)),
+            (self.processor.video_token, len(videos)),
+        ))
         processed = self.processor(
-            text=self._render(messages), images=images or None,
+            text=prompt, images=images or None,
             videos=videos or None, fps=video_fps or None,
             return_tensors="np",
         )

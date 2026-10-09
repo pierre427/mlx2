@@ -270,7 +270,8 @@ def test_gemma3n_adapter_reports_real_frame_batches(monkeypatch):
 
     class Processor:
         tokenizer = type(
-            "Tokenizer", (), {"image_token": "<image>", "audio_token": "<audio>"}
+            "Tokenizer", (), {"image_token": "<image>", "audio_token": "<audio>",
+                              "image_token_id": 2, "audio_token_id": 4}
         )()
 
         def apply_chat_template(self, messages, **kwargs):
@@ -279,13 +280,13 @@ def test_gemma3n_adapter_reports_real_frame_batches(monkeypatch):
         def __call__(self, **kwargs):
             assert len(kwargs["images"]) == 2
             return {
-                "input_ids": np.array([[1, 2, 3]]),
-                "token_type_ids": np.array([[0, 1, 1]]),
+                "input_ids": np.array([[1, 2, 2, 3]]),
+                "token_type_ids": np.array([[0, 1, 1, 0]]),
             }
 
     adapter = object.__new__(Gemma3nAdapter)
     adapter.processor = Processor()
-    adapter.identity = {"fingerprint": "artifact"}
+    adapter.identity = {"fingerprint": "artifact", "config": {"vision_soft_tokens_per_image": 1}}
     adapter.video_policy = Gemma3nVideoPolicy(frame_batch_size=1)
     prepared = adapter.prepare_multimodal_request(
         {
@@ -323,7 +324,8 @@ def test_gemma3n_refuses_wav_audio_at_a_rate_its_extractor_does_not_use():
 
     class Processor:
         tokenizer = type(
-            "Tokenizer", (), {"image_token": "<image>", "audio_token": "<audio>"}
+            "Tokenizer", (), {"image_token": "<image>", "audio_token": "<audio>",
+                              "image_token_id": 2, "audio_token_id": 4}
         )()
         feature_extractor = type("FeatureExtractor", (), {"sampling_rate": 16_000})()
 
@@ -332,11 +334,11 @@ def test_gemma3n_refuses_wav_audio_at_a_rate_its_extractor_does_not_use():
 
         def __call__(self, **kwargs):
             processed.append(kwargs)
-            return {"input_ids": np.array([[1, 2, 3]])}
+            return {"input_ids": np.array([[1, 4, 3]])}
 
     adapter = object.__new__(Gemma3nAdapter)
     adapter.processor = Processor()
-    adapter.identity = {"fingerprint": "artifact"}
+    adapter.identity = {"fingerprint": "artifact", "config": {"audio_soft_tokens_per_image": 1}}
     adapter.video_policy = Gemma3nVideoPolicy()
 
     def request(rate):

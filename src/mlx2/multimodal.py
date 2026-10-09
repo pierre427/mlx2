@@ -64,7 +64,9 @@ def decode_image(payload, mime_type, *, max_pixels=16_000_000):
     except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
         # The warning is an exception when warnings are promoted to errors.
         raise ValueError("image exceeds the pixel bound") from error
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, SyntaxError, struct.error) as error:
+        # Pillow's TIFF/EXIF reader (reached through exif_transpose) raises
+        # SyntaxError for a bad header; that is malformed input, not a fault.
         raise ValueError(f"failed to decode image: {error}") from error
     width, height = image.size
     return MediaValue(

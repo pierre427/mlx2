@@ -28,6 +28,52 @@ def write_weights(path, shapes):
     (path / "model.safetensors").write_bytes(len(raw).to_bytes(8, "little") + raw)
 
 
+IMAGE, IMAGE_START, IMAGE_END, TILE = 124907, 125009, 125010, 124908
+
+
+class SpanProcessor:
+    """The pinned Lfm2VlProcessor's output shape: each image or video frame
+    becomes ``<|image_start|>``, 64+ ``<image>`` tokens (plus tile and
+    thumbnail markers) and ``<|image_end|>``."""
+
+    image_token = "<image>"
+    image_start_token = "<|image_start|>"
+    image_end_token = "<|image_end|>"
+    tokenizer = property(lambda self: self)
+
+    def __init__(self, ids):
+        self.ids = ids
+
+    def convert_tokens_to_ids(self, token):
+        return {"<image>": IMAGE, "<|image_start|>": IMAGE_START,
+                "<|image_end|>": IMAGE_END}[token]
+
+    def apply_chat_template(self, messages, **kwargs):
+        self.messages = messages
+        return "prompt"
+
+    def __call__(self, **kwargs):
+        import numpy as np
+
+        self.images = kwargs["images"]
+        self.text = kwargs["text"]
+        return {"input_ids": np.asarray([self.ids]),
+                "pixel_values": np.zeros((len(self.images), 1), dtype=np.float32)}
+
+
+def span(*body):
+    return [IMAGE_START, *body, IMAGE_END]
+
+
+def fake_mlx_modules():
+    fake_mlx = types.ModuleType("mlx")
+    fake_mlx.__path__ = []
+    fake_core = types.ModuleType("mlx.core")
+    fake_core.array = lambda value: value
+    fake_mlx.core = fake_core
+    return {"mlx": fake_mlx, "mlx.core": fake_core}
+
+
 class LFM25VLCPUTest(unittest.TestCase):
     def setUp(self):
         install_for_test_case(self)
@@ -143,19 +189,8 @@ class LFM25VLCPUTest(unittest.TestCase):
     def test_media_prefill_boundary_excludes_decode_anchor(self):
         import numpy as np
 
-        image_token = 124907
-
-        class Processor:
-            image_token = "<image>"
-            tokenizer = property(lambda self: self)
-            def apply_chat_template(self, messages, **kwargs):
-                return "prompt"
-            def __call__(self, **kwargs):
-                return {"input_ids": np.asarray([self.ids]),
-                        "pixel_values": np.zeros((1, 1), dtype=np.float32)}
-
-        processor = Processor()
-        processor.ids = [10, image_token, 11, 12]
+        image_token = IMAGE
+        processor = SpanProcessor([10, *span(image_token), 12])
         adapter = object.__new__(LFM25VLAdapter)
         adapter.identity = {"image_token_id": image_token}
         adapter.processor = processor
@@ -173,30 +208,32 @@ class LFM25VLCPUTest(unittest.TestCase):
                 patch.object(lfm_module, "resolve_media", return_value=media), \
                 patch.object(lfm_module, "media_fingerprint", return_value="media-key"):
             ready = adapter.prepare_multimodal_request(request)
-            self.assertEqual(ready["_mlx2_media_token_end"], 2)
+            self.assertEqual(ready["_mlx2_media_token_end"], 3)
             self.assertEqual(ready["_mlx2_media_fingerprint"], "media-key")
             self.assertIn("pixel_values", ready["_mlx2_prefill_inputs"])
             tokens = ready["_mlx2_prompt_tokens"]
             self.assertEqual(adapter_media_checkpoint_position(
-                adapter, ready, tokens, cached_tokens=0), 2)
+                adapter, ready, tokens, cached_tokens=0), 3)
             self.assertIsNone(adapter_media_checkpoint_position(
-                adapter, ready, tokens, cached_tokens=2))
+                adapter, ready, tokens, cached_tokens=3))
             no_suffix = {**ready, "_mlx2_prompt_tokens": tokens[:-1]}
             no_suffix["_mlx2_media_proof"] = adapter._media_checkpoint_proof(
-                tokens[:-1], "media-key", 2
+                tokens[:-1], "media-key", 3
             )
             self.assertIsNone(adapter_media_checkpoint_position(
                 adapter, no_suffix, tokens[:-1], cached_tokens=0))
-            forged = {**ready, "_mlx2_media_token_end": 1}
+            forged = {**ready, "_mlx2_media_token_end": 2}
             with self.assertRaisesRegex(ValueError, "not bound"):
                 adapter_media_checkpoint_position(
                     adapter, forged, tokens, cached_tokens=0)
-            forged = {**ready, "_mlx2_prompt_tokens": [10, image_token, 99, 12]}
+            forged = {**ready, "_mlx2_prompt_tokens": [10, *span(image_token), 99]}
             with self.assertRaisesRegex(ValueError, "not bound"):
                 adapter_media_checkpoint_position(
                     adapter, forged, tokens, cached_tokens=0)
-            processor.ids = [10, image_token]
-            with self.assertRaisesRegex(ValueError, "final prompt token"):
+            # An image placeholder as the final (decode-anchor) token can only
+            # come from an unclosed span, which the span check refuses.
+            processor.ids = [10, IMAGE_START, image_token]
+            with self.assertRaisesRegex(ValueError, "placeholders do not match"):
                 adapter.prepare_multimodal_request(request)
         self.assertNotIn("mlx", sys.modules)
 
@@ -214,25 +251,16 @@ class LFM25VLCPUTest(unittest.TestCase):
     def test_video_frames_use_ordered_images_and_media_boundary(self):
         import numpy as np
 
-        image_token = 124907
+        image_token = IMAGE
         frame_a = np.zeros((2, 3, 3), dtype=np.uint8)
         frame_b = np.ones((2, 3, 3), dtype=np.uint8)
 
-        class Processor:
-            image_token = "<image>"
-            tokenizer = property(lambda self: self)
-
+        class Processor(SpanProcessor):
             def apply_chat_template(self, messages, **kwargs):
                 self.messages = messages
                 return messages[0]["content"]
 
-            def __call__(self, **kwargs):
-                self.images = kwargs["images"]
-                self.text = kwargs["text"]
-                return {"input_ids": np.asarray([[10, image_token, image_token, 11, 12]]),
-                        "pixel_values": np.zeros((2, 1), dtype=np.float32)}
-
-        processor = Processor()
+        processor = Processor([10, *span(image_token), *span(image_token), 11, 12])
         adapter = object.__new__(LFM25VLAdapter)
         adapter.identity = {"image_token_id": image_token}
         adapter.processor = processor
@@ -255,10 +283,10 @@ class LFM25VLCPUTest(unittest.TestCase):
              patch.object(lfm_module, "resolve_media", return_value=media) as resolve, \
              patch.object(lfm_module, "media_fingerprint", return_value="video-key") as fingerprint:
             ready = adapter.prepare_multimodal_request(request)
-            self.assertEqual(ready["_mlx2_media_token_end"], 3)
+            self.assertEqual(ready["_mlx2_media_token_end"], 6)
             self.assertEqual(ready["_mlx2_media_fingerprint"], "video-key")
             self.assertEqual(adapter_media_checkpoint_position(
-                adapter, ready, ready["_mlx2_prompt_tokens"], cached_tokens=0), 3)
+                adapter, ready, ready["_mlx2_prompt_tokens"], cached_tokens=0), 6)
             self.assertIs(processor.images[0], frame_a)
             self.assertIs(processor.images[1], frame_b)
             self.assertIn("[video frame 1/2 at 0.000s] <image>", processor.text)
@@ -267,14 +295,76 @@ class LFM25VLCPUTest(unittest.TestCase):
             self.assertEqual(resolve.call_args.kwargs["fps"], 1)
             self.assertEqual(resolve.call_args.kwargs["max_frames"], 16)
             self.assertEqual(fingerprint.call_args.kwargs["policy"]["video_fps"], 1)
-            original_call = Processor.__call__
-            def missing_frame_placeholder(self, **kwargs):
-                result = original_call(self, **kwargs)
-                result["input_ids"] = np.asarray([[10, image_token, 11, 12]])
-                return result
-            with patch.object(Processor, "__call__", missing_frame_placeholder):
-                with self.assertRaisesRegex(ValueError, "placeholders do not match"):
-                    adapter.prepare_multimodal_request(request)
+            processor.ids = [10, *span(image_token), 11, 12]  # one frame's span missing
+            with self.assertRaisesRegex(ValueError, "placeholders do not match"):
+                adapter.prepare_multimodal_request(request)
+        self.assertNotIn("mlx", sys.modules)
+
+    def span_adapter(self, ids):
+        adapter = object.__new__(LFM25VLAdapter)
+        adapter.identity = {"image_token_id": IMAGE}
+        adapter.processor = SpanProcessor(ids)
+        adapter._media_proof_key = b"cpu-test-media-key"
+        adapter.media_checkpoint_enabled = True
+        return adapter
+
+    def prepare_spans(self, ids, parts, media):
+        import numpy  # noqa: F401  load before patch.dict, which unloads new modules
+
+        adapter = self.span_adapter(ids)
+        request = {"messages": [{"role": "user", "content": parts}]}
+        with patch.dict(sys.modules, fake_mlx_modules()), \
+                patch.object(lfm_module, "resolve_media", side_effect=media), \
+                patch.object(lfm_module, "media_fingerprint", return_value="media-key"):
+            return adapter, adapter.prepare_multimodal_request(request)
+
+    def test_expanded_image_span_is_one_image(self):
+        # The pinned processor emits 64 <image> tokens for a 64x64 image; a
+        # count of <image> tokens refused every real image and video frame.
+        ids = [10, *span(*[IMAGE] * 64), 11, 12]
+        image = types.SimpleNamespace(value="decoded")
+        adapter, ready = self.prepare_spans(
+            ids, [{"type": "image_url", "image_url": "image"}], [image]
+        )
+        self.assertEqual(ready["_mlx2_prompt_tokens"], ids)
+        self.assertEqual(ready["_mlx2_media_token_end"], 66)
+        self.assertEqual(adapter_media_checkpoint_position(
+            adapter, ready, ids, cached_tokens=0), 66)
+        self.assertNotIn("mlx", sys.modules)
+
+    def test_tiled_image_and_video_frame_spans_are_prepared(self):
+        import numpy as np
+
+        tiled = span(TILE, *[IMAGE] * 256, TILE + 1, *[IMAGE] * 256, *[IMAGE] * 64)
+        frame = span(*[IMAGE] * 64)
+        ids = [10, *tiled, 11, *frame, 13, *frame, 14, 15]
+        image = types.SimpleNamespace(value="decoded")
+        video = types.SimpleNamespace(
+            value=[np.zeros((2, 3, 3), np.uint8), np.ones((2, 3, 3), np.uint8)],
+            metadata={"timestamps_seconds": (0.0, 1.0)},
+        )
+        adapter, ready = self.prepare_spans(ids, [
+            {"type": "image_url", "image_url": "image"},
+            {"type": "input_video", "video_url": "video"},
+        ], [image, video])
+        self.assertEqual(len(adapter.processor.images), 3)
+        self.assertEqual(ready["_mlx2_media_token_end"], len(ids) - 3)
+        self.assertNotIn("mlx", sys.modules)
+
+    def test_image_spans_that_do_not_match_resolved_media_fail_closed(self):
+        image = types.SimpleNamespace(value="decoded")
+        one_image = [{"type": "image_url", "image_url": "image"}]
+        for ids, parts in (
+            ([10, *span(*[IMAGE] * 64), 11, 12], one_image * 2),  # one span, two images
+            ([10, IMAGE, 11, 12], one_image),  # <image> outside any span
+            ([10, *span(IMAGE), IMAGE, 11, 12], one_image),  # stray <image> after the span
+            ([10, *span(), *span(IMAGE), 11, 12], one_image * 2),  # an empty span
+            ([10, IMAGE_START, IMAGE, 11, 12], one_image),  # an unclosed span
+            ([10, IMAGE_START, *span(IMAGE), 11, 12], one_image),  # a nested start
+        ):
+            with self.subTest(ids=ids[:6]), \
+                    self.assertRaisesRegex(ValueError, "placeholders do not match"):
+                self.prepare_spans(ids, parts, [image] * len(parts))
         self.assertNotIn("mlx", sys.modules)
 
     def test_video_without_frames_is_rejected(self):

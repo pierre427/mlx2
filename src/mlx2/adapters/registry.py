@@ -38,6 +38,23 @@ class AdapterResolution:
         return route
 
     @property
+    def artifact_fingerprint(self) -> str:
+        """The artifact fingerprint in either resolver shape.
+
+        Most resolvers nest ``{"identity": {...}}``; Flash-Next, the mlx-vlm
+        families, LFM2.5-VL, Muse Glimmer and the pinned vision candidates
+        return the identity itself with a top-level ``fingerprint``.
+        """
+        identity = self.artifact.get("identity", self.artifact)
+        fingerprint = identity.get("fingerprint") if isinstance(identity, dict) else None
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise ValueError(
+                f"{getattr(self.adapter_type, '__name__', self.adapter_type)} "
+                "artifact has no fingerprint"
+            )
+        return fingerprint
+
+    @property
     def default_mtp_ordinary_handoff(self) -> dict | None:
         """Return the adapter-declared native-MTP handoff policy, if any.
 

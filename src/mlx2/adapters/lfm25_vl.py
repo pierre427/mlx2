@@ -63,6 +63,32 @@ LFM25_VL = ModelDescriptor(
 )
 
 
+def _image_spans(ids, image_id, start_id, end_id) -> list[tuple[int, int]] | None:
+    """Return each ``<|image_start|>``..``<|image_end|>`` span in ``ids``.
+
+    The pinned processor expands every image or video frame into one span of
+    64+ ``<image>`` tokens plus tile and thumbnail markers, so placeholders
+    are counted as spans.  A nested, unclosed or empty span, or an
+    ``<image>`` outside a span, returns None.
+    """
+    spans, start, filled = [], None, False
+    for index, token in enumerate(ids):
+        if token == start_id:
+            if start is not None:
+                return None
+            start, filled = index, False
+        elif token == end_id:
+            if start is None or not filled:
+                return None
+            spans.append((start, index))
+            start = None
+        elif token == image_id:
+            if start is None:
+                return None
+            filled = True
+    return None if start is not None else spans
+
+
 def _object(path: Path) -> dict:
     def unique(pairs):
         result = {}
@@ -721,9 +747,15 @@ class LFM25VLAdapter:
         prompt = self._apply_chat_template(messages)
         processed = self.processor(text=prompt, images=images, return_tensors="np")
         ids, kwargs = _ids_and_kwargs(processed)
-        positions = [i for i, token in enumerate(ids) if token == self.identity["image_token_id"]]
-        if len(positions) != len(images):
+        image_id = self.identity["image_token_id"]
+        convert = self.processor.tokenizer.convert_tokens_to_ids
+        spans = _image_spans(
+            ids, image_id, convert(self.processor.image_start_token),
+            convert(self.processor.image_end_token),
+        )
+        if not spans or len(spans) != len(images):
             raise ValueError("LFM processor image placeholders do not match resolved media")
+        positions = [i for i, token in enumerate(ids) if token == image_id]
         if positions[-1] >= len(ids) - 1:
             # PromptBatch.generate holds the final prompt token as its decode
             # anchor.  It cannot pass image features to that separate forward.

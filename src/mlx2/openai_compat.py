@@ -62,6 +62,25 @@ RESPONSES_INPUT_ITEM_INCLUDES = frozenset(
 )
 
 
+def refuse_video_sampling_options(part):
+    """Fail closed on per-part video sampling no adapter honours.
+
+    Every video adapter samples with its own declared policy, which its
+    media fingerprint binds; serving a part that asks for another ``fps``
+    or ``max_frames`` would silently substitute that policy.  An explicit
+    null asks for nothing, so it is dropped: returns ``part`` without them.
+    """
+    asked = [key for key in ("fps", "max_frames") if part.get(key) is not None]
+    if asked:
+        raise CapabilityUnavailable(
+            f"input_video {'/'.join(asked)} is not supported: video adapters "
+            "sample with their own declared policy"
+        )
+    return {
+        key: value for key, value in part.items() if key not in ("fps", "max_frames")
+    }
+
+
 def _responses_content(content, *, file_resolver=None):
     if isinstance(content, str):
         if not content:
@@ -102,7 +121,7 @@ def _responses_content(content, *, file_resolver=None):
             }
             if unknown or not any(part.get(key) for key in ("video_url", "file_id")):
                 raise ValueError("input_video requires video_url or file_id")
-            pieces.append({**part, "type": "input_video"})
+            pieces.append({**refuse_video_sampling_options(part), "type": "input_video"})
             has_media = True
         else:
             raise ValueError("unsupported Responses content part")

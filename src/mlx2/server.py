@@ -64,6 +64,7 @@ from .openai_compat import (
     RESPONSES_INPUT_ITEM_INCLUDES,
     enforce_tool_contract,
     normalize_tool_choice,
+    refuse_video_sampling_options,
     response_id,
     responses_input_items,
     responses_input_items_page,
@@ -581,6 +582,9 @@ def validate_request(
                     for part in content
                 ):
                     raise ValueError("invalid multimodal content part")
+                for part in content:
+                    if part["type"] == "input_video":
+                        refuse_video_sampling_options(part)
             elif not isinstance(content, str) and not (
                 message["role"] == "assistant" and message.get("tool_calls")
             ):
@@ -594,6 +598,31 @@ def validate_request(
                     for c in calls
                 ):
                     raise ValueError("invalid tool call history")
+        if any(
+            isinstance(message.get("content"), list)
+            and any(
+                part["type"] == "input_video" and {"fps", "max_frames"} & set(part)
+                for part in message["content"]
+            )
+            for message in messages
+        ):
+            # Only null sampling options are left (requested ones were refused
+            # above); they ask for nothing, so the engine never sees them.
+            messages = [
+                {
+                    **message,
+                    "content": [
+                        refuse_video_sampling_options(part)
+                        if part["type"] == "input_video"
+                        else part
+                        for part in message["content"]
+                    ],
+                }
+                if isinstance(message.get("content"), list)
+                else message
+                for message in messages
+            ]
+            body = {**body, "messages": messages}
         if any(
             message["role"] == "assistant" and message.get("content") is None
             for message in messages
@@ -5844,7 +5873,14 @@ def main():
             )
         from .serving import runtime_identity
 
-        artifact_binding = adapter_resolution.artifact["identity"]["fingerprint"]
+        try:
+            artifact_binding = adapter_resolution.artifact_fingerprint
+        except ValueError as error:
+            engine.close()
+            if request_tracer is not None:
+                request_tracer.close()
+            server.server_close()
+            parser.error(str(error))
         semantic_middleware = SemanticServingMiddleware.create(
             root,
             model_binding=artifact_binding,

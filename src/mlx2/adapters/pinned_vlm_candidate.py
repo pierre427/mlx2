@@ -11,7 +11,10 @@ from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..multimodal import media_fingerprint, resolve_media
-from .mlx_vlm import MediaFeatureCache, _LogitsModel, _ids_and_kwargs, _plain_messages, _source
+from .mlx_vlm import (
+    MediaFeatureCache, _LogitsModel, _ids_and_kwargs, _plain_messages,
+    _require_media_markers, _source,
+)
 
 # Not the project pin (mlx_vlm_pin.MLX_VLM_REVISION, which pyproject installs
 # and which does not descend from this revision): this adapter loads only when
@@ -312,6 +315,10 @@ class PinnedVisionCandidateAdapter:
         messages = self._template_messages(request["messages"], replacements)
         prompt = self.processor.apply_chat_template(messages, tokenize=False,
                                                      add_generation_prompt=True)
+        _require_media_markers(prompt, "vision candidate", (
+            (self.processor.image_token, len(images)),
+            (getattr(self.processor, "video_token", None), len(videos)),
+        ))
         processor_kwargs = {"text": prompt, "images": images or None,
                             "videos": videos or None}
         if self.model_type != "smolvlm":

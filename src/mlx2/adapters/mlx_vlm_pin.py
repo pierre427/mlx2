@@ -5,8 +5,9 @@ part of what a qualification run measured.  ``MLX_VLM_REVISION`` is Blaizzy
 mlx-vlm main after the 0.7.3 release (0.7.3 plus the empty 3/5/6-bit quantized
 KV width fix #2342, Qwen3.5 batched left padding #2357, small top-p / low
 temperature sampling #2358 and interleaved image order #2362).  Adapters refuse
-to load on any other revision, and the resolved revision is recorded in the
-runtime identity so receipts bind it.
+to load on any other revision or on an editable checkout with local changes
+under ``mlx_vlm/``, and the resolved revision is recorded in the runtime
+identity so receipts bind it.
 
 The Qwen-Image direct adapter (``generative_media.py``) runs on this same
 revision; it was re-qualified on it after its first qualification on the
@@ -26,15 +27,23 @@ MLX_VLM_REVISION = "67599f2e8ec31bf35cbb7b02794114f20844f0bb"
 
 
 def _git_head(root: Path) -> str | None:
+    """HEAD of an editable checkout, suffixed ``+dirty`` when ``mlx_vlm/`` is
+    modified: a local edit at the pinned HEAD is not the pinned code."""
     if not (root / ".git").exists():
         return None
     try:
-        return subprocess.run(
+        head = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
             check=True, capture_output=True, text=True, timeout=5,
         ).stdout.strip() or None
+        changes = subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(root), "status",
+             "--porcelain", "--untracked-files=normal", "--", "mlx_vlm"],
+            check=True, capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return None
+    return f"{head}+dirty" if head and changes else head
 
 
 def mlx_vlm_runtime() -> dict | None:
