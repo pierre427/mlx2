@@ -72,9 +72,11 @@ _GVR_PATH_COUNTERS = (
 )
 # Opt-in selection timing (benchmarks only): synchronize before and after
 # every stage-one selector dispatch and histogram the wall time per producer,
-# so a served A/B can report P50/P99 selection time.  The two device syncs per
-# dispatch change the timing of the request around them: never read
-# whole-request latency from a timed run.
+# so a served A/B can report P50/P99 selection time.  The exact-band refine
+# (block_topk of the block_topk + 32 candidates) is its own histogram,
+# ``<producer>_refine``: pooled with the primary selection it made the P50 a
+# refine time.  The two device syncs per dispatch change the timing of the
+# request around them: never read whole-request latency from a timed run.
 _SELECT_TIMING = os.environ.get(
     "MLX_QWEN4_QSA_STAGE1_SELECT_TIMING", "0"
 ).strip().lower() in {"1", "true", "on", "yes"}
@@ -782,9 +784,18 @@ def _record_select_time(producer: str, seconds: float) -> None:
 
 
 def _select_scores(
-    scores: mx.array, q_positions: mx.array, *, topk: int, compress_ratio: int
+    scores: mx.array,
+    q_positions: mx.array,
+    *,
+    topk: int,
+    compress_ratio: int,
+    role: str = "primary",
 ) -> mx.array:
-    """Select score-column IDs with the configured exact selector."""
+    """Select score-column IDs with the configured exact selector.
+
+    ``role`` only names the timing histogram: the exact-band refine is
+    recorded as ``<producer>_refine``, apart from the primary selection.
+    """
     if not _SELECT_TIMING:
         return _select_scores_untimed(
             scores, q_positions, topk=topk, compress_ratio=compress_ratio
@@ -799,7 +810,10 @@ def _select_scores(
         scores, q_positions, topk=topk, compress_ratio=compress_ratio
     )
     mx.eval(selected)
-    _record_select_time(producer, time.perf_counter() - tic)
+    _record_select_time(
+        producer if role == "primary" else f"{producer}_{role}",
+        time.perf_counter() - tic,
+    )
     return selected
 
 
@@ -918,7 +932,11 @@ def qsa_stage1_select(
         )
         refine_positions = valid_candidates * ratio - 1
         selected_slots = _select_scores(
-            exact, refine_positions, topk=topk, compress_ratio=compress_ratio
+            exact,
+            refine_positions,
+            topk=topk,
+            compress_ratio=compress_ratio,
+            role="refine",
         )
         selected = mx.take_along_axis(candidate_ids, selected_slots, axis=-1)
     else:

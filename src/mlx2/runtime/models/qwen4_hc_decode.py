@@ -92,7 +92,7 @@ from operator import is_
 import mlx.core as mx
 from mlx import nn
 
-from .served_exp import ServedExpGate, metal_helper
+from .served_exp import ServedExpGate, is_device_fault, metal_helper
 
 HC_DECODE_ENV = "MLX_QWEN4_HC_DECODE"
 HC_COUNT = 4
@@ -1313,6 +1313,11 @@ def _try_launch(module, hyper_input, rows: int, law: int, eager_norm: bool, comp
             mx.eval(mixed) if inject is None else mx.eval(mixed, inject)
             _VALIDATED.add(signature)
     except Exception as exc:  # noqa: BLE001 - optional native path
+        if is_device_fault(exc):
+            # Not a compile failure: serving recovers the step (fails the
+            # lanes in the failed buffer, rebuilds) and the signature is not
+            # yet validated, so the next call validates again.
+            raise
         with _LOCK:
             _BROKEN = True
             _STATS["errors"] += 1

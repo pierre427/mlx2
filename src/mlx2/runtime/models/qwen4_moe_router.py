@@ -189,17 +189,27 @@ _PROBE_OK = False
 
 
 def probe_qwen4_moe_router(dtype=mx.bfloat16) -> bool:
+    """One-shot check of the kernel's routes, cached once it has evaluated.
+
+    A call it declines without running (a non-bf16 dtype, no Metal) caches
+    nothing.  A device fault is not a verdict on the kernel: it propagates
+    to serving's recovery and the next call probes again."""
     global _PROBE_COMPLETE, _PROBE_OK
     if _PROBE_COMPLETE:
         return _PROBE_OK
-    _PROBE_COMPLETE = True
     if dtype != mx.bfloat16 or not mx.metal.is_available():
         return False
     try:
         gates = mx.arange(NUM_EXPERTS, dtype=dtype)[None, None, :]
         (indices, scores) = qwen4_moe_router(gates)
         mx.eval(indices, scores)
-        _PROBE_OK = indices.tolist() == [[list(range(502, 512))]]
-    except (RuntimeError, ValueError):
-        _PROBE_OK = False
+        ok = indices.tolist() == [[list(range(502, 512))]]
+    except (RuntimeError, ValueError) as exc:
+        from .served_exp import is_device_fault
+
+        if is_device_fault(exc):
+            raise
+        ok = False
+    _PROBE_OK = ok
+    _PROBE_COMPLETE = True
     return _PROBE_OK

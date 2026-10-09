@@ -21,6 +21,7 @@ from .models.qwen4_qsa_indexed import (
     qwen4_qsa_indexed_private_delta_preflight,
     qwen4_qsa_private_delta_min_context,
 )
+from .models.served_exp import is_device_fault
 
 
 class SegmentedBatchUnsupported(TypeError):
@@ -580,6 +581,8 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
                         scale=attention.scale,
                     )
                 except (QSAIndexedProbeDeclined, RuntimeError) as error:
+                    if is_device_fault(error):
+                        raise
                     from .segmented_self_mtp import note_qsa_exact_set_fold_event
 
                     note_qsa_exact_set_fold_event(
@@ -612,6 +615,10 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
                     scale=attention.scale,
                 )
         except (QSAIndexedProbeDeclined, RuntimeError) as error:
+            if is_device_fault(error):
+                # The step's command buffer failed: serving recovers the
+                # lanes; dense rows would continue on partly written state.
+                raise
             dense_rows = []
             for index in range(batch):
                 (keys, values) = (row_keys[index], row_values[index])

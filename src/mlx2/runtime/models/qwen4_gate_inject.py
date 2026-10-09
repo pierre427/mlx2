@@ -210,6 +210,11 @@ def try_qwen4_gate_inject(
     try:
         out = _launch(residual, branch, raw_gate)
     except Exception as exc:  # noqa: BLE001 - failure must fall back closed
+        from .served_exp import is_device_fault
+
+        if is_device_fault(exc):
+            # Not a kernel failure: serving recovers the step.
+            raise
         _record_decision(admission, error=repr(exc))
         return None
     _record_decision(admission)

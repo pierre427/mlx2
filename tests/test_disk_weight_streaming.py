@@ -402,6 +402,54 @@ def test_bound_shards_refuse_identity_drift_unknown_shards_and_escapes(tmp_path,
     assert _descriptors_open_on(paths) == 0
 
 
+def _write_one_byte_shard(path):
+    header = json.dumps(
+        {"w": {"dtype": "U8", "shape": [1], "data_offsets": [0, 1]}}
+    ).encode()
+    path.write_bytes(len(header).to_bytes(8, "little") + header + b"\x01")
+
+
+@pytest.mark.parametrize(
+    "alias", ["./s.safetensors", "s.safetensors/", "./././s.safetensors"]
+)
+def test_aliased_shard_spellings_fail_closed_without_leaking(tmp_path, monkeypatch, alias):
+    # Names were deduplicated as strings but descriptors keyed by the joined
+    # Path, so the second spelling's os.open overwrote the first descriptor
+    # and the constructor's failure path closed only one of them (sweep
+    # 2026-10-08, c5-generate-1).
+    shard = tmp_path / "s.safetensors"
+    _write_one_byte_shard(shard)
+    names = ["s.safetensors", alias]
+    info = shard.stat()
+    records = [(name, info.st_size, info.st_mtime_ns) for name in names]
+    opened = []
+    original = os.open
+
+    def tracked(path, flags, *args, **kwargs):
+        fd = original(path, flags, *args, **kwargs)
+        stat = os.fstat(fd)
+        opened.append((fd, (stat.st_dev, stat.st_ino)))
+        return fd
+
+    monkeypatch.setattr(os, "open", tracked)
+    try:
+        with pytest.raises(StreamingUnavailable):
+            BoundShards(tmp_path, names, records=records)
+    finally:
+        monkeypatch.undo()
+        leaked = []
+        for (fd, identity) in opened:
+            try:
+                stat = os.fstat(fd)
+            except OSError:
+                continue
+            if (stat.st_dev, stat.st_ino) == identity:
+                leaked.append(fd)
+        for fd in leaked:
+            os.close(fd)
+    assert not leaked, f"bound descriptors left open after a failed bind: {leaked}"
+
+
 def test_a_stray_unindexed_shard_is_never_bound(tmp_path, monkeypatch):
     (root, weight_map, records) = _moe_checkpoint(tmp_path, monkeypatch)
     mx.save_safetensors(str(root / "stray.safetensors"), {"x": mx.zeros((2,))})

@@ -98,7 +98,12 @@ def nax_kernel_available():
         )
         mx.eval(out)
         _NAX_AVAILABLE = True
-    except Exception:
+    except Exception as exc:
+        from .served_exp import is_device_fault
+
+        if is_device_fault(exc):
+            # Not a kernel refusal: let serving recover, probe again.
+            raise
         _NAX_AVAILABLE = False
     return _NAX_AVAILABLE
 

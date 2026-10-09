@@ -53,6 +53,7 @@ import contextvars
 import gc
 import hashlib
 import json
+import logging
 import os
 import stat as stat_module
 import threading
@@ -62,6 +63,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
 
 # Concurrency sweet spot measured on the M3 Pro's internal NVMe: random
 # ~900 KiB reads run 2.14 GB/s at one thread and 7.46 GB/s at sixteen.  Never
@@ -423,6 +426,12 @@ class BoundShards:
                 if relative.is_absolute() or ".." in relative.parts:
                     raise StreamingUnavailable(f"shard path escapes the artifact: {name}")
                 path = self.root / relative
+                if path in self._fds:
+                    # "./s" and "s" are one file: a second descriptor would
+                    # overwrite the first, which then never closes.
+                    raise StreamingUnavailable(
+                        f"shard {name} aliases already-bound shard {self._names[path]}"
+                    )
                 fd = os.open(str(path), os.O_RDONLY)
                 self._fds[path] = fd
                 self._names[path] = name
@@ -1141,7 +1150,12 @@ def _streamed_class():
             host = np.asarray(indices, dtype=np.int64)
             unique = np.unique(host)  # ascending: the remap stays monotonic,
             # so a sorted gather is still sorted afterwards.
-            entries = self._stream_cache.acquire([int(e) for e in unique])
+            try:
+                entries = self._stream_cache.acquire([int(e) for e in unique])
+            except BaseException:
+                if self._stream_collector is not None:
+                    self._stream_collector.note_lost_call(self._stream_layer)
+                raise
             self._stream_cache.note_gather(int(unique.size))
             if self._stream_collector is not None:
                 self._stream_collector.observe(self._stream_layer, unique)
@@ -1446,6 +1460,14 @@ class ExpertStreamManager(_ManagerBase):
             self._closed = True
             for cache in self.caches.values():
                 cache.clear()
+            if self.collector is not None:
+                # Engine shutdown closes only this manager: the atlas sink
+                # and the trace tail are persisted here or never.  Telemetry
+                # must not break shutdown.
+                try:
+                    self.collector.close()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("expert atlas not persisted at close: %s", exc)
 
 
 # Load-time fusions this addressing layer can reassemble from checkpoint

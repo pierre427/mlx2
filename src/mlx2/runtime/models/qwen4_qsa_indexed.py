@@ -22,6 +22,7 @@ from .qwen4_qsa_indexed_merge import (
     record_native_gate_engaged,
 )
 from .qwen4_qsa_nax import compact_blocks_to_kernel_inputs, compact_token_validity
+from .served_exp import is_device_fault
 
 from .import_env import snapshot as _import_env_snapshot
 from ..mlx_build import VERIFIED_MLX_BUILDS
@@ -997,14 +998,21 @@ def _candidate_ladder(splits: int | None, gqa: int, hpt: int | None = None):
 
 
 def _measure_candidates(candidates, dispatch):
-    """Compile viable candidates, then time one real dispatch for each."""
+    """Compile viable candidates, then time one real dispatch for each.
+
+    A Metal device fault is not a candidate refusal: the first eval runs the
+    step's whole upstream graph, so it propagates to serving's recovery and
+    the caller caches nothing, probing again on the next call.
+    """
     viable = []
     for candidate in candidates:
         try:
             (output, _) = dispatch(candidate)
             mx.eval(output)
             viable.append(candidate)
-        except RuntimeError:
+        except RuntimeError as exc:
+            if is_device_fault(exc):
+                raise
             continue
     timings = {}
     outputs = {}
@@ -1014,7 +1022,9 @@ def _measure_candidates(candidates, dispatch):
             (output, counter) = dispatch(candidate)
             mx.eval(output)
             elapsed = time.perf_counter_ns() - started
-        except RuntimeError:
+        except RuntimeError as exc:
+            if is_device_fault(exc):
+                raise
             continue
         timings[candidate[1], candidate[2]] = elapsed / 1000000.0
         outputs[candidate] = (output, counter)

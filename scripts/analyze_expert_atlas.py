@@ -61,6 +61,7 @@ def main(argv=None):
     print("=" * width)
     print("MoE expert atlas counterfactual (collect-only atlas; LRU actually ran)")
     print("=" * width)
+    print(f"LRU baseline: {report['baseline']} (trace {report['trace_format']})")
     print(
         f"{'pin_fraction':>13} {'pinned/layer':>13} {'hit_rate':>10} "
         f"{'page_ins':>10} {'vs LRU':>10}"

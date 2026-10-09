@@ -537,6 +537,63 @@ def test_first_use_error_demotes_the_path(monkeypatch, served_exp_forms_match):
     assert HCD.hc_decode_status()["declines"]["demoted after an error"] == 2
 
 
+class _FaultyMx:
+    """``mx`` for the HC module whose next ``eval`` raises ``text`` once."""
+
+    def __init__(self, text):
+        self.text = text
+
+    def __getattr__(self, name):
+        return getattr(mx, name)
+
+    def eval(self, *args):
+        if self.text is not None:
+            (text, self.text) = (self.text, None)
+            raise RuntimeError(text)
+        return mx.eval(*args)
+
+
+_OOM = (
+    "[METAL] Command buffer execution failed: Insufficient Memory "
+    "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)"
+)
+_TIMEOUT = (
+    "[METAL] Command buffer execution failed: Caused GPU Timeout Error "
+    "(00000002:kIOGPUCommandBufferCallbackErrorTimeout)"
+)
+
+
+@pytest.mark.parametrize("fault", [_OOM, _TIMEOUT], ids=["oom", "gpu_timeout"])
+def test_device_fault_in_validation_reraises_and_does_not_demote(
+    reference_kernels, monkeypatch, fault
+):
+    # Serving recovers device faults by failing the lanes stepped in the
+    # failed buffer and rebuilding; the first-use validation eval swallowed
+    # one, set the process-wide _BROKEN and served the composed ops for the
+    # rest of the process (sweep 2026-10-08, flashnext-kernels#2).
+    monkeypatch.setattr(HCD, "mx", _FaultyMx(fault))
+    m = _module()
+    x = _x(3)
+    HCD.set_hc_decode_enabled(True)
+    with pytest.raises(RuntimeError, match="Command buffer execution failed"):
+        m(x)
+    status = HCD.hc_decode_status()
+    assert status["broken"] is False, status["last_error"]
+    # Serving recovered; the next step validates again and serves the kernel.
+    m(x)
+    status = HCD.hc_decode_status()
+    assert status["broken"] is False
+    assert status["calls"] == 1
+
+
+def test_compile_failure_in_validation_still_demotes(reference_kernels, monkeypatch):
+    monkeypatch.setattr(HCD, "mx", _FaultyMx("Unable to build metal library"))
+    m = _module()
+    HCD.set_hc_decode_enabled(True)
+    m(_x(4))
+    assert HCD.hc_decode_status()["broken"] is True
+
+
 def test_layout_cache_rechecks_replaced_tensors():
     m = _module()
     assert HCD._cached_static_admission(m) is None

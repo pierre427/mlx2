@@ -20,7 +20,7 @@ import pytest
 from mlx2.runtime.models import qwen4_qsa_stage1 as stage1
 
 
-def _radix_model(scores, q_positions, *, topk, compress_ratio):
+def _radix_model(scores, q_positions, *, topk, compress_ratio, role="primary"):
     s = np.maximum(np.array(scores, dtype=np.float32), np.float32(0.0))
     rows, blocks = s.shape
     out = []

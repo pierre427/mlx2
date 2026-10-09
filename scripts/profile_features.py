@@ -1325,9 +1325,13 @@ def metric_of(res, key):
         vals = [r["decode_tps"] for r in rs if r.get("decode_tps")]
         return statistics.median(vals) if vals else None
     if key.startswith("select_p"):
-        # select_p99 -> the slowest producer's P99 selection time (ms).
+        # select_p99 -> the slowest producer's P99 selection time (ms).  The
+        # exact-band refine ("<producer>_refine") is not the selection under
+        # test.
         timing = (res.get("captured") or {}).get("select_timing") or {}
-        vals = [t.get(key[len("select_"):] + "_ms") for t in timing.values()]
+        vals = [t.get(key[len("select_"):] + "_ms")
+                for (producer, t) in timing.items()
+                if not producer.endswith("_refine")]
         vals = [v for v in vals if v is not None]
         return max(vals) if vals else None
     return None

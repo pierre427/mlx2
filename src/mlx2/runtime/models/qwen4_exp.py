@@ -119,6 +119,7 @@ from .qwen4_qsa_stage1 import (
     qsa_stage1_select,
     qsa_stage1_supported,
 )
+from .served_exp import is_device_fault
 from .qwen3_5 import GatedDeltaNet as Qwen35GatedDeltaNet
 from .qwen3_next import Qwen3NextSparseMoeBlock as SparseMoeBlock
 from . import qwen3_next
@@ -1493,6 +1494,8 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 threadgroup_y=threadgroup_y,
             )
         except Exception as exc:
+            if is_device_fault(exc):
+                raise
             return self._fused_gdn_batch_fallback(
                 f"Metal kernel dispatch failed: {type(exc).__name__}"
             )
@@ -1604,6 +1607,8 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 threadgroup_y=threadgroup_y,
             )
         except Exception as exc:
+            if is_device_fault(exc):
+                raise
             return fallback(f"Metal kernel dispatch failed: {type(exc).__name__}")
         (out, conv_state, recurrent_state) = outputs[:3]
         if compact:
@@ -1838,6 +1843,8 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 else:
                     (state_snapshots, conv_snapshots) = outputs[3:]
         except Exception as exc:
+            if is_device_fault(exc):
+                raise
             return fallback(f"Metal kernel dispatch failed: {type(exc).__name__}")
         if not catchup:
             per_row_fn = None
@@ -2020,6 +2027,8 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 gate = z.reshape(1, steps, self.num_v_heads, self.head_v_dim)
                 flat = self.norm(out, gate).reshape(1, steps, -1)
         except Exception as exc:
+            if is_device_fault(exc):
+                raise
             return self._fused_gdn_prefill_fallback(
                 f"Metal kernel dispatch failed: {type(exc).__name__}"
             )
@@ -2155,6 +2164,8 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                     threadgroup_y=threadgroup_y,
                 )
         except Exception as exc:
+            if is_device_fault(exc):
+                raise
             return self._fused_gdn_fallback(
                 f"Metal kernel dispatch failed: {type(exc).__name__}"
             )
@@ -3290,7 +3301,8 @@ class PLELayer(nn.Module):
         ``None`` is the fail-closed answer and is cached as such, so a
         signature that raised once is not retried while its entry lives --
         the eager chain is always a correct substitute, and a compile failure
-        must cost one receipt, not one exception per round.  A signature seen
+        must cost one receipt, not one exception per round.  A device fault
+        is not a compile failure: it propagates and caches nothing.  A signature seen
         fewer than ``_PLE_COMPILE_MIN_SEEN`` times also answers ``None``
         (``cold_eager``); a full cache evicts its least recently used entry.
         """
@@ -3352,6 +3364,8 @@ class PLELayer(nn.Module):
 
             compiled = (mx.compile(head), mx.compile(tail))
         except Exception as exc:
+            if is_device_fault(exc):
+                raise
             compiled = None
             _record_ple_compile("fallbacks", signature=repr(signature), error=repr(exc))
         else:
@@ -3393,6 +3407,10 @@ class PLELayer(nn.Module):
             args = tuple((a for a in (sigmoid, value, mask, state) if a is not None))
             return compiled_tail(*args)
         except Exception as exc:
+            if is_device_fault(exc):
+                # Not a trace failure: serving recovers the step and the
+                # compiled chain stays cached for the next call.
+                raise
             self._ple_compile_cache[signature] = (self._chain_params(), None)
             _record_ple_compile("fallbacks", signature=repr(signature), error=repr(exc))
             return self._device_chain(hidden, embeddings, mask, state, write_state)
@@ -5413,6 +5431,10 @@ def _indexed_qsa_attention_or_gather(
             q, k, v, compact, scale=scale, splits=splits, output_gate=output_gate
         )
     except (QSAIndexedProbeDeclined, RuntimeError) as error:
+        if is_device_fault(error):
+            # The step's command buffer failed: serving recovers the lanes;
+            # gather would continue on its partly written state.
+            raise
         reason = (
             error.reason
             if isinstance(error, QSAIndexedProbeDeclined)
@@ -5464,6 +5486,8 @@ def _indexed_qsa_quantized_attention_or_gather(
             value_bits=value_bits,
         )
     except (QSAIndexedProbeDeclined, RuntimeError) as error:
+        if is_device_fault(error):
+            raise
         reason = (
             error.reason
             if isinstance(error, QSAIndexedProbeDeclined)
@@ -5536,6 +5560,8 @@ def _capture_qsa_indexed_comparison(
             q, k, v, compact, scale=scale, splits=splits
         )
     except (QSAIndexedProbeDeclined, RuntimeError) as error:
+        if is_device_fault(error):
+            raise
         indexed_out = None
         fallback_reason = (
             error.reason

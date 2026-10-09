@@ -87,7 +87,8 @@ def _run_glue(key, builder, *args):
     """Run one compiled span, or return ``None`` to mean "stay eager".
 
     Fail-closed: a span that raises is demoted for the life of the process and
-    the caller answers from the eager arithmetic, which is the same math.
+    the caller answers from the eager arithmetic, which is the same math.  A
+    device fault propagates instead and demotes nothing.
     """
     global _GLUE_LAST_RECEIPT
     for arg in args:
@@ -104,6 +105,11 @@ def _run_glue(key, builder, *args):
     try:
         out = compiled(*args)
     except Exception as exc:
+        from .served_exp import is_device_fault
+
+        if is_device_fault(exc):
+            # Not a trace failure: serving recovers the step; keep the span.
+            raise
         _GLUE_COMPILE_CACHE[key] = None
         _GLUE_STATS["fallbacks"] += 1
         _GLUE_LAST_RECEIPT = {"span": repr(key), "error": repr(exc)}

@@ -222,3 +222,13 @@ def test_dry_run_refuses_env_the_adapter_clears():
     )
     assert any("cleared by the model adapter" in p for p in problems)
     assert pf._check_env({"MLX2_LOOP_TRACE": "/tmp/t"}, '"MLX2_LOOP_TRACE"') == []
+
+
+def test_select_percentiles_report_the_primary_selection_not_the_refine():
+    # Stage-one timing records the exact-band refine as "<producer>_refine"
+    # (sweep 2026-10-08); select_p50/p99 measure the primary selection.
+    out = {"radix_exact": {"count": 10, "p50_ms": 14.5, "p99_ms": 20.5},
+           "radix_exact_refine": {"count": 10, "p50_ms": 30.0, "p99_ms": 40.0}}
+    res = {"requests": [{}], "captured": {"select_timing": out}}
+    assert pf.metric_of(res, "select_p50") == 14.5
+    assert pf.metric_of(res, "select_p99") == 20.5

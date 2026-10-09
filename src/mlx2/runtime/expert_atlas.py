@@ -37,7 +37,15 @@ DATA_OFFSET = 4096
 COUNTER_ITEMSIZE = 8
 DEFAULT_HALF_LIFE = 2_000_000
 DEFAULT_MIN_SAMPLES = 20_000
-TRACE_MAGIC = b"MLX2XTR1"
+# Trace v2: uint32 ``(layer, id)`` rows, each ``observe()`` call preceded by
+# a ``(_TRACE_CALL, n)`` row, so calls replay exactly.  v1 had no call rows:
+# its calls can only be inferred, and its replay is approximate.
+TRACE_MAGIC = b"MLX2XTR2"
+TRACE_MAGIC_V1 = b"MLX2XTR1"
+# Marker rows (first column; a layer index never reaches these values).
+_TRACE_CALL = 0xFFFFFFFF  # (CALL, n): the next n rows are one call
+_TRACE_LOST = 0xFFFFFFFE  # (LOST, layer): an acquire that failed, unrecorded
+_TRACE_END = 0xFFFFFFFD  # (END, dropped calls): written once, at close
 ATLAS_MAGIC = b"MLX2ATL1"
 ATLAS_SENTINEL = b"ENDATLAS"
 
@@ -107,8 +115,13 @@ class AtlasCollector:
         self.trace_limit = int(trace_limit)
         self._trace = None
         self._trace_written = 0
+        # Set at the first call the record limit drops: no later call is
+        # written either, so the trace stays an exact prefix of the run.
+        self._trace_full = False
+        self._trace_dropped_calls = 0
         self._steps = 0
         self._dropped = 0
+        self._closed = False
 
     def bind(self, *, num_layers: int, num_units: int) -> None:
         import numpy as np
@@ -144,13 +157,16 @@ class AtlasCollector:
         self.observations += int(ids.size)
         self._steps += 1
         if self._trace is not None:
-            if self._trace_written + ids.size <= self.trace_limit:
-                payload = np.empty((ids.size, 2), dtype=np.uint32)
-                payload[:, 0] = layer
-                payload[:, 1] = ids
+            if not self._trace_full and self._trace_written + ids.size <= self.trace_limit:
+                payload = np.empty((ids.size + 1, 2), dtype=np.uint32)
+                payload[0] = (_TRACE_CALL, ids.size)
+                payload[1:, 0] = layer
+                payload[1:, 1] = ids
                 self._trace.write(payload.tobytes())
                 self._trace_written += int(ids.size)
             else:
+                self._trace_full = True
+                self._trace_dropped_calls += 1
                 self._dropped += int(ids.size)
         if (
             self.sink is not None
@@ -159,6 +175,12 @@ class AtlasCollector:
             >= self.checkpoint_every
         ):
             self.flush()
+
+    def note_lost_call(self, layer: int) -> None:
+        """An ``acquire`` that raised: it changed the LRU (it evicts before it
+        reads) but no call was observed, so the trace marks the gap."""
+        if self._trace is not None and not self._trace_full:
+            self._trace.write(struct.pack("<II", _TRACE_LOST, int(layer)))
 
     def counters(self) -> Dict[str, int]:
         return {
@@ -221,11 +243,26 @@ class AtlasCollector:
         return self.sink
 
     def close(self) -> None:
-        if self._trace is not None:
-            self._trace.flush()
-            self._trace.close()
-            self._trace = None
-        self.flush()
+        """Persist the trace tail and the sink once; later calls do nothing.
+
+        A repeated flush would append an empty generation to the sink.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self._trace is not None:
+                try:
+                    # The end row: the trace closed cleanly, and how many
+                    # calls the record limit dropped.
+                    dropped = min(self._trace_dropped_calls, 0xFFFFFFFF)
+                    self._trace.write(struct.pack("<II", _TRACE_END, dropped))
+                    self._trace.flush()
+                finally:
+                    self._trace.close()
+                    self._trace = None
+        finally:
+            self.flush()
 
     def _digest(self) -> str:
         if self.model_path is None:
@@ -332,16 +369,26 @@ def write_atlas(sink, manifest: dict, counts) -> None:
 def load_atlas(sink, *, expect_digest=None, geometry=None) -> Optional[Atlas]:
     """Return the persisted atlas, or ``None`` for any reason at all.
 
-    Stale, torn, truncated, geometry-mismatched or checkpoint-mismatched: all
-    of them degrade to "no atlas".  The caller runs unpinned, which is the
-    baseline path and must work on its own.
+    Stale, torn, truncated, malformed, geometry-mismatched or
+    checkpoint-mismatched: all of them degrade to "no atlas".  The caller
+    runs unpinned, which is the baseline path and must work on its own.
     """
+    try:
+        return _load_atlas(sink, expect_digest=expect_digest, geometry=geometry)
+    except (TypeError, ValueError, OverflowError):
+        # A manifest field of the wrong type: malformed, so no atlas.
+        return None
+
+
+def _load_atlas(sink, *, expect_digest, geometry) -> Optional[Atlas]:
     import numpy as np
 
     (manifest_path, data_path) = _paths(sink)
     try:
         manifest = json.loads(manifest_path.read_text())
     except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(manifest, dict):
         return None
     if manifest.get("format") != ATLAS_FORMAT:
         return None
@@ -375,10 +422,14 @@ def load_atlas(sink, *, expect_digest=None, geometry=None) -> Optional[Atlas]:
     if (zlib.crc32(payload) & 0xFFFFFFFF) != int(manifest.get("crc32", -1)):
         return None
     counts = np.frombuffer(payload, dtype=np.uint64).reshape(layers, units).copy()
+    generations = manifest.get("generations") or []
+    # The next checkpoint copies every generation as a dict: keep only those.
+    if not isinstance(generations, list):
+        generations = []
     return Atlas(
         counts=counts,
         total_observations=int(manifest.get("total_observations") or 0),
-        generations=list(manifest.get("generations") or []),
+        generations=[dict(item) for item in generations if isinstance(item, dict)],
         manifest=manifest,
     )
 
@@ -388,21 +439,131 @@ def load_atlas(sink, *, expect_digest=None, geometry=None) -> Optional[Atlas]:
 # ---------------------------------------------------------------------------
 
 
-def read_trace(path) -> Tuple[int, int, object]:
+def _read_rows(path) -> Tuple[int, int, int, object]:
     import numpy as np
 
     blob = Path(path).expanduser().read_bytes()
-    if not blob.startswith(TRACE_MAGIC):
+    if blob.startswith(TRACE_MAGIC):
+        version = 2
+    elif blob.startswith(TRACE_MAGIC_V1):
+        version = 1
+    else:
         raise ValueError("not an mlx2 expert access trace")
     (layers, units) = struct.unpack("<II", blob[8:16])
     records = np.frombuffer(blob[16:], dtype=np.uint32)
     usable = (records.size // 2) * 2
-    return (layers, units, records[:usable].reshape(-1, 2))
+    return (version, layers, units, records[:usable].reshape(-1, 2))
 
 
-def _lru_hit_rate(sequence, capacity: int, pinned=frozenset()) -> Tuple[int, int]:
-    """Replay one layer's access sequence.  Returns ``(hits, accesses)``.
+def read_trace(path) -> Tuple[int, int, object]:
+    """``(layers, units, rows)``: the ``(layer, id)`` row of every recorded
+    access, in order (a v2 trace's marker rows removed)."""
+    (version, layers, units, records) = _read_rows(path)
+    if version == 2:
+        records = records[records[:, 0] < _TRACE_END]
+    return (layers, units, records)
 
+
+def _trace_calls(records, layers: int) -> List[List[List[int]]]:
+    """Infer a legacy v1 trace's ``observe()`` calls, per layer.
+
+    v1 recorded no call boundaries.  Every call writes one layer's
+    ``np.unique`` ids, strictly ascending, so a call is taken to end where the
+    layer changes or the id stops increasing.  That is ambiguous whenever two
+    consecutive recorded calls share a layer and ascend across the boundary:
+    a single streamed projection, or calls the record limit dropped between
+    them.  Its replay is therefore approximate.
+    """
+    import numpy as np
+
+    calls: List[List[List[int]]] = [[] for _ in range(layers)]
+    if len(records) == 0:
+        return calls
+    layer_ids = records[:, 0].astype(np.int64)
+    units = records[:, 1].astype(np.int64)
+    breaks = np.flatnonzero(
+        (layer_ids[1:] != layer_ids[:-1]) | (units[1:] <= units[:-1])
+    ) + 1
+    starts = np.concatenate(([0], breaks))
+    stops = np.concatenate((breaks, [len(records)]))
+    for (start, stop) in zip(starts.tolist(), stops.tolist()):
+        layer = int(layer_ids[start])
+        if layer < layers:
+            calls[layer].append(units[start:stop].tolist())
+    return calls
+
+
+def _trace_calls_v2(records, layers: int) -> Tuple[List[List[List[int]]], dict]:
+    """A v2 trace's recorded calls, per layer, and what the trace covers."""
+    calls: List[List[List[int]]] = [[] for _ in range(layers)]
+    info = {"calls": 0, "closed": False, "dropped_calls": 0, "lost_calls": 0,
+            "torn": False}
+    (pos, rows) = (0, len(records))
+    while pos < rows:
+        if info["closed"]:
+            raise ValueError("expert access trace has rows after its end row")
+        (kind, value) = (int(records[pos, 0]), int(records[pos, 1]))
+        if kind == _TRACE_CALL:
+            stop = pos + 1 + value
+            if stop > rows:
+                # The process ended mid-write: keep the complete calls.
+                info["torn"] = True
+                break
+            block = records[pos + 1 : stop]
+            if value == 0 or (block[:, 0] != block[0, 0]).any() or block[0, 0] >= _TRACE_END:
+                raise ValueError("malformed call in expert access trace")
+            layer = int(block[0, 0])
+            if layer < layers:
+                calls[layer].append(block[:, 1].tolist())
+            info["calls"] += 1
+            pos = stop
+        elif kind == _TRACE_LOST:
+            info["lost_calls"] += 1
+            pos += 1
+        elif kind == _TRACE_END:
+            info["closed"] = True
+            info["dropped_calls"] = value
+            pos += 1
+        else:
+            raise ValueError("expert access trace row outside a call")
+    return (calls, info)
+
+
+def load_trace_calls(path) -> Tuple[int, int, List[List[List[int]]], dict]:
+    """``(layers, units, calls per layer, info)`` of a recorded trace.
+
+    ``info["baseline"]`` says what replaying the calls with the engine's rule
+    reproduces: ``"exact"`` -- a complete v2 trace (closed, nothing dropped or
+    lost), the LRU that ran; ``"exact_prefix"`` -- a v2 trace cut short by its
+    record limit or by the process ending, the LRU that ran up to its last
+    recorded call; ``"approximate"`` -- a legacy v1 trace (calls inferred) or
+    one with a failed acquire it could not record.
+    """
+    (version, layers, units, records) = _read_rows(path)
+    if version == 1:
+        calls = _trace_calls(records, int(layers))
+        info = {"calls": sum(len(layer) for layer in calls), "closed": None,
+                "dropped_calls": None, "lost_calls": None, "torn": None,
+                "baseline": "approximate"}
+    else:
+        (calls, info) = _trace_calls_v2(records, int(layers))
+        if info["lost_calls"]:
+            info["baseline"] = "approximate"
+        elif info["closed"] and not info["dropped_calls"]:
+            info["baseline"] = "exact"
+        else:
+            info["baseline"] = "exact_prefix"
+    info["version"] = version
+    return (layers, units, calls, info)
+
+
+def _lru_hit_rate(calls, capacity: int, pinned=frozenset()) -> Tuple[int, int]:
+    """Replay one layer's calls.  Returns ``(hits, accesses)``.
+
+    Each call is replayed as ``weight_stream.ExpertLRU.acquire`` serves it:
+    the call's whole set is held, so a miss evicts only entries outside it;
+    hits are refreshed in request order, misses inserted after them, and the
+    cache is trimmed back to capacity (a call wider than it overflows).
     ``pinned`` occupies capacity permanently; the rest is LRU.  The actual
     engine always runs with ``pinned`` empty -- that is the whole point of the
     collect-only rule -- so a non-empty set here is strictly counterfactual.
@@ -413,21 +574,30 @@ def _lru_hit_rate(sequence, capacity: int, pinned=frozenset()) -> Tuple[int, int
     resident: "OrderedDict[int, None]" = OrderedDict()
     hits = 0
     total = 0
-    for unit in sequence:
-        unit = int(unit)
-        total += 1
-        if unit in pinned:
-            hits += 1
+    for call in calls:
+        wanted = list(dict.fromkeys(int(unit) for unit in call))
+        total += len(wanted)
+        hits += sum(1 for unit in wanted if unit in pinned)
+        wanted = [unit for unit in wanted if unit not in pinned]
+        if not wanted or lru_capacity == 0:
             continue
-        if unit in resident:
-            hits += 1
-            resident.move_to_end(unit)
-            continue
-        if lru_capacity == 0:
-            continue
-        while len(resident) >= lru_capacity:
+        missing = []
+        for unit in wanted:
+            if unit in resident:
+                hits += 1
+                resident.move_to_end(unit)
+            else:
+                missing.append(unit)
+        keep = set(wanted)
+        while len(resident) + len(missing) > lru_capacity:
+            victim = next((unit for unit in resident if unit not in keep), None)
+            if victim is None:
+                break
+            del resident[victim]
+        for unit in missing:
+            resident[unit] = None
+        while len(resident) > lru_capacity:
             resident.popitem(last=False)
-        resident[unit] = None
     return (hits, total)
 
 
@@ -441,21 +611,24 @@ def replay_counterfactual(
 ) -> dict:
     """What an atlas-pinned resident set *would* have achieved, per layer.
 
-    The ``pin_fraction = 0`` row is the LRU that actually ran.  Every other row
-    is hypothetical: nothing in the serving path consults the atlas.
+    The ``pin_fraction = 0`` row replays the trace call by call with the
+    engine's eviction rule.  ``baseline`` (see :func:`load_trace_calls`) says
+    whether that is the LRU that actually ran (``"exact"``), the run up to the
+    trace's last recorded call (``"exact_prefix"``), or an estimate
+    (``"approximate"``).  Every other row is hypothetical: nothing in the
+    serving path consults the atlas.
     """
     import numpy as np
 
     if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
         raise ValueError("counterfactual capacity must be a positive integer")
-    (layers, units, records) = read_trace(trace_path)
+    (layers, units, per_layer, trace_info) = load_trace_calls(trace_path)
     effective_capacity = min(capacity, int(units))
     counts = None
     if atlas is not None:
         counts = np.asarray(atlas.counts if isinstance(atlas, Atlas) else atlas)
         if counts.shape != (layers, units):
             counts = None
-    per_layer = [records[records[:, 0] == layer][:, 1] for layer in range(layers)]
 
     # The actual plain-LRU policy is the comparison baseline even when a
     # caller requests only hypothetical pin fractions.
@@ -470,7 +643,7 @@ def replay_counterfactual(
         hits = 0
         total = 0
         layer_rows = []
-        for (layer, sequence) in enumerate(per_layer):
+        for (layer, calls) in enumerate(per_layer):
             pinned = frozenset()
             if counts is not None and pin_budget > 0:
                 eligible = np.where(counts[layer] >= min_samples)[0]
@@ -479,7 +652,7 @@ def replay_counterfactual(
                 ]
                 pinned = frozenset(int(unit) for unit in order[:pin_budget])
             (layer_hits, layer_total) = _lru_hit_rate(
-                sequence, effective_capacity, pinned
+                calls, effective_capacity, pinned
             )
             hits += layer_hits
             total += layer_total
@@ -508,13 +681,30 @@ def replay_counterfactual(
     for row in rows:
         row["page_ins_vs_lru"] = row["page_ins"] - baseline["page_ins"]
         row["hit_rate_delta"] = row["hit_rate"] - baseline["hit_rate"]
+    baseline_note = {
+        "exact": "The pin_fraction 0 row reproduces the LRU that ran.",
+        "exact_prefix": (
+            "The trace stops before the run did (record limit or no clean "
+            "close): the pin_fraction 0 row reproduces the LRU that ran up to "
+            "the last recorded call."
+        ),
+        "approximate": (
+            "The pin_fraction 0 row is approximate: a legacy trace without "
+            "call boundaries, or a failed acquire the trace could not record."
+        ),
+    }[trace_info["baseline"]]
     return {
         "schema": "mlx2.expert-atlas-counterfactual.v1",
         "note": (
             "Counterfactual replay only. The serving path runs plain LRU; the "
             "atlas is collect-only and never influenced residency. Wall-clock "
-            "numbers from a streamed run are not benchmarks."
+            "numbers from a streamed run are not benchmarks. " + baseline_note
         ),
+        "baseline": trace_info["baseline"],
+        "trace_format": {
+            key: trace_info[key]
+            for key in ("version", "calls", "closed", "dropped_calls", "lost_calls", "torn")
+        },
         "capacity_experts": effective_capacity,
         "requested_capacity_experts": capacity,
         "layers": layers,

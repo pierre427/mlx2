@@ -962,6 +962,12 @@ def probe_qwen4_fused_gdn_decode(dtype, *, state_dtype=None) -> Optional[int]:
                 logger.info("Qwen4 fused GDN probe failed: %s", exc)
                 break
             except RuntimeError as exc:
+                from .served_exp import is_device_fault
+
+                if is_device_fault(exc):
+                    # Not a kernel refusal: let serving recover, probe again.
+                    # Every other GDN probe starts from this one.
+                    raise
                 logger.info(
                     "Qwen4 fused GDN threadgroup_y=%d is unavailable: %s",
                     threadgroup_y,

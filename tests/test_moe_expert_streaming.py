@@ -659,6 +659,66 @@ def test_atlas_is_ignored_when_stale_torn_or_mismatched(tmp_path):
     assert expert_atlas.load_atlas(sink) is None
 
 
+def _valid_manifest():
+    return expert_atlas.build_manifest(
+        digest="0" * 64, num_layers=1, num_units=2,
+        total_observations=0, generations=[],
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda m: [],
+        lambda m: "not-an-object",
+        lambda m: 7,
+        lambda m: {**m, "num_layers": "corrupt"},
+        lambda m: {**m, "num_units_per_layer": [2]},
+        lambda m: {**m, "data_offset": "x"},
+        lambda m: {**m, "crc32": None},
+        lambda m: {**m, "crc32": "x"},
+        lambda m: {**m, "total_observations": "x"},
+    ],
+    ids=["list", "string", "number", "layers-str", "units-list",
+         "offset-str", "crc-null", "crc-str", "total-str"],
+)
+def test_malformed_atlas_manifest_is_ignored_not_fatal(tmp_path, mutate):
+    # load_atlas promises None "for any reason at all"; a manifest that
+    # parses as JSON but holds the wrong types raised instead, aborting the
+    # streamed load at collector.bind (sweep 2026-10-08, c6-flashnext-2).
+    sink = tmp_path / "weight_atlas.json"
+    # A well-formed .bin so every manifest field is actually reached.
+    expert_atlas.write_atlas(sink, _valid_manifest(), np.zeros((1, 2), np.uint64))
+    sink.write_text(json.dumps(mutate(json.loads(sink.read_text()))))
+
+    assert expert_atlas.load_atlas(sink) is None
+    # The served path: install_expert_streaming -> collector.bind -> load_atlas.
+    collector = expert_atlas.AtlasCollector(sink=sink, checkpoint_every=0)
+    collector.bind(num_layers=1, num_units=2)
+    collector.observe(0, [1])
+    # The checkpoint replaces the bad sink with a valid atlas.
+    assert collector.flush() == sink
+    assert expert_atlas.load_atlas(sink).counts.tolist() == [[0, 1]]
+
+
+@pytest.mark.parametrize("generations", ["abc", {"a": 1}, [1, 2], ["x"]])
+def test_malformed_atlas_generations_do_not_break_checkpoint(tmp_path, generations):
+    sink = tmp_path / "weight_atlas.json"
+    expert_atlas.write_atlas(sink, _valid_manifest(), np.zeros((1, 2), np.uint64))
+    bad = json.loads(sink.read_text())
+    bad["generations"] = generations
+    sink.write_text(json.dumps(bad))
+
+    collector = expert_atlas.AtlasCollector(sink=sink, checkpoint_every=1)
+    collector.bind(num_layers=1, num_units=2)
+    # observe() checkpoints from the paging path; it must not raise.
+    collector.observe(0, [1])
+    atlas = expert_atlas.load_atlas(sink)
+    assert atlas is not None
+    assert atlas.total_observations == 1
+    assert all(isinstance(g, dict) for g in atlas.generations)
+
+
 def test_atlas_merge_decays_old_generations():
     prior = np.array([[1000, 0]], dtype=np.uint64)
     observed = np.array([[0, 5]], dtype=np.uint64)
@@ -817,7 +877,7 @@ def test_counterfactual_reports_what_pinning_would_have_done(tmp_path):
         block[:, 0] = layer
         block[:, 1] = sequence
     trace.write_bytes(
-        expert_atlas.TRACE_MAGIC + struct.pack("<II", layers, units) + records.tobytes()
+        expert_atlas.TRACE_MAGIC_V1 + struct.pack("<II", layers, units) + records.tobytes()
     )
 
     counts = np.zeros((layers, units), dtype=np.uint64)
@@ -848,7 +908,7 @@ def test_counterfactual_ignores_units_below_the_trust_floor(tmp_path):
     trace = tmp_path / "trace.bin"
     records = np.array([[0, 1], [0, 2], [0, 1]], dtype=np.uint32)
     trace.write_bytes(
-        expert_atlas.TRACE_MAGIC + struct.pack("<II", 1, 4) + records.tobytes()
+        expert_atlas.TRACE_MAGIC_V1 + struct.pack("<II", 1, 4) + records.tobytes()
     )
     counts = np.array([[0, 3, 1, 0]], dtype=np.uint64)
     report = expert_atlas.replay_counterfactual(
@@ -863,7 +923,7 @@ def test_counterfactual_clamps_requested_capacity_to_expert_count(tmp_path):
     trace = tmp_path / "trace.bin"
     records = np.array([[0, 0], [0, 1], [0, 2], [0, 3]], dtype=np.uint32)
     trace.write_bytes(
-        expert_atlas.TRACE_MAGIC + struct.pack("<II", 1, 4) + records.tobytes()
+        expert_atlas.TRACE_MAGIC_V1 + struct.pack("<II", 1, 4) + records.tobytes()
     )
     report = expert_atlas.replay_counterfactual(
         trace,
@@ -875,6 +935,270 @@ def test_counterfactual_clamps_requested_capacity_to_expert_count(tmp_path):
     assert report["requested_capacity_experts"] == 100
     assert report["capacity_experts"] == 4
     assert report["rows"][1]["pinned_per_layer"] == 2
+
+
+def test_engine_shutdown_persists_atlas_and_trace_tail(checkpoint, tmp_path):
+    # serving._atlas_collector() builds the collector with the default
+    # checkpoint_every (100_000), and engine shutdown closes only the
+    # ExpertStreamManager: directly for the legacy install, through
+    # adapter.close() for the early install. A run below one checkpoint
+    # left no atlas at all, with the trace tail still buffered (sweep
+    # 2026-10-08, flashnext-host#1).
+    (path, weights) = checkpoint
+    sink = tmp_path / "weight_atlas.json"
+    trace = tmp_path / "trace.bin"
+    collector = expert_atlas.AtlasCollector(path, sink=sink, trace_path=trace)
+    model = _reference(weights)
+    manager = install_expert_streaming(
+        model,
+        path,
+        ceiling_bytes=_ceiling_for(path, TOP_K),
+        top_k=TOP_K,
+        collector=collector,
+    )
+    for step in range(5):
+        (x, indices) = _inputs(tokens=4, seed=300 + step)
+        _run(model, x, indices)
+    observed = collector.observations
+    records = collector.counters()["atlas_trace_records_total"]
+    assert 0 < observed < collector.checkpoint_every
+    manager.close()  # all that engine teardown calls
+
+    atlas = expert_atlas.load_atlas(
+        sink, expect_digest=expert_atlas.index_digest(path)
+    )
+    assert atlas is not None, "shutdown left no atlas on disk"
+    assert atlas.total_observations == observed
+    assert int(atlas.counts.sum()) == observed
+    (_, _, rows) = expert_atlas.read_trace(trace)
+    assert rows.shape[0] == records
+    info = expert_atlas.load_trace_calls(trace)[3]
+    # The end row is written last, at close: the buffered tail is on disk.
+    assert info["closed"] and info["baseline"] == "exact"
+    assert trace.stat().st_size == 16 + 8 * (records + info["calls"] + 1)
+    # The counters still report the final totals after shutdown.
+    assert manager.counters()["atlas_observations_total"] == observed
+    # A second close (the validator closes the collector itself first) adds
+    # no empty generation.
+    generations = len(atlas.generations)
+    collector.close()
+    manager.close()
+    again = expert_atlas.load_atlas(sink)
+    assert again.total_observations == observed
+    assert len(again.generations) == generations
+
+
+def test_engine_shutdown_survives_an_atlas_that_cannot_be_written(
+    checkpoint, tmp_path, monkeypatch
+):
+    (path, weights) = checkpoint
+    collector = expert_atlas.AtlasCollector(path, sink=tmp_path / "weight_atlas.json")
+    model = _reference(weights)
+    manager = install_expert_streaming(
+        model, path, ceiling_bytes=_ceiling_for(path, TOP_K), top_k=TOP_K,
+        collector=collector,
+    )
+    (x, indices) = _inputs(tokens=4, seed=301)
+    _run(model, x, indices)
+
+    def disk_full(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(expert_atlas, "write_atlas", disk_full)
+    manager.close()  # telemetry must never break shutdown
+    assert all(cache.resident == 0 for cache in manager.caches.values())
+
+
+class _CountingReader:
+    """Host-only reader: ExpertLRU's accounting without any file I/O."""
+
+    expert_bytes = 1
+
+    def __init__(self, num_experts):
+        self.num_experts = num_experts
+
+    def check_sources(self):
+        pass
+
+    def outstanding_bytes(self):
+        return 0
+
+    def iter_many(self, experts):
+        for expert in experts:
+            yield (expert, (expert,))
+
+    def materialize(self, payload):
+        return payload
+
+
+def test_counterfactual_lru_row_reproduces_the_lru_that_ran(tmp_path):
+    # The 0.0 row is documented as "the LRU that actually ran". ExpertLRU
+    # holds a call's whole working set: a miss evicts only entries outside
+    # it. A per-id replay let the miss on expert 1 evict expert 3, which the
+    # same call needs next, and reported 5 page-ins / 0 hits per projection
+    # where the engine did 4 / 1 (sweep 2026-10-08, flashnext-host#0).
+    trace = tmp_path / "trace.bin"
+    collector = expert_atlas.AtlasCollector(None, trace_path=trace)
+    projections = 2  # e.g. gate and up of one layer: the trace interleaves
+    collector.bind(num_layers=projections, num_units=16)
+    stats = weight_stream.StreamStats()
+    caches = [
+        weight_stream.ExpertLRU(_CountingReader(16), capacity_experts=3, stats=stats)
+        for _ in range(projections)
+    ]
+    for routed in ([3], [7], [8], [3, 1]):
+        for (layer, cache) in enumerate(caches):
+            # Exactly what StreamedQuantizedSwitchLinear.__call__ does.
+            unique = np.unique(np.asarray(routed, dtype=np.int64))
+            cache.acquire([int(e) for e in unique])
+            collector.observe(layer, unique)
+    collector.close()
+    assert (stats.page_ins, stats.hits) == (8, 2)
+
+    report = expert_atlas.replay_counterfactual(trace, capacity=3, pin_fractions=(0.0,))
+    lru = report["rows"][0]
+    assert (lru["page_ins"], lru["hits"]) == (stats.page_ins, stats.hits)
+    assert report["baseline"] == "exact"
+
+
+def test_counterfactual_lru_row_matches_a_streamed_run(checkpoint, tmp_path):
+    (path, weights) = checkpoint
+    collector = expert_atlas.AtlasCollector(path, trace_path=tmp_path / "trace.bin")
+    model = _reference(weights)
+    manager = install_expert_streaming(
+        model, path, ceiling_bytes=_ceiling_for(path, 6), top_k=TOP_K,
+        collector=collector,
+    )
+    try:
+        for step in range(40):
+            (x, indices) = _inputs(tokens=1, seed=900 + step)
+            _run(model, x, indices)
+        collector.close()
+        capacity = manager.plan.capacity_experts
+        (page_ins, hits) = (manager.stats.page_ins, manager.stats.hits)
+    finally:
+        manager.close()
+    report = expert_atlas.replay_counterfactual(
+        tmp_path / "trace.bin", capacity=capacity, pin_fractions=(0.0,)
+    )
+    lru = report["rows"][0]
+    assert (lru["page_ins"], lru["hits"]) == (page_ins, hits)
+    assert report["baseline"] == "exact"
+
+
+def _serve(collector, caches, schedule):
+    """Serve ``(projection, routed ids)`` calls as the streamed module does."""
+    for (layer, routed) in schedule:
+        unique = np.unique(np.asarray(routed, dtype=np.int64))
+        caches[layer].acquire([int(e) for e in unique])
+        collector.observe(layer, unique)
+
+
+def test_counterfactual_single_projection_trace_keeps_call_boundaries(tmp_path):
+    # One streamed projection: consecutive calls share a layer, so a trace
+    # without call boundaries read {1,3},{7,8} as one call {1,3,7,8} and
+    # credited 7 and 8 as hits the engine never had (review round 1).
+    trace = tmp_path / "trace.bin"
+    collector = expert_atlas.AtlasCollector(None, trace_path=trace)
+    collector.bind(num_layers=1, num_units=16)
+    stats = weight_stream.StreamStats()
+    cache = weight_stream.ExpertLRU(_CountingReader(16), capacity_experts=2, stats=stats)
+    _serve(collector, [cache], [(0, [7, 8]), (0, [1, 3]), (0, [7, 8])])
+    collector.close()
+    assert (stats.page_ins, stats.hits) == (6, 0)
+
+    report = expert_atlas.replay_counterfactual(trace, capacity=2, pin_fractions=(0.0,))
+    lru = report["rows"][0]
+    assert (lru["page_ins"], lru["hits"]) == (stats.page_ins, stats.hits)
+    assert report["baseline"] == "exact"
+
+
+def test_counterfactual_trace_with_dropped_calls_replays_only_its_prefix(tmp_path):
+    # The record limit dropped the wide calls but kept later small ones, so
+    # projection 0's {1,3} and {7,8} became adjacent and merged: the replay
+    # reported 2 hits where the engine had none (review round 1).
+    trace = tmp_path / "trace.bin"
+    collector = expert_atlas.AtlasCollector(None, trace_path=trace, trace_limit=6)
+    collector.bind(num_layers=2, num_units=16)
+    stats = [weight_stream.StreamStats() for _ in range(2)]
+    caches = [
+        weight_stream.ExpertLRU(_CountingReader(16), capacity_experts=2, stats=s)
+        for s in stats
+    ]
+    wide = [0, 2, 4, 6, 9]
+    _serve(collector, caches, [(0, [7, 8]), (1, wide), (0, [1, 3]), (1, wide), (0, [7, 8])])
+    collector.close()
+    assert stats[0].hits == 0
+
+    report = expert_atlas.replay_counterfactual(trace, capacity=2, pin_fractions=(0.0,))
+    lru = report["rows"][0]
+    assert lru["layers"][0]["hits"] == 0
+    # Recorded: the run up to its first dropped call, replayed exactly.
+    assert (lru["page_ins"], lru["hits"]) == (2, 0)
+    assert report["baseline"] == "exact_prefix"
+    assert report["trace_format"]["dropped_calls"] == 4
+
+
+def test_counterfactual_unclosed_or_torn_trace_is_a_prefix(tmp_path):
+    trace = tmp_path / "trace.bin"
+    collector = expert_atlas.AtlasCollector(None, trace_path=trace)
+    collector.bind(num_layers=1, num_units=16)
+    for routed in ([7, 8], [1, 3], [7, 8]):
+        collector.observe(0, np.asarray(routed))
+    collector._trace.flush()  # a killed process: no end row
+    (_, _, calls, info) = expert_atlas.load_trace_calls(trace)
+    assert calls == [[[7, 8], [1, 3], [7, 8]]]
+    assert (info["closed"], info["torn"], info["baseline"]) == (False, False, "exact_prefix")
+    trace.write_bytes(trace.read_bytes()[:-8])  # the last call cut mid-write
+    (_, _, calls, info) = expert_atlas.load_trace_calls(trace)
+    assert calls == [[[7, 8], [1, 3]]]
+    assert (info["torn"], info["baseline"]) == (True, "exact_prefix")
+    collector._trace.close()
+
+
+def test_counterfactual_labels_a_legacy_trace_approximate(tmp_path):
+    trace = tmp_path / "trace.bin"
+    records = np.array([[0, 7], [0, 8], [0, 1], [0, 3], [0, 7], [0, 8]], dtype=np.uint32)
+    trace.write_bytes(
+        expert_atlas.TRACE_MAGIC_V1 + struct.pack("<II", 1, 16) + records.tobytes()
+    )
+    report = expert_atlas.replay_counterfactual(trace, capacity=2, pin_fractions=(0.0,))
+    assert report["baseline"] == "approximate"
+    assert report["trace_format"]["version"] == 1
+
+
+def test_counterfactual_trace_with_a_failed_acquire_is_approximate(checkpoint, tmp_path):
+    # A failed acquire still changed the LRU (it evicts before it reads)
+    # but wrote no call, so the replay cannot claim the run's LRU.
+    (path, weights) = checkpoint
+    trace = tmp_path / "trace.bin"
+    collector = expert_atlas.AtlasCollector(path, trace_path=trace)
+    model = _reference(weights)
+    manager = install_expert_streaming(
+        model, path, ceiling_bytes=_ceiling_for(path, TOP_K), top_k=TOP_K,
+        collector=collector,
+    )
+    try:
+        reader = next(iter(manager.caches.values())).reader
+        real_check = reader.check_sources
+        failures = [OSError(5, "Input/output error")]
+
+        def check_sources():
+            if failures:
+                raise failures.pop()
+            real_check()
+
+        reader.check_sources = check_sources
+        with pytest.raises(OSError):
+            _run(model, *_inputs(tokens=4, seed=310))
+        for step in range(3):
+            _run(model, *_inputs(tokens=4, seed=311 + step))
+        collector.close()
+    finally:
+        manager.close()
+    report = expert_atlas.replay_counterfactual(trace, capacity=3, pin_fractions=(0.0,))
+    assert report["baseline"] == "approximate"
+    assert report["trace_format"]["lost_calls"] == 1
 
 
 # ---------------------------------------------------------------------------

@@ -307,7 +307,6 @@ def probe_fused_group_norm(rows: int = 1024) -> bool:
     global _PROBE_COMPLETE, _PROBE_OK
     if _PROBE_COMPLETE:
         return _PROBE_OK
-    _PROBE_COMPLETE = True
     if not mx.metal.is_available():
         return False
     previous = _ENABLE
@@ -321,13 +320,20 @@ def probe_fused_group_norm(rows: int = 1024) -> bool:
         got = fused_group_norm(x, w, eps=EPS, group_size=GROUP_SIZE,
                                candidate_rows=(rows,))
         mx.eval(ref, got)
-        _PROBE_OK = bool(mx.array_equal(ref, got).item())
-    except Exception:  # noqa: BLE001 -- a self-check must never raise; a Metal
-        # compile or admission failure of any kind means "not usable", and the
-        # caller falls back to the eager arithmetic, which is the same math.
-        _PROBE_OK = False
+        ok = bool(mx.array_equal(ref, got).item())
+    except Exception as exc:  # noqa: BLE001 -- a Metal compile or admission
+        # failure of any kind means "not usable", and the caller falls back to
+        # the eager arithmetic, which is the same math.  A device fault is not
+        # a verdict on the kernel: it propagates and nothing is cached.
+        from .served_exp import is_device_fault
+
+        if is_device_fault(exc):
+            raise
+        ok = False
     finally:
         set_fused_group_norm_enabled(previous)
+    _PROBE_OK = ok
+    _PROBE_COMPLETE = True
     return _PROBE_OK
 
 

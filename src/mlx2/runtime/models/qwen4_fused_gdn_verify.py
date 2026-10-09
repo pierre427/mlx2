@@ -992,6 +992,11 @@ def probe_qwen4_fused_gdn_replay_verify(
                 logger.info("Qwen4 compact GDN replay probe failed: %s", exc)
                 break
             except RuntimeError as exc:
+                from .served_exp import is_device_fault
+
+                if is_device_fault(exc):
+                    # Not a kernel refusal: let serving recover, probe again.
+                    raise
                 logger.info(
                     "Qwen4 compact GDN replay width %d unavailable at threadgroup_y=%d: %s",
                     steps,
@@ -1076,6 +1081,11 @@ def probe_qwen4_fused_gdn_verify(
                 logger.info("Qwen4 fused GDN verify probe failed: %s", exc)
                 break
             except RuntimeError as exc:
+                from .served_exp import is_device_fault
+
+                if is_device_fault(exc):
+                    # Not a kernel refusal: let serving recover, probe again.
+                    raise
                 logger.info(
                     "Qwen4 fused GDN verify width %d unavailable at threadgroup_y=%d: %s",
                     steps,
@@ -1155,6 +1165,11 @@ def probe_qwen4_fused_gdn_catchup(
                 logger.info("Qwen4 fused GDN catch-up probe failed: %s", exc)
                 break
             except RuntimeError as exc:
+                from .served_exp import is_device_fault
+
+                if is_device_fault(exc):
+                    # Not a kernel refusal: let serving recover, probe again.
+                    raise
                 logger.info(
                     "Qwen4 fused GDN catch-up width %d unavailable at threadgroup_y=%d: %s",
                     steps,

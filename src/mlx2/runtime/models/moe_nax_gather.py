@@ -1719,6 +1719,17 @@ def _canary_problem(dtype, mode, bits, group_size, N, K, x_scale=0.5):
     return wq, scales, biases, wd, x, idx
 
 
+def _is_device_fault(exc) -> bool:
+    """A Metal out-of-memory or GPU timeout raised while a canary ran.
+
+    Not a verdict on the kernel: the canary's eval shares the device with
+    the step, so the fault propagates to serving's device-fault recovery and
+    nothing is cached; the next call runs the canary again."""
+    from .served_exp import is_device_fault
+
+    return is_device_fault(exc)
+
+
 def _self_test(key: tuple) -> Optional[bool]:
     """Run one kernel instantiation on a small canary.
 
@@ -1763,6 +1774,8 @@ def _self_test(key: tuple) -> Optional[bool]:
             ok = err <= scale / 64
             detail = f"max err {err:.3g} vs fp32 reference (max {scale:.3g})"
     except Exception as e:  # noqa: BLE001
+        if _is_device_fault(e):
+            raise
         if "transformation" in str(e):
             return None
         logger.warning(
@@ -1857,6 +1870,8 @@ def _self_test_act(key: tuple) -> Optional[bool]:
         x_gate, x_up = mx.split(gate_up, 2, axis=-1)
         ok = _bits_equal(out, reference_activation(x_up, x_gate, limit))
     except Exception as e:  # noqa: BLE001
+        if _is_device_fault(e):
+            raise
         if "transformation" in str(e):
             return None
         logger.warning(
@@ -1905,6 +1920,8 @@ def _self_test_act_map(key: tuple) -> Optional[bool]:
             return False
         ok = _bits_equal(out, ref)
     except Exception as e:  # noqa: BLE001
+        if _is_device_fault(e):
+            raise
         if "transformation" in str(e):
             return None
         logger.warning(
@@ -1979,6 +1996,8 @@ def _self_test_split(key: tuple) -> Optional[bool]:
 
             ok = _bits_equal(out, reference_activation(proj(up), proj(gate), limit))
     except Exception as e:  # noqa: BLE001
+        if _is_device_fault(e):
+            raise
         if "transformation" in str(e):
             return None
         logger.warning("NAX split gate/up self-test raised for %s: %s", _describe(key), e)
@@ -1992,7 +2011,9 @@ def _self_test_split(key: tuple) -> Optional[bool]:
 
 
 def _checked(key: tuple, test) -> bool:
-    """The cached self-test verdict for ``key`` (running ``test`` once)."""
+    """The cached self-test verdict for ``key`` (running ``test`` once).
+
+    A device fault raised by ``test`` propagates and caches nothing."""
     ok = _verified.get(key)
     if ok is None:
         with _lock:

@@ -7,7 +7,7 @@ from functools import lru_cache
 from typing import Callable
 import mlx.core as mx
 
-from .served_exp import ServedExpGate
+from .served_exp import ServedExpGate, is_device_fault
 
 _ENV_NAME = "MLX_QWEN4_QSA_INDEXED_FUSED_MERGE"
 _GATE_ENV_NAME = "MLX_QWEN4_QSA_INDEXED_FUSED_GATE"
@@ -293,7 +293,11 @@ def _fused_merge(m, l, o, *, output_dtype, output_gate=None):
                         candidate = threads
                         _PROBE_RESULTS[key] = threads
                         break
-                    except RuntimeError:
+                    except RuntimeError as exc:
+                        if is_device_fault(exc):
+                            # Not a kernel refusal: let serving recover,
+                            # probe again.
+                            raise
                         continue
                 if candidate is None:
                     _PROBE_RESULTS[key] = False
@@ -334,7 +338,9 @@ def combine_indexed_partials(
         if output_gate is not None and gate is None:
             output = mlx_apply_output_gate(output, output_gate)
         return output
-    except RuntimeError:
+    except RuntimeError as exc:
+        if is_device_fault(exc):
+            raise
         _record_fallback()
         if on_fallback is not None:
             on_fallback()

@@ -68,3 +68,61 @@ def test_record_bins_by_upper_edge(monkeypatch):
     first = next(e for e in stage1.SELECT_TIMING_EDGES_US if e >= 11)
     assert buckets[first] == 1
     assert buckets[stage1.SELECT_TIMING_EDGES_US[-1] * 2] == 1
+
+
+def _fake_select(scores, positions, *, topk, compress_ratio):
+    rows = int(scores.shape[0])
+    return mx.broadcast_to(mx.arange(topk, dtype=mx.uint32)[None], (rows, topk))
+
+
+def test_exact_band_refine_is_timed_apart_from_primary(monkeypatch):
+    # The exact-band route dispatches the selector twice per stage-one call:
+    # over all pooled blocks (block_topk + 32 candidates), then over those
+    # candidates (block_topk).  Both resolve to the same producer name, so
+    # one histogram held an even mixture and its P50 was the refine dispatch
+    # (sweep 2026-10-08, flashnext-kernels#3).
+    monkeypatch.setattr(stage1, "qsa_stage1_kernel_available", lambda: True)
+    monkeypatch.setattr(stage1, "nax_kernel_available", lambda: True)
+    monkeypatch.setattr(stage1, "_KEYS_STATIONARY", False)
+    monkeypatch.setattr(stage1, "_ONEPASS_TOPK", False)
+    monkeypatch.setattr(stage1, "_DIRECT_SELECTOR", "off")
+    monkeypatch.setattr(stage1, "_SELECT_TIMING", True)
+    monkeypatch.setattr(stage1, "_SELECT_TIMING_STATS", {})
+    monkeypatch.setattr(
+        stage1,
+        "_mpp_scores",
+        lambda q, pooled: mx.zeros(
+            (int(q.shape[1]), int(pooled.shape[1])), dtype=mx.float32
+        ),
+    )
+    widths = []
+
+    def select(scores, positions, *, topk, compress_ratio):
+        widths.append(int(scores.shape[1]))
+        return _fake_select(scores, positions, topk=topk, compress_ratio=compress_ratio)
+
+    monkeypatch.setattr(stage1, "_select_scores_untimed", select)
+
+    (blocks, topk, ratio, length) = (64, 8, 4, 2)
+    q = mx.zeros((1, length, 4, 128), dtype=mx.float16)
+    pooled = mx.zeros((1, blocks, 128), dtype=mx.float16)
+    positions = mx.full((1, length), blocks * ratio - 1, dtype=mx.int32)
+
+    route = stage1.qsa_stage1_route(q, pooled, block_topk=topk)
+    assert route["score_producer"] == "mpp_exact_band"
+    assert route["selector"] == route["refine_selector"] == "radix_exact"
+
+    calls = 3
+    for _ in range(calls):
+        stage1.qsa_stage1_select(
+            q, pooled, positions, block_topk=topk, compress_ratio=ratio
+        )
+    assert widths == [blocks, topk + 32] * calls
+    producers = stage1.qsa_stage1_candidate_status(reset=True)["select_timing"][
+        "producers"
+    ]
+    # Both dispatches are still timed ...
+    assert sum(p["count"] for p in producers.values()) == 2 * calls
+    # ... but the primary selector's histogram holds only primary dispatches.
+    assert producers[route["selector"]]["count"] == calls
+    assert producers[route["refine_selector"] + "_refine"]["count"] == calls
