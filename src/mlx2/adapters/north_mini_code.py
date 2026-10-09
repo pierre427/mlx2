@@ -17,6 +17,7 @@ from ..process_env import (
     require_process_numerics,
 )
 from ..sampling_defaults import SamplingDefaults, VendorSampling
+from .artifact_paths import shard_within_artifact
 from .external_draft_policy import ExternalDraftAdapterMixin
 
 CACHE_LAYOUT = "north-mini-code-layer-segments-v1"
@@ -287,11 +288,13 @@ def inspect_artifact(model_path: str | Path) -> dict:
     for name in names:
         if not isinstance(name, str):
             raise TypeError("weight shard path must be a string")
-        item = (path / name).resolve()
+        item = path / name
         if (
-            not item.is_relative_to(path)
-            or item.suffix != ".safetensors"
+            Path(name).is_absolute()
+            or ".." in Path(name).parts
+            or Path(name).suffix != ".safetensors"
             or not item.is_file()
+            or not shard_within_artifact(path, item.resolve())
         ):
             raise ValueError("weight index must reference local safetensors files")
         stat = item.stat()

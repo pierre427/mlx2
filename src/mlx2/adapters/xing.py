@@ -18,6 +18,7 @@ import struct
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from .artifact_paths import shard_within_artifact
 from .mtp_depth_cap import validate_self_mtp_num_draft
 from ..sampling_defaults import XING4_SAMPLING
 from ..process_env import (
@@ -168,8 +169,14 @@ def inspect_artifact(model_path: str | Path) -> dict:
     for name in sorted(set(index.values())):
         if not isinstance(name, str):
             raise TypeError("weight shard path must be a string")
-        item = (path / name).resolve()
-        if not item.is_relative_to(path) or item.suffix != ".safetensors" or not item.is_file():
+        item = path / name
+        if (
+            Path(name).is_absolute()
+            or ".." in Path(name).parts
+            or Path(name).suffix != ".safetensors"
+            or not item.is_file()
+            or not shard_within_artifact(path, item.resolve())
+        ):
             raise ValueError("weight index must reference local safetensors files")
         stat = item.stat()
         records.append((name, stat.st_size, stat.st_mtime_ns))

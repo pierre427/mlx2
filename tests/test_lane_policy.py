@@ -298,3 +298,58 @@ def test_status_and_metrics_expose_lane_state(monkeypatch):
     finally:
         installer.STATS.clear()
         lane.uninstall(model)
+
+
+@pytest.mark.parametrize(
+    ("detected", "family", "source"),
+    [
+        ({"moe": True, "formats": {"q4": 1}}, None, "builtin.moe"),
+        ({"moe": False, "formats": {"q4": 1}, "backend": "simd"}, None, "backend:simd"),
+        ({"moe": False, "formats": {"q4": 417}}, "muse-glimmer", "family:muse-glimmer"),
+    ],
+)
+@pytest.mark.parametrize("overrides", [{"mode": "auto"}, {"mode": "auto", "max_rows": 64}])
+def test_policy_mode_auto_keeps_the_detected_off_default(detected, family, source, overrides):
+    # A --lane-policy "auto" means the detected policy, as on the CLI; it
+    # forced crossover over the MoE, simd and Muse off defaults.
+    cli = policy.resolve(detected, family=family, mode="auto")
+    assert cli["mode"] == "off" and cli["sources"]["mode"] == source
+    resolved = policy.resolve(detected, family=family, mode="auto", overrides=overrides)
+    assert resolved["mode"] == "off"
+    assert resolved["sources"]["mode"] == source
+    if "max_rows" in overrides:
+        assert resolved["max_rows"] == 64 and resolved["sources"]["max_rows"] == "override"
+    adapter = policy.resolve(detected, family=family, mode="auto", adapter={"mode": "auto"})
+    assert adapter["mode"] == "off" and adapter["sources"]["mode"] == source
+
+
+def test_policy_mode_auto_on_dense_mpp_is_the_builtin_crossover():
+    detected = {"moe": False, "formats": {"q4": 1}, "backend": "mpp"}
+    resolved = policy.resolve(detected, mode="auto", overrides={"mode": "auto"})
+    assert resolved["mode"] == "crossover" and resolved["sources"]["mode"] == "builtin"
+
+
+def test_moe_sub_policy_mode_auto_keeps_moe_off():
+    detected = {"moe": True, "formats": {"q4": 1}}
+    resolved = policy.resolve(detected, mode="auto", overrides={"moe": {"mode": "auto"}})
+    assert resolved["mode"] == "off" and resolved["sources"]["mode"] == "builtin.moe"
+    tuned = policy.resolve(detected, mode="auto", overrides={"moe": {"mode": "auto", "max_rows": 16}})
+    assert tuned["mode"] == "off" and tuned["max_rows"] == 16
+    # Review r1: each moe value names its own source, not the last layer
+    # that touched the moe object.
+    assert tuned["sources"]["mode"] == "builtin.moe"
+    assert tuned["sources"]["max_rows"] == "override.moe"
+    layered = policy.resolve(
+        detected, adapter={"moe": {"min_rows": {"q4": 12}}},
+        overrides={"moe": {"mode": "crossover", "min_rows": {"q8": 24}}},
+    )
+    assert layered["mode"] == "crossover" and layered["sources"]["mode"] == "override.moe"
+    assert layered["min_rows"]["q8"] == 24
+    assert layered["sources"]["min_rows.q8"] == "override.moe"
+
+
+def test_explicit_policy_modes_still_opt_in():
+    detected = {"moe": True, "formats": {"q4": 1}, "backend": "simd"}
+    for mode in ("crossover", "exact"):
+        resolved = policy.resolve(detected, mode="auto", overrides={"mode": mode})
+        assert resolved["mode"] == mode and resolved["sources"]["mode"] == "override"

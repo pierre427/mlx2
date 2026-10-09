@@ -1644,3 +1644,54 @@ def test_json_answer_with_tools_fails_closed_without_a_tool_grammar(scripted_eng
     )
     assert "error" not in final, final
     assert json.loads(content) == {"a": 1}
+
+
+def test_thinking_budget_closes_self_addressed_reasoning_at_any_other_message():
+    """Muse-shaped: a tool call or direct answer ends reasoning; no forced switch."""
+    sep, own, user, tool = (2, 3), (4, 12, 13), (4, 18, 13), (4, 19, 13)
+    release = sep + user
+    processor = ThinkingBudgetProcessor(2, 6, release, reasoning_message=(sep, own))
+    call = [*own, 10, *sep, *tool, 11, 11, 11, 11, 11]
+    assert _admitted(processor, call) == EVERYTHING and processor.fired is False
+    assert processor.dormant([1, 1, *call]) and not processor.fired_for_generated(call)
+    answer = [*user, 11, 11, 11, 11, 11, 11, 11]
+    assert _admitted(processor, answer) == EVERYTHING and not processor.fired_for_generated(answer)
+    # Run-on reasoning still gets the whole switch, finished once begun.
+    ids = [*own, 10, 11, 10]
+    for expected in release:
+        assert _admitted(processor, ids) == {expected}
+        ids.append(expected)
+    assert _admitted(processor, ids) == EVERYTHING
+    assert processor.fired is True and processor.fired_for_generated(ids)
+
+
+def test_thinking_budget_leaves_an_open_recipient_choice_to_the_model():
+    """Review r1: budget 1 sees only the shared " to" (4) of every header."""
+    sep, own, user, tool = (2, 3), (4, 12, 13), (4, 18, 13), (4, 19, 13)
+    release = sep + user
+    for reply in ([*user, 11, 11], [*tool, 11, 11]):
+        processor = ThinkingBudgetProcessor(2, 1, release, reasoning_message=(sep, own))
+        for length in range(1, len(reply) + 1):
+            assert _admitted(processor, reply[:length]) == EVERYTHING
+        assert processor.fired is False and not processor.fired_for_generated(reply)
+    # A message to itself completes; the whole release is then forced.
+    processor = ThinkingBudgetProcessor(2, 1, release, reasoning_message=(sep, own))
+    ids = [own[0]]
+    for token in own[1:]:
+        assert _admitted(processor, ids) == EVERYTHING
+        ids.append(token)
+    for expected in release:
+        assert _admitted(processor, ids) == {expected}
+        ids.append(expected)
+    assert _admitted(processor, ids) == EVERYTHING
+    assert processor.fired is True and processor.fired_for_generated(ids)
+    # A header the model opened by a later budget: its choice, not forced --
+    # also past " to=user" (8 = 6 + 2) when a tool's name extends "user".
+    reasoning = [*own, 10, *sep]
+    for budget in (6, 7, 8):
+        processor = ThinkingBudgetProcessor(2, budget, release, reasoning_message=(sep, own))
+        for reply in (tool, user, (4, 18, 15, 13)):
+            ids = reasoning + list(reply) + [11]
+            for length in range(budget, len(ids) + 1):
+                assert _admitted(processor, ids[:length]) == EVERYTHING
+            assert not processor.fired_for_generated(ids)

@@ -23,6 +23,7 @@ from .runtime.tool_parsers._schema import (
     schema_value_matches,
     string_length_bounds,
 )
+from .thinking_guard import reasoning_closed_at, release_boundary
 
 
 # Insignificant whitespace is bounded for the same reason digit runs are: it is
@@ -1054,27 +1055,68 @@ class ThinkingBudgetProcessor:
     Design references: mlx-vlm#2230, omlx#3510, ollama#17566.  The output mask
     is a pure function of the generated prefix: no mutable call count decides
     which marker token comes next, so MTP draft/verify and rollback replay the
-    exact same decision.
+    exact same decision.  Self-addressed reasoning (``reasoning_message``, see
+    ``mlx2.thinking_guard``) also closes, unforced, at its first message to
+    anybody else, and a recipient the model is choosing at the budget is its
+    own: forcing waits for that header (``release_boundary``).
     """
 
     # P5: the mask is a pure function of the token history.
     history_pure = True
 
-    def __init__(self, prompt_length, budget, close_token_ids):
+    def __init__(self, prompt_length, budget, close_token_ids, *, reasoning_message=None):
         self.prompt_length = int(prompt_length)
         self.budget = int(budget)
         self.close_token_ids = tuple(int(token) for token in close_token_ids)
         if self.prompt_length < 0 or self.budget < 0 or not self.close_token_ids:
             raise ValueError("thinking budget processor requires valid bounds and a close marker")
+        self.reasoning_message = (
+            tuple(tuple(int(token) for token in part) for part in reasoning_message)
+            if reasoning_message
+            else None
+        )
+        if self.reasoning_message is not None and not all(self.reasoning_message):
+            raise ValueError("self-addressed reasoning needs a separator and a header")
         self.fired = False
 
     def _close_position(self, generated):
         marker = self.close_token_ids
         limit = len(generated) - len(marker) + 1
+        found = None
         for position in range(max(0, limit)):
             if tuple(generated[position : position + len(marker)]) == marker:
-                return position
-        return None
+                found = position
+                break
+        if self.reasoning_message is not None:
+            ended = reasoning_closed_at(
+                generated, *self.reasoning_message, release=self.close_token_ids
+            )
+            if ended is not None and (found is None or ended[0] < found):
+                found = ended[0]
+        return found
+
+    def _boundary(self, generated):
+        """The first generated index the budget may force, or None (not yet)."""
+        if self.reasoning_message is None:
+            return self.budget
+        return release_boundary(
+            generated, *self.reasoning_message, self.budget, self.close_token_ids
+        )
+
+    def _forced(self, generated, position):
+        """Whether the close at ``position`` is the marker completed across the boundary.
+
+        A marker crossing the boundary was completed under enforcement; one
+        ending at or before it was emitted naturally, as is any other close.
+        """
+        marker = self.close_token_ids
+        boundary = self._boundary(generated)
+        return (
+            position is not None
+            and boundary is not None
+            and position <= boundary < position + len(marker)
+            and tuple(generated[position : position + len(marker)]) == marker
+        )
 
     def _generated_values(self, tokens):
         """Copy only the generated suffix; the fixed prompt is never rescanned."""
@@ -1085,11 +1127,11 @@ class ThinkingBudgetProcessor:
             generated = generated.tolist()
         return [int(item) for item in generated]
 
-    def _partial_at_boundary(self, generated):
-        """Longest marker prefix ending exactly at the budget boundary."""
+    def _partial_at_boundary(self, generated, boundary):
+        """Longest marker prefix ending exactly at the forcing boundary."""
         marker = self.close_token_ids
-        for width in range(min(len(marker) - 1, self.budget), 0, -1):
-            if tuple(generated[self.budget - width : self.budget]) == marker[:width]:
+        for width in range(min(len(marker) - 1, boundary), 0, -1):
+            if tuple(generated[boundary - width : boundary]) == marker[:width]:
                 return width
         return 0
 
@@ -1099,15 +1141,13 @@ class ThinkingBudgetProcessor:
 
     def fired_for_generated(self, generated):
         """Whether a committed generated-token suffix crossed the boundary."""
-        position = self._close_position(generated)
-        return position is not None and (
-            position <= self.budget < position + len(self.close_token_ids)
-        )
+        generated = [int(item) for item in generated]
+        return self._forced(generated, self._close_position(generated))
 
     def dormant(self, tokens):
         """P5: whether ``tokens`` leave this processor masking nothing.
 
-        True before the budget boundary and once a close marker is present;
+        True before the budget boundary and once reasoning has closed;
         side-effect free (``fired`` is not touched).
         """
         generated = self._generated_values(tokens)
@@ -1128,17 +1168,14 @@ class ThinkingBudgetProcessor:
         generated = self._generated_values(tokens)
         position = self._close_position(generated)
         if position is not None:
-            # A marker crossing the boundary was completed under enforcement;
-            # one ending at or before it was emitted naturally.
-            self.fired = (
-                position <= self.budget < position + len(self.close_token_ids)
-            )
+            self.fired = self._forced(generated, position)
             return logits
-        if len(generated) < self.budget:
+        boundary = self._boundary(generated)
+        if boundary is None or len(generated) < boundary:
             self.fired = False
             return logits
-        partial = self._partial_at_boundary(generated)
-        start = self.budget - partial
+        partial = self._partial_at_boundary(generated, boundary)
+        start = boundary - partial
         offset = len(generated) - start
         prefix = tuple(generated[start:])
         if offset >= len(self.close_token_ids) or prefix != self.close_token_ids[:offset]:

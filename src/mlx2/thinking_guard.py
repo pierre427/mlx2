@@ -34,9 +34,114 @@ buys: a caller only ever rewrites the last ``rewrite_window`` generated tokens
 (speculative verify rows and rollbacks rewrite at most the draft depth).  It is off unless a request asks for a
 ``thinking_budget``; nothing about it is model-specific beyond the close ids the
 adapter declares.
+
+**Self-addressed reasoning** (Muse): a model that reasons in messages it
+addresses to itself ends reasoning by opening a message to anybody else -- the
+user's answer, a tool call, or, skipping reasoning, a first message to either.
+Only the first writes the release marker, so such an adapter also declares its
+message separator and self header (``reasoning_message``) and reasoning closes,
+unforced, where the first other message begins (``reasoning_closed_at``).
+Headers share their first tokens, so the recipient is the model's to choose:
+the release stays out of every header the model writes, and a budget that
+falls in one waits for it to end (``release_boundary``) -- forcing from there
+when the message is to itself, nothing when it is to anybody else.
 """
 
 from __future__ import annotations
+
+
+def reasoning_closed_at(generated, separator, header, release=(), start=0):
+    """``(close, decided)`` where self-addressed reasoning ended, or None.
+
+    The reply's first message opens at index 0 and every later one after
+    ``separator``; reasoning ends where the first message whose header departs
+    from ``header`` begins (``close``: 0 or its separator), as the id at
+    ``decided`` shows.  A message whose header is still a prefix of ``header``
+    is undecided, and so is the ``release`` marker while it is being written:
+    it closes once complete, so a budget that forces it finishes it.  A pure
+    function of the ids; ``start`` skips decisions before it, which the caller
+    has already examined and found open.
+    """
+    width, size = len(separator), len(header)
+
+    def decide(at, opened):
+        departed = None
+        for offset, token in enumerate(generated[opened : opened + size]):
+            if token != header[offset]:
+                departed = opened + offset
+                break
+        if departed is None:
+            return None
+        written = generated[at : at + len(release)]
+        for offset, token in enumerate(written):
+            if token != release[offset]:
+                return max(departed, at + offset)
+        if len(written) < len(release):
+            return None
+        return max(departed, at + len(release) - 1)
+
+    decided = decide(0, 0)
+    if decided is not None:
+        return 0, decided
+    first = separator[0]
+    index = max(0, start - max(width + size, len(release)) + 1)
+    while True:
+        try:
+            index = generated.index(first, index)
+        except ValueError:
+            return None
+        if tuple(generated[index : index + width]) == separator:
+            decided = decide(index, index + width)
+            if decided is not None:
+                return index, decided
+        index += 1
+
+
+def open_header(generated, separator, header, length, window):
+    """Where the header the first ``length`` ids end inside opened, or None.
+
+    A message opens at 0 or right after ``separator``, and its header runs to
+    the first ``header[-1]`` (the message start that ends every header).
+    Until then its recipient is not decided: headers share their first ids
+    (`` to``, and `` to=user`` also opens a tool named ``user_x``), so only
+    the model can tell whom the message is for.  ``window`` bounds the look
+    back; a longer header counts as none.
+    """
+    width, end = len(separator), header[-1]
+    for opened in range(length, max(0, length - window) - 1, -1):
+        if opened == 0 or (
+            opened >= width and tuple(generated[opened - width : opened]) == separator
+        ):
+            return opened
+        if generated[opened - 1] == end:
+            return None
+    return None
+
+
+def release_boundary(generated, separator, header, budget, release):
+    """The first generated index a reasoning budget may force, or None.
+
+    The budget itself, unless the model is writing a message header there
+    (``open_header``): the recipient is the model's choice.  Addressed to
+    itself, the message is reasoning and the budget applies where its header
+    ends; addressed to anybody else, reasoning ended unforced and nothing is
+    forced (None, also while the header is still being written).  Until
+    reasoning closes, an open header is a prefix of ``header`` or the
+    ``release`` being written (``reasoning_closed_at``), which bounds the look
+    back.
+    """
+    if len(generated) < budget:
+        return budget  # nothing is forced before the budget anyway
+    opened = open_header(
+        generated, separator, header, budget, len(header) + len(release)
+    )
+    if opened is None:
+        return budget
+    try:
+        end = generated.index(header[-1], opened) + 1
+    except ValueError:
+        return None
+    return end if tuple(generated[opened:end]) == header else None
 
 
 class ThinkingGuard:
@@ -45,12 +150,20 @@ class ThinkingGuard:
 
     def __init__(self, prompt_length, close_ids, *, budget, soft_ratio=0.8, ramp_nats=2.0,
                  tau=2.5, ngram=6, direction=None, alpha=0.0, hammer=0.0,
-                 rewrite_window=256, nudge_ids=()):
+                 rewrite_window=256, nudge_ids=(), reasoning_message=None):
         self.prompt_length = int(prompt_length)
         self.rewrite_window = max(1, int(rewrite_window))
         self.close_ids = tuple(int(token) for token in close_ids)
         if not self.close_ids:
             raise ValueError("the thinking guard needs a close marker")
+        # (separator, self header) of self-addressed reasoning, or None.
+        self.reasoning_message = (
+            tuple(tuple(int(token) for token in part) for part in reasoning_message)
+            if reasoning_message
+            else None
+        )
+        if self.reasoning_message is not None and not all(self.reasoning_message):
+            raise ValueError("self-addressed reasoning needs a separator and a header")
         self.nudge_ids = tuple(int(token) for token in nudge_ids)
         self.budget = None if budget is None else int(budget)
         self.soft = (
@@ -68,6 +181,7 @@ class ThinkingGuard:
         self._undo = []  # per _ids position: alarm state before advancing it
         self._generated = []  # every generated id seen, close marker included
         self._close_at = None  # index of the first close marker in _generated
+        self._close_decided = None  # index of the id that decided _close_at
         self.trip_reason = None
         self.released_at = None
         self.forced = False
@@ -180,16 +294,33 @@ class ThinkingGuard:
             common += 1
         del known[common:]
         known.extend(tail[common - start :])
-        width = len(self.close_ids)
-        if self._close_at is not None and self._close_at + width > common:
+        if self._close_at is not None and self._close_decided >= common:
             self._close_at = None
         if self._close_at is None:
-            self._close_at = self._find_close(known, max(0, common - width + 1))
+            self._close_at, self._close_decided = self._first_close(known, common)
         if self._forced_at is not None and common < self._forced_at:
             self._forced_at = None
             self.forced = False
         self._truncate(min(len(self._ids), common))
         return length
+
+    def _first_close(self, known, start):
+        """``(index, decided)`` of the first close, or ``(None, None)``.
+
+        The marker, or the end of self-addressed reasoning, whichever begins
+        first.  Ids before ``start`` were already examined with reasoning
+        open, so only a close that the ids from ``start`` on decide is new.
+        """
+        width = len(self.close_ids)
+        close = self._find_close(known, max(0, start - width + 1))
+        found = (None, None) if close is None else (close, close + width - 1)
+        if self.reasoning_message is not None:
+            ended = reasoning_closed_at(
+                known, *self.reasoning_message, release=self.close_ids, start=start
+            )
+            if ended is not None and (found[0] is None or ended < found):
+                found = ended
+        return found
 
     def _find_close(self, known, start):
         """Index of the first complete close marker at or after ``start``."""
@@ -243,6 +374,30 @@ class ThinkingGuard:
         self.think_tokens = length
         return length
 
+    def _release_boundary(self):
+        """The first generated index the budget may force (``release_boundary``)."""
+        if self.reasoning_message is None or self.budget is None:
+            return self.budget
+        return release_boundary(
+            self._generated, *self.reasoning_message, self.budget, self.close_ids
+        )
+
+    def _chooses(self, length):
+        """Whether the step after ``length`` ids is the model's recipient choice.
+
+        Self-addressed reasoning only.  Before the budget the release and the
+        nudge stay out of every header (all are the model's); at the budget a
+        header the model opened by then decides first (``release_boundary``),
+        while one the forced release opened is finished by it.
+        """
+        if self.reasoning_message is None:
+            return False
+        if self.budget is not None and length >= self.budget:
+            boundary = self._release_boundary()
+            return boundary is None or length < boundary
+        window = len(self.reasoning_message[1]) + len(self.close_ids)
+        return open_header(self._generated, *self.reasoning_message, length, window) is not None
+
     def _forces(self, length):
         """Whether the step after ``length`` ids forces the close; latches it."""
         if self._close_at is not None or self._tripped_at is None:
@@ -259,7 +414,7 @@ class ThinkingGuard:
         import mlx.core as mx
 
         length = self._observe(tokens)
-        if self._close_at is not None or self._tripped_at is None:
+        if self._close_at is not None or self._tripped_at is None or self._chooses(length):
             return logits
         nudge = self._nudge_target(length)
         if nudge is not None and nudge < logits.shape[-1]:
@@ -294,8 +449,8 @@ class ThinkingGuard:
         start = max(0, min(len(generated), length) - self.rewrite_window)
         tail = generated[start:]
         scalars = (
-            self._close_at, self.released_at, self.forced, self._forced_at,
-            self.think_tokens, self._open,
+            self._close_at, self._close_decided, self.released_at, self.forced,
+            self._forced_at, self.think_tokens, self._open,
         )
         try:
             return self(tokens, logits)
@@ -303,8 +458,8 @@ class ThinkingGuard:
             del generated[start:]
             generated.extend(tail)
             (
-                self._close_at, self.released_at, self.forced, self._forced_at,
-                self.think_tokens, self._open,
+                self._close_at, self._close_decided, self.released_at, self.forced,
+                self._forced_at, self.think_tokens, self._open,
             ) = scalars
             # Alarm positions before ``start`` were never truncated.
             index = min(start, ids_length)
@@ -358,17 +513,22 @@ class ThinkingGuard:
         # A forcing row admits only the next marker token, so a forced close
         # ends at or past the budget while a natural one ends before it: a
         # marker whose last token is at or past the budget, with the alarm
-        # tripped by then, is exactly a forced one.
+        # tripped by then, is exactly a forced one.  Self-addressed reasoning
+        # that ended in another message was never forced, and a recipient
+        # the model was choosing at the budget moves it (``release_boundary``).
+        width = len(self.close_ids)
+        boundary = self._release_boundary()
         self.forced = (
-            self.budget is not None
+            boundary is not None
             and close_at is not None
-            and close_at + len(self.close_ids) - 1 >= self.budget
+            and close_at + width - 1 >= boundary
             and self._tripped_at is not None
+            and tuple(self._generated[close_at : close_at + width]) == self.close_ids
         )
         self._forced_at = close_at if self.forced else None
 
     def dormant(self, tokens):
-        """P5: True once the close marker is generated (logits pass through).
+        """P5: True once reasoning has closed (logits pass through).
 
         Side-effect free; before the marker the alarm may bias at any step,
         so the guard is never reported dormant there.
@@ -377,7 +537,13 @@ class ThinkingGuard:
         if hasattr(generated, "tolist"):
             generated = generated.tolist()
         generated = [int(item) for item in generated]
-        return self._find_close_in(generated)
+        return self._find_close_in(generated) or (
+            self.reasoning_message is not None
+            and reasoning_closed_at(
+                generated, *self.reasoning_message, release=self.close_ids
+            )
+            is not None
+        )
 
     def _find_close_in(self, generated):
         marker, width = self.close_ids, len(self.close_ids)

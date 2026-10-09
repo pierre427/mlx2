@@ -172,6 +172,21 @@ def _validate(partial: dict, where: str) -> None:
         _validate({k: v for k, v in partial["moe"].items() if k != "moe"}, f"{where}.moe")
 
 
+def _without_auto(partial: dict) -> dict:
+    """``partial`` with a ``mode`` (or ``moe.mode``) of ``auto`` left out.
+
+    ``auto`` means the detected policy, as on the CLI; merged as a value it
+    replaced the MoE, backend and family ``off`` defaults and then resolved
+    to crossover.
+    """
+    out = {k: v for k, v in partial.items() if not (k == "mode" and v == "auto")}
+    if isinstance(out.get("moe"), dict) and out["moe"].get("mode") == "auto":
+        out["moe"] = {k: v for k, v in out["moe"].items() if k != "mode"}
+        if not out["moe"]:
+            del out["moe"]
+    return out
+
+
 def _merge(base: dict, partial: dict, source: str, sources: dict) -> dict:
     out = copy.deepcopy(base)
     for key, value in partial.items():
@@ -182,6 +197,13 @@ def _merge(base: dict, partial: dict, source: str, sources: dict) -> dict:
         elif key == "moe":
             out["moe"] = {**out.get("moe", {}), **copy.deepcopy(value)}
             sources["moe"] = source
+            # Per value too: the MoE step reports each one's own layer.
+            for sub, item in value.items():
+                if sub == "min_rows":
+                    for fmt in item:
+                        sources[f"moe.min_rows.{fmt}"] = source
+                else:
+                    sources[f"moe.{sub}"] = source
         else:
             out[key] = copy.deepcopy(value)
             sources[key] = source
@@ -203,6 +225,7 @@ def resolve(detected: dict, *, family: str | None = None, adapter=None, override
     policy = copy.deepcopy(BUILTIN)
     user = load_overrides(overrides)
     _validate(user, "--lane-policy")
+    user = _without_auto(user)
     name = detected.get("backend")
     policy = _merge(policy, BACKEND_DEFAULTS.get(name or "", {}), f"backend:{name}", sources)
     fam = FAMILY_DEFAULTS.get(family or "", {})
@@ -221,22 +244,23 @@ def resolve(detected: dict, *, family: str | None = None, adapter=None, override
     )
     adapter = load_overrides(adapter)
     _validate(adapter, f"adapter {family}")
+    adapter = _without_auto(adapter)
     policy = _merge(policy, adapter, f"adapter:{family}", sources)
     policy = _merge(policy, user, "override", sources)
     if detected.get("moe"):
         # MoE adjustments apply after defaults, but explicit top-level
         # overrides of the same keys still win.
         moe = {k: v for k, v in policy.get("moe", {}).items()}
-        moe_source = sources.get("moe", "builtin")
         for key, value in moe.items():
             if key == "min_rows":
                 for fmt, rows in value.items():
                     if sources.get(f"min_rows.{fmt}") != "override":
                         policy["min_rows"][fmt] = rows
-                        sources[f"min_rows.{fmt}"] = f"{moe_source}.moe"
+                        origin = sources.get(f"moe.min_rows.{fmt}", "builtin")
+                        sources[f"min_rows.{fmt}"] = f"{origin}.moe"
             elif sources.get(key) != "override":
                 policy[key] = value
-                sources[key] = f"{moe_source}.moe"
+                sources[key] = f"{sources.get(f'moe.{key}', 'builtin')}.moe"
     if mode is not None and mode != "auto":
         policy["mode"] = mode
         sources["mode"] = "cli"
@@ -245,6 +269,8 @@ def resolve(detected: dict, *, family: str | None = None, adapter=None, override
     if policy["declared_groups"] and not policy["grouping"]:
         raise ValueError("lane policy: declared_groups requires grouping")
     policy.pop("moe", None)
+    # The per-value moe bookkeeping stays internal; receipts keep their keys.
+    sources = {k: v for k, v in sources.items() if not k.startswith("moe.")}
     return {**policy, "detected": detected, "family": family, "sources": sources}
 
 

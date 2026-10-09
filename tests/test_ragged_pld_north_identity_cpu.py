@@ -71,11 +71,30 @@ NORTH_SOURCE = "src/mlx2/adapters/north_mini_code.py"
 # Re-pinned 2026-10-06 (sweep): process-global claims moved into the shared
 # claim_stock_moe helper and the workspace receipt string; the allowlisted
 # inspector functions and constants are byte-identical.
-NORTH_SHA256 = "494c7225a679616b699cbe07732d9679c4b34db3c7c7d2ea80220955f1c5683c"
+# Re-pinned 2026-10-08 (sweep): inspect_artifact checks the index name's
+# suffix and traversal, then shard containment through the shared
+# artifact_paths.shard_within_artifact, so Hub snapshot links into the
+# repository's own blobs are accepted.  The allowlist is unchanged; the helper
+# joins the reference globals (AST-extracted below, stdlib only).
+NORTH_SHA256 = "3b50f0e4e08d8221fe8988c2b5d47c56e56c486a0a05f1e83385e3d9629c930d"
 REFERENCE_FUNCTIONS = ("_load_json", "_safe_index", "_quantized_shapes", "_expected_weight_headers",
                        "_validate_weight_headers", "_unique_pairs", "inspect_artifact")
 REFERENCE_CONSTANTS = ("_SAFETENSORS_HEADER_LIMIT", "_DTYPE_BYTES")
-REFERENCE_GLOBALS = {"hashlib": hashlib, "json": json, "math": math, "struct": struct, "Path": Path}
+ARTIFACT_PATHS_SOURCE = "src/mlx2/adapters/artifact_paths.py"
+
+
+def _shard_within_artifact():
+    """The inspector's one sibling helper, executed from its source with ``Path`` only."""
+    tree = ast.parse((ROOT / ARTIFACT_PATHS_SOURCE).read_bytes())
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "shard_within_artifact")
+    assert not any(isinstance(n, (ast.Import, ast.ImportFrom)) for n in ast.walk(fn))
+    namespace = {"__builtins__": builtins, "Path": Path}
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), ARTIFACT_PATHS_SOURCE, "exec"), namespace)  # noqa: S102
+    return namespace["shard_within_artifact"]
+
+
+REFERENCE_GLOBALS = {"hashlib": hashlib, "json": json, "math": math, "struct": struct, "Path": Path,
+                     "shard_within_artifact": _shard_within_artifact()}
 METADATA = ("config.json", "model.safetensors.index.json", "tokenizer.json", "tokenizer_config.json",
             "chat_template.jinja", "generation_config.json")
 
@@ -676,12 +695,11 @@ def test_unsafe_shard_paths_refuse(tmp_path):
 
 @pytest.mark.parametrize("rename", [lambda p, n: str(p / n), lambda p, n: f"../{p.name}/{n}"])
 def test_absolute_or_dotdot_names_refuse_even_when_they_land_inside(tmp_path, rename):
-    """Stricter than the inspector (which resolves these inside and accepts them): refusal only."""
+    """The inspector checks the index name itself, so it refuses these as well."""
     path = tmp_path / "north"
     name = min(make_north(path))
     _rename_index(path, name, rename(path, name))
-    with pytest.raises(ValueError, match="is not a local"):
-        Q.artifact_manifest(path)
+    refused(path, "is not a local")
 
 
 def test_two_index_names_for_one_file_refuse(tmp_path):

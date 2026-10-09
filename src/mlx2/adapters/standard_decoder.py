@@ -189,6 +189,16 @@ def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> 
         raise ValueError("invalid rotary base")
     if type(config.get("tie_word_embeddings")) is not bool:
         raise ValueError("tie_word_embeddings must be declared")
+    scaling = config.get("rope_scaling")
+    if isinstance(scaling, dict) and (
+        scaling.get("type") or scaling.get("rope_type", "default")
+    ) == "dynamic":
+        # DynamicNTKScalingRoPE recomputes one scalar base per call and
+        # refuses per-row offset arrays; serving prefills and decodes through
+        # the merged BatchKVCache even at one lane, so no request could run.
+        raise ValueError(
+            "dynamic NTK RoPE is not supported on the batched serving cache"
+        )
     if family in {"qwen3", "qwen3_moe"} or config.get("head_dim") is not None:
         _positive(config, "head_dim")
     elif config["hidden_size"] % heads:
@@ -308,7 +318,6 @@ def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> 
             if not isinstance(rope_type, str) or rope_type not in {
                 "default",
                 "linear",
-                "dynamic",
                 "llama3",
                 "yarn",
                 "deepseek_yarn",
@@ -319,7 +328,6 @@ def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> 
                 raise ValueError(f"unsupported Llama RoPE type: {rope_type!r}")
             if rope_type in {
                 "linear",
-                "dynamic",
                 "llama3",
                 "yarn",
                 "deepseek_yarn",

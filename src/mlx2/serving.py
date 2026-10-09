@@ -1370,13 +1370,20 @@ def row_exact_target_mutation_guard(adapter, *, lane_policy=None, lora=False):
 
     if not available():
         return  # This device's lane installer is an identity.
+    exact = lane_policy.get("mode") == "exact"
     for name, module in model.named_modules():
         threshold = lane_policy.get("min_rows", {}).get(format_class(module))
+        if threshold is None or skipped(lane_policy, name):
+            continue
         if (
             type(module) is nn.Linear
-            and threshold is not None
-            and (lane_policy.get("mode") == "exact" or threshold <= lane_policy["max_rows"])
-            and not skipped(lane_policy, name)
+            and (exact or threshold <= lane_policy["max_rows"])
+        ) or (
+            # A quantized target verifies through row_exact_qmv, which gives
+            # every row stock one-row arithmetic: a lane law over one-row
+            # calls (ordinary decode) would break that equality.
+            type(module) is nn.QuantizedLinear
+            and (exact or threshold <= 1)
         ):
             raise ValueError(
                 "selected target_verify_row_exact cannot share native projections with lane matmul"
@@ -1866,6 +1873,21 @@ def thinking_release_token_ids(adapter):
     accessor = getattr(adapter, "thinking_release_token_ids", None)
     ids = accessor() if callable(accessor) else None
     return tuple(int(token) for token in ids) if ids else None
+
+
+def thinking_message_ids(adapter):
+    """``(separator, self header)`` of self-addressed reasoning, or None.
+
+    An adapter whose model reasons in messages addressed to itself (Muse)
+    declares them: reasoning then also closes, unforced, where the first
+    message to anybody else begins -- a tool call or a direct answer writes no
+    release switch, and a budget must not force one into it.
+    """
+    accessor = getattr(adapter, "thinking_message_ids", None)
+    ids = accessor() if callable(accessor) else None
+    if not ids:
+        return None
+    return tuple(tuple(int(token) for token in part) for part in ids)
 
 
 def structured_answer_token_ids(adapter, request):
@@ -7211,7 +7233,7 @@ class ServingEngine:
                 name
                 for name in ("invariant_prefill", "row_exact_verify")
                 if getattr(adapter, name, None) is not None
-            ]
+            ] + (["sp_qmm"] if self.sp_qmm_enabled else [])
             if self.lane_matmul == "auto" and owners:
                 # An explicitly selected mechanism that owns the projections
                 # wins over the automatic lane law, which steps aside (as it
@@ -7231,6 +7253,10 @@ class ServingEngine:
                 raise ValueError(
                     "TensorFold Flash qmv and lane_matmul cannot own the same projections"
                 )
+            if self.sp_qmm_enabled and self.lane_matmul != "off":
+                # sp_qmm swaps exact nn.QuantizedLinear modules; lane-covered
+                # projections would already be LaneQuantizedLinear.
+                raise ValueError("sp_qmm and lane_matmul cannot own the same projections")
             from .runtime.lane import available as lane_available
 
             if self.lane_matmul != "off" and not (
@@ -10484,6 +10510,7 @@ class ServingEngine:
                                 ),
                                 direction=direction, alpha=steer_alpha if direction else 0.0,
                                 hammer=self.thinking_steer_hammer if direction else 0.0,
+                                reasoning_message=thinking_message_ids(adapter),
                             )
                             # Before any grammar: the guard only acts while the
                             # reasoning channel is open, the grammar only after.
@@ -10536,7 +10563,8 @@ class ServingEngine:
                                     "thinking_budget requires an adapter thinking-close marker"
                                 )
                             budget_processor = ThinkingBudgetProcessor(
-                                prompt_len, budget, release_ids
+                                prompt_len, budget, release_ids,
+                                reasoning_message=thinking_message_ids(adapter),
                             )
                             processors.append(budget_processor)
                         job.thinking_budget = budget_processor

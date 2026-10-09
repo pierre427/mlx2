@@ -488,13 +488,22 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         return _Qwen35CacheBudget(_dense_qwen35_budget(self), family="9b")
 
     def diagnostics(self):
+        # The inherited 27B receipts: each mechanism the shared constructor
+        # installs (fused GDN, fp16 GDN state, invariant prefill, ...) reports
+        # itself only while selected, so the qualifier can observe it here.
+        # The 27B's always-present speculation fields do not apply (no MTP
+        # or draft route), so the default receipt is unchanged.
         result = {
+            key: value
+            for key, value in super().diagnostics().items()
+            if key not in ("speculation", "segmented_mtp", "norm_convention")
+        }
+        result.update({
             "architecture": "dense-hybrid-gdn-gqa",
             "layout": self.layout,
             "mtp_head_present": False,
             "scope": "text-only",
-            **self.dtype_diagnostics(),
-        }
+        })
         artifact = getattr(self, "_neural_concept_artifact", None)
         if artifact is not None:
             result["neural_concept_bridge"] = {

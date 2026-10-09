@@ -927,3 +927,187 @@ def test_nudge_guard_matches_a_fresh_guard_under_random_rollbacks():
             ids.append(int(np.flatnonzero(np.isfinite(row))[0]))
         else:
             ids += [int(token) for token in rng.integers(3, 12, size=int(rng.integers(1, 3)))]
+
+
+# Self-addressed reasoning, Muse-shaped: <|eom|><|start|>assistant separates
+# messages, " to=self<|message|>" addresses one to the model itself and the
+# release switch opens the user's answer.  " to=f<|message|>" is a tool call.
+SEP, SELF, USER, TOOL = (3, 4), (5, 6, 9), (5, 7, 9), (5, 8, 9)
+RELEASE = SEP + USER
+MESSAGE = (SEP, SELF)
+
+
+def test_self_addressed_reasoning_closes_at_any_other_message():
+    from mlx2.thinking_guard import reasoning_closed_at
+
+    def closed(ids):
+        return reasoning_closed_at(list(ids), SEP, SELF, release=RELEASE)
+
+    assert closed(SELF + (10, 11) + SEP + SELF + (12,)) is None  # reasoning only
+    assert closed(SELF[:2]) is None  # an undecided first header
+    assert closed(SELF + (10,) + SEP + TOOL + (12,)) == (4, 7)  # a tool call
+    assert closed(TOOL + (12,)) == (0, 1)  # a call without reasoning
+    assert closed(USER + (12,)) == (0, 1)  # a direct answer
+    # The release closes once complete, so a forced one is finished.
+    assert closed(SELF + (10,) + RELEASE[:4]) is None
+    assert closed(SELF + (10,) + RELEASE) == (4, 8)
+    assert closed(SELF + (10,) + RELEASE[:3] + (8,)) == (4, 7)
+    # ``start`` only skips decisions the caller already examined.
+    ids = list(SELF + (10, 11) + SEP + SELF + (12,) * 20 + SEP + TOOL)
+    assert reasoning_closed_at(ids, SEP, SELF, release=RELEASE, start=len(ids) - 2) == (30, 33)
+
+
+def test_guard_stops_at_a_tool_call_and_never_forces_the_release_into_it():
+    guard = ThinkingGuard(2, RELEASE, budget=12, soft_ratio=0.5, reasoning_message=MESSAGE)
+    ids = list(SELF + (10, 11) + SEP + TOOL)
+    for _ in range(20):
+        assert not _call(guard, ids).any()  # out of the way past the budget
+        ids.append(12)
+    receipt = guard.receipt()
+    assert receipt["released_at"] == 5 and receipt["think_tokens"] == 5
+    assert receipt["forced_close"] is False
+    assert guard.dormant(np.array([1, 2] + ids))
+    guard.settle(ids)
+    assert guard.receipt()["forced_close"] is False
+
+
+def test_guard_still_forces_the_whole_release_after_run_on_reasoning():
+    guard = ThinkingGuard(2, RELEASE, budget=8, soft_ratio=0.5, reasoning_message=MESSAGE)
+    ids = list(SELF) + [10, 11, 12, 13, 10]
+    for expected in RELEASE:
+        assert _masked_to(_call(guard, ids)) == expected
+        ids.append(expected)
+    assert not _call(guard, ids).any()
+    assert guard.receipt()["released_at"] == 8 and guard.receipt()["forced_close"] is True
+    settled = ThinkingGuard(2, RELEASE, budget=8, soft_ratio=0.5, reasoning_message=MESSAGE)
+    settled.settle(ids + [12])
+    assert settled.receipt()["forced_close"] is True
+
+
+@pytest.mark.parametrize(("budget", "seed"), [(40, 4), (1, 5), (7, 6), (12, 7)])
+def test_self_addressed_guard_matches_a_fresh_guard_under_random_rollbacks(budget, seed):
+    import copy
+
+    rng = np.random.default_rng(seed)
+    chunks = [SEP, SELF, USER, TOOL, RELEASE, RELEASE[:3], (10,), (11, 12), (13,), (9,),
+              SELF[:1], SELF[:2]]
+
+    def make():
+        return ThinkingGuard(2, RELEASE, budget=budget, soft_ratio=0.5, tau=2.5, ngram=4,
+                             rewrite_window=32, reasoning_message=MESSAGE)
+    live, ids = make(), list(SELF)
+    for step in range(800):
+        if rng.random() < 0.02:
+            live, ids = make(), list(SELF)
+        if len(ids) > 3 and rng.random() < 0.2:
+            del ids[len(ids) - int(rng.integers(1, min(len(ids) - 3, 10) + 1)):]
+        row = _call(live, ids)
+        fresh = make()
+        np.testing.assert_array_equal(row, _call(fresh, ids))
+        for key in ("released_at", "think_tokens"):
+            assert live.receipt()[key] == fresh.receipt()[key], key
+        tokens = np.array([1, 2] + ids)
+        assert live.dormant(tokens) == (fresh.receipt()["released_at"] is not None)
+        # forced_close latches on the forcing rows a guard evaluated; a fresh
+        # guard saw none of them, so both answer from the ids via settle.
+        settled = copy.deepcopy(live)
+        settled.settle(ids)
+        fresh.settle(ids)
+        assert settled.receipt()["forced_close"] == fresh.receipt()["forced_close"]
+        if step % 7 == 0:
+            drafted = mx.array([1, 2] + ids + [10, 3], dtype=mx.uint32)
+            logits = mx.zeros((1, VOCAB))
+            before = _guard_state(live)
+            expected = copy.deepcopy(live)(drafted, logits)
+            np.testing.assert_array_equal(np.array(live.probe(drafted, logits)), np.array(expected))
+            assert _guard_state(live) == before
+        if np.isinf(row).any() and rng.random() < 0.7:
+            ids.append(_masked_to(row))
+        else:
+            ids += list(chunks[int(rng.integers(len(chunks)))])
+
+
+def test_guard_leaves_a_budget_1_recipient_choice_to_the_model():
+    # Review r1: at budget 1 only the shared " to" (5) is written.  It opens
+    # a reasoning message, an answer and a tool call alike; forcing the
+    # release there broke the header of a direct answer or tool call.
+    for recipient in (USER, TOOL):
+        guard = ThinkingGuard(2, RELEASE, budget=1, reasoning_message=MESSAGE)
+        ids = list(recipient[:1])
+        for token in recipient[1:] + (12, 12):
+            assert not _call(guard, ids).any()  # the model chooses
+            ids.append(token)
+        guard.settle(ids)
+        assert guard.receipt()["released_at"] == 0
+        assert guard.receipt()["forced_close"] is False
+    # A message to itself completes, then the whole release is forced.
+    guard = ThinkingGuard(2, RELEASE, budget=1, reasoning_message=MESSAGE)
+    ids = list(SELF[:1])
+    for token in SELF[1:]:
+        assert not _call(guard, ids).any()
+        ids.append(token)
+    for expected in RELEASE:
+        assert _masked_to(_call(guard, ids)) == expected
+        ids.append(expected)
+    assert not _call(guard, ids).any()
+    assert guard.receipt()["released_at"] == 3 and guard.receipt()["forced_close"] is True
+    settled = ThinkingGuard(2, RELEASE, budget=1, reasoning_message=MESSAGE)
+    settled.settle(ids + [12])
+    assert settled.receipt()["forced_close"] is True
+
+
+def test_guard_defers_to_a_header_the_model_opened_by_the_budget():
+    # Natural separator, then the budget falls on the next recipient choice.
+    reasoning = list(SELF) + [10]
+    for budget in (6, 7):  # the empty header, or after the shared " to"
+        guard = ThinkingGuard(2, RELEASE, budget=budget, soft_ratio=0.5, reasoning_message=MESSAGE)
+        ids = reasoning + list(SEP) + list(TOOL[:budget - 6])
+        for token in TOOL[budget - 6:] + (12,):
+            assert not _call(guard, ids).any()
+            ids.append(token)
+        assert guard.receipt()["released_at"] == 4 and guard.receipt()["forced_close"] is False
+        # The model writing the answer switch itself is not a forced close.
+        answer = reasoning + list(RELEASE) + [12]
+        natural = ThinkingGuard(2, RELEASE, budget=budget, soft_ratio=0.5, reasoning_message=MESSAGE)
+        for length in range(budget, len(answer)):
+            assert not _call(natural, answer[:length]).any()
+        natural.settle(answer)
+        assert natural.receipt()["forced_close"] is False
+    # A switch the budget began (mid-separator) is still finished.
+    guard = ThinkingGuard(2, RELEASE, budget=5, soft_ratio=0.5, reasoning_message=MESSAGE)
+    ids = reasoning + [SEP[0]]
+    for expected in RELEASE[1:]:
+        assert _masked_to(_call(guard, ids)) == expected
+        ids.append(expected)
+    guard.settle(ids)
+    assert guard.receipt()["forced_close"] is True
+
+
+def test_release_ramp_stays_out_of_every_header_the_model_writes():
+    guard = ThinkingGuard(2, RELEASE, budget=40, soft_ratio=0.25, reasoning_message=MESSAGE)
+    reasoning = list(SELF) + [10, 11, 12, 13] * 3
+    assert _call(guard, reasoning)[RELEASE[0]] > 0  # tripped, ramping
+    assert _call(guard, reasoning + [SEP[0]])[SEP[1]] > 0  # the separator too
+    # The recipient is the model's: " to" also opens a tool call, and after
+    # " to=self" the ramp's next marker id (<|eom|>) would break the header.
+    for header in ((), (5,), (5, 6), (5, 7)):
+        assert not _call(guard, reasoning + list(SEP) + list(header)).any(), header
+    assert _call(guard, reasoning + list(SEP) + list(SELF))[RELEASE[0]] > 0
+    # Nor inside the reply's first header.
+    early = ThinkingGuard(2, RELEASE, budget=2, soft_ratio=0.5, reasoning_message=MESSAGE)
+    assert not _call(early, [5]).any()
+
+
+def test_budget_never_completes_the_answer_header_over_a_tool_sharing_it():
+    # A tool named like "user_x" opens " to" "=user" "_x": the release's
+    # recipient ids are a prefix of its header.
+    shared = (5, 7, 14, 9)
+    for start in ([], list(SELF) + [10] + list(SEP)):
+        budget = len(start) + 2  # right after " to=user"
+        guard = ThinkingGuard(2, RELEASE, budget=budget, soft_ratio=0.5, reasoning_message=MESSAGE)
+        ids = start + list(shared[:2])
+        for token in shared[2:] + (12,):
+            assert not _call(guard, ids).any()
+            ids.append(token)
+        guard.settle(ids)
+        assert guard.receipt()["forced_close"] is False

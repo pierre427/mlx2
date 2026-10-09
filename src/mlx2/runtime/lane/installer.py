@@ -479,7 +479,9 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS,
     only when grouping is on; any that form add their digest to the law.
     ``skip(name, module)`` lets an adapter keep a projection on stock kernels
     (for example a huge vocabulary head it measures separately).  Idempotent
-    for the class swap; a repeat call updates the row window.
+    for the class swap; a repeat call updates the row window and grouping,
+    and raises ``ValueError`` before changing anything when it would cover
+    other projections than the installed ones (load a fresh model instead).
     """
     if type(chunk_above_max) is not bool:
         raise TypeError("chunk_above_max must be a boolean")
@@ -502,25 +504,45 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS,
             return min_rows
         value = min_rows_by_format.get(format_class(module))
         return None if value is None or value > max_rows else int(value)
+    def covers(name, module) -> bool:
+        """Whether this install runs ``module`` on the lane law."""
+        kind = _RESTORE.get(type(module), type(module))
+        if kind not in _SWAP or (kind is nn.Linear and not unquantized):
+            return False
+        if skip(name, module) or threshold(module) is None:
+            return False
+        if kind is not type(module):
+            return True
+        try:
+            prepare(module)
+        except LaneUnsupported:
+            return False
+        return True
     current = backend() or "mpp"
-    if any(lw is not None and lw.backend != current
-           for lw in (_prepared(m) for _n, m in model.named_modules())):
+    prepared = [lw for lw in (_prepared(m) for _n, m in model.named_modules()) if lw is not None]
+    if any(lw.backend != current for lw in prepared):
         # Installed under the other backend: its prepared weights and groups
         # would keep running that law under this receipt.  Start over.
         uninstall(model)
+    elif prepared:
+        # Restoring or adding single projections would leave their siblings
+        # on stacks the earlier coverage formed (another split-K) under the
+        # law of a fresh install.  Serving installs once per loaded model.
+        changed = sorted(name for name, module in model.named_modules()
+                         if (type(module) in _RESTORE or type(module) in _SWAP)
+                         and covers(name, module) != (type(module) in _RESTORE))
+        if changed:
+            raise ValueError(
+                "lane policy coverage cannot change on an already-installed model; "
+                f"load a fresh model ({len(changed)} projections differ, first {changed[0]!r})")
     covered: Counter = Counter()
     refused: Counter = Counter()
+    skipped = []
     for name, module in model.named_modules():
         kind = type(module)
         if kind in _RESTORE:
-            rows = threshold(module)
-            if rows is None:
-                # Covered by an earlier install, not by this one: back to
-                # stock, so the receipt describes what runs.
-                _restore(module)
-                refused["no threshold for this format"] += 1
-                continue
-            object.__setattr__(module, "_lane_min_rows", rows)
+            # Covered by this install too (checked above).
+            object.__setattr__(module, "_lane_min_rows", threshold(module))
             object.__setattr__(module, "_lane_max_rows", int(max_rows))
             object.__setattr__(module, "_lane_chunk_above_max", chunk_above_max)
             covered["already"] += 1
@@ -529,6 +551,7 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS,
             continue
         if skip(name, module):
             refused["skipped"] += 1
+            skipped.append(name)
             continue
         rows = threshold(module)
         if rows is None:
@@ -572,6 +595,11 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS,
         # Calls up to max_rows take the lane arithmetic: a wider window is a
         # different law (33-64-row verify or prefill tails change).
         law += f"+rows-le-{max_rows}"
+    if skipped:
+        # Skipped projections keep stock arithmetic at every width: which
+        # ones is part of the law (and so of the APCv2 namespace).
+        names = "\n".join(sorted(skipped))
+        law += f"+skip[{hashlib.sha256(names.encode()).hexdigest()[:12]}]"
     live = {group.declared for _name, module in model.named_modules()
             if (group := _group(module)) is not None and group.declared is not None}
     grouped = any(_group(module) is not None for _name, module in model.named_modules())

@@ -92,3 +92,91 @@ def test_granite_inspects_from_a_hub_cache_snapshot(tmp_path):
         link("model.safetensors", struct.pack("<Q", size) + stream.read(size))
     receipt = granite_swa.inspect_artifact(snapshot)
     assert [name for name, *_ in receipt["identity"]["files"]] == ["model.safetensors"]
+
+
+def _as_hub_snapshot(flat, repo):
+    """Move a flat artifact into ``repo/blobs`` behind ``repo/snapshots/rev0`` links."""
+    blobs, snapshot = repo / "blobs", repo / "snapshots" / "rev0"
+    blobs.mkdir(parents=True)
+    snapshot.mkdir(parents=True)
+    for item in sorted(flat.iterdir()):
+        blob = blobs / hashlib.sha256(item.name.encode()).hexdigest()
+        item.rename(blob)  # keeps sparse shard fixtures sparse
+        (snapshot / item.name).symlink_to(os.path.relpath(blob, snapshot))
+    return snapshot
+
+
+MUSE_CONFIG = b'{"model_type": "muse_glimmer"}'
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+def test_muse_inspects_from_a_hub_cache_snapshot(tmp_path, sharded):
+    """Muse resolved each shard and required the blob to sit inside the
+    snapshot with a .safetensors suffix, so every snapshot was refused."""
+    from mlx2.adapters import muse_glimmer, registry
+
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    (flat / "config.json").write_bytes(MUSE_CONFIG)
+    shards = ["model.safetensors"]
+    if sharded:
+        shards = ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
+        (flat / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"a": shards[0], "b": shards[1]}}))
+    for name in shards:
+        (flat / name).write_bytes(name.encode())
+    snapshot = _as_hub_snapshot(flat, tmp_path / "models--org--Muse-Glimmer")
+    receipt = muse_glimmer.inspect_artifact(snapshot)
+    assert [name for name, *_ in receipt["files"]] == shards
+    assert registry.inspect_model(snapshot).artifact["files"] == receipt["files"]
+
+
+def test_muse_still_refuses_shards_outside_the_repository(tmp_path):
+    from mlx2.adapters import muse_glimmer
+
+    foreign = tmp_path / "elsewhere"
+    foreign.mkdir()
+    (foreign / "model.safetensors").write_bytes(b"foreign")
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "config.json").write_bytes(MUSE_CONFIG)
+    (artifact / "model.safetensors").symlink_to(foreign / "model.safetensors")
+    with pytest.raises(ValueError, match="local safetensors"):
+        muse_glimmer.inspect_artifact(artifact)
+    # Another repository's blob store is foreign as well.
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "model.safetensors").write_bytes(b"other")
+    other = _as_hub_snapshot(other, tmp_path / "models--other")
+    snapshot = tmp_path / "models--x" / "snapshots" / "rev0"
+    snapshot.mkdir(parents=True)
+    (tmp_path / "models--x" / "blobs").mkdir()
+    (snapshot / "config.json").write_bytes(MUSE_CONFIG)
+    (snapshot / "model.safetensors").symlink_to((other / "model.safetensors").resolve())
+    with pytest.raises(ValueError, match="local safetensors"):
+        muse_glimmer.inspect_artifact(snapshot)
+
+
+def test_xing_inspects_from_a_hub_cache_snapshot(tmp_path):
+    from test_xing_adapter import _artifact
+
+    from mlx2.adapters import xing
+
+    flat = xing.inspect_artifact(_artifact(tmp_path / "flat"))
+    snapshot = _as_hub_snapshot(_artifact(tmp_path / "moved"), tmp_path / "models--org--Xing")
+    receipt = xing.inspect_artifact(snapshot)
+    assert [name for name, *_ in receipt["identity"]["files"]] == [
+        name for name, *_ in flat["identity"]["files"]
+    ]
+
+
+def test_north_inspects_from_a_hub_cache_snapshot(tmp_path):
+    from test_north_mini_code_port import artifact
+
+    from mlx2.adapters import north_mini_code
+
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    snapshot = _as_hub_snapshot(artifact(flat), tmp_path / "models--org--North")
+    receipt = north_mini_code.inspect_artifact(snapshot)
+    assert [name for name, *_ in receipt["identity"]["files"]] == ["model.safetensors"]

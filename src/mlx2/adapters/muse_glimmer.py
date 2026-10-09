@@ -20,6 +20,7 @@ from ..process_env import (
     require_process_numerics,
 )
 from ..sampling_defaults import SamplingDefaults, VendorSampling
+from .artifact_paths import shard_within_artifact
 from .muse_glimmer_config import ModelArgs
 
 MUSE_GLIMMER = ModelDescriptor(
@@ -89,8 +90,17 @@ def inspect_artifact(model_path: str | Path) -> dict:
             digest.update(item.read_bytes())
     records = []
     for name in names:
-        item = (path / name).resolve()
-        if not item.is_relative_to(path) or item.suffix != ".safetensors":
+        # The index name carries the suffix; a Hub snapshot links it to a
+        # suffixless blob in the repository's own store (artifact_paths).
+        if (
+            not isinstance(name, str)
+            or Path(name).is_absolute()
+            or ".." in Path(name).parts
+            or Path(name).suffix != ".safetensors"
+        ):
+            raise ValueError("Weight index must reference local safetensors files")
+        item = path / name
+        if not shard_within_artifact(path, item.resolve()):
             raise ValueError("Weight index must reference local safetensors files")
         stat = item.stat()
         record = (name, stat.st_size, stat.st_mtime_ns)
@@ -166,7 +176,26 @@ def _thinking_enabled(request: dict) -> bool:
     return bool(enabled)
 
 
+# Recipients the template itself addresses: ``to=self`` is reasoning and
+# ``to=user`` the answer, so a tool by either name could never be called.
+_RESERVED_RECIPIENTS = ("self", "user")
+
+
+def _refuse_reserved_recipients(request: dict) -> None:
+    if request.get("tool_choice") == "none":
+        # No tool reaches the template, so none can be addressed.
+        return
+    for tool in request.get("tools", ()):
+        name = tool["function"]["name"]
+        if name in _RESERVED_RECIPIENTS:
+            raise ValueError(
+                f"Muse tool name {name!r} is reserved: the template addresses "
+                "reasoning to 'self' and the answer to 'user'"
+            )
+
+
 def _tool_names(request: dict) -> tuple[str, ...]:
+    _refuse_reserved_recipients(request)
     names = tuple(tool["function"]["name"] for tool in request.get("tools", ()))
     if any(_MUSE_TOOL_NAME.fullmatch(name) is None for name in names):
         raise ValueError(
@@ -179,14 +208,19 @@ def _recipient_header(name: str) -> str:
     return f" to={name}<|message|>"
 
 
+# What the template writes between two messages of one assistant turn.
+_MESSAGE_SEPARATOR = "<|eom|><|start|>assistant"
 # The template's switch from a reasoning message to the user's answer.
-_THINKING_RELEASE = "<|eom|><|start|>assistant" + _recipient_header("user")
+_THINKING_RELEASE = _MESSAGE_SEPARATOR + _recipient_header("user")
 
 
 def render_prompt_text(tokenizer, request: dict) -> str:
     """Muse prompt text; ``prompt_tokens`` is its special-token-free encoding."""
     if "messages" not in request:
         return request["prompt"]
+    # Thinking or not: the reasoning budget, the recipient processor and the
+    # output parser all read a ``to=self`` message as reasoning.
+    _refuse_reserved_recipients(request)
     effort = _reasoning_effort(request)
     strengths = {
         "none": "low",
@@ -787,6 +821,32 @@ class MuseGlimmerAdapter:
         except Exception:  # noqa: BLE001 - undeclared marker, not a load failure
             return None
         return tuple(ids)
+
+    def thinking_message_ids(self):
+        """``(<|eom|><|start|>assistant, " to=self<|message|>")`` ids, or None.
+
+        Muse reasons in messages addressed to itself and ends reasoning by
+        opening one to anybody else: the user's answer (the release switch),
+        a tool call, or -- skipping reasoning -- a first message to either.
+        Only the answer writes the release, so the thinking guard and the
+        history-mode budget also close reasoning where any other message
+        begins; a budget then never forces the switch into a tool call's
+        arguments or into an answer.  Declared only when both decode back
+        exactly.
+        """
+        try:
+            parts = []
+            for text in (_MESSAGE_SEPARATOR, _recipient_header("self")):
+                ids = [
+                    int(token)
+                    for token in self.tokenizer.encode(text, add_special_tokens=False)
+                ]
+                if not ids or self.tokenizer.decode(ids) != text:
+                    return None
+                parts.append(tuple(ids))
+        except Exception:  # noqa: BLE001 - undeclared, not a load failure
+            return None
+        return tuple(parts)
 
     def request_logits_processors(self, request, *, prompt_length):
         """Return the request-scoped Muse recipient policy, if one is needed."""

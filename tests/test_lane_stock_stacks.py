@@ -99,16 +99,19 @@ def test_exact_mode_and_off_device_installs_probe_nothing(monkeypatch):
     assert "stock_stacked" not in lane.install(_Attention(), min_rows=1)
 
 
-def test_a_narrower_reinstall_restores_formats_it_no_longer_covers(live):
+def test_a_narrower_reinstall_is_refused_and_keeps_the_installed_layout(live):
+    # Review r2 (2026-10-08): an installed model's coverage is fixed; a
+    # reinstall that would cover other projections raises before changing any.
     model = _Attention()
     lane.install(model, min_rows=1)
-    assert type(model.q_proj) is inst.LaneQuantizedLinear
-    receipt = lane.install(model, min_rows=1, min_rows_by_format={"q8": 8})
-    assert receipt["covered"] == {} and receipt["groups"] == {}
-    assert receipt["refused"] == {"no threshold for this format": 4}
-    for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
-        assert type(model[name]) is nn.QuantizedLinear
-        assert inst._prepared(model[name]) is None and "_lane_min_rows" not in model[name].__dict__
+    names = ("q_proj", "k_proj", "v_proj", "o_proj")
+    before = [(type(model[n]), inst._group(model[n]), inst._prepared(model[n])) for n in names]
+    assert before[0][0] is inst.LaneQuantizedLinear
+    with pytest.raises(ValueError, match="coverage cannot change"):
+        lane.install(model, min_rows=1, min_rows_by_format={"q8": 8})
+    for name, (kind, group, prepared) in zip(names, before, strict=True):
+        assert type(model[name]) is kind and model[name]._lane_min_rows == 1
+        assert inst._group(model[name]) is group and inst._prepared(model[name]) is prepared
 
 
 def test_simd_refuses_non_bf16_checkpoints():
