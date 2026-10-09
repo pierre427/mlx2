@@ -4,6 +4,7 @@ import json
 import socket
 import threading
 import time
+import traceback
 from contextlib import contextmanager
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
@@ -139,6 +140,79 @@ def test_header_deadline_expires_while_bytes_keep_arriving():
         finally:
             stopped.set()
             sender.join()
+
+
+@pytest.mark.parametrize("keepalive_first", [False, True])
+def test_request_line_deadline_408_is_recorded_without_stale_state(keepalive_first):
+    # A request line that misses the header deadline never reaches
+    # parse_request, so the 408 had no path or metric start on a fresh
+    # connection (AttributeError in the handler, no metric) and the previous
+    # request's on a keep-alive one (no metric, its auth receipt reused).
+    engine = AdminEngine()
+    engine.http_metrics = HttpRuntimeMetrics()
+    errors = []
+
+    class Authenticator:
+        def authenticate(self, headers, **kwargs):
+            return SimpleNamespace(tenant="tenant-a", method="api_key")
+
+    class Server(ThreadingHTTPServer):
+        def handle_error(self, request, client_address):
+            errors.append(traceback.format_exc())
+
+    handler = handler_for(engine, tenant_authenticator=Authenticator())
+    handler.REQUEST_HEADER_DEADLINE_SECONDS = 0.3
+    server = Server(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with socket.create_connection(("127.0.0.1", server.server_port), timeout=3) as client:
+            expected = {}
+            if keepalive_first:
+                client.sendall(b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                reader = client.makefile("rb")
+                assert b" 200 " in reader.readline()
+                length = 0
+                while (line := reader.readline()) != b"\r\n":
+                    if line.lower().startswith(b"content-length:"):
+                        length = int(line.split(b":", 1)[1])
+                reader.read(length)
+                expected[("GET", "models", "2xx")] = 1
+            client.sendall(b"GET /v1/mod")
+            stopped = threading.Event()
+
+            def trickle():
+                for _ in range(40):
+                    try:
+                        client.sendall(b"e")
+                    except OSError:
+                        return
+                    if stopped.wait(0.04):
+                        return
+
+            sender = threading.Thread(target=trickle)
+            sender.start()
+            try:
+                head = client.recv(4096).split(b"\r\n\r\n", 1)[0]
+            finally:
+                stopped.set()
+                sender.join()
+        assert head.split(b"\r\n", 1)[0].endswith(b" 408 Request Timeout")
+        assert b"X-MLX2-Tenant-Auth" not in head
+        # The request line never parsed: no method, no route.
+        expected[("other", "other", "4xx")] = 1
+        deadline = time.monotonic() + 2
+        while (
+            engine.http_metrics.prometheus_snapshot()["requests"] != expected
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+        assert engine.http_metrics.prometheus_snapshot()["requests"] == expected, errors
+        assert errors == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def test_header_reader_zero_limit_never_touches_the_socket():

@@ -373,3 +373,78 @@ def test_a_failing_hosted_stream_still_sends_response_created_first(variant):
     assert raw.count(": keep-alive") >= 1
     types = [json.loads(line[6:])["type"] for line in raw.splitlines() if line.startswith("data: {")]
     assert types[0] == "response.created" and types[-1] == "response.failed", types
+
+
+@pytest.mark.parametrize("variant", ["overloaded", "admission_closed", "engine_down"])
+def test_a_continuation_failure_on_an_open_hosted_stream_is_an_sse_failure(variant):
+    """A slow hosted tool's keepalives commit ``200 text/event-stream``; the
+    continuation round is then submitted again.  When that submit raised
+    (slots taken while the tool ran, a drain timeout, a dead engine) the
+    handler wrote a raw ``HTTP/1.1 429``/``503`` response into the event
+    stream, or ended it with no terminal event and no HTTP metric."""
+    from test_serving_contract import TOOLS, post_response
+
+    from mlx2.batch_metrics import HttpRuntimeMetrics
+    from mlx2.serving import AdmissionClosed, Overloaded
+
+    failures = {
+        "overloaded": lambda: Overloaded("maximum inflight requests reached"),
+        "admission_closed": lambda: AdmissionClosed("draining", "generation"),
+        "engine_down": lambda: RuntimeError("model is not ready"),
+    }
+
+    class Backend:
+        def prepare(self, tools):
+            return TOOLS, {"weather": "binding"}
+
+        def execute(self, binding, arguments):
+            time.sleep(0.6)  # long enough for keepalives to open the stream
+            return {"temperature": 21}
+
+    class ToolEngine(SilentEngine):
+        rounds = 0
+
+        def submit(self, request, *, tenant_id="default", **_):
+            self.rounds += 1
+            if self.rounds > 1:
+                raise failures[variant]()
+            self.events = (
+                {"delta": {"tool_calls": [{
+                    "index": 0, "id": "call_weather", "type": "function",
+                    "function": {"name": "weather", "arguments": '{"city":"T"}'},
+                }]}},
+                {"finish_reason": "tool_calls", "receipt": {}},
+            )
+            return super().submit(request, tenant_id=tenant_id)
+
+    engine = ToolEngine()
+    engine.http_metrics = HttpRuntimeMetrics()
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        handler_for(engine, tool_backend=Backend(), sse_keepalive_seconds=0.2),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with post_response(
+            f"http://127.0.0.1:{server.server_port}", input="weather?", stream=True,
+            tools=[{"type": "mcp", "server_label": "weather",
+                    "server_url": "https://example.invalid/mcp", "require_approval": "never"}],
+        ) as response:
+            assert response.status == 200
+            assert response.headers["Content-Type"] == "text/event-stream"
+            raw = response.read().decode()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert engine.rounds == 2
+    assert raw.count(": keep-alive") >= 1
+    # No second HTTP response is written into the committed event stream.
+    assert "HTTP/1.1" not in raw, raw[-300:]
+    types = [json.loads(line[6:])["type"] for line in raw.splitlines() if line.startswith("data: {")]
+    assert types and types[0] == "response.created" and types[-1] == "response.failed", types
+    # Counted once, with the status the client actually saw.
+    assert engine.http_metrics.prometheus_snapshot()["requests"] == {
+        ("POST", "responses", "2xx"): 1,
+    }

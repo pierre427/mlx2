@@ -247,14 +247,27 @@ def discover(base_url, api_key, model=None, *, fetch=_get_json):
         raise ClientError(f"could not identify an mlx2 server at {base_url}")
     if model is None:
         model = entries[0].get("id")
-    selected = next((entry for entry in entries if entry.get("id") == model), {})
+    selected = next((entry for entry in entries if entry.get("id") == model), None)
+    if selected is None:
+        # The server answers 404 "unknown model" for any other id, so an agent
+        # started on it would fail on every request.
+        served = ", ".join(str(entry.get("id")) for entry in entries)
+        raise ClientError(f"{base_url} does not serve model {model!r} (served: {served})")
     status = fetch(base_url, "/v1/status", api_key)
     context = status.get("max_context") if isinstance(status, dict) else None
     if type(context) is not int or context <= 0:
         raise ClientError(
             "mlx2 is running but its context limit is not available yet; wait and retry"
         )
-    vision = "vision" in (selected.get("capabilities") or ())
+    capabilities = selected.get("capabilities")
+    if capabilities is None and selected.get("parent") is not None:
+        # A LoRA id is served by its parent's route; older servers list no
+        # capabilities on its entry.
+        parent = next(
+            (entry for entry in entries if entry.get("id") == selected["parent"]), {}
+        )
+        capabilities = parent.get("capabilities")
+    vision = "vision" in (capabilities or ())
     return model, context, vision
 
 

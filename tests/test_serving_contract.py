@@ -1601,6 +1601,42 @@ def test_files_api_and_responses_utf8_file_input(http_engine):
     assert "alpha beta" in engine.job.request["messages"][0]["content"]
 
 
+@pytest.mark.parametrize("uploaded_type", ["text/html", "image/svg+xml"])
+def test_file_content_never_serves_an_active_client_chosen_type(
+    http_engine, uploaded_type
+):
+    # The uploader picks the multipart part's Content-Type.  /content echoed
+    # it, so an uploaded HTML page opened in a browser ran script on the API
+    # origin, where its requests pass Origin == Host (and the loopback admin
+    # check when the browser runs on the serving host).
+    _, base = http_engine
+    payload = b"<script>fetch('/v1/admin/quiesce',{method:'POST'})</script>"
+    with upload_file(
+        base,
+        payload,
+        filename="page.html",
+        purpose="user_data",
+        content_type=uploaded_type,
+    ) as response:
+        uploaded = json.load(response)
+    # The upload is still accepted; only the served type changes.
+    assert uploaded["object"] == "file"
+    with urlopen(base + f"/v1/files/{uploaded['id']}/content") as response:
+        assert response.headers["Content-Type"] == "application/octet-stream"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["Content-Disposition"].startswith("attachment")
+        assert response.read() == payload
+    with upload_file(
+        base, b'{"a": 1}\n', filename="rows.jsonl", purpose="user_data",
+        content_type="application/jsonl",
+    ) as response:
+        inert = json.load(response)
+    with urlopen(base + f"/v1/files/{inert['id']}/content") as response:
+        # Inert text/JSON types are still served as declared.
+        assert response.headers["Content-Type"] == "application/jsonl"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
 def test_embeddings_and_rerank_are_capability_gated_and_standard_shaped():
     class AuxiliaryEngine(FakeEngine):
         def embed(self, inputs, *, dimensions=None):

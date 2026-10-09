@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import time
 
@@ -133,6 +134,56 @@ def test_file_store_evicts_the_largest_tenant_not_the_oldest_file():
         )
     assert files.get("alice", kept["id"])["id"] == kept["id"]
     assert files.status()["files"] == 3
+
+
+def test_batch_retention_evicts_the_largest_tenant_not_the_oldest_batch(tmp_path):
+    # Retention was one global FIFO over finished batches, so one tenant
+    # creating max_batches batches unlinked every other tenant's finished
+    # batch record (GET 404, list empty).  The Responses and Files stores
+    # evict from the largest tenant; batches must not be the exception.
+    files = FileStore()
+    row = json.dumps(
+        {"custom_id": "row-0", "method": "POST", "url": "/v1/embeddings",
+         "body": {"input": "x"}}
+    ).encode() + b"\n"
+    root = tmp_path / "batches"
+    manager = BatchManager(
+        files, lambda endpoint, body, tenant: (200, {"ok": True}),
+        max_batches=4, root=root,
+    )
+
+    def finished(tenant):
+        source = files.create(
+            tenant, filename="in.jsonl", purpose="batch",
+            content_type="application/jsonl", content=row,
+        )
+        batch = manager.create(
+            tenant,
+            {"input_file_id": source["id"], "endpoint": "/v1/embeddings",
+             "completion_window": "24h"},
+        )
+        deadline = time.monotonic() + 5
+        while manager.get(tenant, batch["id"])["status"] != "completed":
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        return batch["id"]
+
+    kept = finished("alice")
+    mallory = [finished("mallory") for _ in range(6)]
+    # The global bound holds, and mallory displaced only her own batches.
+    assert manager.status()["batches"] == 4
+    assert manager.get("alice", kept)["status"] == "completed"
+    assert [item["id"] for item in manager.list("alice")["data"]] == [kept]
+    assert {item["id"] for item in manager.list("mallory")["data"]} == set(mallory[-3:])
+
+    # A restart under a smaller bound trims the same way: alice's record is
+    # the oldest on disk, and still is not the one dropped.
+    os.utime(manager._path("alice", kept), ns=(1, 1))
+    restored = BatchManager(
+        files, lambda endpoint, body, tenant: (200, {}), max_batches=2, root=root,
+    )
+    assert restored.get("alice", kept)["status"] == "completed"
+    assert [item["id"] for item in restored.list("mallory")["data"]] == [mallory[-1]]
 
 
 def test_file_store_never_evicts_a_protected_file_to_make_room(tmp_path):

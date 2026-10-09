@@ -293,6 +293,56 @@ def test_discover_errors_are_actionable():
         )
 
 
+_SERVED_CATALOG = {
+    "object": "list",
+    "data": [
+        {"id": "served-model", "owned_by": "mlx2", "capabilities": ["text", "vision"]},
+        {"id": "lora-a", "owned_by": "mlx2", "parent": "served-model"},
+    ],
+}
+
+
+def _served_fetch(_base, path, _key, **_kwargs):
+    return _SERVED_CATALOG if path == "/v1/models" else {"max_context": 32768}
+
+
+def test_discover_rejects_a_model_the_server_does_not_serve():
+    # The server answers 404 "unknown model" for any id outside /v1/models
+    # (server._generation_model); the launcher started the agent on it anyway,
+    # with vision silently off, so every agent request failed after launch.
+    with pytest.raises(clients.ClientError, match="typo-model"):
+        clients.discover("http://h", "k", "typo-model", fetch=_served_fetch)
+    assert clients.discover("http://h", "k", "served-model", fetch=_served_fetch) == (
+        "served-model",
+        32768,
+        True,
+    )
+    # A LoRA id runs on its parent's route: a catalog entry without its own
+    # capabilities (servers before review round 1) inherits the parent's.
+    assert clients.discover("http://h", "k", "lora-a", fetch=_served_fetch) == (
+        "lora-a",
+        32768,
+        True,
+    )
+
+
+def test_cli_fails_before_exec_on_an_unserved_model(monkeypatch, capsys):
+    monkeypatch.setattr(clients, "find_executable", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(clients, "_get_json", _served_fetch)
+    real = clients.discover
+    monkeypatch.setattr(
+        clients, "discover", lambda url, key, model=None: real(url, key, model, fetch=_served_fetch)
+    )
+    calls = []
+    status = cli.main(
+        ["--model", "typo-model", "claude"],
+        environment={"PATH": "/usr/bin"},
+        execvpe=lambda *call: calls.append(call),
+    )
+    assert status == 1 and calls == []
+    assert "typo-model" in capsys.readouterr().err
+
+
 def test_cli_execs_client_with_private_env(fake_server, monkeypatch, capsys):
     url, _ = fake_server
     monkeypatch.setattr(clients, "find_executable", lambda name: f"/bin/{name}")

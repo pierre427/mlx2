@@ -693,8 +693,9 @@ class BatchManager:
                 self._counts["restore_failures"] += 1
                 continue
             while len(self._batches) > self.max_batches:
-                key, _ = self._batches.popitem(last=False)
-                _unlink_restored(self._path(*key), self._counts)
+                victim = _eviction_key(self._batches, keep=key)
+                del self._batches[victim]
+                _unlink_restored(self._path(*victim), self._counts)
                 self._counts["evictions"] += 1
         self._counts["restored"] += len(self._batches)
 
@@ -761,14 +762,19 @@ class BatchManager:
             if active >= self.max_batches:
                 raise CapabilityUnavailable("maximum active local batches reached")
             while len(self._batches) >= self.max_batches:
-                removable = next(
-                    (
-                        key
-                        for key, item in self._batches.items()
-                        if item["status"]
-                        in {"completed", "failed", "cancelled"}
+                # The oldest finished batch of the tenant holding the most,
+                # counting the one being created, as in the Responses and
+                # Files stores: one global FIFO let a tenant unlink every
+                # other tenant's finished records by creating its own.
+                # Running batches are never chosen.
+                removable = _eviction_key(
+                    {**self._batches, key: record},
+                    keep=key,
+                    protect=frozenset(
+                        entry
+                        for entry, item in self._batches.items()
+                        if item["status"] not in {"completed", "failed", "cancelled"}
                     ),
-                    None,
                 )
                 if removable is None:
                     raise CapabilityUnavailable("maximum retained local batches reached")

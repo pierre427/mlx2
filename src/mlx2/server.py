@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import collections
 import contextlib
 from copy import deepcopy
 from dataclasses import dataclass
@@ -112,6 +113,24 @@ REQUEST_BODY_JSON_OVERHEAD_BYTES = 64 << 10
 MIN_POSITIVE_TEMPERATURE = 1.0 / 3.4028234663852886e38
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 ADMIN_PREFETCH_LIMIT = 32
+# Uploaded file types a browser cannot run.  Files accepts any declared type,
+# but /content serves only these as declared; anything else (text/html,
+# image/svg+xml, ...) would execute on the API origin when opened.
+INERT_FILE_CONTENT_TYPES = frozenset(
+    {
+        "text/plain",
+        "text/markdown",
+        "application/json",
+        "application/jsonl",
+        "application/x-ndjson",
+    }
+)
+
+
+def served_file_content_type(content_type):
+    """Return the Content-Type /v1/files/{id}/content may send for a file."""
+    base = str(content_type or "").split(";", 1)[0].strip().lower()
+    return base if base in INERT_FILE_CONTENT_TYPES else "application/octet-stream"
 
 
 def load_admin_token(path):
@@ -154,8 +173,11 @@ def resolve_reasoning_signing_key(args):
 
 
 def is_loopback_address(client_address):
+    text = str(client_address)
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
     try:
-        address = ipaddress.ip_address(str(client_address).split("%", 1)[0])
+        address = ipaddress.ip_address(text.split("%", 1)[0])
     except ValueError:
         return False
     return (
@@ -398,22 +420,183 @@ def request_body_limit(max_context: int, configured: int | None = None) -> int:
     return min(MAX_REQUEST_BODY_BYTES, max(MIN_REQUEST_BODY_BYTES, derived))
 
 
+DEFAULT_MAX_CONNECTIONS = 32
+
+
+def _connection_limit_response(head):
+    """The 503 a connection gets when every connection slot is taken."""
+    target = head.split(b"\r\n", 1)[0].split(b" ")
+    path = target[1].decode("latin-1") if len(target) > 1 else ""
+    payload = json.dumps(
+        translated_api_error(
+            503,
+            "server connection limit reached; retry",
+            anthropic=path.startswith("/v1/messages"),
+        )
+    ).encode()
+    return (
+        b"HTTP/1.1 503 Service Unavailable\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Retry-After: 1\r\n"
+        b"Connection: close\r\n"
+        + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+        + payload
+    )
+
+
+def _read_ready(sock, limit=1 << 16):
+    """Read what has already arrived on a non-blocking socket, up to ``limit``.
+
+    Returns ``(data, closed)``; ``closed`` says the peer has shut its side.
+    """
+    data = b""
+    with contextlib.suppress(BlockingIOError):
+        while len(data) < limit:
+            chunk = sock.recv(min(1 << 16, limit - len(data)))
+            if not chunk:
+                return data, True
+            data += chunk
+    return data, False
+
+
 class BoundedHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
+    # A connection arriving with every slot taken (idle keep-alive sockets
+    # hold theirs for the idle timeout) is told to retry rather than reset.
+    # At most this many refusals run at once, each for at most
+    # ``refusal_seconds``; past that the accept thread answers at once,
+    # without waiting for the request, and up to ``max_lingering`` of those
+    # sockets stay open (drained, never waited on) until the client closes
+    # or ``refusal_seconds`` passes.
+    max_refusals = 8
+    refusal_seconds = 1.0
+    max_lingering = 64
 
-    def __init__(self, *args, max_connections=32, **kwargs):
+    def __init__(
+        self, server_address, *args, max_connections=DEFAULT_MAX_CONNECTIONS, **kwargs
+    ):
         self.connections = threading.BoundedSemaphore(max_connections)
-        super().__init__(*args, **kwargs)
+        self.refusals = threading.BoundedSemaphore(self.max_refusals)
+        # (deadline, socket) answered by _refuse_now; accept thread only.
+        self._lingering = collections.deque()
+        # ``--host ::1``, ``[::1]`` and ``::`` are documented binds; the
+        # inherited AF_INET socket cannot resolve them.  Names (``localhost``)
+        # stay IPv4 so the default bind does not move to ``::1``.
+        host, *rest = server_address
+        literal = str(host).strip()
+        if literal.startswith("[") and literal.endswith("]"):
+            literal = literal[1:-1]
+        try:
+            ipv6 = ipaddress.ip_address(literal.split("%", 1)[0]).version == 6
+        except ValueError:
+            ipv6 = False
+        if ipv6:
+            self.address_family = socket.AF_INET6
+            server_address = (literal, *rest)
+        super().__init__(server_address, *args, **kwargs)
+
+    def server_bind(self):
+        if self.address_family == socket.AF_INET6 and self.server_address[0] == "::":
+            # The IPv6 wildcard also serves IPv4, as 0.0.0.0 does.
+            with contextlib.suppress(AttributeError, OSError):
+                self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
 
     def process_request(self, request, address):
         if not self.connections.acquire(blocking=False):
-            self.shutdown_request(request)
+            self._refuse(request)
             return
         try:
             super().process_request(request, address)
         except BaseException:
             self.connections.release()
             raise
+
+    def _refuse(self, request):
+        if not self.refusals.acquire(blocking=False):
+            self._refuse_now(request)
+            return
+        try:
+            threading.Thread(
+                target=self._send_refusal,
+                args=(request,),
+                name="mlx2-http-refusal",
+                daemon=True,
+            ).start()
+        except BaseException:
+            self.refusals.release()
+            self.shutdown_request(request)
+            raise
+
+    def _refuse_now(self, request):
+        # Runs on the accept thread, so nothing here waits: the reply goes
+        # out on a non-blocking socket and the socket lingers, drained
+        # between accepts, so request bytes arriving later do not reach a
+        # closed socket, whose RST would cut the reply.
+        try:
+            request.setblocking(False)
+            request.send(_connection_limit_response(_read_ready(request)[0]))
+            request.shutdown(socket.SHUT_WR)
+        except OSError:
+            self.shutdown_request(request)
+            return
+        self._lingering.append((time.monotonic() + self.refusal_seconds, request))
+        while len(self._lingering) > self.max_lingering:
+            self.shutdown_request(self._lingering.popleft()[1])
+
+    def service_actions(self):
+        super().service_actions()
+        now = time.monotonic()
+        for _ in range(len(self._lingering)):
+            deadline, request = self._lingering.popleft()
+            try:
+                finished = _read_ready(request)[1] or now >= deadline
+            except OSError:
+                finished = True
+            if finished:
+                self.shutdown_request(request)
+            else:
+                self._lingering.append((deadline, request))
+
+    def server_close(self):
+        super().server_close()
+        while self._lingering:
+            self.shutdown_request(self._lingering.popleft()[1])
+
+    def _send_refusal(self, request):
+        deadline = time.monotonic() + self.refusal_seconds
+
+        def receive(size):
+            budget = deadline - time.monotonic()
+            if budget <= 0:
+                return b""
+            request.settimeout(budget)
+            return request.recv(size)
+
+        try:
+            # Closing with unread request bytes sends a RST that can discard
+            # the reply, so read the head first, then shut the write side and
+            # drain any body until the client closes or the budget ends.
+            head = b""
+            while b"\r\n\r\n" not in head and len(head) < 65536:
+                chunk = receive(4096)
+                if not chunk:
+                    break
+                head += chunk
+            request.settimeout(self.refusal_seconds)
+            request.sendall(_connection_limit_response(head))
+            request.shutdown(socket.SHUT_WR)
+            drained = 0
+            while drained < MAX_REQUEST_BODY_BYTES:
+                chunk = receive(1 << 16)
+                if not chunk:
+                    break
+                drained += len(chunk)
+        except OSError:
+            pass
+        finally:
+            self.shutdown_request(request)
+            self.refusals.release()
 
     def process_request_thread(self, request, address):
         try:
@@ -1155,6 +1338,10 @@ def _request_json(raw):
     # that can hold one pay for the check.
     if isinstance(raw, str):
         raw = raw.encode("utf-8", "surrogatepass")
+    elif (encoding := json.detect_encoding(raw)) not in ("utf-8", "utf-8-sig"):
+        # ``json.loads`` also accepts UTF-16 and UTF-32, where neither form
+        # below is spelled with these bytes: scan the body's UTF-8 form.
+        raw = raw.decode(encoding, "surrogatepass").encode("utf-8", "surrogatepass")
     if b"\\ud" in raw or b"\\uD" in raw or b"\xed" in raw:
         try:
             json.dumps(value, ensure_ascii=False).encode("utf-8")
@@ -1797,15 +1984,8 @@ def handler_for(
             filename = part.get("filename", "inline.txt")
         else:
             raise ValueError("input_file requires file_id or file_data")
-        allowed = {
-            "text/plain",
-            "text/markdown",
-            "application/json",
-            "application/jsonl",
-            "application/x-ndjson",
-        }
         content_type = content_type.split(";", 1)[0].lower()
-        if content_type not in allowed:
+        if content_type not in INERT_FILE_CONTENT_TYPES:
             raise ValueError("mlx2 input_file supports UTF-8 text files only")
         try:
             text = content.decode("utf-8")
@@ -2031,20 +2211,26 @@ def handler_for(
             self._connection_header_sent = False
             self._interim_response = False
             self._request_body_remaining = 0
+            self._request_parsed = False
 
         def handle_one_request(self):
             self.rfile.begin_request()
+            self._request_parsed = False
             super().handle_one_request()
             if self.rfile.expired:
                 # The stdlib swallowed the timeout; tell the client why the
                 # connection is going away.
-                for attr, value in (
-                    ("requestline", ""),
-                    ("command", None),
-                    ("request_version", self.protocol_version),
-                ):
-                    if not hasattr(self, attr):
-                        setattr(self, attr, value)
+                if not self._request_parsed:
+                    # The request line itself missed the deadline, so
+                    # parse_request never ran: nothing of this request is
+                    # known, and a keep-alive connection still holds the
+                    # previous request's path, metric and auth receipt.
+                    self._begin_request_state()
+                    self.requestline = ""
+                    self.command = None
+                    self.path = ""
+                    self.request_version = self.protocol_version
+                    self.headers = None
                 self.close_connection = True
                 try:
                     self.api_error(
@@ -2055,7 +2241,7 @@ def handler_for(
                 except OSError:
                     pass
 
-        def parse_request(self):
+        def _begin_request_state(self):
             # BaseHTTPRequestHandler reuses this instance for every request on
             # a keep-alive connection. Start after the request line arrives so
             # idle time between requests is not charged to the next request.
@@ -2070,6 +2256,10 @@ def handler_for(
             self._body_consumed = False
             self._connection_header_sent = False
             self._request_body_remaining = 0
+
+        def parse_request(self):
+            self._request_parsed = True
+            self._begin_request_state()
             if not super().parse_request():
                 return False
             try:
@@ -2563,7 +2753,15 @@ def handler_for(
                 try:
                     if content_request:
                         content, content_type, _ = file_store.content(tenant_id, file_id)
-                        self.send_bytes(200, content, content_type=content_type)
+                        self.send_bytes(
+                            200,
+                            content,
+                            content_type=served_file_content_type(content_type),
+                            headers={
+                                "X-Content-Type-Options": "nosniff",
+                                "Content-Disposition": "attachment",
+                            },
+                        )
                     else:
                         self.send_json(200, file_store.get(tenant_id, file_id))
                 except ResourceNotFound:
@@ -2656,6 +2854,8 @@ def handler_for(
                                     "owned_by": "mlx2",
                                     "parent": status.get("model", Path(engine.model_path).name),
                                     "loaded": status["healthy"],
+                                    # Served by the base route.
+                                    "capabilities": status.get("capabilities", []),
                                 }
                                 for name in (status.get("multi_lora") or {}).get(
                                     "registered", ()
@@ -2705,10 +2905,14 @@ def handler_for(
             else:
                 self.error(404, "unknown endpoint")
 
-        def send_bytes(self, status, value, *, content_type="application/octet-stream"):
+        def send_bytes(
+            self, status, value, *, content_type="application/octet-stream", headers=None
+        ):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(value)))
+            for name, header in (headers or {}).items():
+                self.send_header(name, str(header))
             self.end_headers()
             try:
                 self.wfile.write(value)
@@ -2947,6 +3151,32 @@ def handler_for(
             # output indexes already sent for function_call items.
             grammar_tool_stream = False
             grammar_stream_decided = False
+
+            def stream_failure(status, message, *, code=None):
+                """Report a failure on a response already committed as SSE.
+
+                A keepalive can commit the stream before a later step (a
+                hosted continuation's submit) fails; a second HTTP status
+                line written into the event stream is not a response.
+                """
+                if anthropic and anthropic_translator is not None:
+                    for failure in anthropic_translator.failure(message, status):
+                        self._anthropic_sse(failure)
+                elif responses_api:
+                    self._responses_failure(
+                        job,
+                        message,
+                        translated_api_error(status, message)["error"]["type"],
+                        code=code,
+                    )
+                else:
+                    error = {"message": message}
+                    if code is not None:
+                        error["code"] = code
+                    self._sse({"error": error})
+                    self._sse("[DONE]")
+                self._record_http(200)
+
             prologue_sent = False
             grammar_stream_ready = False
             grammar_message_index = None
@@ -4270,17 +4500,14 @@ def handler_for(
                 else:
                     self.api_error(502, str(exc), anthropic=anthropic)
             except ModelOutputError as exc:
-                if streaming and anthropic and anthropic_translator is not None:
-                    for failure in anthropic_translator.failure(str(exc), 502):
-                        self._anthropic_sse(failure)
-                    self._record_http(200)
+                if streaming:
+                    stream_failure(502, str(exc))
                 else:
                     self.api_error(502, str(exc), anthropic=anthropic)
             except HostedToolError as exc:
                 # The MCP server failed, not the request: a bad gateway.
-                if streaming and responses_api:
-                    self._responses_failure(job, str(exc), "server_error")
-                    self._record_http(200)
+                if streaming:
+                    stream_failure(502, str(exc))
                 else:
                     self.api_error(502, str(exc), anthropic=anthropic)
             except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -4339,28 +4566,43 @@ def handler_for(
                 else:
                     self.api_error(500, str(exc), anthropic=anthropic)
             except ResourceNotFound as exc:
-                self.api_error(404, str(exc).strip("'"), anthropic=anthropic)
+                if streaming:
+                    stream_failure(404, str(exc).strip("'"))
+                else:
+                    self.api_error(404, str(exc).strip("'"), anthropic=anthropic)
             except CapabilityUnavailable as exc:
-                self.api_error(501, str(exc), anthropic=anthropic)
+                if streaming:
+                    stream_failure(501, str(exc))
+                else:
+                    self.api_error(501, str(exc), anthropic=anthropic)
             except Overloaded as exc:
-                self.api_error(429, str(exc), anthropic=anthropic)
+                if streaming:
+                    stream_failure(429, str(exc))
+                else:
+                    self.api_error(429, str(exc), anthropic=anthropic)
             except AdmissionClosed as exc:
-                self.api_error(
-                    503,
-                    str(exc),
-                    anthropic=anthropic,
-                    retry_after=True,
-                )
+                if streaming:
+                    stream_failure(503, str(exc))
+                else:
+                    self.api_error(
+                        503,
+                        str(exc),
+                        anthropic=anthropic,
+                        retry_after=True,
+                    )
             except SampleFailed as exc:
                 # Parallel samples report the engine's own status, exactly as
                 # the single-sample path does for its terminal error event.
-                self.api_error(
-                    exc.status,
-                    str(exc),
-                    anthropic=anthropic,
-                    mlx2=exc.mlx2,
-                    code=exc.code,
-                )
+                if streaming:
+                    stream_failure(exc.status, str(exc), code=exc.code)
+                else:
+                    self.api_error(
+                        exc.status,
+                        str(exc),
+                        anthropic=anthropic,
+                        mlx2=exc.mlx2,
+                        code=exc.code,
+                    )
             except ClientGone:
                 engine_counts = getattr(engine, "counts", None)
                 if engine_counts is not None:
@@ -4375,7 +4617,9 @@ def handler_for(
                     engine_counts["client_disconnects"] += 1
                 self._record_http(499)
             except (RuntimeError, TimeoutError) as exc:
-                if not streaming:
+                if streaming:
+                    stream_failure(503, str(exc))
+                else:
                     self.api_error(503, str(exc), anthropic=anthropic)
             except Exception as exc:
                 # A fault the handler does not classify must still answer and
@@ -5824,7 +6068,13 @@ def main():
         logging.getLogger("mlx2.server").info(
             "reasoning signing key persisted at %s", signing_key_path
         )
-    server = BoundedHTTPServer((args.host, args.port), BaseHTTPRequestHandler)
+    server = BoundedHTTPServer(
+        (args.host, args.port),
+        BaseHTTPRequestHandler,
+        # Every in-flight request holds a connection: a fixed cap below
+        # --max-inflight made the larger admission bound unreachable.
+        max_connections=max(DEFAULT_MAX_CONNECTIONS, args.max_inflight),
+    )
     request_tracer = None
     try:
         from .tracing import OptionalRequestTracer

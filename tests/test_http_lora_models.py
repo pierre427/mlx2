@@ -7,6 +7,7 @@ import pytest
 from test_http_request_lifecycle import _server
 from test_server_quiesce import AdminEngine
 
+from mlx2 import clients
 from mlx2.server import handler_for
 from mlx2.serving import Job
 
@@ -17,7 +18,12 @@ class LoRAEngine(AdminEngine):
         self.requests = []
 
     def status(self):
-        return {**super().status(), "multi_lora": {"enabled": True, "registered": ["sql"]}}
+        return {
+            **super().status(),
+            "capabilities": ["text", "vision"],
+            "max_context": 4096,
+            "multi_lora": {"enabled": True, "registered": ["sql"]},
+        }
 
     def submit(self, request, *, tenant_id="default"):
         self.requests.append(request)
@@ -81,3 +87,23 @@ def test_batch_generation_accepts_registered_lora_models(path, body):
     assert status == 200
     assert payload["model"] == "sql"
     assert engine.requests[-1]["model"] == "sql"
+
+
+def test_lora_models_advertise_and_discover_the_base_route_capabilities():
+    # A LoRA id is served by the base route, images included; its catalog
+    # entry carried no capabilities, so `mlx2 --model sql opencode` launched
+    # the agent text-only.
+    engine = LoRAEngine()
+    with _server(engine) as (_, port):
+        url = f"http://127.0.0.1:{port}"
+        connection = HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            connection.request("GET", "/v1/models")
+            catalog = json.loads(connection.getresponse().read())
+        finally:
+            connection.close()
+        entries = {entry["id"]: entry for entry in catalog["data"]}
+        assert entries["sql"]["parent"] == "fixture"
+        assert entries["sql"]["capabilities"] == entries["fixture"]["capabilities"]
+        assert clients.discover(url, "k", "sql") == ("sql", 4096, True)
+        assert clients.discover(url, "k", "fixture") == ("fixture", 4096, True)
