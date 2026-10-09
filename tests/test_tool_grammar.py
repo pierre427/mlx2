@@ -506,6 +506,71 @@ def test_default_policy_is_unchanged_and_skips_are_counted(scripted_engine):
     assert engine.counts["constrained_tool_grammar_skips"] == 1
 
 
+def _string_sum(**bounds):
+    return {
+        "type": "function",
+        "function": {
+            "name": "sum",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {"x": {"type": "string", **bounds}},
+                "required": ["x"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def test_qwen_strict_string_max_length_is_capped_at_the_wire_bound():
+    """The Qwen XML builder wrote a strict string's ``maxLength`` into its
+    quantifier unclamped, so ``maxLength: 8192`` (admitted by request
+    validation and clamped by the JSON, North and Muse builders) made
+    admission's server-grammar pricing refuse the request with a 400."""
+    from mlx2.runtime.tool_parsers.qwen3_coder import constrained_tool_grammar
+    from mlx2.structured_output import prepare_structured_automata
+
+    grammar = constrained_tool_grammar(
+        [_string_sum(maxLength=8192)], "required", parallel_tool_calls=False
+    )
+    prepare_structured_automata(server_grammar=grammar)
+    language = regex.compile(rf"(?:{grammar})")
+    for value in ("a", "a" * 4096):
+        assert language.fullmatch(QWEN_CALL.replace("\n1\n", f"\n{value}\n"))
+    # A minLength past the wire bound cannot be represented: the auto plan
+    # skips with the documented reason and keeps the terminal contract.
+    _, status, _ = plan_tool_grammar(
+        {"tools": [_string_sum(minLength=5000)]},
+        _qwen_accessor,
+        open_marker="<tool_call>",
+    )
+    assert status == "skipped_grammar_unrepresentable"
+
+
+def test_auto_grammar_serves_a_strict_tool_with_a_long_max_length(scripted_engine):
+    build, state = scripted_engine
+    engine = _auto_engine(build)
+    request = _request(tools=[_string_sum(maxLength=8192)])
+    state["script"] = [HELLO, EOS]
+    _, content, calls, final = _run_request(engine, request)
+    assert "error" not in final, final
+    assert content == "hello" and calls == []
+    assert final["receipt"]["request_controls"]["tool_choice"]["decode_grammar"] == "engaged"
+    state["script"] = [TOOL_CALL, EOS]
+    _, _, calls, final = _run_request(engine, request)
+    assert "error" not in final, final
+    assert json.loads(calls[0]["function"]["arguments"]) == {"x": "1"}
+    # Without an execution policy, a JSON answer with callable tools still
+    # decodes under the adapter's calls-or-answer grammar.
+    engine = build(declare_marker=True)
+    state["script"] = [7, 8, 9, 10, 11, EOS]
+    _, content, calls, final = _run_request(
+        engine, {**request, "response_format": {"type": "json_object"}, "max_tokens": 8}
+    )
+    assert "error" not in final, final
+    assert json.loads(content) == {"a": 1} and calls == []
+
+
 def test_extension_policies_require_the_base_grammar():
     from mlx2.serving import ServingEngine
 

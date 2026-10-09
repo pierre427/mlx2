@@ -22,6 +22,7 @@ from ._schema import (
     required_parameter_names,
     resolve_local_refs,
     schema_value_matches,
+    string_length_bounds,
 )
 
 _name_regex = re.compile(r"\s*([^\s<>]+)>?")
@@ -59,6 +60,24 @@ class UnclosedJSONString(ValueError):
 _string_types = {"string", "str", "text", "varchar", "char", "enum"}
 _bool_types = {"boolean", "bool", "binary"}
 _obj_types = {"object", "array", "arr"}
+
+
+def _scalar_kind(param_type: str) -> Optional[str]:
+    """``integer``, ``number`` or ``boolean`` when the non-strict parser
+    converts, and so can reject, a value of ``param_type``; else ``None``.
+
+    One classification for ``_convert_param_value`` and the non-strict
+    grammar, so the grammar never admits text the parser then rejects.
+    """
+    if param_type in _string_types:
+        return None
+    if param_type.startswith(("int", "uint", "long", "short", "unsigned")):
+        return "integer"
+    if param_type.startswith(("num", "float")):
+        return "number"
+    if param_type in _bool_types:
+        return "boolean"
+    return None
 
 
 def _get_arguments_config(func_name: str, tools: Optional[Any]) -> tuple[dict, bool]:
@@ -146,15 +165,10 @@ def _convert_param_value(
             return None
         if param_type not in _string_types:
             raise ValueError(f"Null is not allowed for {param_name}")
+    kind = _scalar_kind(param_type)
     if param_type in _string_types:
         return param_value
-    elif (
-        param_type.startswith("int")
-        or param_type.startswith("uint")
-        or param_type.startswith("long")
-        or param_type.startswith("short")
-        or param_type.startswith("unsigned")
-    ):
+    elif kind == "integer":
         try:
             value = Decimal(param_value)
         except InvalidOperation as exc:
@@ -165,14 +179,14 @@ def _convert_param_value(
         if value and value.adjusted() >= 4300:
             raise ValueError("Integer literal exceeds 4300 digits")
         return int(value)
-    elif param_type.startswith("num") or param_type.startswith("float"):
+    elif kind == "number":
         float_param_value = float(param_value)
         if not math.isfinite(float_param_value):
             raise ValueError(f"Invalid number literal {param_value!r}")
         # Preserve integral JSON numbers exactly here too.
         exact = Decimal(param_value)
         return int(exact) if exact == exact.to_integral_value() else float_param_value
-    elif param_type in _bool_types:
+    elif kind == "boolean":
         if param_value.lower() not in ("true", "false"):
             raise ValueError(f"Invalid boolean literal {param_value!r}")
         return param_value.lower() == "true"
@@ -246,17 +260,13 @@ def _raw_parameter_pattern(schema):
     if (declared == "string" and set(schema) == {"type"}) or nullable_string:
         return _RAW_VALUE_CHAR + "*"
     if declared == "string" and set(schema) <= {"type", "minLength", "maxLength"}:
-        minimum = schema.get("minLength", 0)
-        maximum = schema.get("maxLength")
-        if type(minimum) is not int or minimum < 0:
-            raise ValueError("string minLength must be a non-negative integer")
-        if maximum is not None and (
-            type(maximum) is not int or maximum < minimum
-        ):
-            raise ValueError("string maxLength must be an ordered non-negative integer")
+        # Cap at the 4096-character wire bound like the JSON, North and Muse
+        # builders: an uncapped count fails server-grammar pricing at
+        # admission, and a minLength past it is unrepresentable.
+        minimum, maximum = string_length_bounds(schema)
         quantifier = (
             f"{{{minimum},}}"
-            if maximum is None
+            if "maxLength" not in schema
             else f"{{{minimum},{maximum}}}"
         )
         return _RAW_VALUE_CHAR + quantifier
@@ -344,8 +354,8 @@ def _parse_function(text: str, start: int, tools: Optional[Any]):
     ``end`` is the index of the ``</function>`` that closes the block, found by
     walking the parameters in order: a raw value ends at the first closer,
     while a strict JSON value ends at the first closer outside its strings.
-    ``None`` means no closer follows, and the block is ignored like any
-    unclosed markup, unless the text ends inside a JSON string.
+    ``None`` means no closer follows (the caller fails the whole block),
+    unless the text ends inside a JSON string.
     """
     try:
         return _walk_function(text, start, tools)
@@ -434,10 +444,12 @@ def parse_tool_call(
     model_output: str,
     tools: Optional[Any] = None,
 ):
-    """Every closed ``<function=`` block of one tool-call block, in order.
+    """Every ``<function=`` block of one tool-call block, in order.
 
-    Raises ``UnclosedJSONString`` when the text ends inside a strict JSON
-    string: the ``</tool_call>`` that ended it was quoted inside the value.
+    Every block must be closed: an unclosed one is malformed and fails the
+    whole tool-call block.  Raises ``UnclosedJSONString`` when the text ends
+    inside a strict JSON string: the ``</tool_call>`` that ended it was quoted
+    inside the value.
     """
     calls, cursor = [], 0
     while (start := model_output.find(_FUNCTION_OPEN, cursor)) >= 0:
@@ -454,7 +466,9 @@ def parse_tool_call(
         except ValueError as exc:
             raise ValueError(f"Malformed Qwen function: {exc}") from exc
         if parsed is None:
-            break
+            # An unclosed ``<function=`` inside a closed tool-call block is
+            # malformed too; breaking here returned its siblings alone.
+            raise ValueError("Malformed Qwen function: unclosed <function> block")
         call, end = parsed
         calls.append(call)
         cursor = end + len(_FUNCTION_CLOSE)
@@ -518,18 +532,23 @@ def _non_strict_value(schema):
 
     Scalar-typed values are converted (``_convert_param_value``), so free text
     for them is admitted by the grammar and then rejected by the parser; every
-    other value is kept or decoded best-effort and stays free text.
+    other value is kept or decoded best-effort and stays free text, except
+    that the parser rejects a bare ``null`` (any case) for a typed non-string
+    value that does not declare null.  The block writes the value between two
+    newlines the parser strips, so the exclusion looks ahead to the closer.
     """
     from ...structured_output import _FINITE_NUMBER, _INTEGER
 
-    kind = infer_type_from_json_schema(schema)
-    kind = kind.strip().lower() if isinstance(kind, str) else None
+    declared = infer_type_from_json_schema(schema)
+    declared = declared.strip().lower() if isinstance(declared, str) else None
     pattern = {
         "integer": _INTEGER,
         "number": _FINITE_NUMBER,
         "boolean": "(?:true|false)",
-    }.get(kind)
+    }.get(_scalar_kind(declared) if declared else None)
     if pattern is None:
+        if declared and declared not in _string_types and not _declares_null(schema):
+            return r"(?![nN][uU][lL][lL]\n</parameter>)" + _RAW_VALUE_CHAR + "*"
         return _RAW_VALUE_CHAR + "*"
     return f"(?:{pattern}|null)" if _declares_null(schema) else pattern
 

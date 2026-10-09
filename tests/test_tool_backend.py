@@ -1,9 +1,16 @@
 """Host-only MCP transport and executor identity regressions."""
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from mlx2.tool_backend import ConfiguredToolBackend, _HTTPMCPClient, _rpc_payload
+from mlx2.tool_backend import (
+    ConfiguredToolBackend,
+    HostedToolError,
+    _HTTPMCPClient,
+    _rpc_payload,
+)
 
 
 @pytest.mark.parametrize("mcp_first", [False, True])
@@ -74,3 +81,129 @@ def test_list_tools_bounds_even_unique_continuation_cursors():
     with pytest.raises(RuntimeError, match="page bound"):
         client.list_tools()
     assert len(calls) == 128
+
+
+def _sse(*events):
+    return "".join(
+        "event: message\ndata: " + json.dumps(event) + "\n\n" for event in events
+    ).encode()
+
+
+@pytest.mark.parametrize("ping_first", [True, False])
+def test_sse_server_request_sharing_the_id_is_not_the_response(ping_first):
+    # MCP Streamable HTTP lets the server send its own requests (ping needs no
+    # capability) on the POST's SSE stream; JSON-RPC ids are per sender, so a
+    # server request may carry the same integer as the client's request.
+    ping = {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+    reply = {"jsonrpc": "2.0", "id": 2, "result": {"content": []}}
+    raw = _sse(ping, reply) if ping_first else _sse(reply, ping)
+    assert _rpc_payload(raw, expected_id=2) == reply
+
+
+@pytest.fixture
+def restarting_mcp_server():
+    """A Streamable HTTP MCP server whose sessions can be invalidated.
+
+    Per the MCP Streamable HTTP transport, a request carrying an unknown or
+    terminated Mcp-Session-Id is answered 404, and the client must start a
+    new session with an InitializeRequest that carries no session id.
+    """
+    state = {"generation": 1, "init_session_headers": [], "calls": 0}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def _json(self, payload, session=None):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            if session:
+                self.send_header("Mcp-Session-Id", session)
+            self.end_headers()
+            self.wfile.write(json.dumps(payload).encode())
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            session = self.headers.get("Mcp-Session-Id")
+            current = f"s{state['generation']}"
+            if body.get("method") == "initialize":
+                state["init_session_headers"].append(session)
+                self._json(
+                    {"jsonrpc": "2.0", "id": body["id"], "result": {
+                        "protocolVersion": "2025-03-26", "capabilities": {},
+                        "serverInfo": {"name": "t", "version": "1"},
+                    }},
+                    session=current,
+                )
+                return
+            if session != current:
+                self.send_response(404)
+                self.end_headers()
+                return
+            if "id" not in body:
+                self.send_response(202)
+                self.end_headers()
+                return
+            if body["method"] == "tools/list":
+                result = {"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}
+            else:
+                state["calls"] += 1
+                result = {"content": [{"type": "text", "text": "ok"}]}
+            self._json({"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/mcp", state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_tool_call_reinitializes_after_mcp_session_expires(restarting_mcp_server):
+    url, state = restarting_mcp_server
+    backend = ConfiguredToolBackend({"servers": {"local": {"server_url": url}}})
+    client = backend.clients["local"]
+    assert backend.execute((client, "echo"), {})["content"][0]["text"] == "ok"
+
+    state["generation"] += 1  # server restart: session s1 is gone
+    assert backend.execute((client, "echo"), {})["content"][0]["text"] == "ok"
+    assert client.session_id == "s2"
+    # The fresh InitializeRequest must not carry the dead session id, and the
+    # rejected call never ran, so the tool ran once per execute.
+    assert state["init_session_headers"] == [None, None]
+    assert state["calls"] == 2
+
+
+def test_tool_discovery_reinitializes_after_mcp_session_expires(restarting_mcp_server):
+    url, state = restarting_mcp_server
+    backend = ConfiguredToolBackend({"servers": {"local": {"server_url": url}}})
+    mcp = {"type": "mcp", "server_label": "local", "server_url": url, "require_approval": "never"}
+    _tools, executors = backend.prepare([mcp])
+    assert list(executors) == ["mcp__local__echo"]
+
+    state["generation"] += 1
+    _tools, executors = backend.prepare([mcp])
+    assert list(executors) == ["mcp__local__echo"]
+    assert state["init_session_headers"] == [None, None]
+
+
+def test_mcp_session_reinitialization_is_bounded(restarting_mcp_server):
+    """A server that ends every new session at once still fails the call."""
+    url, state = restarting_mcp_server
+    backend = ConfiguredToolBackend({"servers": {"local": {"server_url": url}}})
+    client = backend.clients["local"]
+    backend.execute((client, "echo"), {})
+    original = client._call
+
+    def always_stale(method, params=None, *, notification=False):
+        if method == "tools/call":
+            state["generation"] += 1  # the session dies before the call lands
+        return original(method, params, notification=notification)
+
+    client._call = always_stale
+    with pytest.raises(HostedToolError, match="404"):
+        backend.execute((client, "echo"), {})
+    assert state["init_session_headers"] == [None, None]

@@ -14,6 +14,7 @@ from copy import deepcopy
 
 from . import agent_compat as _agent
 from .api_resources import CapabilityUnavailable
+from .runtime.tool_parsers._schema import _json_equal
 
 
 RESPONSES_FIELDS = frozenset(
@@ -130,9 +131,12 @@ def refuse_video_sampling_options(part):
     }
 
 
-def _responses_content(content, *, file_resolver=None):
+def _responses_content(content, *, file_resolver=None, allow_empty=False):
+    # ``allow_empty`` admits an assistant replay of this server's own empty
+    # answer (a turn that only reasoned, or stopped at once): the message item
+    # ``responses_payload`` emits must round-trip through ``input``.
     if isinstance(content, str):
-        if not content:
+        if not content and not allow_empty:
             raise ValueError("Responses input text must not be empty")
         return content
     if not isinstance(content, list) or not content:
@@ -175,7 +179,7 @@ def _responses_content(content, *, file_resolver=None):
         else:
             raise ValueError("unsupported Responses content part")
     text = "".join(part["text"] for part in pieces if part["type"] == "text")
-    if not text and not has_media:
+    if not text and not has_media and not allow_empty:
         raise ValueError("Responses input text must not be empty")
     return pieces if has_media else text
 
@@ -319,7 +323,11 @@ def _responses_messages(
                 if not isinstance(phase, str) or phase not in _agent.MESSAGE_PHASES:
                     raise ValueError("message phase must be commentary or final_answer")
                 _agent.count(counts, "agent_compat_phase_inputs")
-        content = _responses_content(item.get("content"), file_resolver=file_resolver)
+        content = _responses_content(
+            item.get("content"),
+            file_resolver=file_resolver,
+            allow_empty=role == "assistant",
+        )
         previous = messages[-1] if messages else None
         if (
             role == "assistant"
@@ -666,15 +674,32 @@ def normalize_tool_choice(body: dict) -> dict:
 
 
 def _validate_schema_value(schema, value, path="arguments"):
+    # Check every keyword the admission compiler (structured_output's strict
+    # subset) accepts: with the decode grammar off this is the only check.
+    if "anyOf" in schema:
+        errors = []
+        for branch in schema["anyOf"]:
+            try:
+                _validate_schema_value(branch, value, path)
+                return
+            except ValueError as error:
+                errors.append(error)
+        raise ValueError(f"{path} does not match any strict tool anyOf branch") from (
+            errors[-1] if errors else None
+        )
+    # JSON equality, not Python's: ``True == 1`` (also inside containers)
+    # would let a generated ``true`` satisfy ``{"enum": [1]}``.
     if "enum" in schema:
-        if value not in schema["enum"]:
+        if not any(_json_equal(value, item) for item in schema["enum"]):
             raise ValueError(f"{path} is not one of the strict tool enum values")
         return
     if "const" in schema:
-        if value != schema["const"]:
+        if not _json_equal(value, schema["const"]):
             raise ValueError(f"{path} does not match the strict tool const value")
         return
     kind = schema.get("type")
+    if kind is None and "properties" in schema:
+        kind = "object"  # as the admission compiler reads a typeless node
     if isinstance(kind, list):
         errors = []
         for item in kind:
@@ -697,6 +722,13 @@ def _validate_schema_value(schema, value, path="arguments"):
         raise ValueError(f"{path} does not match strict tool type {kind!r}")
     if kind == "number" and isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"{path} must be a finite strict tool number")
+    if kind == "string":
+        # Admission bounded these to ordered non-negative integers.  ``len``
+        # counts code points, as JSON Schema and the grammar's quantifier do.
+        minimum = schema.get("minLength", 0)
+        maximum = schema.get("maxLength")
+        if len(value) < minimum or (maximum is not None and len(value) > maximum):
+            raise ValueError(f"{path} violates the strict tool string length bounds")
     if kind == "array":
         for index, item in enumerate(value):
             _validate_schema_value(schema["items"], item, f"{path}[{index}]")

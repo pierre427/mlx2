@@ -806,6 +806,86 @@ def test_one_malformed_qwen_function_makes_the_whole_block_malformed():
     assert tolerant.tool_call_parse_fallbacks == 1
 
 
+_WEATHER_TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}]
+_PARIS_CALL = (
+    "\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n"
+    "</function>\n"
+)
+_UNCLOSED_SIBLINGS = [
+    # </function> forgotten on the second call
+    _PARIS_CALL + "<function=get_weather>\n<parameter=city>\nLondon\n</parameter>\n",
+    # </parameter> and </function> forgotten on the second call
+    _PARIS_CALL + "<function=get_weather>\n<parameter=city>\nLondon\n",
+    # only the name of the second call was written
+    _PARIS_CALL + "<function=get_weather>\n",
+]
+
+
+@pytest.mark.parametrize("body", _UNCLOSED_SIBLINGS)
+def test_unclosed_qwen_sibling_function_makes_the_whole_block_malformed(body):
+    """An unclosed ``<function=`` after a closed sibling inside a closed
+    ``<tool_call>`` block used to parse as the first call alone: the second
+    call vanished, ``tool_choice=required`` passed, and no fallback counter
+    moved.  It is malformed like any other bad sibling."""
+    from mlx2.openai_compat import enforce_tool_contract
+
+    with pytest.raises(ValueError, match="Malformed Qwen function"):
+        parse_tool_call(body, _WEATHER_TOOLS)
+    text = "<tool_call>" + body + "</tool_call>"
+    for constrained in (True, False):
+        parser = OutputParser(
+            chat=True, tools=_WEATHER_TOOLS, parse_tool=parse_tool_call,
+            constrained_tools=constrained,
+        )
+        with pytest.raises(ValueError, match="Malformed Qwen function"):
+            calls = [
+                call
+                for event in parser.finish(text, "stop")
+                for call in event.get("tool_calls", ())
+            ]
+            # Unreachable once the block fails: a required choice must not
+            # pass with the London call dropped.
+            enforce_tool_contract(
+                {"tools": _WEATHER_TOOLS, "tool_choice": "required"},
+                calls,
+                finish_reason="stop",
+            )
+    tolerant = OutputParser(
+        chat=True, tools=_WEATHER_TOOLS, parse_tool=parse_tool_call,
+        tolerant_tool_markers=True,
+    )
+    events = tolerant.finish(text, "stop")
+    assert not [call for event in events for call in event.get("tool_calls", ())]
+    assert "".join(event.get("content", "") for event in events) == text
+    assert tolerant.tool_call_parse_fallbacks == 1
+
+
+def test_closed_qwen_siblings_and_a_length_cut_sibling_still_parse():
+    london = _PARIS_CALL.replace("Paris", "London")
+    calls = parse_tool_call(_PARIS_CALL + london, _WEATHER_TOOLS)
+    assert [call["arguments"]["city"] for call in calls] == ["Paris", "London"]
+    # max_tokens cutting a second call before </tool_call> is a requested
+    # stop, not malformed output: the partial call is dropped without raising.
+    parser = OutputParser(
+        chat=True, tools=_WEATHER_TOOLS, parse_tool=parse_tool_call
+    )
+    events = parser.finish(
+        "<tool_call>" + _PARIS_CALL + "<function=get_weather>\n<parameter=city>\nLon",
+        "length",
+    )
+    assert [call for event in events for call in event.get("tool_calls", ())] == []
+
+
 def test_qwen_unclosed_middle_string_parameter_is_malformed_not_swallowed():
     """A string parameter left open before the next ``<parameter=`` used to
     swallow it: ``path`` became ``"a.txt\\n<parameter=content>\\nhello"`` and

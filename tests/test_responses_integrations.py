@@ -425,6 +425,92 @@ def test_stateless_replay_renders_the_same_history_as_previous_response_id():
     assert engine.counts["reasoning_signature_rejections"] == 0
 
 
+class EmptyAnswerFirstTurnEngine(ContinuationEngine):
+    """Turn one ends with no answer text; later turns answer."""
+
+    def __init__(self, first_events):
+        super().__init__()
+        self.first_events = first_events
+
+    def submit(self, request, *, tenant_id="default"):
+        self.requests.append(request)
+        job = Job(request)
+        job.prompt_tokens = 2
+        job.completion_tokens = 2
+        events = self.first_events if len(self.requests) == 1 else [
+            {"delta": {"content": "done"}},
+            {"finish_reason": "stop", "receipt": {}},
+        ]
+        for event in events:
+            job.events.put(event)
+        return job
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "first_events",
+    [
+        [{"delta": {"reasoning_content": "long thought"}},
+         {"finish_reason": "length", "receipt": {}}],
+        [{"finish_reason": "stop", "receipt": {}}],
+    ],
+    ids=["reasoning-only-length", "empty-eos"],
+)
+def test_stateless_replay_accepts_the_servers_own_empty_answer(first_events, stream):
+    # ``input += response.output`` must round-trip every output this server
+    # emits, including the empty message item of a turn that produced no
+    # answer text, and render the same history as ``previous_response_id``.
+    engine = EmptyAnswerFirstTurnEngine(first_events)
+    request = {
+        "model": "fixture",
+        "store": True,
+        "include": ["reasoning.encrypted_content"],
+    }
+    with _Served(engine, response_store=ResponseStore()) as base:
+        with _post(base, {**request, "input": "hi"}) as response:
+            first = json.load(response)
+        assert first["output"][-1]["type"] == "message"
+        assert first["output"][-1]["content"][0]["text"] == ""
+        with _post(base, {
+            **request,
+            "input": "go on",
+            "previous_response_id": first["id"],
+        }) as response:
+            assert response.status == 200
+        held = engine.requests[-1]["messages"]
+        with _post(base, {
+            **request,
+            "store": False,
+            "stream": stream,
+            "input": [
+                {"role": "user", "content": "hi"},
+                *first["output"],
+                {"role": "user", "content": "go on"},
+            ],
+        }) as response:
+            assert response.status == 200
+            response.read()
+        stateless = engine.requests[-1]["messages"]
+    assert stateless == held
+    assert [message["role"] for message in stateless] == ["user", "assistant", "user"]
+    assert stateless[1]["content"] == ""
+
+
+def test_empty_assistant_string_replay_is_accepted_but_empty_user_text_is_not():
+    request, _ = responses_to_chat_request({
+        "input": [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": ""},
+            {"role": "user", "content": "b"},
+        ]
+    })
+    assert [m["role"] for m in request["messages"]] == ["user", "assistant", "user"]
+    assert request["messages"][1]["content"] == ""
+    for role in ("user", "system", "developer"):
+        with pytest.raises(ValueError, match="must not be empty"):
+            responses_to_chat_request({"input": [{"role": role, "content": ""}]})
+
+
 def test_responses_render_one_leading_system_message_without_agent_compat():
     # ``instructions`` plus a developer item (directly or held through
     # ``previous_response_id``) used to reach the template as two system

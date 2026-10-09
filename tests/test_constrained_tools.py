@@ -429,6 +429,98 @@ def test_non_strict_forced_grammars_only_admit_calls_their_parser_accepts(wire):
 
 
 @pytest.mark.parametrize(
+    ("kind", "good", "expected", "bad"),
+    [
+        ("int", "3", 3, "five"),
+        ("int32", "-7", -7, "seven"),
+        ("uint64", "12", 12, "x12"),
+        ("long", "4", 4, "many"),
+        ("short", "2", 2, "two"),
+        ("unsigned", "9", 9, "nine"),
+        ("float", "1.5", 1.5, "1.5x"),
+        ("float64", "2.25", 2.25, "inf"),
+        ("numeric", "0.5", 0.5, "half"),
+        ("bool", "true", True, "yes"),
+        ("binary", "false", False, "0"),
+    ],
+)
+def test_non_strict_qwen_grammar_narrows_every_type_its_parser_converts(
+    kind, good, expected, bad
+):
+    """Only ``integer``/``number``/``boolean`` were narrowed; the parser also
+    converts (and raises on) the Qwen reference parser's type aliases, so a
+    forced call over ``{"type": "int"}`` still admitted ``five`` and then
+    failed although the grammar was engaged to guarantee a parseable call."""
+    tools = [{"type": "function", "function": {"name": "f", "parameters": {
+        "type": "object",
+        "properties": {"n": {"type": kind}},
+        "required": ["n"],
+    }}}]
+    # Non-strict parameter types are not validated, and a forced call engages
+    # the grammar.
+    validate_request(
+        {
+            "messages": [{"role": "user", "content": "go"}],
+            "tools": tools,
+            "tool_choice": "required",
+        },
+        constrained_tool_grammar=True,
+    )
+    grammar = qwen_grammar(tools, "required", parallel_tool_calls=False)
+
+    def call(value):
+        return (
+            f"<tool_call>\n<function=f>\n<parameter=n>\n{value}\n</parameter>"
+            "\n</function>\n</tool_call>"
+        )
+
+    def parse(text):
+        return parse_tool_call(text[len("<tool_call>"):-len("</tool_call>")], tools)
+
+    assert _matches(grammar, call(good))
+    assert parse(call(good))["arguments"] == {"n": expected}
+    for value in (bad, "null"):
+        with pytest.raises(ValueError):
+            parse(call(value))
+        assert not _matches(grammar, call(value)), (kind, value)
+
+
+@pytest.mark.parametrize("kind", ["object", "array", "dict", "custom"])
+def test_non_strict_qwen_grammar_rejects_the_null_its_parser_rejects(kind):
+    """Free-text values of a typed non-string parameter admitted a bare
+    ``null``, which the parser rejects unless the schema declares null."""
+    def tools(schema):
+        return [{"type": "function", "function": {"name": "f", "parameters": {
+            "type": "object", "properties": {"n": schema}, "required": ["n"],
+        }}}]
+
+    def call(value):
+        return (
+            f"<tool_call>\n<function=f>\n<parameter=n>\n{value}\n</parameter>"
+            "\n</function>\n</tool_call>"
+        )
+
+    def parse(text, declared):
+        return parse_tool_call(
+            text[len("<tool_call>"):-len("</tool_call>")], declared
+        )["arguments"]["n"]
+
+    plain = tools({"type": kind})
+    grammar = qwen_grammar(plain, "required", parallel_tool_calls=False)
+    for value in ("null", "NULL", "Null"):
+        with pytest.raises(ValueError):
+            parse(call(value), plain)
+        assert not _matches(grammar, call(value)), value
+    for value in ("nullable", "null x", '{"a": null}', "[null]"):
+        assert _matches(grammar, call(value)), value
+        parse(call(value), plain)
+    nullable = tools({"type": [kind, "null"]})
+    grammar = qwen_grammar(nullable, "required", parallel_tool_calls=False)
+    assert _matches(grammar, call("null"))
+    assert parse(call("null"), nullable) is None
+
+
+@pytest.mark.parametrize(
     ("declared", "good", "bad"),
     [
         (["string", "null"], [('"Paris"', "Paris"), ("null", None)], ["Paris"]),

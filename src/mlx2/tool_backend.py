@@ -8,6 +8,7 @@ import threading
 from collections import Counter
 from http.client import HTTPException
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from .api_resources import CapabilityUnavailable
@@ -23,6 +24,15 @@ class HostedToolError(RuntimeError):
 
     status = 502
     code = "hosted_tool_error"
+
+
+class _SessionExpired(HostedToolError):
+    """The MCP server answered 404 for this client's session id.
+
+    Streamable HTTP servers may end a session at any time (a restart, idle
+    expiry); the client must then start a new one.  A subclass, so a request
+    that still fails after one new session is a 502 like any other.
+    """
 
 
 def _rpc_payload(raw, *, expected_id):
@@ -41,9 +51,13 @@ def _rpc_payload(raw, *, expected_id):
             elif line.startswith("data:"):
                 value = line[5:]
                 data.append(value.removeprefix(" "))
+    # JSON-RPC ids are per sender: a request the server sends on this stream
+    # (``ping`` needs no capability) may carry the same id, but it has a
+    # ``method`` and is not the reply.
     responses = [
         event for event in events
         if isinstance(event, dict)
+        and "method" not in event
         and type(event.get("id")) is type(expected_id)
         and event.get("id") == expected_id
     ]
@@ -93,6 +107,10 @@ class _HTTPMCPClient:
                 result = _rpc_payload(response.read(), expected_id=message["id"])
         except HostedToolError:
             raise
+        except HTTPError as error:
+            if error.code == 404 and "Mcp-Session-Id" in headers:
+                raise _SessionExpired(f"MCP {method} failed: {error}") from error
+            raise HostedToolError(f"MCP {method} failed: {error}") from error
         except (OSError, ValueError, HTTPException) as error:
             # OSError covers URLError, HTTPError and timeouts; ValueError
             # covers undecodable or malformed JSON replies.
@@ -118,6 +136,9 @@ class _HTTPMCPClient:
     def _initialize(self):
         if self.initialized:
             return
+        # A new InitializeRequest never carries an old session id: not after
+        # the server ended it, nor after a half-finished handshake.
+        self.session_id = None
         self._call(
             "initialize",
             {
@@ -129,34 +150,54 @@ class _HTTPMCPClient:
         self._call("notifications/initialized", notification=True)
         self.initialized = True
 
+    def _with_session(self, operation):
+        """Run ``operation`` in a live session; called with the lock held.
+
+        If the server ended the session, start a new one and retry once.  The
+        404 means the server turned the request away unrun, so retrying a
+        ``tools/call`` cannot run the tool twice.
+        """
+        self._initialize()
+        try:
+            return operation()
+        except _SessionExpired:
+            self.initialized = False
+            self._initialize()
+            return operation()
+
+    def _list_tools(self):
+        tools, seen, params = [], set(), None
+        for _ in range(128):
+            result = self._call("tools/list", params)
+            if (
+                not isinstance(result, dict)
+                or not isinstance(result.get("tools"), list)
+                or any(not isinstance(tool, dict) for tool in result["tools"])
+            ):
+                raise HostedToolError(
+                    "MCP server returned an invalid tools/list response"
+                )
+            tools.extend(result["tools"])
+            cursor = result.get("nextCursor")
+            if cursor is None:
+                return tools
+            if not isinstance(cursor, str) or cursor in seen:
+                raise HostedToolError("MCP server returned an invalid pagination cursor")
+            seen.add(cursor)
+            params = {"cursor": cursor}
+        raise HostedToolError("MCP tools/list exceeded the pagination page bound")
+
     def list_tools(self):
         with self.lock:
-            self._initialize()
-            tools, seen, params = [], set(), None
-            for _ in range(128):
-                result = self._call("tools/list", params)
-                if (
-                    not isinstance(result, dict)
-                    or not isinstance(result.get("tools"), list)
-                    or any(not isinstance(tool, dict) for tool in result["tools"])
-                ):
-                    raise HostedToolError(
-                        "MCP server returned an invalid tools/list response"
-                    )
-                tools.extend(result["tools"])
-                cursor = result.get("nextCursor")
-                if cursor is None:
-                    return tools
-                if not isinstance(cursor, str) or cursor in seen:
-                    raise HostedToolError("MCP server returned an invalid pagination cursor")
-                seen.add(cursor)
-                params = {"cursor": cursor}
-            raise HostedToolError("MCP tools/list exceeded the pagination page bound")
+            # A new session restarts from the first page: the old session's
+            # cursors may not be valid in it.
+            return self._with_session(self._list_tools)
 
     def call_tool(self, name, arguments):
         with self.lock:
-            self._initialize()
-            return self._call("tools/call", {"name": name, "arguments": arguments})
+            return self._with_session(
+                lambda: self._call("tools/call", {"name": name, "arguments": arguments})
+            )
 
 
 class ConfiguredToolBackend:

@@ -75,6 +75,36 @@ def test_sentencepiece_token_bytes_preserve_the_leading_space_marker():
     assert result["bytes"] == list(b" hello")
 
 
+def _piece_tokenizer(names, pieces):
+    return SimpleNamespace(
+        convert_ids_to_tokens=lambda ids: [names[i] for i in ids],
+        decode=lambda ids, **_kwargs: "".join(pieces[i] for i in ids),
+        all_special_ids=(),
+        get_added_vocab=lambda: {},
+    )
+
+
+@pytest.mark.parametrize("piece", ["Über", "é", "Cómo", "¿", "ético", "ï"])
+def test_sentencepiece_word_internal_latin1_token_bytes_are_utf8(piece):
+    # Gemma 4 SentencePiece pieces without a U+2581 boundary marker: their
+    # characters happen to lie in the GPT-2 byte alphabet, but the vocabulary
+    # is not byte-level, so the bytes are the piece's UTF-8, not Latin-1.
+    tokenizer = _piece_tokenizer([piece], [piece])
+    result = token_logprob(np.array([0.0]), 0, tokenizer, top_n=1, array_module=np)
+    assert result["bytes"] == list(piece.encode("utf-8"))
+    assert result["top_logprobs"][0]["bytes"] == list(piece.encode("utf-8"))
+
+
+def test_byte_level_partial_utf8_token_keeps_its_raw_bytes():
+    # GPT-2 alphabet "âĢ" spells bytes E2 80, the first two bytes of a
+    # three-byte character; its isolated decode is U+FFFD.
+    tokenizer = _piece_tokenizer(["âĢ", "Ã©"], ["�", "é"])
+    result = token_logprob(np.array([0.0, -1.0]), 0, tokenizer, top_n=2, array_module=np)
+    assert result["bytes"] == [0xE2, 0x80]
+    by_id = {entry["id"]: entry["bytes"] for entry in result["top_logprobs"]}
+    assert by_id[1] == list("é".encode("utf-8"))
+
+
 @pytest.mark.parametrize("accepted", [0, 1, 2])
 def test_actual_mtp_output_construction_uses_target_rows_for_accept_and_replacement(accepted):
     # Execute the production output-row construction only, with CPU arrays.

@@ -28,6 +28,11 @@ from .lark_regex import LarkGrammarError, lark_to_regex
 _LOG = logging.getLogger(__name__)
 
 GRAMMAR_MODES = frozenset({"off", "validate"})
+# Wall-clock budget for validating one custom tool input against its
+# client-declared grammar.  ``regex`` backtracks, so a pathological grammar
+# would otherwise pin the HTTP handler thread; Codex's linear apply_patch
+# grammar checks a 100 KB patch in under 30 ms.
+_GRAMMAR_VALIDATION_TIMEOUT_SECONDS = 1.0
 
 #: Hosted Responses tools that need an OpenAI-side executor.  In agent-compat
 #: mode they are removed from the request (never simulated) and reported.
@@ -510,17 +515,24 @@ def rewrite_responses_output(payload, tool_map, compat: AgentCompat, counts=None
             text = arguments["input"]
             constraint = custom[name].get("constraint")
             if constraint is not None:
-                if constraint.fullmatch(text) is None:
+                try:
+                    matched = constraint.fullmatch(
+                        text, timeout=_GRAMMAR_VALIDATION_TIMEOUT_SECONDS
+                    )
+                    reason = "does not match its declared grammar"
+                except TimeoutError:
+                    # Not shown to match within the budget: fail closed.
+                    matched = None
+                    reason = "exceeded its grammar validation time budget"
+                if matched is None:
                     count(counts, "agent_compat_custom_tool_grammar_rejected")
-                    # The client only sees "does not match"; without the text
-                    # a rejection cannot be diagnosed after the fact.
+                    # The client only sees the reason; without the text a
+                    # rejection cannot be diagnosed after the fact.
                     _LOG.warning(
-                        "agent-compat: %s input rejected by its grammar: %.600r",
-                        name, text,
+                        "agent-compat: %s input rejected (%s): %.600r",
+                        name, reason, text,
                     )
-                    raise ToolContractError(
-                        f"custom tool {name!r} input does not match its declared grammar"
-                    )
+                    raise ToolContractError(f"custom tool {name!r} input {reason}")
                 count(counts, "agent_compat_custom_tool_grammar_validated")
             call_id = item["call_id"]
             output[position] = {

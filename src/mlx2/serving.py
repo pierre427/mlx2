@@ -11353,10 +11353,18 @@ class ServingEngine:
                             self._observe_thinking_budget(job)
                         job.last_progress = time.monotonic()
                         failure = getattr(job.structured, "failure", None)
-                        if failure is not None:
+                        failure_row = getattr(job.structured, "failure_row", None)
+                        if failure is not None and (
+                            failure_row is None or job.completion_tokens >= failure_row
+                        ):
                             # The grammar dead-ended or overran its budget; the
                             # processor stopped masking so the batch stayed
-                            # consistent.  Fail this request closed here.
+                            # consistent.  Fail this request closed here.  A
+                            # token before the failure row (a speculative verify
+                            # row, or ordinary decode's unused next-token row,
+                            # latched it first) was drawn from a masked row:
+                            # it is delivered, so a client stop it completes
+                            # still ends the request normally.
                             batch.remove([response.uid])
                             self.counts["structured_output_failures"] += 1
                             from .structured_automaton import NO_CONTINUATION

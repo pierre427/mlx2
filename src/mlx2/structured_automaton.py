@@ -1398,9 +1398,15 @@ def token_bytes_value(tokenizer, token_id: int) -> bytes:
             try:
                 decoded = raw.decode("utf-8")
             except UnicodeDecodeError:
-                return raw
-            if decoded == piece:
-                return raw
+                # A byte-level token holding part of a character decodes
+                # alone to U+FFFD.  A SentencePiece piece such as "é" also
+                # lies in the alphabet but decodes to itself: its bytes are
+                # its UTF-8, not the alphabet's Latin-1 reading.
+                if "�" in piece:
+                    return raw
+            else:
+                if decoded == piece:
+                    return raw
     return piece.encode("utf-8")
 
 

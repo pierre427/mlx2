@@ -1318,6 +1318,9 @@ class StructuredOutputProcessor:
         # would take every other lane down with it.
         self.failure = None
         self.failure_context = None
+        # The generated-token index the failure was latched for: the first
+        # token drawn from an unmasked row.  Every earlier token was masked.
+        self.failure_row = None
 
     def __deepcopy__(self, memo):
         """Snapshot for a speculative round without copying shared machinery.
@@ -1377,6 +1380,7 @@ class StructuredOutputProcessor:
         "tail_mass_bound",
         "failure",
         "failure_context",
+        "failure_row",
         "constraining",
         "deferred_tokens",
         "_generated_token_count",
@@ -2361,6 +2365,11 @@ class StructuredOutputProcessor:
         from .structured_automaton import NO_CONTINUATION
 
         self.failure = str(exc)
+        # Every row is evaluated with the tokens before it in context, so the
+        # count of those tokens is the index of the first unmasked token.  A
+        # missing count falls back to the (no longer) constrained ids, which
+        # can only make the row earlier: fail closed sooner, never later.
+        self.failure_row = int(getattr(self, "_generated_token_count", len(token_ids)))
         if not self.capture_failure_context or self.failure != NO_CONTINUATION:
             return
         try:
