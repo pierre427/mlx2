@@ -4395,8 +4395,15 @@ def handler_for(
                                             "item": item,
                                         }
                                     )
+                                # A truncated response ends with
+                                # response.incomplete, carrying that object.
                                 self._responses_sse(
-                                    {"type": "response.completed", "response": payload}
+                                    {
+                                        "type": "response.incomplete"
+                                        if payload["status"] == "incomplete"
+                                        else "response.completed",
+                                        "response": payload,
+                                    }
                                 )
                             else:
                                 if grammar_tool_stream:

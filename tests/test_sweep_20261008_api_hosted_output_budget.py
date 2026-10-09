@@ -115,15 +115,14 @@ def _respond(engine, backend, body):
     if body.get("stream"):
         events = [json.loads(line[len("data: "):]) for line in raw.splitlines()
                   if line.startswith("data: {")]
-        # The terminal event follows the open Responses-truncation decision:
-        # main reports a length stop as completed (944daa7f4,
-        # test_responses_integrations pins it), so the stream ends with exactly
-        # one response.completed and never a response.incomplete.
+        # Exactly one terminal event ends the stream, named after the object's
+        # status: a truncated response ends with response.incomplete.
         terminal = [e["type"] for e in events if e["type"] in (
             "response.completed", "response.incomplete", "response.failed")]
-        assert terminal == ["response.completed"], terminal
-        assert events[-1]["type"] == "response.completed"
-        return events[-1]["response"]
+        assert len(terminal) == 1 and events[-1]["type"] == terminal[0], terminal
+        payload = events[-1]["response"]
+        assert terminal[0] == "response." + payload["status"], terminal
+        return payload
     return json.loads(raw)
 
 
@@ -140,7 +139,10 @@ def test_hosted_tool_rounds_share_one_max_output_tokens_budget(stream):
     assert caps == [10, 6, 2]
     assert payload["usage"]["output_tokens"] <= 10, payload["usage"]
     assert payload["mlx2"]["hosted_tools"]["output_budget_exhausted"] is False
-    assert payload["status"] == "completed"
+    # The last round stopped on what was left of the budget: the response
+    # was cut at max_output_tokens.
+    assert payload["status"] == "incomplete"
+    assert payload["incomplete_details"] == {"reason": "max_output_tokens"}
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -159,10 +161,12 @@ def test_an_exhausted_budget_ends_the_loop_without_another_round(stream):
     assert not [item for item in payload["output"] if item["type"] == "function_call"]
     assert payload["mlx2"]["hosted_tools"]["rounds"] == 1
     assert payload["mlx2"]["hosted_tools"]["output_budget_exhausted"] is True
-    # Status follows the open Responses-truncation decision (see _respond):
-    # a length stop is serialized as completed, with no incomplete_details.
-    assert payload["status"] == "completed"
-    assert "incomplete_details" not in payload
+    # The loop ended on the output budget: the response is incomplete, and
+    # a stream ends with response.incomplete (see _respond).
+    assert payload["status"] == "incomplete"
+    assert payload["incomplete_details"] == {"reason": "max_output_tokens"}
+    assert [item["status"] for item in payload["output"]
+            if item["type"] == "message"] == ["incomplete"]
 
 
 def test_an_unset_budget_keeps_the_per_round_default():

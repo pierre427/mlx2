@@ -67,8 +67,11 @@ def test_responses_signed_unicode_reasoning_and_logprobs_serialize_on_main_paylo
         tenant_id="tenant-a",
         include=options["include"],
     )
-    assert payload["status"] == "completed"
-    assert "incomplete_details" not in payload
+    # A length stop is truncation: OpenAI's incomplete semantics, with the
+    # cut-off message item incomplete and the reasoning before it complete.
+    assert payload["status"] == "incomplete"
+    assert payload["incomplete_details"] == {"reason": "max_output_tokens"}
+    assert [item["status"] for item in payload["output"]] == ["completed", "incomplete"]
     assert signer.verify_responses(
         payload["output"][0]["encrypted_content"],
         model="fixture",

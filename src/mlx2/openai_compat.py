@@ -1102,12 +1102,17 @@ def responses_payload(
     output_order=None,
     tool_choice=None,
 ):
-    """Render a completed chat choice as a Responses API object.
+    """Render a finished chat choice as a Responses API object.
 
     ``tool_choice`` is the caller's original value; without it the chat
-    request's value is echoed.
+    request's value is echoed.  A choice cut off by the output cap
+    (``finish_reason:"length"``, including a hosted-tool loop that spent its
+    budget) is OpenAI's truncation: ``status:"incomplete"`` with
+    ``incomplete_details.reason:"max_output_tokens"``, and the message item
+    it cut off is ``incomplete``.  Every other finish is ``completed``.
     """
     message = choice["message"]
+    truncated = choice.get("finish_reason") == "length"
     output_by_kind = {}
     response_identifier = response_id(job)
     reasoning = message.get("reasoning_content", "")
@@ -1128,7 +1133,7 @@ def responses_payload(
         output_by_kind["message"] = {
                 "id": f"msg_{job.id}",
                 "type": "message",
-                "status": "completed",
+                "status": "incomplete" if truncated else "completed",
                 "role": "assistant",
                 "content": [
                     {
@@ -1169,7 +1174,12 @@ def responses_payload(
         "id": response_identifier,
         "object": "response",
         "created_at": int(job.created),
-        "status": "completed",
+        "status": "incomplete" if truncated else "completed",
+        **(
+            {"incomplete_details": {"reason": "max_output_tokens"}}
+            if truncated
+            else {}
+        ),
         "model": model,
         "output": output,
         "parallel_tool_calls": bool(job.request.get("parallel_tool_calls", True)),
