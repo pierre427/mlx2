@@ -1,5 +1,6 @@
 """Independent same-prefix requests wait for the first APCv2 publication."""
 
+import queue
 import time
 
 import mlx.core as mx
@@ -165,3 +166,39 @@ def test_a_memory_deferred_follower_reuses_the_checkpoint_it_waited_for(
             assert follower.cached_tokens == 127
     finally:
         engine.close()
+
+
+def _terminals(job):
+    """Every terminal event queued for ``job`` so far."""
+    events = []
+    while True:
+        try:
+            events.append(job.events.get_nowait())
+        except queue.Empty:
+            return [e for e in events if "error" in e or "finish_reason" in e]
+
+
+def test_drain_timeout_finishes_a_same_prefix_follower_once(engine):
+    """``_fail_drain_timeout`` gave the parked follower its 503, then the
+    worker's cancellation sweep over ``prefix_waiting`` found it cancelled and
+    queued a second terminal (``cancelled``) for the same request."""
+    # Keep the leader generating past the drain deadline.
+    engine._inject_device_fault = lambda active: time.sleep(0.005)
+    leader = submit(engine, prompt(), max_tokens=300)
+    follower = submit(engine, prompt(), max_tokens=8)
+    deadline = time.monotonic() + 10
+    while not follower.apc_sequence_waited and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert follower.apc_sequence_waited  # parked in the worker's prefix_waiting
+
+    engine.quiesce(drain_timeout_seconds=0.2, suspend=False)
+    assert engine.wait_for_quiesce(10)
+    engine._inject_device_fault = lambda active: None
+    engine.resume()
+    # A later request proves the worker ran further iterations and is live.
+    _, receipt = collect(submit(engine, prompt(5), tenant="bob", max_tokens=2))
+    assert "error" not in receipt, receipt
+
+    assert _terminals(leader) == [{"error": "drain timeout", "status": 503}]
+    assert _terminals(follower) == [{"error": "drain timeout", "status": 503}]
+    assert engine.status()["inflight"] == 0

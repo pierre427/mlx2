@@ -5138,7 +5138,10 @@ class BatchGenerator:
 
     def _decline_state_checkpoint(self, uid: int, position: int) -> None:
         purpose = self._boundary_purpose(uid, position)
-        if purpose == BoundaryPurpose.INFLIGHT:
+        # A follower's request keeps an already planned JUNCTION's role
+        # (``add_state_boundary``), so its declines are reported too; the
+        # server ignores a decline no follower asked for.
+        if purpose in (BoundaryPurpose.INFLIGHT, BoundaryPurpose.JUNCTION):
             self._state_checkpoint_declines.append((int(uid), int(position)))
         self._consume_state_boundary(uid, position)
 
@@ -5153,7 +5156,7 @@ class BatchGenerator:
         return drained
 
     def drain_state_checkpoint_declines(self):
-        """Transfer exact in-flight boundaries that capture could not satisfy."""
+        """Transfer exact in-flight/junction boundaries capture could not satisfy."""
         drained = getattr(self, "_state_checkpoint_declines", [])
         self._state_checkpoint_declines = []
         return drained

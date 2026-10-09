@@ -7091,6 +7091,18 @@ class ServingEngine:
                 waiters.pop(resolution_key, None)
                 self.apc_inflight_resolutions.pop(resolution_key, None)
 
+        def cancel_prefix_wait(waiting):
+            """Settle a cancelled follower's in-flight wait (not its terminal)."""
+            if waiting.apc_prefix_wait_leader_uid is None:
+                return
+            waiting.apc_prefix_wait_release = "cancelled"
+            waiting.apc_prefix_wait_ms = max(
+                0.0, (time.monotonic() - waiting.apc_prefix_wait_started) * 1000.0
+            )
+            settle_prefix_wait(waiting)
+            waiting.apc_prefix_wait_leader_uid = None
+            self.counts["apc_inflight_prefix_waits_cancelled"] += 1
+
         def prefix_wait_ready(waiting):
             leader_uid = waiting.apc_prefix_wait_leader_uid
             if leader_uid is None:
@@ -9205,7 +9217,42 @@ class ServingEngine:
                                 "apcv2_fanout_boundaries"
                             ] += 1
 
+            # Prompt-end interior snapshots queued for paced publication.  Each
+            # belongs to its owner's lifecycle: the owner's remaining snapshots
+            # are published before its successful terminal event and dropped
+            # when it ends any other way, so none is stored after the client
+            # saw the request end.  A late store would undo a session delete,
+            # land old-weight state after a LoRA swap's APCv2 clear (that
+            # drain waits only for ``self.jobs``), or make entries resident
+            # again on a suspended server.
             pending_interiors = deque()
+
+            def drop_queued_interiors(*, live_owners=True):
+                """Drop queued snapshots of ended owners (all: ``live_owners=False``)."""
+                if not pending_interiors:
+                    return
+                with self.lock:
+                    kept = [
+                        item
+                        for item in pending_interiors
+                        if live_owners and self.jobs.get(item[1].id) is item[1]
+                    ]
+                dropped = len(pending_interiors) - len(kept)
+                if dropped:
+                    self.counts["apc_interior_publications_dropped"] += dropped
+                    pending_interiors.clear()
+                    pending_interiors.extend(kept)
+
+            def publish_queued_interiors(owner):
+                """Publish ``owner``'s queued snapshots now, before its terminal event."""
+                owned = [item for item in pending_interiors if item[1] is owner]
+                if not owned:
+                    return
+                kept = [item for item in pending_interiors if item[1] is not owner]
+                pending_interiors.clear()
+                pending_interiors.extend(kept)
+                for item in owned:
+                    publish_interior(*item)
 
             while not self.stop_event.is_set():
                 if _loop_trace.enabled():
@@ -9226,6 +9273,13 @@ class ServingEngine:
                             attaching_cohort,
                         )
                         held_cohort = attaching_cohort = None
+                        # Parked same-prefix followers already got their one
+                        # drain-timeout 503; only their wait is left to settle.
+                        while prefix_waiting:
+                            cancel_prefix_wait(prefix_waiting.popleft())
+                    # Every owner has ended: no queued snapshot may be stored
+                    # after the transition (a suspend would get it back).
+                    drop_queued_interiors()
                     suspend_report = None
                     if quiesce_action["suspend"]:
                         try:
@@ -9339,21 +9393,7 @@ class ServingEngine:
                 for _ in range(len(prefix_waiting)):
                     waiting = prefix_waiting.popleft()
                     if waiting.cancelled.is_set():
-                        if waiting.apc_prefix_wait_leader_uid is not None:
-                            waiting.apc_prefix_wait_release = "cancelled"
-                            waiting.apc_prefix_wait_ms = max(
-                                0.0,
-                                (
-                                    time.monotonic()
-                                    - waiting.apc_prefix_wait_started
-                                )
-                                * 1000.0,
-                            )
-                            settle_prefix_wait(waiting)
-                            waiting.apc_prefix_wait_leader_uid = None
-                            self.counts[
-                                "apc_inflight_prefix_waits_cancelled"
-                            ] += 1
+                        cancel_prefix_wait(waiting)
                         self._finish(waiting, {"error": "cancelled"})
                     else:
                         prefix_waiting.append(waiting)
@@ -11103,6 +11143,10 @@ class ServingEngine:
                         self._fail_lanes_after_device_oom(
                             exc, batch, active, fault=fault
                         )
+                        # Queued snapshots hold device memory outside APCv2
+                        # and the load baseline: the release check below
+                        # would read them as a leak and stop the worker.
+                        drop_queued_interiors(live_owners=False)
                         batch = None
                         batch = self._rebuild_after_device_oom(
                             exc, build_batch, apc, fault=fault
@@ -11187,6 +11231,11 @@ class ServingEngine:
                             active[response.uid].last_progress = time.monotonic()
                             if response.end_of_prompt:
                                 active[response.uid].replaying = False
+                                # Every planned boundary is now captured (its
+                                # bytes are live memory, which headroom
+                                # already measures) or declined: release the
+                                # plan from the in-flight headroom ledger.
+                                active[response.uid].state_boundary_planned_bytes = 0
                             if active[response.uid].request.get("return_progress"):
                                 self._emit_prompt_progress(
                                     active[response.uid],
@@ -11948,6 +11997,12 @@ class ServingEngine:
                                 if stopped
                                 else response.finish_reason
                             )
+                            # Its terminal event is this request's ownership
+                            # boundary: interiors still paced behind other
+                            # lanes are stored now, not after it.  Only a
+                            # success gets here; a 500 or 429 terminal above
+                            # leaves them to this round's drop.
+                            publish_queued_interiors(job)
                             self._finish(
                                 job, {"finish_reason": reason, "receipt": receipt}
                             )
@@ -11975,6 +12030,7 @@ class ServingEngine:
                     # Interior checkpoints are snapshots: beside other
                     # decoding lanes publish one per round so their stores'
                     # disk spills do not stack into one neighbour gap.
+                    drop_queued_interiors()
                     while pending_interiors:
                         publish_interior(*pending_interiors.popleft())
                         if len(active) >= 2:
@@ -11992,6 +12048,7 @@ class ServingEngine:
                     from .runtime.paged_apcv2_native_restore import reap_failed_native_restores
 
                     reap_failed_native_restores()
+                    drop_queued_interiors()
                     while pending_interiors:
                         publish_interior(*pending_interiors.popleft())
                     self._service_admin_prefetch(apc)

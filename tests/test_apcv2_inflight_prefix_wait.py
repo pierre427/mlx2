@@ -226,6 +226,57 @@ def test_cancelled_follower_releases_without_cancelling_leader(monkeypatch):
         engine.close()
 
 
+def test_drain_timeout_finishes_a_parked_follower_once(monkeypatch):
+    """``_fail_drain_timeout`` gave the parked follower its 503, then the
+    worker's cancellation sweep over ``prefix_waiting`` found it cancelled
+    and queued a second terminal for it.  Its wait must still settle (the
+    waiter entry and the outcome counters balance)."""
+    engine, vocab = make_engine(
+        monkeypatch, enabled=True, lanes=2, coalesce_ms=1000
+    )
+    try:
+        # Slow rounds keep the leader short of the shared boundary until the
+        # drain deadline has passed.
+        engine._inject_device_fault = lambda active: time.sleep(0.1)
+        leader = engine.submit({"tokens": conversation(vocab, 5), "max_tokens": 64})
+        follower = engine.submit({"tokens": conversation(vocab, 9), "max_tokens": 8})
+        deadline = time.monotonic() + 10
+        while not follower.apc_prefix_wait_done and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert follower.apc_prefix_wait_done
+        engine.quiesce(drain_timeout_seconds=0.1, suspend=False)
+        assert engine.wait_for_quiesce(10)
+        engine._inject_device_fault = lambda active: None
+        engine.resume()
+        # A later request proves the worker ran further iterations.
+        _output, receipt = collect(
+            engine.submit({"tokens": conversation(vocab, 13), "max_tokens": 2},
+                          tenant_id="bob")
+        )
+        assert "error" not in receipt, receipt
+        terminals = {}
+        for name, job in (("leader", leader), ("follower", follower)):
+            events = []
+            while not job.events.empty():
+                events.append(job.events.get_nowait())
+            terminals[name] = [
+                event for event in events
+                if "error" in event or "finish_reason" in event
+            ]
+        assert terminals == {
+            "leader": [{"error": "drain timeout", "status": 503}],
+            "follower": [{"error": "drain timeout", "status": 503}],
+        }
+        assert follower.apc_prefix_wait_release == "cancelled"
+        assert not engine.apc_inflight_waiters
+        assert not engine.apc_inflight_resolutions
+        counts = engine.counts
+        assert counts["apc_inflight_prefix_waits"] == 1
+        assert counts["apc_inflight_prefix_waits_cancelled"] == 1
+    finally:
+        engine.close()
+
+
 def test_cancelled_leader_releases_follower_to_cold_prefill(monkeypatch):
     # Simulate a capture that was accepted by admission but never reaches the
     # publication queue.  The follower must still be released when the leader
@@ -349,6 +400,84 @@ def test_capture_failure_releases_followers_before_decode(monkeypatch):
         assert not next(
             job for job in jobs if not job.apc_prefix_wait_done
         ).apc_inflight_planned_bytes
+    finally:
+        engine.close()
+
+
+def test_junction_capture_failure_releases_followers_before_decode(monkeypatch):
+    """A follower may ask for a position the leader already planned as a
+    learned JUNCTION; the boundary keeps its junction role.  A declined
+    capture there was reported only for INFLIGHT boundaries, so the
+    followers waited for the leader's decode instead of the documented
+    release on capture failure."""
+    from mlx2.runtime import cow_cache
+
+    mx.set_default_device(mx.cpu)
+    monkeypatch.setattr(
+        serving, "runtime_identity", lambda: {"source_sha256": "cpu-inflight-junction"}
+    )
+    monkeypatch.setattr(memory, "execution_headroom", lambda: 100 * 2**30)
+    monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 0)
+    original = cow_cache.snapshot_prompt_cache_descriptors
+    decline = {"on": False}
+
+    def maybe_decline(*args, **kwargs):
+        if decline["on"]:
+            raise RuntimeError("forced exact snapshot decline")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cow_cache, "snapshot_prompt_cache_descriptors", maybe_decline)
+    model, vocab = tiny_qwen38_mtp()
+    engine = ServingEngine(
+        "tiny",
+        adapter_factory=_adapter(model, vocab),
+        qualification_mode=True,
+        mtp=False,
+        max_lanes=4,
+        max_inflight=8,
+        tenant_scoped_cache=True,
+        # One chunk past the shared prefix, so the prior request leaves no
+        # exact state at or below 96 and the leader starts cold.
+        prefill_step=128,
+        coalesce_window_ms=50,
+        execution_policy={
+            "apc_inflight_prefix_wait": {"enabled": True, "min_shared_tokens": 64},
+            "apc_junction_checkpoints": True,
+        },
+    )
+    assert engine.ready.wait(60), engine.error
+    try:
+        # A stored path the next requests branch from at 96: the leader plans
+        # a JUNCTION there before any follower asks for the position.
+        _output, receipt = collect(
+            engine.submit(
+                {"tokens": conversation(vocab, 3, tail_tokens=64), "max_tokens": 4}
+            )
+        )
+        assert "error" not in receipt
+        decline["on"] = True
+        jobs = [
+            engine.submit(
+                {"tokens": conversation(vocab, seed, tail_tokens=64), "max_tokens": 8}
+            )
+            for seed in (61, 67, 71, 73)
+        ]
+        results = [collect(job) for job in jobs]
+        assert all(output and "error" not in receipt for output, receipt in results)
+        leader = next(job for job in jobs if not job.apc_prefix_wait_done)
+        assert leader.state_boundaries == (
+            StateBoundary(96, BoundaryPurpose.JUNCTION),
+        )
+        assert engine.counts["apc_inflight_checkpoints_existing_plan"] == 3
+        waited = [job for job in jobs if job.apc_prefix_wait_done]
+        assert len(waited) == 3
+        assert [job.apc_prefix_wait_release for job in waited] == [
+            "checkpoint_capture_failed"
+        ] * 3
+        assert engine.counts["apc_inflight_prefix_waits_checkpoint_capture_failed"] == 3
+        assert not engine.apc_inflight_waiters
+        assert not engine.apc_inflight_resolutions
+        assert not leader.apc_inflight_planned_bytes
     finally:
         engine.close()
 
@@ -505,6 +634,79 @@ def test_selection_accounts_pending_boundaries_and_declines_missing_projection()
         available_checkpoint_bytes=10_000,
         cache_projection=lambda position: position * 5,
     ) is None
+
+
+def test_a_decoding_lane_releases_its_boundary_plan_from_the_ledger(monkeypatch):
+    """Selection charges every lane's planned checkpoint bytes against the
+    headroom.  A lane's interior/rolling plan (``state_boundary_planned_bytes``)
+    was set at admission and never released, so a lane that had long finished
+    its prompt -- every planned boundary captured, and resident, or declined --
+    kept suppressing in-flight waits for its whole decode."""
+    mx.set_default_device(mx.cpu)
+    monkeypatch.setattr(
+        serving, "runtime_identity", lambda: {"source_sha256": "cpu-inflight-ledger"}
+    )
+    monkeypatch.setattr(memory, "execution_headroom", lambda: 100 * 2**30)
+    monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 0)
+    model, vocab = tiny_qwen38_mtp()
+    engine = ServingEngine(
+        "tiny",
+        adapter_factory=_adapter(model, vocab),
+        qualification_mode=True,
+        mtp=False,
+        max_lanes=2,
+        tenant_scoped_cache=True,
+        prefill_step=16,
+        coalesce_window_ms=1,
+        execution_policy={
+            "apc_inflight_prefix_wait": {"enabled": True, "min_shared_tokens": 64},
+            "apc_interior_checkpoints": {"count": 4, "min_stride": 16},
+        },
+    )
+    assert engine.ready.wait(60), engine.error
+    try:
+        engine._inject_device_fault = lambda active: time.sleep(0.005)
+        decoding = engine.submit(
+            {"tokens": conversation(vocab, 5, tail_tokens=200), "max_tokens": 200}
+        )
+        deadline = time.monotonic() + 30
+        while decoding.completion_tokens < 4 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert decoding.completion_tokens >= 4
+        # The lane's prompt planned (and captured) interior checkpoints.
+        assert engine.counts["apc_interior_checkpoints_captured"] >= 2
+        selector = object.__new__(ServingEngine)
+        selector.apc_inflight_prefix_policy = {
+            "enabled": True,
+            "min_shared_tokens": 64,
+            "max_wait_ms": 300_000,
+        }
+        selector.apc_inflight_route = "hybrid"
+        selector.counts = Counter()
+        shared = list(range(1, 97))
+        leader_tokens = tuple(shared + [101 + index for index in range(32)])
+        leader = Job({"tokens": list(leader_tokens)})
+        leader.uid = decoding.uid + 1
+        leader.apc_sequence_key = ("namespace", leader_tokens, "session")
+        follower_tokens = tuple(shared + [201 + index for index in range(32)])
+        follower = Job({"tokens": list(follower_tokens)})
+        follower.apc_sequence_key = ("namespace", follower_tokens, "session")
+        selected = selector._select_inflight_prefix_leader(
+            SimpleNamespace(add_state_boundary=lambda *args: True),
+            {decoding.uid: decoding, leader.uid: leader},
+            follower,
+            follower_tokens,
+            SimpleNamespace(cached_tokens=0),
+            # Exactly the new boundary's projection: nothing else is pending.
+            available_checkpoint_bytes=96 * 5,
+            cache_projection=lambda position: position * 5,
+        )
+        assert selected is leader, dict(selector.counts)
+        assert selector.counts["apc_inflight_prefix_waits_skipped_headroom"] == 0
+        decoding.cancelled.set()
+        collect(decoding)
+    finally:
+        engine.close()
 
 
 def test_kv_only_route_fails_closed_until_prompt_boundary_release_exists():
