@@ -43,6 +43,7 @@ _HTTP_EXACT_ROUTES = {
     "/v1/batches": "batches",
     "/v1/embeddings": "embeddings",
     "/v1/rerank": "rerank",
+    "/v1/systemone": "systemone",
     "/v1/messages": "anthropic_messages",
     "/v1/messages/count_tokens": "anthropic_count_tokens",
     "/tokenize": "tokenize",

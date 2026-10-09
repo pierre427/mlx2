@@ -45,6 +45,7 @@ gguf-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"
 [project.scripts]
 mlx2-serve = "mlx2.server:main"
 mlx2 = "mlx2.cli:main"
+mlx2-decisions = "mlx2.decisions.server:main"
 mlx2-diarize = "mlx2.diarize_cli:main"
 mlx2-radio = "mlx2.radio_cli:main"
 mlx2-top = "mlx2.top:main"
