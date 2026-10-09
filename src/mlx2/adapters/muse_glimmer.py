@@ -151,12 +151,19 @@ def normalize_messages(messages: list[dict]) -> list[dict]:
 _MUSE_TOOL_NAME = re.compile(r"[\w.-]+\Z", re.ASCII)
 
 
+def _reasoning_effort(request: dict) -> str:
+    """The request's effort; a null effort or toggle is an absent one."""
+    effort = request.get("reasoning_effort")
+    if effort is None:
+        effort = "high" if request.get("enable_thinking") else "none"
+    return effort
+
+
 def _thinking_enabled(request: dict) -> bool:
-    effort = request.get(
-        "reasoning_effort",
-        "high" if request.get("enable_thinking", False) else "none",
-    )
-    return bool(request.get("enable_thinking", effort != "none"))
+    enabled = request.get("enable_thinking")
+    if enabled is None:
+        return _reasoning_effort(request) != "none"
+    return bool(enabled)
 
 
 def _tool_names(request: dict) -> tuple[str, ...]:
@@ -180,10 +187,7 @@ def render_prompt_text(tokenizer, request: dict) -> str:
     """Muse prompt text; ``prompt_tokens`` is its special-token-free encoding."""
     if "messages" not in request:
         return request["prompt"]
-    effort = request.get(
-        "reasoning_effort",
-        "high" if request.get("enable_thinking", False) else "none",
-    )
+    effort = _reasoning_effort(request)
     strengths = {
         "none": "low",
         "minimal": "low",

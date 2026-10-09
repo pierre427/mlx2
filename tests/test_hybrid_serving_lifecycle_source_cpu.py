@@ -481,7 +481,8 @@ class HttpCapabilityValidation(unittest.TestCase):
         nodes=[node for node in server.body if isinstance(node,ast.FunctionDef) and
             node.name in ('validate_request','normalize_client_options')]
         compat=ast.parse((ROOT/'src/mlx2/openai_compat.py').read_text())
-        nodes += [node for node in compat.body if isinstance(node,ast.FunctionDef) and node.name=='normalize_tool_choice']
+        nodes += [node for node in compat.body if isinstance(node,ast.FunctionDef) and node.name in
+            ('normalize_tool_choice','drop_null_fields','flatten_text_parts','flatten_text_messages')]
         environment={'__package__':'mlx2','__name__':'mlx2.server','math':math,'Mapping':Mapping,'MAX_TOP_LOGPROBS':20,'MAX_OUTPUT_TOKENS':2_097_152}
         exec(compile(ast.Module(body=nodes,type_ignores=[]),'server.py','exec'),environment)
         self.validate=environment['validate_request']

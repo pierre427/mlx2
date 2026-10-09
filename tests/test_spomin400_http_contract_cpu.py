@@ -21,7 +21,7 @@ from mlx2.runtime.paged_n20_phase_control import PhaseController
 def parser():
  tree=ast.parse((ROOT/'src/mlx2/server.py').read_text())
  nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in ('validate_request','normalize_client_options')]
- compat=ast.parse((ROOT/'src/mlx2/openai_compat.py').read_text());nodes += [n for n in compat.body if isinstance(n,ast.FunctionDef) and n.name=='normalize_tool_choice']
+ compat=ast.parse((ROOT/'src/mlx2/openai_compat.py').read_text());nodes += [n for n in compat.body if isinstance(n,ast.FunctionDef) and n.name in ('normalize_tool_choice','drop_null_fields','flatten_text_parts','flatten_text_messages')]
  env={'__package__':'mlx2','math':math,'Mapping':Mapping,'MAX_TOP_LOGPROBS':20,'MAX_OUTPUT_TOKENS':2_097_152}
  exec(compile(ast.Module(body=nodes,type_ignores=[]),'actual server validator','exec'),env)
  return env['validate_request']

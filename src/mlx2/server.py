@@ -63,7 +63,9 @@ from .openai_compat import (
     ResponsesInputItemsUnavailable,
     ResponsesTextLogprobs,
     RESPONSES_INPUT_ITEM_INCLUDES,
+    drop_null_fields,
     enforce_tool_contract,
+    flatten_text_messages,
     normalize_tool_choice,
     refuse_video_sampling_options,
     response_id,
@@ -673,7 +675,6 @@ def validate_request(
     """
     if not isinstance(body, dict):
         raise ValueError("request must be a JSON object")
-    body = normalize_client_options(body)
     supported = {
         "model",
         "messages",
@@ -721,10 +722,27 @@ def validate_request(
         "session_id",
         "return_progress",
         "verify_bitexact",
+        "user",
     }
+    # OpenAI clients serialize an unset field as an explicit null
+    # (openai-python sends ``"stop": null`` for ``stop=None``).  Treat a
+    # recognised top-level null exactly as an absent field, before aliases and
+    # disagreement checks compare it: required fields still fail on their own
+    # "must be" errors, and the engine never sees a key that carries no value.
+    # An unknown field keeps its null and is refused below like any other.
+    body = drop_null_fields(
+        body, supported | {"options", "chat_template_kwargs", "think"}
+    )
+    body = normalize_client_options(body)
     unknown = set(body) - supported
     if unknown:
         raise ValueError(f"unsupported request fields: {', '.join(sorted(unknown))}")
+    if "user" in body:
+        # End-user tag for the provider's abuse monitoring.  Validated and
+        # ignored as Responses does: it never changes local execution.
+        if not isinstance(body["user"], str):
+            raise ValueError("user must be text")
+        body = {key: value for key, value in body.items() if key != "user"}
     if "max_completion_tokens" in body:
         if "max_tokens" in body and body["max_tokens"] != body["max_completion_tokens"]:
             raise ValueError("max_tokens and max_completion_tokens disagree")
@@ -741,6 +759,10 @@ def validate_request(
         messages = body.get("messages")
         if not isinstance(messages, list) or not messages:
             raise ValueError("messages must be a non-empty list")
+        # An all-text part array on any role is text, not media: only a list
+        # that still carries an image, audio or video part is multimodal.
+        messages = flatten_text_messages(messages)
+        body = {**body, "messages": messages}
         for message in messages:
             if not isinstance(message, dict) or message.get("role") not in (
                 "system",
@@ -828,14 +850,6 @@ def validate_request(
             }
     elif not isinstance(body.get("prompt"), str) or not body["prompt"]:
         raise ValueError("prompt must be a non-empty string")
-    # OpenAI clients serialize an unset constraint as an explicit null.  Treat
-    # it exactly as an absent field so the engine never sees a constraint key
-    # that carries no constraint.
-    body = {
-        key: value
-        for key, value in body.items()
-        if key not in {"response_format", "grammar"} or value is not None
-    }
     if "response_format" in body or "grammar" in body:
         if "response_format" in body and "grammar" in body:
             raise ValueError("response_format and grammar are mutually exclusive")
@@ -1162,6 +1176,7 @@ def normalize_client_options(body):
         "thinking_budget": "thinking_budget",
     }
     allowed = {"temperature", "top_p", "top_k", "min_p", "seed", "stop", *aliases}
+    options = drop_null_fields(options, allowed)
     if set(options) - allowed:
         raise ValueError("unsupported options: " + ", ".join(sorted(set(options) - allowed)))
     for name, value in options.items():
@@ -3322,11 +3337,6 @@ def handler_for(
                         engine_counts = getattr(engine, "counts", None)
                         if engine_counts is not None:
                             engine_counts["reasoning_signature_rejections"] += rejections
-                    if anthropic_count_tokens:
-                        self.send_json(
-                            200, {"input_tokens": int(engine.count_tokens(body))}
-                        )
-                        return
                 if responses_api:
                     with wrongly_typed_request_is_invalid():
                         body, response_options = prepare_responses_request(
@@ -3355,6 +3365,14 @@ def handler_for(
                         else 64,
                         max_stops=ANTHROPIC_MAX_STOP_SEQUENCES if anthropic else 4,
                     )
+                if anthropic_count_tokens:
+                    # Count the request /v1/messages would serve: validation
+                    # narrows a named choice's tools and canonicalizes their
+                    # schemas, exactly as /tokenize renders it.
+                    self.send_json(
+                        200, {"input_tokens": int(engine.count_tokens(body))}
+                    )
+                    return
                 if semantic_middleware is not None and chat:
                     ensure_semantic_classifier()
                     body, semantic_state = semantic_middleware.prepare(
@@ -3477,6 +3495,11 @@ def handler_for(
                     "reasoning_tokens": 0,
                 }
                 hosted_receipts = []
+                # Responses ``max_output_tokens`` bounds the whole response,
+                # every hosted tool round included; None keeps each round's
+                # prompt-aware default.
+                hosted_budget = body.get("max_tokens")
+                hosted_budget_exhausted = False
                 def commit_stream():
                     """Commit the SSE response headers (once)."""
                     nonlocal streaming
@@ -3914,6 +3937,18 @@ def handler_for(
                                 "the model mixed server-executed (hosted) and "
                                 "client tool calls in one turn"
                             )
+                        if (
+                            executable
+                            and hosted_budget is not None
+                            and hosted_usage["completion_tokens"] >= hosted_budget
+                        ):
+                            # No output budget is left for a round to read the
+                            # tool results: the hosted calls are neither run
+                            # nor handed to a client that cannot run them.
+                            executable = False
+                            calls = []
+                            hosted_budget_exhausted = True
+                            event = {**event, "finish_reason": "length"}
                         if executable:
                             if hosted_rounds >= 8:
                                 raise ToolContractError(
@@ -3967,6 +4002,10 @@ def handler_for(
                             response_options.setdefault("hosted_messages", []).extend(
                                 (message, *outputs)
                             )
+                            if hosted_budget is not None:
+                                body["max_tokens"] = (
+                                    hosted_budget - hosted_usage["completion_tokens"]
+                                )
                             hosted_rounds += 1
                             continuation_kwargs = {"tenant_id": tenant_id}
                             if admission_lease is not None:
@@ -3975,7 +4014,7 @@ def handler_for(
                             parts, reasoning, calls, probabilities = [], [], [], []
                             text_logprobs = ResponsesTextLogprobs()
                             continue
-                        if hosted_rounds:
+                        if hosted_rounds or hosted_budget_exhausted:
                             # Every round's tokens, including its prefix-cache
                             # hits and reasoning, count toward the response.
                             usage = {
@@ -3996,6 +4035,7 @@ def handler_for(
                                 "hosted_tools": {
                                     "rounds": hosted_rounds,
                                     "receipts": hosted_receipts,
+                                    "output_budget_exhausted": hosted_budget_exhausted,
                                 },
                             }
                         if buffered_hosted_stream and not prologue_sent:
@@ -4034,15 +4074,19 @@ def handler_for(
                                     {**call, "index": index}
                                     for index, call in enumerate(message["tool_calls"])
                                 ]
+                            held = {"index": 0, "finish_reason": None, "delta": delta}
+                            if wants_logprobs(body):
+                                # The held message's one delta carries every
+                                # token's logprob, as the non-streaming
+                                # response reports them.
+                                held["logprobs"] = {"content": probabilities}
                             self._sse(
                                 {
                                     "id": job.id,
                                     "object": "chat.completion.chunk",
                                     "created": int(job.created),
                                     "model": model,
-                                    "choices": [
-                                        {"index": 0, "finish_reason": None, "delta": delta}
-                                    ],
+                                    "choices": [held],
                                 }
                             )
                             self._sse(

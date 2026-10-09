@@ -16,6 +16,17 @@ def constrained_tool_choice(request):
     return choice == "required" or isinstance(choice, dict)
 
 
+def callable_tools(request):
+    """The request's tools, or None when ``tool_choice`` "none" asks for no call.
+
+    The engine admits tools with "none" onto a route that declares no TOOLS;
+    an adapter without a tool route serves that request as plain text.
+    """
+    if request.get("tool_choice", "auto") == "none":
+        return None
+    return request.get("tools") or None
+
+
 class ToolCallConstraintError(ValueError):
     """A parsed tool-call sequence violates an explicit request bound.
 

@@ -259,8 +259,8 @@ class PinnedVisionCandidateAdapter:
         return request["prompt"]
 
     def output_parser(self, request):
-        from ..output import OutputParser
-        if request.get("tools"):
+        from ..output import OutputParser, callable_tools
+        if callable_tools(request):
             raise ValueError("vision candidate has no qualified tool route")
         return OutputParser(chat="messages" in request, stops=request.get("stop", ()))
 

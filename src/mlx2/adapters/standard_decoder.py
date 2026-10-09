@@ -938,9 +938,9 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
         return request["prompt"]
 
     def output_parser(self, request):
-        from ..output import OutputParser
+        from ..output import OutputParser, callable_tools
 
-        if request.get("tools") or request.get("tool_choice") not in (
+        if callable_tools(request) or request.get("tool_choice") not in (
             None,
             "none",
             "auto",

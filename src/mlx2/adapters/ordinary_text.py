@@ -50,15 +50,17 @@ class OrdinaryTextAdapter:
         return request["prompt"]
 
     def output_parser(self, request):
-        from ..output import OutputParser
+        from ..output import OutputParser, callable_tools
 
-        if request.get("tools") or request.get("enable_thinking"):
+        if callable_tools(request) or request.get("enable_thinking"):
             raise ValueError("tools and reasoning are not declared for this adapter")
         return OutputParser(chat="messages" in request, thinking=False, tools=None,
                             stops=request.get("stop", ()))
 
     def tool_constraint(self, request):
-        if request.get("tools"):
+        from ..output import callable_tools
+
+        if callable_tools(request):
             raise ValueError("tools are not declared for this adapter")
         return None
 

@@ -66,8 +66,7 @@ def _chat_tool(tool, *, anthropic=False, default_strict=None, compat=False):
         schema = _object(tool.get("input_schema"), "tool input_schema")
         # ``description`` is optional here; the empty default keeps a chat
         # template that renders it (``| tojson``) from meeting a Jinja
-        # Undefined.  ``/v1/messages/count_tokens`` renders without passing
-        # through ``validate_request``, so the default has to be set here too.
+        # Undefined (``validate_request`` sets the same default).
         function = {"name": name, "description": "", "parameters": schema}
         if "description" in tool:
             function["description"] = _text(tool["description"], "tool description")
@@ -464,7 +463,9 @@ def anthropic_request_to_chat(
         },
         "Anthropic request",
     )
-    if not count_tokens and "max_tokens" not in body:
+    if not count_tokens and body.get("max_tokens") is None:
+        # The chat validator reads a forwarded null as "unset" and would
+        # apply the server default; Messages requires an explicit cap.
         raise ValueError("max_tokens is required")
     if "container" in body:
         raise ValueError("container is unsupported")
@@ -542,8 +543,8 @@ def anthropic_request_to_chat(
     if "tool_choice" in body:
         choice = _anthropic_tool_choice(body["tool_choice"])
         if withheld:
-            # vLLM #59718: a forced choice must name a tool still offered
-            # (``/count_tokens`` never reaches ``normalize_tool_choice``).
+            # vLLM #59718: a forced choice must name a tool still offered;
+            # say so here, ahead of ``normalize_tool_choice``'s generic error.
             offered = {tool["function"]["name"] for tool in result.get("tools", ())}
             if choice == "required" and not offered:
                 raise ValueError("tool_choice any needs a tool that is currently offered")

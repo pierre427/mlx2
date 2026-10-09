@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from ..output import callable_tools
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from ..process_env import PROCESS_NUMERICS, require_process_numerics
 
@@ -334,7 +335,7 @@ class _GptOssOrdinaryAdapter:
         return self.direct_final and not self.thinking_enabled(request)
 
     def prompt_tokens(self, request: dict) -> list[int]:
-        if request.get("tools"):
+        if callable_tools(request):
             raise ValueError("GPT-OSS tool calling is not implemented")
         if "messages" not in request:
             return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
@@ -356,7 +357,7 @@ class _GptOssOrdinaryAdapter:
         return tokens
 
     def output_parser(self, request):
-        if request.get("tools"):
+        if callable_tools(request):
             raise ValueError("GPT-OSS tool calling is not implemented")
         from .gpt_oss_output import HarmonyOutputParser
         return HarmonyOutputParser(

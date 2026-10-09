@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..multimodal import media_fingerprint, resolve_media
-from ..output import OutputParser
+from ..output import OutputParser, callable_tools
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from .mlx_vlm import MediaFeatureCache, _LogitsModel, _ids_and_kwargs, _plain_messages, _source
 
@@ -701,7 +701,7 @@ class LFM25VLAdapter:
         return owner.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     def output_parser(self, request):
-        if request.get("tools"):
+        if callable_tools(request):
             raise ValueError("LFM2.5-VL tool calling is unqualified")
         return OutputParser(chat="messages" in request, stops=request.get("stop", ()))
 

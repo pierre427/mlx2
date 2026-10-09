@@ -49,6 +49,55 @@ RESPONSES_FIELDS = frozenset(
 )
 
 
+def drop_null_fields(body: Mapping, recognized) -> dict:
+    """Return ``body`` without its null ``recognized`` members: null is "unset".
+
+    OpenAI declares its optional request fields nullable, and clients send an
+    unset keyword as an explicit ``null`` (openai-python serializes ``None``).
+    An unrecognised field keeps its null, so the caller's unsupported-field
+    check still refuses it whatever its value.
+    """
+    return {
+        key: value
+        for key, value in body.items()
+        if value is not None or key not in recognized
+    }
+
+
+def flatten_text_parts(content):
+    """The joined text of an all-text content-part array, else ``None``.
+
+    OpenAI Chat accepts ``content`` as an array of ``{"type": "text"}`` parts
+    on every role.  Such an array asks for no media capability and renders as
+    its text, the way Responses flattens its own text parts.
+    """
+    if (
+        isinstance(content, list)
+        and content
+        and all(
+            isinstance(part, Mapping)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+            for part in content
+        )
+    ):
+        return "".join(part["text"] for part in content)
+    return None
+
+
+def flatten_text_messages(messages: list) -> list:
+    """``messages`` with every all-text content-part array flattened to text."""
+    flattened = []
+    for message in messages:
+        text = (
+            flatten_text_parts(message.get("content"))
+            if isinstance(message, Mapping)
+            else None
+        )
+        flattened.append(message if text is None else {**message, "content": text})
+    return flattened
+
+
 class ToolContractError(ValueError):
     """Generated tool output violated a validated request contract."""
 
@@ -402,6 +451,10 @@ def responses_to_chat_request(
     compat_on = agent_compat is not None and agent_compat.enabled
     if not isinstance(body, Mapping):
         raise ValueError("request must be a JSON object")
+    # A null optional field is an absent one (``instructions``,
+    # ``previous_response_id`` and ``metadata`` already read it so); a null
+    # ``input`` is then still missing.
+    body = drop_null_fields(body, RESPONSES_FIELDS)
     unknown = set(body) - RESPONSES_FIELDS
     if unknown:
         raise ValueError(f"unsupported Responses fields: {', '.join(sorted(unknown))}")

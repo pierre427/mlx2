@@ -4485,6 +4485,17 @@ class ServingEngine:
                 raise ValueError("this model declares no sampling profiles")
             vendor.select(thinking=None, requested=profile)
         public_request = {key: value for key, value in request.items() if key != "mlx_fault"}
+        if not callable(
+            getattr(getattr(self, "adapter", None), "prepare_multimodal_request", None)
+        ) and isinstance(public_request.get("messages"), list):
+            # Without a media hook an all-text part array asks for no media
+            # capability; render it as its text (the HTTP validator already
+            # does, for every route).
+            from .openai_compat import flatten_text_messages
+
+            public_request["messages"] = flatten_text_messages(
+                public_request["messages"]
+            )
         activation = activation_capsule_request(public_request)
         has_media = any(
             isinstance(message.get("content"), list)
