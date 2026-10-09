@@ -165,18 +165,24 @@ def test_multilane_cap_respects_dflash2_proposal_floor(cap):
         )
 
 
-def test_shipped_progressive_profiles_still_accepted():
-    root = Path(__file__).resolve().parents[1] / "qualification/policies"
-    for name in (
-        "muse-dflash2-progressive.json",
-        "muse-dflash2-progressive-b1-m3.json",
-    ):
-        policy = normalize_external_policy(json.loads((root / name).read_text()))
-        assert policy["progressive_verification_tile"] == 3
+def test_progressive_tile_two_is_accepted():
     accepted = normalize_external_policy(
         {**_PROGRESSIVE_BASE, "progressive_verification_tile": 2}
     )
     assert accepted["progressive_verification_tile"] == 2
+
+
+def test_shipped_progressive_profiles_still_accepted():
+    root = Path(__file__).resolve().parents[1] / "qualification/policies"
+    names = ("muse-dflash2-progressive.json", "muse-dflash2-progressive-b1-m3.json")
+    present = [name for name in names if (root / name).is_file()]
+    if not present:
+        # Trees without qualification/ (the public mirror) carry neither file.
+        pytest.skip("shipped qualification policies absent")
+    assert present == list(names), f"incomplete shipped policy set: {present}"
+    for name in names:
+        policy = normalize_external_policy(json.loads((root / name).read_text()))
+        assert policy["progressive_verification_tile"] == 3
 
 
 def test_muse_cache_projection_keeps_rolling_boundaries():
