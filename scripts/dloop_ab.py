@@ -105,6 +105,22 @@ def _validate_numeric_args(pairs, max_tokens, state_oracle_tokens, width):
         raise ValueError("--width must be one of 1, 2, 4, or 8")
 
 
+def _decode_token_total(rows, context):
+    """Require every measured request to contribute at least one decode token."""
+    if not isinstance(rows, (list, tuple)) or not rows:
+        raise ValueError(f"{context}: no request rows to summarize")
+    counts = []
+    for index, row in enumerate(rows):
+        count = row.get("decode_tokens") if isinstance(row, dict) else None
+        if type(count) is not int or count <= 0:
+            raise ValueError(
+                f"{context} row {index}: insufficient decode-token count; "
+                "each request must emit at least one decode token"
+            )
+        counts.append(count)
+    return sum(counts)
+
+
 def _verify_frozen_git(expected_revision):
     try:
         actual = subprocess.check_output(
@@ -447,11 +463,15 @@ def summarize(results, arms, baseline):
     out = {}
     for name in arms:
         runs = [r for r in results if r["arm"] == name]
-        per_pair = [
-            sum(x["decode_seconds"] for x in r["rows"])
-            / sum(x["decode_tokens"] for x in r["rows"])
-            for r in runs
-        ]
+        if not runs:
+            raise ValueError(f"arm {name!r}: no completed pairs to summarize")
+        per_pair = []
+        for run in runs:
+            context = f"arm {name!r} pair {run.get('pair', '?')}"
+            decode_tokens = _decode_token_total(run.get("rows"), context)
+            per_pair.append(
+                sum(row["decode_seconds"] for row in run["rows"]) / decode_tokens
+            )
         loops = [x["draft_loop"] for r in runs for x in r["rows"] if x["draft_loop"]]
         out[name] = {
             "ms_per_token_pairs": [1e3 * v for v in per_pair],
@@ -522,6 +542,9 @@ def main(argv=None):
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
+        _validate_numeric_args(
+            args.pairs, args.max_tokens, args.state_oracle_tokens, args.width
+        )
         _validate_identity_args(
             args.source_revision, args.runtime_source_sha256, args.artifact_identity
         )
@@ -529,12 +552,6 @@ def main(argv=None):
             args.source_revision, args.runtime_native_sha256, args.artifact_identity
         )
         _validate_arms(args.arm)
-        if args.pairs < 1 or args.max_tokens < 1 or args.width not in (1, 2, 4, 8):
-            raise ValueError(
-                "pairs/max-tokens must be positive and width must be 1, 2, 4, or 8"
-            )
-        if args.state_oracle_tokens < 0:
-            raise ValueError("--state-oracle-tokens must be nonnegative")
         if args.out.exists():
             raise ValueError(f"output already exists: {args.out}")
         git_revision = _verify_frozen_git(args.source_revision)
@@ -624,7 +641,7 @@ def main(argv=None):
             results.append(
                 {"pair": pair, "arm": name, "config": arms[name], "rows": rows}
             )
-            total = sum(r["decode_tokens"] for r in rows)
+            total = _decode_token_total(rows, f"arm {name!r} pair {pair}")
             secs = sum(r["decode_seconds"] for r in rows)
             print(
                 json.dumps(
