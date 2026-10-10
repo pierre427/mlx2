@@ -25,7 +25,7 @@ LOCKS = (Path("/Users/Shared/mlxuag/gpu.lock"), Path("/tmp/gpu.lock"))
 WAITERS = Path("/Users/Shared/mlxuag/gpu.lock.waiters")
 DEFAULT_SESSION = "codex-hils-declared-groups-20260930"
 MODEL_PROCESS = re.compile(
-    r"-m mlx2\.server|mlx_lm\.server|mlx_vlm\.server|rapid-mlx|llama-server|"
+    r"-m\s+mlx2\.(?:server|decisions\.server)(?:\s|$)|mlx_lm\.server|mlx_vlm\.server|rapid-mlx|llama-server|"
     r"qualify_hils_declared_groups\.py",
     re.IGNORECASE,
 )

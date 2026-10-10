@@ -19,6 +19,23 @@ def _load_module():
     return module
 
 
+def test_foreign_decision_server_blocks_gpu_admission(monkeypatch):
+    module = _load_module()
+    monkeypatch.setattr(module.os, "getpid", lambda: 10)
+    monkeypatch.setattr(module.os, "getppid", lambda: 9)
+    monkeypatch.setattr(
+        module.subprocess, "check_output",
+        lambda *args, **kwargs: (
+            "11 /venv/bin/python -m mlx2.decisions.server --port 9000\n"
+            "12 /venv/bin/python -m mlx2.top\n"
+            "13 /venv/bin/python -m mlx2.server_helpers\n"
+        ),
+    )
+    assert module.foreign_model_processes() == [
+        "11 /venv/bin/python -m mlx2.decisions.server --port 9000"
+    ]
+
+
 def test_exclusive_receipt_refuses_to_overwrite(tmp_path: Path) -> None:
     module = _load_module()
     receipt = tmp_path / "attempt.json"
