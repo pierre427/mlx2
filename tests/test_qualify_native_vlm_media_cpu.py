@@ -14,9 +14,11 @@ from mlx2.media_qualification import (
 )
 from scripts.qualify_native_vlm_media import (
     FAMILIES,
+    _apc_counter_delta,
     _batching_observation,
     _drain,
     _enable_batching_observer,
+    _media_start,
     _ordinary_bound_method,
     _parity_caches,
     evaluate_native_report,
@@ -369,6 +371,94 @@ def test_native_evaluator_rejects_identity_fixture_parity_and_media_reuse_tamper
     r, e = _report("gemma3n")
     r["apc_stats_delta"] = {"hits": True}
     assert not _eval(r, e)["prefix_reuse"]
+
+
+def test_apc_delta_uses_only_declared_flat_counters_and_fails_closed():
+    before = {
+        "hits": 2,
+        "misses": 3,
+        "lifetime": {"hits": 8},
+        "layer_segments": {"logical_bytes": 1024},
+    }
+    after = {
+        "hits": 5,
+        "misses": 4,
+        "lifetime": {"hits": 11},
+        "layer_segments": {"logical_bytes": 2048},
+    }
+    assert _apc_counter_delta(before, after, ("hits", "misses")) == {
+        "hits": 3,
+        "misses": 1,
+    }
+    with pytest.raises(ValueError, match="missing or non-monotonic"):
+        _apc_counter_delta(before, after, ("hits", "stores"))
+    with pytest.raises(ValueError, match="missing or non-monotonic"):
+        _apc_counter_delta(before, {**after, "hits": 1}, ("hits",))
+    with pytest.raises(ValueError, match="missing or non-monotonic"):
+        _apc_counter_delta(before, {**after, "hits": True}, ("hits",))
+
+
+@pytest.mark.parametrize(
+    ("modality", "tokens", "bounds_name", "bounds", "start_ids", "end_ids"),
+    [
+        (
+            "image",
+            [7, 101, 8, 9, 102, 101, 10, 102],
+            "image_bound",
+            [[[2, 4], [6, 7]]],
+            {"im_start_id": 101, "slice_start_id": 103},
+            {"im_end_id": 102, "slice_end_id": 104},
+        ),
+        (
+            "audio",
+            [7, 201, 8, 9, 202],
+            "audio_bounds",
+            [[[2, 4]]],
+            {"audio_start_id": 201},
+            {"audio_end_id": 202},
+        ),
+    ],
+)
+def test_minicpmo_media_start_uses_prepared_bounds_and_tokenizer_special_ids(
+    modality, tokens, bounds_name, bounds, start_ids, end_ids
+):
+    tokenizer = SimpleNamespace(**start_ids, **end_ids)
+    adapter = SimpleNamespace(
+        identity={"model_type": "minicpmo"},
+        processor=SimpleNamespace(tokenizer=tokenizer),
+    )
+    prepared = {"_mlx2_prefill_inputs": {bounds_name: bounds}}
+
+    assert _media_start(adapter, tokens, prepared=prepared, modality=modality) == 1
+
+
+def test_minicpmo_media_start_rejects_missing_or_marker_misaligned_bounds():
+    adapter = SimpleNamespace(
+        identity={"model_type": "minicpmo"},
+        processor=SimpleNamespace(
+            tokenizer=SimpleNamespace(
+                im_start_id=101,
+                slice_start_id=103,
+                im_end_id=102,
+                slice_end_id=104,
+            )
+        ),
+    )
+    tokens = [7, 101, 8, 9, 102]
+    with pytest.raises(AssertionError, match="image_bound are missing"):
+        _media_start(
+            adapter,
+            tokens,
+            prepared={"_mlx2_prefill_inputs": {"image_bound": []}},
+            modality="image",
+        )
+    with pytest.raises(AssertionError, match="disagree with tokenizer markers"):
+        _media_start(
+            adapter,
+            tokens,
+            prepared={"_mlx2_prefill_inputs": {"image_bound": [[[1, 4]]]}},
+            modality="image",
+        )
 
 
 def test_encoder_batching_observation_requires_real_bounded_overflow_chunks():

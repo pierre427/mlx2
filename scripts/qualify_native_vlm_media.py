@@ -372,7 +372,54 @@ def _parity(adapter, prepared, family):
     }
 
 
-def _media_start(adapter, tokens):
+def _media_start(adapter, tokens, *, prepared=None, modality=None):
+    if adapter.identity.get("model_type") == "minicpmo":
+        import numpy as np
+
+        if modality not in {"image", "audio"} or not isinstance(prepared, dict):
+            raise AssertionError(
+                "MiniCPM-o media start requires prepared modality data"
+            )
+        tokenizer = getattr(adapter.processor, "tokenizer", None)
+        if modality == "image":
+            bounds_name = "image_bound"
+            start_ids = {
+                getattr(tokenizer, "im_start_id", None),
+                getattr(tokenizer, "slice_start_id", None),
+            }
+            end_ids = {
+                getattr(tokenizer, "im_end_id", None),
+                getattr(tokenizer, "slice_end_id", None),
+            }
+        else:
+            bounds_name = "audio_bounds"
+            start_ids = {getattr(tokenizer, "audio_start_id", None)}
+            end_ids = {getattr(tokenizer, "audio_end_id", None)}
+        if any(type(token_id) is not int for token_id in start_ids | end_ids):
+            raise AssertionError("MiniCPM-o tokenizer special token ids are missing")
+        inputs = prepared.get("_mlx2_prefill_inputs")
+        bounds = inputs.get(bounds_name) if isinstance(inputs, dict) else None
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 1:
+            raise AssertionError(f"MiniCPM-o processor {bounds_name} are missing")
+        pairs = np.asarray(bounds[0])
+        if pairs.ndim != 2 or pairs.shape[1] != 2 or pairs.dtype.kind not in "iu":
+            raise AssertionError(f"MiniCPM-o processor {bounds_name} are malformed")
+        markers = []
+        for start, end in pairs.tolist():
+            if not 0 < start < end < len(tokens):
+                raise AssertionError(f"MiniCPM-o processor {bounds_name} exceed prompt")
+            if (
+                int(tokens[start - 1]) not in start_ids
+                or int(tokens[end]) not in end_ids
+            ):
+                raise AssertionError(
+                    f"MiniCPM-o processor {bounds_name} disagree with tokenizer markers"
+                )
+            markers.append(start - 1)
+        if not markers:
+            raise AssertionError(f"MiniCPM-o processor returned no {modality} bounds")
+        return min(markers)
+
     config = adapter.identity.get("config") or {}
     ids = set()
     for key in ("image_token_id", "video_token_id", "audio_token_id"):
@@ -387,6 +434,24 @@ def _media_start(adapter, tokens):
     if not pos:
         raise AssertionError("processor emitted no recognized media token")
     return min(pos)
+
+
+def _apc_counter_delta(before, after, counter_keys):
+    """Subtract only APCv2's declared flat counters, never nested telemetry."""
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        raise TypeError("APCv2 statistics snapshots must be mappings")
+    keys = tuple(counter_keys)
+    if not keys or any(not isinstance(key, str) or not key for key in keys):
+        raise TypeError("APCv2 counter key contract is missing")
+    if len(set(keys)) != len(keys):
+        raise ValueError("APCv2 counter key contract contains duplicates")
+    delta = {}
+    for key in keys:
+        old, new = before.get(key), after.get(key)
+        if type(old) is not int or type(new) is not int or old < 0 or new < old:
+            raise ValueError(f"APCv2 counter {key!r} is missing or non-monotonic")
+        delta[key] = new - old
+    return delta
 
 
 def _drain(job):
@@ -487,10 +552,14 @@ def run_family(family, model_path):
                     ).decode(),
                     "prompt_tokens": len(tokens),
                     "media_token_end": end,
-                    "media_token_start": _media_start(adapter, tokens),
+                    "media_token_start": _media_start(
+                        adapter, tokens, prepared=prep, modality=kind
+                    ),
                     "changed_prompt_tokens": len(ct),
                     "changed_media_token_end": ce,
-                    "changed_media_token_start": _media_start(adapter, ct),
+                    "changed_media_token_start": _media_start(
+                        adapter, ct, prepared=changed_prep, modality=kind
+                    ),
                     "media_fingerprint": str(fingerprint),
                     "changed_media_fingerprint": str(
                         changed_prep["_mlx2_media_fingerprint"]
@@ -584,10 +653,7 @@ def run_family(family, model_path):
                 )
             }
         apc_after = dict(engine.apc.apc_stats)
-        apc_delta = {
-            key: apc_after.get(key, 0) - apc_before.get(key, 0)
-            for key in set(apc_before) | set(apc_after)
-        }
+        apc_delta = _apc_counter_delta(apc_before, apc_after, engine.apc._STAT_KEYS)
         settings = engine.snapshot.get("settings")
         if not isinstance(settings, dict) or not isinstance(serving_runtime, dict):
             raise TypeError("serving runtime/settings identity missing")

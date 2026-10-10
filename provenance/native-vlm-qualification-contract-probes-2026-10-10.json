@@ -1,0 +1,22 @@
+{
+  "implementation": "Native VLM qualification producer contract probes",
+  "source_repository": "https://github.com/Blaizzy/mlx-vlm",
+  "source_revision": "67599f2e8ec31bf35cbb7b02794114f20844f0bb0",
+  "source_paths": [
+    "mlx_vlm/models/minicpmo/processing_minicpmo.py"
+  ],
+  "license": "MIT",
+  "local_paths": [
+    "scripts/qualify_native_vlm_media.py",
+    "tests/test_qualify_native_vlm_media_cpu.py"
+  ],
+  "modifications": [
+    "Original probe logic validates prepared image/audio bounds against the pinned tokenizer start/end marker IDs; no tensor implementation copied.",
+    "APCv2 statistics deltas use the local declared flat counter contract and reject missing, invalid or decreasing counters."
+  ],
+  "validation": [
+    "27 focused CPU producer/evaluator tests passed.",
+    "Actual cached MiniCPM-o processor image bounds [[7,71]] and audio bounds [[29,33]] matched marker IDs without loading model weights or evaluating MLX.",
+    "GPU qualification remains pending for the corrected producer."
+  ]
+}
