@@ -41,6 +41,29 @@ seconds. Thermal state stayed nominal; no contamination was flagged. All
 streams completed and returned the needle, but the cache-hit gate remained
 unsatisfied. Historical decode (17.98) and 4/4 warm hits were not recovered.
 
+The rerun trace makes the scheduling failure concrete. Three cold responses
+reported compute widths `[3, 4]`, while the late fourth response reported
+`[1, 4]`. The first cohort therefore decoded while the fourth request was
+still prefilling, then all four eventually merged into ordinary decode. In the
+warm phase, three requests had near-complete APCv2 hits and one was a full
+miss, but all four TTFTs clustered at 24.16-24.90 seconds: the warm hits waited
+for the miss instead of entering decode. APCv2 recorded 19 value evictions,
+all with zero prior hits, and only three of four warm requests survived as
+full-prefix hits.
+
+The causal sequence was:
+
+1. The width policy had already selected ordinary execution above width three,
+   but joining admission still priced and allocated self-MTP depth two.
+2. That speculative admission admitted three rows first, splitting one logical
+   four-request arrival into a three-row cohort and a late singleton.
+3. Admission evicted reusable APCv2 entries when ordinary decode already fit,
+   solely to seek an optional speculative depth that the static width policy
+   would immediately retire.
+4. Warm coarrival timing compared remaining cold work with total context,
+   including cached history. A request with only a short uncached tail could
+   therefore wait behind a full 32K miss.
+
 Further investigation after the rerun found that the static ordinary-width
 policy still paid speculative admission costs before retiring MTP. An idle
 non-atomic cohort whose selected width exceeds the static MTP threshold now
@@ -55,6 +78,11 @@ hold and exemption comparisons use initial uncached work, excluding cached
 history, so a nearly warm anchor is not held behind a full cold prefill merely
 because both prompts have 32K total context. CPU regression tests preserve equal
 cold cohort formation, outlier latency, cache ownership and memory bounds.
+
+These fixes are route-generic. They operate on the executor's declared
+ordinary-handoff policy, admission depths, target-cache bytes, and initial
+uncached work; they contain no Flash Next or model-name branch. The same
+contracts apply to any self-MTP adapter that exposes a static ordinary handoff.
 
 Validation: 225 focused CPU tests and nine subtests passed; an additional
 merge-copy refusal regression passed with the other four new pure CPU tests.
