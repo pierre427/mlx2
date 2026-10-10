@@ -389,3 +389,35 @@ def test_eight_multichunk_coarrivals_form_one_cohort(model):
         assert segmented_self_mtp_stats()["width_lock_plain_fallbacks"] == 0
     finally:
         gen.close()
+
+
+def test_static_ordinary_width_prepares_all_coarrivals_without_optional_eviction(model):
+    evictions = []
+    controller = SelfMTPLaneAdmissionController(
+        saturation_lane_cap=4, cache_estimator=lambda _: 0,
+    )
+    admission = _make_self_mtp_admission_callback(
+        controller, free_memory=lambda: 24.0,
+        reclaim_memory=lambda: None,
+        evict_unused_cache=lambda: evictions.append(True) or True,
+    )
+    gen = BatchGenerator(
+        model, completion_batch_size=4, prefill_step_size=64,
+        self_mtp=dict(SELF_MTP), mtp_admission=admission,
+        mtp_ordinary_handoff={"enabled": True, "max_mtp_width": 3},
+    )
+    try:
+        gen.insert([[1 + i, 2, 3, 4, 5, 6] for i in range(4)], max_tokens=[8] * 4)
+        delivered = []
+        for _ in range(30):
+            _, responses = gen.next()
+            delivered.extend(responses)
+            if len(delivered) == 32:
+                break
+        assert len(delivered) == 32
+        assert evictions == []
+        assert gen.scheduler_stats["mtp_ordinary_handoff_lanes"] == 4
+        assert gen.scheduler_stats["mtp_ordinary_preparation_admissions"] >= 1
+        assert len({response.uid for response in delivered[:4]}) == 4
+    finally:
+        gen.close()

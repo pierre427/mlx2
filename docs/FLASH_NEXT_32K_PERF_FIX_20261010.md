@@ -30,3 +30,38 @@ partial allocation, initial alias exclusion, ownership cleanup, grant safety,
 depth fallback and prefill projection bounds. No qualification campaign or
 background worker was restarted. The requested GPU validation is one cold/warm
 32K width-four performance cell under a fresh lease and paired locks.
+
+## Single GPU rerun and subsequent CPU follow-up
+
+The only rerun used ea8113b7e under CPG generation 397 and paired locks.
+Cold prefill rose from 547.8 to 580.4 tokens/s/request, cold decode from 4.83
+to 6.10, and cold four-request wall-clock fell from 88.94 to 79.54 seconds.
+Warm hits rose from 2/4 to 3/4 and warm wall-clock fell from 53.34 to 29.81
+seconds. Thermal state stayed nominal; no contamination was flagged. All
+streams completed and returned the needle, but the cache-hit gate remained
+unsatisfied. Historical decode (17.98) and 4/4 warm hits were not recovered.
+
+Further investigation after the rerun found that the static ordinary-width
+policy still paid speculative admission costs before retiring MTP. An idle
+non-atomic cohort whose selected width exceeds the static MTP threshold now
+reserves the greater of a serial preparation peak and ordinary batch
+transients. At the prepared ownership seam, an ordinary admission check prices
+all target merge copies before handing off the cohort. Adaptive park policies,
+active cohorts and strict atomic cohorts retain their existing contracts.
+
+Admission also now tries the ordinary floor before evicting APC to buy an
+optional draft depth; cycle eviction stops once all rows can progress. Cohort
+hold and exemption comparisons use initial uncached work, excluding cached
+history, so a nearly warm anchor is not held behind a full cold prefill merely
+because both prompts have 32K total context. CPU regression tests preserve equal
+cold cohort formation, outlier latency, cache ownership and memory bounds.
+
+Validation: 225 focused CPU tests and nine subtests passed; an additional
+merge-copy refusal regression passed with the other four new pure CPU tests.
+These follow-up changes were made AFTER the sole GPU rerun and have no
+full-model performance validation. Do not attribute them to the measurements
+above. No second GPU run was started. Background qualification remains stopped.
+
+The detailed comparison includes prefill, cold/warm TTFT, per-request decode,
+and cold/warm concurrent HTTP wall-clock in
+`qualification/runs/flash-next-32k-w4-fix-20261010/comparison.md`.

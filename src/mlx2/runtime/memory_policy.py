@@ -1007,7 +1007,7 @@ def _make_self_mtp_admission_callback(
         # limits never flush a useful cache. Admission still uses observed
         # headroom after every eviction, never estimated reclaimed bytes.
         if (
-            not fits(decision)
+            any(mode == "queue" for mode in decision.modes)
             and not shortfall_held
             and evict_unused_cache is not None
         ):
@@ -1024,6 +1024,10 @@ def _make_self_mtp_admission_callback(
             # A bounded pass also protects this scheduling seam from a
             # callback that reports success without consuming an entry.
             for _ in range(32):
+                # Lower speculative depth/plain decode already makes progress.
+                # Never destroy reusable state merely to buy optional depth.
+                if not any(mode == "queue" for mode in decision.modes):
+                    break
                 if (decision.modes, decision.draft_depths) == (ceiling.modes, ceiling.draft_depths):
                     break
                 if not evict_unused_cache():
@@ -1108,6 +1112,30 @@ def _make_self_mtp_admission_callback(
                 at=clock(),
             )
         return actions
+
+    def ordinary_preparation(rows):
+        """Price a statically parked cohort plus one serial draft preparation.
+
+        Preparation retains every lane's cache, but teacher-forces lanes one
+        at a time. Bound the peak by the greater of one configured speculative
+        transient and the whole ordinary decode batch, without buying a
+        speculative cohort the selected width policy will immediately retire.
+        """
+        rows = tuple(rows)
+        if not rows:
+            return {}
+        depth = max_draft() if callable(max_draft) else max_draft
+        speculative = controller.transient_gib_per_lane * controller.TRANSIENT_SCALE[depth]
+        ordinary = len(rows) * controller.transient_gib_per_lane * controller.TRANSIENT_SCALE[0]
+        extra = max(0.0, speculative - ordinary)
+        priced = []
+        for i, row in enumerate(rows):
+            pending = float(row[5]) if len(row) > 5 else 0.0
+            priced.append((*row[:5], pending + (extra if i == 0 else 0.0)))
+        return _admit(
+            priced, max_draft_override=0,
+            hysteresis=ordinary_demoted, shortfall=ordinary_shortfall,
+        )
 
     def admit(rows):
         return _admit(rows, atomic_cohort=False)
@@ -1194,6 +1222,7 @@ def _make_self_mtp_admission_callback(
     )
     admit.reclaim = reclaim_memory
     admit.atomic.reclaim = reclaim_memory
+    admit.ordinary_preparation = ordinary_preparation
     # Expose the adapter-qualified cache geometry to the sliced-prefill owner.
     # Keeping this in bytes avoids repeated GiB rounding while it binds one
     # final-context reservation for the lifetime of a queued continuation.

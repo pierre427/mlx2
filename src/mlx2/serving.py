@@ -2355,7 +2355,7 @@ def admit_lane_headroom(
     # The depth fallback shares the first attempt's settle deadline.
     settle = bounded_settle(settle)
 
-    def attempt(depth):
+    def attempt(depth, *, allow_eviction=False):
         required = lane_admission_required_gib(
             controller,
             context_tokens=context_tokens,
@@ -2368,8 +2368,8 @@ def admit_lane_headroom(
             required * (1 << 30),
             headroom=headroom,
             reclaim=reclaim,
-            evict=evict,
-            evictable=evictable,
+            evict=evict if allow_eviction else lambda: False,
+            evictable=evictable if allow_eviction else lambda: 0,
             settle=settle,
         )
         return (fits, required)
@@ -2381,6 +2381,19 @@ def admit_lane_headroom(
         (fits, floor) = attempt(0)
         if fits:
             return (True, True, floor)
+    # Evict only when even the required ordinary floor cannot progress.
+    # A full-depth optimization must not purge the next request's warm state.
+    (fits, floor) = attempt(0, allow_eviction=True)
+    if fits:
+        full = lane_admission_required_gib(
+            controller, context_tokens=context_tokens, draft_depth=draft_depth,
+            cache_gib=cache_gib,
+            prompt_lookup_num_draft=prompt_lookup_num_draft,
+            prefill_gib=prefill_gib,
+        )
+        if headroom() >= full * (1 << 30):
+            return (True, False, full)
+        return (True, draft_depth > 0, floor)
     return (False, False, required)
 
 

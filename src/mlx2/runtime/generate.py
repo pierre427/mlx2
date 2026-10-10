@@ -2371,6 +2371,43 @@ class MTPGenerationBatch:
             self.scheduler_stats, f"mtp_ordinary_handoff_{reason}"
         )
 
+    def _handoff_prepared_idle_cohort(self) -> bool:
+        """Admit the selected ordinary route before buying unused MTP depth.
+
+        Only a fresh idle, non-atomic cohort takes this seam. The ordinary
+        callback prices its retained caches and pending merge copies against
+        measured headroom; if any row must wait, normal admission remains.
+        """
+        policy = self.ordinary_handoff_policy
+        if (
+            policy is None or not policy.enabled or self.state.lanes
+            or _cohort_plain_width(self) or getattr(self, "park_memory", None) is not None
+            or not self._paused
+            or any(getattr(p.detached.lane, "_batch_cohort", None)
+                   for p in self._paused.values())
+        ):
+            return False
+        rows = tuple(self.mtp_cycle_state())
+        decision = policy.decision(
+            width=len(rows), width_locked=False, adaptive=self.adaptive_depth_policy
+        )
+        at_depth = getattr(self.mtp_admission, "at_depth", None)
+        if decision is None or not callable(at_depth):
+            return False
+        # Ordinary merge allocates a batched target alongside the private
+        # prepared rows. Segmented-MTP admission does not price that copy.
+        priced = []
+        for row in rows:
+            package = self._paused[row[0]]
+            target_copy = sum(cache.nbytes for cache in package.detached.caches.target)
+            priced.append((*row[:5], float(row[5]) + target_copy / float(1 << 30)))
+        approved = dict(at_depth(0)(priced) or {})
+        if not all(approved.get(row[0]) == "plain" for row in rows):
+            return False
+        self._memory_queued.difference_update(row[0] for row in rows)
+        self._handoff_all_to_plain(decision=decision, projected_width=len(rows))
+        return True
+
     def _maybe_handoff_active_cohort(self) -> bool:
         if (
             self._ordinary_handoff_latched
@@ -2768,7 +2805,8 @@ class MTPGenerationBatch:
             if uid in self._paused or uid in self.uids:
                 raise ValueError(f"duplicate self-MTP lane uid {uid}")
             self._paused[uid] = package
-        self._apply_admission()
+        if not self._handoff_prepared_idle_cohort():
+            self._apply_admission()
 
     def extract_cache(self, idx: int) -> List[Any]:
         if self.state.proposal_open:
@@ -3460,7 +3498,10 @@ class BatchGenerator:
         )
         if mtp_ordinary_handoff is not None and self.self_mtp is None:
             raise ValueError("MTP ordinary handoff requires a self-MTP route")
-        self.mtp_ordinary_handoff = mtp_ordinary_handoff
+        from .adaptive_policy import MTPOrdinaryHandoffPolicy
+
+        handoff = MTPOrdinaryHandoffPolicy.from_value(mtp_ordinary_handoff)
+        self.mtp_ordinary_handoff = handoff if handoff.enabled else None
         if mtp_acceptance_log is not None and self.self_mtp is None:
             raise ValueError("MTP acceptance logging requires a self-MTP route")
         self.mtp_acceptance_logger = None
@@ -3773,6 +3814,7 @@ class BatchGenerator:
         # remaining growth before allowing the next slice.
         self._mtp_prefill_resident = set()
         self._mtp_prefill_projection_bytes = {}
+        self._mtp_initial_prefill_tokens = {}
         self._mtp_prefill_initial_bytes = {}
         self._mtp_prefill_materialized_bytes = {}
         self._mtp_prefill_failures = []
@@ -3873,6 +3915,7 @@ class BatchGenerator:
         getattr(self, "_prefill_chunk_trace", {}).clear()
         getattr(self, "_mtp_prefill_resident", set()).clear()
         getattr(self, "_mtp_prefill_projection_bytes", {}).clear()
+        getattr(self, "_mtp_initial_prefill_tokens", {}).clear()
         getattr(self, "_mtp_prefill_initial_bytes", {}).clear()
         getattr(self, "_mtp_prefill_materialized_bytes", {}).clear()
         getattr(self, "_mtp_prefill_failures", []).clear()
@@ -4240,6 +4283,7 @@ class BatchGenerator:
                 self._mtp_states[self._uid_count] = mtp_state
                 self._mtp_lane_rngs[self._uid_count] = lane_rng
                 self._mtp_configs[self._uid_count] = dict(mtp_config)
+                self._mtp_initial_prefill_tokens[self._uid_count] = sum(map(len, seq))
             uids.append(self._uid_count)
             self._uid_count += 1
         return uids
@@ -4722,6 +4766,18 @@ class BatchGenerator:
         admission_policy = self.mtp_admission
         if cohort_uids:
             admission_policy = getattr(admission_policy, "atomic", admission_policy)
+        handoff = getattr(self, "mtp_ordinary_handoff", None)
+        prepare_plain = getattr(admission_policy, "ordinary_preparation", None)
+        if (
+            not cohort_uids and not rows and callable(prepare_plain)
+            and handoff is not None and handoff.enabled
+            and getattr(self, "mtp_park_memory", None) is None
+            and len(joining) + len(self._plain_fallback_batch) > handoff.max_mtp_width
+        ):
+            admission_policy = prepare_plain
+            _bump_bounded_counter(
+                self.scheduler_stats, "mtp_ordinary_preparation_admissions"
+            )
         decisions = dict(admission_policy(tuple(rows + joining)) or {})
         if cohort_uids:
             # Integer decisions are speculative depths.  A plain/queue action
@@ -4991,6 +5047,7 @@ class BatchGenerator:
             ) = sequence[:9]
             getattr(self, "_mtp_prefill_resident", set()).discard(uid)
             getattr(self, "_mtp_prefill_projection_bytes", {}).pop(uid, None)
+            getattr(self, "_mtp_initial_prefill_tokens", {}).pop(uid, None)
             getattr(self, "_mtp_prefill_initial_bytes", {}).pop(uid, None)
             getattr(self, "_mtp_prefill_materialized_bytes", {}).pop(uid, None)
             prompt = [token for segment in segments for token in segment]
@@ -5515,7 +5572,9 @@ class BatchGenerator:
         held instead while (a) no self-MTP lane is live, (b) another row in
         the admission window still needs prefill, and (c) every such
         sibling's remaining prefill is at most
-        ``MTP_COARRIVAL_HOLD_RESIDUAL_FACTOR`` times this row's prompt.  (c)
+        ``MTP_COARRIVAL_HOLD_RESIDUAL_FACTOR`` times this row's initial
+        uncached work. Cached history cannot make a warm anchor wait behind
+        a full cold prefill. (c)
         is an outlier guard: a short prompt does not wait for a much longer
         one.  It is per sibling, not summed, because a one-chunk burst of
         any size is prepared together; summing released the first of eight
@@ -5548,7 +5607,9 @@ class BatchGenerator:
         ):
             return False
         own = rows[index]
-        own_tokens = len(own[4]) + sum(len(segment) for segment in own[1])
+        own_tokens = getattr(self, "_mtp_initial_prefill_tokens", {}).get(
+            own[0], len(own[4]) + sum(map(len, own[1]))
+        )
         pending = [
             residual
             for (i, sequence) in enumerate(rows)
@@ -5927,6 +5988,7 @@ class BatchGenerator:
                 self._mtp_configs.pop(uid, None)
                 self._mtp_prefill_resident.discard(uid)
                 self._mtp_prefill_projection_bytes.pop(uid, None)
+                getattr(self, "_mtp_initial_prefill_tokens", {}).pop(uid, None)
                 getattr(self, "_mtp_prefill_initial_bytes", {}).pop(uid, None)
                 getattr(self, "_mtp_prefill_materialized_bytes", {}).pop(uid, None)
         if len(keep[1]) < len(self._prompt_batch):
@@ -6743,6 +6805,7 @@ class BatchGenerator:
             self._mtp_states.pop(uid, None)
             self._mtp_lane_rngs.pop(uid, None)
             self._mtp_configs.pop(uid, None)
+            getattr(self, "_mtp_initial_prefill_tokens", {}).pop(uid, None)
         self.scheduler_stats["mtp_target_only_plain_fallbacks"] = (
             self.scheduler_stats.get("mtp_target_only_plain_fallbacks", 0)
             + len(uids)
@@ -7227,7 +7290,9 @@ class BatchGenerator:
         Rows beyond the lane window wait for capacity and are not recorded.
         """
         self._coarrival_members = {
-            int(sequence[0]): len(sequence[4]) + sum(map(len, sequence[1]))
+            int(sequence[0]): getattr(self, "_mtp_initial_prefill_tokens", {}).get(
+                sequence[0], len(sequence[4]) + sum(map(len, sequence[1]))
+            )
             for sequence in list(self._unprocessed_sequences)[: max(n, 0)]
         }
 
