@@ -3773,6 +3773,8 @@ class BatchGenerator:
         # remaining growth before allowing the next slice.
         self._mtp_prefill_resident = set()
         self._mtp_prefill_projection_bytes = {}
+        self._mtp_prefill_initial_bytes = {}
+        self._mtp_prefill_materialized_bytes = {}
         self._mtp_prefill_failures = []
         self._prompt_boundaries = {}
         self._interior_checkpoint_positions = {}
@@ -3871,6 +3873,8 @@ class BatchGenerator:
         getattr(self, "_prefill_chunk_trace", {}).clear()
         getattr(self, "_mtp_prefill_resident", set()).clear()
         getattr(self, "_mtp_prefill_projection_bytes", {}).clear()
+        getattr(self, "_mtp_prefill_initial_bytes", {}).clear()
+        getattr(self, "_mtp_prefill_materialized_bytes", {}).clear()
         getattr(self, "_mtp_prefill_failures", []).clear()
         logger = getattr(self, "mtp_acceptance_logger", None)
         if logger is not None:
@@ -4817,12 +4821,21 @@ class BatchGenerator:
 
         total = sum(
             int(getattr(leaf, "nbytes", 0))
-            for leaf in _walk_cache_entries(prompt_cache)
+            for leaf in _walk_cache_entries(prompt_cache or ())
         )
         mtp_state = self._mtp_states.get(uid)
         if mtp_state is not None:
             total += sum(int(getattr(leaf, "nbytes", 0)) for leaf in mtp_state[0])
         return total
+
+    def materialized_admission_bytes(self, uid):
+        """Evaluated cache growth already charged to measured live headroom.
+
+        Initial warm state is excluded: descriptor aliases have not paid for
+        their first-write copies. Only completed bounded prefill publishes a
+        credit; queued, decoding and retired lanes return zero.
+        """
+        return getattr(self, "_mtp_prefill_materialized_bytes", {}).get(uid, 0)
 
     def _record_mtp_prefill_failure(self, uid, current_bytes, projected_bytes):
         failures = getattr(self, "_mtp_prefill_failures", None)
@@ -4978,6 +4991,8 @@ class BatchGenerator:
             ) = sequence[:9]
             getattr(self, "_mtp_prefill_resident", set()).discard(uid)
             getattr(self, "_mtp_prefill_projection_bytes", {}).pop(uid, None)
+            getattr(self, "_mtp_prefill_initial_bytes", {}).pop(uid, None)
+            getattr(self, "_mtp_prefill_materialized_bytes", {}).pop(uid, None)
             prompt = [token for segment in segments for token in segment]
             config = dict(self.self_mtp or {})
             config.update(self._mtp_configs.pop(uid, {}))
@@ -5371,6 +5386,13 @@ class BatchGenerator:
             self.model, history, prompt[: 2 * max(int(max_tokens), 1)], config
         )
         tic = time.perf_counter()
+        if not hasattr(self, "_mtp_prefill_initial_bytes"):
+            self._mtp_prefill_initial_bytes = {}
+            self._mtp_prefill_materialized_bytes = {}
+        if uid not in self._mtp_prefill_initial_bytes:
+            self._mtp_prefill_initial_bytes[uid] = self._mtp_prefill_resident_bytes(
+                uid, prompt_cache
+            )
         (remaining, prompt_cache, mtp_state, processed) = advance_self_mtp_prefill(
             mx.array(prompt, dtype=mx.uint32),
             self.model,
@@ -5397,6 +5419,10 @@ class BatchGenerator:
                 position=len(history),
             )
         self._mtp_prefill_resident.add(uid)
+        self._mtp_prefill_materialized_bytes[uid] = max(
+            0, self._mtp_prefill_resident_bytes(uid, prompt_cache)
+            - self._mtp_prefill_initial_bytes[uid],
+        )
         if uid not in self._mtp_prefill_projection_bytes:
             cache_projection = getattr(
                 getattr(self, "mtp_admission", None),
@@ -5901,6 +5927,8 @@ class BatchGenerator:
                 self._mtp_configs.pop(uid, None)
                 self._mtp_prefill_resident.discard(uid)
                 self._mtp_prefill_projection_bytes.pop(uid, None)
+                getattr(self, "_mtp_prefill_initial_bytes", {}).pop(uid, None)
+                getattr(self, "_mtp_prefill_materialized_bytes", {}).pop(uid, None)
         if len(keep[1]) < len(self._prompt_batch):
             self._prompt_batch.filter(sorted(keep[1]))
             self._currently_processing = [

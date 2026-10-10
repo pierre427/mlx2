@@ -2288,7 +2288,7 @@ def cold_media_feature_peak_increment_gib(
     return value / float(1 << 30)
 
 
-def unmaterialized_lane_bytes(jobs):
+def unmaterialized_lane_bytes(jobs, *, materialized_bytes=None):
     """Lane bytes granted to attached jobs that have not been allocated yet.
 
     Admission measures headroom, but an attached lane allocates nothing until
@@ -2301,12 +2301,19 @@ def unmaterialized_lane_bytes(jobs):
     the first decode step failed with a Metal out-of-memory.  A grant is held
     until the lane's first generated token, by which point its cache copy,
     recurrent state and one decode transient have all been allocated and the
-    measurement sees them.
+    measurement sees them. Bounded prefill can allocate cache before that
+    first token: subtract only the executor's observed net allocation growth,
+    never a projected size or an untouched COW alias. Keep the remaining
+    growth and transient reservation until generation begins.
     """
-    return int(
-        sum(float(getattr(job, "admission_reserved_gib", 0.0) or 0.0) for job in jobs)
-        * (1 << 30)
-    )
+    remaining = 0
+    for job in jobs:
+        grant = int(float(getattr(job, "admission_reserved_gib", 0.0) or 0.0) * (1 << 30))
+        allocated = 0 if materialized_bytes is None else materialized_bytes(job.uid)
+        if type(allocated) is not int or allocated < 0:
+            raise ValueError("materialized admission bytes must be a nonnegative integer")
+        remaining += max(0, grant - allocated)
+    return remaining
 
 
 def admit_lane_headroom(
@@ -10158,9 +10165,13 @@ class ServingEngine:
                             # Exact ordinary prefix; the capsule conditions
                             # only the uncached prompt tail.
                             self.counts["activation_capsule_exact_prefix_hits"] += 1
+                        target_only_plain = bool(
+                            getattr(hit, "target_only_plain_fallback", False)
+                        )
                         cache_copy = warm_cache_copy_gib(
                             hit, context_tokens=len(tokens) + maximum,
-                            prefill_step=self.prefill_step, mtp=self.mtp,
+                            prefill_step=self.prefill_step,
+                            mtp=self.mtp and not target_only_plain,
                         )
                         # PLD verifies the anchor plus as many as
                         # ``num_draft`` proposed tokens in one target
@@ -10169,7 +10180,12 @@ class ServingEngine:
                         # fit. Scale the calibrated width-3 transient to
                         # the actual forward width; the ordinary one-row
                         # share is already included by the lane cost.
-                        granted = unmaterialized_lane_bytes(active.values())
+                        granted = unmaterialized_lane_bytes(
+                            active.values(),
+                            materialized_bytes=getattr(
+                                batch, "materialized_admission_bytes", None
+                            ),
+                        )
                         prefill_gib = prefill_transient_gib(
                             cache_budget,
                             context_tokens=len(tokens),
@@ -10240,7 +10256,7 @@ class ServingEngine:
                             (admitted, depth_floor, required) = admit_lane_headroom(
                                 controller,
                                 context_tokens=len(tokens) + maximum,
-                                draft_depth=config["num_draft"] if self.mtp else 0,
+                                draft_depth=config["num_draft"] if self.mtp and not target_only_plain else 0,
                                 cache_gib=cache_copy,
                                 prefill_gib=prefill_gib,
                                 headroom=admission_headroom,

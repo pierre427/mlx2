@@ -106,3 +106,26 @@ def test_atomic_cohort_is_refused_not_admitted_into_one_reading(monkeypatch):
             assert "error" not in again, again
     finally:
         engine.close()
+
+
+def test_evaluated_prefill_growth_is_not_reserved_twice():
+    jobs = [NS(uid=1, admission_reserved_gib=4.0),
+            NS(uid=2, admission_reserved_gib=4.0)]
+    # One lane has allocated 3 GiB; the untouched COW lane still owes all 4.
+    assert serving.unmaterialized_lane_bytes(
+        jobs, materialized_bytes=lambda uid: 3 * GIB if uid == 1 else 0
+    ) == 5 * GIB
+    assert serving.unmaterialized_lane_bytes(jobs) == 8 * GIB
+    jobs[0].admission_reserved_gib = 0.0
+    assert serving.unmaterialized_lane_bytes(
+        jobs, materialized_bytes=lambda uid: 3 * GIB if uid == 1 else 0
+    ) == 4 * GIB
+
+
+@pytest.mark.parametrize("invalid", [-1, 0.5, True])
+def test_materialization_credit_rejects_invalid_accounting(invalid):
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        serving.unmaterialized_lane_bytes(
+            [NS(uid=1, admission_reserved_gib=4.0)],
+            materialized_bytes=lambda _: invalid,
+        )

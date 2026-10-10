@@ -444,8 +444,29 @@ def test_successful_bounded_prefill_slice_marks_cache_as_owned(monkeypatch):
     assert (progress[0].uid, progress[0].progress) == (7, (4, 9))
     assert not progress[0].end_of_prompt
     assert batch._mtp_prefill_resident == {7}
+    assert batch.materialized_admission_bytes(7) == (1 << 20) + (1 << 18)
+    assert batch.materialized_admission_bytes(99) == 0
     assert batch._unprocessed_sequences[0][4] == [0, 1, 2, 3]
 
+
+
+def test_prefill_credit_excludes_initial_warm_aliases(monkeypatch):
+    batch = _scheduler_only_mtp_batch(9, step=4)
+    batch.model = object()
+    row = list(batch._unprocessed_sequences[0])
+    row[3] = [_SizedCache(3 << 20, 4)]
+    batch._unprocessed_sequences[0] = tuple(row)
+    batch._mtp_states[7] = ([_SizedCache(1 << 20, 3)], None)
+    monkeypatch.setattr(generate_runtime, "_prefetch_known_mtp_tail", lambda *_: None)
+    monkeypatch.setattr(
+        hybrid_speculative, "advance_self_mtp_prefill",
+        lambda prompt, _model, **_kwargs: (
+            prompt[4:], [_SizedCache(5 << 20, 8)],
+            ([_SizedCache(2 << 20, 7)], mx.zeros((1, 1, 1))), 4,
+        ),
+    )
+    batch._advance_mtp_prefill(0, 4)
+    assert batch.materialized_admission_bytes(7) == 3 << 20
 
 def test_sliced_mtp_continuation_progresses_as_headroom_falls():
     total = 260_001
@@ -566,6 +587,8 @@ def test_sliced_mtp_projection_ownership_clears_on_remove_and_close():
     batch = _scheduler_only_mtp_batch(9, step=4)
     batch._mtp_prefill_resident = {7}
     batch._mtp_prefill_projection_bytes = {7: 1234}
+    batch._mtp_prefill_initial_bytes = {7: 100}
+    batch._mtp_prefill_materialized_bytes = {7: 1234}
     batch._mtp_states = {7: None}
     batch._mtp_lane_rngs = {7: None}
     batch._mtp_configs = {7: {}}
@@ -578,6 +601,8 @@ def test_sliced_mtp_projection_ownership_clears_on_remove_and_close():
 
     assert not batch._mtp_prefill_resident
     assert not batch._mtp_prefill_projection_bytes
+    assert batch.materialized_admission_bytes(7) == 0
+    assert not batch._mtp_prefill_initial_bytes
     assert not batch._mtp_states
     assert not batch._mtp_lane_rngs
     assert not batch._mtp_configs

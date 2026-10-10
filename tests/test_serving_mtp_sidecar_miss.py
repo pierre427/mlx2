@@ -28,7 +28,7 @@ def _serve_warm_target_hit(monkeypatch, behind):
         def lookup(self, _key, tokens, **_kw):
             # An ordinary-route checkpoint: warm target prefix, no sidecar.
             return NS(
-                cache=Branch([object()]),
+                cache=Branch([NS(nbytes=1 << 20)]),
                 cached_tokens=len(tokens) - behind,
                 remaining_tokens=list(tokens[-behind:]),
                 miss_reason=None,
@@ -141,6 +141,14 @@ def _serve_warm_target_hit(monkeypatch, behind):
         def close(self):
             pass
 
+    admission_calls = []
+    real_admit = serving.admit_lane_headroom
+
+    def admit(controller, **kwargs):
+        admission_calls.append(kwargs)
+        return real_admit(controller, **kwargs)
+
+    monkeypatch.setattr(serving, "admit_lane_headroom", admit)
     monkeypatch.setattr(serving, "runtime_identity", lambda: {"source_sha256": "fake"})
     monkeypatch.setattr(memory, "execution_headroom", lambda: 100 * 2**30)
     monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 0)
@@ -157,6 +165,8 @@ def _serve_warm_target_hit(monkeypatch, behind):
         _choice, _usage, receipt = collect_nonstream_job(job, body, chat=False)
     finally:
         engine.close()
+    engine.counts["test_admission_depth"] = admission_calls[0]["draft_depth"]
+    engine.counts["test_admission_cache_gib"] = admission_calls[0]["cache_gib"]
     engine.counts["test_discarded_lookups"] = len(discarded)
     engine.counts.update(f"test_discarded_{reason}" for reason in discarded)
     return inserted, closed, receipt, engine.counts
@@ -171,6 +181,8 @@ def test_mtp_route_marks_prompt_boundary_hit_for_plain_fallback(monkeypatch):
     assert closed == [True], "the warm lease is released only after the request"
     assert receipt["cached_tokens"] == 3
     assert counts["mtp_sidecar_missing_plain_fallbacks"] == 1
+    assert counts["test_admission_depth"] == 0
+    assert counts["test_admission_cache_gib"] >= (1 << 20) / (1 << 30)
     assert counts["mtp_sidecar_missing_misses"] == 0
 
 
@@ -184,6 +196,8 @@ def test_mtp_route_target_only_hit_below_the_boundary_fails_closed(monkeypatch):
     assert closed == [True]
     assert receipt["cached_tokens"] == 0
     assert counts["mtp_sidecar_missing_misses"] == 1
+    assert counts["test_admission_depth"] == 2
+    assert counts["test_admission_cache_gib"] == 0.0
     assert counts["mtp_sidecar_missing_plain_fallbacks"] == 0
     # The refused hit's APCv2 credit (a lookup hit, reused tokens, the
     # entry's hit count) is withdrawn.
