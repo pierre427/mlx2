@@ -114,3 +114,31 @@ def test_mcp_code_is_never_a_publication_input():
     assert "mcp" not in public_text.lower()
     assert 'radio = ["mlx>=0.32"]' in public_text and "mlx2-serve" in public_text
     assert ex.public_text("src/mlx2/server.py", "x = 'mcp'\n") == "x = 'mcp'\n"
+
+
+def test_only_reviewed_qualification_runfiles_and_policy_are_exportable():
+    allowed = {
+        "docs/QUALIFICATION.md",
+        "qualification/runs/qualify-1010-correctness/dloop_qualification.py",
+        "qualification/runs/qualify-1010-correctness/ladder.py",
+        "qualification/runs/qualify-1010-correctness/performance_assessment.py",
+        "qualification/runs/qualify-1010-correctness/qualification_verdict.py",
+        "qualification/runs/qualify-1010-correctness/run_profile.py",
+        "qualification/runs/qualify-1010-correctness/thermal_ladder.py",
+        "qualification/runs/qualify-1010-correctness/thermal-policy.json",
+        "qualification/runs/qualify-1010-correctness/test_dloop_qualification.py",
+        "qualification/runs/qualify-1010-correctness/test_qualification_verdict.py",
+        "qualification/runs/qualify-1010-correctness/test_run_profile.py",
+        "qualification/runs/qualify-1010-correctness/test_thermal_ladder.py",
+    }
+    assert all(exporter.is_public_code_path(path) for path in allowed)
+    for private in (
+        "docs/audits/2026-10-10-rc2/qualification-plan.md",
+        "qualification/runs/qualify-1010-correctness/README.md",
+        "qualification/runs/qualify-1010-correctness/host-manifest.json",
+        "qualification/runs/qualify-1010-correctness/thermal-policy-private.json",
+        "qualification/runs/qualify-1010-correctness/events.log",
+        "qualification/receipts/private.json",
+        "qualification/runs/qualify-1010-correctness/../private.py",
+    ):
+        assert not exporter.is_public_code_path(private), private

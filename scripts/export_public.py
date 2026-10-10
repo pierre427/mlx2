@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare an explicitly allowlisted, code-only snapshot for local review.
+"""Prepare an explicitly allowlisted code and qualification-policy snapshot.
 
 This tool never publishes. Start from the current public repository head in an
 isolated checkout, apply only reviewed exported paths, and inspect the staged
@@ -29,6 +29,23 @@ from pathlib import Path
 
 CODE_ROOTS = {"src", "scripts", "tests"}
 ROOT_FILES = {".gitignore", "LICENSE", "NOTICE", "README.md", "pyproject.toml"}
+# These are the reviewed qualification runfiles published as one self-contained
+# producer/auditor set. Keep this exact-path allowlist narrow: qualification/
+# also contains private plans, receipts, manifests, logs, and model artifacts.
+QUALIFICATION_RUN_FILES = {
+    "qualification/runs/qualify-1010-correctness/dloop_qualification.py",
+    "qualification/runs/qualify-1010-correctness/ladder.py",
+    "qualification/runs/qualify-1010-correctness/performance_assessment.py",
+    "qualification/runs/qualify-1010-correctness/qualification_verdict.py",
+    "qualification/runs/qualify-1010-correctness/run_profile.py",
+    "qualification/runs/qualify-1010-correctness/thermal_ladder.py",
+    "qualification/runs/qualify-1010-correctness/thermal-policy.json",
+    "qualification/runs/qualify-1010-correctness/test_dloop_qualification.py",
+    "qualification/runs/qualify-1010-correctness/test_qualification_verdict.py",
+    "qualification/runs/qualify-1010-correctness/test_run_profile.py",
+    "qualification/runs/qualify-1010-correctness/test_thermal_ladder.py",
+}
+PUBLIC_DOCS = {"docs/QUALIFICATION.md"}
 # Never published, whatever the allowlist says (Pierre, 2026-10-08): MCP
 # servers and their tests stay private.  A path is private when any of its
 # components names an MCP (``example_mcp/``, ``test_example_mcp.py``, ...).
@@ -47,10 +64,16 @@ def is_private_path(name: str) -> bool:
 def is_public_code_path(name: str) -> bool:
     """The publication allowlist minus the private exclusions."""
     path = Path(name)
-    allowed = name in ROOT_FILES or (
-        len(path.parts) > 1 and path.parts[0] in CODE_ROOTS
-        and path.suffix == ".py"
-        and all(not part.startswith(".") for part in path.parts)
+    allowed = (
+        name in ROOT_FILES
+        or name in PUBLIC_DOCS
+        or name in QUALIFICATION_RUN_FILES
+        or (
+            len(path.parts) > 1
+            and path.parts[0] in CODE_ROOTS
+            and path.suffix == ".py"
+            and all(not part.startswith(".") for part in path.parts)
+        )
     )
     return allowed and not is_private_path(name)
 

@@ -1,0 +1,10 @@
+{
+  "required_thermal_state": 0,
+  "max_battery_temperature_c": 40.0,
+  "max_virtual_temperature_c": 45.0,
+  "max_temperature_delta_c": 0.5,
+  "consecutive_samples": 3,
+  "sample_interval_seconds": 15,
+  "max_wait_seconds": 1800,
+  "require_temperatures": true
+}
