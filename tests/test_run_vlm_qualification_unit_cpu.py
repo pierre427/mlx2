@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import venv
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -237,3 +239,25 @@ def test_owned_probe_is_reaped_when_cancelled(monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         unit._run_owned(["probe"], cwd=ROOT, env={}, timeout=10)
     assert events == ["terminate", "wait"]
+
+
+def test_python_interpreter_path_preserves_venv_and_runtime_prefix(tmp_path):
+    environment = tmp_path / "venv"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+    selected = environment / "bin" / "python"
+    python = unit.python_interpreter_path(selected)
+
+    assert python == Path(os.path.abspath(selected))
+    result = subprocess.run(
+        [
+            str(python),
+            "-c",
+            "import json, site, sys; print(json.dumps(dict(prefix=sys.prefix, site=site.getsitepackages())))",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    runtime = json.loads(result.stdout)
+    assert Path(runtime["prefix"]) == environment
+    assert any(str(environment) in path for path in runtime["site"])

@@ -99,6 +99,11 @@ def producer_profile(root, family):
     return profile
 
 
+def python_interpreter_path(path):
+    """Normalize the spelling of an interpreter path without dereferencing venv links."""
+    return Path(os.path.abspath(Path(path).expanduser()))
+
+
 def server_argv(*, python, root, artifact, profile, host, port, policy_path):
     command = [
         str(python),
@@ -229,7 +234,7 @@ def run_unit(args):
     artifact_config = json.loads((artifact / "config.json").read_text())
     if artifact_config.get("model_type") != args.family:
         raise ValueError("artifact config model_type does not match family")
-    python = Path(args.python).expanduser().resolve()
+    python = python_interpreter_path(args.python)
     dispatcher = root / "scripts" / "qualify_vlm_routes.py"
     media_command = [
         str(python),
