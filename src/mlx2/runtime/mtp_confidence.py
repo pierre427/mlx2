@@ -143,6 +143,14 @@ class DraftConfidenceRow:
     verify_depth: int
     accepted: int
     relaxed: int = 0
+    # Tokens this cycle actually delivered (accepted drafts, then the target's
+    # bonus or correction, cut at a stop) and how many tokens the request had
+    # generated before them.  Together they let an offline pass rebuild each
+    # request's committed stream and label lookahead positions exactly under
+    # greedy decoding.  Empty / -1 when the caller did not supply them.
+    emitted: tuple[int, ...] = ()
+    position: int = -1
+    request: int = -1
 
     def labels(self) -> list[Optional[int]]:
         out: list[Optional[int]] = []
@@ -526,7 +534,13 @@ def evaluate_confidence(
     return report
 
 
-def rows_from_proposal(proposal, prev_tokens: Sequence[int]) -> list[DraftConfidenceRow]:
+def rows_from_proposal(
+    proposal,
+    prev_tokens: Sequence[int],
+    emitted: Optional[Sequence[Sequence[int]]] = None,
+    positions: Optional[Sequence[int]] = None,
+    requests: Optional[Sequence[int]] = None,
+) -> list[DraftConfidenceRow]:
     """Build host rows from a closed ``SelfMTPCycleResult`` carrying features."""
     features = getattr(proposal, "draft_features", ()) or ()
     tokens = getattr(proposal, "draft_feature_tokens", ()) or ()
@@ -546,6 +560,11 @@ def rows_from_proposal(proposal, prev_tokens: Sequence[int]) -> list[DraftConfid
                 verify_depth=int(proposal.draft_depths[index]),
                 accepted=int(proposal.accepted_lengths[index]),
                 relaxed=int(relaxed[index]),
+                emitted=(
+                    tuple(int(t) for t in emitted[index]) if emitted is not None else ()
+                ),
+                position=int(positions[index]) if positions is not None else -1,
+                request=int(requests[index]) if requests is not None else -1,
             )
         )
     return rows
@@ -600,6 +619,9 @@ class MTPAcceptanceLogger:
                             "verify_depth": row.verify_depth,
                             "accepted": row.accepted,
                             "relaxed": row.relaxed,
+                            "emitted": list(row.emitted),
+                            "position": row.position,
+                            "request": row.request,
                             "labels": row.labels(),
                         },
                         separators=(",", ":"),
@@ -636,6 +658,9 @@ def load_acceptance_log(path) -> list[DraftConfidenceRow]:
                     verify_depth=int(data["verify_depth"]),
                     accepted=int(data["accepted"]),
                     relaxed=int(data.get("relaxed", 0)),
+                    emitted=tuple(int(t) for t in data.get("emitted", ())),
+                    position=int(data.get("position", -1)),
+                    request=int(data.get("request", -1)),
                 )
             )
     return rows

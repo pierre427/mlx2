@@ -114,8 +114,8 @@ def _make_external_tree_verifier(problem):
     gen.tree_gates = {"logprobs_on_request": False}
     gen.scheduler_stats = {}
     gen._target_law = (
-        lambda lane, logits, history, reachable=True, response_rows=None:
-        problem.P(tuple(history[len(lane.base):]))
+        lambda lane, logits, history, reachable=True, response_rows=None, *, history_suffix=():
+        problem.P(tuple([*history, *history_suffix][len(lane.base):]))
     )
     return gen
 
@@ -158,8 +158,8 @@ def test_tree_walk_exact(seed, target):
         lane.history = list(lane.base)
         # history = base + [anchor] + path tokens; strip base+anchor below
         gen._target_law = (
-            lambda ln, logits, history, reachable=True, response_rows=None:
-            problem.P(tuple(history[len(ln.base) + 1:]))
+            lambda ln, logits, history, reachable=True, response_rows=None, *, history_suffix=():
+            problem.P(tuple([*history, *history_suffix][len(ln.base) + 1:]))
         )
         decision = gen._verify_tree(lane, block, np.zeros((1, 64)))
         return tuple(decision.emitted)

@@ -63,9 +63,15 @@ def _settings(host, *, runtime):
         engine.close()
 
 
-def test_only_mlx_vlm_routes_bind_the_revision_in_settings(host):
-    runtime = _runtime(MLX_VLM_REVISION)
-    assert _settings(host, runtime=runtime)["mlx_vlm"] == runtime
+def test_only_mlx_vlm_routes_bind_the_dependency_contract_in_settings(host):
+    # ``settings.mlx_vlm`` is the dependency-content identity the adapter
+    # bound (adapters/vlm_runtime.py), which is what a media qualification
+    # record must carry to match this route; the installed-build provenance
+    # (``mlx_vlm_build``) is diagnostic and stays out of the settings.
+    identity = {"schema": "mlx2.vlm-dependencies.v1", "family": "gemma3n",
+                "source_sha256": "c" * 64, "dependency_files": 126,
+                "reference_revision": MLX_VLM_REVISION}
+    assert _settings(host, runtime=identity)["mlx_vlm"] == identity
     assert "mlx_vlm" not in _settings(host, runtime=None)
 
 
@@ -148,3 +154,47 @@ def test_untracked_module_in_editable_checkout_fails_closed(editable_checkout):
     (editable_checkout / "mlx_vlm" / "models" / "extra.py").write_text("X = 1\n")
     with pytest.raises(RuntimeError, match="not the pinned revision"):
         mlx_vlm_pin.require_pinned_mlx_vlm()
+
+
+@pytest.mark.parametrize("shadowed", [False, True])
+def test_vcs_install_record_must_describe_the_imported_package(tmp_path, monkeypatch, shadowed):
+    """A matching direct_url commit says nothing about a PYTHONPATH shadow."""
+    import json
+    from types import SimpleNamespace
+
+    installed = tmp_path / "site-packages"
+    loaded = tmp_path / "shadow" if shadowed else installed
+    direct = json.dumps({
+        "url": "https://example.invalid/mlx-vlm.git",
+        "vcs_info": {"vcs": "git", "commit_id": MLX_VLM_REVISION},
+    })
+    dist = SimpleNamespace(
+        version="0.7.3", read_text=lambda name: direct,
+        locate_file=lambda path: installed / path,
+    )
+    monkeypatch.setattr(mlx_vlm_pin.importlib.metadata, "distribution", lambda name: dist)
+    monkeypatch.setattr(mlx_vlm_pin.importlib.util, "find_spec", lambda name: SimpleNamespace(
+        origin=str(loaded / "mlx_vlm" / "__init__.py"),
+    ))
+    if shadowed:
+        with pytest.raises(RuntimeError, match="not the pinned revision"):
+            require_pinned_mlx_vlm()
+    else:
+        assert require_pinned_mlx_vlm()["revision"] == MLX_VLM_REVISION
+
+
+def test_shadowed_vcs_record_uses_the_actual_checkout_revision(editable_checkout, monkeypatch):
+    """Candidate routes may intentionally put another clean checkout first."""
+    import json
+    from types import SimpleNamespace
+
+    direct = json.dumps({"vcs_info": {"commit_id": "unrelated-installed-revision"}})
+    dist = SimpleNamespace(
+        version="0.7.3", read_text=lambda name: direct,
+        locate_file=lambda path: editable_checkout / "site-packages" / path,
+    )
+    monkeypatch.setattr(mlx_vlm_pin.importlib.metadata, "distribution", lambda name: dist)
+    assert require_pinned_mlx_vlm()["revision"] == mlx_vlm_pin.MLX_VLM_REVISION
+    (editable_checkout / "mlx_vlm" / "__init__.py").write_text("changed = True\n")
+    with pytest.raises(RuntimeError, match="not the pinned revision"):
+        require_pinned_mlx_vlm()

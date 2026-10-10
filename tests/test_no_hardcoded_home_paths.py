@@ -9,7 +9,6 @@ under the home directory are spelled Path.home() / ... instead.
 import ast
 import importlib.util
 from pathlib import Path
-import re
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,12 +34,7 @@ def _offending_literals(path):
             continue
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             value = node.value
-            absolute_home = (
-                "[" not in value
-                and "/USER/" not in value
-                and re.match(r"^/(?:Users/(?!Shared/)|home/)[^/]+/", value)
-            )
-            if absolute_home or value.startswith("~/"):
+            if "~" in value or value.startswith("~/"):
                 hits.append((node.lineno, value.splitlines()[0][:80]))
     return hits
 

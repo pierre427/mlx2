@@ -121,8 +121,33 @@ def _structured_thinking_extra_body():
     return {"thinking_budget": STRUCTURED_THINKING_BUDGET}
 
 
+def _responses_stream_request(scripted):
+    """Body of the typed-stream case.
+
+    Against a real server the case checks the stream lifecycle, not the
+    model's length: a free-form sampled reply to "typed response stream" ran
+    past ``max_output_tokens`` on Qwen3.8-27B-8bit in 4 of 5 replays, and a
+    truncated response correctly ends ``response.incomplete`` (2026-10-08),
+    which the SDK's ``get_final_response`` rejects.  A greedy one-word answer
+    ends well inside the cap."""
+    body = {
+        "input": "typed response stream",
+        "max_output_tokens": 128,
+        "reasoning": {"effort": "none"},
+        "stream_options": {"include_usage": True},
+    }
+    if not scripted:
+        body.update(input="Reply with the single word: ready", temperature=0)
+    return body
+
+
 def _assert_response_stream_lifecycle(event_types):
     assert event_types[0] == "response.created"
+    if event_types[-1] == "response.incomplete":
+        raise AssertionError(
+            "the stream ended response.incomplete (the reply reached "
+            "max_output_tokens) instead of response.completed"
+        )
     assert event_types[-1] == "response.completed"
     required = [
         "response.output_item.added",
@@ -359,15 +384,13 @@ def run_client(base_url, *, scripted=True):
 
     def responses_stream():
         with openai_client.responses.stream(
-            model=MODEL,
-            input="typed response stream",
-            max_output_tokens=128,
-            reasoning={"effort": "none"},
-            stream_options={"include_usage": True},
+            model=MODEL, **_responses_stream_request(scripted)
         ) as stream:
             event_types = [event.type for event in stream]
+            # Name a truncated stream before the SDK's own "no
+            # response.completed" error hides why.
+            _assert_response_stream_lifecycle(event_types)
             final = stream.get_final_response()
-        _assert_response_stream_lifecycle(event_types)
         assert final.output_text == "hello from mlx2" if scripted else bool(final.output_text.strip())
 
     def responses_tools():

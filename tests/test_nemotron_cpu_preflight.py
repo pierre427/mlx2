@@ -182,3 +182,19 @@ def test_require_current_diarization_qualification_refuses_historical_receipt(tm
     assert qualification["state"] == "refused_stale_or_incomplete"
     assert qualification["accepted"] is False
     assert "adapter_source_sha256" in qualification["differences"]
+
+
+@pytest.mark.parametrize("text", ["[]", '"nemotron3_diarization"', '{"model_type": "other"}', "{"])
+def test_diarize_cli_reports_an_unusable_model_config_as_an_error(tmp_path, capsys, text):
+    # Review 2026-10-09: a non-object config.json was an AttributeError
+    # traceback from inspect_audio_model, unlike every other config error.
+    from mlx2 import diarize_cli
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(text)
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"")
+    assert diarize_cli.main([str(audio), "--model", str(model)]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and err.startswith("error: ")

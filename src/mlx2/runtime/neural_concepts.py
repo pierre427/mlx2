@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,19 @@ def _softmax(value: np.ndarray, axis: int = -1) -> np.ndarray:
     return weights / np.sum(weights, axis=axis, keepdims=True)
 
 
+# The shipped default is also the ceiling: a larger bound would move a
+# malformed, correctly fingerprinted artifact's failure from admission into
+# memory exhaustion (integration review, 2026-10-09).
+MAX_GRAPH_CONCEPTS_CEILING = 4096
+
+
+def _manifest_int(manifest: dict, key: str) -> int:
+    value = manifest.get(key, 0)
+    if type(value) is not int:  # bool is an int subclass; refuse it too
+        raise ValueError(f"neural concept manifest {key} must be an integer")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class NeuralConceptArtifact:
     root: Path
@@ -84,6 +98,11 @@ class NeuralConceptArtifact:
     def fingerprint(self) -> str:
         return str(self.manifest["fingerprint"])
 
+    @property
+    def max_graph_concepts(self) -> int:
+        # Validated as an exact int at load; no coercion at request time.
+        return self.manifest.get("max_graph_concepts", 4096)
+
     @classmethod
     def load(
         cls,
@@ -99,6 +118,8 @@ class NeuralConceptArtifact:
         if root.is_symlink() or not root.is_dir():
             raise ValueError("neural concept artifact root must be a real directory")
         manifest = json.loads(manifest_path.read_text())
+        if not isinstance(manifest, dict):
+            raise ValueError("neural concept artifact manifest must be a JSON object")
         if manifest.get("schema") != NEURAL_CONCEPT_SCHEMA:
             raise ValueError("unsupported neural concept artifact schema")
         expected = {
@@ -119,11 +140,23 @@ class NeuralConceptArtifact:
         fingerprint = hashlib.sha256(encoded + weights_path.read_bytes()).hexdigest()
         if manifest.get("fingerprint") != fingerprint:
             raise ValueError("neural concept artifact fingerprint mismatch")
-        feature_dim = int(manifest.get("feature_dim", 0))
-        state_dim = int(manifest.get("state_dim", 0))
-        hidden_dim = int(manifest.get("hidden_dim", 0))
-        rounds = int(manifest.get("message_rounds", 0))
-        temperature = float(manifest.get("attention_temperature", 0.0))
+        # Exact JSON types: int() would accept "16", True or 16.9.
+        feature_dim = _manifest_int(manifest, "feature_dim")
+        state_dim = _manifest_int(manifest, "state_dim")
+        hidden_dim = _manifest_int(manifest, "hidden_dim")
+        rounds = _manifest_int(manifest, "message_rounds")
+        if "max_graph_concepts" in manifest:
+            max_graph_concepts = _manifest_int(manifest, "max_graph_concepts")
+            if not 1 <= max_graph_concepts <= MAX_GRAPH_CONCEPTS_CEILING:
+                raise ValueError(
+                    "neural concept manifest max_graph_concepts must be 1 to "
+                    f"{MAX_GRAPH_CONCEPTS_CEILING}"
+                )
+        temperature = manifest.get("attention_temperature", 0.0)
+        if type(temperature) not in (int, float) or not math.isfinite(temperature):
+            raise ValueError(
+                "neural concept manifest attention_temperature must be a finite number"
+            )
         if not (8 <= feature_dim <= 1024 and 8 <= state_dim <= 512):
             raise ValueError("neural concept dimensions are out of bounds")
         if (
@@ -133,7 +166,10 @@ class NeuralConceptArtifact:
             or not 0.001 <= temperature <= 1.0
         ):
             raise ValueError("neural concept bridge geometry is out of bounds")
-        relation_order = tuple(manifest.get("relations", ()))
+        relations = manifest.get("relations", [])
+        if not isinstance(relations, list):
+            raise ValueError("neural concept manifest relations must be a list")
+        relation_order = tuple(relations)
         if relation_order != tuple(sorted(RELATIONS)):
             raise ValueError("neural concept relation vocabulary mismatch")
         required = {
@@ -151,11 +187,10 @@ class NeuralConceptArtifact:
             "output_gate": (1,),
         }
         training = manifest.get("training", {})
-        max_decode_steps = (
-            training.get("max_decode_steps", 0)
-            if isinstance(training, Mapping)
-            else 0
-        )
+        if not isinstance(training, Mapping):
+            # A present non-object silently meant "no step bound" before.
+            raise ValueError("neural concept manifest training must be an object")
+        max_decode_steps = training.get("max_decode_steps", 0)
         if isinstance(max_decode_steps, bool) or not isinstance(
             max_decode_steps, int
         ):
@@ -202,7 +237,7 @@ class RecurrentConceptEncoder:
         if not isinstance(concepts, Mapping) or not isinstance(edges, list):
             raise TypeError("semantic graph must contain concepts and edges")
         identifiers = tuple(sorted(concepts))
-        if len(identifiers) > int(self.artifact.manifest.get("max_graph_concepts", 4096)):
+        if len(identifiers) > self.artifact.max_graph_concepts:
             raise ValueError("semantic graph exceeds neural encoder bound")
         if not identifiers:
             return ()
@@ -312,9 +347,7 @@ def validate_state_document(document: Mapping, artifact: NeuralConceptArtifact) 
     if document.get("state_dim") != artifact.state_dim:
         raise ValueError("neural concept state dimension mismatch")
     rows = document.get("concepts")
-    if not isinstance(rows, list) or len(rows) > int(
-        artifact.manifest.get("max_graph_concepts", 4096)
-    ):
+    if not isinstance(rows, list) or len(rows) > artifact.max_graph_concepts:
         raise ValueError("invalid neural concept state rows")
     result = []
     seen = set()

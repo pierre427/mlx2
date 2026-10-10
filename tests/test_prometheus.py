@@ -59,6 +59,7 @@ class FakeEngine:
                 "spomin_exact_boundary_stores": 1,
                 "structured_output_dead_ends": 1,
                 "tool_call_constraint_failures": 1,
+                "tool_call_id_replacements": 2,
             }
         )
         self.batch_metrics = exercised_batch_metrics()
@@ -172,6 +173,8 @@ class FakeEngine:
                     "prefetch_hits": 1,
                     "persisted_writes": 3,
                     "restore_digest_failures": 1,
+                    "pinned_parks_lost": 4,
+                    "shutdown_parks_skipped": 5,
                 },
                 "persistence": {
                     "rescan": {
@@ -351,6 +354,9 @@ def test_engine_exposition_is_non_destructive_bounded_and_advanced():
     assert "mlx2_time_to_first_token_seconds_bucket" in first
     assert "mlx2_prefix_cache_hits_total 3" in first
     assert 'mlx2_prefix_cache_session_events_total{operation="parks"} 2' in first
+    # Integration review: the APC-internal park-loss counters reach /metrics.
+    assert 'mlx2_prefix_cache_session_events_total{operation="pinned_parks_lost"} 4' in first
+    assert 'mlx2_prefix_cache_session_events_total{operation="shutdown_parks_skipped"} 5' in first
     assert "mlx2_prefix_cache_rescan_registered_total 2" in first
     assert 'mlx2_prefix_cache_rescan_discarded_total{reason="identity_mismatch"} 1' in first
     assert 'component="approximate_kv",event="applied"' in first
@@ -358,6 +364,7 @@ def test_engine_exposition_is_non_destructive_bounded_and_advanced():
     assert 'component="thinking_budget",event="forced_close"' in first
     assert 'component="tool_calls",event="parse_fallback"' in first
     assert 'component="tool_calls",event="parallel_bound_failure"' in first
+    assert 'component="tool_calls",event="model_id_replaced"} 2' in first
     assert 'capability="tool_calls",reason="parallel_bound"' in first
     assert 'component="json_schema",event="reference_failure"' in first
     assert 'component="structured_output",event="dead_end"} 1' in first
@@ -748,3 +755,28 @@ def test_histogram_le_labels_use_shortest_round_trip_form():
     assert 'mlx2_inter_token_latency_seconds_bucket{le="0.1"} 0' in rendered
     assert 'mlx2_inter_token_latency_seconds_bucket{le="0.075"} 0' in rendered
     assert 'mlx2_e2e_request_latency_seconds_bucket{le="0.32"} 0' in rendered
+
+
+def test_apc_parked_session_loss_counters_are_exported():
+    """A parked session lost at shutdown parking or at a model-state
+    invalidation is counted by the engine; those counters must reach
+    /metrics or the loss stays invisible to operators."""
+    engine = FakeEngine()
+    engine.counts.update(
+        {
+            "apc_shutdown_parks_skipped": 3,
+            "apc_shutdown_pinned_parks_lost": 1,
+            "apc_invalidation_pinned_parks_lost": 2,
+            "apc_suspend_pinned_parks_lost": 4,
+        }
+    )
+    rendered = render_engine_metrics(engine)
+    assert "mlx2_apc_suspend_pinned_parks_lost_total 4" in rendered
+    assert "mlx2_apc_shutdown_parks_skipped_total 3" in rendered
+    assert "mlx2_apc_shutdown_pinned_parks_lost_total 1" in rendered
+    assert "mlx2_apc_invalidation_pinned_parks_lost_total 2" in rendered
+    # Declared-at-zero counters render as zero, not as a missing series.
+    quiet = render_engine_metrics(FakeEngine())
+    assert "mlx2_apc_invalidation_pinned_parks_lost_total 0" in quiet
+    assert "mlx2_apc_shutdown_pinned_parks_lost_total 0" in quiet
+    assert "mlx2_apc_suspend_pinned_parks_lost_total 0" in quiet

@@ -404,6 +404,7 @@ _ENGINE_EVENTS = {
     "tool_call_parse_fallbacks": ("tool_calls", "parse_fallback"),
     "tool_call_constraint_failures": ("tool_calls", "parallel_bound_failure"),
     "tool_call_constraint_truncations": ("tool_calls", "parallel_bound_truncated"),
+    "tool_call_id_replacements": ("tool_calls", "model_id_replaced"),
     "constrained_tool_grammar_engagements": ("tool_calls", "decode_grammar_engaged"),
     "constrained_tool_grammar_skips": ("tool_calls", "decode_grammar_skipped"),
     "constrained_tool_grammar_auto_engagements": (
@@ -1092,6 +1093,8 @@ def _add_apcv2(
         "session_deletes",
         "pin_expiries",
         "pin_cap_rejections",
+        "pinned_parks_lost",
+        "shutdown_parks_skipped",
         "publication_rejections",
         "persistence_io_failures",
         "persisted_writes",
@@ -1627,6 +1630,46 @@ def _add_int8_prefill(builder: PrometheusBuilder, engine: Any) -> None:
         "Int8 weight-copy bytes (resident plus worst per-call transient).",
         int(handle.weight_copy_bytes()) if handle is not None else 0,
     )
+    builder.counter(
+        "mlx2_int8_prefill_q8_inplace_calls_total",
+        "Projection calls computed by the in-place Q8 W8A8 kernel.",
+        int(counts.get("q8_calls", 0)),
+    )
+    builder.counter(
+        "mlx2_int8_prefill_q8_inplace_rows_total",
+        "Activation rows computed by the in-place Q8 W8A8 kernel.",
+        int(counts.get("q8_rows", 0)),
+    )
+    builder.gauge(
+        "mlx2_int8_prefill_q8_inplace_modules",
+        "Projections bound to the in-place Q8 W8A8 kernel.",
+        int(handle.q8_module_count()) if handle is not None else 0,
+    )
+    builder.gauge(
+        "mlx2_int8_prefill_q8_metadata_copy_bytes",
+        "Group-major Q8 scale/bias copies (resident plus worst transient).",
+        int(handle.metadata_copy_bytes()) if handle is not None else 0,
+    )
+    if getattr(policy, "q45_inplace", False):
+        # Only for a Q4/Q5 in-place policy, so existing scrapes are unchanged.
+        for bits in (4, 5):
+            builder.counter(
+                "mlx2_int8_prefill_q45_inplace_calls_total",
+                "Projection calls computed by the in-place Q4/Q5 W4A8/W5A8 kernels.",
+                int(counts.get(f"q{bits}_calls", 0)),
+                {"bits": str(bits)},
+            )
+            builder.gauge(
+                "mlx2_int8_prefill_q45_inplace_modules",
+                "Projections bound to the in-place Q4/Q5 kernels.",
+                int(handle.q45_module_count(bits)) if handle is not None else 0,
+                {"bits": str(bits)},
+            )
+        builder.counter(
+            "mlx2_int8_prefill_q45_inplace_rows_total",
+            "Activation rows computed by the in-place Q4/Q5 kernels.",
+            int(counts.get("q45_rows", 0)),
+        )
 
 
 _LANE_PATHS = {
@@ -1955,6 +1998,10 @@ def render_engine_metrics(engine: Any) -> str:
         ("resumes", "mlx2_resumes_total", "Transitions that reopened model admission."),
         ("prefetches_queued", "mlx2_prefetches_queued_total", "Admin resume session prefetches queued."),
         ("prefetches_cancelled", "mlx2_prefetches_cancelled_total", "Session prefetches cancelled while admission was closed."),
+        ("apc_shutdown_parks_skipped", "mlx2_apc_shutdown_parks_skipped_total", "APCv2 resident checkpoints shutdown parking could not write."),
+        ("apc_shutdown_pinned_parks_lost", "mlx2_apc_shutdown_pinned_parks_lost_total", "Parked session checkpoints left without a disk copy at shutdown; missing after restart."),
+        ("apc_invalidation_pinned_parks_lost", "mlx2_apc_invalidation_pinned_parks_lost_total", "Parked session checkpoints destroyed by a model-state invalidation (LoRA load/unload)."),
+        ("apc_suspend_pinned_parks_lost", "mlx2_apc_suspend_pinned_parks_lost_total", "Parked session checkpoints dropped by a resident suspend."),
     ):
         builder.counter(metric, help_text, int(counts.get(key, 0)))
     for endpoint_class in (

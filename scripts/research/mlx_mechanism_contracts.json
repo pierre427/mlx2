@@ -1,0 +1,131 @@
+{
+  "schema": 1,
+  "scope": "inventory only; not runtime admission or qualification",
+  "mechanisms": {
+    "qsa_indexed": {
+      "sources": [
+        "src/mlx2/runtime/models/qwen4_qsa_indexed.py"
+      ],
+      "tests": [
+        "tests/test_qwen4_qsa_indexed.py",
+        "tests/test_qwen4_qsa_indexed_merge.py"
+      ],
+      "current_gate": "Build allowlist and shape eligibility in qwen4_qsa_indexed; preserve existing behavior",
+      "needs": [
+        "device/shape eligibility",
+        "ordinary-reference numerics",
+        "cache/index ownership"
+      ]
+    },
+    "qsa_fused_scores": {
+      "sources": [
+        "src/mlx2/runtime/models/qwen4_qsa_scores.py"
+      ],
+      "tests": [
+        "tests/test_qsa_output_gate_build_metal.py",
+        "tests/test_qsa_optional_epilogues_metal.py"
+      ],
+      "current_gate": "Existing feature and shape gates; broad build inventory is not independent mechanism evidence",
+      "needs": [
+        "custom-kernel ABI",
+        "fused score exactness",
+        "selector identity"
+      ]
+    },
+    "quantized_projection": {
+      "sources": [
+        "src/mlx2/runtime/models/sp_qmm.py",
+        "src/mlx2/runtime/models/moe_nax_gather.py"
+      ],
+      "tests": [
+        "tests/test_sp_qmm.py",
+        "tests/test_moe_nax_gather.py",
+        "tests/test_moe_nax_gather_bits.py"
+      ],
+      "current_gate": "Existing device/shape/bit eligibility and policy gates",
+      "needs": [
+        "custom-kernel ABI",
+        "dtype and bit-width matrix",
+        "stock dispatch/arithmetic equivalence"
+      ]
+    },
+    "attention_rows": {
+      "sources": [
+        "src/mlx2/runtime/models/qwen4_attn_rows.py",
+        "src/mlx2/runtime/models/qwen4_attn_window.py"
+      ],
+      "tests": [
+        "tests/test_qwen4_attn_rows.py",
+        "tests/test_qwen4_attn_window.py"
+      ],
+      "current_gate": "Existing row and window eligibility gates",
+      "needs": [
+        "stock SDPA dispatch",
+        "row/window geometry",
+        "mask and cache boundary equivalence"
+      ]
+    },
+    "hyperconnection_decode": {
+      "sources": [
+        "src/mlx2/runtime/models/qwen4_hc_decode.py"
+      ],
+      "tests": [
+        "tests/test_qwen4_hc_decode.py",
+        "tests/test_check_qwen4_hc_decode_gate.py"
+      ],
+      "current_gate": "Existing served-exp and policy gates",
+      "needs": [
+        "reduction arithmetic",
+        "dtype/width coverage"
+      ]
+    },
+    "residency": {
+      "sources": [
+        "src/mlx2/runtime/weight_residency.py"
+      ],
+      "tests": [
+        "tests/test_audit_mlx_rebase_4640_4641.py"
+      ],
+      "current_gate": "Owned residency refresh implementation; source-header checks are not live allocator evidence",
+      "needs": [
+        "loaded extension ABI",
+        "allocator and lifetime behavior"
+      ]
+    },
+    "tensorfold_target": {
+      "sources": [
+        "src/mlx2/runtime/qwen38_tensorfold.py",
+        "src/mlx2/runtime/tensorfold_qwen38/lane_tree.py",
+        "src/mlx2/runtime/tensorfold_qwen38/lane_attention.py"
+      ],
+      "tests": [
+        "tests/test_qwen38_tensorfold_component_oracle_host.py",
+        "tests/test_qwen38_tensorfold_coupled_laws_host.py",
+        "tests/test_tensorfold_prefill.py"
+      ],
+      "current_gate": "Vendored source hashes and explicit execution profile",
+      "needs": [
+        "vendored source identity",
+        "component/state parity",
+        "same-shape ordinary reference"
+      ]
+    },
+    "native_paged_lifecycle": {
+      "sources": [
+        "src/mlx2/adapters/native_cohort.py",
+        "src/mlx2/adapters/native_hybrid.py",
+        "src/mlx2/adapters/native_qwen3.py"
+      ],
+      "tests": [
+        "tests/test_native_adapter_boundary_cpu.py",
+        "tests/test_hybrid_serving_lifecycle_source_cpu.py"
+      ],
+      "current_gate": "Explicit research profile/source/wheel binding",
+      "needs": [
+        "native extension ABI",
+        "device construction and cancellation",
+        "atomic retirement"
+      ]
+    }
+  }
+}

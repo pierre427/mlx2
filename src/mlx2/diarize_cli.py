@@ -73,7 +73,8 @@ def main(argv=None):
             args.output.write_text(rendered + "\n")
         else:
             print(rendered)
-    except (OSError, ValueError) as error:
+    except (OSError, TypeError, ValueError) as error:
+        # TypeError: a config.json or manifest that is not a JSON object.
         print(f"error: {error}", file=sys.stderr)
         return 1
     return 0

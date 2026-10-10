@@ -704,7 +704,7 @@ def check_continuation_generation(
                         lane.uid,
                         logits,
                         law,
-                        history,
+                        [*history, *keywords.get("history_suffix", ())],
                         bool(
                             keywords.get(
                                 "reachable", positional[0] if positional else True

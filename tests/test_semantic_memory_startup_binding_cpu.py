@@ -37,6 +37,8 @@ def _gemma3n_artifact(root):
 
 class _FakeEngine:
     reasoning_signer = None
+    # main() validates the engine arguments before binding; keep the contract.
+    validate_arguments = staticmethod(server.ServingEngine.validate_arguments)
 
     def __init__(self, model, **kwargs):
         self.closed = False

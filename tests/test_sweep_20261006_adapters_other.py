@@ -288,8 +288,10 @@ def test_hy_v3_runtime_carries_no_dead_mtp_surface():
     for name in ("mtp_step", "make_mtp_cache", "_remap_mtp_weights"):
         assert not hasattr(hy_v3.Model, name)
     assert not hasattr(hy_v3, "HYV3MTP")
-    # The public mirror's provenance/ records are frozen; this record
-    # check runs on the source tree only.
+    provenance = json.loads(
+        (Path(__file__).resolve().parents[1] / "provenance" / "hy-v3.json").read_text()
+    )
+    assert not any("strict-loading" in line for line in provenance["modifications"])
 
 
 HY_FULL = Path("/Volumes/T7/models/kernelpool/Hy3-6bit")
@@ -328,8 +330,10 @@ def test_gpt_oss_carries_no_dead_speculative_hooks():
     for cls in (gpt_oss.Model, gpt_oss.AttentionBlock, gpt_oss_puzzle.Model):
         assert "kv_sink" not in inspect.signature(cls.__call__).parameters
     assert not getattr(gpt_oss.Model, "supports_speculative_rollback", False)
-    # The public mirror's provenance/ records are frozen; this record
-    # check runs on the source tree only.
+    provenance = json.loads(
+        (Path(__file__).resolve().parents[1] / "provenance" / "gpt-oss-ordinary.json").read_text()
+    )
+    assert not any("reasoning routes pending" in line for line in provenance["modifications"])
 
 
 NORTH = MODELS / "North-Mini-Code-1.0-mlx-4bit"

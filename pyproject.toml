@@ -30,9 +30,10 @@ observability = [
 # mlx-vlm is pinned to one revision: main after the 0.7.3 release, which adds
 # #2342 (3/5/6-bit KV width), #2357 (Qwen3.5 batched left padding), #2358
 # (small top-p / low temperature) and #2362.  Gemma 4, Gemma 3n and MiniCPM-o
-# execute this code and refuse any other revision (adapters/mlx_vlm_pin.py).
-# The 0.7.1 per-cycle slowdown (omlx#3750) concerned Qwen MTP routes, which do
-# not import mlx-vlm.  Qwen-Image keeps its own pin in generative_media.py.
+# use adapter-owned source-content contracts: a different checkout is accepted
+# only when its reachable dependency bytes match (adapters/vlm_runtime.py).
+# Conversion/research tooling keeps its own exact source pin. This installation
+# pin remains the reproducible default, not a claim of arbitrary compatibility.
 multimodal = [
     "pillow>=10",
     "opencv-python>=4.10",
@@ -58,4 +59,6 @@ addopts = "-q"
 testpaths = ["tests"]
 
 [tool.setuptools.package-data]
-"mlx2.adapters" = ["assets/*.npz", "assets/*.json"]
+"mlx2" = ["route_dispatch.json"]
+"mlx2.adapters" = ["assets/*.npz", "assets/*.json", "vlm_contracts/*.json"]
+"mlx2.runtime" = ["data/*.json"]

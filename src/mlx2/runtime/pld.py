@@ -31,6 +31,7 @@ from .generate import (
 from .models import cache as cache_module
 from .models.cache import ArraysCache, CacheList, KVCache, RotatingKVCache
 from .prefill_plan import prompt_length_prefill_step
+from . import round_phases
 from .prompt_lookup import (
     AdaptiveLookback,
     CostAwarePLDLatch,
@@ -588,9 +589,11 @@ class PromptLookupBatchGenerator:
         prompt_lookup=None,
         decode_time_fairness=None,
         recent_source_store=None,
+        decode_first=None,
         **_kwargs,
     ):
         self.model = model
+        round_phases.initialize(self, decode_first)
         self._recovery_revision = (
             f"{type(model).__module__}.{type(model).__qualname__}:{id(model)}"
         )
@@ -956,6 +959,7 @@ class PromptLookupBatchGenerator:
                     step,
                     contended=True,
                 )
+            step = round_phases.prefill_width(self, step)
             count = min(step, len(lane.remaining) - 1)
             depth = len(lane.history)
             inputs = [lane.remaining.popleft() for _ in range(count)]
@@ -2071,16 +2075,18 @@ class PromptLookupBatchGenerator:
         if finish_reason and lane.speculation_started:
             _stop_speculation(lane.cache)
             lane.speculation_started = False
-        committed_response_tokens = tuple(
-            lane.lookup_history[-lane.generated :]
-        ) if lane.generated else ()
-        prior_response_tokens = committed_response_tokens[: -len(delivered)]
-        delivered_response_tokens = []
-        response_token_limit = int(
-            lane.config.get("recent_committed_response_tokens", 2048)
-        )
+        recent_tail = None
+        if lane.config.get("recent_committed_segments", False):
+            response_token_limit = int(
+                lane.config.get("recent_committed_response_tokens", 2048)
+            )
+            # Only the bounded tail before this round is needed. Copying the
+            # whole generated response here made long responses quadratic,
+            # even when recent-segment publication was disabled.
+            end = len(lane.lookup_history) - len(delivered)
+            start = max(len(lane.lookup_history) - lane.generated, end - response_token_limit)
+            recent_tail = deque(lane.lookup_history[start:end], maxlen=response_token_limit)
         for index, (token, row, from_draft) in enumerate(delivered):
-            delivered_response_tokens.append(token)
             final = index == len(delivered) - 1
             response = GenerationBatch.Response(
                 uid=lane.uid,
@@ -2095,20 +2101,36 @@ class PromptLookupBatchGenerator:
                 execution_width=getattr(lane, "round_width", 1),
             )
             response.speculative_receipt = receipt
-            if lane.config.get("recent_committed_segments", False):
+            if recent_tail is not None:
                 # Attach exactly the prefix delivered through this response,
                 # not the rest of a multi-token verify round. The serving
                 # parser may stop between responses and publish only what the
                 # client actually consumed.
-                response.pld_committed_response_tokens = tuple(
-                    (prior_response_tokens + tuple(delivered_response_tokens))[
-                        -response_token_limit:
-                    ]
-                )
+                recent_tail.append(token)
+                response.pld_committed_response_tokens = tuple(recent_tail)
                 response.pld_source_scope = lane.source_scope
             lane.ready.append(response)
 
     def next(self):
+        mode = self.decode_first.mode()
+        self._decode_first_round_mode = mode
+        return round_phases.publish_round(
+            self, mode, lambda: self._scheduler_round(mode)
+        )
+
+    def _prefill_phase(self, candidates):
+        waiting = [self.lanes[uid] for uid in candidates
+                   if uid in self.lanes and self.lanes[uid].anchor is None]
+        if waiting:
+            lane = waiting[self._prefill_cursor % len(waiting)]
+            self._prefill_cursor += 1
+            contended = self.decode_time_fairness.enabled and any(
+                other.anchor is not None for other in self.lanes.values()
+            )
+            return [self._prefill(lane, contended=contended)]
+        return []
+
+    def _scheduler_round(self, mode):
         prompts = []
         # At most one bounded prefill slice per poll, round-robin over the
         # lanes still prefilling, and lanes that already held an anchor
@@ -2121,14 +2143,19 @@ class PromptLookupBatchGenerator:
             for lane in self.lanes.values()
             if lane.anchor is not None and not lane.ready
         ]
-        waiting = [lane for lane in self.lanes.values() if lane.anchor is None]
-        if waiting:
-            lane = waiting[self._prefill_cursor % len(waiting)]
-            self._prefill_cursor += 1
-            contended = self.decode_time_fairness.enabled and any(
-                other.anchor is not None for other in self.lanes.values()
-            )
-            prompts.append(self._prefill(lane, contended=contended))
+        candidates = tuple(lane.uid for lane in self.lanes.values()
+                           if lane.anchor is None)
+        if mode == "off":
+            prompts.extend(self._prefill_phase(candidates))
+        responses = self._decode_phase(pending)
+        pending.clear()
+        if mode != "off":
+            # Verification and lane cleanup have completed before publication.
+            yield responses
+            prompts.extend(self._prefill_phase(candidates))
+        return prompts, responses
+
+    def _decode_phase(self, pending):
         decode_started = time.perf_counter()
         # The cost latch measures one physical target row. Keep that geometry
         # when several PLD requests coexist: a width-two segmented target is
@@ -2213,7 +2240,7 @@ class PromptLookupBatchGenerator:
                 previous_steps, self._steps_counter, ALLOCATOR_RECLAIM_STEP_INTERVAL
             ):
                 mx.clear_cache()
-        return prompts, responses
+        return responses
 
     def scheduler_waiting_uids(self):
         """Lanes still prefilling: they wait on the prefill round-robin, not
@@ -2262,6 +2289,7 @@ class PromptLookupBatchGenerator:
             close()
 
     def close(self):
+        round_phases.close_pending(self)
         self.remove(tuple(self.lanes))
         self._cohort_owner = None
         self.boundaries.clear()

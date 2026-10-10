@@ -1065,3 +1065,83 @@ def test_high_margin_screen_still_fires_on_distinct_prompts():
     assert excess["candidate_comparisons"] == 8
     assert excess["p_value"] < excess["alpha"]
     assert not excess["passed"]
+
+
+def test_slow_adaptive_policy_is_qualified_with_separate_performance_failure():
+    report = _qualification_report()
+    candidate = report["arms"]["adaptive"]
+    candidate["sequential"]["median_decode_tokens_per_second"] = 1.0
+    for row in candidate["concurrent"]:
+        row["aggregate_tokens_per_second"] = 1.0
+    bucket = candidate["final_status"]["scheduler"]["adaptive_mtp_cost_model"]["buckets"]["5-8"]
+    bucket["probe_fraction"] = 0.9
+    evidence = benchmark.adaptive_qualification_evidence(report)
+    assert evidence["passed"]
+    assert evidence["buckets"][0]["passed"]
+    assert not evidence["performance_assessment"]["passed"]
+    assert evidence["performance_assessment"]["qualification_gate"] is False
+
+
+def test_fast_adaptive_policy_does_not_override_incorrectness():
+    report = _qualification_report()
+    report["correctness"]["passed"] = False
+    candidate = report["arms"]["adaptive"]
+    candidate["sequential"]["median_decode_tokens_per_second"] = 1000.0
+    for row in candidate["concurrent"]:
+        row["aggregate_tokens_per_second"] = 1000.0
+    evidence = benchmark.adaptive_qualification_evidence(report)
+    assert evidence["performance_assessment"]["passed"]
+    assert not evidence["passed"]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("throughput_tolerance", float("nan")),
+     ("max_probe_fraction", float("inf")),
+     ("differential_alpha", float("nan")),
+     ("differential_alpha", 0.0)],
+)
+def test_qualifier_rejects_invalid_or_weaker_confidence_parameters(tmp_path, key, value):
+    from scripts import qualify_serving
+    report = _qualification_report()
+    recorded = benchmark.adaptive_qualification_evidence(report)
+    recorded[key] = value
+    report.update(
+        schema=benchmark.SCHEMA,
+        passed=True,
+        benchmark_harness={
+            "name": "scripts/benchmark_adaptive_mtp.py",
+            "sha256": benchmark.hashlib.sha256(
+                benchmark.Path(benchmark.__file__).read_bytes()
+            ).hexdigest(),
+        },
+        adaptive_qualification=recorded,
+    )
+    path = tmp_path / "adaptive.json"
+    path.write_text(json.dumps(report))
+    with pytest.raises(ValueError, match="weaker qualification limits"):
+        qualify_serving.validate_adaptive_benchmark(path, {})
+
+
+def test_qualifier_accepts_explicit_performance_limits_without_weakening_correctness(tmp_path):
+    from scripts import qualify_serving
+    report = _qualification_report()
+    candidate = report["arms"]["adaptive"]["final_status"]
+    recorded = benchmark.adaptive_qualification_evidence(
+        report, throughput_tolerance=0.4, max_probe_fraction=0.5
+    )
+    report.update(
+        schema=benchmark.SCHEMA,
+        passed=recorded["passed"],
+        benchmark_harness={
+            "name": "scripts/benchmark_adaptive_mtp.py",
+            "sha256": benchmark.hashlib.sha256(
+                benchmark.Path(benchmark.__file__).read_bytes()
+            ).hexdigest(),
+        },
+        adaptive_qualification=recorded,
+    )
+    path = tmp_path / "adaptive.json"
+    path.write_text(json.dumps(report))
+    _, evidence = qualify_serving.validate_adaptive_benchmark(path, candidate)
+    assert evidence["adaptive_qualification"]["passed"]

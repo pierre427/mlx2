@@ -163,11 +163,15 @@ def test_qwen_backend_uses_the_shared_mlx_vlm_pin(monkeypatch: pytest.MonkeyPatc
         _verify_qwen_backend_revision()
 
 
-def test_qwen_model_load_fails_closed_off_pin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_qwen_model_load_fails_closed_outside_content_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mlx2.adapters import vlm_runtime
     monkeypatch.setattr(generative_media, "_qwen_bound_inputs", lambda path: {})
     monkeypatch.setattr(generative_media, "inspect_qwen_image21", lambda path: SimpleNamespace(path=tmp_path))
-    monkeypatch.setattr(mlx_vlm_pin, "mlx_vlm_runtime", lambda: {"version": "0.7.2", "source": "index", "editable": False, "revision": None})
-    with pytest.raises(RuntimeError, match="not the pinned revision"):
+    def refuse(family):
+        assert family == "qwen_image"
+        raise RuntimeError("dependency content differs")
+    monkeypatch.setattr(vlm_runtime, "bind_backend", refuse)
+    with pytest.raises(RuntimeError, match="dependency content differs"):
         QwenImage21Adapter(tmp_path)._model(edit=False)
 
 

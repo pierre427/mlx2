@@ -21,6 +21,7 @@ from pathlib import Path
 ROOT = Path("/tmp/mlx2-candidate-m3.oOgHrM")
 LOCK = Path("/Users/Shared/mlxuag/gpu.lock")
 SOURCE_REV = "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5"
+FAMILIES = {"smol": "smolvlm", "qwen": "qwen2_5_vl"}  # label -> mlx-vlm contract family
 
 
 def image_uri(size):
@@ -37,6 +38,20 @@ def request(uri, index):
         {"type": "input_image", "image_url": uri},
         {"type": "text", "text": "Name its main color."},
     ]}], "skip_writing_prefix_cache": True, "max_tokens": 1}
+
+
+def source_contract(adapter, family) -> dict:
+    """The adapter's bound mlx-vlm dependency-content identity (see
+    ``adapters/vlm_runtime.py``) for the benchmarked family; the pre-contract
+    ``{revision}`` shape, another family and another reference line are refused."""
+    from mlx2.media_qualification import source_contract_identity
+
+    runtime = getattr(adapter, "mlx_vlm_runtime", None)
+    if not source_contract_identity(runtime, SOURCE_REV, family=FAMILIES[family]):
+        raise RuntimeError(
+            f"source mlx-vlm dependency contract drift: {runtime}"
+        )
+    return runtime
 
 
 def run(family, mode, repeats):
@@ -61,9 +76,8 @@ def run(family, mode, repeats):
         )
         uri = image_uri(32)
     try:
-        source = adapter.mlx_vlm_runtime.get("revision")
-        if source != SOURCE_REV:
-            raise RuntimeError(f"unexpected pinned source revision: {source}")
+        contract = source_contract(adapter, family)
+        source = contract["reference_revision"]
         rows = []
         for index in range(-2, repeats):
             mx.synchronize()
@@ -96,7 +110,8 @@ def run(family, mode, repeats):
         return {
             "schema": "mlx2.m3-tower-direct-timing.v1",
             "family": family, "mode": mode,
-            "source_revision": source, "repeats": repeats,
+            "source_revision": source, "mlx_vlm_runtime": dict(contract),
+            "repeats": repeats,
             "execution_config": adapter.execution_config(max_lanes=1, prefill_step=128),
             "source_sha256": {
                 name: hashlib.sha256((ROOT / "src/mlx2" / name).read_bytes()).hexdigest()

@@ -498,6 +498,8 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS,
         raise ValueError("declared projection groups require grouping")
     from .policy import format_class
 
+    _refuse_int8_wrapped(model)
+
     def threshold(module):
         """Per-projection min rows; None keeps the projection on stock."""
         if min_rows_by_format is None:
@@ -665,6 +667,24 @@ def _check_simd_twins(model) -> dict:
             **{kind: shapes for kind, shapes in by_kind.items() if shapes}}
 
 
+def _lane_class(module):
+    """The module's lane-level class, looking through an int8 prefill wrapper.
+
+    int8 prefill wraps a lane projection in a subclass that sends prefill rows
+    to its int8 kernels and every other call to the lane class
+    (``int8_prefill._projection_classes``)."""
+    return getattr(type(module), "_mlx2_int8_prefill_base", type(module))
+
+
+def _refuse_int8_wrapped(model) -> None:
+    wrapped = [name for name, module in model.named_modules()
+               if hasattr(type(module), "_mlx2_int8_prefill_base")]
+    if wrapped:
+        raise ValueError(
+            "lane matmul cannot be (re)installed or removed under an int8 prefill "
+            f"install; remove int8 prefill first ({len(wrapped)} wrapped, first {wrapped[0]!r})")
+
+
 def _restore(module) -> None:
     module.__class__ = _RESTORE[type(module)]
     for name in ("_lane_prepared", "_lane_group", "_lane_columns", "_lane_min_rows",
@@ -674,6 +694,7 @@ def _restore(module) -> None:
 
 def uninstall(model) -> int:
     """Restore stock classes; returns how many projections were restored."""
+    _refuse_int8_wrapped(model)
     restored = 0
     for _name, module in model.named_modules():
         if type(module) in _RESTORE:
@@ -690,7 +711,7 @@ def set_enabled(on: bool, *, grouping: bool | None = None) -> None:
 
 
 def installed(module) -> bool:
-    return type(module) in _RESTORE and _prepared(module) is not None
+    return _lane_class(module) in _RESTORE and _prepared(module) is not None
 
 
 def apply_policy(model, policy: dict, declared=()) -> dict | None:

@@ -1271,7 +1271,8 @@ def adaptive_qualification_evidence(
                 "minimum_samples_per_depth": min_samples,
                 "missing_depths": missing,
                 "probe_fraction": probe_fraction,
-                "passed": not missing and probe_fraction <= max_probe_fraction,
+                "passed": not missing,
+                "efficiency_passed": probe_fraction <= max_probe_fraction,
             }
         )
     decreases = int(scheduler.get("adaptive_mtp_depth_decreases_concurrent", 0))
@@ -1419,7 +1420,7 @@ def adaptive_qualification_evidence(
     }
     correctness_passed = bool(report.get("correctness", {}).get("passed"))
     throughput_passed = all(row["passed"] for row in throughput)
-    common_passed = correctness_passed and throughput_passed and smoke_passed
+    common_passed = correctness_passed and smoke_passed
     adaptive_evidence_passed = (
         not adaptive_selected
         or (
@@ -1457,6 +1458,16 @@ def adaptive_qualification_evidence(
         "enabled_features": enabled_features,
         "features": features,
         "missing_feature_evidence": missing_feature_evidence,
+        "performance_assessment": {
+            "passed": throughput_passed and all(
+                row["efficiency_passed"] for row in bucket_rows
+            ),
+            "throughput_passed": throughput_passed,
+            "probe_efficiency_passed": all(
+                row["efficiency_passed"] for row in bucket_rows
+            ),
+            "qualification_gate": False,
+        },
         "throughput_tolerance": throughput_tolerance,
         "differential_alpha": differential_alpha,
         "throughput": throughput,

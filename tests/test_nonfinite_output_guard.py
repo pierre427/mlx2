@@ -270,6 +270,9 @@ def test_prompt_lookup_lane_failure_keeps_peer_and_executor_live(batched):
     from mlx2.runtime.adaptive_policy import DecodeTimeFairness
 
     generator.decode_time_fairness = DecodeTimeFairness()
+    from mlx2.runtime.round_phases import initialize
+    initialize(generator, None)
+    generator.scheduler_stats = {}
     if batched:
         generator._round_batched = lambda lanes: (_ for _ in ()).throw(
             PromptLookupLaneFailure(29, "invalid sampled token")

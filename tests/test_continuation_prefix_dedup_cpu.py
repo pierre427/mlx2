@@ -244,7 +244,8 @@ def test_mixed_sampling_uses_one_draw_per_reached_prefix_and_actual_law(monkeypa
     original = engine._target_law
     seen = []
 
-    def law(lane, logits, history, *args):
+    def law(lane, logits, history, *args, history_suffix=()):
+        history = [*history, *history_suffix]
         value = original(lane, logits, history, *args)
         prompt = prompts[lanes.index(lane)]
         expected = oracle(model, prompt, history[len(prompt) :]).astype(mx.float32)

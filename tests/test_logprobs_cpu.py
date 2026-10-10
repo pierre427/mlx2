@@ -11,7 +11,12 @@ import weakref
 import numpy as np
 import pytest
 
-from mlx2.logprobs import MAX_TOP_LOGPROBS, token_logprob, wants_logprobs
+from mlx2.logprobs import (
+    MAX_TOP_LOGPROBS,
+    token_logprob,
+    wants_logprobs,
+    wants_logprobs_at,
+)
 from mlx2.server import validate_request
 
 
@@ -153,6 +158,23 @@ def test_text_format_is_normalized_and_top_alone_requests_probabilities():
     assert "response_format" not in request
     assert wants_logprobs(request)
     assert not wants_logprobs({"logprobs": False, "top_logprobs": 0})
+
+
+def test_logprob_window_is_one_based_and_bounded():
+    request = {
+        "logprobs": True,
+        "top_logprobs": 2,
+        "logprobs_start": 18,
+        "logprobs_end": 18,
+    }
+    assert not wants_logprobs_at(request, 17)
+    assert wants_logprobs_at(request, 18)
+    assert not wants_logprobs_at(request, 19)
+    assert not wants_logprobs_at({}, 18)
+    validated = validate_request(
+        {"messages": [{"role": "user", "content": "hi"}], **request}, chat=True
+    )
+    assert validated["logprobs_start"] == validated["logprobs_end"] == 18
 
 
 @pytest.mark.parametrize("count", [0, 1, MAX_TOP_LOGPROBS])

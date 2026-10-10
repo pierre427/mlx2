@@ -36,6 +36,47 @@ def test_only_metal_memory_failures_are_recovered():
     assert not serving.is_device_out_of_memory(ValueError(str(OOM)))
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # MLX's allocator when Metal returns no buffer (backend/metal/allocator.cpp).
+        "[malloc] Unable to allocate 1073741824 bytes.",
+        # MLX's allocator above a strict memory limit.
+        "[metal::malloc] Resource limit (68719476736) exceeded.",
+    ],
+)
+def test_allocator_failures_are_memory_faults(text):
+    assert serving.is_device_out_of_memory(RuntimeError(text))
+    assert serving.device_fault_kind(RuntimeError(text)) == "out_of_memory"
+    assert not serving.is_device_out_of_memory(ValueError(text))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Not MLX's wording (a 2026-10-09 repro invented it): a generic
+        # substring must not turn an unrelated step failure into recovery.
+        "[metal::malloc] Out of memory",
+        "tokenizer: out of memory for vocab table",
+        "unable to allocate a lane slot for request r1",
+        "resource limit (lanes) reached",
+    ],
+)
+def test_generic_memory_wording_is_not_a_device_fault(text):
+    assert not serving.is_device_out_of_memory(RuntimeError(text))
+    assert serving.device_fault_kind(RuntimeError(text)) is None
+
+
+def test_a_buffer_size_limit_is_not_a_memory_fault():
+    # A single buffer past Metal's maximum size is a geometry error that
+    # abandoning lanes cannot cure.
+    text = (
+        "[metal::malloc] Attempting to allocate 137438953472 bytes which is "
+        "greater than the maximum allowed buffer size of 103079215104 bytes."
+    )
+    assert not serving.is_device_out_of_memory(RuntimeError(text))
+
+
 GPU_TIMEOUT = RuntimeError(
     "[METAL] Command buffer execution failed: Caused GPU Timeout Error "
     "(00000002:kIOGPUCommandBufferCallbackErrorTimeout)."

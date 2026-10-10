@@ -215,7 +215,8 @@ class Validation(_helpers.Validation):
         original, calls = self.tracked(model)
         original_law, observations = batch._target_law, []
 
-        def law(lane, logits, history, *args):
+        def law(lane, logits, history, *args, history_suffix=()):
+            history = [*history, *history_suffix]
             result = original_law(lane, logits, history, *args)
             oracle = model(self.mx.array([history]), cache=model.make_cache())[0, -1]
             if lane.sampling["sampling_temp"]:

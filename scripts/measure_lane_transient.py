@@ -23,6 +23,8 @@ def main():
     ap.add_argument("--depths", default="0,1,2")
     ap.add_argument("--out", default="/tmp/transient.json")
     ap.add_argument("--no-mtp", action="store_true")
+    ap.add_argument("--lane-matmul", choices=("off", "auto", "crossover", "exact"), default="off",
+                    help="install the lane matmul as the server's --lane-matmul would")
     args = ap.parse_args()
 
     from mlx2.adapters.registry import resolve_adapter
@@ -32,6 +34,16 @@ def main():
     t0 = time.time()
     adapter = cls(args.model, require_mtp=True) if use_mtp else cls(args.model)
     model = adapter.model
+    lane = {"mode": "off", "law_id": "stock"}
+    if args.lane_matmul != "off":
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from mtp_confidence_gpu import _install_lane
+
+        lane = _install_lane(args, adapter)
+        print(f"lane matmul: {lane}", flush=True)
     mx.eval(model.parameters())
     mx.clear_cache()
     weights_gib = gib(mx.get_active_memory())
@@ -129,7 +141,7 @@ def main():
             mx.clear_cache()
 
     with open(args.out, "w") as f:
-        json.dump({"weights_gib": weights_gib, "rows": rows}, f, indent=1)
+        json.dump({"weights_gib": weights_gib, "lane_matmul": lane, "rows": rows}, f, indent=1)
     print("wrote", args.out)
 
 

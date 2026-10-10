@@ -200,7 +200,9 @@ def _block_generator(problem, unprocessed):
     gen.fly_verification = FLyVerificationPolicy()
     gen.exact_verification = "block"
 
-    def target_law(lane, logits, history, reachable=True, response_rows=None, greedy_token=False):
+    def target_law(lane, logits, history, reachable=True, response_rows=None, greedy_token=False,
+                   *, history_suffix=()):
+        history = [*history, *history_suffix]
         prefix = tuple(history[len(lane.base) + 1:])
         if response_rows is not None:
             response_rows.append(None)

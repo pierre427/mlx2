@@ -334,6 +334,31 @@ def test_batch_generator_acceptance_log_matches_ordinary_output(tmp_path):
         rows = load_acceptance_log(log_path)
         assert len(rows) == stats["mtp_acceptance_log_records"]
         assert any(len(r.features) > r.verify_depth for r in rows)  # lookahead seen
+        # Delivered tokens, keyed by the request's token count, rebuild the
+        # exact generated stream, so lookahead drafts can be labelled offline.
+        assert len({r.request for r in rows}) == 1 and rows[0].request >= 0
+        stream = {}
+        for r in sorted(rows, key=lambda r: r.position):
+            assert r.position >= 0 and r.emitted
+            assert list(r.tokens[: min(r.accepted, len(r.emitted))]) == list(
+                r.emitted[: min(r.accepted, len(r.emitted))]
+            )
+            for offset, token in enumerate(r.emitted):
+                assert stream.setdefault(r.position + offset, token) == token
+        first = min(stream)
+        rebuilt = [stream[i] for i in range(first, max(stream) + 1)]
+        assert rebuilt == outputs[1][first : first + len(rebuilt)]
+        # Within the verified depth, the stream agrees with the verifier.
+        for r in rows:
+            match = 0
+            while (
+                match < r.verify_depth
+                and r.position + match in stream
+                and stream[r.position + match] == r.tokens[match]
+            ):
+                match += 1
+            if r.position + r.verify_depth in stream:
+                assert match == r.accepted
     finally:
         mx.set_default_device(previous)
 

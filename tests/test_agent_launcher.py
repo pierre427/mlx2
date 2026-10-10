@@ -201,6 +201,24 @@ def test_opencode_command_merges_user_config():
             "opencode", "/bin/opencode", "http://h", "m", 1, "k",
             {"OPENCODE_CONFIG_CONTENT": "[1]"},
         )
+    # Sweep 2026-10-09 (ops-cli#4): an empty-but-set variable (``export
+    # OPENCODE_CONFIG_CONTENT=`` or a bare .env line) is "no content", as
+    # OpenCode itself treats it (a truthiness check), not a malformed object.
+    _, empty = clients.command(
+        "opencode", "/bin/opencode", "http://h", "m", 1000, "k",
+        {"OPENCODE_CONFIG_CONTENT": ""},
+    )
+    assert json.loads(empty["OPENCODE_CONFIG_CONTENT"]) == json.loads(
+        text_only["OPENCODE_CONFIG_CONTENT"]
+    )
+    # Only the empty string is "unset": a whitespace or a non-string value
+    # still has to parse as an object.
+    for value in (" ", False, 0, []):
+        with pytest.raises(clients.ClientError, match="JSON object"):
+            clients.command(
+                "opencode", "/bin/opencode", "http://h", "m", 1, "k",
+                {"OPENCODE_CONFIG_CONTENT": value},
+            )
 
 
 def test_codex_command_keeps_overrides_at_root():

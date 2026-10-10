@@ -5,6 +5,7 @@ from threading import Event,Lock
 from types import SimpleNamespace as NS,ModuleType
 from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1]
+_HOST_FINDERS=list(sys.meta_path)
 class Guard(importlib.abc.MetaPathFinder):
     def find_spec(self,name,path=None,target=None):
         if name=='mlx' or name.startswith('mlx.') or name=='_paged_kv_native':raise RuntimeError('GPU/native import forbidden')
@@ -14,9 +15,28 @@ from mlx2.runtime.packed_prefill_receipt import bootstrap_prefill_attribution
 IDENTITY={'host':'cpu','hardware':'cpu','artifact_sha256':'a'*64,'source_commit':'b'*40,
           'source_tree_sha256':'c'*64,'mlx_wheel_version':'pinned','mlx_wheel_sha256':'d'*64,'kernel_sha256':'e'*64}
 # Reuse existing host queue/owner doubles; retain production extracted methods.
+_HOST_MODULES=dict(sys.modules)
 path=ROOT/'tests/test_hybrid_serving_lifecycle_source_cpu.py';tree=ast.parse(path.read_text())
 nodes=[n for n in tree.body if not (isinstance(n,ast.If) and '__name__' in ast.unparse(n.test))]
 fixture={'__file__':str(path),'__name__':'cpu_fixture'};exec(compile(ast.Module(body=nodes,type_ignores=[]),str(path),'exec'),fixture)
+# The fixture replaces runtime modules in sys.modules and blocks imports through
+# sys.meta_path.  pytest collects every module before running any test, so keep
+# that view only while this module's tests run; later modules import the real
+# runtime.
+_MODULE_VIEW={name:module for name,module in sys.modules.items() if _HOST_MODULES.get(name) is not module}
+_FINDERS=[finder for finder in sys.meta_path if finder not in _HOST_FINDERS]
+def _restore_host(modules,finders):
+    for name in set(sys.modules)-set(modules):del sys.modules[name]
+    sys.modules.update(modules);sys.meta_path[:]=finders
+_restore_host(_HOST_MODULES,_HOST_FINDERS)
+_SAVED_HOST=None
+def setUpModule():
+    global _SAVED_HOST
+    _SAVED_HOST=(dict(sys.modules),list(sys.meta_path))
+    sys.modules.update(_MODULE_VIEW);sys.meta_path[:0]=_FINDERS
+def tearDownModule():
+    # Also drops modules first imported while the doubles were installed.
+    _restore_host(*_SAVED_HOST)
 
 class Profiles(unittest.TestCase):
     def load(self,data,counts=(32,96),environment=None):
@@ -125,7 +145,8 @@ class PackedAttachment(unittest.TestCase):
             called.append('packed');self.assertEqual(kwargs['live_identity'],IDENTITY)
             if cancel:jobs[0].cancelled.set()
             self.assertEqual(kwargs['profile']['schema'],P.FACTORY_SCHEMA);return self.owners,self.candidate,self.boot
-        adapter=NS(identity={'path':'/artifact','fingerprint':'rev'},create_native_packed_prefill_b2=factory)
+        from mlx2.adapters.native_hybrid import HybridNativeCohort
+        adapter=NS(native_cohort_backend=HybridNativeCohort,identity={'path':'/artifact','fingerprint':'rev'},create_native_packed_prefill_b2=factory)
         native=ModuleType('_paged_kv_native');native.__file__='/native.so'
         retirement=ModuleType('mlx2.runtime.qwen35_paged_graph_factory');retirement._ORPHANS=[];self.orphans=retirement._ORPHANS
         identity=ModuleType('mlx2.runtime.paged_price_identity');identity.cached_live_price_identity=lambda *a,**kw:IDENTITY

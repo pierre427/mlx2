@@ -88,7 +88,7 @@ def test_no_adapter_keeps_a_private_copy_of_the_cap(module):
     assert "num_draft <= 3" not in source
 
 
-@pytest.mark.parametrize("num_draft", [4, 5])
+@pytest.mark.parametrize("num_draft", [9, 10])
 def test_serving_refuses_at_startup_a_depth_lane_admission_cannot_cost(monkeypatch, num_draft):
     """An opted-in depth past the calibrated verify transients fails the load.
 
@@ -104,8 +104,8 @@ def test_serving_refuses_at_startup_a_depth_lane_admission_cannot_cost(monkeypat
     monkeypatch.setattr(serving, "runtime_identity", lambda: {"source_sha256": "src"})
     monkeypatch.setattr(memory, "execution_headroom", lambda: 100 * 2**30)
     monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 0)
-    assert max(SelfMTPLaneAdmissionController.TRANSIENT_SCALE) == 4
-    depth = validate_self_mtp_num_draft(num_draft, environ={"MLX2_MTP_DEPTH_CAP": "8"})
+    assert max(SelfMTPLaneAdmissionController.TRANSIENT_SCALE) == 9
+    depth = validate_self_mtp_num_draft(num_draft, environ={"MLX2_MTP_DEPTH_CAP": "12"})
     model, vocab = tiny_qwen38_mtp()
 
     class Adapter(make_adapter(model, vocab)):
@@ -118,7 +118,7 @@ def test_serving_refuses_at_startup_a_depth_lane_admission_cannot_cost(monkeypat
         max_lanes=1, prefill_step=16,
     )
     try:
-        if num_draft == 4:
+        if num_draft == 9:
             assert engine.ready.wait(60), engine.error
             tokens, _receipt, _job = run(engine, range(1, 20), max_tokens=4)
             assert len(tokens) == 4
@@ -126,8 +126,8 @@ def test_serving_refuses_at_startup_a_depth_lane_admission_cannot_cost(monkeypat
             engine.thread.join(60)
             assert not engine.ready.is_set()
             assert engine.error == (
-                "ValueError: self-MTP num_draft 5 has no calibrated lane-admission "
-                "verify transient; calibrated depths are 1 to 4"
+                "ValueError: self-MTP num_draft 10 has no calibrated lane-admission "
+                "verify transient; calibrated depths are 1 to 9"
             )
     finally:
         engine.close()

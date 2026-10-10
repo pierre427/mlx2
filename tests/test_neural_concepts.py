@@ -81,6 +81,52 @@ def write_artifact(
     return root
 
 
+def rewrite_manifest(root: Path, **overrides):
+    """Apply field overrides and re-sign the manifest (fingerprint stays valid)."""
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest.pop("fingerprint")
+    manifest.update(overrides)
+    encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    weights = (root / "weights.npz").read_bytes()
+    manifest["fingerprint"] = hashlib.sha256(encoded + weights).hexdigest()
+    (root / "manifest.json").write_text(json.dumps(manifest, sort_keys=True))
+
+
+@pytest.mark.parametrize(
+    "overrides, fragment",
+    [
+        # Sweep 2026-10-09 review: int()/float()/tuple() coercion accepted
+        # these; a signed manifest must carry exact JSON types.
+        ({"feature_dim": "16"}, "feature_dim must be an integer"),
+        ({"message_rounds": True}, "message_rounds must be an integer"),
+        ({"hidden_dim": 16.0}, "hidden_dim must be an integer"),
+        ({"attention_temperature": "0.07"}, "attention_temperature"),
+        ({"relations": "x"}, "relations must be a list"),
+        # Integration review: the request-time bound read the manifest
+        # through int() after the other fields were made exact.
+        ({"max_graph_concepts": "16"}, "max_graph_concepts must be an integer"),
+        ({"max_graph_concepts": True}, "max_graph_concepts must be an integer"),
+        ({"max_graph_concepts": 0}, "max_graph_concepts must be 1 to 4096"),
+        ({"max_graph_concepts": 4097}, "max_graph_concepts must be 1 to 4096"),
+        ({"training": "x"}, "training must be an object"),
+        ({"training": [1]}, "training must be an object"),
+    ],
+)
+def test_manifest_fields_must_carry_exact_json_types(tmp_path, overrides, fragment):
+    root = write_artifact(tmp_path)
+    rewrite_manifest(root, **overrides)
+    with pytest.raises(ValueError, match=fragment):
+        NeuralConceptArtifact.load(
+            root, model_binding="model", tokenizer_binding="tokenizer", runtime_binding="runtime"
+        )
+    rewrite_manifest(root, feature_dim=16, message_rounds=2, hidden_dim=16,
+                     attention_temperature=0.07, relations=sorted(RELATIONS),
+                     max_graph_concepts=4096, training={})
+    NeuralConceptArtifact.load(
+        root, model_binding="model", tokenizer_binding="tokenizer", runtime_binding="runtime"
+    )
+
+
 @pytest.fixture
 def artifact():
     with tempfile.TemporaryDirectory() as directory:

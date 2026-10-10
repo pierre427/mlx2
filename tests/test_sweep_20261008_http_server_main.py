@@ -44,7 +44,7 @@ def run_main_until_engine(monkeypatch, argv):
         server,
         "resolve_route_selection",
         lambda args, policy, resolution: types.SimpleNamespace(
-            native_mtp=False, route="ordinary", source="test"
+            native_mtp=False, route="ordinary", source="engine_argument"
         ),
     )
     monkeypatch.setattr(
@@ -53,10 +53,15 @@ def run_main_until_engine(monkeypatch, argv):
     monkeypatch.setattr(exit_trace.ExitTrace, "install", lambda self, fault_log=None: self)
     monkeypatch.setattr(server, "BoundedHTTPServer", RecordingServer)
 
-    def engine(*args, **kwargs):
-        raise _EngineReached
+    class Engine:
+        # main() validates the engine arguments (the real constructor's
+        # validate-only prefix) before binding; the stub keeps that contract.
+        validate_arguments = staticmethod(server.ServingEngine.validate_arguments)
 
-    monkeypatch.setattr(server, "ServingEngine", engine)
+        def __init__(self, *args, **kwargs):
+            raise _EngineReached
+
+    monkeypatch.setattr(server, "ServingEngine", Engine)
     monkeypatch.setattr(sys, "argv", ["mlx2.server", "--model", "unused", *argv])
     with pytest.raises(_EngineReached):
         server.main()
@@ -68,7 +73,10 @@ def run_main_until_engine(monkeypatch, argv):
 def test_main_never_caps_connections_below_max_inflight(monkeypatch, inflight):
     built = run_main_until_engine(
         monkeypatch,
-        ["--host", "127.0.0.1", "--port", "0", "--max-inflight", str(inflight)],
+        # Lanes may not exceed in-flight requests; the engine refuses that
+        # configuration, so keep the width within every in-flight value.
+        ["--host", "127.0.0.1", "--port", "0", "--max-lanes", "8",
+         "--max-inflight", str(inflight)],
     )
     slots = built["server"].connections
     capacity = 0

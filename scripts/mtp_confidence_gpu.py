@@ -332,6 +332,37 @@ def _summarize(results, arms) -> dict:
     }
 
 
+def _install_lane(args, adapter):
+    """Apply ``--lane-matmul`` the way the server does; ``off`` installs nothing."""
+    mode = getattr(args, "lane_matmul", "off")
+    if mode == "off":
+        return {"law_id": "stock", "mode": "off"}
+    from mlx2.runtime.lane import apply_policy, available
+    from mlx2.runtime.lane.policy import detect, resolve
+
+    if not available():
+        raise SystemExit(f"--lane-matmul {mode}: no lane backend on this device")
+    config = json.loads((Path(args.model) / "config.json").read_text())
+    policy = resolve(
+        detect(adapter.model, config),
+        family=getattr(getattr(adapter, "descriptor", None), "family", None),
+        adapter=(
+            adapter.lane_policy_defaults()
+            if callable(getattr(adapter, "lane_policy_defaults", None))
+            else None
+        ),
+        mode=mode,
+    )
+    receipt = apply_policy(adapter.model, policy) or {"law_id": "stock"}
+    if mode != "auto" and not receipt.get("covered"):
+        raise SystemExit(f"--lane-matmul {mode} covered no projection")
+    return {
+        "mode": mode,
+        "law_id": receipt.get("law_id"),
+        "covered": len(receipt.get("covered") or {}),
+    }
+
+
 def cmd_profile(args) -> None:
     lanes_list = list(args.widths)
     plan = {"model": args.model, "lanes": lanes_list, "depths": list(range(0, args.max_depth + 1)),
@@ -345,11 +376,15 @@ def cmd_profile(args) -> None:
 
     sys.path.insert(0, str(ROOT / "src"))
     from mlx2.adapters.registry import resolve_adapter
+
+    # The adapter pins its import-time environment; runtime model modules
+    # (the generator among them) may only be imported after it is built.
+    adapter = resolve_adapter(args.model, mtp=True)(args.model)
     from mlx2.runtime.generate import BatchGenerator
     from mlx2.runtime.sample_utils import LaneRNG
 
-    adapter = resolve_adapter(args.model, mtp=True)(args.model)
     model, tokenizer = adapter.model, adapter.tokenizer
+    lane_receipt = _install_lane(args, adapter)
     # Long-form prompts only, so no lane finishes inside the timed window.
     prompts = [list(tokenizer.encode(PROMPTS[i])) for i in PROFILE_PROMPTS]
     table: dict[str, list[float]] = {}
@@ -365,7 +400,10 @@ def cmd_profile(args) -> None:
             mtp_acceptance_log=probe_log,
         )
         gen.insert(
-            prompts[:lanes], max_tokens=[(args.warmup + args.cycles) * 8] * lanes,
+            # A cycle delivers at most depth + 1 tokens; leave headroom so no
+            # lane finishes inside the timed window at deep depths.
+            prompts[:lanes],
+            max_tokens=[(args.warmup + args.cycles) * (args.max_depth + 2) + 64] * lanes,
             lane_rngs=[LaneRNG(i) for i in range(lanes)],
             self_mtp_configs=[{"sampling_temp": 0.0}] * lanes,
         )
@@ -445,6 +483,7 @@ def cmd_profile(args) -> None:
         "cycle_table": {k: [v / unit for v in row] for k, row in table.items()},
         "raw": raw,
         "probe_overhead": overhead,
+        "lane_matmul": lane_receipt,
         "provenance": {
             "cycle_table": (
                 "measured: median BatchGenerator.next() seconds per (lanes, "
@@ -487,10 +526,11 @@ def cmd_diag(args) -> None:
 
     sys.path.insert(0, str(ROOT / "src"))
     from mlx2.adapters.registry import resolve_adapter
+
+    adapter = resolve_adapter(args.model, mtp=True)(args.model)
     from mlx2.runtime.generate import BatchGenerator
     from mlx2.runtime.sample_utils import LaneRNG
 
-    adapter = resolve_adapter(args.model, mtp=True)(args.model)
     model, tokenizer = adapter.model, adapter.tokenizer
     prompts = [list(tokenizer.encode(PROMPTS[i])) for i in PROFILE_PROMPTS]
     out = []
@@ -547,6 +587,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pairs", type=int, default=3)
     parser.add_argument("--startup-timeout", type=float, default=600)
     parser.add_argument("--max-depth", type=int, default=3)
+    parser.add_argument("--lane-matmul", choices=("off", "auto", "crossover", "exact"), default="off",
+                        help="profile: install the lane matmul as the server's --lane-matmul would")
     parser.add_argument("--cycles", type=int, default=64)
     parser.add_argument("--warmup", type=int, default=8)
     parser.add_argument("--draft-step-cost", type=float, default=0.06)

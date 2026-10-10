@@ -1,0 +1,4 @@
+{
+  "ple_read_policy": "adaptive",
+  "ple_adaptive_warm": false
+}

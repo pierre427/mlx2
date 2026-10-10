@@ -40,7 +40,8 @@ def test_return_progress_validation_requires_stream_and_boolean():
     )
     assert request["return_progress"] is True
     translated = anthropic_request_to_chat(
-        {"messages": MESSAGES, "max_tokens": 4, "stream": True, "return_progress": True}
+        {"model": "fixture", "messages": MESSAGES, "max_tokens": 4,
+         "stream": True, "return_progress": True}
     )
     assert translated["return_progress"] is True
     # A generation-only control: it must not split the host prompt cache.
@@ -422,8 +423,8 @@ def test_responses_and_messages_progress_events(endpoint):
     assert "prompt_progress" in _sse(wire)[1]
 
     with _post(base, "/v1/messages",
-               {"messages": MESSAGES, "max_tokens": 8, "stream": True,
-                "return_progress": True}) as response:
+               {"model": "fixture", "messages": MESSAGES, "max_tokens": 8,
+                "stream": True, "return_progress": True}) as response:
         frames = _sse(response.read().decode())
     assert [f["type"] for f in frames[:3]] == ["message_start", "ping", "ping"]
     assert frames[2]["prompt_progress"]["processed"] == 8
@@ -502,8 +503,9 @@ def _real_tokenizer(name):
     path = MODELS / name
     if not (path / "tokenizer_config.json").exists():
         pytest.skip(f"{name} tokenizer not available")
-    from mlx2.runtime.tokenizer_utils import TokenizerWrapper
     from transformers import AutoTokenizer
+
+    from mlx2.runtime.tokenizer_utils import TokenizerWrapper
 
     return TokenizerWrapper(
         AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
@@ -564,6 +566,8 @@ def test_external_and_pld_prefill_report_progress():
     from mlx2.runtime.adaptive_policy import DecodeTimeFairness
 
     generator.decode_time_fairness = DecodeTimeFairness()
+    from mlx2.runtime.round_phases import initialize
+    initialize(generator, None)
     lane = NS(uid=1, remaining=deque([5, 6, 7, 8, 9]), history=[1, 2],
               lookup_history=[1, 2, 5, 6, 7, 8, 9], cache=[])
     generator._capture_lane_recovery = lambda lane: None

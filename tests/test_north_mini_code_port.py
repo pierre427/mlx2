@@ -921,3 +921,62 @@ def test_tiny_north_matches_the_transformers_reference():
         expected = reference(torch.tensor(tokens)).logits.numpy()
     actual = np.array(port(mx.array(tokens)))
     assert np.abs(expected - actual).max() < 1e-4
+
+
+def test_model_written_tool_call_ids_are_unique_and_well_formed():
+    """``parse_actions`` passed ``tool_call_id`` through verbatim, so two
+    actions with the same id (or an id with spaces) reached Chat, Responses
+    and Anthropic clients, which key tool results by id."""
+    from mlx2.adapters.north_output import ACTION_CLOSE, ACTION_OPEN
+
+    block = json.dumps(
+        [
+            {"tool_name": "echo", "parameters": {"value": 1}, "tool_call_id": "call_abc"},
+            {"tool_name": "echo", "parameters": {"value": 2}, "tool_call_id": "call_abc"},
+            {"tool_name": "echo", "parameters": {"value": 3}, "tool_call_id": "not an id / weird"},
+            {"tool_name": "echo", "parameters": {"value": 4}, "tool_call_id": "x" * 65},
+            {"tool_name": "echo", "parameters": {"value": 5}, "tool_call_id": "fine-id.9"},
+        ]
+    )
+    calls = parse_actions(block, TOOLS)
+    ids = [call["id"] for call in calls]
+    assert len(set(ids)) == 5
+    assert ids[0] == "call_abc" and ids[4] == "fine-id.9"
+    assert all(id_.startswith("call_") and len(id_) == 29 for id_ in (ids[1], ids[2], ids[3]))
+    # The parser counts replacements and keeps ids unique across the turn.
+    parser = NorthOutputParser(chat=True, thinking=False, tools=TOOLS, parallel_tool_calls=True)
+    events = parser.push(ACTION_OPEN + block + ACTION_CLOSE)
+    seen = [e["tool_calls"][0]["id"] for e in events if "tool_calls" in e]
+    assert len(set(seen)) == 5 and parser.tool_call_id_replacements == 3
+    again = json.dumps([{"tool_name": "echo", "parameters": {"value": 6}, "tool_call_id": "call_abc"}])
+    events = parser.push(ACTION_OPEN + again + ACTION_CLOSE)
+    (call,) = [e["tool_calls"][0] for e in events if "tool_calls" in e]
+    assert call["id"] != "call_abc" and parser.tool_call_id_replacements == 4
+
+
+def test_tool_call_id_replacements_count_only_emitted_calls():
+    """Under ``parallel_tool_calls:false`` the second call is dropped by the
+    parallel bound; a malformed id on it must not count as a replacement,
+    and its id must not stay reserved against a later block."""
+    from mlx2.adapters.north_output import ACTION_CLOSE, ACTION_OPEN
+
+    block = json.dumps(
+        [
+            {"tool_name": "echo", "parameters": {"value": 1}, "tool_call_id": "keep_1"},
+            {"tool_name": "echo", "parameters": {"value": 2}, "tool_call_id": "bad id"},
+        ]
+    )
+    parser = NorthOutputParser(chat=True, thinking=False, tools=TOOLS, parallel_tool_calls=False)
+    events = parser.push(ACTION_OPEN + block + ACTION_CLOSE)
+    assert [e["tool_calls"][0]["id"] for e in events if "tool_calls" in e] == ["keep_1"]
+    assert parser.tool_call_id_replacements == 0
+    assert parser.tool_call_constraint_truncations == 1
+    parser = NorthOutputParser(chat=True, thinking=False, tools=TOOLS, parallel_tool_calls=False)
+    block = json.dumps(
+        [
+            {"tool_name": "echo", "parameters": {"value": 1}, "tool_call_id": "keep_1"},
+            {"tool_name": "echo", "parameters": {"value": 2}, "tool_call_id": "dropped"},
+        ]
+    )
+    parser.push(ACTION_OPEN + block + ACTION_CLOSE)
+    assert "dropped" not in parser._call_ids and parser._call_ids == {"keep_1"}

@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from ..thinking_guard import stack_block_steer, verify_block_steer
+from . import round_phases
 from .committed_recovery import CommittedRecoverySlot
 from .cow_cache import (
     COWCacheUnsupported,
@@ -65,6 +66,20 @@ def _delivered_accepts(decision):
     with the target's correction or bonus token, but a stop can cut delivery
     on an accepted draft, and then every emitted token is an accepted one."""
     return min(int(decision.accepted), len(decision.emitted))
+
+
+def _history_window(history, suffix, context_size, generation_start):
+    """Slice a logical history+suffix without copying its unused prefix.
+
+    Match ``history[generation_start:][-context_size:]``, including the
+    full-window spelling ``context_size=0`` and Python's negative indices.
+    The slices are applied to the combined sequence before splitting it.
+    """
+    boundary = len(history)
+    length = boundary + len(suffix)
+    start = slice(generation_start, None).indices(length)[0]
+    start += slice(-context_size, None).indices(length - start)[0]
+    return history[start:] + suffix if start < boundary else suffix[start - boundary:]
 
 
 # Tree15 round-cost gates (TensorFold parity bridge).  Off on an explicit
@@ -475,10 +490,11 @@ class ExternalDraftBatchGenerator:
                  exact_verification="token",
                  progressive_verification_tile=None,
                  multilane_draft_cap=None,
-                 decode_time_fairness=None,
+                 decode_time_fairness=None, decode_first=None,
                  **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
+        round_phases.initialize(self, decode_first)
         self.memory_headroom = memory_headroom
         self.reclaim_memory = reclaim_memory; self.evict_checkpoint = evict_checkpoint
         self._schedule_cursor = 0; self._reclaims_left = 0; self._allocator_reclaimed = False
@@ -1027,11 +1043,13 @@ class ExternalDraftBatchGenerator:
         state.validate(self.binding, len(lane.history)); return state
 
     def _prefill_limit(self, lane):
-        if not self.prefill_step_autoscale:
-            return self.prefill_step
-        return prompt_length_prefill_step(
-            len(lane.history) + len(lane.remaining), maximum=self.prefill_step
+        step = (
+            prompt_length_prefill_step(
+                len(lane.history) + len(lane.remaining), maximum=self.prefill_step
+            )
+            if self.prefill_step_autoscale else self.prefill_step
         )
+        return step
 
     def _sync_decode_fairness_stats(self):
         fairness = self.decode_time_fairness
@@ -1213,7 +1231,7 @@ class ExternalDraftBatchGenerator:
 
     def _target_law(
         self, lane, logits, history, reachable=True, response_rows=None,
-        greedy_token=False,
+        greedy_token=False, *, history_suffix=(),
     ):
         """Return the verification law of one target row.
 
@@ -1221,18 +1239,24 @@ class ExternalDraftBatchGenerator:
         to publish for this position, or ``None`` to publish the law itself.
         ``greedy_token`` returns a greedy row's argmax instead of its dense
         one-hot law (``verify_greedy_proposals``).
+        Keep ``history_suffix`` separate until a reachable processor needs
+        tokens; ordinary laws need neither a full host copy nor an MLX array.
         """
         from .sample_utils import make_transformed_logprobs
         # Processors compute in float32, as ordinary decode applies them.
         value = logits[None].astype(self.mx.float32)
-        tokens = self.mx.array(history, dtype=self.mx.int32)
         # A row that follows a draft token the target gives zero probability is
         # never used by verification.  Its history can already be outside a
         # structured-output grammar, and asking the processor about it would
         # latch a dead-end failure on a healthy lane (GPU: every structured
         # request on the DFlash2 route returned 502).
-        for processor in (lane.processors if reachable else ()):
-            value = processor(tokens, value)
+        if reachable and lane.processors:
+            tokens = self.mx.array(
+                [*history, *history_suffix] if len(history_suffix) else history,
+                dtype=self.mx.int32,
+            )
+            for processor in lane.processors:
+                value = processor(tokens, value)
         temp = float(lane.sampling.get("sampling_temp", 0))
         if temp == 0:
             # Greedy verification uses the one-hot law, but the logprobs API
@@ -1659,6 +1683,21 @@ class ExternalDraftBatchGenerator:
             state["processors"] = list(snapshot.processors)
             lane.__dict__.clear(); lane.__dict__.update(state)
 
+    def _draft_accepts_processors(self):
+        # Inspect only a path that will actually supply processor keywords.
+        # Lazy binding also supports host/source harnesses using __new__.
+        from .call_contracts import KeywordSupportCache
+
+        support = getattr(self, "_draft_processor_support", None)
+        if support is None:
+            support = self._draft_processor_support = KeywordSupportCache(
+                "logits_processors"
+            )
+        return support.accepts(
+            self.draft.draft_distributions,
+            declared=bool(getattr(self.draft, "supports_logits_processors", False)),
+        )
+
     def _propose(self, cohort, *, adaptive_depth=None):
         """Draft phase: one proposal block per cohort row, ``None`` for no draft.
 
@@ -1738,28 +1777,6 @@ class ExternalDraftBatchGenerator:
                     sum(len(row) for row in pairing),
                 )
             try:
-                import inspect
-
-                supports_processors = bool(
-                    getattr(
-                        self.draft,
-                        "supports_logits_processors",
-                        False,
-                    )
-                )
-                try:
-                    parameters = inspect.signature(
-                        self.draft.draft_distributions
-                    ).parameters
-                    supports_processors = supports_processors or (
-                        "logits_processors" in parameters
-                        or any(
-                            parameter.kind is inspect.Parameter.VAR_KEYWORD
-                            for parameter in parameters.values()
-                        )
-                    )
-                except (TypeError, ValueError):
-                    pass
                 extra = {"context_tokens": pairing} if self.pair_context_tokens else {}
                 if getattr(self.draft, "requires_proposal_contexts", False):
                     from .proposal_providers import continuation_context_revision
@@ -1833,7 +1850,7 @@ class ExternalDraftBatchGenerator:
                     # kinds and pairing (EAGLE) drafters keep the sequential
                     # path.
                     tokens, q = self._propose_pairwise(lanes, arguments)
-                elif any(processors) and supports_processors:
+                elif any(processors) and self._draft_accepts_processors():
                     tokens,q = self.draft.draft_distributions(
                         *arguments,
                         logits_processors=processors,
@@ -2046,9 +2063,10 @@ class ExternalDraftBatchGenerator:
                         self._target_law(
                             lane,
                             logits[0, row],
-                            local_history + inputs[: row + 1],
+                            local_history,
                             True,
                             stage_response_rows,
+                            history_suffix=inputs[: row + 1],
                         )
                     )
                     window.mark()
@@ -2141,7 +2159,10 @@ class ExternalDraftBatchGenerator:
             # past it (steps, tail bound, a latched budget overrun) at commit.
             window = VerifyWindow(lane.processors)
             for j in range(count+1):
-                targets.append(self._target_law(lane, logits[row,j], lane.history + inputs[:j+1], reachable, response_rows, greedy_token=greedy))
+                targets.append(self._target_law(
+                    lane, logits[row, j], lane.history, reachable, response_rows,
+                    greedy_token=greedy, history_suffix=inputs[:j + 1],
+                ))
                 window.mark()
                 if reachable and j < count and lane.processors and (
                     targets[-1] != int(drafts[j]) if greedy
@@ -2220,9 +2241,10 @@ class ExternalDraftBatchGenerator:
         law = self._target_law(
             lane,
             logits[0, 0],
-            lane.history + [lane.anchor, *drafts],
+            lane.history,
             True,
             response_rows,
+            history_suffix=[lane.anchor, *drafts],
         )
         bonus = lane.rng.sample(law)
         emitted = [*drafts, bonus]
@@ -2528,9 +2550,10 @@ class ExternalDraftBatchGenerator:
             law = self._target_law(
                 lane,
                 logits[0, row],
-                lane.history + [inputs[index] for index in prefix_rows],
+                lane.history,
                 True,
                 response_rows,
+                history_suffix=[inputs[index] for index in prefix_rows],
             )
             target_laws.append(law)
             return lane.rng.sample(law)
@@ -2589,17 +2612,20 @@ class ExternalDraftBatchGenerator:
         rows = logits[0, :width].astype(mx.float32)
         vocab = int(rows.shape[-1])
         inputs = [lane.anchor] + list(block.tokens)
-        histories = [
-            lane.history + [inputs[index] for index in path] for path in paths
-        ]
+        # Length-only processors need no token copies. Presence penalties
+        # inspect only their declared window, rather than N full prompts.
+        lengths = [len(lane.history) + len(path) for path in paths]
         for processor in lane.processors:
             presence = getattr(processor, "presence_window", None)
             if presence is not None:
                 penalty, context_size, start = presence
                 flat = []
-                for row, history in enumerate(histories):
-                    window = history if start is None else history[start:]
-                    for token in set(window[-context_size:]):
+                for row, path in enumerate(paths):
+                    window = _history_window(
+                        lane.history, [inputs[index] for index in path],
+                        context_size, start,
+                    )
+                    for token in set(window):
                         flat.append(row * vocab + int(token))
                 if flat:
                     mask = mx.zeros((width * vocab,), dtype=mx.bool_)
@@ -2609,9 +2635,9 @@ class ExternalDraftBatchGenerator:
             forbidden = [
                 sorted({
                     int(token)
-                    for token in processor.forbidden_token_ids_at_length(len(history))
+                    for token in processor.forbidden_token_ids_at_length(length)
                 })
-                for history in histories
+                for length in lengths
             ]
             count = max((len(ids) for ids in forbidden), default=0)
             if count:
@@ -3574,8 +3600,10 @@ class ExternalDraftBatchGenerator:
 
                 def sample_row(logits_row, prefix, *, _lane=lane,
                                _response_rows=response_rows, _window=window, _laws=laws):
-                    law = self._target_law(_lane, logits_row, _lane.history + [_lane.anchor, *prefix],
-                                           True, _response_rows)
+                    law = self._target_law(
+                        _lane, logits_row, _lane.history, True, _response_rows,
+                        history_suffix=[_lane.anchor, *prefix],
+                    )
                     _window.mark()
                     _laws.append(law)
                     return _lane.rng.sample(law)
@@ -4262,9 +4290,10 @@ class ExternalDraftBatchGenerator:
                     self._target_law(
                         lane,
                         logits[row, 0],
-                        lane.history + [lane.anchor],
+                        lane.history,
                         True,
                         response_rows,
+                        history_suffix=[lane.anchor],
                     )
                 ]
                 result = verify_proposals([], [], targets, lane.rng)
@@ -4480,15 +4509,19 @@ class ExternalDraftBatchGenerator:
         self._discard_prelaunched([uid])
 
     def next(self):
-        prompts, responses = [], []
-        self._memory_waiting_uids.clear()
-        self._atomic_prefill_waiting_uids.clear()
-        self._reclaims_left = 2; self._allocator_reclaimed = False
-        ordered = list(self.lanes.values())
-        if ordered:
-            start = self._schedule_cursor % len(ordered)
-            ordered = ordered[start:] + ordered[:start]
-            self._schedule_cursor += 1
+        mode = self.decode_first.mode()
+        self._decode_first_round_mode = mode
+        return round_phases.publish_round(
+            self, mode, lambda: self._scheduler_round(mode)
+        )
+
+    def _prefill_phase(self, candidates):
+        # A published phase may be resumed after cancellation or new arrivals.
+        ordered = [self.lanes[uid] for uid in candidates if uid in self.lanes]
+        self._memory_waiting_uids.difference_update(
+            lane.uid for lane in ordered if lane.anchor is None
+        )
+        prompts = []
         # At most one bounded prefill slice; active decode progresses every poll.
         active_count = sum(l.anchor is not None for l in self.lanes.values())
         defer_serial_prefill = False
@@ -4501,6 +4534,11 @@ class ExternalDraftBatchGenerator:
                 lane for lane in ordered
                 if lane.anchor is None and len(lane.remaining) > 1
             ][: self.capacity - active_count]
+            if self._decode_first_round_mode == "all":
+                budget = self.decode_first.prefill_token_budget or self.prefill_step
+                if len(candidates) > budget:
+                    self.decode_first.bump("budget_deferred_rows", len(candidates) - budget)
+                    candidates = candidates[:budget]
             pristine = [lane for lane in candidates if not lane.history]
             if (
                 self.external_prefill_coalesce_ms
@@ -4542,6 +4580,13 @@ class ExternalDraftBatchGenerator:
                     depth=max(len(lane.history) for lane in candidates),
                 )
                 append = min(append, slab_step)
+            if candidates and self._decode_first_round_mode == "all":
+                budget_step = round_phases.prefill_width(
+                    self, max(self._prefill_limit(lane) for lane in candidates),
+                    len(candidates),
+                )
+                slab_step = budget_step if slab_step is None else min(slab_step, budget_step)
+                append = min(append, slab_step)
             cohort = (
                 self._fit_cohort(candidates, append, prefill=True)
                 if append and not defer_serial_prefill else []
@@ -4560,6 +4605,7 @@ class ExternalDraftBatchGenerator:
                 limit = self._fair_step(
                     limit, contended=True, depth=len(lane.history)
                 )
+            limit = round_phases.prefill_width(self, limit)
             append = min(limit, max(1, len(lane.remaining)-1))
             admitted = self._admit([lane], append, prefill=True)
             while not admitted and self._reclaim_for_admission():
@@ -4576,6 +4622,62 @@ class ExternalDraftBatchGenerator:
                 )
                 break
             self._memory_waiting_uids.add(lane.uid)
+        return prompts
+
+    def _drain_ready(self, prompts):
+        responses = []
+        # A lane can finish in the poll that completes its prefill
+        # (max_tokens=1, or a stop as the first token).  Its end_of_prompt
+        # response is in this same return, so its committed boundary stays
+        # for serving to pop, as the ordinary and PLD routes keep it.
+        # Dropping it with the lane lost the boundary and failed n>1 fanout
+        # siblings.  A boundary returned by an earlier poll was already
+        # offered, so it still goes with its lane.
+        prompt_ended = {prompt.uid for prompt in prompts if prompt.end_of_prompt}
+        prompt_ended.update(getattr(self, "_decode_first_resumed_prompt_uids", ()))
+        for lane in list(self.lanes.values()):
+            while lane.ready:
+                response = lane.ready.popleft(); responses.append(response)
+                if response.finish_reason:
+                    self.remove([lane.uid], cancelled=False, keep_boundary=lane.uid in prompt_ended)
+                    break
+                if self.ready_drain == "one":
+                    break
+        return responses
+
+    def _scheduler_round(self, mode):
+        prompts, responses = [], []
+        # A pending prefill may have just failed admission. Keep that evidence
+        # until this lane's next admission attempt; clearing it here would hide
+        # memory stalls behind the decode-first publication boundary.
+        if mode == "off":
+            self._memory_waiting_uids.clear()
+        else:
+            self._memory_waiting_uids.intersection_update(self.lanes)
+        self._atomic_prefill_waiting_uids.clear()
+        self._reclaims_left = 2; self._allocator_reclaimed = False
+        ordered = list(self.lanes.values())
+        if ordered:
+            start = self._schedule_cursor % len(ordered)
+            ordered = ordered[start:] + ordered[:start]
+            self._schedule_cursor += 1
+        candidates = tuple(lane.uid for lane in ordered)
+        if mode == "off":
+            prompts.extend(self._prefill_phase(candidates))
+        self._decode_phase(ordered)
+        responses.extend(self._drain_ready(prompts))
+        self._reclaim_after_emission(len(responses))
+        if mode != "off":
+            # No speculative transaction is open across the publication point.
+            ordered.clear()
+            yield responses
+            prompts.extend(self._prefill_phase(candidates))
+        return prompts, responses
+
+    def _decode_phase(self, ordered):
+        self._memory_waiting_uids.difference_update(
+            lane.uid for lane in ordered if lane.anchor is not None
+        )
         ready = [
             lane
             for lane in ordered
@@ -4661,24 +4763,6 @@ class ExternalDraftBatchGenerator:
                 time.perf_counter() - decode_started
             )
             self._sync_decode_fairness_stats()
-        # A lane can finish in the poll that completes its prefill
-        # (max_tokens=1, or a stop as the first token).  Its end_of_prompt
-        # response is in this same return, so its committed boundary stays
-        # for serving to pop, as the ordinary and PLD routes keep it.
-        # Dropping it with the lane lost the boundary and failed n>1 fanout
-        # siblings.  A boundary returned by an earlier poll was already
-        # offered, so it still goes with its lane.
-        prompt_ended = {prompt.uid for prompt in prompts if prompt.end_of_prompt}
-        for lane in list(self.lanes.values()):
-            while lane.ready:
-                response = lane.ready.popleft(); responses.append(response)
-                if response.finish_reason:
-                    self.remove([lane.uid], cancelled=False, keep_boundary=lane.uid in prompt_ended)
-                    break
-                if self.ready_drain == "one":
-                    break
-        self._reclaim_after_emission(len(responses))
-        return prompts, responses
 
     def _reclaim_after_emission(self, count):
         """Release the MLX buffer pool on the self-MTP emitted-token cadence.
@@ -4729,4 +4813,5 @@ class ExternalDraftBatchGenerator:
         return result
 
     def close(self):
+        round_phases.close_pending(self)
         self.remove(list(self.lanes)); self.boundaries.clear()

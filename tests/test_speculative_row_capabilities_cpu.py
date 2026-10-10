@@ -118,3 +118,28 @@ def test_current_adapter_defaults_are_not_clamped():
         assert effective_num_draft == num_draft
         assert effective_policy is policy
         assert receipt["clamped"] is False
+
+
+def test_current_adapter_windows_bound_the_draft_loop_ceiling():
+    """The loop's ceiling is sized by the same declaration as ``num_draft``:
+    the 27B (9 rows) may draft at most 8 under a loop; Flash-Next (17) is
+    not the binding bound below the prior's deepest end."""
+    from mlx2.adapters.flash_next import FlashNextAdapter
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
+    from mlx2.adapters.self_mtp_rows import constrain_self_mtp_draft_loop
+
+    def loop(end):
+        return {"num_draft": 3, "draft_loop": {"boundaries": [3, end], "threshold": -0.4}}
+
+    rows = declared_exact_self_mtp_rows(object.__new__(Qwen3827BAdapter))
+    assert rows.effective_max_self_mtp_proposer_depth == 8
+    assert constrain_self_mtp_draft_loop(rows, {}, loop(8)) == {
+        "effective_self_mtp_draft_ceiling": 8,
+        "effective_self_mtp_verify_rows": 9,
+    }
+    with pytest.raises(ValueError, match="10 verify rows"):
+        constrain_self_mtp_draft_loop(rows, {}, loop(9))
+    rows = declared_exact_self_mtp_rows(object.__new__(FlashNextAdapter))
+    assert rows.effective_max_self_mtp_proposer_depth >= 9
+    assert constrain_self_mtp_draft_loop(rows, {}, loop(9))["effective_self_mtp_verify_rows"] == 10
+    assert constrain_self_mtp_draft_loop(None, {"a": 1}, loop(9)) == {"a": 1}

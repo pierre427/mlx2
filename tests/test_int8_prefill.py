@@ -195,9 +195,113 @@ def test_decode_row_bound_counts_self_mtp_copy_draft_spans():
         ip.validate_decode_row_bound(small, bound(1, CopyDraftPolicy(enabled=True)))
 
 
+def test_decode_row_bound_counts_the_draft_loop_ceiling():
+    # A draft loop lets a lane at num_draft draft to the loop's last
+    # boundary, so a looped verify forward carries ceiling + 1 rows; the
+    # bound used to read num_draft only and a row_threshold between the two
+    # passed validation while the looped verify ran the int8 kernel.
+    from mlx2.runtime.copy_draft import CopyDraftPolicy
+
+    loop = {"boundaries": [3, 9], "threshold": -0.4}
+
+    def bound(lanes, config, copy=None):
+        return ip.max_decode_rows(
+            max_lanes=lanes, config=config, speculation="self_mtp", copy_draft_policy=copy
+        )
+
+    looped = {"num_draft": 3, "draft_loop": loop}
+    assert bound(1, looped) == 11
+    assert bound(4, looped) == 44  # every width may loop
+    # A probed topology holds at one lane only: max(1 x 11, 4 x 5).
+    assert bound(4, {"num_draft": 3, "draft_loop": {**loop, "max_width": 1}}) == 20
+    assert bound(3, {"num_draft": 3, "draft_loop": {**loop, "max_width": 1}}) == 15
+    assert bound(2, {"num_draft": 3, "draft_loop": {**loop, "max_width": 1}}) == 11
+    # Below the first boundary a lane is not gated: unchanged.
+    assert bound(4, {"num_draft": 2, "draft_loop": loop}) == 16
+    assert bound(4, {"num_draft": 3, "draft_loop": {"stage": 1, "threshold": -0.4}}) == 20
+    # Cohort copies are capped by the looped head depth the executor plans with.
+    assert bound(4, looped, CopyDraftPolicy(enabled=True, batched_max_span=None)) == 44
+    assert bound(4, looped, CopyDraftPolicy(enabled=True, max_span=16, batched_max_span=16)) == 72
+    small = ip.Int8PrefillPolicy(enabled=True, scope="mlp", row_threshold=8)
+    with pytest.raises(ip.Int8PrefillError, match="11 rows"):
+        ip.validate_decode_row_bound(small, bound(1, looped))
+    ip.validate_decode_row_bound(small, bound(1, {"num_draft": 3}))
+
+
 # --------------------------------------------------------------------------
 # device gating
 # --------------------------------------------------------------------------
+
+# Metal's own wording for a command buffer that failed for lack of memory
+# (the form serving's device_fault_kind recognises), and MLX's allocator
+# refusal when no buffer could be made.
+_OOM = (
+    "[METAL] Command buffer execution failed: Insufficient Memory "
+    "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)"
+)
+_ALLOC = "[malloc] Unable to allocate 1073741824 bytes."
+_REFUSAL = "Unable to build metal library"
+
+
+@pytest.fixture
+def probe_state(monkeypatch):
+    monkeypatch.setattr(ip, "device_support", lambda: (True, "fake-M5"))
+    monkeypatch.setattr(ip, "_probe_result", None)
+
+
+def _gemm_faulting_once(calls, message):
+    """First call raises ``message``; later calls return the exact reference."""
+
+    def gemm(xq, xs, wq, ws, bias=None):
+        calls.append(xq.shape)
+        if len(calls) == 1:
+            raise RuntimeError(message)
+        return xq.astype(mx.float32) @ wq.astype(mx.float32).T
+
+    return gemm
+
+
+@pytest.mark.parametrize("message", [_OOM, _ALLOC], ids=["command_buffer", "allocator"])
+def test_probe_reraises_a_device_fault_and_caches_nothing(monkeypatch, probe_state, message):
+    # A transient Metal fault in the canary GEMM was cached process-wide as
+    # "kernel unsupported" (the 10-08 sweep's rule for every other probe:
+    # re-raise is_device_fault before caching anything).
+    from mlx2.runtime.models.served_exp import is_device_fault
+
+    calls = []
+    monkeypatch.setattr(ip, "_int8_gemm", _gemm_faulting_once(calls, message))
+    with pytest.raises(RuntimeError) as info:
+        ip.require_supported_device()
+    assert not isinstance(info.value, ip.Int8PrefillError), str(info.value)
+    assert is_device_fault(info.value)
+    assert ip._probe_result is None, ip._probe_result
+    # Memory is back: the next install probes again and succeeds.
+    assert ip.require_supported_device() == "fake-M5"
+    assert len(calls) == 2 and ip._probe_result == (True, "ok")
+
+
+def test_apply_after_a_transient_fault_installs(monkeypatch, probe_state):
+    """Through the public install path (``apply`` -> ``require_supported_device``)."""
+    calls = []
+    monkeypatch.setattr(ip, "_int8_gemm", _gemm_faulting_once(calls, _OOM))
+    model = _Model(bits=None)
+    with pytest.raises(RuntimeError, match="Insufficient Memory"):
+        ip.apply(model, ip.Int8PrefillPolicy.from_value("mlp"))
+    handle = ip.apply(model, ip.Int8PrefillPolicy.from_value("mlp"))
+    try:
+        assert handle.device == "fake-M5"
+    finally:
+        ip.remove(handle)
+
+
+def test_kernel_refusal_is_still_cached(monkeypatch, probe_state):
+    """A genuine compile refusal keeps its cached decline."""
+    calls = []
+    monkeypatch.setattr(ip, "_int8_gemm", _gemm_faulting_once(calls, _REFUSAL))
+    for _ in range(2):
+        with pytest.raises(ip.Int8PrefillError, match="kernel probe failed"):
+            ip.require_supported_device()
+    assert len(calls) == 1 and ip._probe_result[0] is False
 
 
 def test_enabled_policy_fails_closed_without_supported_gpu():
@@ -458,11 +562,14 @@ def test_qualification_demands_observed_int8_and_approximate_tier():
         assert "feature_int8_prefill" not in required_feature_checks(settings)
 
 
-def test_server_flag_defaults_off_and_accepts_scopes():
+def test_server_flag_defaults_auto_and_accepts_scopes():
     from mlx2.server import build_parser
 
     parser = build_parser()
-    assert parser.parse_args(["--model", "m"]).int8_prefill == "off"
+    # ``auto`` resolves per model and needs qualification evidence to turn on
+    # (tests/test_int8_prefill_auto.py); ``off`` stays selectable.
+    assert parser.parse_args(["--model", "m"]).int8_prefill == "auto"
+    assert parser.parse_args(["--model", "m", "--int8-prefill", "off"]).int8_prefill == "off"
     assert parser.parse_args(["--model", "m", "--int8-prefill", "all"]).int8_prefill == "all"
     with pytest.raises(SystemExit):
         parser.parse_args(["--model", "m", "--int8-prefill", "attn"])

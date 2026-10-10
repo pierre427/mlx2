@@ -107,7 +107,7 @@ def test_inherited_env_does_not_enable_a_default_generator(model, monkeypatch):
 @pytest.mark.parametrize(
     ("prompt_lookup", "backend"), [(True, None), (False, "external_draft")]
 )
-def test_serving_refuses_decode_first_off_batch_generator_routes(
+def test_serving_passes_decode_first_to_speculative_executors(
     monkeypatch, prompt_lookup, backend
 ):
     from mlx2 import serving
@@ -115,8 +115,25 @@ def test_serving_refuses_decode_first_off_batch_generator_routes(
 
     monkeypatch.setattr(serving, "runtime_identity", lambda: {"source_sha256": "fake"})
 
+    captured = []
+
+    def create(*args, **kwargs):
+        captured.append(kwargs["decode_first"])
+        raise RuntimeError("executor-construction-reached")
+
+    from mlx2.contracts import Capability
+
     class Adapter(_UnsupportedInteriorAdapter):
-        pass
+        descriptor = SimpleNamespace(capabilities=frozenset({Capability.PROMPT_LOOKUP}))
+        create_external_batch = create
+
+        def execution_config(self, **kwargs):
+            config = super().execution_config(**kwargs)
+            config["prompt_lookup"] = True
+            return config
+
+    from mlx2.runtime import pld
+    monkeypatch.setattr(pld.PromptLookupBatchGenerator, "__init__", create)
 
     Adapter.backend = backend
     engine = serving.ServingEngine(
@@ -130,7 +147,11 @@ def test_serving_refuses_decode_first_off_batch_generator_routes(
     try:
         engine.thread.join(5)
         assert not engine.ready.is_set()
-        assert "decode_first requires" in (engine.error or "")
+        assert "executor-construction-reached" in (engine.error or "")
+        assert captured == [{
+            "enabled": True, "shared_prefill_budget": True,
+            "prefill_token_budget": None,
+        }]
     finally:
         engine.close()
 

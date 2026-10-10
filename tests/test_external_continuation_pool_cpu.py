@@ -109,7 +109,8 @@ def test_mixed_temperature_pool_draws_once_from_each_actual_target_prefix(monkey
     original = generator._target_law
     seen = []
 
-    def law(lane, logits, history, *args):
+    def law(lane, logits, history, *args, history_suffix=()):
+        history = [*history, *history_suffix]
         actual = original(lane, logits, history, *args)
         ordinary = model(mx.array([history]), cache=model.make_cache())[0, -1]
         if lane.sampling.get("sampling_temp"):

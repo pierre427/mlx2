@@ -6,6 +6,8 @@ This factory makes no performance or qualification claim.
 from __future__ import annotations
 from threading import RLock
 
+from mlx2.runtime.native_admission_retirement import register_reaper
+
 _LIMIT = 12 << 30
 _LOCK = RLock()
 _CHARGED = 0
@@ -126,6 +128,9 @@ def reap_hybrid_admission_orphans():
             pass
 
 
+register_reaper(f"{__name__}:{id(_ORPHANS)}", reap_hybrid_admission_orphans)
+
+
 def create_shared_hybrid_graph_pack(adapter, requests, *, profile,
                                      permit_candidate=False, cancelled=lambda: False):
     """requests=(uid, revision, exact prompt IDs, maximum), two cold lanes."""
@@ -149,9 +154,9 @@ def create_shared_hybrid_graph_pack(adapter, requests, *, profile,
     from .paged_kv_pool import PagedKVPool
     from .paged_kv_token import PagedKVTokenOwner, TokenKVProfile
     from .paged_kv_write import NativeWriteBackend, PagedKVWriteOwner
-    from .qwen3_paged_native_backend import NativeQwen3PagedBackend
-    from .paged_native_atomic_owner import NativeAtomicRequestOwner
     from .paged_gdn_checkpoint import GDNBoundaryCheckpoint
+    from .paged_native_atomic_owner import NativeAtomicRequestOwner
+    from .qwen3_paged_native_backend import NativeQwen3PagedBackend
     # Geometry/dtype validation does not allocate or cast model weights.
     probe = Qwen35PagedCandidate(adapter.model, None,
         q1_stripes=profile['q1_simd_stripes'], q1_split_partition=profile['q1_split_partition'])

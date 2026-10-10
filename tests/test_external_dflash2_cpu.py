@@ -1918,7 +1918,7 @@ def test_partial_fit_rotates_lanes_without_ready_queue_masking(monkeypatch, ordi
         real(anchors,hidden,cache,count,rngs,temperatures)
         return [[0]*count for _ in anchors],[[q]*count for _ in anchors]
     monkeypatch.setattr(d,'draft_distributions',proposals)
-    monkeypatch.setattr(b,'_target_law',lambda *args,greedy_token=False:1 if greedy_token else p)
+    monkeypatch.setattr(b,'_target_law',lambda *args,greedy_token=False,**kwargs:1 if greedy_token else p)
     append=1 if ordinary else b.num_draft+1
     b._admit([b.lanes[0]],append);budget[0]=int(b.scheduler_stats['reservation_bytes']*1.8)
     assert not b._admit(list(b.lanes.values()),append)

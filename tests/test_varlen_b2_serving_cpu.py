@@ -9,7 +9,13 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+# The HTTP gate helpers live with the research scripts, not in the package.
+_RESEARCH = str(Path(__file__).resolve().parents[1] / "scripts" / "research")
+if _RESEARCH not in sys.path:
+    sys.path.append(_RESEARCH)
+
 from mlx2 import serving
+from mlx2.adapters.native_qwen3 import Qwen3NativeCohort
 from mlx2.runtime.paged_b2_research_profile import (
     CONTEXT_BOUNDS, SUSTAINED_CONTEXT_BOUNDS, FLAGS, PACKED_FLAG, SCHEMA, SCHEMA_V2, SCHEMA_V3,
     SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SUSTAINED_FLAG, SUSTAINED_TOKENS,
@@ -245,7 +251,8 @@ def test_sustained_context_98_refused_before_shared_arena_allocation(monkeypatch
     batch = SimpleNamespace(
         _find_uids=lambda uids: {uids[0]: (0, 0)},
         _unprocessed_sequences=[(None, None, None, None, None, None, False)])
-    adapter = SimpleNamespace(identity={"path": str(tmp_path)})
+    adapter = SimpleNamespace(identity={"path": str(tmp_path)},
+                              native_cohort_backend=lambda kind: Qwen3NativeCohort())
     with pytest.raises(ValueError, match="context scope"):
         serving.install_explicit_native_qwen3_b2_cohort(
             batch, adapter, jobs, lifecycle_lock=RLock(),
@@ -625,7 +632,8 @@ def test_b2_second_handoff_failure_retires_uninstalled_owner(monkeypatch, tmp_pa
         remove=lambda uids: removed.append(tuple(uids)),
         _find_uids=lambda uids: {uids[0]: (0, uids[0] - 1)},
         _unprocessed_sequences=[(None, None, None, None, None, None, ())] * 2)
-    adapter = SimpleNamespace(identity={"path": str(tmp_path), "fingerprint": "rev"})
+    adapter = SimpleNamespace(identity={"path": str(tmp_path), "fingerprint": "rev"},
+                              native_cohort_backend=lambda kind: Qwen3NativeCohort())
     with pytest.raises((RuntimeError if mode == "v3_terminal" else ValueError),
                        match=("paired terminal" if mode == "v3_terminal"
                               else "handoff refused: cancelled")):

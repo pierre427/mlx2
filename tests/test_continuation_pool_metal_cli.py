@@ -376,7 +376,7 @@ def test_actual_cpu_pool_all_sampled_draws_match_original_prefix_s1_reference():
             law = original(current, logits, history, *args, **kwargs)
             observations.append(
                 {
-                    "history_tokens": list(history),
+                    "history_tokens": [*history, *kwargs.get("history_suffix", ())],
                     "reachable": kwargs.get("reachable", args[0] if args else True),
                     "raw_logits": np.asarray(logits.astype(mx.float32)).copy(),
                     "law": law.copy(),

@@ -816,11 +816,7 @@ def test_dflash2_receipt_settings_bind_complete_tree_geometry():
 
 
 def test_real_checkpoint_headers_map_onto_the_drafter():
-    if (
-        not (DRAFT / "config.json").exists()
-        or not (TARGET / "config.json").exists()
-        or not POLICY.exists()
-    ):
+    if not (DRAFT / "config.json").exists() or not (TARGET / "config.json").exists():
         pytest.skip("local Qwen3.8 27B DFlash2 artifacts are not installed")
     from mlx2.adapters.dflash2 import _read_safetensors_header
     from mlx2.adapters.qwen38_27b import (

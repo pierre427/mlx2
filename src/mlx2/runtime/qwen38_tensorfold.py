@@ -113,10 +113,10 @@ def _import(root, names):
 def _modules(source_root=None, *, cached=False):
     """Return ``(lane_tree, cache_hit)`` for the hash-checked vendored source.
 
-    Uncached (the default) re-runs ``git rev-parse`` for every forward.
-    Cached validates each resolved root once per process and then reuses the
-    imported module: code already imported cannot change with the checkout,
-    so a per-call revision check adds a subprocess without adding safety.
+    Uncached (the default) rechecks the vendored module digests on every call.
+    Cached validates each resolved root once, imports the lazy kernel
+    dependencies up front, and then reuses those imported module objects.
+    Both paths install the owned GDN overrides.
     """
 
     root = None if source_root is None else Path(source_root).resolve()
