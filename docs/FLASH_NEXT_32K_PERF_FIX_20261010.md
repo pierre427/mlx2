@@ -31,9 +31,9 @@ depth fallback and prefill projection bounds. No qualification campaign or
 background worker was restarted. The requested GPU validation is one cold/warm
 32K width-four performance cell under a fresh lease and paired locks.
 
-## Single GPU rerun and subsequent CPU follow-up
+## First GPU rerun and subsequent CPU follow-up
 
-The only rerun used ea8113b7e under CPG generation 397 and paired locks.
+The first rerun used ea8113b7e under CPG generation 397 and paired locks.
 Cold prefill rose from 547.8 to 580.4 tokens/s/request, cold decode from 4.83
 to 6.10, and cold four-request wall-clock fell from 88.94 to 79.54 seconds.
 Warm hits rose from 2/4 to 3/4 and warm wall-clock fell from 53.34 to 29.81
@@ -84,12 +84,36 @@ ordinary-handoff policy, admission depths, target-cache bytes, and initial
 uncached work; they contain no Flash Next or model-name branch. The same
 contracts apply to any self-MTP adapter that exposes a static ordinary handoff.
 
-Validation: 225 focused CPU tests and nine subtests passed; an additional
-merge-copy refusal regression passed with the other four new pure CPU tests.
-These follow-up changes were made AFTER the sole GPU rerun and have no
-full-model performance validation. Do not attribute them to the measurements
-above. No second GPU run was started. Background qualification remains stopped.
+Validation before the post-fix retest: 225 focused CPU tests and nine subtests
+passed; an additional merge-copy refusal regression passed with the other four
+new pure CPU tests. These follow-up changes were made after the first GPU
+rerun and must not be attributed to that first measurement.
+
+## Post-fix GPU retest
+
+One further cold/warm repetition ran at ffc2c384b under CPG generation 401
+with paired locks. Cold decode recovered to 26.92 tokens/s/request and cold
+wall-clock was 78.02 seconds. All four warm requests reused at least 99.996%
+of their prompts; warm TTFT was 1.99 seconds and warm wall-clock was 6.56
+seconds. This exceeds the October 7 median for decode and improves its cold
+and warm wall-clock, while cold prefill (472.77 tokens/s/request) and TTFT
+(69.31 seconds) regressed relative to the first rerun. The result therefore
+recovers the decode and warm-cache failures without claiming a uniform
+improvement in every phase.
+
+Cold receipts still show arrival skew: three rows entered self-MTP at width
+three before handing off at width four, while the fourth reports ordinary
+width four. Their final decode rates nevertheless clustered at 24.48-27.03
+tokens/s, and the warm pass had complete cache coverage. Cold cohort formation
+and prefill efficiency remain opportunities for further work.
+
+All eight streams returned the correct needle. The strict harness remains
+failed because only 2/4 warm texts were byte-identical to their cold outputs,
+the already documented batch-composition nondeterminism. Thermal state stayed
+nominal, swapouts were unchanged, and no foreign activity or refusal was
+recorded. This is one observation, not a replicated benchmark or qualification
+claim. Background qualification remains stopped.
 
 The detailed comparison includes prefill, cold/warm TTFT, per-request decode,
 and cold/warm concurrent HTTP wall-clock in
-`qualification/runs/flash-next-32k-w4-fix-20261010/comparison.md`.
+`qualification/runs/flash-next-32k-w4-postfix-retest-20261010/report.md`.
