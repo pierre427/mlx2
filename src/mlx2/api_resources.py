@@ -7,6 +7,7 @@ crash exposes either the old record or the new one, never a partial JSON file.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -36,6 +37,24 @@ class StoreCapacityExceeded(RuntimeError):
 def _tenant_name(tenant_id):
     value = str(tenant_id or "default")
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+class DuplicateKeyError(ValueError):
+    """A request object repeats a key (``json.loads`` would keep the last)."""
+
+
+def _unique_pairs(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise DuplicateKeyError(f"duplicate object key {key!r} in request body")
+        value[key] = item
+    return value
+
+
+def decode_request_json(raw):
+    """``json.loads`` for a request body or batch row; duplicate keys raise."""
+    return json.loads(raw, object_pairs_hook=_unique_pairs)
 
 
 def _atomic_write(path, data):
@@ -409,9 +428,33 @@ class FileStore:
         directory = self.root / _tenant_name(tenant_id)
         return directory / f"{file_id}.json", directory / f"{file_id}.bin"
 
+    def _reclaim_orphan_content(self):
+        """Remove ``.bin`` payloads whose ``.json`` was never published.
+
+        The crash window between the two publications of ``create`` leaves
+        content no metadata names, which no restore or eviction would ever
+        reach.  Bad or rejected metadata keeps both of its paths (see the
+        restore tests); only content with no sibling metadata at all is
+        swept.  Symlinks are left alone as the restore reader leaves them.
+        """
+        for content_path in self.root.glob("*/*.bin"):
+            try:
+                if content_path.parent.is_symlink() or content_path.is_symlink():
+                    continue
+                metadata_path = content_path.with_suffix(".json")
+                if metadata_path.is_symlink() or metadata_path.exists():
+                    # Present, bad, or a symlink (dangling or not): the
+                    # restore reader rejects and keeps it; so does the sweep.
+                    continue
+                content_path.unlink()
+                self._counts["orphans_reclaimed"] += 1
+            except OSError:
+                self._counts["restore_failures"] += 1
+
     def _restore(self):
         if self.root is None or not self.root.exists():
             return
+        self._reclaim_orphan_content()
         for metadata_path in _restore_candidates(self.root, self._counts):
             try:
                 # Filename/type fields are small; do not let corrupt metadata
@@ -518,16 +561,24 @@ class FileStore:
             metadata_path, content_path = self._paths(*key)
             if metadata_path is not None:
                 _atomic_write(content_path, content)
-                _atomic_write(
-                    metadata_path,
-                    _json_bytes(
-                        {
-                            **item.object(),
-                            "tenant_id": item.tenant_id,
-                            "content_type": item.content_type,
-                        }
-                    ),
-                )
+                try:
+                    _atomic_write(
+                        metadata_path,
+                        _json_bytes(
+                            {
+                                **item.object(),
+                                "tenant_id": item.tenant_id,
+                                "content_type": item.content_type,
+                            }
+                        ),
+                    )
+                except BaseException:
+                    # Content without metadata is unreachable and uncounted
+                    # (``_restore`` discovers ``*.json`` only): unpublish it
+                    # rather than leave an orphan on disk.
+                    with contextlib.suppress(OSError):
+                        content_path.unlink(missing_ok=True)
+                    raise
             self._files[key] = item
             self._bytes += len(content)
             while len(self._files) > self.max_files or self._bytes > self.max_bytes:
@@ -920,7 +971,7 @@ class BatchManager:
             custom_id = None
             if output_full:
                 try:
-                    custom_id = json.loads(raw).get("custom_id")
+                    custom_id = decode_request_json(raw).get("custom_id")
                 except (ValueError, AttributeError):
                     pass
                 output_limit_error(
@@ -931,7 +982,10 @@ class BatchManager:
                     self._persist(record)
                 continue
             try:
-                row = json.loads(raw)
+                # A repeated key anywhere in the row (its ``body`` is a request
+                # body) is refused as the HTTP parser refuses it, not kept
+                # last-wins.
+                row = decode_request_json(raw)
                 if not isinstance(row, dict) or set(row) != {"custom_id", "method", "url", "body"}:
                     raise ValueError("each batch row requires custom_id, method, url, and body")
                 custom_id = row["custom_id"]

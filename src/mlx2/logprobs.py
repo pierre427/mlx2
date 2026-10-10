@@ -17,6 +17,20 @@ def wants_logprobs(request):
     return bool(request.get("logprobs", False) or request.get("top_logprobs", 0))
 
 
+def wants_logprobs_at(request, completion_token):
+    """Whether this one-based completion position should cross to the host.
+
+    The optional bounded window is a diagnostic aid for first-divergence
+    capture.  It does not change sampling or device execution; it only avoids
+    serializing every vocabulary row while localizing one suspect token.
+    """
+    if not wants_logprobs(request):
+        return False
+    start = int(request.get("logprobs_start", 1))
+    end = int(request.get("logprobs_end", 2**63 - 1))
+    return start <= int(completion_token) <= end
+
+
 def token_logprob(logprobs, token, tokenizer, *, top_n=0, array_module):
     """Serialize the emitted token and its top alternatives from the same row.
 

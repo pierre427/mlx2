@@ -830,3 +830,32 @@ def test_responses_grammar_stream_items_match_agent_compat_rewrites(
     for record in records:
         if "item_id" in record:
             assert record["item_id"] == output[0]["id"]
+
+
+@pytest.mark.parametrize(
+    "literals",
+    [
+        ("</atem:parameter>", "</atem:invoke>"),
+        ("<ab>", "<ac>", "<b"),
+        ("<ab", "<abc"),  # the longer literal is excluded by its prefix
+        ("ab", "ba"),  # no shared first character: the lookahead fallback
+    ],
+)
+def test_text_excluding_several_literals_matches_exactly_the_texts_without_any(literals):
+    import itertools
+
+    from mlx2.structured_automaton import automaton_for
+
+    compiled = regex.compile(rf"(?:{text_excluding(*literals)})")
+    if len({literal[0] for literal in literals}) == 1:
+        automaton_for(compiled)  # the block form compiles for the exact engine
+    alphabet = sorted(set("".join(literals))) + ["z"]
+    for length in range(7):
+        for chars in itertools.product(alphabet, repeat=length):
+            text = "".join(chars)
+            expected = not any(literal in text for literal in literals)
+            assert bool(compiled.fullmatch(text)) == expected, text
+    for literal in literals:
+        assert not compiled.fullmatch("hello " + literal + " world")
+        text = literal[:-1] + "\n" + literal[:-1]
+        assert bool(compiled.fullmatch(text)) == (not any(item in text for item in literals))

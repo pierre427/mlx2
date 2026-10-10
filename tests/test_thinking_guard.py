@@ -1111,3 +1111,161 @@ def test_budget_never_completes_the_answer_header_over_a_tool_sharing_it():
             ids.append(token)
         guard.settle(ids)
         assert guard.receipt()["forced_close"] is False
+
+
+def _receipt_keys(guard):
+    return {
+        key: guard.receipt().get(key)
+        for key in ("forced_close", "released_at", "tripped", "tripped_at", "think_tokens")
+    }
+
+
+def test_receipt_is_the_same_whether_the_close_was_observed_stepwise_or_at_once():
+    """P5: the receipt is a function of the ids.  Observing the close marker
+    token by token advanced the alarm over the marker's own leading tokens
+    (tripping there) and never undid it once the marker completed, so a
+    stepwise guard and a fresh guard fed the same ids disagreed on
+    ``tripped`` / ``tripped_at`` / ``forced_close`` while their logits agreed."""
+    close = (3, 4, 5)
+
+    def guard(budget):
+        return ThinkingGuard(2, close, budget=budget, soft_ratio=0.5, tau=1.0, ngram=3, rewrite_window=4)
+
+    # The soft budget (12) lands on the marker's second token.
+    before = [8, 7, 10, 9, 7, 7, 7, 9, 4, 4, 3, 4]
+    final = before + [5]
+    live = guard(24)
+    _call(live, before)
+    assert live.receipt()["tripped"] == "budget_soft"  # the step at 12 saw no close yet
+    live_row = _call(live, final)
+    fresh = guard(24)
+    fresh_row = _call(fresh, final)
+    np.testing.assert_array_equal(live_row, fresh_row)
+    assert _receipt_keys(live) == _receipt_keys(fresh)
+    assert live.receipt()["tripped"] is None and live.receipt()["released_at"] == 10
+    # A close forced at the budget reads as forced on both paths.
+    final = [8, 3, 4, 5, 7, 7, 8]
+    live = guard(2)
+    for length in (2, 3, 4, 7):
+        _call(live, final[:length])
+    fresh = guard(2)
+    _call(fresh, final)
+    assert _receipt_keys(live) == _receipt_keys(fresh)
+    assert live.receipt()["forced_close"] is True and live.receipt()["released_at"] == 1
+
+
+def test_receipt_purity_under_rollback_fuzz():
+    """The lane's differential fuzz (seed 2): stepwise observation with
+    rollbacks against one fresh guard on the final ids, 148/400 receipts
+    differed before the fix with identical logits."""
+    import random
+
+    close, alphabet = (3, 4, 5), [3, 4, 5, 6, 7, 8, 9, 10]
+
+    def sequence(rng, n):
+        out = []
+        while len(out) < n:
+            r = rng.random()
+            if r < 0.15:
+                out += list(close)
+            elif r < 0.4:
+                out += [rng.choice([7, 8])] * rng.randrange(1, 4)
+            else:
+                out.append(rng.choice(alphabet))
+        return out[:n]
+
+    rng = random.Random(2)
+    mismatches = []
+    for trial in range(400):
+        final = sequence(rng, rng.randrange(3, 40))
+        budget, window = rng.randrange(2, 30), rng.choice([4, 8, 256])
+
+        def make():
+            return ThinkingGuard(
+                2, close, budget=budget, soft_ratio=0.5, tau=1.0, ngram=3, rewrite_window=window
+            )
+
+        live, seen = make(), 0
+        while seen < len(final):
+            if seen > 0 and rng.random() < 0.4:
+                seen -= rng.randrange(1, min(window, seen) + 1)
+                _call(live, final[:seen] + sequence(rng, rng.randrange(1, 4)))
+            seen = min(len(final), seen + rng.randrange(1, 4))
+            _call(live, final[:seen])
+        live_row = _call(live, final)
+        fresh = make()
+        fresh_row = _call(fresh, final)
+        np.testing.assert_array_equal(live_row, fresh_row)
+        if _receipt_keys(live) != _receipt_keys(fresh):
+            mismatches.append((trial, budget, window, final, _receipt_keys(live), _receipt_keys(fresh)))
+    assert not mismatches, mismatches[:3]
+
+
+def test_probe_restores_the_alarm_when_a_draft_completes_a_marker_before_the_sync_window():
+    """A probed draft row that completes a close marker whose start lies
+    before the sync window truncated the alarm below the window; the restore
+    then replayed only the window's ids, leaving a gap in the alarm input."""
+    close = (3, 4, 5)
+    guard = ThinkingGuard(2, close, budget=None, tau=1.0, ngram=2, rewrite_window=1)
+    committed = [8, 9, 8, 9, 3, 4]  # a marker prefix the model wrote itself
+    _call(guard, committed)
+    probe = mx.array([1, 2] + committed + [5], dtype=mx.uint32)
+    guard.probe(probe, mx.zeros((1, VOCAB)))
+    fresh = ThinkingGuard(2, close, budget=None, tau=1.0, ngram=2, rewrite_window=1)
+    _call(fresh, committed)
+    assert guard._ids == fresh._ids == committed
+    assert guard.receipt() == fresh.receipt()
+    np.testing.assert_array_equal(_call(guard, committed + [8]), _call(fresh, committed + [8]))
+    assert guard.receipt() == fresh.receipt()
+
+
+def test_forced_close_requires_the_marker_prefix_after_the_forcing_step():
+    """A forcing row admits only the next marker token, so ids past the first
+    forcing step that are not the marker's continuation were not written by
+    the guard (a processor bypass, a vocabulary past the marker id): the
+    receipt fails closed instead of reporting a forced close it never made."""
+    guard = ThinkingGuard(2, (3, 4, 5), budget=2, soft_ratio=0.5)
+    guard.settle([8, 9, 10])
+    assert guard.receipt()["forced_close"] is False and guard.receipt()["released_at"] is None
+    guard.settle([8, 9, 3, 4])  # a genuine forced marker cut short by max_tokens
+    assert guard.receipt()["forced_close"] is True and guard.receipt()["released_at"] is None
+    guard.settle([8, 9, 3, 9])
+    assert guard.receipt()["forced_close"] is False
+    guard.settle([8, 9, 3, 4, 5, 7])
+    assert guard.receipt()["forced_close"] is True and guard.receipt()["released_at"] == 2
+    # A later complete marker does not make ids the mask would have refused forced.
+    guard.settle([8, 9, 10, 3, 4, 5])
+    assert guard.receipt()["forced_close"] is False and guard.receipt()["released_at"] == 3
+    guard.settle([8, 9, 10, 11, 3, 4, 5, 7])
+    assert guard.receipt()["forced_close"] is False and guard.receipt()["released_at"] == 4
+    # The model wrote a marker prefix before the budget; forcing continues it.
+    guard.settle([8, 3, 4])
+    assert guard.receipt()["forced_close"] is True
+    guard.settle([8, 3, 8])
+    assert guard.receipt()["forced_close"] is False
+
+
+def test_a_natural_message_boundary_close_is_never_reported_forced():
+    """Self-addressed reasoning that ended in a message to the user or a tool
+    closed naturally; a release marker the model spells later (inside that
+    message) is not a forced close, so the first close must be the marker
+    itself for the receipt to say forced."""
+    separator, self_header, user_header = (3, 4), (5, 6, 9), (5, 7, 9)
+    release = separator + user_header
+
+    def guard():
+        return ThinkingGuard(
+            2, release, budget=3, soft_ratio=0.5, reasoning_message=(separator, self_header)
+        )
+
+    for first_message in (user_header, (5, 8, 9)):  # to the user, to a tool
+        settled = guard()
+        settled.settle(list(first_message + release))
+        receipt = settled.receipt()
+        assert receipt["released_at"] == 0 and receipt["think_tokens"] == 0
+        assert receipt["forced_close"] is False, first_message
+    # Reasoning to itself that the budget released (the marker from the
+    # forcing step on) reads as forced.
+    settled = guard()
+    settled.settle(list(self_header) + list(release))
+    assert settled.receipt()["forced_close"] is True and settled.receipt()["released_at"] == 3

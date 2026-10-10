@@ -35,6 +35,38 @@ def _text(value, name, *, empty=True):
     return value
 
 
+def anthropic_request_model(body, *, agent_compat=None):
+    """Validate the Messages request shape and return its required model id."""
+    body = _object(body, "request")
+    compat = agent_compat is not None and agent_compat.enabled
+    _only(
+        body,
+        {
+            *(("context_management", "output_config") if compat else ()),
+            "model",
+            "system",
+            "messages",
+            "max_tokens",
+            "stop_sequences",
+            "temperature",
+            "top_p",
+            "top_k",
+            "tools",
+            "tool_choice",
+            "thinking",
+            "metadata",
+            "stream",
+            "service_tier",
+            "container",
+            "mcp_servers",
+            "session_id",
+            "return_progress",
+        },
+        "Anthropic request",
+    )
+    return _text(body.get("model"), "model", empty=False)
+
+
 def _cache_control(value):
     """Validate Anthropic's prompt-cache marker; APCv2 itself is automatic."""
     value = _object(value, "cache_control")
@@ -220,7 +252,10 @@ def _anthropic_message(
     content = message.get("content")
     if isinstance(content, str):
         return [{"role": role, "content": content}], 0
-    if not isinstance(content, list) or not content:
+    # An empty block list is this server's own answer for a turn with no
+    # visible output (``content: []``); the assistant role may replay it, as
+    # Responses accepts its empty message item.  Other roles stay required.
+    if not isinstance(content, list) or (not content and role != "assistant"):
         raise ValueError("message content must be text or a nonempty block list")
     if role == "assistant":
         text, reasoning, calls = [], [], []
@@ -437,32 +472,8 @@ def anthropic_request_to_chat(
 ):
     """Translate Anthropic Messages/count_tokens input to a chat request."""
     body = _object(body, "request")
+    request_model = anthropic_request_model(body, agent_compat=agent_compat)
     compat = agent_compat is not None and agent_compat.enabled
-    _only(
-        body,
-        {
-            *(("context_management", "output_config") if compat else ()),
-            "model",
-            "system",
-            "messages",
-            "max_tokens",
-            "stop_sequences",
-            "temperature",
-            "top_p",
-            "top_k",
-            "tools",
-            "tool_choice",
-            "thinking",
-            "metadata",
-            "stream",
-            "service_tier",
-            "container",
-            "mcp_servers",
-            "session_id",
-            "return_progress",
-        },
-        "Anthropic request",
-    )
     if not count_tokens and body.get("max_tokens") is None:
         # The chat validator reads a forwarded null as "unset" and would
         # apply the server default; Messages requires an explicit cap.
@@ -511,8 +522,7 @@ def anthropic_request_to_chat(
         translation_metadata["reasoning_signature_rejections"] = rejections
     if "session_id" in body:
         result["session_id"] = body["session_id"]
-    if "model" in body:
-        result["model"] = _text(body["model"], "model", empty=False)
+    result["model"] = request_model
     for source, target in (
         ("max_tokens", "max_tokens"),
         ("stop_sequences", "stop"),

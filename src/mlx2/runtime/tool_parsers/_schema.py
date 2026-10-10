@@ -250,17 +250,6 @@ def infer_type_from_json_schema(schema: Any) -> Optional[str]:
     return None
 
 
-def is_string_type(schema: Any) -> bool:
-    """True when a schema fragment resolves to a JSON ``string`` type.
-
-    Matches the exact JSON-schema type name ``string`` (as the parsers did
-    before), but first resolves ``anyOf`` / ``oneOf`` / list-form unions so that
-    e.g. ``{"type": ["string", "null"]}`` is recognized.
-    """
-    resolved = infer_type_from_json_schema(schema)
-    return isinstance(resolved, str) and resolved.strip().lower() == "string"
-
-
 def string_length_bounds(schema: dict, *, wire_max: int = 4096) -> tuple[int, int]:
     """Return bounded raw-string lengths or reject unsupported constraints."""
     minimum = schema.get("minLength", 0)
@@ -279,8 +268,16 @@ def string_length_bounds(schema: dict, *, wire_max: int = 4096) -> tuple[int, in
     return minimum, min(maximum, wire_max)
 
 
-def raw_string_pattern(schema: Any, *, forbidden: str = "<", wire_max: int = 4096):
+def raw_string_pattern(schema: Any, *, forbidden="<", wire_max: int = 4096, free_text=None):
     """Regex for schemas that can use an adapter's unquoted text field.
+
+    ``forbidden`` is what the adapter's wire cannot carry inside a raw value:
+    a string of single characters, or a sequence of literals (the closing
+    tags that end the value).  An enum or const spelling one is refused; a
+    free string excludes them, unbounded unless the schema bounds its length
+    (a counted bound on a literal exclusion needs the scanner's lookahead).
+    ``free_text`` replaces the unbounded exclusion (an adapter's reference to
+    a rule it defines once, so the exclusion is not spelled per parameter).
 
     ``None`` means the schema needs JSON spelling (for example a union of
     string and null). Unsupported string constraints raise so strict tool
@@ -290,6 +287,7 @@ def raw_string_pattern(schema: Any, *, forbidden: str = "<", wire_max: int = 409
         return None
     import regex
 
+    excluded = tuple(forbidden)  # a string's characters, or the literals
     if "pattern" in schema:
         raise ValueError("string pattern is unsupported by raw tool parameters")
     if "enum" in schema:
@@ -301,7 +299,7 @@ def raw_string_pattern(schema: Any, *, forbidden: str = "<", wire_max: int = 409
             return None
         if any(len(value) > wire_max for value in values):
             raise ValueError(f"string enum exceeds the {wire_max}-character wire bound")
-        if any(any(char in value for char in forbidden) for value in values):
+        if any(any(item in value for item in excluded) for value in values):
             raise ValueError("string enum contains a tool-wire delimiter")
         return "(?:" + "|".join(regex.escape(value) for value in values) + ")"
     if "const" in schema:
@@ -311,7 +309,7 @@ def raw_string_pattern(schema: Any, *, forbidden: str = "<", wire_max: int = 409
             return None
         if len(value) > wire_max:
             raise ValueError(f"string const exceeds the {wire_max}-character wire bound")
-        if any(char in value for char in forbidden):
+        if any(item in value for item in excluded):
             raise ValueError("string const contains a tool-wire delimiter")
         return regex.escape(value)
     if schema.get("type") != "string":
@@ -321,8 +319,14 @@ def raw_string_pattern(schema: Any, *, forbidden: str = "<", wire_max: int = 409
         names = ", ".join(sorted(map(str, unknown)))
         raise ValueError(f"unsupported raw string schema keywords: {names}")
     minimum, maximum = string_length_bounds(schema, wire_max=wire_max)
-    excluded = regex.escape(forbidden)
-    return rf"[^{excluded}]{{{minimum},{maximum}}}"
+    if all(len(item) == 1 for item in excluded):
+        return rf"[^{regex.escape(''.join(excluded))}]{{{minimum},{maximum}}}"
+    from ...tool_grammar import text_excluding
+
+    if not ({"minLength", "maxLength"} & set(schema)):
+        return free_text if free_text is not None else text_excluding(*excluded)
+    alternatives = "|".join(regex.escape(item) for item in excluded)
+    return rf"(?:(?!{alternatives})[\s\S]){{{minimum},{maximum}}}"
 
 
 def _json_equal(left: Any, right: Any) -> bool:

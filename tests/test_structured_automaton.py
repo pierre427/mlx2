@@ -599,8 +599,9 @@ def _bounded_string_schema(maximum):
 
 def _tool_grammar_tools(maximum=None):
     """A strict and a non-strict tool; ``maximum`` adds a bounded string
-    parameter.  Qwen's XML string values need a lookahead the automaton
-    refuses, so its grammars here use the strict tool without one."""
+    parameter.  Qwen's XML string values and Muse's bounded ATEM strings need
+    a lookahead the automaton refuses, so their grammars here use the strict
+    tool without one (Muse's unbounded strings are block languages)."""
     properties = {
         "mode": {"enum": ["append", "replace", "create"]},
         "lines": {"type": "integer"},
@@ -627,7 +628,7 @@ def _minimization_corpus():
     from mlx2.adapters.muse_glimmer_output import constrained_tool_grammar as muse_grammar
     from mlx2.runtime.tool_parsers.qwen3_coder import constrained_tool_grammar as qwen_grammar
 
-    tools = _tool_grammar_tools(24)
+    tools = _tool_grammar_tools()
     return {
         **{f"json maxLength={n}": compile_constraint(_bounded_string_schema(n)).pattern.pattern
            for n in (1, 8, 40)},
@@ -748,6 +749,11 @@ def test_long_bounded_strings_compile_fast():
         started = time.perf_counter()
         automaton = compile_pattern(source)
         elapsed = time.perf_counter() - started
-        assert automaton.state_count > depth  # the unrolled chain is there
+        if "maxLength" in source or "{0,4096}" in source:
+            assert automaton.state_count > depth  # the unrolled chain is there
+        else:
+            # An unbounded Muse raw string is a block language that excludes
+            # the closing tags (no counted chain), so the automaton stays small.
+            assert automaton.state_count < 1024
         assert automaton.fullmatch(source[:0], partial=True)
         assert elapsed < bound, (source[:40], elapsed)

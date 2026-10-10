@@ -746,23 +746,96 @@ def _validate_schema_value(schema, value, path="arguments"):
                 _validate_schema_value(properties[name], item, f"{path}.{name}")
 
 
+def _committed_partial_names(cut) -> list[str]:
+    """The function names a stop-cut record says the model committed to.
+
+    Fails closed on a record that cannot say: an unreadable name, no
+    ``function`` member, names that are not nonempty strings, or a
+    ``functions`` list that is not the canonical multi-name shape
+    (``mlx2.output.stop_cut_record``: two or more names, the first of which
+    is ``function``).
+    """
+    unreadable = ToolContractError(
+        "model started a call whose function name could not be read"
+    )
+    if not isinstance(cut, Mapping) or "function" not in cut or cut.get("name_unreadable"):
+        raise unreadable
+    function = cut["function"]
+    if function is not None and (not isinstance(function, str) or not function):
+        raise unreadable
+    if "functions" not in cut:
+        return [] if function is None else [function]
+    names = cut["functions"]  # present: canonical list shape or unreadable
+    if (
+        not isinstance(names, list)
+        or len(names) < 2
+        or names[0] != function
+        or any(not isinstance(name, str) or not name for name in names)
+    ):
+        raise unreadable
+    return names
+
+
 def enforce_tool_contract(
     body: Mapping,
     calls: list[dict],
     *,
     finish_reason: str | None = None,
+    stop_truncated_tool_call: Mapping | None = None,
+    truncated_tool_call: Mapping | None = None,
 ) -> None:
-    """Fail closed if generated calls violate requested choice/schema controls."""
+    """Validate completed and grammar-committed partial tool identities.
+
+    A truncated_tool_call receipt records an unfinished call and its cause:
+    max_tokens for a length finish or stop_sequence for a client stop.
+    Its canonical function/name-unreadable fields use stop_cut_record.
+    Committed names obey the same declared/named choice contract as complete
+    calls. Incomplete arguments are never executable, and a cut before a name
+    does not fulfill a required call; the truthful truncation remains incomplete.
+    Ordinary prose exhausted by max_tokens remains a valid length finish.
+    stop_truncated_tool_call is the historical stop-only receipt field.
+    """
     choice = body.get("tool_choice", "auto")
-    exhausted = finish_reason == "length" and not calls
+    declared = {
+        tool["function"]["name"]: tool["function"] for tool in body.get("tools", ())
+    }
+    cut = stop_truncated_tool_call if finish_reason == "stop" else None
+    if truncated_tool_call is not None:
+        expected_cause = {"length": "max_tokens", "stop": "stop_sequence"}.get(
+            finish_reason
+        )
+        if (
+            not isinstance(truncated_tool_call, Mapping)
+            or expected_cause is None
+            or truncated_tool_call.get("cause") != expected_cause
+        ):
+            raise ToolContractError("tool truncation evidence contradicts finish reason")
+        if cut is not None and dict(cut) != {
+            key: value for key, value in truncated_tool_call.items()
+            if key != "cause"
+        }:
+            raise ToolContractError("tool truncation records disagree")
+        cut = truncated_tool_call
+    partials = _committed_partial_names(cut) if cut is not None else []
+    exhausted = not calls and (finish_reason == "length" or cut is not None)
     if choice == "none" and calls:
         raise ToolContractError("model emitted a tool call while tool_choice was none")
+    if choice == "none" and cut is not None:
+        # A committed (stop-cut) call is a call the client said must not
+        # happen; membership in the declared tools does not excuse it.
+        raise ToolContractError("model started a tool call while tool_choice was none")
+    if any(partial not in declared for partial in partials):
+        raise ToolContractError("model started a call to an undeclared function")
     if choice == "required" and not calls and not exhausted:
         raise ToolContractError("model did not emit a required tool call")
     if isinstance(choice, Mapping):
         required_name = choice["function"]["name"]
-        if (not calls and not exhausted) or any(
-            call.get("function", {}).get("name") != required_name for call in calls
+        if (
+            (not calls and not exhausted)
+            or any(
+                call.get("function", {}).get("name") != required_name for call in calls
+            )
+            or any(partial != required_name for partial in partials)
         ):
             raise ToolContractError(
                 f"model did not exclusively call required function {required_name!r}"
@@ -772,12 +845,9 @@ def enforce_tool_contract(
             "model emitted parallel calls while parallel_tool_calls was false"
         )
 
-    definitions = {
-        tool["function"]["name"]: tool["function"] for tool in body.get("tools", ())
-    }
     for call in calls:
         function = call.get("function", {})
-        definition = definitions.get(function.get("name"))
+        definition = declared.get(function.get("name"))
         if definition is None:
             raise ToolContractError("model called an undeclared function")
         if definition.get("strict") is not True:

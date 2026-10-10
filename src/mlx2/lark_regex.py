@@ -16,11 +16,35 @@ operators, ``-> alias`` (ignored: aliases do not change the language),
 fixed table of common terminals.  Everything else (``%ignore``, ``%declare``,
 templates, recursion, unknown imports) is rejected: silently widening or
 narrowing a client's grammar would make validation meaningless.
+
+A ``/regex/`` terminal is enforced by the ``regex`` module, which reads some
+spellings differently from Python's ``re`` (fuzzy ``{e<=1}`` braces, POSIX
+``[[:alpha:]]`` classes, verbose-mode ``{1, 2}``, ``\\m`` ``\\M`` ``\\G`` ``\\K``
+``\\p`` escapes, ``(?|`` ``(?r)`` ``(?V1)`` groups).  A terminal is accepted only
+when both engines compile it and it uses none of those, so what the client's
+grammar says is what the server enforces (``_regex_terminal``).  The class
+escapes ``\\w`` ``\\d`` ``\\s`` keep the enforcing engine's Unicode
+definitions (UTS#18: marks and connector punctuation are word characters,
+superscript digits are not), which are also llguidance's, the reference
+enforcer of this grammar syntax; ``re``'s ``str.isalnum()`` reading is the
+outlier and is not what a client's grammar means.
 """
 
 from __future__ import annotations
 
 import re
+import warnings
+from collections import Counter
+
+import regex
+from regex import _regex_core
+
+try:  # ``re``'s parser: private, stable since 3.11 (``sre_parse`` before)
+    from re import _constants as _re_constants
+    from re import _parser as _re_parser
+except ImportError:  # pragma: no cover - older interpreters
+    import sre_constants as _re_constants
+    import sre_parse as _re_parser
 
 MAX_GRAMMAR_CHARS = 16384
 MAX_REGEX_CHARS = 4096
@@ -157,14 +181,242 @@ def _literal(token: str) -> str:
     return f"(?i:{escaped})" if insensitive else escaped
 
 
+# Escapes the ``regex`` module reads as extensions.  ``re`` refuses most of
+# them too, but naming them keeps the refusal explicit should ``re`` learn one.
+_REGEX_ONLY_ESCAPES = frozenset("mMGKpPXRhHeLg")
+_RE_REPEATS = frozenset(
+    getattr(_re_constants, name)
+    for name in ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT")
+    if hasattr(_re_constants, name)
+)
+
+
+def _regex_tree(pattern: str):
+    """``regex``'s parse tree of ``pattern`` (the enforcing engine's reading)."""
+    bits = regex.V0
+    while True:
+        source = _regex_core.Source(pattern)
+        info = _regex_core.Info(bits, str, {})
+        info.guess_encoding = _regex_core.UNICODE
+        source.ignore_space = bool(info.flags & _regex_core.VERBOSE)
+        try:
+            return _regex_core._parse_pattern(source, info)
+        except _regex_core._UnscopedFlagSet:
+            bits = info.global_flags  # a global inline flag: parse again under it
+
+
+def _regex_nodes(root):
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        yield node
+        for value in vars(node).values():
+            if isinstance(value, _regex_core.RegexBase):
+                pending.append(value)
+            elif isinstance(value, (list, tuple)):
+                pending.extend(item for item in value if isinstance(item, _regex_core.RegexBase))
+
+
+def _re_repeat_bounds(subpattern) -> list:
+    """The ``(min, max)`` of every repeat node in ``re``'s parse tree
+    (``None`` for unbounded), in no particular order."""
+    bounds = []
+    for opcode, value in subpattern:
+        if opcode in _RE_REPEATS:
+            low, high = value[0], value[1]
+            bounds.append((low, None if high is _re_constants.MAXREPEAT else high))
+            bounds.extend(_re_repeat_bounds(value[2]))
+        elif opcode is _re_constants.SUBPATTERN:
+            bounds.extend(_re_repeat_bounds(value[3]))
+        elif opcode is _re_constants.BRANCH:
+            for branch in value[1]:
+                bounds.extend(_re_repeat_bounds(branch))
+        elif opcode in (_re_constants.ASSERT, _re_constants.ASSERT_NOT):
+            bounds.extend(_re_repeat_bounds(value[1]))
+        elif opcode is _re_constants.ATOMIC_GROUP:
+            bounds.extend(_re_repeat_bounds(value))
+        elif opcode is _re_constants.GROUPREF_EXISTS:
+            bounds.extend(_re_repeat_bounds(value[1]))
+            if value[2]:
+                bounds.extend(_re_repeat_bounds(value[2]))
+    return bounds
+
+
+def _regex_repeat_bounds(tree) -> list:
+    """The ``(min, max)`` of every repeat node in ``regex``'s parse tree.
+    Lazy and possessive repeats subclass ``GreedyRepeat``, so they are
+    counted by their bounds like any other."""
+    bounds = []
+    for node in _regex_nodes(tree):
+        if isinstance(node, _regex_core.GreedyRepeat):
+            high = node.max_count
+            bounds.append((node.min_count, None if high in (None, _regex_core.UNLIMITED) else high))
+    return bounds
+
+
+_FLAG_GROUP = re.compile(r"\(\?([a-zA-Z]*)(?:-([a-zA-Z]*))?([:)])")
+
+
+def _spaced_brace_in_verbose_scope(pattern: str) -> bool:
+    """True when a ``{...}`` containing whitespace sits where verbose mode is
+    in effect: ``regex`` drops the whitespace and reads a quantifier, ``re``
+    keeps a literal.  Scope-aware: ``(?x:...)`` / ``(?-x:...)`` groups and
+    ``(?x)`` for the rest of its group; escapes, character classes and
+    verbose comments are skipped (a brace in those reads alike)."""
+    stack = [False]
+    i, n = 0, len(pattern)
+    while i < n:
+        char = pattern[i]
+        if char == "\\":
+            i += 2
+            continue
+        if char == "[":
+            j = i + 1
+            if j < n and pattern[j] == "^":
+                j += 1
+            if j < n and pattern[j] == "]":
+                j += 1
+            while j < n and pattern[j] != "]":
+                j += 2 if pattern[j] == "\\" else 1
+            i = j + 1
+            continue
+        if char == "(":
+            if pattern.startswith("(?#", i):
+                end = pattern.find(")", i)
+                i = n if end < 0 else end + 1
+                continue
+            match = _FLAG_GROUP.match(pattern, i)
+            if match:
+                on, off, close = match.group(1) or "", match.group(2) or "", match.group(3)
+                verbose = stack[-1]
+                if "x" in on:
+                    verbose = True
+                if "x" in off:
+                    verbose = False
+                if close == ":":
+                    stack.append(verbose)
+                else:
+                    stack[-1] = verbose
+                i = match.end()
+                continue
+            stack.append(stack[-1])
+            i += 1
+            continue
+        if char == ")":
+            if len(stack) > 1:
+                stack.pop()
+            i += 1
+            continue
+        if char == "#" and stack[-1]:
+            end = pattern.find("\n", i)
+            i = n if end < 0 else end + 1
+            continue
+        if char == "{" and stack[-1]:
+            end = pattern.find("}", i)
+            if end > i and any(ch.isspace() for ch in pattern[i + 1 : end]):
+                return True
+            i = end + 1 if end > i else i + 1
+            continue
+        i += 1
+    return False
+
+
+def _check_read_alike(pattern: str) -> None:
+    """Refuse a terminal whose braces the two engines read differently.
+
+    Both engines have compiled ``pattern`` (the terminal with its flags
+    scoped).  ``regex`` reads ``{e<=1}``, ``{s}``, ``{i,d}`` as fuzzy matching
+    where ``re`` reads a literal (a ``Fuzzy`` node in its tree); in a verbose
+    scope, inline or scoped, ``regex`` reads ``{1, 2}`` as a quantifier where
+    ``re`` keeps the literal, which shows as a repeat node with bounds in its
+    tree that ``re``'s tree lacks (comments and disabled scopes read alike in
+    both).  Asked
+    of the two parsers, so the decision is exactly the engines' own.
+    """
+    tree = _regex_tree(pattern)
+    if any(isinstance(node, _regex_core.Fuzzy) for node in _regex_nodes(tree)):
+        raise LarkGrammarError("fuzzy matching braces are not portable in a lark terminal")
+    # A brace with whitespace inside it, in a terminal that opens a verbose
+    # scope anywhere, is refused outright: ``regex`` reads it as a quantifier
+    # and ``re`` as a literal, and a nested shape can balance the repeat
+    # bounds compared below (``(?x:(?:a{0, 1}?){1,2})``), so the parse-tree
+    # comparison alone is not a proof.  Fail closed on the spelling instead.
+    if _spaced_brace_in_verbose_scope(pattern):
+        raise LarkGrammarError(
+            "a brace expression in a verbose lark terminal is a quantifier to the "
+            "enforcing engine only: write it without spaces, or escape it"
+        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the same future-syntax warnings as compiling
+        parsed = _re_parser.parse(pattern)
+    # Compare the bounds, not the node count: a lazy or possessive brace
+    # (``a{1, 2}?``) would otherwise be read as one repeat by each engine.
+    if Counter(_regex_repeat_bounds(tree)) != Counter(_re_repeat_bounds(parsed)):
+        raise LarkGrammarError(
+            "a brace expression in a verbose lark terminal is a quantifier to the "
+            "enforcing engine only: write it without spaces, or escape it"
+        )
+
+
+def _check_portable(body: str) -> None:
+    """Refuse the set syntax the two engines read differently.
+
+    A ``[:name:]`` inside a bracket set is a POSIX class to ``regex`` (V0)
+    and plain members to ``re``.  Spellings the two engines read alike
+    (``[[a]]``, ``[.a.]``, a top-level ``[:alpha:]``, set-operator lookalikes
+    under V0) are accepted; braces are checked on the parse trees
+    (``_check_read_alike``).
+    """
+    position, length, in_set = 0, len(body), False
+    while position < length:
+        char = body[position]
+        if char == "\\":
+            escaped = body[position + 1 : position + 2]
+            if escaped in _REGEX_ONLY_ESCAPES:
+                raise LarkGrammarError(
+                    f"regex-module extension \\{escaped} is not portable in a lark terminal"
+                )
+            position += 2
+            continue
+        if in_set:
+            if char == "]":
+                in_set = False
+            elif char == "[" and body[position + 1 : position + 2] == ":":
+                raise LarkGrammarError(
+                    "POSIX character classes are not portable in a lark terminal"
+                )
+            position += 1
+            continue
+        if char == "[":
+            in_set = True
+            position += 1
+            if body[position : position + 1] == "^":
+                position += 1
+            if body[position : position + 1] == "]":
+                position += 1  # a leading ``]`` is literal in both engines
+            continue
+        position += 1
+
+
 def _regex_terminal(token: str) -> str:
     end = token.rindex("/")
     body, flags = token[1:end], token[end + 1 :]
+    _check_portable(body)
+    # The terminal as it is lowered: its flags scoped to it.  A global inline
+    # flag inside the body (``(?x)``) is refused by ``re`` here; ``regex``
+    # would apply it to the whole lowered grammar.
+    pattern = f"(?{flags}:{body})" if flags else f"(?:{body})"
     try:
-        re.compile(body)
-    except re.error as error:
+        with warnings.catch_warnings():
+            # ``re`` warns about set syntax a future version may read
+            # differently; the enforcing engine (V0) reads it as ``re`` does.
+            warnings.simplefilter("ignore")
+            re.compile(pattern)
+        regex.compile(pattern)
+    except (re.error, regex.error) as error:
         raise LarkGrammarError(f"invalid lark regex {token!r}: {error}") from error
-    return f"(?{flags}:{body})" if flags else f"(?:{body})"
+    _check_read_alike(pattern)
+    return pattern
 
 
 def _bounded(size: int) -> int:

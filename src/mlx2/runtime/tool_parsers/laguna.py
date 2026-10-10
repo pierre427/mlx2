@@ -194,3 +194,33 @@ def parse_tool_call(text, tools=None):
             )
         calls.append({"name": name, "arguments": arguments})
     return calls[0] if len(calls) == 1 else calls
+
+
+def partial_function_names(partial, tools=None):
+    """The function a cut-short tool-call body had committed to, if any.
+
+    The reader behind ``OutputParser``'s stop-cut record (see
+    :func:`mlx2.output.stop_cut_record`), by :func:`parse_tool_call`'s own
+    two rules: the name is everything before the first ``<arg_key>``,
+    stripped, whatever characters it holds; a block with no argument marker
+    names its function on its first line.  Either delimiter commits the
+    name (a cut after the first newline reads as the parser would read the
+    block closed there); before both nothing is committed.  Raises
+    ``ValueError`` when the marker came with no name before it, which the
+    parser serves as a call to the empty name and rejects.
+    """
+    # A nested block, as the parser splits one.
+    body = partial.lstrip().removeprefix("<tool_call>").lstrip()
+    position = body.find(_ARG_KEY_OPEN)
+    if position >= 0:
+        name = body[:position].strip()
+        if not name:
+            raise ValueError("Laguna tool call names no function")
+        return [name]
+    line, newline, _rest = body.partition("\n")
+    if not newline:
+        return []
+    return [line.strip()]
+
+
+parse_tool_call.partial_function_names = partial_function_names

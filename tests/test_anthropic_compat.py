@@ -235,6 +235,7 @@ def test_anthropic_sdk_output_blocks_round_trip_nullable_public_fields():
     assert request["messages"][0]["content"] == "checking"
     direct = anthropic_request_to_chat(
         {
+            "model": "fixture",
             "messages": [
                 {
                     "role": "assistant",
@@ -257,6 +258,7 @@ def test_anthropic_sdk_output_blocks_round_trip_nullable_public_fields():
     with pytest.raises(ValueError, match="non-direct tool_use caller"):
         anthropic_request_to_chat(
             {
+                "model": "fixture",
                 "messages": [
                     {
                         "role": "assistant",
@@ -288,6 +290,8 @@ class AnthropicEngine:
         self.reasoning_signer = ReasoningSigner(b"shared-secret")
         self.invalid_tool = False
         self.last_request = None
+        self.submit_calls = 0
+        self.count_tokens_calls = 0
         self.thinking_enabled = None
 
     def status(self):
@@ -297,10 +301,12 @@ class AnthropicEngine:
         return {}
 
     def count_tokens(self, request):
+        self.count_tokens_calls += 1
         assert request["messages"][-1]["content"] == "hello"
         return 7
 
     def submit(self, request, *, tenant_id="default"):
+        self.submit_calls += 1
         self.last_request = request
         # Simulate North/Xing: the adapter defaults thinking on unless the
         # translated request contains an explicit false control.
@@ -450,6 +456,104 @@ def test_anthropic_unknown_model_uses_anthropic_not_found_envelope(
         "type": "error",
         "error": {"type": "not_found_error", "message": "unknown model"},
     }
+
+
+_MISSING_MODEL = object()
+
+
+@pytest.mark.parametrize("model", [_MISSING_MODEL, None], ids=["missing", "null"])
+def test_anthropic_translation_requires_model_before_history_translation(model):
+    body = {"messages": [], "max_tokens": 8}
+    if model is not _MISSING_MODEL:
+        body["model"] = model
+    with pytest.raises(ValueError, match="model must be nonempty text"):
+        anthropic_request_to_chat(body)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [_MISSING_MODEL, None, "", 7, [], {}],
+    ids=["missing", "null", "empty", "number", "array", "object"],
+)
+@pytest.mark.parametrize("path", ["/v1/messages", "/v1/messages/count_tokens"])
+@pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
+def test_anthropic_model_is_required_text_before_engine_admission(
+    anthropic_endpoint, path, stream, model
+):
+    engine, base = anthropic_endpoint
+    body = {"messages": [{"role": "user", "content": "hello"}], "stream": stream}
+    if model is not _MISSING_MODEL:
+        body["model"] = model
+    if path == "/v1/messages":
+        body["max_tokens"] = 8
+
+    with pytest.raises(HTTPError) as error:
+        _post(base, path, body)
+    assert error.value.code == 400
+    payload = json.load(error.value)
+    assert payload["type"] == "error"
+    assert payload["error"]["type"] == "invalid_request_error"
+    assert engine.submit_calls == 0
+    assert engine.count_tokens_calls == 0
+
+
+@pytest.mark.parametrize(
+    "path, stream",
+    [
+        ("/v1/messages", False),
+        ("/v1/messages", True),
+        ("/v1/messages/count_tokens", False),
+    ],
+)
+def test_anthropic_valid_loaded_model_is_accepted(path, stream, anthropic_endpoint):
+    engine, base = anthropic_endpoint
+    body = {
+        "model": "fixture",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": stream,
+    }
+    if path == "/v1/messages":
+        body["max_tokens"] = 8
+    with _post(base, path, body) as response:
+        assert response.status == 200
+        if path.endswith("count_tokens"):
+            assert json.load(response) == {"input_tokens": 7}
+        elif stream:
+            assert "event: message_start" in response.read().decode()
+        else:
+            assert json.load(response)["model"] == "fixture"
+    assert engine.count_tokens_calls == (path.endswith("count_tokens"))
+    assert engine.submit_calls == (path == "/v1/messages")
+
+
+@pytest.mark.parametrize(
+    "path, stream",
+    [
+        ("/v1/messages", False),
+        ("/v1/messages", True),
+        ("/v1/messages/count_tokens", False),
+    ],
+)
+def test_anthropic_unknown_model_is_not_found_before_admission(
+    path, stream, anthropic_endpoint
+):
+    engine, base = anthropic_endpoint
+    body = {
+        "model": "not-loaded",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": stream,
+    }
+    if path == "/v1/messages":
+        body["max_tokens"] = 8
+    with pytest.raises(HTTPError) as error:
+        _post(base, path, body)
+    assert error.value.code == 404
+    assert json.load(error.value) == {
+        "type": "error",
+        "error": {"type": "not_found_error", "message": "unknown model"},
+    }
+    assert engine.submit_calls == 0
+    assert engine.count_tokens_calls == 0
 
 
 @pytest.mark.parametrize(

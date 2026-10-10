@@ -46,6 +46,7 @@ TOKEN_PREFIX = "mlx2t1."
 TOKEN_MAC_DOMAIN = b"mlx2-tenant-token-v1."
 MAX_CREDENTIAL_BYTES = 4096
 DEFAULT_TOKEN_MAX_TTL = 7 * 24 * 3600
+MAX_TOKEN_TTL = 366 * 24 * 3600  # the ceiling TenantAuthenticator accepts
 TOKEN_IAT_SKEW_SECONDS = 30
 SCOPES = frozenset({"inference", "adapters"})
 DEFAULT_SCOPES = ("inference",)
@@ -225,9 +226,25 @@ def mint_token(
     ttl_seconds: int,
     scopes=DEFAULT_SCOPES,
     now: float | None = None,
+    max_ttl_seconds: int = DEFAULT_TOKEN_MAX_TTL,
 ) -> str:
+    """Mint a token the verifying server will accept.
+
+    ``max_ttl_seconds`` is the server's ``token_max_ttl`` (default: the
+    server default, 7 days); a longer token would be minted only to be
+    classified as expired on arrival, the key-id mint/load mismatch again.
+    """
     validate_tenant(tenant)
     _validate_scopes(list(scopes), "token")
+    if type(ttl_seconds) is not int or ttl_seconds <= 0:
+        # The verifier treats a token with exp <= iat as expired on arrival.
+        raise ValueError("token ttl_seconds must be a positive integer")
+    if type(max_ttl_seconds) is not int or not 60 <= max_ttl_seconds <= MAX_TOKEN_TTL:
+        raise ValueError("token max_ttl_seconds must be 60 s to 366 days")
+    if ttl_seconds > max_ttl_seconds:
+        raise ValueError(
+            f"token ttl_seconds exceeds the server's token_max_ttl ({max_ttl_seconds} s)"
+        )
     issued = int(time.time() if now is None else now)
     payload = _b64(
         json.dumps(
@@ -262,7 +279,7 @@ class TenantAuthenticator:
             raise ValueError("tenant auth needs a keys file or a token secret")
         if header_policy not in HEADER_POLICIES:
             raise ValueError(f"tenant header policy must be one of {HEADER_POLICIES}")
-        if not 60 <= int(token_max_ttl) <= 366 * 24 * 3600:
+        if not 60 <= int(token_max_ttl) <= MAX_TOKEN_TTL:
             raise ValueError("tenant token max TTL must be 60 s to 366 days")
         self._keys = dict(keys or {})
         self._token_secret = token_secret
@@ -504,13 +521,34 @@ def _main(argv=None):
     token = commands.add_parser("mint-token", help="print a signed tenant token")
     token.add_argument("--tenant", required=True)
     token.add_argument("--ttl-seconds", type=int, default=24 * 3600)
+    token.add_argument(
+        "--max-ttl-seconds",
+        type=int,
+        default=DEFAULT_TOKEN_MAX_TTL,
+        help="the server's --tenant-auth-token-max-ttl; a longer token is refused on arrival",
+    )
     token.add_argument("--scope", action="append", choices=sorted(SCOPES))
     source = token.add_mutually_exclusive_group(required=True)
     source.add_argument("--secret-file")
     source.add_argument("--secret-env")
     args = parser.parse_args(argv)
+    try:
+        return _run(args)
+    except (OSError, ValueError) as error:
+        # A bad tenant, key id or secret source is a usage error, not a fault.
+        parser.error(str(error))
+
+
+def _run(args) -> int:
     if args.command == "new-key":
         validate_tenant(args.tenant)
+        # The same rule as load_keys_file: an entry the server would refuse
+        # must not be minted (the key is printed once and handed out).
+        if not KEY_ID_PATTERN.match(args.key_id):
+            raise ValueError(
+                "--key-id must be 1-128 characters of [A-Za-z0-9._:-] "
+                "starting with a letter or digit"
+            )
         key = generate_api_key()
         entry = {
             "key_id": args.key_id,
@@ -522,14 +560,19 @@ def _main(argv=None):
         print(json.dumps({"api_key": key, "keys_file_entry": entry}, indent=2))
         return 0
     secret = load_token_secret(path=args.secret_file, env=args.secret_env)
-    print(
-        mint_token(
+    try:
+        minted = mint_token(
             secret,
             args.tenant,
             ttl_seconds=args.ttl_seconds,
             scopes=tuple(args.scope or DEFAULT_SCOPES),
+            max_ttl_seconds=args.max_ttl_seconds,
         )
-    )
+    except ValueError as error:
+        # A usage error (exit 2, like parser.error): nothing reaches stdout.
+        print(f"mint-token: error: {error}", file=sys.stderr)
+        raise SystemExit(2) from error
+    print(minted)
     return 0
 
 

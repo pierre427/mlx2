@@ -1178,3 +1178,164 @@ def test_non_strict_named_tool_grammars_enforce_required_parameters():
     assert not _matches(north, action.format("{}"))
     assert not _matches(north, action.format('{"label":"ok"}'))
     assert _matches(north, action.format('{"x":[1,{"a":null}],"label":"ok"}'))
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "string"},
+        {"type": "string", "maxLength": 64},
+        {"type": "string", "enum": ["if (a < b) {", "x"]},
+    ],
+    ids=["free", "bounded", "enum"],
+)
+def test_muse_raw_values_admit_angle_brackets_the_parser_accepts(strict, schema):
+    """``parse_atem`` ends a raw value at ``</atem:parameter>`` and rejects
+    only ``</atem:invoke>`` inside it; the grammar forbade every ``<``, so an
+    edit tool could never be asked for ``if (a < b) {``."""
+    import regex
+
+    from mlx2.structured_automaton import AutomatonUnsupported, automaton_for
+
+    tools = [{"type": "function", "function": {"name": "edit", "strict": strict, "parameters": {
+        "type": "object",
+        "properties": {"old": schema, "new": {"type": "string"}},
+        "required": ["old", "new"],
+        "additionalProperties": False,
+    }}}]
+    grammar = regex.compile(muse_grammar(tools, "required", parallel_tool_calls=False))
+    bounded = strict and "maxLength" in schema  # only the strict parser bounds
+    if not bounded:
+        automaton_for(grammar)  # still compiles for the exact engine
+    else:
+        with pytest.raises(AutomatonUnsupported):
+            automaton_for(grammar)  # a counted bound needs the scanner's lookahead
+
+    def call(old, new):
+        return (
+            '<atem:invoke name="edit">'
+            f'<atem:parameter name="old">{old}</atem:parameter>'
+            f'<atem:parameter name="new">{new}</atem:parameter>'
+            "</atem:invoke>"
+        )
+
+    body = call("if (a < b) {", "if (a <= b) { <T> 2>&1 </atem:x")
+    assert grammar.fullmatch("<atem:function_calls>" + body + "</atem:function_calls>")
+    assert [c["arguments"] for c in parse_atem(body, tools)] == [
+        {"old": "if (a < b) {", "new": "if (a <= b) { <T> 2>&1 </atem:x"}
+    ]
+    for old, new in [("x", "a</atem:invoke>b"), ("x", "a</atem:parameter>b")]:
+        text = "<atem:function_calls>" + call(old, new) + "</atem:function_calls>"
+        assert not grammar.fullmatch(text)
+        with pytest.raises(ValueError):
+            parse_atem(call(old, new), tools)
+    if bounded:
+        text = "<atem:function_calls>" + call("<" * 65, "y") + "</atem:function_calls>"
+        assert not grammar.fullmatch(text)
+        assert grammar.fullmatch(text.replace("<" * 65, "<" * 64))
+
+
+def test_north_non_ascii_names_and_keys_admit_both_json_spellings():
+    """North's grammar spelled a non-ASCII tool name and non-strict required
+    key with ``ensure_ascii=True`` only, the sibling of the enum/const
+    literal defect: the raw spelling the model reads elsewhere was refused.
+    ``parse_actions`` decodes either spelling to the declared name/key."""
+    import json
+
+    from mlx2.adapters.north_output import parse_actions
+
+    tools = [{"type": "function", "function": {"name": "天気", "parameters": {
+        "type": "object",
+        "properties": {"都市": {"type": "string"}},
+        "required": ["都市"],
+    }}}]
+    grammar = north_grammar(tools, "required", parallel_tool_calls=False)
+
+    def action(calls, **kw):
+        return json.dumps(calls, separators=(",", ":"), **kw)
+
+    for ensure_ascii in (False, True):
+        block = action([{"tool_name": "天気", "parameters": {"都市": "東京"}}], ensure_ascii=ensure_ascii)
+        assert _matches(grammar, f"<|START_ACTION|>{block}<|END_ACTION|>"), block
+        assert parse_actions(block, tools)[0]["arguments"] == {"都市": "東京"}
+    block = action([{"tool_name": "天気", "parameters": {}}])
+    assert not _matches(grammar, f"<|START_ACTION|>{block}<|END_ACTION|>")
+
+
+def test_schema_literals_admit_either_json_spelling_of_non_ascii_text():
+    """North renders names through Jinja's ``tojson`` (escaped) and writes
+    its own JSON; every parser decodes both spellings, so a strict property
+    name, an enum and a const admit the raw and the ``\\uXXXX`` spelling."""
+    import json
+
+    from mlx2.adapters.north_output import parse_actions
+
+    tools = [{"type": "function", "function": {"name": "天気", "strict": True, "parameters": {
+        "type": "object",
+        "properties": {"都市": {"type": "string", "enum": ["東京", "大阪"]}},
+        "required": ["都市"],
+        "additionalProperties": False,
+    }}}]
+    grammar = north_grammar(tools, "required", parallel_tool_calls=False)
+    for ensure_ascii in (False, True):
+        block = json.dumps(
+            [{"tool_name": "天気", "parameters": {"都市": "東京"}}],
+            separators=(",", ":"), ensure_ascii=ensure_ascii,
+        )
+        assert _matches(grammar, f"<|START_ACTION|>{block}<|END_ACTION|>"), block
+        assert parse_actions(block, tools)[0]["arguments"] == {"都市": "東京"}
+    schema = {"type": "object", "properties": {"k": {"type": "string", "const": "café"}},
+              "required": ["k"], "additionalProperties": False}
+    constraint = compile_constraint(
+        {"type": "json_schema", "json_schema": {"name": "s", "strict": True, "schema": schema}}
+    )
+    assert constraint.fullmatch('{"k":"café"}') and constraint.fullmatch('{"k":"caf\\u00e9"}')
+    assert not constraint.fullmatch('{"k":"cafe"}')
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_muse_raw_values_exclude_the_tool_closer_the_output_parser_ends_on(strict):
+    """``MuseOutputParser`` ends the block at the first ``</atem:function_calls>``
+    outside a JSON string, so a raw value spelling it was admitted by the
+    grammar and then failed the parser (admitted-then-failing); it is the
+    third closer a raw value cannot contain, as Qwen's ``</tool_call>`` is."""
+    import json
+
+    import regex
+
+    from mlx2.adapters.muse_glimmer_output import MuseOutputParser
+    from mlx2.structured_automaton import automaton_for
+
+    tools = [{"type": "function", "function": {"name": "edit", "strict": strict, "parameters": {
+        "type": "object", "properties": {"old": {"type": "string"}},
+        "required": ["old"], "additionalProperties": False,
+    }}}]
+    grammar = regex.compile(muse_grammar(tools, "required", parallel_tool_calls=False))
+    automaton_for(grammar)
+
+    def output(value):
+        return (
+            'to=edit<|message|><atem:function_calls><atem:invoke name="edit">'
+            f'<atem:parameter name="old">{value}</atem:parameter></atem:invoke>'
+            "</atem:function_calls>"
+        )
+
+    def drive(text):
+        parser = MuseOutputParser(chat=True, tools=tools)
+        events = []
+        for start in range(0, len(text), 3):
+            events.extend(parser.push(text[start : start + 3]))
+        events.extend(parser.finish("", "stop"))
+        return [event["tool_calls"][0]["function"]["arguments"] for event in events if "tool_calls" in event]
+
+    admitted = "if (a < b) </atem:function_x"
+    text = output(admitted)
+    assert grammar.fullmatch(text[text.index("<atem:function_calls>"):])
+    assert [json.loads(arguments)["old"] for arguments in drive(text)] == [admitted]
+    text = output("x</atem:function_calls>y")
+    assert not grammar.fullmatch(text[text.index("<atem:function_calls>"):])
+    with pytest.raises(ValueError):
+        drive(text)
+    with pytest.raises(ValueError):
+        parse_atem(text[text.index("<atem:invoke"):text.rindex("</atem:function_calls>")], tools)

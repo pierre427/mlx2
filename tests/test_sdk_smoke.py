@@ -75,6 +75,36 @@ def test_responses_stream_lifecycle_allows_multiple_text_deltas():
     ])
 
 
+def test_responses_stream_case_asks_real_servers_for_a_short_greedy_reply():
+    # Regression (qualify-27b-8bit-int8auto-20261009): the sampled free-form
+    # reply ran past max_output_tokens, the stream correctly ended
+    # response.incomplete, and the case failed on model verbosity.
+    smoke = _load_sdk_smoke()
+    real = smoke._responses_stream_request(scripted=False)
+    assert real["temperature"] == 0
+    assert "single word" in real["input"]
+    assert real["max_output_tokens"] == 128
+    scripted = smoke._responses_stream_request(scripted=True)
+    assert scripted["input"] == "typed response stream"  # canned engine text
+    assert "temperature" not in scripted
+
+
+def test_responses_stream_lifecycle_names_a_truncated_stream():
+    smoke = _load_sdk_smoke()
+    events = [
+        "response.created",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.incomplete",
+    ]
+    with pytest.raises(AssertionError, match="ended response.incomplete"):
+        smoke._assert_response_stream_lifecycle(events)
+
+
 def test_responses_stream_lifecycle_rejects_out_of_order_events():
     smoke = _load_sdk_smoke()
     with pytest.raises(AssertionError):

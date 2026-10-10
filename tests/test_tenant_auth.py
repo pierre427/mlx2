@@ -1,5 +1,6 @@
 """Authenticated tenant identity: verification, fail-closed HTTP, consumers."""
 
+import inspect
 import json
 import os
 import re
@@ -126,7 +127,8 @@ def test_tokens_verify_mac_before_parsing_and_enforce_expiry(tmp_path):
         "malformed": [f"{prefix}.{payload}", f"{prefix}.{payload}.!!", f"{prefix}.a.b.c"],
         "expired": [
             mint_token(SECRET, "tenant-t", ttl_seconds=60, now=now - 120),
-            mint_token(SECRET, "tenant-t", ttl_seconds=30 * 86400, now=now),
+            mint_token(SECRET, "tenant-t", ttl_seconds=30 * 86400, now=now,
+                       max_ttl_seconds=31 * 86400),
             mint_token(SECRET, "tenant-t", ttl_seconds=60, now=now + 3600),
         ],
     }
@@ -139,6 +141,44 @@ def test_tokens_verify_mac_before_parsing_and_enforce_expiry(tmp_path):
     with pytest.raises(TenantAuthError) as caught:
         auth.authenticate({"x-api-key": KEY_A})
     assert caught.value.reason == "unknown_key"
+
+
+def test_mint_token_refuses_a_ttl_the_server_rejects_on_arrival(capsys):
+    """Integration review: the verifier refuses tokens longer than its
+    token_max_ttl (7 days by default, 366 days at most), so a longer token
+    was minted only to be refused on arrival (the minted-but-refused shape
+    of the key-id fix). The mint carries the server's maximum explicitly."""
+    from mlx2.tenant_auth import DEFAULT_TOKEN_MAX_TTL, MAX_TOKEN_TTL, mint_token
+
+    with pytest.raises(ValueError, match="exceeds the server's token_max_ttl"):
+        mint_token(SECRET, "tenant-t", ttl_seconds=DEFAULT_TOKEN_MAX_TTL + 1)
+    assert mint_token(SECRET, "tenant-t", ttl_seconds=DEFAULT_TOKEN_MAX_TTL)
+    assert mint_token(
+        SECRET, "tenant-t", ttl_seconds=30 * 86400, max_ttl_seconds=31 * 86400
+    )
+    with pytest.raises(ValueError, match="60 s to 366 days"):
+        mint_token(
+            SECRET, "tenant-t", ttl_seconds=60, max_ttl_seconds=MAX_TOKEN_TTL + 1
+        )
+    # The CLI refuses before printing anything, and honours the server's
+    # configured maximum when told it; its help names the server's real flag.
+    from mlx2 import tenant_auth
+    import mlx2.server as server_mod
+
+    assert "--tenant-auth-token-max-ttl" in inspect.getsource(server_mod)
+    assert "--tenant-auth-token-max-ttl" in inspect.getsource(tenant_auth._main)
+
+    os.environ["MLX2_TEST_TOKEN_SECRET"] = "s" * 40
+    try:
+        argv = ["mint-token", "--tenant", "tenant-t", "--ttl-seconds",
+                str(8 * 86400), "--secret-env", "MLX2_TEST_TOKEN_SECRET"]
+        with pytest.raises(SystemExit):
+            tenant_auth._main(argv)
+        assert capsys.readouterr().out == ""
+        assert tenant_auth._main(argv + ["--max-ttl-seconds", str(30 * 86400)]) == 0
+        assert capsys.readouterr().out.startswith(tenant_auth.TOKEN_PREFIX)
+    finally:
+        os.environ.pop("MLX2_TEST_TOKEN_SECRET", None)
 
 
 def test_keys_file_validation_is_strict(tmp_path):
@@ -777,3 +817,60 @@ def test_gate_api_key_and_tenant_auth_are_refused_together(tmp_path):
         tenant_authenticator=_auth(tmp_path),
     )
     assert build_tenant_authenticator(_args("--api-key-env", "MLX2_API_KEY")) is None
+
+
+def test_new_key_cli_refuses_a_key_id_the_keys_file_loader_refuses(tmp_path, capsys):
+    # Sweep 2026-10-09 (ops-cli#3): a key id the server's keys-file loader
+    # rejects must be refused at mint time, before a key is printed and
+    # handed out.
+    for bad in ("bad id/with slash", "", ".leading-dot", "x" * 129):
+        with pytest.raises(SystemExit) as exc:
+            tenant_auth._main(["new-key", "--tenant", "team", "--key-id", bad])
+        assert exc.value.code == 2
+        out, err = capsys.readouterr()
+        assert out == ""
+        assert "key-id" in err
+    # A valid id round-trips through the loader.
+    assert tenant_auth._main(["new-key", "--tenant", "team", "--key-id", "k.1:a"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    keys_file = tmp_path / "keys.json"
+    keys_file.write_text(json.dumps({"version": 1, "keys": [printed["keys_file_entry"]]}))
+    keys_file.chmod(0o600)
+    principal, disabled = tenant_auth.load_keys_file(keys_file)[
+        printed["keys_file_entry"]["sha256"]
+    ]
+    assert (principal.tenant, principal.key_id, disabled) == ("team", "k.1:a", False)
+
+
+def test_tenant_cli_reports_configuration_errors_as_usage_errors(
+    tmp_path, capsys, monkeypatch
+):
+    # Review 2026-10-09: --tenant and the secret source were validated by the
+    # library (ValueError traceback, exit 1), unlike --key-id (exit 2).
+    monkeypatch.setenv("MLX2_TEST_SECRET", "s" * 40)
+    cases = [
+        ["new-key", "--tenant", "bad tenant", "--key-id", "k"],
+        ["mint-token", "--tenant", "bad tenant", "--secret-env", "MLX2_TEST_SECRET"],
+        ["mint-token", "--tenant", "t", "--secret-file", str(tmp_path / "absent")],
+        # Expired on arrival: the verifier would refuse it.
+        ["mint-token", "--tenant", "t", "--ttl-seconds", "0", "--secret-env", "MLX2_TEST_SECRET"],
+        ["mint-token", "--tenant", "t", "--ttl-seconds", "-5", "--secret-env", "MLX2_TEST_SECRET"],
+    ]
+    short = tmp_path / "short"
+    short.write_bytes(b"too-short")
+    short.chmod(0o600)
+    cases.append(["mint-token", "--tenant", "t", "--secret-file", str(short)])
+    for argv in cases:
+        with pytest.raises(SystemExit) as exc:
+            tenant_auth._main(argv)
+        out, err = capsys.readouterr()
+        assert (exc.value.code, out) == (2, ""), argv
+        assert "error:" in err, argv
+    assert tenant_auth._main(
+        ["mint-token", "--tenant", "t", "--secret-env", "MLX2_TEST_SECRET"]
+    ) == 0
+    assert capsys.readouterr().out.strip()
+    # The rule lives in the library, so every minting caller gets it.
+    for ttl in (0, -1, True, 3.5, "60"):
+        with pytest.raises(ValueError, match="positive integer"):
+            tenant_auth.mint_token(b"s" * 40, "t", ttl_seconds=ttl)

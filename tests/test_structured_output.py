@@ -1357,3 +1357,105 @@ def test_server_tool_grammar_is_priced_before_compiling(monkeypatch):
     _refuse_compiling(monkeypatch, "(?:a{4096}){4096}")
     with pytest.raises(ValueError, match="server tool grammar unrolls to more than"):
         make_structured_processor(None, 0, server_grammar="(?:a{4096}){4096}")
+
+
+def _schema_constraint(schema):
+    return compile_constraint(
+        {"type": "json_schema", "json_schema": {"name": "s", "strict": True, "schema": schema}},
+        None,
+    )
+
+
+def test_non_ascii_enum_const_and_property_names_admit_their_raw_spelling():
+    # ``_json_literal`` escaped non-ASCII, so a non-ASCII enum admitted only
+    # its \\uXXXX spelling: the model chose between 北京 and 上海 at a hex digit.
+    constraint = _schema_constraint({"type": "string", "enum": ["café", "thé"]})
+    assert accepts(constraint, '"café"') and accepts(constraint, '"thé"')
+    assert not accepts(constraint, '"cafe"')
+    constraint = _schema_constraint({"type": "string", "const": "北京"})
+    assert accepts(constraint, '"北京"') and not accepts(constraint, '"上海"')
+    constraint = _schema_constraint(
+        {
+            "type": "object",
+            "properties": {"名前": {"type": "string", "enum": ["北京", "上海"]}},
+            "required": ["名前"],
+            "additionalProperties": False,
+        }
+    )
+    assert accepts(constraint, '{"名前":"上海"}')
+    # The JSON string escapes a literal still needs stay escaped.
+    constraint = _schema_constraint({"type": "string", "enum": ['say "hi"\n', "é\\"]})
+    assert accepts(constraint, '"say \\"hi\\"\\n"') and accepts(constraint, '"é\\\\"')
+
+
+def test_non_ascii_enum_is_reachable_byte_by_byte_through_the_automaton():
+    from test_structured_bytes import ByteLevelTokenizer, _allowed
+
+    tokenizer = ByteLevelTokenizer()
+    constraint = _schema_constraint(
+        {
+            "type": "object",
+            "properties": {"k": {"type": "string", "enum": ["café", "thé"]}},
+            "required": ["k"],
+            "additionalProperties": False,
+        }
+    )
+    processor = StructuredOutputProcessor(tokenizer, 0, constraint)
+    assert processor.engine == "automaton"
+    document = '{"k":"café"}'
+    ids = tokenizer.encode_bytes(document)
+    for step, token in enumerate(ids):
+        assert token in _allowed(processor, ids[:step]), (step, document.encode()[: step + 1])
+    assert tokenizer.eos in _allowed(processor, ids)
+    # The merged "é" piece is admitted where the raw bytes are.
+    piece = tokenizer.raw.index("é".encode())
+    assert piece in _allowed(processor, tokenizer.encode_bytes('{"k":"caf'))
+
+
+def test_response_format_orders_required_properties_first_like_strict_tools():
+    """A schema that declares an optional property before a required one
+    was refused as ``response_format`` (400) while the same schema inside a
+    strict tool was accepted after ``_canonical_json_order``.  Admission now
+    lists required properties first on both surfaces, keeping the declared
+    order within each group, and the body carries the ordered copy the
+    engaged grammar is compiled from."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "nickname": {"type": "string"},
+            "reasoning": {"type": "string"},
+            "name": {"type": "string"},
+            "detail": {
+                "type": "object",
+                "properties": {"note": {"type": "string"}, "id": {"type": "integer"}},
+                "required": ["id"],
+                "additionalProperties": False,
+            },
+        },
+        "required": ["reasoning", "name", "detail"],
+        "additionalProperties": False,
+    }
+    body = {
+        "messages": [{"role": "user", "content": "x"}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": "s", "schema": schema}},
+    }
+    request = validate_request(body)
+    ordered = request["response_format"]["json_schema"]["schema"]
+    assert list(ordered["properties"]) == ["reasoning", "name", "detail", "nickname"]
+    assert list(ordered["properties"]["detail"]["properties"]) == ["id", "note"]
+    assert ordered["required"] == schema["required"]  # arrays keep their order
+    constraint = compile_constraint(request["response_format"])
+    assert accepts(constraint, '{"reasoning":"r","name":"n","detail":{"id":1},"nickname":"k"}')
+    assert accepts(constraint, '{"reasoning":"r","name":"n","detail":{"id":1,"note":"x"}}')
+    assert not accepts(constraint, '{"nickname":"k","reasoning":"r","name":"n","detail":{"id":1}}')
+    # A schema already in order is passed through unchanged, declared order kept.
+    body["response_format"]["json_schema"]["schema"] = {
+        "type": "object",
+        "properties": {"reasoning": {"type": "string"}, "answer": {"type": "string"}},
+        "required": ["reasoning", "answer"],
+        "additionalProperties": False,
+    }
+    request = validate_request(body)
+    assert list(request["response_format"]["json_schema"]["schema"]["properties"]) == [
+        "reasoning", "answer",
+    ]

@@ -245,10 +245,33 @@ def _require_schema_keys(schema, allowed):
 
 
 def _json_literal(value):
+    """The JSON spelling of ``value`` with non-ASCII raw (``ensure_ascii=False``).
+
+    Quotes, backslashes and control characters stay escaped.
+    """
     try:
-        return json.dumps(value, separators=(",", ":"), allow_nan=False)
+        return json.dumps(
+            value, separators=(",", ":"), allow_nan=False, ensure_ascii=False
+        )
     except (TypeError, ValueError) as exc:
         raise ValueError("JSON schema literals must be valid finite JSON values") from exc
+
+
+def json_literal_pattern(value):
+    """Regex admitting either JSON spelling of ``value``.
+
+    The plain string language admits raw Unicode, so an enum, const or
+    property name admitted only as ``\\uXXXX`` escapes would make the model
+    choose between values at a hex digit; a literal admitted only raw would
+    refuse the spelling a template that escapes (Jinja's ``tojson``) shows
+    the model.  Both decode to the same value, so both are admitted; an
+    ASCII literal has one spelling.
+    """
+    raw = _json_literal(value)
+    escaped = json.dumps(value, separators=(",", ":"), allow_nan=False)
+    if escaped == raw:
+        return regex.escape(raw)
+    return "(?:" + regex.escape(raw) + "|" + regex.escape(escaped) + ")"
 
 
 def _pattern_children(node):
@@ -345,13 +368,13 @@ def _schema_pattern_unbounded(schema, depth=0, *, finite_numbers=False):
             for value in enum
         ):
             raise ValueError("JSON schema enum values must match its declared type")
-        return "(?:" + "|".join(regex.escape(_json_literal(v)) for v in enum) + ")"
+        return "(?:" + "|".join(json_literal_pattern(v) for v in enum) + ")"
     if "const" in schema:
         _require_schema_keys(schema, {"const", "type"})
         if "type" in schema:
             if not schema_value_matches(schema["const"], {"type": schema["type"]}):
                 raise ValueError("JSON schema const must match its declared type")
-        return regex.escape(_json_literal(schema["const"]))
+        return json_literal_pattern(schema["const"])
     kind = schema.get("type")
     if isinstance(kind, list):
         _require_schema_keys(schema, {"type"})
@@ -424,7 +447,7 @@ def _schema_pattern_unbounded(schema, depth=0, *, finite_numbers=False):
                     "JSON schema lowers to more than "
                     f"{_MAX_SCHEMA_PATTERN_CHARS} regex characters"
                 )
-            pair = regex.escape(json.dumps(name)) + _WS + ":" + _WS + value
+            pair = json_literal_pattern(name) + _WS + ":" + _WS + value
             if name in required:
                 if optional_seen:
                     raise ValueError("required properties must precede optional properties")

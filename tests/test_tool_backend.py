@@ -207,3 +207,71 @@ def test_mcp_session_reinitialization_is_bounded(restarting_mcp_server):
     with pytest.raises(HostedToolError, match="404"):
         backend.execute((client, "echo"), {})
     assert state["init_session_headers"] == [None, None]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # Sweep 2026-10-09 review: the prefix check admitted userinfo tricks.
+        "http://127.0.0.1:80@evil.example/mcp",
+        "https://user:pw@docs.example/mcp",
+        "http://127.0.0.1/mcp",  # loopback HTTP needs an explicit port
+        "http://127.0.0.1:x/mcp",
+        "http://localhost:9999/mcp",
+        "http://127.0.0.2:9999/mcp",
+        "https:///mcp",
+        "ftp://docs.example/mcp",
+        42,
+    ],
+)
+def test_server_url_allowlist_is_structural(url):
+    with pytest.raises(ValueError, match="allowlisted"):
+        ConfiguredToolBackend({"servers": {"docs": {"server_url": url}}})
+
+
+@pytest.mark.parametrize(
+    "url", ["https://docs.example/mcp", "https://docs.example:8443/", "http://127.0.0.1:9999/mcp"]
+)
+def test_server_url_allowlist_accepts_https_and_loopback_http(url):
+    assert ConfiguredToolBackend({"servers": {"docs": {"server_url": url}}}).clients["docs"].url == url
+
+
+@pytest.mark.parametrize("code", [301, 302, 307, 308])
+def test_mcp_client_refuses_redirects(code):
+    # Review 2026-10-09: urllib follows a 3xx anywhere and copies the
+    # configured headers to the new host; the allowlist covers one origin.
+    hits = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            hits.append((self.path, self.headers.get("X-Api-Key")))
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if self.path == "/mcp":
+                self.send_response(code)
+                self.send_header("Location", f"http://127.0.0.1:{port}/elsewhere")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"jsonrpc":"2.0","id":1,"result":{}}')
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        backend = ConfiguredToolBackend(
+            {"servers": {"local": {"server_url": f"http://127.0.0.1:{port}/mcp",
+                                   "headers": {"X-Api-Key": "secret"}}}}
+        )
+        with pytest.raises(HostedToolError, match=str(code)):
+            backend.clients["local"]._call("initialize", {})
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert hits == [("/mcp", "secret")]  # the redirect target was never contacted

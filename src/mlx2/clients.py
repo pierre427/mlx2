@@ -136,7 +136,11 @@ def command(
         output = output_budget(context)
         reference = f"{PROVIDER}/{model}"
         try:
-            config = json.loads(environment.get("OPENCODE_CONFIG_CONTENT", "{}"))
+            # Empty-but-set is "no content", as OpenCode reads it (a
+            # truthiness check), not a malformed object.  Only the empty
+            # string: any other value must parse as an object.
+            raw = environment.get("OPENCODE_CONFIG_CONTENT")
+            config = json.loads("{}" if raw in (None, "") else raw)
             config.update(model=reference, small_model=reference)
             # An agent-level model outranks the top-level one; point the
             # built-in agents at the served model, keeping their other settings.

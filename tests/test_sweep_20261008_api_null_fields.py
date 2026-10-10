@@ -146,7 +146,11 @@ def test_responses_null_effort_is_absent_after_validation():
 def test_anthropic_null_max_tokens_is_still_missing():
     # Anthropic requires max_tokens; a null must not fall through to the
     # server default now that a forwarded null means "absent".
-    body = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": None}
+    body = {
+        "model": "fixture",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": None,
+    }
     with pytest.raises(ValueError, match="max_tokens is required"):
         anthropic_request_to_chat(body)
     counted = anthropic_request_to_chat(body, count_tokens=True)

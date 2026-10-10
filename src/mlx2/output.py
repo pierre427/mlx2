@@ -161,6 +161,53 @@ class _CodeSpans:
         return self.fence is not None or bool(self.inline)
 
 
+def stop_cut_record(partial_names, partial, tools):
+    """The ``stop_truncated_tool_call`` record for a call a client stop cut.
+
+    ``partial_names`` is the grammar's own reader of a cut-short tool-call
+    body (``parse_tool.partial_function_names``): it returns the function
+    names the body had committed to, in order, by the same rules its parser
+    binds a completed call's name with, and raises ``ValueError`` when a name
+    delimiter has been seen but the name is not one the grammar can read.
+    Tool admission accepts any nonempty name up to 128 characters, so no
+    generic character class can stand in for those rules (``db:lookup``,
+    ``a/b``, an escaped JSON string).
+
+    The record is ``{"function": name}`` once the name is committed (with
+    ``"functions": [...]`` when the body committed to several, as a Qwen
+    block with two ``<function=`` openers does), ``{"function": None}`` for
+    a cut before the delimiter (the api group's case: Qwen ``<tool_call>\\n``
+    cut by ``stop: ["\\n"]``), and ``{"function": None, "name_unreadable":
+    True}`` for a committed name the grammar cannot read.  The terminal tool
+    contract exempts the second, judges the first, and fails the third: a
+    name the receipt cannot state is never ``None`` by default.  A grammar
+    that publishes no reader is read the same way: nothing after the opener
+    is a cut before the name, anything else is unreadable.
+    """
+    try:
+        if partial_names is None:
+            if partial.strip():
+                raise ValueError("the grammar publishes no partial-name reader")
+            names = []
+        else:
+            names = list(partial_names(partial, tools))
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("a committed function name is empty")
+    except ValueError:
+        return {"function": None, "name_unreadable": True}
+    record = {"function": names[0] if names else None}
+    if len(names) > 1:
+        record["functions"] = names
+    return record
+
+
+def truncated_tool_record(partial_names, partial, tools, *, cause):
+    """Grammar-owned evidence for an unfinished, never executable tool call."""
+    if cause not in ("max_tokens", "stop_sequence"):
+        raise ValueError("unsupported tool truncation cause")
+    return {**stop_cut_record(partial_names, partial, tools), "cause": cause}
+
+
 class OutputParser:
     """Incremental channel parser with opt-in tolerant tool markers.
 
@@ -170,9 +217,17 @@ class OutputParser:
     def __init__(
         self, *, chat=False, thinking=False, tools=None, parse_tool=None, stops=(),
         constrained_tools=False, parallel_tool_calls=True,
-        tolerant_tool_markers=False, think_close_separator="",
+        tolerant_tool_markers=False, think_close_separator="", partial_names=None,
     ):
         self.chat, self.tools, self.parse_tool = chat, tools or [], parse_tool
+        # The grammar's reader of a stop-cut call's committed name (see
+        # :func:`stop_cut_record`); a tool parser publishes its own as
+        # ``partial_function_names``.
+        self.partial_names = (
+            partial_names
+            if partial_names is not None
+            else getattr(parse_tool, "partial_function_names", None)
+        )
         self.constrained_tools = bool(constrained_tools)
         self.parallel_tool_calls = bool(parallel_tool_calls)
         self.tolerant_tool_markers = bool(tolerant_tool_markers)
@@ -202,6 +257,14 @@ class OutputParser:
         self.tool_count = 0
         self.tool_call_parse_fallbacks = 0
         self.tool_call_constraint_truncations = 0
+        # A tool call in progress that the client's stop string cut short
+        # (dropped below): the :func:`stop_cut_record` of what the partial
+        # call had committed to.  The receipt carries it so the terminal tool
+        # contract can tell a stop that ended a call the model was making
+        # (and which one) from a turn the model ended without the call it
+        # owed.
+        self.stop_truncated_tool_call = None
+        self.truncated_tool_call = None
         self._code = _CodeSpans()
         # Whitespace-only content after a tool call is held back: the newline
         # between two parallel calls is template structure, not an answer.  It
@@ -235,6 +298,17 @@ class OutputParser:
     @property
     def stop_sequence(self):
         return self.stop_matcher.stop_sequence
+
+    def _record_cut_call(self, partial, *, stop_hit):
+        self.truncated_tool_call = truncated_tool_record(
+            self.partial_names, partial, self.tools,
+            cause="stop_sequence" if stop_hit else "max_tokens",
+        )
+        if stop_hit:
+            self.stop_truncated_tool_call = {
+                key: value for key, value in self.truncated_tool_call.items()
+                if key != "cause"
+            }
 
     def _stop_gated(self):
         """Whether buffered text is (or may still become) reasoning.
@@ -346,6 +420,7 @@ class OutputParser:
                         # short.  That is a requested stop, not a malformed
                         # model output: drop the partial call (it is neither
                         # a call nor answer text) rather than fail the request.
+                        self._record_cut_call(self.buffer, stop_hit=stop_hit)
                         self.buffer = ""
                         self.channel = "content"
                         break
@@ -447,6 +522,10 @@ class OutputParser:
                     self._emit(events, self.buffer[:end])
                 self.buffer = self.buffer[end:]
                 break
+        if final and (stop_hit or self._length_finish) and self.channel == "tool":
+            # The stop landed right after the opener: a call was in progress
+            # with nothing buffered yet, so the tool branch never ran.
+            self._record_cut_call(self.buffer, stop_hit=stop_hit)
         if final:
             self._pending_space = ""
         return events

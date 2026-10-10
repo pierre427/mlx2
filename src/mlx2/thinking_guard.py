@@ -185,7 +185,6 @@ class ThinkingGuard:
         self.trip_reason = None
         self.released_at = None
         self.forced = False
-        self._forced_at = None
         self.think_tokens = 0
         # alpha actuator: an adapter-calibrated commit direction
         # {"layer": L, "vector": rms_L * v_hat}.  While the reasoning channel is
@@ -298,9 +297,6 @@ class ThinkingGuard:
             self._close_at = None
         if self._close_at is None:
             self._close_at, self._close_decided = self._first_close(known, common)
-        if self._forced_at is not None and common < self._forced_at:
-            self._forced_at = None
-            self.forced = False
         self._truncate(min(len(self._ids), common))
         return length
 
@@ -362,17 +358,61 @@ class ThinkingGuard:
         return self.nudge_ids[length - start]
 
     def _observe(self, tokens):
-        """Sync the guard state to ``tokens``; the state half of ``__call__``."""
+        """Sync the guard state to ``tokens``; the state half of ``__call__``.
+
+        P5: afterwards the alarm has read exactly the ids before the close
+        (all of them while reasoning is open), however they arrived.  A
+        close observed token by token had advanced the alarm over the
+        marker's own leading tokens, so a stepwise guard tripped there while
+        a fresh guard fed the same ids did not; the alarm is undone back to
+        the close instead, and ``forced`` is read from the ids too.
+        """
         length = self._sync(tokens)
         self._open = self._close_at is None
         self.released_at = self._close_at
-        if self._close_at is not None:
-            self.think_tokens = self._close_at
-            return length
-        for token in self._generated[len(self._ids):]:
+        limit = length if self._close_at is None else self._close_at
+        self._truncate(min(len(self._ids), limit))
+        for token in self._generated[len(self._ids) : limit]:
             self._advance(token)
-        self.think_tokens = length
+        self.think_tokens = limit
+        self.forced = self._forced_close(length)
         return length
+
+    def _forced_close(self, length):
+        """Whether the ids show a forced close: a pure function of them.
+
+        A forcing row admits only the next marker token, so from the first
+        forcing step (the release boundary, once the alarm has tripped; the
+        soft budget trips it by position at the latest) the ids must
+        continue the marker from whatever prefix the model had written: the
+        whole rest of it once reasoning has closed, a prefix of the rest
+        while it is open.  Ids there that do not were not written by a
+        forcing row (a close the model wrote before the budget, a processor
+        bypass, a marker id past the vocabulary), and the receipt fails
+        closed.  Self-addressed reasoning that ended in another message was
+        never forced, and a recipient the model was choosing at the budget
+        moves the boundary (``release_boundary``).
+        """
+        boundary = self._release_boundary()
+        tripped = self._tripped_at if self._tripped_at is not None else self.soft
+        if boundary is None or tripped is None:
+            return False
+        first = max(boundary, tripped)
+        if length <= first:
+            return False
+        expected = self.close_ids[self._marker_offset(first) :]
+        written = tuple(self._generated[first : first + len(expected)])
+        if self._close_at is None:
+            return written == expected[: len(written)]
+        # The first close must be the marker itself (self-addressed reasoning
+        # that ended in a message to anybody else closed naturally, whatever
+        # the model spells later) and still open at the forcing step.
+        width = len(self.close_ids)
+        return (
+            self._close_at + width - 1 >= first
+            and tuple(self._generated[self._close_at : self._close_at + width]) == self.close_ids
+            and written == expected
+        )
 
     def _release_boundary(self):
         """The first generated index the budget may force (``release_boundary``)."""
@@ -399,15 +439,17 @@ class ThinkingGuard:
         return open_header(self._generated, *self.reasoning_message, length, window) is not None
 
     def _forces(self, length):
-        """Whether the step after ``length`` ids forces the close; latches it."""
+        """Whether the step after ``length`` ids forces the close.
+
+        The step is a lookahead: it admits only the next marker token, so
+        ``forced`` is set for this call's receipt, and the next observation
+        reads it back from the ids (``_forced_close``).
+        """
         if self._close_at is not None or self._tripped_at is None:
             return False
         if self.budget is None or length < self.budget:
             return False
         self.forced = True
-        if self._forced_at is None:
-            # A marker prefix the model already wrote continues, not restarts.
-            self._forced_at = length - self._marker_offset(length)
         return True
 
     def __call__(self, tokens, logits):
@@ -450,7 +492,7 @@ class ThinkingGuard:
         tail = generated[start:]
         scalars = (
             self._close_at, self._close_decided, self.released_at, self.forced,
-            self._forced_at, self.think_tokens, self._open,
+            self.think_tokens, self._open,
         )
         try:
             return self(tokens, logits)
@@ -459,10 +501,12 @@ class ThinkingGuard:
             generated.extend(tail)
             (
                 self._close_at, self._close_decided, self.released_at, self.forced,
-                self._forced_at, self.think_tokens, self._open,
+                self.think_tokens, self._open,
             ) = scalars
-            # Alarm positions before ``start`` were never truncated.
-            index = min(start, ids_length)
+            # Alarm positions before ``start`` are unchanged unless the call
+            # found a close that begins before the window (a marker the
+            # draft completed) and undid the alarm to it: replay from there.
+            index = min(start, ids_length, len(ids))
             limit = min(len(ids), ids_length)
             while index < limit and ids[index] == generated[index]:
                 index += 1
@@ -492,8 +536,8 @@ class ThinkingGuard:
 
         That last call is a lookahead, though: it evaluates the row after the
         final committed token, which is never sampled.  So whether a close
-        was forced is read from the committed ids themselves, not from the
-        rows the guard evaluated.
+        was forced is read from the committed ids themselves
+        (``_forced_close``), not from the rows the guard evaluated.
         """
         import numpy as np
 
@@ -504,28 +548,6 @@ class ThinkingGuard:
             ]
         )
         self._observe(tokens)
-        close_at = self._close_at
-        if close_at is not None:
-            # Ordinary decode observed every id before the close, one step at
-            # a time; a speculative route may have skipped some of them.
-            for token in self._generated[len(self._ids) : close_at]:
-                self._advance(token)
-        # A forcing row admits only the next marker token, so a forced close
-        # ends at or past the budget while a natural one ends before it: a
-        # marker whose last token is at or past the budget, with the alarm
-        # tripped by then, is exactly a forced one.  Self-addressed reasoning
-        # that ended in another message was never forced, and a recipient
-        # the model was choosing at the budget moves it (``release_boundary``).
-        width = len(self.close_ids)
-        boundary = self._release_boundary()
-        self.forced = (
-            boundary is not None
-            and close_at is not None
-            and close_at + width - 1 >= boundary
-            and self._tripped_at is not None
-            and tuple(self._generated[close_at : close_at + width]) == self.close_ids
-        )
-        self._forced_at = close_at if self.forced else None
 
     def dormant(self, tokens):
         """P5: True once reasoning has closed (logits pass through).

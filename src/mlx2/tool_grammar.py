@@ -33,32 +33,58 @@ SHAPE_CALLS_OR_ANSWER = "calls_or_answer"
 
 
 def _char(character):
+    """One character of a literal, spelled for inside and outside a class.
+
+    Printable ASCII is escaped as itself (an exclusion is spelled once per
+    partial literal, so the ``\\uXXXX`` form would be six characters each);
+    everything else is a code point escape.
+    """
     point = ord(character)
+    if 0x21 <= point < 0x7F:
+        return regex.escape(character)
     return rf"\u{point:04x}" if point <= 0xFFFF else rf"\U{point:08x}"
 
 
-def text_excluding(literal):
-    """Regex for any text (including empty) that never contains ``literal``.
+def text_excluding(*literals):
+    """Regex for any text (including empty) that never contains a ``literal``.
 
-    When the opener's first character does not recur inside it (true of every
-    shipped tool-call opener) the language is written as blocks: a character
-    other than the first, or a partial opener that breaks off.  A partial
-    opener broken off by the first character again restarts a new block, so
-    ``(?:D*B)`` covers runs such as ``<to<tool``.  Other literals fall back to
-    a lookahead, which only the scanner engine enforces.
+    Several literals exclude text containing any of them (an adapter's two
+    closing tags, say).  When they share a first character that recurs in
+    none of them (true of every shipped tool-call opener and closer) the
+    language is written as blocks: a character other than the first, or a
+    partial literal that breaks off.  A partial literal broken off by the
+    first character again restarts a new block, so ``(?:D*B)`` covers runs
+    such as ``<to<tool``; with several literals the partials form a trie, and
+    a partial breaks off at a character that continues none of them.  Other
+    literals fall back to a lookahead, which only the scanner engine enforces.
     """
-    if not isinstance(literal, str) or not literal:
+    if not literals or any(
+        not isinstance(literal, str) or not literal for literal in literals
+    ):
         raise ValueError("tool-call opener must be a nonempty string")
-    first, rest = literal[0], literal[1:]
-    if first in rest:
-        return rf"(?:(?!{regex.escape(literal)})[\s\S])*"
-    if not rest:
+    kept = []  # a literal another one prefixes is excluded by that prefix
+    for literal in sorted(set(literals), key=lambda item: (len(item), item)):
+        if not any(literal.startswith(shorter) for shorter in kept):
+            kept.append(literal)
+    first = kept[0][0]
+    if any(literal[0] != first or first in literal[1:] for literal in kept):
+        excluded = "|".join(regex.escape(literal) for literal in kept)
+        return rf"(?:(?!{excluded})[\s\S])*"
+    if len(kept[0]) == 1:
         return rf"[^{_char(first)}]*"
-    partials = [_char(first) + "".join(map(_char, rest[:k])) for k in range(len(rest))]
-    dangling = "(?:" + "|".join(partials) + ")"
+    partials = {}  # proper prefix -> the characters that continue it
+    for literal in kept:
+        for k in range(1, len(literal)):
+            following = partials.setdefault(literal[:k], [])
+            if literal[k] not in following:
+                following.append(literal[k])
+    dangling = "(?:" + "|".join("".join(map(_char, partial)) for partial in partials) + ")"
     broken = "(?:" + "|".join(
-        rf"{partial}[^{_char(rest[k])}{_char(first)}]"
-        for k, partial in enumerate(partials)
+        "".join(map(_char, partial))
+        + "[^"
+        + "".join(map(_char, [*following, first]))
+        + "]"
+        for partial, following in partials.items()
     ) + ")"
     return rf"(?:[^{_char(first)}]|{dangling}*{broken})*{dangling}*"
 
@@ -74,7 +100,9 @@ def _split_definitions(pattern):
         definitions = recursive_json_object_pattern(finite_numbers=finite_numbers)[1]
         if pattern.endswith(definitions):
             return pattern[: -len(definitions)], definitions
-    if "(?(DEFINE)" in pattern:
+    if any(f"(?P<{name}>" in pattern for name in ("value", "object", "array")):
+        # A JSON DEFINE block anywhere but the end cannot be merged with the
+        # answer's; an adapter's own rules (other names) ride in the body.
         raise ValueError("tool grammar carries definitions that cannot be merged")
     return pattern, ""
 

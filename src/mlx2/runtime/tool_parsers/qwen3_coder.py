@@ -477,6 +477,81 @@ def parse_tool_call(
     return calls[0] if len(calls) == 1 else calls
 
 
+def partial_function_names(partial: str, tools: Any | None = None) -> list[str]:
+    """The functions a cut-short tool-call block had committed to, in order.
+
+    The reader behind ``OutputParser``'s stop-cut record (see
+    :func:`mlx2.output.stop_cut_record`), by this parser's own rules: every
+    ``<function=`` block that closed names its function as
+    :func:`_parse_function` reads it, and the unclosed last block has
+    committed to its name once the name run (``_name_regex``: anything but
+    whitespace, ``<`` and ``>``) has ended, at the ``>`` that closes it or at
+    the whitespace or ``<parameter=`` the parser also accepts after it.  A
+    cut inside the run, or right after ``<function=``, has committed to
+    nothing yet.  Raises ``ValueError`` when the run ended with no name in it
+    (``<function=>``, ``<function=<``), which the parser rejects as a
+    malformed function name.
+
+    Past the open block's name the text is walked parameter by parameter
+    as :func:`_walk_function` reads it: a raw value runs to its first closer,
+    a strict JSON value (``_decodes_as_json``) to the first closer outside
+    its strings (``_json_value_end``).  A later ``<function=`` between
+    parameters is another committed name, one quoted inside a value (a JSON
+    string may even spell a closer first) is value text, and a cut inside a
+    value ends the walk.
+    """
+    names, cursor = [], 0
+    while (start := partial.find(_FUNCTION_OPEN, cursor)) >= 0:
+        body = start + len(_FUNCTION_OPEN)
+        try:
+            parsed = _parse_function(partial, body, tools)
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            call, end = parsed
+            names.append(call["name"])
+            cursor = end + len(_FUNCTION_CLOSE)
+            continue
+        # The block in progress (or one the parser rejects past its name).
+        match = _name_regex.match(partial, body)
+        if match is None:
+            if partial[body:].strip():
+                raise ValueError("Malformed function name")
+            break
+        if not (match.group(0).endswith(">") or match.end() < len(partial)):
+            break
+        names.append(match.group(1))
+        cursor = match.end()
+        try:
+            param_config, strict = _get_arguments_config(match.group(1), tools)
+        except ValueError:
+            param_config, strict = {}, False  # the parser fails the block
+        while True:
+            opener = partial.find(_PARAMETER_OPEN, cursor)
+            later = partial.find(_FUNCTION_OPEN, cursor)
+            if opener < 0 or 0 <= later < opener:
+                break  # no parameter before the next opener (or the end)
+            body = opener + len(_PARAMETER_OPEN)
+            param_match = _name_regex.match(partial, body)
+            if param_match is not None and _decodes_as_json(
+                param_config.get(param_match.group(1)), strict
+            ):
+                try:
+                    end = _json_value_end(partial, param_match.end(), param_match.group(1))
+                except UnclosedJSONString:
+                    return names  # cut inside a JSON string: value text
+            else:
+                closer = _CLOSER.search(partial, body)
+                end = closer.start() if closer is not None else -1
+            if end < 0:
+                return names  # cut inside a value: the rest is value text
+            cursor = _CLOSER.match(partial, end).end()
+    return names
+
+
+parse_tool_call.partial_function_names = partial_function_names
+
+
 def _selected_functions(tools, tool_choice):
     definitions = [tool["function"] for tool in tools]
     if isinstance(tool_choice, dict):

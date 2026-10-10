@@ -9,7 +9,8 @@ from collections import Counter
 from http.client import HTTPException
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .api_resources import CapabilityUnavailable
 
@@ -67,6 +68,26 @@ def _rpc_payload(raw, *, expected_id):
     if response.get("jsonrpc") != "2.0" or ("result" in response) == ("error" in response):
         raise HostedToolError("MCP server returned an invalid JSON-RPC response")
     return response
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    """Refuse every redirect: the operator allowlisted one origin.
+
+    urllib would otherwise follow a 3xx anywhere, copying the configured
+    headers (an Authorization or X-Api-Key value) to the new host, so an
+    allowlisted HTTPS server could forward the credentials to plain HTTP
+    elsewhere.  Returning None makes the 3xx an HTTPError like any other.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = build_opener(_NoRedirect())
+
+
+def urlopen(request, *, timeout):
+    return _OPENER.open(request, timeout=timeout)
 
 
 class _HTTPMCPClient:
@@ -200,6 +221,28 @@ class _HTTPMCPClient:
             )
 
 
+def _allowlisted_server_url(url) -> bool:
+    """HTTPS to a named host, or plain HTTP to 127.0.0.1 with an explicit port.
+
+    Parsed structurally: a string-prefix check admitted
+    ``http://127.0.0.1:80@evil.example/mcp``, whose host is ``evil.example``
+    (the prefix is userinfo), and would have sent the configured headers
+    there in clear text.  Userinfo is refused in every scheme.
+    """
+    if not isinstance(url, str):
+        return False
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+    if "@" in parts.netloc or not parts.hostname:
+        return False
+    if parts.scheme == "https":
+        return True
+    return parts.scheme == "http" and parts.hostname == "127.0.0.1" and port is not None
+
+
 class ConfiguredToolBackend:
     """Resolve only MCP servers explicitly allowlisted by the operator."""
 
@@ -217,8 +260,7 @@ class ConfiguredToolBackend:
             if (
                 not isinstance(label, str)
                 or not isinstance(value, dict)
-                or not isinstance(value.get("server_url"), str)
-                or not value["server_url"].startswith(("https://", "http://127.0.0.1:"))
+                or not _allowlisted_server_url(value.get("server_url"))
             ):
                 raise ValueError("MCP servers require labels and allowlisted HTTP URLs")
             headers = value.get("headers", {})
