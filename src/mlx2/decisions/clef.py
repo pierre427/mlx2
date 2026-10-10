@@ -221,6 +221,8 @@ class RenderedQuestion:
 class RenderedDecision:
     token_ids: tuple[int, ...]
     questions: tuple[RenderedQuestion, ...]
+    # State tokens cut to fit the context; zero when the state was rendered whole.
+    state_tokens_dropped: int = 0
 
 
 def _encode(tokenizer, text: str) -> list[int]:
@@ -287,6 +289,7 @@ def render_decision(
         raise DecisionInputTooLong(
             "Clef truncation would remove the entire nonempty state"
         )
+    dropped = max(0, len(state_ids) - available)
     state_ids = state_ids[:available]
     offset = len(prefix) + len(state_ids)
     rows = tuple(
@@ -299,7 +302,7 @@ def render_decision(
         )
         for name, question, span, spans, labels in relative
     )
-    return RenderedDecision(tuple(prefix + state_ids + schema + suffix), rows)
+    return RenderedDecision(tuple(prefix + state_ids + schema + suffix), rows, dropped)
 
 
 def format_answers(rendered: RenderedDecision, distributions) -> dict:
@@ -349,5 +352,8 @@ def format_answers(rendered: RenderedDecision, distributions) -> dict:
         }
         if kind == "score":
             answer["legend"] = dict(zip(labels, row.question["criteria"]))
+            # Clef renders every level description as an option (see
+            # render_decision), so the legend is what the model scored.
+            answer["legend_source"] = "prompt"
         answers[row.name] = answer
     return answers

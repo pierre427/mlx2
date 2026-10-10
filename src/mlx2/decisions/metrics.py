@@ -16,6 +16,15 @@ from ..prometheus import (
     PrometheusBuilder,
 )
 
+# Process counters behind /v1/status.  ``executions`` counts every request
+# whose model forward began (in flight, succeeded or failed); it is what
+# "observed_used" means, while ``requests`` counts successes only.
+COUNTER_NAMES = ("requests", "failures", "refusals", "input_tokens", "executions")
+
+
+def new_counters() -> dict[str, int]:
+    return dict.fromkeys(COUNTER_NAMES, 0)
+
 
 class DecisionRuntimeMetrics:
     """Host-only decision execution metrics; never synchronizes the device."""

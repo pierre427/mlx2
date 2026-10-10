@@ -27,4 +27,26 @@ def load_local_tokenizer(model_path: str | Path):
         raise ValueError(
             "decision Qwen tokenizer must declare a repairable pretokenize_regex"
         )
+    receipt["reserved_tokens"] = sorted(reserved_token_strings(tokenizer))
     return tokenizer, receipt
+
+
+def reserved_token_strings(tokenizer) -> frozenset[str]:
+    """Every string the tokenizer folds into one added or special token.
+
+    ``encode(..., add_special_tokens=False)`` still matches added tokens inside
+    user text, so ``</think>`` or ``<tool_call>`` in a request string becomes
+    prompt structure.  The request contract refuses these strings; a tokenizer
+    that exposes no added-token list cannot be guarded and is refused.
+    """
+    decoder = getattr(tokenizer, "added_tokens_decoder", None)
+    if not isinstance(decoder, dict):
+        raise TypeError("decision tokenizer exposes no added token list")
+    reserved = {str(getattr(token, "content", token)) for token in decoder.values()}
+    reserved.update(
+        str(token) for token in getattr(tokenizer, "all_special_tokens", ())
+    )
+    reserved.discard("")
+    if not reserved:
+        raise ValueError("decision tokenizer declares no added token to reserve")
+    return frozenset(reserved)

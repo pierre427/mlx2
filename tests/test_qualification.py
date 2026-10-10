@@ -155,22 +155,30 @@ def _rebind_to_current_producer(companion):
     exercise the route-binding contract, so they re-bind the recorded traces
     to the current producer pin (the evaluator still recomputes every check
     from the real traces)."""
-    from mlx2.qualification import APPROVED_MEDIA_PRODUCERS
+    from mlx2.qualification import APPROVED_MEDIA_PRODUCERS, PINNED_MEDIA_SOURCE_REVISION
 
     companion["qualification_harness"] = APPROVED_MEDIA_PRODUCERS[companion["model_type"]][0]
+    # The runs also predate the mlx-vlm dependency-content contract: their
+    # ``mlx_vlm`` identity names an install, not the executed source bytes.
+    # Re-bind that identity the same way (the parity rows stay as recorded).
+    identity = {"schema": "mlx2.vlm-dependencies.v1", "family": companion["model_type"],
+                "source_sha256": "c" * 64, "dependency_files": 105,
+                "reference_revision": PINNED_MEDIA_SOURCE_REVISION}
+    companion["settings"]["mlx_vlm"] = dict(identity)
+    for arm in companion["arms"].values():
+        arm["mlx_vlm_runtime"] = dict(identity)
+        arm["parity"]["source_sha256"] = identity["source_sha256"]
+        if "binding" in arm:
+            arm["binding"]["settings"]["mlx_vlm"] = dict(identity)
+    for case in companion.get("text_source", {}).get("cases", {}).values():
+        case["source_sha256"] = identity["source_sha256"]
 
 
 def test_smol_companion_is_recomputed_before_route_selection(tmp_path):
     from mlx2.adapters.smolvlm2 import DESCRIPTOR
 
-    fixture = (
-        Path(__file__).resolve().parents[1]
-        / "docs/experiments"
-        / "SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json"
-    )
-    if not fixture.is_file():
-        pytest.skip("source-bound private media receipt is absent from public projection")
-    companion = json.loads(fixture.read_text())
+    companion = json.loads((Path(__file__).resolve().parents[1] / "docs/experiments"
+                            / "SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json").read_text())
     _rebind_to_current_producer(companion)
     record = {
         "passed": True, "runtime": companion["runtime"],
@@ -203,14 +211,8 @@ def test_family_media_companion_binds_normal_route_contract(
     import importlib
 
     descriptor = getattr(importlib.import_module(module_name), descriptor_name)
-    fixture = (
-        Path(__file__).resolve().parents[1]
-        / "docs/experiments"
-        / f"{family}-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json"
-    )
-    if not fixture.is_file():
-        pytest.skip("source-bound private media receipt is absent from public projection")
-    companion = json.loads(fixture.read_text())
+    companion = json.loads((Path(__file__).resolve().parents[1] / "docs/experiments"
+                            / f"{family}-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json").read_text())
     _rebind_to_current_producer(companion)
     record = {
         "passed": True, "runtime": companion["runtime"],

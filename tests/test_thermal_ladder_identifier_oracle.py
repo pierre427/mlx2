@@ -1,6 +1,7 @@
 """Exact semantic identifier checks for the exploratory thermal ladder."""
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 
@@ -65,3 +66,35 @@ def test_warm_hit_excludes_chat_preamble_only_reuse():
     summary = ladder.summarize_run(cold, full, ["NEEDLE-X-0"])
     assert summary["warm_apc_hits"] == 1
     assert summary["warm_equals_cold"] == 1
+
+
+def test_stream_logit_diagnostic_is_explicit_and_preserves_rows(monkeypatch):
+    ladder = _ladder_module()
+    client = ladder.Stream("http://127.0.0.1:1", 1, "fixture")
+    client.top_logprobs = 2
+    client.verify_bitexact = True
+    client.min_tokens_supported = False
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return iter([
+                b'data: {"choices":[{"delta":{"content":"A"},"logprobs":{"content":[{"id":1,"logprob":-0.1,"top_logprobs":[{"id":2,"logprob":-0.2}]}]}}],"usage":{"prompt_tokens":3,"completion_tokens":1},"mlx2":{"cached_tokens":2}}\n',
+                b'data: [DONE]\n',
+            ])
+
+        def __exit__(self, *_args):
+            return False
+
+    def urlopen(request, timeout):
+        captured.update(json.loads(request.data))
+        assert timeout == 1
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    row = client.request("prompt", 1)
+    assert captured["logprobs"] is True
+    assert captured["top_logprobs"] == 2
+    assert captured["verify_bitexact"] is True
+    assert row["content"] == "A"
+    assert row["logprobs"][0]["top_logprobs"][0]["id"] == 2

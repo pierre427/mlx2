@@ -300,6 +300,7 @@ def test_artifact_inspection_accepts_only_prepared_clef_layout(tmp_path):
 class FakeEngine:
     model_name = "clef-flash"
     capabilities = ("text", "noul", "choice", "score")
+    reserved_tokens = frozenset({"<think>", "</think>"})
 
     def predict(self, normalized):
         return {

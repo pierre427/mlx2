@@ -31,10 +31,57 @@ NEAR_CONTEXT_PROMPT_SHA256 = {
 }
 
 
+# The identity ``adapters/vlm_runtime.bind_backend`` publishes as
+# ``adapter.mlx_vlm_runtime`` and the engine records as ``settings.mlx_vlm``:
+# the digest of the executed mlx-vlm source closure plus the reviewed
+# reference revision.  The pre-contract ``{version, source, editable,
+# revision}`` shape named an install, not the executed bytes, and is refused.
+VLM_DEPENDENCY_SCHEMA = "mlx2.vlm-dependencies.v1"
+
+
 def _sha256(value):
     return isinstance(value, str) and len(value) == 64 and all(
         digit in "0123456789abcdef" for digit in value
     )
+
+
+def source_contract_identity(runtime, revision, family=None):
+    """True when ``runtime`` is a dependency-content identity bound to
+    ``revision`` (and, when given, to the contract ``family``).  Both are the
+    reviewed values the caller is written against, never read from the
+    report itself."""
+    return (isinstance(runtime, dict)
+            and runtime.get("schema") == VLM_DEPENDENCY_SCHEMA
+            and isinstance(runtime.get("family"), str) and bool(runtime["family"])
+            and (family is None or runtime["family"] == family)
+            and _sha256(runtime.get("source_sha256"))
+            and type(runtime.get("dependency_files")) is int
+            and runtime["dependency_files"] > 0
+            and isinstance(revision, str) and len(revision) == 40
+            and runtime.get("reference_revision") == revision)
+
+
+def parity_source_bound(parity, runtime, revision):
+    """A parity trace is evidence only against the source bytes that produced
+    it: its recorded revision and digest must equal the arm's bound identity."""
+    return (source_contract_identity(runtime, revision)
+            and isinstance(parity, dict)
+            and parity.get("source_revision") == revision
+            and parity.get("source_sha256") == runtime["source_sha256"])
+
+
+def arm_source_bound(arm, *, settings, family, revision):
+    """An arm is evidence only for the identity the route served under: its
+    ``mlx_vlm_runtime`` must equal the report's served ``settings.mlx_vlm``,
+    name the family the report qualifies, and bind its parity trace.  A
+    self-asserted identity with a matching fabricated digest is not evidence."""
+    if not isinstance(arm, dict) or not isinstance(settings, dict):
+        return False
+    runtime = arm.get("mlx_vlm_runtime")
+    return (source_contract_identity(runtime, revision)
+            and runtime["family"] == family
+            and settings.get("mlx_vlm") == runtime
+            and parity_source_bound(arm.get("parity"), runtime, revision))
 
 
 def _finished(row):
@@ -154,9 +201,11 @@ def _text_case(case, prompt, *, max_tokens=TEXT_TOKENS, min_tokens=0):
                for step, row in enumerate(decode))
 
 
-def _text_source(report):
+def _text_source(report, digest):
     trace = report.get("text_source")
     if not isinstance(trace, dict) or trace.get("artifact") != report.get("artifact"):
+        return False
+    if not _sha256(digest):
         return False
     cases = trace.get("cases")
     if not isinstance(cases, dict) or set(cases) != (
@@ -165,6 +214,7 @@ def _text_source(report):
         return False
     if not all(_text_case(cases[name], prompt) and
                cases[name].get("source_revision") == report.get("source_revision")
+               and cases[name].get("source_sha256") == digest
                for name, prompt in TEXT_PROMPTS.items()):
         return False
     if cases["hermes_client"]["prompt_tokens_sha256"] == cases["cold_text"]["prompt_tokens_sha256"]:
@@ -177,6 +227,7 @@ def _text_source(report):
                 and _text_case(case, prompt, max_tokens=NEAR_CONTEXT_TOKENS,
                                min_tokens=NEAR_CONTEXT_TOKENS)
                 and case.get("source_revision") == report.get("source_revision")
+                and case.get("source_sha256") == digest
                 and 3840 < case["prompt_tokens"] <= 4096 - NEAR_CONTEXT_TOKENS):
             return False
     return (cases["near_context"]["generated_token_ids"]
@@ -189,6 +240,15 @@ def evaluate_smol_media_report(report):
         return {name: False for name in SMOL_MEDIA_CHECKS}
     arms = {kind: _arm(report, kind) for kind in ("image", "video")}
     aligned = {kind: _aligned(arm.get("fixture"), kind) for kind, arm in arms.items()}
+    # ``source_revision`` is pinned by the route validator; here every arm and
+    # text trace must be bound to the one served identity for that revision.
+    bound = {kind: arm_source_bound(
+        arm, settings=report.get("settings"), family="smolvlm",
+        revision=report.get("source_revision"),
+    ) for kind, arm in arms.items()}
+    if not all(bound.values()):
+        return {name: False for name in SMOL_MEDIA_CHECKS}
+    digest = arms["image"]["mlx_vlm_runtime"]["source_sha256"]
     parity = {kind: _parity(arm.get("parity")) for kind, arm in arms.items()}
     serving = {kind: arm.get("serving") if isinstance(arm.get("serving"), dict)
                else {} for kind, arm in arms.items()}
@@ -231,5 +291,5 @@ def evaluate_smol_media_report(report):
         "media_token_alignment": all(aligned.values()),
         "multimodal_state_replay": all(replay(kind) for kind in arms),
         "multimodal_apcv2_reuse": all(apcv2(kind) for kind in arms),
-        "text_source_parity": _text_source(report),
+        "text_source_parity": _text_source(report, digest),
     }

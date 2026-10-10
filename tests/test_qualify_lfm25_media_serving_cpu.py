@@ -11,6 +11,9 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts/qualify_lfm25_media_serv
 SPEC = importlib.util.spec_from_file_location("qualify_lfm25_media_serving", SCRIPT)
 producer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(producer)
+IDENTITY = {"schema": "mlx2.vlm-dependencies.v1", "family": "lfm2_vl",
+            "source_sha256": "c" * 64, "dependency_files": 112,
+            "reference_revision": media_evaluator.SOURCE_REVISION}
 
 
 def _state():
@@ -37,7 +40,8 @@ def _parity():
                         "hybrid_state": _state(), "step": step,
                         "input_token": 101}
                        for step in range(producer.DECODE_STEPS)],
-            "source_revision": media_evaluator.SOURCE_REVISION}
+            "source_revision": media_evaluator.SOURCE_REVISION,
+            "source_sha256": IDENTITY["source_sha256"]}
 
 
 def _serving(end=7):
@@ -77,6 +81,7 @@ def _arm(kind):
             "post_media_checkpoint_proof_accepted": True,
         },
         "parity": _parity(), "serving": _serving(),
+        "mlx_vlm_runtime": dict(IDENTITY),
     }
 
 
@@ -84,7 +89,8 @@ def _report():
     text = _serving()
     return {"arms": {kind: _arm(kind) for kind in ("image", "video")},
             "text_ordinary": {"cold": text["cold"], "warm": text["warm1"]},
-            "settings": {"max_lanes": 1, "max_inflight": 1},
+            "settings": {"max_lanes": 1, "max_inflight": 1,
+                         "mlx_vlm": dict(IDENTITY)},
             "batching_requested": False}
 
 
@@ -132,3 +138,44 @@ def test_changed_pixels_reuse_inside_the_media_span_fails():
         report = _report()
         report["arms"]["image"]["serving"]["changed_pixels"]["receipt"]["cached_tokens"] = cached
         assert not producer.evaluate_lfm_media_report(report)["image_apcv2_reuse"]
+
+
+def test_parity_is_bound_to_the_dependency_contract_identity():
+    """Parity rows are evidence only against the source bytes that produced
+    them: the arm's contract identity and the parity's recorded digest must
+    agree, and the pre-contract ``{revision}`` runtime shape is refused."""
+    report = _report()
+    assert all(producer.evaluate_lfm_media_report(report).values())
+    for path, value in (
+        (("mlx_vlm_runtime", "reference_revision"), "b" * 40),
+        (("mlx_vlm_runtime", "schema"), "other"),
+        (("mlx_vlm_runtime", "source_sha256"), "d" * 64),
+        (("mlx_vlm_runtime", "family"), "qwen2_5_vl"),
+        (("parity", "source_sha256"), None),
+        (("parity", "source_revision"), "b" * 40),
+        (("mlx_vlm_runtime",), {"version": "0.6.17", "source": "index",
+                                "editable": False,
+                                "revision": media_evaluator.SOURCE_REVISION}),
+    ):
+        report = _report()
+        item = report["arms"]["video"]
+        for key in path[:-1]:
+            item = item[key]
+        item[path[-1]] = value
+        checks = producer.evaluate_lfm_media_report(report)
+        assert not any(checks.values()), path
+
+
+def test_arm_identity_must_be_the_one_the_route_served_under():
+    report = _report()
+    other = {**IDENTITY, "source_sha256": "e" * 64}
+    for arm in report["arms"].values():
+        arm["mlx_vlm_runtime"] = dict(other)
+        arm["parity"]["source_sha256"] = other["source_sha256"]
+    assert not any(producer.evaluate_lfm_media_report(report).values())
+    report = _report()
+    del report["settings"]["mlx_vlm"]
+    assert not any(producer.evaluate_lfm_media_report(report).values())
+    report = _report()
+    del report["arms"]["image"]["mlx_vlm_runtime"]
+    assert not any(producer.evaluate_lfm_media_report(report).values())

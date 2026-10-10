@@ -25,6 +25,7 @@ from mlx2.lfm25_media_qualification import check_serving_rows, evaluate_lfm_medi
 
 SCHEMA = "mlx2.media-serving-qualification.v1"
 SOURCE_REVISION = "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5"
+FAMILY = "lfm2_vl"  # mlx-vlm contract family == report model_type
 LOCK = Path("/Users/Shared/mlxuag/gpu.lock")
 SETUP = {
     "qualification_mode": True,
@@ -41,6 +42,22 @@ DECODE_STEPS = 4
 MAX_ABS_TOLERANCE = 1e-4
 EXPECTED_CONV_LAYERS = 22
 EXPECTED_ATTENTION_LAYERS = 8
+
+
+def source_contract(adapter) -> dict:
+    """The adapter's bound mlx-vlm dependency-content identity, or fail closed.
+
+    ``bind_backend`` verified the executed source closure against the reviewed
+    contract for ``SOURCE_REVISION`` and published that identity as
+    ``adapter.mlx_vlm_runtime``; the installed-build provenance
+    (``adapter.mlx_vlm_build``) is diagnostic and is not a binding.
+    """
+    from mlx2.media_qualification import source_contract_identity
+
+    runtime = getattr(adapter, "mlx_vlm_runtime", None)
+    if not source_contract_identity(runtime, SOURCE_REVISION, family=FAMILY):
+        raise AssertionError("source mlx-vlm dependency contract drift")
+    return runtime
 
 
 def sha256(data: bytes) -> str:
@@ -210,8 +227,7 @@ def parity_arm(adapter, prepared: dict) -> dict:
     from mlx_vlm.models.cache import ArraysCache as SourceArraysCache
     from mlx_vlm.models.cache import KVCache as SourceKVCache
 
-    if adapter.mlx_vlm_runtime.get("revision") != SOURCE_REVISION:
-        raise AssertionError("source mlx-vlm revision drift")
+    contract = source_contract(adapter)
     source_model = adapter.model._model
     layer_types = adapter.identity["config"]["text_config"]["layer_types"]
     source_cache = [
@@ -249,7 +265,8 @@ def parity_arm(adapter, prepared: dict) -> dict:
     return {"prefill": prefill, "prefill_hybrid_state": prefill_state,
             "prefill_max_abs": prefill["max_abs"],
             "prefill_argmax_match": prefill["argmax_match"], "decode": decode,
-            "source_revision": adapter.mlx_vlm_runtime["revision"]}
+            "source_revision": contract["reference_revision"],
+            "source_sha256": contract["source_sha256"]}
 
 
 def collect(job) -> dict:
@@ -378,7 +395,7 @@ def run(model_path: str) -> dict:
     result = {
         "schema": SCHEMA,
         "family": "lfm2.5-vl",
-        "model_type": "lfm2_vl",
+        "model_type": FAMILY,
         "qualification_harness": {
             "name": "scripts/qualify_lfm25_media_serving.py",
             "sha256": sha256(Path(__file__).read_bytes()),
@@ -427,7 +444,7 @@ def main(argv=None):
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         result = {"schema": SCHEMA, "family": "lfm2.5-vl",
-                  "model_type": "lfm2_vl", "passed": False}
+                  "model_type": FAMILY, "passed": False}
         try:
             result = run(str(args.model_path))
         except Exception as exc:

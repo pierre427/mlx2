@@ -9,6 +9,7 @@ import math
 import os
 import re
 from pathlib import Path
+import platform
 import subprocess
 import sys
 import time
@@ -18,9 +19,10 @@ from urllib.request import Request, urlopen
 
 QUALIFICATION_HARNESS_SCHEMA = "mlx2.qualification-harness.v1"
 APPROVED_ADAPTIVE_BENCHMARK_SHA256 = (
-    "a3467281191c7d55aa80f3fc29aa03fa19ec0402ae0e15dc0b5189c62c62d7cb"
+    "d7d2f51195008db855a942632ba0ab87cfa709ecf6d27996c824cc5aeacabd6f"
 )
 PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v2"
+PREFLIGHT_DELTA_SCHEMA = "mlx2.qualification-preflight-delta.v1"
 CROSS_HOST_PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v3"
 PREFLIGHT_TENSORFOLD_OWNED_SOURCE = (
     Path.home() / ".codex/worktrees/tensorfold-upstream-parity-20260928"
@@ -618,13 +620,231 @@ def qualification_harness_identity(path=None):
     }
 
 
-def _tree_sha256(root, pattern):
-    digest = hashlib.sha256()
-    for path in sorted(root.glob(pattern)):
-        if path.is_file():
-            digest.update(str(path.relative_to(root)).encode())
-            digest.update(path.read_bytes())
-    return digest.hexdigest()
+# Files whose content a preflight's pass depends on besides the runtime
+# (src/), the harness and the pytest configuration, which the binding covers:
+# everything under tests/, scripts/ (tests assert on scripts/fixtures/*.json
+# through the scripts that load them, and glob scripts/*.py), provenance/
+# (records and the NOTICE files a qualifier hashes), native/ and
+# qualification/ (plans, policies, top-level records, committed artifacts a
+# test round-trips, corpora, experiments, history, receipts), plus the
+# experiment companions and docs/PROVENANCE.md that tests read.  Campaign
+# evidence under qualification/runs/ is left out by design: a campaign
+# writes there and must not invalidate the receipt; the few tests that
+# assert on frozen run evidence are outside the binding.
+PREFLIGHT_TREE_PATTERNS = (
+    "tests/**/*", "scripts/**/*", "provenance/**/*", "native/**/*", "qualification/**/*",
+    "docs/experiments/**/*", "docs/PROVENANCE.md",
+)
+PREFLIGHT_TREE_EXCLUDED_PREFIXES = ("qualification/runs/",)
+# Identity fields a preflight receipt is bound to.  The git revision is
+# recorded but not bound: a commit that changes no bound file (docs, campaign
+# evidence) leaves every earlier test result valid, and a commit that changes
+# tests or scripts is caught file by file through the tree.
+PREFLIGHT_BINDING_KEYS = ("runtime", "qualification_harness", "pytest_config_sha256")
+
+
+def preflight_tree(root=None):
+    """Per-file SHA-256 of PREFLIGHT_TREE_PATTERNS (relative paths)."""
+    root = Path(__file__).resolve().parents[1] if root is None else Path(root)
+    tree = {}
+    for pattern in PREFLIGHT_TREE_PATTERNS:
+        for path in sorted(root.glob(pattern)):
+            relative = str(path.relative_to(root))
+            if (path.is_file() and "__pycache__" not in path.parts
+                    and not relative.startswith(PREFLIGHT_TREE_EXCLUDED_PREFIXES)):
+                tree[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return tree
+
+
+def preflight_tree_sha256(tree):
+    """Aggregate digest of a per-file tree (the identity's test_source_sha256)."""
+    return hashlib.sha256(json.dumps(tree, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def preflight_binding(identity):
+    return {key: identity.get(key) for key in PREFLIGHT_BINDING_KEYS}
+
+
+def preflight_tree_changes(before, after):
+    """``{"added", "modified", "removed"}`` relative paths between two trees."""
+    return {
+        "added": sorted(set(after) - set(before)),
+        "modified": sorted(p for p in set(before) & set(after) if before[p] != after[p]),
+        "removed": sorted(set(before) - set(after)),
+    }
+
+
+def _is_test_module(path):
+    return path.startswith("tests/") and Path(path).name.startswith("test_") and path.endswith(".py")
+
+
+def preflight_impacted_tests(changes, tree, root=None):
+    """Test modules a change can reach: the transitive reverse closure of a
+    lexical name scan (over-selecting).
+
+    Every touched path (added, modified or removed) is a search name: the
+    module stem for a ``.py`` file (tests load scripts by path and helpers by
+    import), the file name otherwise.  Every ``.py`` file in the tree -- a
+    test module, a test helper or a script -- whose text names it is a
+    consumer: a consumer that is a test module is selected, and every
+    consumer is a search name in turn, so helper->helper->test and
+    script->script->test chains are followed to a fixed point.  A module
+    that walks a bound directory (glob, rglob, iterdir, walk, listdir or
+    scandir, with the directory's name on the call's line or the two before
+    it) reads files under it without naming one, so it is a consumer of each
+    touched file there whose name matches a literal glob pattern it uses (or
+    of every file, for a pattern-less or non-literal walk).
+    Changed or added test modules also run themselves.
+
+    Fails closed (the caller needs the full preflight) when a touched file
+    that is not a test module reaches no test module through any chain --
+    the scan is lexical, so a load it cannot see must not pass with no test
+    run -- and when a ``conftest.py`` is touched, since that reaches every
+    test.  Both the writer and the validator call this, so a delta that
+    skipped either is refused.  ``src/`` is not here: it is bound through
+    the runtime identity, so a change there needs the full suite."""
+    import fnmatch
+    import re
+
+    root = Path(__file__).resolve().parents[1] if root is None else Path(root)
+    touched = changes["added"] + changes["modified"] + changes["removed"]
+    conftests = sorted(p for p in touched if Path(p).name == "conftest.py")
+    if conftests:
+        raise AssertionError(
+            f"preflight delta: {', '.join(conftests)} changed and reaches every test: "
+            "rerun the full preflight"
+        )
+    modules = sorted(p for p in tree if p.endswith(".py"))
+    tests = {p for p in modules if _is_test_module(p)}
+    texts = {p: (root / p).read_text(errors="replace") for p in modules}
+    words = {p: set(re.findall(r"\w+", text)) for p, text in texts.items()}
+    # Directory walkers, per top-level directory named (case-insensitively, so
+    # a SCRIPTS constant counts) on the walk call's line or the two before
+    # it: the basename pattern of a literal glob/rglob argument (a "*.py"
+    # rglob reads only .py files), or None for a non-literal pattern or a
+    # pattern-less walk, which reads everything.  ast.walk is a tree walk,
+    # not a directory walk.
+    walk = re.compile(r"(?<!ast\.)\b(r?glob|iterdir|walk|listdir|scandir)\s*\(\s*(?:(['\"])([^'\"]*)\2)?")
+    tops = {p.split("/", 1)[0] for p in tree}
+    top_words = {top: re.compile(r"(?<![\w])" + re.escape(top) + r"(?![\w])", re.I) for top in tops}
+    walkers = {}
+    for p in modules:
+        lines = texts[p].splitlines()
+        for index, line in enumerate(lines):
+            for call, _, literal in walk.findall(line):
+                window = "\n".join(lines[max(0, index - 2):index + 1])
+                pattern = Path(literal).name if call in ("glob", "rglob") and literal else None
+                for top, word in top_words.items():
+                    if word.search(window):
+                        walkers.setdefault(p, {}).setdefault(top, set()).add(pattern)
+
+    def directory_consumers(path):
+        top, name = path.split("/", 1)[0], Path(path).name
+        return {p for p, by_top in walkers.items()
+                if p != path and top in by_top
+                and any(pattern is None or fnmatch.fnmatch(name, pattern) for pattern in by_top[top])}
+
+    consumers_of = {}
+
+    def consumers(path):
+        if path not in consumers_of:
+            name = Path(path).stem if path.endswith(".py") else Path(path).name
+            if re.fullmatch(r"\w+", name):
+                hits = {p for p in modules if p != path and name in words[p]}
+            else:
+                pattern = re.compile(r"(?<![\w])" + re.escape(name) + r"(?![\w])")
+                hits = {p for p in modules if p != path and pattern.search(texts[p])}
+            consumers_of[path] = hits
+        return consumers_of[path]
+
+    selected = {p for p in changes["added"] + changes["modified"] if p in tests}
+    unreached = []
+    for start in touched:
+        reached, frontier, seen = set(), [start], set()
+        while frontier:
+            path = frontier.pop()
+            if path in seen:
+                continue
+            seen.add(path)
+            hits = consumers(path)
+            if path == start:
+                hits = hits | directory_consumers(path)
+            reached.update(hits & tests)
+            frontier.extend(sorted(hits - seen))
+        if not reached and not _is_test_module(start):
+            unreached.append(start)
+        selected.update(reached)
+    if unreached:
+        raise AssertionError(
+            "preflight delta cannot reach any test module from "
+            f"{', '.join(sorted(unreached))}: rerun the full preflight"
+        )
+    return sorted(selected)
+
+
+INTERPRETER_IDENTITY_KEYS = ("executable", "implementation", "version")
+
+
+def interpreter_identity():
+    """The interpreter this harness runs under, as invoked.
+
+    A receipt binds it (integration review 2026-10-09): the arguments after
+    a command's head say what pytest was asked, not that Python ran it, so
+    the validators compare the head and this identity against the trusted
+    local values, never against the receipt alone."""
+    return {
+        "executable": sys.executable,
+        "implementation": platform.python_implementation(),
+        "version": "%d.%d.%d" % sys.version_info[:3],
+    }
+
+
+def _canonical_executable(executable):
+    """A path with symlinks resolved; malformed unless it names an existing
+    file.  A venv's python, python3 and the binary they point at are one
+    interpreter; a path that does not exist cannot have run anything."""
+    if not isinstance(executable, str) or not executable:
+        return _MALFORMED_COMMAND
+    try:
+        return os.path.realpath(executable, strict=True)
+    except (OSError, RuntimeError):
+        return _MALFORMED_COMMAND
+
+
+def _well_formed_interpreter(identity):
+    return (isinstance(identity, dict) and set(identity) == set(INTERPRETER_IDENTITY_KEYS)
+            and all(isinstance(identity[key], str) and identity[key]
+                    for key in INTERPRETER_IDENTITY_KEYS))
+
+
+def _same_local_interpreter(identity, trusted):
+    """``identity`` names the trusted local interpreter: same implementation
+    and version, executables canonical-equal (symlinks resolved on both
+    sides).  Only for interpreters on this host; a remote one is compared
+    exactly, since its paths cannot be resolved here."""
+    if (not _well_formed_interpreter(identity)
+            or identity["implementation"] != trusted["implementation"]
+            or identity["version"] != trusted["version"]):
+        return False
+    canonical = _canonical_executable(identity["executable"])
+    return canonical is not _MALFORMED_COMMAND and canonical == _canonical_executable(
+        trusted["executable"])
+
+
+def _ran_under(command, trusted):
+    """A commanded lane's head is the trusted local interpreter; an absent
+    lane has nothing to prove."""
+    if command is None:
+        return True
+    if _command_args(command) is _MALFORMED_COMMAND:
+        return False
+    canonical = _canonical_executable(command[0])
+    return canonical is not _MALFORMED_COMMAND and canonical == _canonical_executable(
+        trusted["executable"])
+
+
+def _command_head(command):
+    return command[0] if isinstance(command, list) and command else command
 
 
 def preflight_identity(runtime_identity_fn=None):
@@ -641,7 +861,10 @@ def preflight_identity(runtime_identity_fn=None):
         "git": {"revision": revision.stdout.strip()},
         "runtime": runtime_identity_fn(),
         "qualification_harness": qualification_harness_identity(),
-        "test_source_sha256": _tree_sha256(root, "tests/**/*.py"),
+        "interpreter": interpreter_identity(),
+        # The whole preflight tree, not only tests/**/*.py: the cross-host (v3)
+        # receipt binds the identity alone.  The key keeps its name for that schema.
+        "test_source_sha256": preflight_tree_sha256(preflight_tree(root)),
         "pytest_config_sha256": hashlib.sha256((root / "pyproject.toml").read_bytes()).hexdigest(),
     }
 
@@ -758,7 +981,7 @@ def run_import_guards(modules) -> int:
 
 
 def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
-                            identity_fn=preflight_identity):
+                            identity_fn=preflight_identity, tree_fn=preflight_tree):
     command, guard_command = preflight_test_commands(pytest_args=pytest_args)
     env = {**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
            "PYTEST_ADDOPTS": "", "PYTEST_PLUGINS": ""}
@@ -779,9 +1002,10 @@ def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
     guard_output = guarded.stdout + guarded.stderr
     receipt = {
         "schema": PREFLIGHT_SCHEMA,
-        "passed": completed.returncode == guarded.returncode == 0,
+        "passed": _zero_returncode(completed.returncode) and _zero_returncode(guarded.returncode),
         "timestamp": time.time(),
         "identity": identity_fn(),
+        "tree": tree_fn(),
         "test_command": command,
         "returncode": completed.returncode,
         "output_sha256": hashlib.sha256(output.encode()).hexdigest(),
@@ -799,15 +1023,38 @@ def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
     return receipt
 
 
-def validate_preflight_receipt(path, active_runtime, *, identity_fn=preflight_identity):
+def _active_runtime_matches_build(active_runtime, build_runtime):
+    """Full-suite proof stays build-wide; independently rebind the active route."""
+    from mlx2.route_identity import recompute_runtime_identity
+    try:
+        return recompute_runtime_identity(active_runtime, build=build_runtime) == active_runtime
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def _validate_full_preflight(path, active_runtime, expected):
+    """A passing, unscoped full-suite receipt bound to ``expected``'s binding.
+
+    Returns the receipt.  The tree is checked by the caller (a full receipt
+    must match the current tree; a delta's base matches its own tree)."""
     path = Path(path)
     receipt = json.loads(path.read_text())
     if receipt.get("schema") != PREFLIGHT_SCHEMA or receipt.get("passed") is not True:
         raise AssertionError(f"preflight receipt is absent or failed: {path}")
-    expected = identity_fn()
-    if receipt.get("identity") != expected:
-        raise AssertionError("preflight receipt does not match current git/runtime source/harness identity")
-    if receipt["identity"].get("runtime") != active_runtime:
+    if preflight_binding(receipt.get("identity") or {}) != preflight_binding(expected):
+        raise AssertionError(
+            "preflight receipt does not match the current runtime source, harness or "
+            "pytest configuration: rerun the full preflight"
+        )
+    # The interpreter is compared against this process, not ``expected``: a
+    # receipt may not vouch for the Python that wrote it.
+    interpreter = interpreter_identity()
+    if not _same_local_interpreter(receipt["identity"].get("interpreter"), interpreter):
+        raise AssertionError(
+            "preflight receipt was not written under this interpreter "
+            f"({_describe_interpreter(interpreter)}): rerun the full preflight"
+        )
+    if not _active_runtime_matches_build(active_runtime, receipt["identity"].get("runtime")):
         raise AssertionError("preflight receipt runtime does not match active server")
     command = receipt.get("test_command")
     guard_command = receipt.get("guard_test_command")
@@ -816,20 +1063,200 @@ def validate_preflight_receipt(path, active_runtime, *, identity_fn=preflight_id
     # Any extra argument can scope the run (--collect-only, -k, a test path,
     # --lf, --deselect, --ignore) and still exit 0 with passed=True, so only
     # the unscoped default command stands in for the unit_tests check.
-    if (not isinstance(command, list) or not command or
-            not isinstance(command[0], str) or command[1:] != ordinary_args[1:] or
-            not isinstance(guard_command, list) or not guard_command or
-            not isinstance(guard_command[0], str) or
-            guard_command[1:] != guarded_args[1:] or
-            receipt.get("returncode") != 0 or receipt.get("guard_returncode") != 0):
+    if (_command_args(command) != list(ordinary_args[1:])
+            or _command_args(guard_command) != list(guarded_args[1:])
+            or not _zero_returncode(receipt.get("returncode"))
+            or not _zero_returncode(receipt.get("guard_returncode"))):
         raise AssertionError(
             "preflight receipt did not run the full unit suite: "
             f"{command!r} / {guard_command!r}: {path}"
         )
+    # The arguments above say what pytest was asked; the head says who ran
+    # it.  `true` with the same arguments exits 0 and runs no test.
+    if not _ran_under(command, interpreter) or not _ran_under(guard_command, interpreter):
+        raise AssertionError(
+            "preflight receipt commands were not run by this interpreter "
+            f"({interpreter['executable']}): {_command_head(command)!r} / "
+            f"{_command_head(guard_command)!r}: {path}"
+        )
+    return receipt
+
+
+def _describe_interpreter(identity):
+    return f"{identity['implementation']} {identity['version']} at {identity['executable']}"
+
+
+def _delta_test_commands(impacted):
+    """Commands a delta runs: impacted ordinary modules in one pytest process,
+    impacted import-guard modules through the pinned guard runner."""
+    guards = set(PREFLIGHT_IMPORT_GUARD_MODULES)
+    ordinary = [p for p in impacted if p not in guards]
+    guarded = [p for p in impacted if p in guards]
+    root = Path(__file__).resolve().parents[1]
+    return (
+        [sys.executable, *FULL_SUITE_PYTEST_ARGS, *ordinary] if ordinary else None,
+        [sys.executable, str(Path(__file__).resolve().relative_to(root)),
+         "--run-import-guards", *guarded] if guarded else None,
+    )
+
+
+def validate_preflight_receipt(path, active_runtime, *, identity_fn=preflight_identity,
+                               tree_fn=preflight_tree):
+    """Trust a full-suite receipt for the current tree, or a delta over one.
+
+    A full receipt must match the current binding (runtime source, harness,
+    pytest configuration) and the current tests/scripts tree.  A delta
+    receipt names a full base with the same binding and covers exactly the
+    tree changes since that base with the impacted tests it reran; both are
+    recomputed here, so a delta that skipped an impacted module is refused."""
+    path = Path(path)
+    receipt = json.loads(path.read_text())
+    expected = identity_fn()
+    if receipt.get("schema") == PREFLIGHT_DELTA_SCHEMA:
+        return _validate_preflight_delta(path, receipt, active_runtime, expected, tree_fn)
+    full = _validate_full_preflight(path, active_runtime, expected)
+    if "tree" in full:
+        changes = preflight_tree_changes(full["tree"], tree_fn())
+        if any(changes.values()):
+            count = sum(len(v) for v in changes.values())
+            raise AssertionError(
+                f"preflight receipt predates {count} test/script change(s); write a "
+                "delta with --preflight-delta --base-preflight on this receipt"
+            )
+    elif full["identity"].get("test_source_sha256") != expected.get("test_source_sha256"):
+        # Receipts written before the per-file tree carry one aggregate digest.
+        raise AssertionError("preflight receipt does not match the current test sources")
     return {"path": str(path.resolve()),
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            "identity": expected, "test_command": command,
-            "guard_test_command": guard_command, "passed": True}
+            "identity": expected, "test_command": full["test_command"],
+            "guard_test_command": full["guard_test_command"], "passed": True}
+
+
+def _validate_preflight_delta(path, receipt, active_runtime, expected, tree_fn):
+    if receipt.get("passed") is not True:
+        raise AssertionError(f"preflight delta receipt failed: {path}")
+    base_ref = receipt.get("base") or {}
+    base_path = Path(base_ref.get("path", ""))
+    if not base_path.is_file() or hashlib.sha256(base_path.read_bytes()).hexdigest() != base_ref.get("sha256"):
+        raise AssertionError("preflight delta base receipt is missing or changed")
+    base = _validate_full_preflight(base_path, active_runtime, expected)
+    if "tree" not in base:
+        raise AssertionError("preflight delta base has no per-file tree; rerun the full preflight")
+    if preflight_binding(receipt.get("identity") or {}) != preflight_binding(expected):
+        raise AssertionError("preflight delta receipt does not match the current binding")
+    interpreter = interpreter_identity()
+    if not _same_local_interpreter(receipt["identity"].get("interpreter"), interpreter):
+        raise AssertionError(
+            "preflight delta receipt was not written under this interpreter "
+            f"({_describe_interpreter(interpreter)}): rerun the full preflight"
+        )
+    current = tree_fn()
+    if receipt.get("tree") != current:
+        raise AssertionError("preflight delta receipt does not match the current tests/scripts")
+    changes = preflight_tree_changes(base["tree"], current)
+    if receipt.get("changes") != changes:
+        raise AssertionError("preflight delta receipt does not cover the tree changes since its base")
+    impacted = preflight_impacted_tests(changes, current)
+    if receipt.get("impacted") != impacted:
+        raise AssertionError("preflight delta receipt did not rerun every impacted test module")
+    ordinary, guarded = _delta_test_commands(impacted)
+    if (_command_args(receipt.get("test_command")) != _command_args(ordinary)
+            or _command_args(receipt.get("guard_test_command")) != _command_args(guarded)
+            or not _lane_passed(ordinary, receipt.get("returncode"))
+            or not _lane_passed(guarded, receipt.get("guard_returncode"))):
+        raise AssertionError("preflight delta receipt commands or results do not match its impacted tests")
+    if (not _ran_under(receipt.get("test_command"), interpreter)
+            or not _ran_under(receipt.get("guard_test_command"), interpreter)):
+        raise AssertionError(
+            "preflight delta receipt commands were not run by this interpreter "
+            f"({interpreter['executable']}): {_command_head(receipt.get('test_command'))!r} / "
+            f"{_command_head(receipt.get('guard_test_command'))!r}: {path}"
+        )
+    return {"path": str(path.resolve()),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "identity": expected, "test_command": base["test_command"],
+            "guard_test_command": base["guard_test_command"], "passed": True,
+            "delta": {"base": base_ref, "changes": changes, "impacted": impacted}}
+
+
+_MALFORMED_COMMAND = object()
+
+
+def _command_args(command):
+    """A command's arguments after its interpreter; None for an absent lane.
+
+    Anything but a non-empty list headed by a non-empty string is malformed
+    and equals nothing, so it never matches an expected command."""
+    if command is None:
+        return None
+    if (not isinstance(command, list) or not command
+            or not isinstance(command[0], str) or not command[0]):
+        return _MALFORMED_COMMAND
+    return list(command[1:])
+
+
+def _zero_returncode(code):
+    """Exactly int 0: JSON false and None compare equal to or pass as 0."""
+    return type(code) is int and code == 0
+
+
+def _lane_passed(command, code):
+    """A lane with a command must show returncode 0; a lane without one must
+    show None.  A missing code is no evidence the run happened."""
+    return _zero_returncode(code) if command is not None else code is None
+
+
+def write_preflight_delta(path, base_path, *, run=subprocess.run, identity_fn=preflight_identity,
+                          tree_fn=preflight_tree):
+    """Rerun only the tests a tests/scripts change can reach, over a full base.
+
+    Refuses (full preflight needed) when the binding moved -- any change under
+    src/, the mlx build, the harness or the pytest configuration -- when a
+    conftest.py changed, or when a touched file reaches no test module."""
+    base_path = Path(base_path).resolve()
+    expected = identity_fn()
+    base = _validate_full_preflight(base_path, expected.get("runtime"), expected)
+    if "tree" not in base:
+        raise AssertionError("base preflight has no per-file tree; rerun the full preflight")
+    current = tree_fn()
+    changes = preflight_tree_changes(base["tree"], current)
+    impacted = preflight_impacted_tests(changes, current)  # refuses conftest/unreachable
+    ordinary, guarded = _delta_test_commands(impacted)
+    env = {**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+           "PYTEST_ADDOPTS": "", "PYTEST_PLUGINS": ""}
+    root = Path(__file__).resolve().parents[1]
+    outputs, codes = [], []
+    for command in (ordinary, guarded):
+        if command is None:
+            outputs.append("")
+            codes.append(None)
+            continue
+        completed = run(command, capture_output=True, text=True, env=env, cwd=root)
+        outputs.append(completed.stdout + completed.stderr)
+        codes.append(completed.returncode)
+    receipt = {
+        "schema": PREFLIGHT_DELTA_SCHEMA,
+        "passed": _lane_passed(ordinary, codes[0]) and _lane_passed(guarded, codes[1]),
+        "timestamp": time.time(),
+        "identity": expected,
+        "base": {"path": str(base_path),
+                 "sha256": hashlib.sha256(base_path.read_bytes()).hexdigest()},
+        "tree": current,
+        "changes": changes,
+        "impacted": impacted,
+        "test_command": ordinary,
+        "returncode": codes[0],
+        "output_tail": outputs[0][-16000:],
+        "guard_test_command": guarded,
+        "guard_returncode": codes[1],
+        "guard_output_tail": outputs[1][-16000:],
+    }
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    if not receipt["passed"]:
+        raise AssertionError(f"impacted tests failed; see {path}")
+    return receipt
 
 
 def _proof_sha256(proof):
@@ -867,13 +1294,19 @@ def validate_cross_host_preflight_receipt(
     path, *, active_runtime, active_artifact, active_settings, active_host_id,
     expected_source_nodes, required_m3_nodes, target_command,
     artifact_dependent_nodes=(), approved_source_skips=None,
-    identity_fn=preflight_identity,
+    identity_fn=preflight_identity, source_interpreter=None,
 ):
     """Validate opt-in M5 source plus M3 target proof; v2 remains unchanged.
 
-    The caller must supply an independently collected, reviewed node inventory
-    and target command. This pure validator is not wired to route selection:
-    no model gains ``unit_tests`` from a self-declared receipt.
+    The caller must supply an independently collected, reviewed node inventory,
+    the target command and the source host's interpreter identity
+    (``source_interpreter``: executable as invoked, implementation, version,
+    as ``interpreter_identity()`` prints it there).  The source proof's
+    identity and command heads are compared with it exactly, since this host
+    cannot resolve paths on the other one; the target proof's interpreter
+    and command head must be this process's interpreter.  This pure
+    validator is not wired to route selection: no model gains ``unit_tests``
+    from a self-declared receipt.
     """
     raw = Path(path).read_bytes()
     bundle = json.loads(raw)
@@ -887,20 +1320,32 @@ def validate_cross_host_preflight_receipt(
     if (bundle.get("source_proof_sha256") != _proof_sha256(source)
             or bundle.get("target_proof_sha256") != _proof_sha256(target)):
         raise AssertionError("cross-host preflight proof digest mismatch")
+    if not _well_formed_interpreter(source_interpreter):
+        raise AssertionError(
+            "cross-host preflight needs a trusted source interpreter identity "
+            "(executable, implementation, version) supplied by the caller"
+        )
     expected_identity = identity_fn()
+    interpreter = interpreter_identity()
     source_identity, target_identity = source.get("identity"), target.get("identity")
     if (not isinstance(expected_identity, dict)
             or set(expected_identity) != {"git", "runtime", "qualification_harness",
-                                          "test_source_sha256", "pytest_config_sha256"}
+                                          "test_source_sha256", "pytest_config_sha256",
+                                          "interpreter"}
             or not isinstance(source_identity, dict)
-            or target_identity != expected_identity
+            or not isinstance(target_identity, dict)
+            or set(target_identity) != set(expected_identity)
+            or any(target_identity[key] != value for key, value in expected_identity.items()
+                   if key != "interpreter")
+            or not _same_local_interpreter(target_identity.get("interpreter"), interpreter)
             or set(source_identity) != set(expected_identity)
             or any(source_identity[key] != value for key, value in expected_identity.items()
-                   if key != "runtime")
+                   if key not in ("runtime", "interpreter"))
+            or source_identity.get("interpreter") != source_interpreter
             or not isinstance(source_identity.get("runtime"), dict)
-            or set(source_identity["runtime"]) != set(active_runtime)
-            or source_identity["runtime"].get("source_sha256") != active_runtime.get("source_sha256")
-            or target_identity.get("runtime") != active_runtime):
+            or set(source_identity["runtime"]) != set(expected_identity["runtime"])
+            or source_identity["runtime"].get("source_sha256") != expected_identity["runtime"].get("source_sha256")
+            or not _active_runtime_matches_build(active_runtime, target_identity.get("runtime"))):
         raise AssertionError("cross-host preflight source or target identity mismatch")
     from mlx2.qualification import APPROVED_QUALIFICATION_HARNESS
     if expected_identity["qualification_harness"] != APPROVED_QUALIFICATION_HARNESS:
@@ -939,6 +1384,12 @@ def validate_cross_host_preflight_receipt(
                 or not suite["command"][0]
                 or suite["command"][1:] != command):
             raise AssertionError("cross-host preflight source command failed or was scoped")
+        if suite["command"][0] != source_interpreter["executable"]:
+            raise AssertionError(
+                "cross-host preflight source command was not run by the trusted "
+                f"source interpreter ({source_interpreter['executable']}): "
+                f"{suite['command'][0]!r}"
+            )
         observed.update(_checked_node_results(
             suite.get("results"), expected_source_nodes[name],
             approved_skips=approved_source_skips,
@@ -956,8 +1407,14 @@ def validate_cross_host_preflight_receipt(
         raise AssertionError("cross-host preflight artifact evidence is incomplete")
     required = set(required_m3_nodes)
     if (not required or not required <= set(observed)
-            or not isinstance(target_command, (list, tuple)) or not target_command):
+            or not isinstance(target_command, (list, tuple)) or not target_command
+            or not isinstance(target_command[0], str) or not target_command[0]):
         raise AssertionError("cross-host preflight M3 coverage policy is missing")
+    if not _ran_under(list(target_command), interpreter):
+        raise AssertionError(
+            "cross-host preflight target command was not run by this interpreter "
+            f"({interpreter['executable']}): {target_command[0]!r}"
+        )
     if (type(target.get("returncode")) is not int or target["returncode"] != 0
             or target.get("command") != list(target_command)
             or not isinstance(target.get("command"), list)):
@@ -2398,11 +2855,15 @@ def validate_adaptive_benchmark(path, initial):
     # excess to trip.  The bound is therefore a floor, unlike the others here.
     differential_alpha = float(recorded.get("differential_alpha", 0.0))
     if (
-        throughput_tolerance > 0.08
-        or max_probe_fraction > 0.075
+        not all(math.isfinite(value) for value in (
+            throughput_tolerance, max_probe_fraction,
+            handoff_margin_threshold, differential_alpha,
+        ))
+        or not 0.0 <= throughput_tolerance <= 1.0
+        or not 0.0 <= max_probe_fraction <= 1.0
         or min_bucket_rounds < 64
-        or handoff_margin_threshold > 0.5
-        or differential_alpha < 0.05
+        or not 0.0 <= handoff_margin_threshold <= 0.5
+        or not 0.05 <= differential_alpha <= 1.0
     ):
         raise ValueError("adaptive benchmark used weaker qualification limits")
     recomputed = adaptive_qualification_evidence(
@@ -2454,7 +2915,13 @@ def main():
               "--preflight-receipt refuses such a receipt as unit_tests evidence."),
     )
     parser.add_argument("--preflight-receipt", type=Path,
-                        help="Use an exact passing preflight receipt instead of rerunning pytest")
+                        help=("Use a passing preflight receipt (full, or a delta over a full "
+                              "base) instead of rerunning pytest"))
+    parser.add_argument("--preflight-delta", action="store_true",
+                        help=("Rerun only the test modules a tests/scripts change since "
+                              "--base-preflight can reach; write a delta receipt to --output"))
+    parser.add_argument("--base-preflight", type=Path,
+                        help="Full preflight receipt a --preflight-delta builds on")
     parser.add_argument("--adapter-qualification", type=Path,
                         help="Source-bound media companion for this exact live route")
     parser.add_argument(
@@ -2481,6 +2948,13 @@ def main():
     if args.preflight_only:
         write_preflight_receipt(args.output, pytest_args=args.preflight_pytest_arg)
         print(f"Preflight evidence: {args.output}", flush=True)
+        return
+    if args.preflight_delta:
+        if args.base_preflight is None:
+            parser.error("--preflight-delta needs --base-preflight")
+        delta = write_preflight_delta(args.output, args.base_preflight)
+        print(f"Preflight delta evidence: {args.output} "
+              f"({len(delta['impacted'])} impacted test modules)", flush=True)
         return
 
     def get(path):
@@ -3307,11 +3781,14 @@ def main():
         check(
             "cache_leases", final["apcv2"]["cow"]["active_leases"] == 0, final["apcv2"]
         )
+        from mlx2.route_identity import recompute_runtime_identity
         from mlx2.serving import runtime_identity
 
         check(
             "runtime_stable",
-            initial["runtime"] == final["runtime"] == runtime_identity(),
+            initial["runtime"] == final["runtime"] == recompute_runtime_identity(
+                initial["runtime"], build=runtime_identity()
+            ),
             initial["runtime"],
         )
         observed = feature_observations(

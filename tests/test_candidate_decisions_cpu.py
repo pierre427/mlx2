@@ -1,5 +1,6 @@
 import json
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -81,7 +82,7 @@ def test_decision_tokenizer_uses_mlx2_integrity_repair(monkeypatch, tmp_path):
 
     from mlx2.runtime import tokenizer_integrity
 
-    sentinel = object()
+    sentinel = SimpleNamespace(added_tokens_decoder={0: "<|im_end|>"})
     calls = {}
 
     def fake_load(path, **kwargs):
@@ -99,6 +100,7 @@ def test_decision_tokenizer_uses_mlx2_integrity_repair(monkeypatch, tmp_path):
     monkeypatch.setattr(tokenizer_integrity, "repair_loaded_tokenizer", fake_repair)
     tokenizer, receipt = load_local_tokenizer(tmp_path)
     assert tokenizer is sentinel
+    assert receipt["reserved_tokens"] == ["<|im_end|>"]
     assert calls["load"][1] == {
         "local_files_only": True,
         "trust_remote_code": False,
@@ -117,7 +119,7 @@ def test_decision_tokenizer_refuses_an_undeclared_integrity_contract(
     monkeypatch.setattr(
         transformers.AutoTokenizer,
         "from_pretrained",
-        lambda *args, **kwargs: object(),
+        lambda *args, **kwargs: SimpleNamespace(added_tokens_decoder={0: "<|x|>"}),
     )
     monkeypatch.setattr(
         tokenizer_integrity,
@@ -162,7 +164,7 @@ def _request():
 
 def test_decision2_segmented_prompt_and_candidate_rows_are_exact():
     request = _request()
-    tokens, candidates, query, labels = render_decision2(
+    tokens, candidates, query, labels, _ = render_decision2(
         CharacterTokenizer(),
         request.state,
         "team",
@@ -196,7 +198,7 @@ def test_decision2_preserves_explicit_noul_order_and_requires_instructions():
         },
         default_model="candidate",
     )
-    _, _, _, labels = render_decision2(
+    _, _, _, labels, _ = render_decision2(
         CharacterTokenizer(),
         normalized.state,
         "truth",
@@ -228,7 +230,7 @@ def test_decision2_preserves_explicit_noul_order_and_requires_instructions():
 
 def test_decision2_truncates_only_state_and_can_refuse():
     question = _request().questions["team"]
-    tokens, _, _, _ = render_decision2(
+    tokens, _, _, _, _ = render_decision2(
         CharacterTokenizer(),
         "x" * 1000,
         "team",
@@ -284,7 +286,7 @@ def test_pplx_prompt_uses_checkpoint_codes_and_calibration_layout():
     )
     assert labels == ["true", "false"]
     assert selected == [1, 0]
-    tokens = render_pplx(
+    tokens, _ = render_pplx(
         CharacterTokenizer(),
         request.state,
         suffix,
@@ -295,7 +297,7 @@ def test_pplx_prompt_uses_checkpoint_codes_and_calibration_layout():
     assert SYSTEM in text
     assert "Options:\nA: No / false\nB: Yes / true" in text
     assert text.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
-    empty = render_pplx(
+    empty, _ = render_pplx(
         CharacterTokenizer(),
         "",
         suffix,
@@ -315,7 +317,7 @@ def test_pplx_prompt_uses_checkpoint_codes_and_calibration_layout():
 def test_jev_prompt_and_family_constraints():
     request = _request()
     codes = tuple(chr(ord("A") + index) for index in range(26))
-    tokens, labels = render_jev(
+    tokens, labels, _ = render_jev(
         CharacterTokenizer(),
         request.state,
         "team",
@@ -329,7 +331,7 @@ def test_jev_prompt_and_family_constraints():
     assert text.startswith('[kind] choice\n[state] {"ticket": "refund"}')
     assert "A) sales\nB) billing: Payments" in text
     assert text.endswith("[decision]:")
-    empty, _ = render_jev(
+    empty, _, _ = render_jev(
         CharacterTokenizer(),
         "",
         "team",

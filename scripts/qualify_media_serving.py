@@ -23,6 +23,7 @@ import tempfile
 
 SCHEMA = "mlx2.media-serving-qualification.v1"
 SOURCE_REVISION = "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5"
+FAMILY = "smolvlm"  # mlx-vlm contract family == report model_type
 LOCK = Path("/Users/Shared/mlxuag/gpu.lock")
 SETUP = {
     "qualification_mode": True,
@@ -48,6 +49,22 @@ MAX_ABS_TOLERANCE = 1e-4
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def source_contract(adapter) -> dict:
+    """The adapter's bound mlx-vlm dependency-content identity, or fail closed.
+
+    ``bind_backend`` verified the executed source closure against the reviewed
+    contract for ``SOURCE_REVISION`` and published that identity as
+    ``adapter.mlx_vlm_runtime``; the installed-build provenance
+    (``adapter.mlx_vlm_build``) is diagnostic and is not a binding.
+    """
+    from mlx2.media_qualification import source_contract_identity
+
+    runtime = getattr(adapter, "mlx_vlm_runtime", None)
+    if not source_contract_identity(runtime, SOURCE_REVISION, family=FAMILY):
+        raise AssertionError("source mlx-vlm dependency contract drift")
+    return runtime
 
 
 def fixture(kind: str, *, changed_pixels: bool = False) -> dict:
@@ -167,8 +184,7 @@ def parity_arm(adapter, prepared: dict) -> dict:
     import mlx.core as mx
     from mlx_vlm.models.cache import KVCache as SourceKVCache
 
-    if adapter.mlx_vlm_runtime.get("revision") != SOURCE_REVISION:
-        raise AssertionError("source mlx-vlm revision drift")
+    contract = source_contract(adapter)
     source_model = adapter.model._model
     source_cache = [SourceKVCache() for _ in source_model.language_model.layers]
     adapter_cache = adapter.model.make_cache()
@@ -193,7 +209,8 @@ def parity_arm(adapter, prepared: dict) -> dict:
         next_token = row["source_argmax"]
     return {"prefill": prefill, "prefill_max_abs": prefill["max_abs"],
             "prefill_argmax_match": prefill["argmax_match"], "decode": decode,
-            "source_revision": adapter.mlx_vlm_runtime["revision"]}
+            "source_revision": contract["reference_revision"],
+            "source_sha256": contract["source_sha256"]}
 
 
 def text_parity_arm(adapter, prompt: str, *, max_tokens: int = TEXT_TOKENS,
@@ -208,8 +225,7 @@ def text_parity_arm(adapter, prompt: str, *, max_tokens: int = TEXT_TOKENS,
     import mlx.core as mx
     from mlx_vlm.models.cache import KVCache as SourceKVCache
 
-    if adapter.mlx_vlm_runtime.get("revision") != SOURCE_REVISION:
-        raise AssertionError("source mlx-vlm revision drift")
+    contract = source_contract(adapter)
     request_body = {"messages": [{"role": "user", "content": prompt}]}
     tokens = list(adapter.prompt_tokens(request_body))
     if len(tokens) <= 1:
@@ -256,7 +272,8 @@ def text_parity_arm(adapter, prompt: str, *, max_tokens: int = TEXT_TOKENS,
         "stop_token_ids": stop_ids,
         "prefill": prefill,
         "decode": decode,
-        "source_revision": adapter.mlx_vlm_runtime["revision"],
+        "source_revision": contract["reference_revision"],
+            "source_sha256": contract["source_sha256"],
         "sampling": {"temperature": 0, "repetition_penalty": 1.0,
                      "presence_penalty": 0.0, "frequency_penalty": 0.0},
         "max_tokens": max_tokens,
@@ -444,7 +461,7 @@ def run(model_path: str) -> dict:
     result = {
         "schema": SCHEMA,
         "family": "smolvlm2",
-        "model_type": "smolvlm",
+        "model_type": FAMILY,
         "qualification_harness": {
             "name": "scripts/qualify_media_serving.py",
             "sha256": sha256(Path(__file__).read_bytes()),
@@ -494,7 +511,7 @@ def main(argv=None):
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         result = {"schema": SCHEMA, "family": "smolvlm2",
-                  "model_type": "smolvlm", "passed": False}
+                  "model_type": FAMILY, "passed": False}
         try:
             result = run(str(args.model_path))
         except Exception as exc:

@@ -11,6 +11,8 @@ import hashlib
 import json
 import math
 
+from .media_qualification import arm_source_bound
+
 
 CHECKS = frozenset({
     "multimodal_image", "multimodal_video", "image_parity", "video_parity",
@@ -89,6 +91,7 @@ def _parity(value, fixture):
     decode = value.get("decode")
     rope = value.get("mrope")
     if (value.get("source_revision") != SOURCE_REVISION
+            or not _hex(value.get("source_sha256"))
             or not _logit(value.get("prefill"), prompt=prompt)
             or value.get("prefill_max_abs") != value["prefill"]["max_abs"]
             or value.get("prefill_argmax_match") is not True
@@ -189,8 +192,8 @@ def evaluate_qwen25_media_report(report):
         aligned = _fixture(fixture, kind)
         parity = aligned and _parity(arm.get("parity"), fixture)
         replay, apcv2 = _serving(arm.get("serving"), fixture) if aligned else (False, False)
-        runtime = arm.get("mlx_vlm_runtime")
-        source = isinstance(runtime, dict) and runtime.get("revision") == SOURCE_REVISION
+        source = arm_source_bound(arm, settings=report.get("settings"),
+                                  family="qwen2_5_vl", revision=SOURCE_REVISION)
         binding = arm.get("binding") == {key: report.get(key) for key in (
             "runtime", "artifact", "settings",
         )}

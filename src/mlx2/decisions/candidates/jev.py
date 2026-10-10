@@ -20,6 +20,7 @@ from .base import (
     inspect_index,
     load_qwen_backbone,
     read_object,
+    usage,
 )
 
 SOURCE_REVISION = "681af1cc55bea1acd1d4d2b5ce1f530ce8e232d1"
@@ -156,14 +157,16 @@ def render_prompt(
     text = prefix + state_text + suffix
     tokens = list(tokenizer.encode(text, add_special_tokens=False))
     if len(tokens) <= max_length:
-        return tokens, labels
+        return tokens, labels, 0
     if not truncate:
         raise DecisionInputTooLong(
             f"JEV request requires {len(tokens)} tokens; maximum is {max_length}"
         )
     fixed = list(tokenizer.encode(prefix + suffix, add_special_tokens=False))
     state_ids = list(tokenizer.encode(state_text, add_special_tokens=False))
-    keep = max(0, max_length - len(fixed) - 8)
+    # Start from the exact budget; the loop below shrinks `keep` when the
+    # re-tokenized join overflows, so no safety margin is needed here.
+    keep = max(0, max_length - len(fixed))
     while True:
         shortened = tokenizer.decode(state_ids[:keep], skip_special_tokens=False)
         tokens = list(
@@ -174,7 +177,7 @@ def render_prompt(
                 raise DecisionInputTooLong(
                     "JEV truncation would remove the entire nonempty state"
                 )
-            return tokens, labels
+            return tokens, labels, max(0, len(state_ids) - keep)
         overflow = len(tokens) - max_length
         if keep == 0:
             raise DecisionInputTooLong("JEV fixed prompt exceeds its context")
@@ -227,8 +230,9 @@ class JevEngine(CandidateEngine):
 
         prepared = []
         token_count = 0
+        dropped = []
         for name, question in request.questions.items():
-            tokens, labels = render_prompt(
+            tokens, labels, cut = render_prompt(
                 self.tokenizer,
                 request.state,
                 name,
@@ -240,6 +244,7 @@ class JevEngine(CandidateEngine):
             token_count = add_request_tokens(
                 token_count, tokens, max_context=self.artifact["max_context"]
             )
+            dropped.append(cut)
             kind = question["type"]
             start, end = self.settings["ranges"][kind]
             if kind == "choice":
@@ -252,7 +257,7 @@ class JevEngine(CandidateEngine):
             ]
             prepared.append((name, question, tokens, labels, token_ids, bias, kind))
         rows = []
-        self._execution_started = True
+        self._begin_execution()
         for name, question, tokens, labels, token_ids, bias, kind in prepared:
             hidden = self.model.model(mx.array([tokens]))[0, -1]
             logits = self.model.logits(hidden)[mx.array(token_ids)].astype(mx.float32)
@@ -263,6 +268,9 @@ class JevEngine(CandidateEngine):
             rows.append((name, question, labels, probabilities.tolist()))
         return {
             "model": self.model_name,
-            "answers": format_answers(rows),
-            "usage": {"input_tokens": token_count, "output_tokens": 0},
+            # JEV scores the trained 0..5 scale; _options never renders the
+            # six descriptions, so the legend is the caller's text, not what
+            # the model saw.
+            "answers": format_answers(rows, legend_source="caller"),
+            "usage": usage(token_count, dropped),
         }

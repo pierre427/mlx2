@@ -110,13 +110,23 @@ def artifact_identity(engine) -> dict[str, Any]:
 
 
 def serving_settings(engine, *, max_connections: int, max_request_bytes: int) -> dict:
-    return {
+    from ..runtime.env_switches import serving_env_switches
+
+    settings = {
         "served_model_name": engine.model_name,
         "capabilities": list(engine.capabilities),
         "max_connections": int(max_connections),
         "max_request_bytes": int(max_request_bytes),
         "route": "decision",
     }
+    # Behaviour-changing MLX2_* switches the Qwen profile does not pin, exactly
+    # as main serving records them (serving.py): MLX2_FUSED_SDPA_MIN_L selects
+    # the d256 prefill SDPA kernel in the decision-prompt length regime.  Absent
+    # switches are not recorded, so receipts taken without any stay valid.
+    process_env = serving_env_switches()
+    if process_env:
+        settings["process_env"] = process_env
+    return settings
 
 
 def qualification_basis(engine, settings: dict) -> dict[str, Any]:

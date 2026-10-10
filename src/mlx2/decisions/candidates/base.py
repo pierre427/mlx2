@@ -16,7 +16,7 @@ from ...adapters.artifact_paths import (
     shard_within_artifact,
 )
 from ...batch_metrics import HttpRuntimeMetrics
-from ..metrics import DecisionRuntimeMetrics, render_decision_metrics
+from ..metrics import DecisionRuntimeMetrics, new_counters, render_decision_metrics
 from ..schema import (
     DecisionExecutionFailure,
     DecisionInputTooLong,
@@ -44,6 +44,17 @@ def add_request_tokens(total: int, tokens, *, max_context: int) -> int:
             f"candidate request requires {total} aggregate tokens; maximum is {maximum}"
         )
     return total
+
+
+def usage(input_tokens: int, dropped: Iterable[int]) -> dict[str, Any]:
+    """The response usage block; ``dropped`` is the per-question state cut."""
+    worst = max(dropped, default=0)
+    return {
+        "input_tokens": int(input_tokens),
+        "output_tokens": 0,
+        "truncated": worst > 0,
+        "state_tokens_dropped": int(worst),
+    }
 
 
 def read_object(path: Path) -> dict[str, Any]:
@@ -202,8 +213,18 @@ def load_qwen_backbone(
 
 def format_answers(
     rows: Iterable[tuple[str, Mapping[str, Any], list[str], list[float]]],
+    *,
+    legend_source: str = "prompt",
 ) -> dict[str, Any]:
-    """Map calibrated family probabilities onto mlx2's stable response shape."""
+    """Map calibrated family probabilities onto mlx2's stable response shape.
+
+    ``legend_source`` says where a score question's level descriptions went:
+    ``"prompt"`` when the family renders them as options, ``"caller"`` when
+    the family scores a fixed trained scale and the legend only echoes the
+    request (JEV).
+    """
+    if legend_source not in {"prompt", "caller"}:
+        raise ValueError(f"unknown legend_source {legend_source!r}")
     answers = {}
     for name, question, labels, probabilities in rows:
         if len(labels) != len(probabilities):
@@ -237,6 +258,7 @@ def format_answers(
         }
         if kind == "score":
             answer["legend"] = dict(zip(labels, question["criteria"]))
+            answer["legend_source"] = legend_source
         answers[name] = answer
     return answers
 
@@ -262,14 +284,12 @@ class CandidateEngine:
         }
         self.http_metrics = HttpRuntimeMetrics()
         self.decision_metrics = DecisionRuntimeMetrics()
-        self._counts = {
-            "requests": 0,
-            "failures": 0,
-            "refusals": 0,
-            "input_tokens": 0,
-        }
+        self._counts = new_counters()
         loading_started = self.decision_metrics.loading_started()
         self._load()
+        # Strings the bound tokenizer folds into control ids; the request
+        # contract refuses them (decisions.tokenizer.reserved_token_strings).
+        self.reserved_tokens = frozenset(self.pretokenizer_receipt["reserved_tokens"])
         self.decision_metrics.loaded(loading_started)
 
     @staticmethod
@@ -311,6 +331,16 @@ class CandidateEngine:
                     started_at, input_tokens=input_tokens
                 )
 
+    def _begin_execution(self) -> None:
+        """Mark the model forward as started: the route is observed used now.
+
+        Counted here rather than at completion so a status read during the
+        first in-flight request, or after a failure, agrees with the receipt.
+        """
+        self._execution_started = True
+        with self._counts_lock:
+            self._counts["executions"] += 1
+
     def record_refusal(self) -> None:
         with self._counts_lock:
             self._counts["refusals"] += 1
@@ -348,7 +378,7 @@ class CandidateEngine:
             "model": self.model_name,
             "decision_family": self.family,
             "qualification": self._qualification["qualification"],
-            "route": self.route_receipt(observed_used=counters["requests"] > 0),
+            "route": self.route_receipt(observed_used=counters["executions"] > 0),
             "tokenizer_integrity": self.pretokenizer_receipt,
             "counters": counters,
         }

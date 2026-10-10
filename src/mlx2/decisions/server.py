@@ -23,6 +23,26 @@ def _reject_json_constant(value):
     raise ValueError(f"non-finite JSON number {value!r} is not accepted")
 
 
+class DuplicateKeyError(ValueError):
+    """A request object repeats a key; every artifact reader rejects this too."""
+
+
+def _unique_pairs(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise DuplicateKeyError(f"duplicate object key {key!r} in request body")
+        value[key] = item
+    return value
+
+
+def decode_request_body(raw: bytes):
+    """Parse one request body; duplicate keys and non-finite numbers raise."""
+    return json.loads(
+        raw, parse_constant=_reject_json_constant, object_pairs_hook=_unique_pairs
+    )
+
+
 class _HeaderPhaseReader:
     """Bound the whole request-line/header phase, not each socket receive."""
 
@@ -115,7 +135,11 @@ class DecisionApplication:
                 "route not found", code="not_found", error_type="invalid_request_error"
             )
         try:
-            request = normalize_request(payload, default_model=self.engine.model_name)
+            request = normalize_request(
+                payload,
+                default_model=self.engine.model_name,
+                reserved_tokens=self.engine.reserved_tokens,
+            )
         except DecisionRequestError as error:
             self.engine.record_refusal()
             return error.status, self.error(str(error), code=error.code)
@@ -327,12 +351,21 @@ def make_handler(
                     ),
                 )
                 return
-            try:
-                length = int(lengths[0])
-            except ValueError:
-                self._json(400, application.error("Content-Length must be an integer"))
+            # int() also accepts a sign, underscores, surrounding spaces and
+            # non-ASCII digits, and refuses thousands of digits with an
+            # exception; HTTP defines one ASCII decimal byte count, and a
+            # proxy may frame the same bytes differently (main server:
+            # Handler._content_length).  Twenty digits already exceed any
+            # max_request_bytes this service accepts.
+            value = lengths[0].strip(" \t")
+            if not (value.isascii() and value.isdigit() and len(value) <= 20):
+                self._json(
+                    400,
+                    application.error("Content-Length must be one decimal byte count"),
+                )
                 return
-            if length < 0 or length > max_request_bytes:
+            length = int(value)
+            if length > max_request_bytes:
                 self._json(
                     413,
                     application.error(
@@ -357,7 +390,7 @@ def make_handler(
                     remaining -= len(chunk)
                 raw = b"".join(chunks)
                 self.connection.settimeout(30)
-                payload = json.loads(raw, parse_constant=_reject_json_constant)
+                payload = decode_request_body(raw)
             except TimeoutError:
                 self.connection.settimeout(30)
                 self._json(
@@ -367,6 +400,9 @@ def make_handler(
                         code="request_timeout",
                     ),
                 )
+                return
+            except DuplicateKeyError as error:
+                self._json(400, application.error(str(error)))
                 return
             except (
                 OSError,

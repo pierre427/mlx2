@@ -4,8 +4,13 @@ import hashlib
 import math
 import json
 import copy
+import os
+import shutil
 from types import SimpleNamespace
 from pathlib import Path
+
+import platform
+import sys
 
 import pytest
 
@@ -35,6 +40,7 @@ def test_preflight_receipt_is_bound_to_git_runtime_tests_and_harness(tmp_path):
     identity = {
         "git": {"revision": "abc"}, "runtime": {"source_sha256": "runtime"},
         "qualification_harness": {"sha256": "harness"}, "test_source_sha256": "tests",
+        "interpreter": qualify.interpreter_identity(),
     }
     path = tmp_path / "preflight.json"
     receipt = qualify.write_preflight_receipt(
@@ -91,6 +97,22 @@ def test_preflight_identity_binds_pytest_configuration():
     ).hexdigest()
 
 
+def test_preflight_identity_test_source_digest_covers_the_whole_tree(monkeypatch):
+    # Review round 1: the cross-host (v3) receipt binds the identity only, and
+    # its test_source_sha256 covered tests/**/*.py alone, so a scripts fixture
+    # or provenance change did not move it.  The key keeps its name for the
+    # v3 schema; its value is the digest of the whole preflight tree.
+    tree = qualify.preflight_tree()
+    moved = {**tree, "scripts/fixtures/qwen4_ple_adaptive_no_warm_policy.json": "0" * 64}
+    seen = []
+    for current in (tree, moved):
+        monkeypatch.setattr(qualify, "preflight_tree", lambda root=None, current=current: current)
+        identity = qualify.preflight_identity(runtime_identity_fn=lambda: {"source_sha256": "t"})
+        assert identity["test_source_sha256"] == qualify.preflight_tree_sha256(current)
+        seen.append(identity["test_source_sha256"])
+    assert seen[0] != seen[1]
+
+
 def test_unimplemented_generic_http_gates_are_machine_visible():
     coverage = qualify.QUALIFICATION_COVERAGE
     assert coverage["strict_json_schema"] is True
@@ -102,16 +124,29 @@ def test_unimplemented_generic_http_gates_are_machine_visible():
     assert coverage["progress_events"] is False
 
 
-@pytest.mark.parametrize("mutation", ["failed", "identity", "active_runtime"])
+@pytest.mark.parametrize("mutation", ["failed", "identity", "active_runtime",
+                                      "returncode_false", "guard_returncode_false",
+                                      "empty_executable", "guard_empty_executable"])
 def test_preflight_receipt_rejects_failed_or_mismatched_evidence(tmp_path, mutation):
     identity = {
         "git": {"revision": "abc"}, "runtime": {"source_sha256": "runtime"},
         "qualification_harness": {"sha256": "harness"}, "test_source_sha256": "tests",
+        "interpreter": qualify.interpreter_identity(),
     }
+    ordinary, guarded = qualify.preflight_test_commands()
     receipt = {"schema": qualify.PREFLIGHT_SCHEMA, "passed": True, "identity": identity,
-               "test_command": ["python", "-m", "pytest"]}
+               "test_command": ordinary, "guard_test_command": guarded,
+               "returncode": 0, "guard_returncode": 0}
     if mutation == "failed":
         receipt["passed"] = False
+    elif mutation == "returncode_false":
+        receipt["returncode"] = False  # review round 3: JSON false == 0 in Python
+    elif mutation == "guard_returncode_false":
+        receipt["guard_returncode"] = False
+    elif mutation == "empty_executable":
+        receipt["test_command"] = ["", *ordinary[1:]]  # review round 4
+    elif mutation == "guard_empty_executable":
+        receipt["guard_test_command"] = ["", *guarded[1:]]
     path = tmp_path / "preflight.json"
     path.write_text(json.dumps(receipt))
     current = identity if mutation != "identity" else {**identity, "test_source_sha256": "changed"}
@@ -136,6 +171,7 @@ def test_preflight_receipt_must_have_run_the_full_unit_suite(tmp_path, pytest_ar
     identity = {
         "git": {"revision": "abc"}, "runtime": {"source_sha256": "runtime"},
         "qualification_harness": {"sha256": "harness"}, "test_source_sha256": "tests",
+        "interpreter": qualify.interpreter_identity(),
     }
     # A collect-only or scoped run exits 0 and writes passed=True: the
     # receipt looks exactly like a full-suite pass unless its command is read.
@@ -163,6 +199,493 @@ def test_preflight_receipt_must_have_run_the_full_unit_suite(tmp_path, pytest_ar
     ordinary, guarded = qualify.preflight_test_commands()
     assert ran[-2:] == [ordinary, guarded]
     assert evidence["guard_test_command"] == guarded
+
+
+# --------------------------------------------------------------------------
+# Scoped preflight deltas (2026-10-09): a tests/scripts change reruns only the
+# test modules it can reach; the binding (src/, mlx build, harness, pytest
+# configuration) still demands the full suite.
+# --------------------------------------------------------------------------
+
+_BOUND = {
+    "git": {"revision": "abc"}, "runtime": {"source_sha256": "runtime"},
+    "qualification_harness": {"sha256": "harness"}, "test_source_sha256": "tests",
+    "pytest_config_sha256": "config", "interpreter": qualify.interpreter_identity(),
+}
+
+
+def _passing_run(ran=None):
+    def run(command, **kwargs):
+        if ran is not None:
+            ran.append(command)
+        return SimpleNamespace(returncode=0, stdout="passed", stderr="")
+    return run
+
+
+def _full_base(tmp_path, tree):
+    path = tmp_path / "preflight.json"
+    qualify.write_preflight_receipt(
+        path, run=_passing_run(), identity_fn=lambda: _BOUND, tree_fn=lambda: tree
+    )
+    return path
+
+
+def _edited(tree, name):
+    return {**tree, name: "0" * 64}
+
+
+def test_full_preflight_survives_a_commit_that_changes_no_bound_file(tmp_path):
+    tree = qualify.preflight_tree()
+    base = _full_base(tmp_path, tree)
+    moved = {**_BOUND, "git": {"revision": "def"}}  # docs-only commit
+    evidence = qualify.validate_preflight_receipt(
+        base, _BOUND["runtime"], identity_fn=lambda: moved, tree_fn=lambda: tree
+    )
+    assert evidence["passed"] and "delta" not in evidence
+
+
+def test_full_preflight_refuses_a_changed_test_tree_and_names_the_delta(tmp_path):
+    tree = qualify.preflight_tree()
+    base = _full_base(tmp_path, tree)
+    with pytest.raises(AssertionError, match="--preflight-delta"):
+        qualify.validate_preflight_receipt(
+            base, _BOUND["runtime"], identity_fn=lambda: _BOUND,
+            tree_fn=lambda: _edited(tree, "scripts/sdk_smoke.py"),
+        )
+
+
+def test_preflight_delta_reruns_only_impacted_modules_and_validates(tmp_path):
+    tree = qualify.preflight_tree()
+    base = _full_base(tmp_path, tree)
+    current = _edited(tree, "scripts/sdk_smoke.py")
+    ran = []
+    delta_path = tmp_path / "delta.json"
+    delta = qualify.write_preflight_delta(
+        delta_path, base, run=_passing_run(ran), identity_fn=lambda: _BOUND,
+        tree_fn=lambda: current,
+    )
+    assert delta["changes"]["modified"] == ["scripts/sdk_smoke.py"]
+    assert "tests/test_sdk_smoke.py" in delta["impacted"]
+    # The closure over-selects (the harness names the script, and many tests
+    # name the harness) but stays well short of the suite.
+    suite = [p for p in tree if qualify._is_test_module(p)]
+    assert len(suite) > 100 and len(delta["impacted"]) < len(suite) // 4
+    # The closure reaches import-guard modules too (through tests/mlx_blocker.py),
+    # which run under the guard command in their own interpreters.
+    guards = set(qualify.PREFLIGHT_IMPORT_GUARD_MODULES)
+    assert ran == [delta["test_command"], delta["guard_test_command"]]
+    assert ran[0][1:3] == ["-m", "pytest"]
+    assert ran[0][3:] == [m for m in delta["impacted"] if m not in guards]
+    assert set(ran[1]) & guards == set(delta["impacted"]) & guards != set()
+    evidence = qualify.validate_preflight_receipt(
+        delta_path, _BOUND["runtime"], identity_fn=lambda: _BOUND, tree_fn=lambda: current
+    )
+    assert evidence["passed"] and evidence["delta"]["impacted"] == delta["impacted"]
+    # The full-suite commands it stands on are the base's.
+    assert evidence["test_command"] == json.loads(base.read_text())["test_command"]
+
+
+@pytest.mark.parametrize("mutation", ["binding", "conftest"])
+def test_preflight_delta_refuses_what_needs_the_full_suite(tmp_path, mutation):
+    tree = qualify.preflight_tree()
+    base = _full_base(tmp_path, tree)
+    identity, current = _BOUND, _edited(tree, "scripts/sdk_smoke.py")
+    if mutation == "binding":
+        identity = {**_BOUND, "runtime": {"source_sha256": "src-changed"}}
+    else:
+        current = _edited(tree, "tests/conftest.py")
+    with pytest.raises(AssertionError, match="full preflight"):
+        qualify.write_preflight_delta(
+            tmp_path / "delta.json", base, run=_passing_run(),
+            identity_fn=lambda: identity, tree_fn=lambda: current,
+        )
+
+
+@pytest.mark.parametrize("mutation", ["trimmed", "stale", "base_edited", "failed",
+                                      "returncode_missing", "guard_returncode_missing",
+                                      "returncode_false", "guard_returncode_false",
+                                      "executable_not_str"])
+def test_preflight_delta_validation_fails_closed(tmp_path, mutation):
+    tree = qualify.preflight_tree()
+    base = _full_base(tmp_path, tree)
+    current = _edited(tree, "scripts/sdk_smoke.py")
+    delta_path = tmp_path / "delta.json"
+    qualify.write_preflight_delta(
+        delta_path, base, run=_passing_run(), identity_fn=lambda: _BOUND,
+        tree_fn=lambda: current,
+    )
+    receipt = json.loads(delta_path.read_text())
+    check_tree = current
+    if mutation == "trimmed":
+        receipt["impacted"] = receipt["impacted"][:1]
+        receipt["test_command"] = receipt["test_command"][:3] + receipt["impacted"]
+    elif mutation == "stale":
+        check_tree = _edited(current, "tests/test_sdk_smoke.py")
+    elif mutation == "base_edited":
+        base.write_text(base.read_text().replace('"passed": true', '"passed": true ', 1))
+    elif mutation == "returncode_missing":
+        # Review round 2: a hand-written delta with the exact commands,
+        # passed: true and no return code carried no evidence the run happened.
+        assert receipt["test_command"]
+        receipt["returncode"] = None
+    elif mutation == "guard_returncode_missing":
+        assert receipt["guard_test_command"]
+        del receipt["guard_returncode"]
+    elif mutation == "returncode_false":
+        receipt["returncode"] = False  # JSON false == 0 in Python
+    elif mutation == "guard_returncode_false":
+        receipt["guard_returncode"] = False
+    elif mutation == "executable_not_str":
+        receipt["test_command"][0] = 0
+    else:
+        receipt["passed"] = False
+    delta_path.write_text(json.dumps(receipt))
+    with pytest.raises(AssertionError, match="preflight delta"):
+        qualify.validate_preflight_receipt(
+            delta_path, _BOUND["runtime"], identity_fn=lambda: _BOUND,
+            tree_fn=lambda: check_tree,
+        )
+
+
+@pytest.mark.parametrize("code", [None, False])
+def test_preflight_receipt_writer_fails_a_lane_without_a_zero_code(tmp_path, code):
+    # Review round 4: the full-receipt writer compared with ==, so a lane
+    # returning False (or None == None) was stamped passed: True.
+    def run(command, **kwargs):
+        return SimpleNamespace(returncode=code, stdout="", stderr="")
+
+    path = tmp_path / "preflight.json"
+    with pytest.raises(AssertionError, match="import guards failed"):
+        qualify.write_preflight_receipt(path, run=run, identity_fn=lambda: _BOUND)
+    assert json.loads(path.read_text())["passed"] is False
+
+
+@pytest.mark.parametrize("code", [None, False])
+def test_preflight_delta_writer_fails_a_commanded_lane_without_a_zero_code(tmp_path, code):
+    # Review round 3: the writer stamped passed: True for a lane whose run
+    # returned no code (or JSON false), which the validator then refused.
+    tree = qualify.preflight_tree()
+    base = _full_base(tmp_path, tree)
+    current = _edited(tree, "scripts/sdk_smoke.py")
+
+    def run(command, **kwargs):
+        return SimpleNamespace(returncode=code, stdout="", stderr="")
+
+    delta_path = tmp_path / "delta.json"
+    with pytest.raises(AssertionError, match="impacted tests failed"):
+        qualify.write_preflight_delta(
+            delta_path, base, run=run, identity_fn=lambda: _BOUND, tree_fn=lambda: current
+        )
+    assert json.loads(delta_path.read_text())["passed"] is False
+
+
+def test_impacted_tests_select_by_name_and_include_changed_tests(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "scripts").mkdir()
+    files = {
+        "tests/test_a.py": "spec = 'scripts/tool_x.py'",
+        "tests/test_b.py": "from helper_y import thing",
+        "tests/test_c.py": "data = open('fixture_z.json')",
+        "tests/test_d.py": "unrelated = 'tool_xy'",
+        "tests/helper_y.py": "thing = 1",
+        "tests/fixture_z.json": "{}",
+        "scripts/tool_x.py": "pass",
+    }
+    for name, text in files.items():
+        (tmp_path / name).write_text(text)
+    tree = {name: "h" for name in files}
+
+    def impacted(*changed, kind="modified"):
+        changes = {"added": [], "modified": [], "removed": []}
+        changes[kind] = list(changed)
+        return qualify.preflight_impacted_tests(changes, tree, root=tmp_path)
+
+    assert impacted("scripts/tool_x.py") == ["tests/test_a.py"]  # not tool_xy
+    assert impacted("tests/helper_y.py") == ["tests/test_b.py"]
+    assert impacted("tests/fixture_z.json") == ["tests/test_c.py"]
+    assert impacted("tests/test_d.py") == ["tests/test_d.py"]
+    assert impacted("scripts/tool_x.py", kind="removed") == ["tests/test_a.py"]
+
+
+def _tmp_tree(tmp_path, files):
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    return {name: "h" for name in files}
+
+
+def _impacted_in(tmp_path, tree, *changed, kind="modified"):
+    changes = {"added": [], "modified": [], "removed": []}
+    changes[kind] = list(changed)
+    return qualify.preflight_impacted_tests(changes, tree, root=tmp_path)
+
+
+def test_impacted_selection_is_the_transitive_reverse_closure(tmp_path):
+    # Sweep 2026-10-09 (delta-underselect): the scan used to be one hop and
+    # left changed test modules out of the consumer scan, so the 30 modules
+    # that import from tests/test_batched_mtp.py were not rerun when it
+    # changed, a script imported by another script selected nothing, and a
+    # helper->helper->test chain selected nothing.
+    tree = _tmp_tree(tmp_path, {
+        "tests/test_shared.py": "def tiny():\n    return 1\n",
+        "tests/test_user.py": "from test_shared import tiny\n",
+        "tests/test_user_user.py": "from test_user import tiny\n",
+        "tests/helper_a.py": "A = 1\n",
+        "tests/helper_b.py": "from helper_a import A\n",
+        "tests/test_c.py": "from helper_b import A\n",
+        "scripts/tool.py": "import inner\n",
+        "scripts/inner.py": "pass\n",
+        "tests/route_helper.py": "spec = 'scripts/tool.py'\n",
+        "tests/test_route.py": "from route_helper import spec\n",
+        "tests/test_unrelated.py": "x = 1\n",
+    })
+    # A changed (or re-added) test module reruns itself and its importers.
+    for kind in ("modified", "added"):
+        assert _impacted_in(tmp_path, tree, "tests/test_shared.py", kind=kind) == [
+            "tests/test_shared.py", "tests/test_user.py", "tests/test_user_user.py",
+        ]
+    # helper -> helper -> test, and script -> script -> helper -> test.
+    assert _impacted_in(tmp_path, tree, "tests/helper_a.py") == ["tests/test_c.py"]
+    assert _impacted_in(tmp_path, tree, "scripts/inner.py") == ["tests/test_route.py"]
+    # A removed test module that others still import reruns them.
+    removed = {k: v for k, v in tree.items() if k != "tests/test_shared.py"}
+    assert _impacted_in(tmp_path, removed, "tests/test_shared.py", kind="removed") == [
+        "tests/test_user.py", "tests/test_user_user.py",
+    ]
+
+
+def test_impacted_refuses_a_touched_file_no_test_reaches(tmp_path):
+    # A delta over a change nothing names used to run zero tests and pass.
+    tree = _tmp_tree(tmp_path, {
+        "tests/test_a.py": "x = 1\n",
+        "tests/conftest.py": "import mapping\n",
+        "tests/mapping.py": "M = {}\n",
+        "tests/test_uses_conftest.py": "# see conftest\n",
+        "scripts/orphan.py": "pass\n",
+        "scripts/fixtures/orphan.json": "{}\n",
+    })
+    for path in ("scripts/orphan.py", "scripts/fixtures/orphan.json"):
+        for kind in ("modified", "added", "removed"):
+            with pytest.raises(AssertionError, match="full preflight") as info:
+                _impacted_in(tmp_path, tree, path, kind=kind)
+            assert path in str(info.value) and "preflight delta" in str(info.value)
+    # conftest.py is scanned like any helper (a changed one is refused by
+    # the delta writer): the consumers of its stem are selected.
+    assert _impacted_in(tmp_path, tree, "tests/mapping.py") == ["tests/test_uses_conftest.py"]
+    # A removed test module nothing imports reaches nothing: that is exact.
+    gone = {k: v for k, v in tree.items() if k != "tests/test_a.py"}
+    assert _impacted_in(tmp_path, gone, "tests/test_a.py", kind="removed") == []
+
+
+def test_impacted_refuses_a_chain_that_reaches_no_test_module(tmp_path):
+    # Review round 1: a touched helper with a consumer that is itself an
+    # orphan (helper_a <- helper_b <- nothing) has consumers but reaches no
+    # test module; it used to yield an empty, passing delta.
+    tree = _tmp_tree(tmp_path, {
+        "tests/test_a.py": "x = 1\n",
+        "tests/helper_a.py": "A = 1\n",
+        "tests/helper_b.py": "from helper_a import A\n",
+        "tests/helper_c.py": "C = 1\n",
+        "tests/test_c.py": "from helper_c import C\n",
+    })
+    with pytest.raises(AssertionError, match="helper_a.*full preflight"):
+        _impacted_in(tmp_path, tree, "tests/helper_a.py")
+    # Even beside a change that does reach a test.
+    with pytest.raises(AssertionError, match="helper_a.*full preflight"):
+        _impacted_in(tmp_path, tree, "tests/helper_a.py", "tests/helper_c.py")
+    assert _impacted_in(tmp_path, tree, "tests/helper_c.py") == ["tests/test_c.py"]
+    # A changed conftest.py reaches every test: refused by the shared
+    # selector, so the validator refuses it as well as the writer.
+    with pytest.raises(AssertionError, match="conftest.py.*full preflight"):
+        _impacted_in(tmp_path, {**tree, "tests/conftest.py": "h"}, "tests/conftest.py")
+
+
+def test_impacted_selects_directory_walking_consumers(tmp_path):
+    # Review round 3: a module that walks a bound directory (glob/rglob/
+    # iterdir/walk/listdir/scandir on scripts/, tests/, ...) reads every file
+    # under it without naming one, so it is a consumer of each touched file
+    # there.  tests/test_no_hardcoded_home_paths.py rglobs scripts/**/*.py.
+    # The walk calls are spliced so that this module's own text does not
+    # read as a walker of scripts/ or provenance/ on the real tree.
+    def walker_text(top, call, pattern=None):
+        arg = "" if pattern is None else repr(pattern)
+        return f"for p in (ROOT / {top!r})." + call + "(" + arg + "):\n    pass\n"
+
+    tree = _tmp_tree(tmp_path, {
+        "scripts/tool.py": "pass\n",
+        "scripts/fixtures/f.json": "{}\n",
+        "tests/test_tool.py": "spec = 'scripts/tool.py'\n",
+        "tests/test_meta.py": walker_text("scripts", "rg" "lob", "*.py"),
+        "tests/test_prov_walk.py": walker_text("provenance", "gl" "ob", "*.json"),
+        "tests/test_any_walk.py": walker_text("scripts", "iter" "dir"),
+        "tests/test_names_dir_only.py": "name = 'scripts'\n",
+        "provenance/p.json": "{}\n",
+    })
+    assert _impacted_in(tmp_path, tree, "scripts/tool.py") == [
+        "tests/test_any_walk.py", "tests/test_meta.py", "tests/test_tool.py",
+    ]
+    # A walked directory places an otherwise unnamed file (no refusal), but
+    # a literal glob pattern limits the walker to the names it matches.
+    assert _impacted_in(tmp_path, tree, "provenance/p.json") == ["tests/test_prov_walk.py"]
+    assert _impacted_in(tmp_path, tree, "scripts/fixtures/f.json") == ["tests/test_any_walk.py"]
+    real = qualify.preflight_tree()
+    changes = {"added": [], "modified": ["scripts/agent_client_conformance.py"], "removed": []}
+    impacted = qualify.preflight_impacted_tests(changes, real)
+    assert {"tests/test_no_hardcoded_home_paths.py",
+            "tests/test_server_subprocess_pythonpath.py"} <= set(impacted)
+
+
+def test_delta_validator_refuses_a_changed_conftest(tmp_path):
+    # Review round 1: the writer refused a conftest.py change but the
+    # validator recomputed the lexical closure and accepted a hand-written
+    # (or foreign-harness) delta that reran only that closure.
+    tree = qualify.preflight_tree()
+    base = _full_base(tmp_path, tree)
+    current = _edited(tree, "tests/conftest.py")
+    changes = qualify.preflight_tree_changes(tree, current)
+    try:
+        impacted = qualify.preflight_impacted_tests(changes, current)
+    except AssertionError:
+        impacted = []  # the selector already refuses; the receipt must still be refused
+    ordinary, guarded = qualify._delta_test_commands(impacted)
+    receipt = {
+        "schema": qualify.PREFLIGHT_DELTA_SCHEMA, "passed": True, "identity": _BOUND,
+        "base": {"path": str(base), "sha256": hashlib.sha256(base.read_bytes()).hexdigest()},
+        "tree": current, "changes": changes, "impacted": impacted,
+        "test_command": ordinary, "returncode": 0 if ordinary else None,
+        "guard_test_command": guarded, "guard_returncode": 0 if guarded else None,
+    }
+    delta_path = tmp_path / "delta.json"
+    delta_path.write_text(json.dumps(receipt))
+    with pytest.raises(AssertionError, match="conftest.py"):
+        qualify.validate_preflight_receipt(
+            delta_path, _BOUND["runtime"], identity_fn=lambda: _BOUND, tree_fn=lambda: current
+        )
+
+
+def test_write_preflight_delta_refuses_a_change_no_test_reaches(tmp_path):
+    tree = qualify.preflight_tree()
+    base = _full_base(tmp_path, tree)
+    # Built at run time so that this module's own text does not name it.
+    orphan = "scripts/fixtures/" + "_".join(["nothing", "names", "this"]) + ".json"
+    current = _edited(tree, orphan)
+    with pytest.raises(AssertionError, match="full preflight"):
+        qualify.write_preflight_delta(
+            tmp_path / "delta.json", base, run=_passing_run(),
+            identity_fn=lambda: _BOUND, tree_fn=lambda: current,
+        )
+
+
+def test_real_tree_delta_reruns_importers_of_a_changed_test_module(tmp_path):
+    changed = "tests/test_batched_mtp.py"
+    importers = sorted(
+        str(p.relative_to(ROOT)) for p in (ROOT / "tests").glob("test_*.py")
+        if "from test_batched_mtp import" in p.read_text(errors="replace")
+    )
+    assert "tests/test_qwen4_external_taps_cpu.py" in importers
+    tree = qualify.preflight_tree()
+    base = _full_base(tmp_path, tree)
+    current = _edited(tree, changed)
+    ran = []
+    delta_path = tmp_path / "delta.json"
+    delta = qualify.write_preflight_delta(
+        delta_path, base, run=_passing_run(ran), identity_fn=lambda: _BOUND,
+        tree_fn=lambda: current,
+    )
+    assert delta["changes"]["modified"] == [changed]
+    assert not set(importers) - set(delta["impacted"])
+    assert not set(importers) - set(ran[0])
+    evidence = qualify.validate_preflight_receipt(
+        delta_path, _BOUND["runtime"], identity_fn=lambda: _BOUND, tree_fn=lambda: current
+    )
+    assert evidence["passed"] and evidence["delta"]["impacted"] == delta["impacted"]
+    # A receipt written by the one-hop selector (the changed module alone)
+    # is refused: it did not rerun the importers.
+    narrow = json.loads(delta_path.read_text())
+    narrow["impacted"] = [changed]
+    narrow["test_command"] = narrow["test_command"][:3] + [changed]
+    delta_path.write_text(json.dumps(narrow))
+    with pytest.raises(AssertionError, match="every impacted test module"):
+        qualify.validate_preflight_receipt(
+            delta_path, _BOUND["runtime"], identity_fn=lambda: _BOUND, tree_fn=lambda: current
+        )
+
+
+def test_preflight_tree_binds_script_fixtures_and_provenance(tmp_path):
+    # Sweep 2026-10-09 (receipt-binding-omits-inputs): tests assert on
+    # scripts/fixtures/*.json (through the PLE smoke script) and read
+    # provenance/*.json, but the tree bound only tests/** and scripts/**/*.py.
+    files = {
+        "tests/test_a.py": "x = 1\n",
+        "scripts/a.py": "pass\n",
+        "scripts/fixtures/policy.json": "{}\n",
+        "scripts/research/m5/notes.md": "n\n",
+        "provenance/x.json": "{}\n",
+        "provenance/nested/y.json": "{}\n",
+        "provenance/NOTICE": "n\n",
+        "docs/Q.md": "d\n",
+        "scripts/__pycache__/a.cpython-312.pyc": "",
+        # Review round 1: tests also read native sources, qualification plans,
+        # policies and top-level records, experiment companions and
+        # docs/PROVENANCE.md.  Campaign evidence under qualification/runs/ is
+        # left out by design (a campaign must not invalidate the receipt).
+        "native/paged_kv/arena.cpp": "// c\n",
+        "qualification/plans/p.json": "{}\n",
+        "qualification/policies/q.json": "{}\n",
+        "qualification/top.json": "{}\n",
+        "qualification/decision_reference.py": "pass\n",
+        "qualification/runs/r/receipt.json": "{}\n",
+        "qualification/runs/r/run_campaign.py": "pass\n",
+        "docs/experiments/e.json": "{}\n",
+        "docs/experiments/E.md": "e\n",
+        "docs/PROVENANCE.md": "p\n",
+        # Review round 2: everything under qualification/ except runs/ (a
+        # test round-trips the committed capsule artifact, weights included)
+        # and every provenance file (a qualifier hashes a .NOTICE).
+        "qualification/artifacts/capsule/manifest.json": "{}\n",
+        "qualification/artifacts/capsule/weights.npz": "\x00bin",
+        "qualification/corpora/c.jsonl": "{}\n",
+        "qualification/experiments/x/sample.npz": "\x00bin",
+        "qualification/experiments/x/probe.py": "pass\n",
+        "qualification/history/h.json": "{}\n",
+        "qualification/receipts/r.json": "{}\n",
+        "provenance/tensor-fa-research.NOTICE": "n\n",
+        "provenance/LICENSE.unified-MIT": "l\n",
+    }
+    _tmp_tree(tmp_path, files)
+    tree = qualify.preflight_tree(tmp_path)
+    assert set(tree) == {
+        "tests/test_a.py", "scripts/a.py", "scripts/fixtures/policy.json",
+        "scripts/research/m5/notes.md", "provenance/x.json", "provenance/nested/y.json",
+        "provenance/NOTICE", "provenance/tensor-fa-research.NOTICE",
+        "provenance/LICENSE.unified-MIT",
+        "native/paged_kv/arena.cpp", "qualification/plans/p.json",
+        "qualification/policies/q.json", "qualification/top.json",
+        "qualification/decision_reference.py",
+        "qualification/artifacts/capsule/manifest.json",
+        "qualification/artifacts/capsule/weights.npz", "qualification/corpora/c.jsonl",
+        "qualification/experiments/x/sample.npz", "qualification/experiments/x/probe.py",
+        "qualification/history/h.json", "qualification/receipts/r.json",
+        "docs/experiments/e.json", "docs/experiments/E.md", "docs/PROVENANCE.md",
+    }
+    assert not any(p.startswith("qualification/runs/") for p in tree)
+    (tmp_path / "scripts/fixtures/policy.json").write_text('{"a": 1}\n')
+    assert qualify.preflight_tree_changes(tree, qualify.preflight_tree(tmp_path)) == {
+        "added": [], "modified": ["scripts/fixtures/policy.json"], "removed": [],
+    }
+    real = qualify.preflight_tree()
+    fixture = "scripts/fixtures/qwen4_ple_adaptive_no_warm_policy.json"
+    provenance = "provenance/omlx3958-wide-verify-sdpa.json"
+    assert fixture in real and provenance in real
+    assert "provenance/tensor-fa-research.NOTICE" in real
+    assert any(p.startswith("qualification/artifacts/") and p.endswith("weights.npz") for p in real)
+    assert not any(p.startswith("qualification/runs/") for p in real)
+    # And a change to either reaches the test that asserts on it (the fixture
+    # through the script that loads it).
+    changes = {"added": [], "modified": [fixture, provenance], "removed": []}
+    impacted = qualify.preflight_impacted_tests(changes, real)
+    assert {"tests/test_smoke_qwen4_ple_incremental_composition.py",
+            "tests/test_omlx3958_wide_sdpa.py"} <= set(impacted)
 
 
 def test_preflight_guard_manifest_partitions_the_test_tree():
@@ -206,6 +729,7 @@ def test_preflight_rejects_incomplete_or_failed_partition(tmp_path, mutation):
     identity = {
         "git": {"revision": "abc"}, "runtime": {"source_sha256": "runtime"},
         "qualification_harness": {"sha256": "harness"}, "test_source_sha256": "tests",
+        "interpreter": qualify.interpreter_identity(),
     }
     path = tmp_path / "preflight.json"
     ordinary, guarded = qualify.preflight_test_commands()
@@ -235,6 +759,7 @@ def test_preflight_records_guard_failure_even_when_ordinary_passes(tmp_path):
     identity = {
         "git": {"revision": "abc"}, "runtime": {"source_sha256": "runtime"},
         "qualification_harness": {"sha256": "harness"}, "test_source_sha256": "tests",
+        "interpreter": qualify.interpreter_identity(),
     }
     calls = []
 
@@ -262,10 +787,13 @@ def _cross_host_case(tmp_path):
         "qualification_harness": qualify.qualification_harness_identity(),
         "test_source_sha256": "test-tree",
         "pytest_config_sha256": "config",
+        "interpreter": qualify.interpreter_identity(),
     }
     artifact_node = "tests/test_a.py::test_local_artifact"
     guard_node = "tests/test_b.py::test_import_guard"
-    target_command = ["python", "-m", "pytest", "--noconftest", guard_node]
+    # The source proof's heads are the same interpreter path (both hosts ran
+    # the same venv layout); the caller vouches for it as the source identity.
+    target_command = [sys.executable, "-m", "pytest", "--noconftest", guard_node]
     source = {
         "host_id": "m5",
         "identity": {**copy.deepcopy(identity), "runtime": copy.deepcopy(source_runtime)},
@@ -295,6 +823,7 @@ def _cross_host_case(tmp_path):
         "target_command": list(target_command),
         "artifact_dependent_nodes": {artifact_node},
         "identity_fn": lambda: copy.deepcopy(identity),
+        "source_interpreter": dict(identity["interpreter"]),
     }
     path = tmp_path / "cross-host.json"
     return path, bundle, arguments
@@ -321,6 +850,7 @@ def test_cross_host_preflight_requires_two_exact_proofs(tmp_path):
     "missing_source_node", "duplicate_source_node", "extra_source_node",
     "artifact_skip", "artifact_evidence_missing", "missing_target_node",
     "skipped_target_node", "failed_source", "failed_target", "tampered_digest",
+    "empty_target_executable",
 ])
 def test_cross_host_preflight_fails_closed(tmp_path, mutation):
     path, bundle, arguments = _cross_host_case(tmp_path)
@@ -363,6 +893,11 @@ def test_cross_host_preflight_fails_closed(tmp_path, mutation):
         source["suites"]["ordinary"]["returncode"] = 1
     elif mutation == "failed_target":
         target["returncode"] = 1
+    elif mutation == "empty_target_executable":
+        # Review round 4: the target command and the caller's expectation
+        # agree, but neither names an interpreter.
+        arguments["target_command"] = ["", *list(arguments["target_command"])[1:]]
+        target["command"] = list(arguments["target_command"])
     _write_cross_host(path, bundle)
     if mutation == "tampered_digest":
         bundle["source"]["host_id"] = "changed"
@@ -1026,10 +1561,15 @@ def test_live_media_companion_binds_the_generic_harness_route(tmp_path):
         (ROOT / "docs/experiments/SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json").read_text()
     )
     # The recorded run names the producer revision that ran it; the producer
-    # has since tightened its media-reuse predicate, which invalidates the
-    # receipt until it is re-run.  Re-bind the real traces to the current pin
-    # to exercise the binding (the evaluator still recomputes every check).
-    report["qualification_harness"] = APPROVED_MEDIA_PRODUCERS[report["model_type"]][0]
+    # has since tightened its media-reuse predicate and bound its traces to
+    # the mlx-vlm dependency-content identity, which invalidates the receipt
+    # until it is re-run.  Re-bind the real traces to the current pin and
+    # identity to exercise the binding (the evaluator still recomputes every
+    # check from the recorded traces).
+    from test_qualification import _rebind_to_current_producer
+
+    _rebind_to_current_producer(report)
+    assert report["qualification_harness"] == APPROVED_MEDIA_PRODUCERS[report["model_type"]][0]
     path = tmp_path / "companion.json"
     path.write_text(json.dumps(report))
     status = {key: report[key] for key in ("runtime", "artifact", "settings")}
@@ -1125,3 +1665,192 @@ def test_import_guards_run_one_module_per_interpreter(monkeypatch):
     calls.clear()
     assert qualify.run_import_guards(["tests/a.py"]) == 0
     assert qualify.run_import_guards(["tests/unlisted.py"]) == 2
+
+
+# --------------------------------------------------------------------------
+# Interpreter binding (2026-10-09, integration review item 3): a receipt must
+# prove that this Python ran pytest.  Before the fix the validators discarded
+# the command head, so `true` with pytest's arguments and exit 0 was a pass.
+# --------------------------------------------------------------------------
+
+
+def _true():
+    exe = shutil.which("true")
+    assert exe, "no `true` executable on this host"
+    return exe
+
+
+def _bound_identity():
+    """The real preflight identity over an injected runtime: it carries the
+    interpreter binding the validators compare."""
+    return qualify.preflight_identity(runtime_identity_fn=lambda: {"source_sha256": "runtime"})
+
+
+def test_interpreter_identity_is_the_canonical_executable_and_version():
+    identity = qualify.interpreter_identity()
+    assert set(identity) == {"executable", "implementation", "version"}
+    assert identity["executable"] == sys.executable  # as invoked; compared canonically
+    assert identity["implementation"] == platform.python_implementation()
+    assert identity["version"] == "%d.%d.%d" % sys.version_info[:3]
+    assert _bound_identity()["interpreter"] == identity
+
+
+@pytest.mark.parametrize("lane", ["test_command", "guard_test_command"])
+@pytest.mark.parametrize("head", ["true", "missing"])
+def test_full_preflight_refuses_a_lane_this_interpreter_did_not_run(tmp_path, lane, head):
+    identity = _bound_identity()
+    path = tmp_path / "preflight.json"
+    qualify.write_preflight_receipt(path, run=_passing_run(), identity_fn=lambda: identity)
+    receipt = json.loads(path.read_text())
+    executable = _true() if head == "true" else str(tmp_path / "no-such-python")
+    receipt[lane] = [executable, *receipt[lane][1:]]  # pytest's arguments, exit 0, no Python
+    path.write_text(json.dumps(receipt))
+    with pytest.raises(AssertionError, match="interpreter"):
+        qualify.validate_preflight_receipt(path, identity["runtime"], identity_fn=lambda: identity)
+
+
+@pytest.mark.parametrize("field", ["executable", "implementation", "version", "absent"])
+def test_full_preflight_refuses_another_interpreter_identity(tmp_path, field):
+    identity = _bound_identity()
+    path = tmp_path / "preflight.json"
+    qualify.write_preflight_receipt(path, run=_passing_run(), identity_fn=lambda: identity)
+    receipt = json.loads(path.read_text())
+    if field == "absent":
+        del receipt["identity"]["interpreter"]
+    else:
+        receipt["identity"]["interpreter"][field] = "other"
+    path.write_text(json.dumps(receipt))
+    with pytest.raises(AssertionError, match="interpreter"):
+        qualify.validate_preflight_receipt(path, identity["runtime"], identity_fn=lambda: identity)
+
+
+def test_full_preflight_accepts_another_path_to_the_same_interpreter(tmp_path):
+    # Symlinks are resolved on both sides: a venv's python, python3 and the
+    # binary they point at are one interpreter.
+    identity = _bound_identity()
+    path = tmp_path / "preflight.json"
+    qualify.write_preflight_receipt(path, run=_passing_run(), identity_fn=lambda: identity)
+    receipt = json.loads(path.read_text())
+    link = tmp_path / "python-alias"
+    link.symlink_to(sys.executable)
+    receipt["test_command"] = [str(link), *receipt["test_command"][1:]]
+    receipt["guard_test_command"] = [os.path.realpath(sys.executable),
+                                     *receipt["guard_test_command"][1:]]
+    path.write_text(json.dumps(receipt))
+    evidence = qualify.validate_preflight_receipt(
+        path, identity["runtime"], identity_fn=lambda: identity
+    )
+    assert evidence["passed"]
+
+
+@pytest.mark.parametrize("lane", ["test_command", "guard_test_command"])
+def test_delta_preflight_refuses_a_lane_this_interpreter_did_not_run(tmp_path, lane):
+    identity = _bound_identity()
+    tree = qualify.preflight_tree()
+    base = tmp_path / "preflight.json"
+    qualify.write_preflight_receipt(
+        base, run=_passing_run(), identity_fn=lambda: identity, tree_fn=lambda: tree
+    )
+    current = _edited(tree, "scripts/sdk_smoke.py")
+    delta_path = tmp_path / "delta.json"
+    qualify.write_preflight_delta(
+        delta_path, base, run=_passing_run(), identity_fn=lambda: identity,
+        tree_fn=lambda: current,
+    )
+    receipt = json.loads(delta_path.read_text())
+    assert receipt[lane], "the delta runs both lanes"
+    receipt[lane] = [_true(), *receipt[lane][1:]]
+    delta_path.write_text(json.dumps(receipt))
+    with pytest.raises(AssertionError, match="preflight delta.*interpreter"):
+        qualify.validate_preflight_receipt(
+            delta_path, identity["runtime"], identity_fn=lambda: identity,
+            tree_fn=lambda: current,
+        )
+
+
+def test_delta_preflight_refuses_a_base_this_interpreter_did_not_run(tmp_path):
+    identity = _bound_identity()
+    tree = qualify.preflight_tree()
+    base = tmp_path / "preflight.json"
+    qualify.write_preflight_receipt(
+        base, run=_passing_run(), identity_fn=lambda: identity, tree_fn=lambda: tree
+    )
+    receipt = json.loads(base.read_text())
+    receipt["test_command"] = [_true(), *receipt["test_command"][1:]]
+    base.write_text(json.dumps(receipt))
+    with pytest.raises(AssertionError, match="interpreter"):
+        qualify.write_preflight_delta(
+            tmp_path / "delta.json", base, run=_passing_run(),
+            identity_fn=lambda: identity, tree_fn=lambda: _edited(tree, "scripts/sdk_smoke.py"),
+        )
+
+
+def _cross_host_interpreter_case(tmp_path):
+    """The v3 case over the real local interpreter on the target and an
+    independently trusted, different interpreter on the source host."""
+    path, bundle, arguments = _cross_host_case(tmp_path)
+    source, target = bundle["source"], bundle["target"]
+    local = qualify.interpreter_identity()
+    remote = {"executable": "/Volumes/m5/mlx2/.venv/bin/python3.12",
+              "implementation": local["implementation"], "version": local["version"]}
+    assert remote != local
+    target["identity"]["interpreter"] = dict(local)
+    target["command"][0] = sys.executable
+    arguments["target_command"] = list(target["command"])
+    arguments["identity_fn"] = (lambda identity=copy.deepcopy(target["identity"]):
+                                copy.deepcopy(identity))
+    source["identity"]["interpreter"] = dict(remote)
+    for suite in source["suites"].values():
+        suite["command"] = [remote["executable"], *suite["command"][1:]]
+    arguments["source_interpreter"] = dict(remote)
+    return path, bundle, arguments
+
+
+def test_cross_host_preflight_accepts_a_trusted_source_interpreter(tmp_path):
+    path, bundle, arguments = _cross_host_interpreter_case(tmp_path)
+    _write_cross_host(path, bundle)
+    result = qualify.validate_cross_host_preflight_receipt(path, **arguments)
+    assert result["passed"] and result["source_nodes"] == 2
+
+
+@pytest.mark.parametrize("mutation", [
+    "true_source_ordinary", "true_source_guard", "true_target",
+    "source_identity_version", "source_identity_executable", "source_identity_absent",
+    "trusted_source_absent", "trusted_source_malformed", "trusted_source_other",
+    "target_identity_version", "target_identity_absent",
+])
+def test_cross_host_preflight_binds_both_interpreters(tmp_path, mutation):
+    path, bundle, arguments = _cross_host_interpreter_case(tmp_path)
+    source, target = bundle["source"], bundle["target"]
+    if mutation == "true_source_ordinary":
+        # The trusted source interpreter is right; the proof's command is not it.
+        source["suites"]["ordinary"]["command"][0] = _true()
+    elif mutation == "true_source_guard":
+        source["suites"]["guard"]["command"][0] = _true()
+    elif mutation == "true_target":
+        target["command"][0] = _true()
+        arguments["target_command"] = list(target["command"])
+    elif mutation == "source_identity_version":
+        source["identity"]["interpreter"]["version"] = "0.0.0"
+    elif mutation == "source_identity_executable":
+        source["identity"]["interpreter"]["executable"] = _true()
+    elif mutation == "source_identity_absent":
+        del source["identity"]["interpreter"]
+    elif mutation == "trusted_source_absent":
+        del arguments["source_interpreter"]
+    elif mutation == "trusted_source_malformed":
+        arguments["source_interpreter"] = {"executable": arguments["source_interpreter"]["executable"]}
+    elif mutation == "trusted_source_other":
+        # The proof is self-consistent, but the operator vouched for a different one.
+        arguments["source_interpreter"]["version"] = "0.0.0"
+    elif mutation == "target_identity_version":
+        target["identity"]["interpreter"]["version"] = "0.0.0"
+        arguments["identity_fn"] = (lambda identity=copy.deepcopy(target["identity"]):
+                                    copy.deepcopy(identity))
+    elif mutation == "target_identity_absent":
+        del target["identity"]["interpreter"]
+        arguments["identity_fn"] = (lambda identity=copy.deepcopy(target["identity"]):
+                                    copy.deepcopy(identity))
+    _write_cross_host(path, bundle)
+    with pytest.raises(AssertionError, match="cross-host preflight"):
+        qualify.validate_cross_host_preflight_receipt(path, **arguments)

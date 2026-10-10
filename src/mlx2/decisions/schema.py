@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -21,6 +22,17 @@ MAX_CHOICE_OPTIONS = 255
 MAX_SCORE_LEVELS = 10
 MAX_RENDERED_STATE_BYTES = 1 << 20
 _RESERVED_TOKEN = re.compile(r"<\|[^|\r\n]{1,64}\|>")
+
+
+@functools.lru_cache(maxsize=8)
+def _reserved_matcher(reserved_tokens: tuple[str, ...]) -> re.Pattern[str]:
+    """The ``<|...|>`` shape plus every string the bound tokenizer folds."""
+    if not reserved_tokens:
+        return _RESERVED_TOKEN
+    longest_first = sorted(reserved_tokens, key=len, reverse=True)
+    return re.compile(
+        "|".join([f"(?:{_RESERVED_TOKEN.pattern})", *map(re.escape, longest_first)])
+    )
 
 
 class DecisionRequestError(ValueError):
@@ -58,7 +70,13 @@ class DecisionRequest:
         object.__setattr__(self, "questions", MappingProxyType(dict(self.questions)))
 
 
-def _validate_json_value(value: Any, *, field: str, reject_media: bool = False):
+def _validate_json_value(
+    value: Any,
+    *,
+    field: str,
+    reject_media: bool = False,
+    reserved: re.Pattern[str] = _RESERVED_TOKEN,
+):
     """Reject values that cannot be rendered safely and deterministically."""
     stack = [(value, 0)]
     while stack:
@@ -76,7 +94,7 @@ def _validate_json_value(value: Any, *, field: str, reject_media: bool = False):
                 raise DecisionRequestError(
                     f"{field} must contain valid Unicode text"
                 ) from error
-            if _RESERVED_TOKEN.search(current):
+            if reserved.search(current):
                 raise DecisionRequestError(
                     f"{field} must not contain reserved model control tokens"
                 )
@@ -101,6 +119,12 @@ def _validate_json_value(value: Any, *, field: str, reject_media: bool = False):
                     raise DecisionRequestError(
                         f"{field} object keys must contain valid Unicode text"
                     ) from error
+                # Keys are rendered verbatim like values (JSON state, option
+                # ids, instruction objects), so they get the same guard.
+                if reserved.search(key):
+                    raise DecisionRequestError(
+                        f"{field} object keys must not contain reserved model control tokens"
+                    )
                 stack.append((child, depth + 1))
             continue
         if isinstance(current, (list, tuple)):
@@ -109,20 +133,34 @@ def _validate_json_value(value: Any, *, field: str, reject_media: bool = False):
         raise DecisionRequestError(f"{field} must contain only JSON values")
 
 
-def _valid_label(value: Any) -> bool:
+def _check_label(value: Any, *, field: str, reserved: re.Pattern[str]) -> None:
+    """Question names and choice labels become prompt structure verbatim."""
     if not isinstance(value, str) or not value:
-        return False
+        raise DecisionRequestError(f"{field} must be nonempty strings")
     try:
         value.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return not any(
+    except UnicodeEncodeError as error:
+        raise DecisionRequestError(
+            f"{field} must contain valid Unicode text"
+        ) from error
+    if any(
         unicodedata.category(character) in {"Cc", "Cs", "Zl", "Zp"}
         for character in value
-    )
+    ):
+        raise DecisionRequestError(f"{field} must not contain control characters")
+    if reserved.search(value):
+        raise DecisionRequestError(
+            f"{field} must not contain reserved model control tokens"
+        )
 
 
-def _criteria(question_name: str, question: Mapping[str, Any], kind: str):
+def _criteria(
+    question_name: str,
+    question: Mapping[str, Any],
+    kind: str,
+    *,
+    reserved: re.Pattern[str],
+):
     criteria = question.get("criteria")
     if kind == "noul":
         if criteria is None:
@@ -158,9 +196,11 @@ def _criteria(question_name: str, question: Mapping[str, Any], kind: str):
                 f"question {question_name!r}: choice supports at most "
                 f"{MAX_CHOICE_OPTIONS} options"
             )
-        if any(not _valid_label(label) for label in criteria):
-            raise DecisionRequestError(
-                f"question {question_name!r}: choice labels must be nonempty strings without control characters"
+        for label in criteria:
+            _check_label(
+                label,
+                field=f"question {question_name!r} choice labels",
+                reserved=reserved,
             )
         if len(set(criteria)) != len(criteria):
             raise DecisionRequestError(
@@ -176,15 +216,25 @@ def _criteria(question_name: str, question: Mapping[str, Any], kind: str):
             f"question {question_name!r}: choice supports at most "
             f"{MAX_CHOICE_OPTIONS} options"
         )
-    if any(not _valid_label(label) for label in criteria):
-        raise DecisionRequestError(
-            f"question {question_name!r}: choice labels must be nonempty strings without control characters"
+    for label in criteria:
+        _check_label(
+            label,
+            field=f"question {question_name!r} choice labels",
+            reserved=reserved,
         )
     return dict(criteria)
 
 
-def normalize_request(payload: Any, *, default_model: str) -> DecisionRequest:
-    """Validate one System One request without importing a model runtime."""
+def normalize_request(
+    payload: Any, *, default_model: str, reserved_tokens: Iterable[str] = ()
+) -> DecisionRequest:
+    """Validate one System One request without importing a model runtime.
+
+    ``reserved_tokens`` is the bound tokenizer's added-token list (see
+    ``decisions.tokenizer.reserved_token_strings``); the ``<|...|>`` shape is
+    always refused.
+    """
+    reserved = _reserved_matcher(tuple(sorted(set(reserved_tokens))))
     if not isinstance(payload, Mapping):
         raise DecisionRequestError("request body must be a JSON object")
     unknown = set(payload) - {
@@ -218,7 +268,9 @@ def normalize_request(payload: Any, *, default_model: str) -> DecisionRequest:
         )
     if "state" not in payload or payload["state"] is None:
         raise DecisionRequestError("state is required and must not be null")
-    _validate_json_value(payload["state"], field="state", reject_media=True)
+    _validate_json_value(
+        payload["state"], field="state", reject_media=True, reserved=reserved
+    )
     try:
         rendered_state = json.dumps(
             payload["state"],
@@ -245,10 +297,7 @@ def normalize_request(payload: Any, *, default_model: str) -> DecisionRequest:
         )
     normalized: dict[str, Mapping[str, Any]] = {}
     for name, raw in questions.items():
-        if not _valid_label(name):
-            raise DecisionRequestError(
-                "question names must be nonempty strings without control characters"
-            )
+        _check_label(name, field="question names", reserved=reserved)
         if not isinstance(raw, Mapping):
             raise DecisionRequestError(f"question {name!r} must be an object")
         unknown_question = set(raw) - {"type", "instructions", "criteria"}
@@ -275,13 +324,15 @@ def normalize_request(payload: Any, *, default_model: str) -> DecisionRequest:
                 instructions,
                 field=f"question {name!r} instructions",
                 reject_media=True,
+                reserved=reserved,
             )
-        criteria = _criteria(name, raw, kind)
+        criteria = _criteria(name, raw, kind, reserved=reserved)
         if criteria is not None:
             _validate_json_value(
                 criteria,
                 field=f"question {name!r} criteria",
                 reject_media=True,
+                reserved=reserved,
             )
         normalized[name] = MappingProxyType(
             {

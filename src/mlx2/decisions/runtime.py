@@ -14,7 +14,7 @@ from .clef import (
     inspect_artifact,
     render_decision,
 )
-from .metrics import DecisionRuntimeMetrics, render_decision_metrics
+from .metrics import DecisionRuntimeMetrics, new_counters, render_decision_metrics
 from .schema import DecisionExecutionFailure, DecisionRequestError
 
 
@@ -47,14 +47,12 @@ class ClefEngine:
         }
         self.http_metrics = HttpRuntimeMetrics()
         self.decision_metrics = DecisionRuntimeMetrics()
-        self._counts = {
-            "requests": 0,
-            "failures": 0,
-            "refusals": 0,
-            "input_tokens": 0,
-        }
+        self._counts = new_counters()
         loading_started = self.decision_metrics.loading_started()
         self._load(artifact)
+        # Strings the bound tokenizer folds into control ids; the request
+        # contract refuses them (decisions.tokenizer.reserved_token_strings).
+        self.reserved_tokens = frozenset(self.pretokenizer_receipt["reserved_tokens"])
         self.decision_metrics.loaded(loading_started)
 
     def _load(self, artifact) -> None:
@@ -178,7 +176,7 @@ class ClefEngine:
             truncate=request.truncate,
         )
         input_ids = mx.array([rendered.token_ids])
-        self._execution_started = True
+        self._begin_execution()
         hidden = self.model.model(input_ids)[0]
         hidden = self.head.hidden_norm(hidden)
         lexical = self._lexical_embeddings(rendered).astype(hidden.dtype)
@@ -208,7 +206,12 @@ class ClefEngine:
         return {
             "model": self.model_name,
             "answers": answers,
-            "usage": {"input_tokens": len(rendered.token_ids), "output_tokens": 0},
+            "usage": {
+                "input_tokens": len(rendered.token_ids),
+                "output_tokens": 0,
+                "truncated": rendered.state_tokens_dropped > 0,
+                "state_tokens_dropped": rendered.state_tokens_dropped,
+            },
             "mlx2": self.route_receipt(observed_used=True),
         }
 
@@ -240,6 +243,16 @@ class ClefEngine:
                 self.decision_metrics.execution_finished(
                     started_at, input_tokens=input_tokens
                 )
+
+    def _begin_execution(self) -> None:
+        """Mark the model forward as started: the route is observed used now.
+
+        Counted here rather than at completion so a status read during the
+        first in-flight request, or after a failure, agrees with the receipt.
+        """
+        self._execution_started = True
+        with self._counts_lock:
+            self._counts["executions"] += 1
 
     def record_refusal(self) -> None:
         with self._counts_lock:
@@ -278,7 +291,7 @@ class ClefEngine:
             "model": self.model_name,
             "decision_family": self.family,
             "qualification": self._qualification["qualification"],
-            "route": self.route_receipt(observed_used=counters["requests"] > 0),
+            "route": self.route_receipt(observed_used=counters["executions"] > 0),
             "tokenizer_integrity": self.pretokenizer_receipt,
             "counters": counters,
         }

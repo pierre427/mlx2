@@ -4,19 +4,6 @@ import importlib.util
 import json
 from pathlib import Path
 
-import pytest
-
-_RUNNER = (
-    Path(__file__).parents[1]
-    / "qualification/runs/muse-progressive-qualification-m3-20261008"
-    / "run_muse_progressive_m3.py"
-)
-# The public mirror does not carry qualification/ run directories; this
-# runner test runs on the source tree only.
-pytestmark = pytest.mark.skipif(
-    not _RUNNER.is_file(), reason="qualification run directory not published"
-)
-
 
 def _runner():
     path = (

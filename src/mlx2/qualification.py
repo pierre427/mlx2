@@ -71,8 +71,51 @@ def required_generic_checks(descriptor, *, capabilities=None):
 # qualify_serving.py intentionally requires a source/runtime re-freeze and an
 # explicit update here; a receipt may not authorize its own producer.
 APPROVED_QUALIFICATION_HARNESS = {
+    # Re-pinned 2026-10-09: route source stability is recomputed independently;
+    # full-suite preflight receipts retain their whole-build source binding.
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
+    # Re-pinned 2026-10-09 (sweep 10-09, integration review item 3): full
+    # and delta receipts bind the interpreter (executable as invoked,
+    # implementation, version) and every commanded lane's head must
+    # canonicalize to the validator's own sys.executable; the cross-host
+    # source proof is compared exactly with a caller-supplied source
+    # interpreter identity and its target proof with the validator's.  A
+    # command headed by `true` with pytest's arguments was accepted before.
+    # Every receipt from f56699ba... must be regenerated.
+    # Re-pinned 2026-10-09 (sweep 10-09, review round 4): a full receipt's
+    # commands must name a non-empty interpreter, the full-receipt writer
+    # stamps passed by the same int-0 rule as the validators, and the
+    # cross-host target command must name an interpreter.  Receipts from
+    # ba9d2a77... must be regenerated.
+    # Re-pinned 2026-10-09 (sweep 10-09, review round 3): a module that walks
+    # a bound directory is a consumer of every touched file under it; full and
+    # delta receipts need an int return code 0 per commanded lane (JSON false
+    # passed as 0) and a well-formed command; the delta writer stamps passed
+    # by the same rule.  Receipts from d52529ce... must be regenerated.
+    # Re-pinned 2026-10-09 (sweep 10-09, review round 2): the tree binds all
+    # of provenance/ and qualification/ except qualification/runs/, and a
+    # delta lane that has a command must carry returncode 0 (a missing code
+    # was accepted).  Receipts from 994729bc... must be regenerated.
+    # Re-pinned 2026-10-09 (sweep 10-09, review round 1): a touched file whose
+    # whole chain reaches no test module and a changed conftest.py are refused
+    # by the shared selector (validator as well as writer); the tree also
+    # binds native/**, qualification/*.json, plans, policies, docs/experiments
+    # and docs/PROVENANCE.md; the identity's test_source_sha256 digests that
+    # whole tree so the cross-host receipt binds it too.  Receipts from
+    # 1b358233... must be regenerated.
+    # Re-pinned 2026-10-09 (sweep 10-09, receipt binding): the preflight tree
+    # now binds every file under scripts/ (fixtures the smoke scripts load)
+    # and provenance/**/*.json (records tests read), not only tests/** and
+    # scripts/**/*.py.  Full and delta receipts from ae567a2e... carry the
+    # narrower tree and must be regenerated.
+    # Re-pinned 2026-10-09 (sweep 10-09, delta-underselect): the preflight
+    # delta's impacted set is the transitive reverse closure of the lexical
+    # scan (changed test modules, helpers and scripts all seed it and every
+    # consumer is followed), and a touched file no test can reach refuses the
+    # delta instead of passing with no test run.  Delta receipts from
+    # 303261c1... are refused by the validator (they rerun too few modules)
+    # and must be regenerated.
     # Re-pinned 2026-10-08 (sweep g11 review round 1): the adapter-diagnostic
     # gates (shared/indexed/pooled/scatter QSA, async promotion, private
     # delta, known-tail and file-backed PLE, compiled PLE hits, Flash-Next
@@ -155,6 +198,8 @@ APPROVED_QUALIFICATION_HARNESS = {
     # deliberately poison sys.modules/sys.meta_path now run in fresh import-
     # guard interpreters instead of contaminating later collection. Receipts
     # from f20fe750... must be regenerated.
+    # Re-pinned 2026-10-06 (Qwen3.8 corrected fused GDN): observations include
+    # admitted verify/prefill calls alongside one-token decode engagements.
     # Re-pinned 2026-10-05 (external-prefill identity): feature observations
     # now require paired run-local counter deltas for dense/sparse live-row
     # compaction and Qwen external packed prefill, plus target-width ingress
@@ -182,7 +227,10 @@ APPROVED_QUALIFICATION_HARNESS = {
     # (8a2ced1d..., NAX gather default) must be regenerated.
     # Re-pinned 2026-10-02 (flip integrate): benchmark_adaptive_mtp.py model
     # defaults now use Path.home(), so APPROVED_ADAPTIVE_BENCHMARK_SHA256 moved.
-    "sha256": "815f6e0ea58473e68bcdfd0804c036157d4547090581b8284a8896769720a966",
+    # Re-pinned 2026-10-10: adaptive feature qualification depends on
+    # correctness and observed policy behavior; speed/probe overhead are
+    # separate performance evidence. Reject nonfinite confidence limits.
+    "sha256": "c840548ef89abc15c0e1094572f8ea955ba4c7579b5080181c4e7879a387f575",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -190,20 +238,29 @@ APPROVED_QUALIFICATION_HARNESS = {
 # check name is not evidence that the reviewed producer ran that check. Add
 # names here only with the corresponding reviewed producer implementation.
 APPROVED_ADAPTER_CHECKS = SMOL_MEDIA_CHECKS | QWEN_MEDIA_CHECKS | LFM_MEDIA_CHECKS
+# Re-pinned 2026-10-09 (bug sweep, churn-adapters#1): the three producers now
+# gate on the adapter's mlx-vlm dependency-content identity
+# (``mlx_vlm_runtime["reference_revision"]`` == the pinned source revision
+# and ``["family"]`` == the producer's model_type)
+# and record ``source_sha256`` beside ``source_revision`` in every parity
+# trace; the previous producers read ``["revision"]`` from the pre-contract
+# identity and refused every adapter.  Companion records from the previous
+# producers (2026-09-26/28) also carry the pre-contract ``settings.mlx_vlm``
+# and must be regenerated.
 APPROVED_MEDIA_HARNESS = {
     "name": "scripts/qualify_media_serving.py",
-    "sha256": "796cb204b9927e53f74bf1d0186b8c24d385947db5a36e56f2f336675a7fc2b5",
+    "sha256": "15f1bad9a3fe8646c25cf0f0e18ef0c8c810c426f65790371192b5fd3fbfb067",
 }
 APPROVED_MEDIA_PRODUCERS = {
     "smolvlm": (APPROVED_MEDIA_HARNESS, evaluate_smol_media_report, SMOL_MEDIA_CHECKS),
     "qwen2_5_vl": (
         {"name": "scripts/qualify_qwen25_media_serving.py",
-         "sha256": "e430c5521cb2bd0cbb51d1458b98fa850d0ca2d7be305bf8013c2ef5915292e8"},
+         "sha256": "b8da95c2fb7bd093d29050ea57232962646ac4a31358e2ab880fc48424c34b86"},
         evaluate_qwen25_media_report, QWEN_MEDIA_CHECKS,
     ),
     "lfm2_vl": (
         {"name": "scripts/qualify_lfm25_media_serving.py",
-         "sha256": "706f232dc13ef062e6f15f8262b683edc6bf4f58c26fe5556ee50bf591cd7776"},
+         "sha256": "c41c51b4a5ce0c3eacfd359bdba398ad5b64dc9fc575243428b9e798616ae977"},
         evaluate_lfm_media_report, LFM_MEDIA_CHECKS,
     ),
 }

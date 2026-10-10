@@ -23,6 +23,7 @@ from .base import (
     inspect_index,
     load_qwen_backbone,
     read_object,
+    usage,
 )
 
 SOURCE_REVISION = "3c64a581d4f95bb2de409d383741fa5b18d84345"
@@ -269,6 +270,7 @@ def render_prompt(tokenizer, state, name, question, *, max_length, truncate):
         raise DecisionInputTooLong(
             f"Decision 2.0 request exceeds the {max_length}-token context"
         )
+    dropped = 0
     if total > max_length:
         state_ids = encode(state_text)
         keep = max(0, max_length - fixed)
@@ -281,6 +283,7 @@ def render_prompt(tokenizer, state, name, question, *, max_length, truncate):
                     raise DecisionInputTooLong(
                         "Decision 2.0 truncation would remove the entire nonempty state"
                     )
+                dropped = max(0, len(state_ids) - keep)
                 break
             overflow = total - max_length
             if keep == 0:
@@ -294,7 +297,7 @@ def render_prompt(tokenizer, state, name, question, *, max_length, truncate):
         tokens.extend(part)
         positions.append(len(tokens) - 1)
     tokens.extend(query)
-    return tokens, positions, len(tokens) - 1, labels
+    return tokens, positions, len(tokens) - 1, labels, dropped
 
 
 class Decision2Head:
@@ -355,8 +358,9 @@ class Decision2Engine(CandidateEngine):
 
         prepared = []
         token_count = 0
+        dropped = []
         for name, question in request.questions.items():
-            tokens, candidates, query, labels = render_prompt(
+            tokens, candidates, query, labels, cut = render_prompt(
                 self.tokenizer,
                 request.state,
                 name,
@@ -367,9 +371,10 @@ class Decision2Engine(CandidateEngine):
             token_count = add_request_tokens(
                 token_count, tokens, max_context=self.artifact["max_context"]
             )
+            dropped.append(cut)
             prepared.append((name, question, tokens, candidates, query, labels))
         rows = []
-        self._execution_started = True
+        self._begin_execution()
         for name, question, tokens, candidates, query, labels in prepared:
             hidden = self.model.model(mx.array([tokens]))[0]
             scores = self.head(hidden[mx.array(candidates)], hidden[query])
@@ -383,5 +388,5 @@ class Decision2Engine(CandidateEngine):
         return {
             "model": self.model_name,
             "answers": format_answers(rows),
-            "usage": {"input_tokens": token_count, "output_tokens": 0},
+            "usage": usage(token_count, dropped),
         }

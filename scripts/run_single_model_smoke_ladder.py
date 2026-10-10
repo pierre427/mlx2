@@ -161,6 +161,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-artifact")
     parser.add_argument("--expected-profile")
     parser.add_argument("--expected-cache-layout")
+    parser.add_argument("--top-logprobs", type=int, default=0)
+    parser.add_argument("--logprobs-token", type=int, default=0)
+    parser.add_argument("--verify-bitexact", action="store_true")
     parser.add_argument(
         "--qualification-ladder",
         action="store_true",
@@ -182,6 +185,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("context bounds must admit at least the 1K rung")
     if args.cache_gib <= 0:
         parser.error("--cache-gib must be positive")
+    if not 0 <= args.top_logprobs <= 20:
+        parser.error("--top-logprobs must be 0..20")
+    if args.logprobs_token < 0:
+        parser.error("--logprobs-token must be nonnegative")
+    if args.logprobs_token and not args.top_logprobs:
+        parser.error("--logprobs-token requires --top-logprobs")
     try:
         max_lanes, max_inflight = server_capacity(
             wide=args.wide,
@@ -225,6 +234,9 @@ def main(argv: list[str] | None = None) -> int:
         "max_lanes": max_lanes,
         "max_inflight": max_inflight,
         "memory_only_cache": args.memory_only_cache,
+        "top_logprobs": args.top_logprobs,
+        "logprobs_token": args.logprobs_token,
+        "verify_bitexact": args.verify_bitexact,
         "owner": owner,
         "started_at": time.time(),
     }
@@ -252,6 +264,8 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if not args.memory_only_cache:
         server_command += ["--cache-dir", str(out / "apcv2-cache")]
+    if args.verify_bitexact:
+        server_command.append("--verify-bitexact")
     base = f"http://127.0.0.1:{args.port}"
     server = None
     rc = 1
@@ -283,6 +297,12 @@ def main(argv: list[str] | None = None) -> int:
                 "--max-tokens", str(args.max_tokens), "--wide", str(args.wide),
                 "--wide-max-context", str(args.wide_max_context),
             ]
+            if args.top_logprobs:
+                ladder_command += ["--top-logprobs", str(args.top_logprobs)]
+            if args.logprobs_token:
+                ladder_command += ["--logprobs-token", str(args.logprobs_token)]
+            if args.verify_bitexact:
+                ladder_command.append("--verify-bitexact")
             with (out / "ladder.log").open("w") as ladder_log:
                 completed = subprocess.run(
                     ladder_command,

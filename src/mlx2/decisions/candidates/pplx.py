@@ -20,6 +20,7 @@ from .base import (
     inspect_index,
     load_qwen_backbone,
     read_object,
+    usage,
 )
 
 SOURCE_REVISION = "6d7712222798f9728eba8bd603afe50a037e063c"
@@ -200,14 +201,16 @@ def render_prompt(tokenizer, state, content_after_state, *, max_length, truncate
     state_text = _describe(state)
     tokens = _chat_tokens(tokenizer, "State:\n" + state_text + content_after_state)
     if len(tokens) <= max_length:
-        return tokens
+        return tokens, 0
     if not truncate:
         raise DecisionInputTooLong(
             f"pplx-decider request requires {len(tokens)} tokens; maximum is {max_length}"
         )
     state_ids = list(tokenizer.encode(state_text, add_special_tokens=False))
     empty = _chat_tokens(tokenizer, "State:\n" + content_after_state)
-    keep = max(0, max_length - len(empty) - 8)
+    # Start from the exact budget; the loop below shrinks `keep` when the
+    # re-tokenized join overflows, so no safety margin is needed here.
+    keep = max(0, max_length - len(empty))
     while True:
         shortened = tokenizer.decode(state_ids[:keep], skip_special_tokens=False)
         tokens = _chat_tokens(tokenizer, "State:\n" + shortened + content_after_state)
@@ -216,7 +219,7 @@ def render_prompt(tokenizer, state, content_after_state, *, max_length, truncate
                 raise DecisionInputTooLong(
                     "pplx-decider truncation would remove the entire nonempty state"
                 )
-            return tokens
+            return tokens, max(0, len(state_ids) - keep)
         overflow = len(tokens) - max_length
         if keep == 0:
             raise DecisionInputTooLong("pplx-decider fixed prompt exceeds its context")
@@ -268,11 +271,12 @@ class PplxDeciderEngine(CandidateEngine):
 
         prepared = []
         token_count = 0
+        dropped = []
         for name, question in request.questions.items():
             labels, selected, content_after_state = _question(
                 name, question, self.codes
             )
-            tokens = render_prompt(
+            tokens, cut = render_prompt(
                 self.tokenizer,
                 request.state,
                 content_after_state,
@@ -282,9 +286,10 @@ class PplxDeciderEngine(CandidateEngine):
             token_count = add_request_tokens(
                 token_count, tokens, max_context=self.artifact["max_context"]
             )
+            dropped.append(cut)
             prepared.append((name, question, tokens, labels, selected))
         rows = []
-        self._execution_started = True
+        self._begin_execution()
         for name, question, tokens, labels, selected in prepared:
             hidden = self.model.model(mx.array([tokens]))[0, -1].astype(mx.float32)
             weights = self.readout[mx.array(selected)].astype(mx.float32)
@@ -295,5 +300,5 @@ class PplxDeciderEngine(CandidateEngine):
         return {
             "model": self.model_name,
             "answers": format_answers(rows),
-            "usage": {"input_tokens": token_count, "output_tokens": 0},
+            "usage": usage(token_count, dropped),
         }

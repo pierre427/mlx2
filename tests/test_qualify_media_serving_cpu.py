@@ -100,8 +100,11 @@ def test_text_trace_uses_typed_prompt_and_source_greedy_chain(monkeypatch):
             assert pixel_values is None and len(cache) == 2
             return SimpleNamespace(shape=(1, len(input_ids[0]), 1000))
 
+    identity = {"schema": "mlx2.vlm-dependencies.v1", "family": "smolvlm",
+                "source_sha256": "c" * 64, "dependency_files": 110,
+                "reference_revision": producer.SOURCE_REVISION}
     adapter = SimpleNamespace(
-        mlx_vlm_runtime={"revision": producer.SOURCE_REVISION},
+        mlx_vlm_runtime=identity,
         model=Candidate(), _eos_ids=lambda: [2],
         prompt_tokens=lambda request: ([1, 10, 11, 12]
             if request == {"messages": [{"role": "user", "content": "test prompt"}]}
@@ -126,6 +129,12 @@ def test_text_trace_uses_typed_prompt_and_source_greedy_chain(monkeypatch):
     assert len(trace["decode"]) == 15
     assert [row["input_token"] for row in trace["decode"]] == list(range(100, 115))
     assert len(calls) == 16
+    assert trace["source_revision"] == producer.SOURCE_REVISION
+    assert trace["source_sha256"] == identity["source_sha256"]
+    adapter.mlx_vlm_runtime = {"version": "0.7.3", "source": "index", "editable": False,
+                               "revision": producer.SOURCE_REVISION}
+    with pytest.raises(AssertionError, match="dependency contract"):
+        producer.text_parity_arm(adapter, "test prompt")
 
 
 def test_changed_pixels_may_reuse_only_the_prefix_before_the_media():

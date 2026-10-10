@@ -6,6 +6,8 @@ import hashlib
 import json
 import math
 
+from .media_qualification import arm_source_bound
+
 DECODE_STEPS = 4
 MAX_ABS_TOLERANCE = 1e-4
 EXPECTED_CONV_LAYERS = 22
@@ -148,10 +150,14 @@ def evaluate_lfm_media_report(report: dict) -> dict[str, bool]:
     arms = report.get("arms")
     if not isinstance(arms, dict) or set(arms) != {"image", "video"}:
         return result
+    # Arms are evidence only when bound to the identity the route served
+    # under; an unbound arm yields no evidence for any check.
+    if not all(arm_source_bound(arms[kind], settings=report.get("settings"),
+                                family="lfm2_vl", revision=SOURCE_REVISION)
+               for kind in ("image", "video")):
+        return result
     for kind in ("image", "video"):
         arm = arms[kind]
-        if not isinstance(arm, dict):
-            return result
         fixture, parity, serving = (
             arm.get("fixture"), arm.get("parity"), arm.get("serving")
         )

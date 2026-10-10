@@ -21,6 +21,9 @@ def load(name):
 
 
 producer = load("qualify_qwen25_media_serving")
+IDENTITY = {"schema": "mlx2.vlm-dependencies.v1", "family": "qwen2_5_vl",
+            "source_sha256": "c" * 64, "dependency_files": 105,
+            "reference_revision": evaluator.SOURCE_REVISION}
 
 
 def digest(value):
@@ -78,6 +81,7 @@ def arm(kind, binding):
         "prefill": logit(10), "prefill_max_abs": 0.0,
         "prefill_argmax_match": True, "decode": decode,
         "source_revision": evaluator.SOURCE_REVISION,
+        "source_sha256": IDENTITY["source_sha256"],
         "mrope": {
             "source_delta": -2,
             "request_owned_prefill": {
@@ -89,12 +93,13 @@ def arm(kind, binding):
     }
     return {"fixture": fixture, "parity": parity, "serving": serving(),
             "binding": binding,
-            "mlx_vlm_runtime": {"revision": evaluator.SOURCE_REVISION}}
+            "mlx_vlm_runtime": dict(IDENTITY)}
 
 
 def report():
     binding = {"runtime": {"source_sha256": "f" * 64},
-               "artifact": "artifact-1", "settings": {"max_lanes": 1}}
+               "artifact": "artifact-1",
+               "settings": {"max_lanes": 1, "mlx_vlm": dict(IDENTITY)}}
     return {"schema": producer.SCHEMA, "model_type": "qwen2_5_vl",
             "source_revision": evaluator.SOURCE_REVISION, **binding,
             "arms": {kind: arm(kind, binding) for kind in ("image", "video")}}
@@ -141,7 +146,12 @@ def test_evaluator_recomputes_mrope_parity_and_apcv2_evidence():
         (("arms", "video", "fixture", "ordered_frame_sha256"), []),
         (("arms", "image", "serving", "warm2", "output"), "red"),
         (("arms", "video", "serving", "changed_pixels", "cached_tokens"), 7),
-        (("arms", "video", "mlx_vlm_runtime", "revision"), "untrusted"),
+        (("arms", "video", "mlx_vlm_runtime", "reference_revision"), "untrusted"),
+        (("arms", "video", "mlx_vlm_runtime", "schema"), "mlx2.vlm-dependencies.v0"),
+        (("arms", "image", "mlx_vlm_runtime", "source_sha256"), "d" * 64),
+        (("arms", "image", "mlx_vlm_runtime", "family"), "smolvlm"),
+        (("arms", "image", "parity", "source_sha256"), None),
+        (("arms", "video", "parity", "source_revision"), "untrusted"),
         (("arms", "image", "binding", "artifact"), "other"),
     ):
         tampered = copy.deepcopy(valid)
@@ -171,3 +181,27 @@ def test_evaluator_refuses_changed_pixels_reuse_inside_the_media_span():
         arm["serving"]["changed_pixels"]["receipt"]["cached_tokens"] = 6
     checks = evaluator.evaluate_qwen25_media_report(stale)
     assert not checks["multimodal_apcv2_reuse"]
+
+
+def test_evaluator_refuses_the_legacy_installed_runtime_shape():
+    """Before the dependency contract the arm recorded ``{version, source,
+    editable, revision}``; that shape names an install, not the executed
+    source bytes, and is no longer evidence."""
+    legacy = report()
+    for arm in legacy["arms"].values():
+        arm["mlx_vlm_runtime"] = {"version": "0.6.17", "source": "index",
+                                  "editable": False,
+                                  "revision": evaluator.SOURCE_REVISION}
+        del arm["parity"]["source_sha256"]
+    assert not any(evaluator.evaluate_qwen25_media_report(legacy).values())
+
+
+def test_evaluator_refuses_an_identity_the_served_settings_do_not_carry():
+    """A self-asserted arm identity with a matching fabricated digest is not
+    evidence; the arm must carry the identity the route served under."""
+    forged = report()
+    other = {**IDENTITY, "source_sha256": "e" * 64}
+    for arm in forged["arms"].values():
+        arm["mlx_vlm_runtime"] = dict(other)
+        arm["parity"]["source_sha256"] = other["source_sha256"]
+    assert not any(evaluator.evaluate_qwen25_media_report(forged).values())
