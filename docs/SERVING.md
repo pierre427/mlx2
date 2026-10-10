@@ -1816,6 +1816,16 @@ is the authority for each token's producing width. This lifecycle contract is
 implemented and CPU-tested; cold/warm token identity still requires separate
 GPU qualification.
 
+The terminal `cache_checkpoint_role` field describes the APCv2 entry read by
+this request's lookup. It is `null` on a cold miss, even when that request
+successfully publishes a committed prompt boundary afterward. A same-prompt
+warm lookup with `cached_tokens == prompt_tokens - 1` and role
+`committed_prompt_boundary` witnesses reuse of that published boundary. To
+attribute it to the cold arm, also establish an initially empty cache and
+exclude unrelated producers. `mlx2.cache_receipts.prompt_boundary_replay_evidence`
+checks this receipt contract; it does not qualify a route or establish token
+identity. Do not relabel a cold miss with its later publication role.
+
 Counters: `prefill_scheduling_bypasses`, `prefill_scheduling_bypass_forced`
 and `prefill_scheduling_one_slice_clamps` in scheduler stats (present only when
 enabled). The qualification settings gain `prefill_scheduling` only when

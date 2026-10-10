@@ -3204,6 +3204,7 @@ class Job:
     effective_max_tokens: int | None = None
     max_tokens_defaulted: bool | None = None
     cached_tokens: int = 0
+    # Input lookup provenance, not this request's later cache publication.
     cache_retention_role: str | None = None
     completion_tokens: int = 0
     reasoning_tokens: int = 0
