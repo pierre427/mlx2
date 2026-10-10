@@ -55,6 +55,12 @@ an ordinary-decode regression result; ordinary-reference qualification remains
 pending. The run's process exit status does not override the arm-equivalence
 failure.
 
+A bounded follow-up on the current frozen snapshot traced a divergence to a
+near-tied ordinary next-token choice: depth one matched ordinary decode, while
+deeper fixed and loop arms differed. Saved ordinary/self-MTP continuations
+matched; one cold continuation selected the tied alternative. This diagnostic
+does not qualify a width, establish a cache defect, or support a wider default.
+
 The separate state-oracle findings were invalidated by a collector-boundary
 bug: the final `response.token` was omitted, so saved and cold continuations
 used different token tails. Those findings do not establish a runtime cache
