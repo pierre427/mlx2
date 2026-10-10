@@ -22,7 +22,7 @@ them as defaults or establish that production traffic has used them.
 | SmolVLM, LFM2.5-VL and Qwen2.5-VL ordinary decode | Three complete passes at the tested 4K context, one lane, 256-token prefill, and 1 GiB cache profile. The evidence is limited to that profile. |
 | Gemma 4 media | Media qualification passed. The generic Hermes literal-prompt probe remains unqualified, so this does not establish that probe's behavior. |
 | Gemma 3n media | Not qualified: the cold continuous-batch reference mismatched, and video-logit parity failed. |
-| MiniCPM-O media | Not qualified: image feature/token parity failed. Audio parity was exact, but the aggregate gate remains coupled and therefore does not pass. |
+| MiniCPM-O media | Not qualified: image feature/token parity failed. Audio parity was exact, but the aggregate gate remains coupled and therefore does not pass. A separate diagnostic-only matrix first diverged at batched vision-tower output while sequential and count-one controls were exact; it does not change this status. |
 
 These results describe the tested cases only. A pass for one modality or probe
 does not override a failed or still-unqualified gate for the route as a whole.
@@ -33,8 +33,10 @@ The public DLoop harness now rejects rows with no decode tokens instead of
 dividing by zero. This is a CPU-tested harness correctness fix; it is not model
 qualification or a performance result. A matched-Q4 width-one behavior run
 completed with loop8 extension/span engagement, but the independent audit
-rejected exact-token equivalence in 48 rows against fixed1 across fixed5–fixed8
-and loop8. The run's process exit status does not override that correctness
+rejected exact-token equivalence in 48 rows against the depth-one self-MTP
+control across fixed5–fixed8 and loop8. This is a self-MTP arm comparison, not
+an ordinary-decode regression result; ordinary-reference qualification remains
+pending. The run's process exit status does not override the arm-equivalence
 failure.
 
 The separate state-oracle findings were invalidated by a collector-boundary
