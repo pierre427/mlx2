@@ -1804,6 +1804,18 @@ prefill age deadline.
   one-call prompts are not promoted and the cohort attaches as one batch, as
   on main.
 
+On ordinary text decode, a declared cohort also owns a final-token frontier.
+Ready rows leave the two-row prefill slots so later members can finish, but no
+member performs its final prompt-token forward until the complete cohort is
+ready. Admission reserves the complete eventual cache geometry and continues
+to account for held caches. Cancellation, an incomplete or oversized group,
+an unmergeable prompt, and memory failure fail the cohort atomically;
+undeclared ordinary requests retain progressive promotion. After release,
+completion or cancellation may shrink physical width, so `return_token_trace`
+is the authority for each token's producing width. This lifecycle contract is
+implemented and CPU-tested; cold/warm token identity still requires separate
+GPU qualification.
+
 Counters: `prefill_scheduling_bypasses`, `prefill_scheduling_bypass_forced`
 and `prefill_scheduling_one_slice_clamps` in scheduler stats (present only when
 enabled). The qualification settings gain `prefill_scheduling` only when

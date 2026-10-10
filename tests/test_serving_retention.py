@@ -1077,7 +1077,7 @@ def test_atomic_publication_forms_one_segmented_mtp_b20_cohort(monkeypatch):
         engine.close()
 
 
-@pytest.mark.parametrize("route", ["native_mtp", "segmented_mtp"])
+@pytest.mark.parametrize("route", ["ordinary", "native_mtp", "segmented_mtp"])
 def test_cancelled_prefilling_cohort_member_spares_queued_ungrouped_work(
     monkeypatch, route
 ):
@@ -1107,7 +1107,7 @@ def test_cancelled_prefilling_cohort_member_spares_queued_ungrouped_work(
         if route == "segmented_mtp"
         else None
     )
-    engine = make_engine(model, vocab, max_lanes=3, extra=extra)
+    engine = make_engine(model, vocab, max_lanes=3, extra=extra, mtp=route != "ordinary")
     try:
         cohort = {"id": "c1", "size": 2}
 

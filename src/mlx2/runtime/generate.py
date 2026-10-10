@@ -3808,6 +3808,10 @@ class BatchGenerator:
         # every request together; no lane from a rejected cohort may start a
         # smaller speculative decode batch.
         self._atomic_cohort_failures = []
+        # Declared ordinary cohorts own their frontier independently of MTP.
+        self._ordinary_cohorts = {}
+        self._ordinary_cohort_active = None
+        self._ordinary_held = None
         # UIDs in this set own mutable target + draft cache state produced by
         # bounded teacher-forced prefill.  Those bytes are already reflected
         # in the live free-memory reading; admission must charge only their
@@ -3878,6 +3882,9 @@ class BatchGenerator:
         )
 
     def close(self):
+        ordinary_uids = tuple(getattr(self, "_ordinary_cohorts", {}))
+        if ordinary_uids:
+            self.remove(ordinary_uids)
         try:
             for continuation in getattr(self, "_native_continuations", {}).values():
                 self._retire_native_continuation(continuation)
@@ -3904,6 +3911,12 @@ class BatchGenerator:
         generation_batch = getattr(self, "_generation_batch", None)
         if isinstance(generation_batch, MTPGenerationBatch):
             generation_batch.close()
+        held = getattr(self, "_ordinary_held", None)
+        if held is not None:
+            held[0].filter([])
+        self._ordinary_held = None
+        self._ordinary_cohort_active = None
+        getattr(self, "_ordinary_cohorts", {}).clear()
         getattr(self, "_prompt_boundaries", {}).clear()
         getattr(self, "_interior_checkpoint_positions", {}).clear()
         getattr(self, "_prefill_cut_positions", {}).clear()
@@ -4277,6 +4290,8 @@ class BatchGenerator:
             self._unprocessed_sequences.append(
                 (self._uid_count, seq, m, c, at, s, lp, sm, time.monotonic(), prefill_input)
             )
+            if self.self_mtp is None and isinstance(mtp_config.get("batch_cohort"), dict):
+                self._ordinary_cohorts[self._uid_count] = dict(mtp_config["batch_cohort"])
             if lane_rng is not None and self.self_mtp is None:
                 self._native_lane_rngs[self._uid_count] = lane_rng
             if self.self_mtp is not None:
@@ -5796,6 +5811,11 @@ class BatchGenerator:
         ]
         if self.self_mtp is not None:
             waiting.extend(self._generation_batch.scheduler_waiting_uids())
+        held = getattr(self, "_ordinary_held", None)
+        if held is not None:
+            # Other members are still making prefix progress; the ready row
+            # must not be mistaken for a memory-starved lane by serving.
+            waiting.extend(held[0].uids)
         return waiting
 
     def _find_uids(self, uids):
@@ -5818,6 +5838,11 @@ class BatchGenerator:
         for i, seq in enumerate(self._unprocessed_sequences):
             if seq[0] in uids:
                 results[seq[0]] = (0, i)
+        held = getattr(self, "_ordinary_held", None)
+        if held is not None:
+            for i, uid in enumerate(held[0].uids):
+                if uid in uids:
+                    results[uid] = (5, i)
         for uid in self._native_continuations:
             if uid in uids:
                 results[uid] = (4, -1)
@@ -5841,6 +5866,9 @@ class BatchGenerator:
                         self._generation_batch.extract_cache(idx),
                         self._generation_batch.tokens[idx],
                     )
+            elif stage == 5:
+                held = self._ordinary_held[0]
+                results[uid] = (held.extract_cache(idx), held.tokens[idx])
             elif stage == 3:
                 results[uid] = (
                     self._plain_fallback_batch.extract_cache(idx),
@@ -5927,9 +5955,35 @@ class BatchGenerator:
         }
 
     def remove(self, uids, return_prompt_caches=False):
+        uids = set(uids)
         caches = {}
         if return_prompt_caches:
             caches = self.extract_cache(uids)
+        cohorts = getattr(self, "_ordinary_cohorts", {})
+        lost = {self._ordinary_cohort_key(cohorts[uid]) for uid in uids if uid in cohorts}
+        for key in lost:
+            members = {uid for uid, value in cohorts.items()
+                       if self._ordinary_cohort_key(value) == key}
+            survivors = members - uids
+            if survivors:
+                self._record_atomic_cohort_failure(
+                    sorted(survivors), cohorts[next(iter(members))],
+                    "declared ordinary cohort lost a member before its decode frontier",
+                )
+            uids.update(members)
+        active = getattr(self, "_ordinary_cohort_active", None)
+        if active is not None and uids.intersection(active["uids"]):
+            self._ordinary_cohort_active = None
+        held = getattr(self, "_ordinary_held", None)
+        if held is not None:
+            indices = [i for i, uid in enumerate(held[0].uids) if uid not in uids]
+            held[0].filter(indices)
+            self._ordinary_held = (
+                (held[0], [held[1][i] for i in indices], [held[2][i] for i in indices])
+                if indices else None
+            )
+        for uid in uids:
+            cohorts.pop(uid, None)
         keep = (
             set(range(len(self._unprocessed_sequences))),
             set(range(len(self._prompt_batch))),
@@ -6661,6 +6715,15 @@ class BatchGenerator:
                     metadata={"phase": "prefill"},
                 )
             )
+        held = getattr(self, "_ordinary_held", None)
+        if held is not None:
+            batch = held[0]
+            for i, uid in enumerate(batch.uids):
+                current = len(batch.tokens[i])
+                states.append(AdmissionState(
+                    uid, current + 1 + batch.max_tokens[i], current,
+                    metadata={"phase": "held_frontier"},
+                ))
         return states
 
     def _cohort_committed(self, candidate_states):
@@ -6700,6 +6763,9 @@ class BatchGenerator:
         admitted_live = float(
             sum((c.nbytes for c in self._generation_batch.prompt_cache))
         ) + float(sum((c.nbytes for c in self._prompt_batch.prompt_cache)))
+        held = getattr(self, "_ordinary_held", None)
+        if held is not None:
+            admitted_live += sum(c.nbytes for c in held[0].prompt_cache)
         return max(projected, admitted_live) + selected_unverified + unselected_live
 
     def _admit_states(self, states):
@@ -7587,6 +7653,24 @@ class BatchGenerator:
             progress = [(self._currently_processing[i][2],) * 2 for i in split]
             self._currently_processing = [self._currently_processing[i] for i in keep]
             ready = self._prompt_batch.split(split)
+            active = getattr(self, "_ordinary_cohort_active", None)
+            if active is not None and destination is None:
+                held = self._ordinary_held
+                if held is None:
+                    self._ordinary_held = (ready, last_inputs, progress)
+                else:
+                    held[0].extend(ready)
+                    held[1].extend(last_inputs)
+                    held[2].extend(progress)
+                ready, last_inputs, progress = self._ordinary_held
+                if set(ready.uids) != set(active["uids"]):
+                    return prompt_responses
+                # Readiness order can differ for cold and warm tails. Restore
+                # declaration/queue order before the shared final-token call.
+                order = [ready.uids.index(uid) for uid in active["uids"]]
+                ready.filter(order)
+                last_inputs = [last_inputs[i] for i in order]
+                progress = [progress[i] for i in order]
             exact_prompt_boundary = None
             if self.post_prefill_transform is not None:
                 if len(ready.uids) != 1:
@@ -7680,6 +7764,11 @@ class BatchGenerator:
             (self._generation_batch if destination is None else destination).extend(
                 gen_batch
             )
+            if active is not None and destination is None:
+                for uid in active["uids"]:
+                    self._ordinary_cohorts.pop(uid, None)
+                self._ordinary_held = None
+                self._ordinary_cohort_active = None
         return prompt_responses
 
     def _mixed_round_ready(self):
@@ -7832,7 +7921,75 @@ class BatchGenerator:
     def _next(self):
         return _drive_round(self._round())
 
+    @staticmethod
+    def _ordinary_cohort_key(cohort):
+        return (cohort.get("tenant_id"), cohort.get("id"), cohort.get("size"))
+
+    def _fail_ordinary_cohort(self, uids, cohort, reason):
+        # Remove all owners before reporting; ServingEngine still owns the jobs
+        # and consumes the existing atomic-failure channel on its next poll.
+        self.remove(uids)
+        self._record_atomic_cohort_failure(tuple(uids), cohort, reason)
+
+    def _ordinary_prefill_indices(self, n):
+        """None preserves progressive admission; a list owns declared admission.
+
+        A declared frontier starts at an idle ordinary boundary, reserves the
+        entire eventual shared-cache geometry, and uses the ordinary bounded
+        prefill slots in successive waves. It never enlarges the prefill batch.
+        """
+        cohorts = getattr(self, "_ordinary_cohorts", {})
+        active = getattr(self, "_ordinary_cohort_active", None)
+        queued = list(self._unprocessed_sequences)
+        if active is None and not cohorts:
+            return None
+        if active is None:
+            if not queued:
+                return []
+            first = next((i for i, row in enumerate(queued) if row[0] in cohorts), len(queued))
+            if first:
+                return list(range(self._budget_admissible(min(n, first))))
+            if len(self._generation_batch) or len(self._prompt_batch):
+                return []
+            cohort = cohorts[queued[0][0]]
+            key = self._ordinary_cohort_key(cohort)
+            members = [row for row in queued
+                       if row[0] in cohorts and self._ordinary_cohort_key(cohorts[row[0]]) == key]
+            uids = tuple(row[0] for row in members)
+            size = cohort.get("size")
+            if (type(size) is not int or size < 1 or len(uids) != size
+                    or size > self.completion_batch_size):
+                self._fail_ordinary_cohort(uids, cohort, "declared ordinary cohort cannot form its complete decode frontier")
+                return []
+            if self.post_prefill_transform is not None or any(
+                len(row) > 9 and row[9] is not None for row in members
+            ):
+                self._fail_ordinary_cohort(uids, cohort, "declared ordinary cohort requires a mergeable text-only prompt frontier")
+                return []
+            active = {"uids": uids, "cohort": cohort}
+            self._ordinary_cohort_active = active
+        members = [row for row in queued if row[0] in active["uids"]]
+        if self.state_budget is not None:
+            self._sync_budget_mutation()
+            states = [self._candidate_admission_state(row) for row in members]
+            if self._cohort_committed(states) > self.state_budget.budget_bytes:
+                self._fail_ordinary_cohort(active["uids"], active["cohort"],
+                                           "declared ordinary cohort exceeds its complete frontier state budget")
+                return []
+        return [i for i, row in enumerate(queued) if row[0] in active["uids"]][:n]
+
     def _round(self):
+        try:
+            return (yield from self._round_impl())
+        except Exception as exc:
+            active = getattr(self, "_ordinary_cohort_active", None)
+            if active is not None:
+                self._fail_ordinary_cohort(active["uids"], active["cohort"],
+                                           f"declared ordinary cohort frontier failed: {exc}")
+            # Preserve device/OOM recovery at the ServingEngine boundary.
+            raise
+
+    def _round_impl(self):
         """One scheduler round as a generator; see :meth:`_round_mtp`."""
         if self.self_mtp is not None:
             return (yield from self._round_mtp())
@@ -7924,7 +8081,13 @@ class BatchGenerator:
                     )
                 else:
                     n = min(n, first)
+        declared_indices = self._ordinary_prefill_indices(n)
         ordered = None
+        if declared_indices is not None:
+            if declared_indices:
+                self._prompt_batch.extend(self._make_batch(
+                    len(declared_indices), indices=declared_indices))
+            n = 0
         if n > 0 and self._prefill_order().enabled and not persistent_head:
             (n, ordered) = self._order_prefill_queue(n)
         n = self._budget_admissible(n)
@@ -7953,7 +8116,7 @@ class BatchGenerator:
                 self._prompt_batch.extend(
                     self._make_batch(len(indices), indices=indices)
                 )
-        elif self._admit_one_chunk_overflow(
+        elif declared_indices is None and self._admit_one_chunk_overflow(
             self._bounded_slice(
                 raw_chunk,
                 contended=contended,
