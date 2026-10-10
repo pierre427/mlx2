@@ -48,10 +48,14 @@ def inspect_gemma4_artifact(model_path):
     )
     variant = next(
         (
-            name for name, expected in _TOPOLOGIES.items()
-            if topology == (
-                expected["layers"], expected["hidden"],
-                expected["moe"], expected["experts"],
+            name
+            for name, expected in _TOPOLOGIES.items()
+            if topology
+            == (
+                expected["layers"],
+                expected["hidden"],
+                expected["moe"],
+                expected["experts"],
             )
         ),
         None,
@@ -63,16 +67,25 @@ def inspect_gemma4_artifact(model_path):
         "full_attention" if index % 6 == 5 else "sliding_attention"
         for index in range(topology[0])
     ]
-    if (layers != expected_layers or text.get("sliding_window") != 1024
-            or text.get("num_kv_shared_layers") != 0):
+    if (
+        layers != expected_layers
+        or text.get("sliding_window") != 1024
+        or text.get("num_kv_shared_layers") != 0
+    ):
         raise ValueError("Gemma 4 full/sliding attention layout is unsupported")
-    if (config.get("audio_config") is not None
-            or (config.get("vision_config") or {}).get("model_type") != "gemma4_vision"
-            or config.get("video_token_id") != 258884):
-        raise ValueError("Expected vision/video Gemma 4 artifact without an audio tower")
+    if (
+        config.get("audio_config") is not None
+        or (config.get("vision_config") or {}).get("model_type") != "gemma4_vision"
+        or config.get("video_token_id") != 258884
+    ):
+        raise ValueError(
+            "Expected vision/video Gemma 4 artifact without an audio tower"
+        )
     quant = config.get("quantization")
-    if quant and any(quant.get(key) != value for key, value in
-                     {"bits": 8, "group_size": 64, "mode": "affine"}.items()):
+    if quant and any(
+        quant.get(key) != value
+        for key, value in {"bits": 8, "group_size": 64, "mode": "affine"}.items()
+    ):
         raise ValueError("Only the local affine 8-bit Gemma 4 conversion is supported")
     provenance = path / "source-and-quantization.json"
     if quant and not provenance.is_file():
@@ -80,8 +93,13 @@ def inspect_gemma4_artifact(model_path):
     if provenance.is_file():
         source = json.loads(provenance.read_text())
         expected_repo, expected_rev = _SOURCE_REVISIONS[variant]
-        if (source.get("source_repo"), source.get("source_revision")) != (expected_repo, expected_rev):
-            raise ValueError("Gemma 4 conversion source does not match its declared model")
+        if (source.get("source_repo"), source.get("source_revision")) != (
+            expected_repo,
+            expected_rev,
+        ):
+            raise ValueError(
+                "Gemma 4 conversion source does not match its declared model"
+            )
         artifact["source_revision"] = expected_rev
     artifact["variant"] = variant
     artifact["precision"] = "mlx-affine-8bit" if quant else "bf16"
@@ -100,8 +118,9 @@ class _Gemma4LogitsModel(_LogitsModel):
         text = model.config.text_config
         count = model.language_model.model.first_kv_shared_layer_idx
         return [
-            KVCache() if kind == "full_attention" else
-            RotatingKVCache(max_size=text.sliding_window, keep=0)
+            KVCache()
+            if kind == "full_attention"
+            else RotatingKVCache(max_size=text.sliding_window, keep=0)
             for kind in text.layer_types[:count]
         ]
 
@@ -111,18 +130,29 @@ def _descriptor(variant, adapter_name):
         model_type="gemma4",
         family="gemma-4",
         variant=variant,
-        state_planes=frozenset({StatePlane.ATTENTION_KV, StatePlane.RNG, StatePlane.TRANSCRIPT}),
-        capabilities=frozenset({
-            Capability.TEXT, Capability.VISION, Capability.VIDEO,
-            Capability.STREAMING, Capability.CONTINUOUS_BATCH,
-            Capability.PREFIX_REUSE, Capability.APC_V2,
-        }),
+        state_planes=frozenset(
+            {StatePlane.ATTENTION_KV, StatePlane.RNG, StatePlane.TRANSCRIPT}
+        ),
+        capabilities=frozenset(
+            {
+                Capability.TEXT,
+                Capability.VISION,
+                Capability.VIDEO,
+                Capability.STREAMING,
+                Capability.CONTINUOUS_BATCH,
+                Capability.PREFIX_REUSE,
+                Capability.APC_V2,
+            }
+        ),
         cache_layout=f"gemma4-{variant}-full-sliding-v1",
         metadata={
             "execution": f"mlx2.adapters.gemma4.{adapter_name}",
             "qualification": "pending",
             "required_qualification_checks": (
-                "multimodal_image", "multimodal_video", "multimodal_apcv2_reuse",
+                "multimodal_image",
+                "multimodal_video",
+                "multimodal_continuous_batch",
+                "multimodal_apcv2_reuse",
             ),
             "audio_input": "unsupported_no_audio_tower",
         },
@@ -167,9 +197,17 @@ class _Gemma4Adapter(_MLXVLMAdapter):
         if artifact["variant"] != self.descriptor.variant:
             raise ValueError("Gemma 4 adapter variant does not match the artifact")
         super().__init__(model_path, execution_policy=execution_policy)
-        self.identity.update({key: artifact[key] for key in (
-            "variant", "precision", "full_attention_layers", "sliding_attention_layers"
-        )})
+        self.identity.update(
+            {
+                key: artifact[key]
+                for key in (
+                    "variant",
+                    "precision",
+                    "full_attention_layers",
+                    "sliding_attention_layers",
+                )
+            }
+        )
 
     def prefill_step_default(self):
         """Adapter-preferred prefill chunk; an explicit engine setting wins."""
@@ -303,9 +341,7 @@ class _Gemma4Adapter(_MLXVLMAdapter):
             "publishable": False,
         }
 
-    def plan_exact_prefix_cascade(
-        self, paths, accepted_prefix=(), *, attempted=()
-    ):
+    def plan_exact_prefix_cascade(self, paths, accepted_prefix=(), *, attempted=()):
         """Plan one Gemma 4 cascade stage without mutating model state."""
 
         from ..runtime.exact_prefix_cascade import next_cascade_stage
@@ -319,7 +355,8 @@ class _Gemma4Adapter(_MLXVLMAdapter):
         from .mlx_vlm_memory import SlidingKVCacheBudget
 
         return SlidingKVCacheBudget.from_gemma4_config(
-            self._text_config(), mtp=mtp,
+            self._text_config(),
+            mtp=mtp,
             prefill_step=self._budget_prefill_step(),
             root_config=self.identity["config"],
         )
@@ -367,17 +404,22 @@ class _Gemma4Adapter(_MLXVLMAdapter):
                     # a literal marker in user text ran its replacement
                     # iterator dry (StopIteration, a server error).
                     if any(marker in str(part.get("text", "")) for marker in markers):
-                        raise ValueError("Gemma 4 text must not contain a media placeholder")
+                        raise ValueError(
+                            "Gemma 4 text must not contain a media placeholder"
+                        )
                     continue
                 kind = {
-                    "image_url": "image", "input_image": "image",
+                    "image_url": "image",
+                    "input_image": "image",
                     "input_video": "video",
                 }.get(part_type)
                 if kind is None:
                     raise ValueError(f"Gemma 4 input part {part_type!r} is unsupported")
                 source = _source(part, kind)
                 value = resolve_media(
-                    source, kind=kind, file_loader=file_loader,
+                    source,
+                    kind=kind,
+                    file_loader=file_loader,
                     **({"fps": 2.0, "max_frames": 32} if kind == "video" else {}),
                 )
                 media.append(value)
@@ -394,13 +436,19 @@ class _Gemma4Adapter(_MLXVLMAdapter):
         messages = _plain_messages(request["messages"], replacements)
         prompt = self._render(messages)
         # Markers in string-content messages reach the processor too.
-        _require_media_markers(prompt, "Gemma 4", (
-            (self.processor.image_token, len(images)),
-            (self.processor.video_token, len(videos)),
-        ))
+        _require_media_markers(
+            prompt,
+            "Gemma 4",
+            (
+                (self.processor.image_token, len(images)),
+                (self.processor.video_token, len(videos)),
+            ),
+        )
         processed = self.processor(
-            text=prompt, images=images or None,
-            videos=videos or None, fps=video_fps or None,
+            text=prompt,
+            images=images or None,
+            videos=videos or None,
+            fps=video_fps or None,
             return_tensors="np",
         )
         media_token_end = _media_token_end(processed)
@@ -427,11 +475,13 @@ class _Gemma4Adapter(_MLXVLMAdapter):
         }
 
     def diagnostics(self):
-        return {**super().diagnostics(),
-                "variant": self.identity["variant"],
-                "precision": self.identity["precision"],
-                "full_attention_layers": self.identity["full_attention_layers"],
-                "sliding_attention_layers": self.identity["sliding_attention_layers"]}
+        return {
+            **super().diagnostics(),
+            "variant": self.identity["variant"],
+            "precision": self.identity["precision"],
+            "full_attention_layers": self.identity["full_attention_layers"],
+            "sliding_attention_layers": self.identity["sliding_attention_layers"],
+        }
 
 
 class Gemma4A4BAdapter(_Gemma4Adapter):
@@ -445,7 +495,9 @@ class Gemma4A4BAdapter(_Gemma4Adapter):
     # 2048 is the fastest step, so the engine-wide default is kept, declared.
     default_prefill_step = 2048
     sampling_defaults = VendorSampling.single(
-        SamplingDefaults(temperature=1.0, top_p=0.95, top_k=64, source=GENERATION_CONFIG),
+        SamplingDefaults(
+            temperature=1.0, top_p=0.95, top_k=64, source=GENERATION_CONFIG
+        ),
         model="google/gemma-4-26B-A4B",
     )
 
@@ -461,7 +513,9 @@ class Gemma431BAdapter(_Gemma4Adapter):
     # faster and lighter than the engine-wide 2048.
     default_prefill_step = 512
     sampling_defaults = VendorSampling.single(
-        SamplingDefaults(temperature=1.0, top_p=0.95, top_k=64, source=GENERATION_CONFIG),
+        SamplingDefaults(
+            temperature=1.0, top_p=0.95, top_k=64, source=GENERATION_CONFIG
+        ),
         model="google/gemma-4-31B",
     )
 

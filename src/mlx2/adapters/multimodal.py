@@ -68,7 +68,8 @@ class MediaFeatureCache:
     def clear(self):
         with self.lock:
             removed = len(self.entries)
-            self.entries.clear(); self.bytes = 0
+            self.entries.clear()
+            self.bytes = 0
             self.counts["clears"] += 1
             self.counts["cleared_entries"] += removed
 
@@ -88,7 +89,10 @@ def install_media_feature_cache(model, cache: MediaFeatureCache, *, family: str)
             if features is None:
                 if family == "gemma3n":
                     features = bound.get_image_features(
-                        pixel_values, bound.vision_tower, bound.config, bound.embed_vision
+                        pixel_values,
+                        bound.vision_tower,
+                        bound.config,
+                        bound.embed_vision,
                     )
                 elif family == "minicpmo":
                     features = bound.get_vision_embedding(
@@ -114,12 +118,21 @@ def install_gemma3n_vision_batching(model, policy: Gemma3nVideoPolicy):
     def batched_features(bound, pixel_values, vision_tower, config, embed_vision):
         import mlx.core as mx
 
-        if pixel_values is None or int(pixel_values.shape[0]) <= policy.frame_batch_size:
+        if pixel_values is None:
+            return original(pixel_values, vision_tower, config, embed_vision)
+        count = int(pixel_values.shape[0])
+        chunks = []
+        observed = getattr(bound, "_mlx2_gemma3n_vision_batching", None)
+        if count <= policy.frame_batch_size:
+            if isinstance(observed, dict):
+                observed["calls"].append({"input_count": count, "chunk_sizes": [count]})
             return original(pixel_values, vision_tower, config, embed_vision)
         features = []
-        for start in range(0, int(pixel_values.shape[0]), policy.frame_batch_size):
+        for start in range(0, count, policy.frame_batch_size):
+            chunk = pixel_values[start : start + policy.frame_batch_size]
+            chunks.append(int(chunk.shape[0]))
             feature = original(
-                pixel_values[start : start + policy.frame_batch_size],
+                chunk,
                 vision_tower,
                 config,
                 embed_vision,
@@ -128,6 +141,8 @@ def install_gemma3n_vision_batching(model, policy: Gemma3nVideoPolicy):
             # every tower graph and defeats the frame-batch memory bound.
             mx.eval(feature)
             features.append(feature)
+        if isinstance(observed, dict):
+            observed["calls"].append({"input_count": count, "chunk_sizes": chunks})
         return mx.concatenate(features, axis=0)
 
     model.get_image_features = types.MethodType(batched_features, model)
@@ -168,13 +183,23 @@ class NativeVideoInput:
             frames,
             times,
             float(media.metadata["source_fps"]),
-            media_fingerprint([media], policy={"family": "gemma3n", "fps": policy.fps, "max_frames": policy.max_frames}),
+            media_fingerprint(
+                [media],
+                policy={
+                    "family": "gemma3n",
+                    "fps": policy.fps,
+                    "max_frames": policy.max_frames,
+                },
+            ),
         )
 
     def batches(self, size: int):
         if size < 1:
             raise ValueError("video frame batch size must be positive")
-        return tuple(self.frames[start : start + size] for start in range(0, len(self.frames), size))
+        return tuple(
+            self.frames[start : start + size]
+            for start in range(0, len(self.frames), size)
+        )
 
     def processor_inputs(self, text: str, image_token: str) -> dict:
         """Bridge native video to Gemma 3n's image/audio processor contract.
@@ -219,14 +244,24 @@ class MiniCPMOExecutionPolicy:
             vision_batch_size=int(config.get("vision_batch_size", 16)),
             slice_mode=bool(config.get("slice_mode", True)),
             max_slice_nums=int(slice_config.get("max_slice_nums", 9)),
-            scale_resolution=int(slice_config.get("scale_resolution", config.get("image_size", 448))),
+            scale_resolution=int(
+                slice_config.get("scale_resolution", config.get("image_size", 448))
+            ),
             audio_chunk_length=float(config.get("audio_chunk_length", 1.0)),
-            chunk_input=bool(config.get("chunk_input", config.get("stream_input", True))),
-            audio_sample_rate=int((config.get("audio_config") or {}).get("sampling_rate", 16_000)),
+            chunk_input=bool(
+                config.get("chunk_input", config.get("stream_input", True))
+            ),
+            audio_sample_rate=int(
+                (config.get("audio_config") or {}).get("sampling_rate", 16_000)
+            ),
         )
 
     def __post_init__(self):
-        if self.vision_batch_size < 1 or self.max_slice_nums < 1 or self.scale_resolution < 14:
+        if (
+            self.vision_batch_size < 1
+            or self.max_slice_nums < 1
+            or self.scale_resolution < 14
+        ):
             raise ValueError("MiniCPM-o vision controls must be positive")
         if not math.isfinite(self.audio_chunk_length) or self.audio_chunk_length <= 0:
             raise ValueError("MiniCPM-o audio_chunk_length must be finite and positive")
@@ -237,7 +272,11 @@ class MiniCPMOExecutionPolicy:
         """Create a global view plus a bounded aspect-preserving crop grid."""
         from PIL import Image
 
-        image = image.convert("RGB") if isinstance(image, Image.Image) else Image.fromarray(image).convert("RGB")
+        image = (
+            image.convert("RGB")
+            if isinstance(image, Image.Image)
+            else Image.fromarray(image).convert("RGB")
+        )
         width, height = image.size
         if not self.slice_mode:
             return (image,)
@@ -263,7 +302,9 @@ class MiniCPMOExecutionPolicy:
     def vision_batches(self, images) -> tuple:
         expanded = tuple(tile for image in images for tile in self.slice_image(image))
         size = self.vision_batch_size if self.batch_vision_input else 1
-        return tuple(expanded[start : start + size] for start in range(0, len(expanded), size))
+        return tuple(
+            expanded[start : start + size] for start in range(0, len(expanded), size)
+        )
 
     def audio_chunks(self, media: MediaValue) -> tuple:
         if int(media.metadata["sample_rate"]) != self.audio_sample_rate:
@@ -273,7 +314,9 @@ class MiniCPMOExecutionPolicy:
         samples = pcm_to_float32(media)
         if not self.chunk_input:
             return (samples,)
-        return chunk_audio(samples, self.audio_sample_rate, chunk_seconds=self.audio_chunk_length)
+        return chunk_audio(
+            samples, self.audio_sample_rate, chunk_seconds=self.audio_chunk_length
+        )
 
     def receipt(self) -> dict:
         return {
@@ -320,7 +363,9 @@ def install_minicpmo_vision_batching(model, policy: MiniCPMOExecutionPolicy):
                 target = (
                     sample_tgt[image_index]
                     if image_index < len(sample_tgt)
-                    else np.array([1, max(int(value.shape[1] // bound.config.patch_size), 1)])
+                    else np.array(
+                        [1, max(int(value.shape[1] // bound.config.patch_size), 1)]
+                    )
                 )
                 flat.append((sample_index, image_index, value, target))
 
@@ -328,11 +373,16 @@ def install_minicpmo_vision_batching(model, policy: MiniCPMOExecutionPolicy):
         for record in flat:
             key = tuple(int(v) for v in record[2].shape)
             groups.setdefault(key, []).append(record)
+        observed = getattr(bound, "_mlx2_minicpmo_vision_batching", None)
+        call_observation = {"input_count": len(flat), "chunk_sizes": []}
         for records in groups.values():
             for start in range(0, len(records), policy.vision_batch_size):
                 chunk = records[start : start + policy.vision_batch_size]
+                call_observation["chunk_sizes"].append(len(chunk))
                 pixels = mx.stack([record[2] for record in chunk], axis=0)
-                targets = mx.array(np.stack([record[3] for record in chunk]), dtype=mx.int32)
+                targets = mx.array(
+                    np.stack([record[3] for record in chunk]), dtype=mx.int32
+                )
                 patch_lengths = targets[:, 0] * targets[:, 1]
                 max_patches = int(mx.max(patch_lengths).item())
                 patch_mask = mx.arange(max_patches)[None, :] < patch_lengths[:, None]
@@ -345,6 +395,8 @@ def install_minicpmo_vision_batching(model, policy: MiniCPMOExecutionPolicy):
                 mx.eval(embeddings)
                 for row, (sample_index, image_index, _, _) in enumerate(chunk):
                     outputs[sample_index].append((image_index, embeddings[row]))
+        if isinstance(observed, dict):
+            observed["calls"].append(call_observation)
         return [
             mx.stack([value for _, value in sorted(sample)], axis=0) if sample else []
             for sample in outputs

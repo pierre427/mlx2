@@ -103,12 +103,17 @@ def test_gemma_frame_batches_are_evaluated_before_constructing_next(monkeypatch)
 
     model = SimpleNamespace(get_image_features=forward)
     install_gemma3n_vision_batching(model, Gemma3nVideoPolicy(frame_batch_size=2))
+    assert not hasattr(model, "_mlx2_gemma3n_vision_batching")
+    model._mlx2_gemma3n_vision_batching = {"calls": []}
     monkeypatch.setattr(mx, "eval", evaluate)
     pixels = mx.arange(5).reshape(5, 1)
     result = model.get_image_features(pixels, None, None, None)
     assert result.tolist() == [[1], [2], [3], [4], [5]]
     assert events == [
         (kind, size) for size in (2, 2, 1) for kind in ("forward", "eval")
+    ]
+    assert model._mlx2_gemma3n_vision_batching["calls"] == [
+        {"input_count": 5, "chunk_sizes": [2, 2, 1]}
     ]
 
 
@@ -137,6 +142,8 @@ def test_minicpm_chunks_evaluate_and_restore_mixed_sample_image_order(monkeypatc
     install_minicpmo_vision_batching(
         model, MiniCPMOExecutionPolicy(vision_batch_size=2)
     )
+    assert not hasattr(model, "_mlx2_minicpmo_vision_batching")
+    model._mlx2_minicpmo_vision_batching = {"calls": []}
     monkeypatch.setattr(mx, "eval", evaluate)
     result = model.get_vision_embedding(
         [
@@ -148,6 +155,9 @@ def test_minicpm_chunks_evaluate_and_restore_mixed_sample_image_order(monkeypatc
     assert [value.tolist() for value in result] == [[[1.0], [2.0]], [[3.0], [4.0]]]
     assert events == [
         (kind, size) for size in (2, 1, 1) for kind in ("forward", "eval")
+    ]
+    assert model._mlx2_minicpmo_vision_batching["calls"] == [
+        {"input_count": 4, "chunk_sizes": [2, 1, 1]}
     ]
 
 

@@ -4,8 +4,17 @@ import json
 from pathlib import Path
 
 from .contracts import Capability, Fidelity, QualifiedProfile, RouteRequest
-from .media_qualification import SMOL_MEDIA_CHECKS, evaluate_smol_media_report
-from .qwen25_media_qualification import CHECKS as QWEN_MEDIA_CHECKS, evaluate_qwen25_media_report
+from .media_qualification import (
+    SMOL_MEDIA_CHECKS,
+    evaluate_smol_media_report,
+    NATIVE_VLM_MEDIA_CHECKS,
+    NATIVE_VLM_SOURCE_REVISIONS,
+    evaluate_native_vlm_report,
+)
+from .qwen25_media_qualification import (
+    CHECKS as QWEN_MEDIA_CHECKS,
+    evaluate_qwen25_media_report,
+)
 from .lfm25_media_qualification import LFM_MEDIA_CHECKS, evaluate_lfm_media_report
 from .routing import RoutePlanner
 
@@ -230,14 +239,19 @@ APPROVED_QUALIFICATION_HARNESS = {
     # Re-pinned 2026-10-10: adaptive feature qualification depends on
     # correctness and observed policy behavior; speed/probe overhead are
     # separate performance evidence. Reject nonfinite confidence limits.
-    "sha256": "c840548ef89abc15c0e1094572f8ea955ba4c7579b5080181c4e7879a387f575",
+    "sha256": "f993acfcb2ca64a31555c1a5c841d451008d285694a63a2a927e02b6fa90bd43",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
 # caller may edit a receipt file, so a bare {"passed": true} under an invented
 # check name is not evidence that the reviewed producer ran that check. Add
 # names here only with the corresponding reviewed producer implementation.
-APPROVED_ADAPTER_CHECKS = SMOL_MEDIA_CHECKS | QWEN_MEDIA_CHECKS | LFM_MEDIA_CHECKS
+APPROVED_ADAPTER_CHECKS = (
+    SMOL_MEDIA_CHECKS
+    | QWEN_MEDIA_CHECKS
+    | LFM_MEDIA_CHECKS
+    | frozenset().union(*NATIVE_VLM_MEDIA_CHECKS.values())
+)
 # Re-pinned 2026-10-09 (bug sweep, churn-adapters#1): the three producers now
 # gate on the adapter's mlx-vlm dependency-content identity
 # (``mlx_vlm_runtime["reference_revision"]`` == the pinned source revision
@@ -254,51 +268,139 @@ APPROVED_MEDIA_HARNESS = {
 APPROVED_MEDIA_PRODUCERS = {
     "smolvlm": (APPROVED_MEDIA_HARNESS, evaluate_smol_media_report, SMOL_MEDIA_CHECKS),
     "qwen2_5_vl": (
-        {"name": "scripts/qualify_qwen25_media_serving.py",
-         "sha256": "b8da95c2fb7bd093d29050ea57232962646ac4a31358e2ab880fc48424c34b86"},
-        evaluate_qwen25_media_report, QWEN_MEDIA_CHECKS,
+        {
+            "name": "scripts/qualify_qwen25_media_serving.py",
+            "sha256": "b8da95c2fb7bd093d29050ea57232962646ac4a31358e2ab880fc48424c34b86",
+        },
+        evaluate_qwen25_media_report,
+        QWEN_MEDIA_CHECKS,
     ),
     "lfm2_vl": (
-        {"name": "scripts/qualify_lfm25_media_serving.py",
-         "sha256": "c41c51b4a5ce0c3eacfd359bdba398ad5b64dc9fc575243428b9e798616ae977"},
-        evaluate_lfm_media_report, LFM_MEDIA_CHECKS,
+        {
+            "name": "scripts/qualify_lfm25_media_serving.py",
+            "sha256": "c41c51b4a5ce0c3eacfd359bdba398ad5b64dc9fc575243428b9e798616ae977",
+        },
+        evaluate_lfm_media_report,
+        LFM_MEDIA_CHECKS,
+    ),
+    # Producer closure independently reviewed 2026-10-10. This enables
+    # evidence validation; models remain unqualified until real probes pass.
+    "gemma3n": (
+        {
+            "name": "scripts/qualify_native_vlm_media.py",
+            "sha256": "90a02d4a27cb6f77f602f2f2ae8c12f65537f46eb63878382bc9e711824029bb",
+            "evaluator_sha256": "c3ebee56e39c13c0fc2cc1b892379d541cee7523192780d37dc4daa9d43b210a",
+            "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
+            "adapter_batching_sha256": "7c8383288b4e060f788d625a352f7e0e2592f844271a529af5a6f105205a6461",
+            "adapter_contract_sha256": "a3fa6ae00b4f69ca08f02a212e48490e991daafa085761cf6f97f670c3abe08b",
+        },
+        evaluate_native_vlm_report,
+        NATIVE_VLM_MEDIA_CHECKS["gemma3n"],
+        True,
+    ),
+    "gemma4": (
+        {
+            "name": "scripts/qualify_native_vlm_media.py",
+            "sha256": "90a02d4a27cb6f77f602f2f2ae8c12f65537f46eb63878382bc9e711824029bb",
+            "evaluator_sha256": "c3ebee56e39c13c0fc2cc1b892379d541cee7523192780d37dc4daa9d43b210a",
+            "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
+            "adapter_batching_sha256": "7c8383288b4e060f788d625a352f7e0e2592f844271a529af5a6f105205a6461",
+            "adapter_contract_sha256": "5605b41a95a68adcb8f5632601a0b4dbd8d04a83a0871b6649afdc44ebe22df2",
+        },
+        evaluate_native_vlm_report,
+        NATIVE_VLM_MEDIA_CHECKS["gemma4"],
+        True,
+    ),
+    "minicpmo": (
+        {
+            "name": "scripts/qualify_native_vlm_media.py",
+            "sha256": "90a02d4a27cb6f77f602f2f2ae8c12f65537f46eb63878382bc9e711824029bb",
+            "evaluator_sha256": "c3ebee56e39c13c0fc2cc1b892379d541cee7523192780d37dc4daa9d43b210a",
+            "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
+            "adapter_batching_sha256": "7c8383288b4e060f788d625a352f7e0e2592f844271a529af5a6f105205a6461",
+            "adapter_contract_sha256": "a3fa6ae00b4f69ca08f02a212e48490e991daafa085761cf6f97f670c3abe08b",
+        },
+        evaluate_native_vlm_report,
+        NATIVE_VLM_MEDIA_CHECKS["minicpmo"],
+        True,
     ),
 }
-PINNED_MEDIA_SOURCE_REVISION = "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5"
+PINNED_MEDIA_SOURCE_REVISION = (
+    "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5"  # compatibility alias
+)
+PINNED_MEDIA_SOURCE_REVISIONS = {
+    "smolvlm": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+    "qwen2_5_vl": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+    "lfm2_vl": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+    **NATIVE_VLM_SOURCE_REVISIONS,
+}
 
 
-def validate_adapter_qualification(report, *, runtime, artifact, settings, descriptor=None):
+def validate_adapter_qualification(
+    report, *, runtime, artifact, settings, descriptor=None
+):
     """Bind a companion producer's traces to the same exact serving route."""
     if not isinstance(report, dict):
         raise ValueError("adapter qualification producer is unavailable")
     model_type = report.get("model_type")
-    if (descriptor is not None and model_type != descriptor.model_type) or model_type not in APPROVED_MEDIA_PRODUCERS:
+    if (
+        descriptor is not None and model_type != descriptor.model_type
+    ) or model_type not in APPROVED_MEDIA_PRODUCERS:
         raise ValueError("adapter qualification producer is unavailable")
-    harness, evaluator, expected_checks = APPROVED_MEDIA_PRODUCERS[model_type]
-    if (report.get("schema") != "mlx2.media-serving-qualification.v1"
-            or report.get("qualification_harness") != harness
-            or report.get("source_revision") != PINNED_MEDIA_SOURCE_REVISION
-            or (descriptor is not None and descriptor.metadata.get("source_revision") != PINNED_MEDIA_SOURCE_REVISION)
-            or report.get("runtime") != runtime
-            or report.get("artifact") != artifact):
-        raise ValueError("adapter qualification does not match approved producer or artifact")
+    producer_entry = APPROVED_MEDIA_PRODUCERS[model_type]
+    if len(producer_entry) == 4:
+        harness, evaluator, expected_checks, approved = producer_entry
+        if approved is not True:
+            raise ValueError(
+                "native media producer is pinned as a candidate but awaits independent review"
+            )
+    else:
+        harness, evaluator, expected_checks = producer_entry
+    source_revision = PINNED_MEDIA_SOURCE_REVISIONS[model_type]
+    if (
+        report.get("schema") != "mlx2.media-serving-qualification.v1"
+        or report.get("qualification_harness") != harness
+        or report.get("source_revision") != source_revision
+        or (
+            descriptor is not None
+            and descriptor.metadata.get("source_revision") is not None
+            and descriptor.metadata.get("source_revision") != source_revision
+        )
+        or report.get("runtime") != runtime
+        or report.get("artifact") != artifact
+    ):
+        raise ValueError(
+            "adapter qualification does not match approved producer or artifact"
+        )
     reported_settings = report.get("settings")
     if not isinstance(reported_settings, dict) or {
-        key: value for key, value in reported_settings.items()
+        key: value
+        for key, value in reported_settings.items()
         if key not in PROVENANCE_ONLY_SETTINGS
     } != {
-        key: value for key, value in settings.items()
+        key: value
+        for key, value in settings.items()
         if key not in PROVENANCE_ONLY_SETTINGS
     }:
         raise ValueError("adapter qualification does not match serving settings")
-    observed = evaluator(report)
+    if model_type in NATIVE_VLM_MEDIA_CHECKS:
+        observed = evaluator(
+            report, expected_family=model_type, expected_harness=harness
+        )
+    else:
+        observed = evaluator(report)
     checks = report.get("checks")
-    if (report.get("passed") is not True or not isinstance(checks, dict)
-            or set(checks) != expected_checks
-            or any(not isinstance(checks.get(name), dict)
-                   or checks[name].get("passed") is not value
-                   for name, value in observed.items())
-            or not all(observed.values())):
+    if (
+        report.get("passed") is not True
+        or not isinstance(checks, dict)
+        or set(checks) != expected_checks
+        or any(
+            not isinstance(checks.get(name), dict)
+            or checks[name].get("passed") is not value
+            for name, value in observed.items()
+        )
+        or not all(observed.values())
+    ):
         raise ValueError("adapter qualification traces are missing or failed")
     return observed
 
@@ -411,7 +513,12 @@ QUALIFIER_NEAR_LIMIT_HEADROOM = 256
 # Flash-Next (qwen4_exp) indexer geometry when a route does not record its
 # own (``settings["qsa_indexer"]``): the TextModelArgs defaults, which both
 # served artifacts use (indexer_budget 2048, compress ratio 4).
-QSA_INDEXER_DEFAULT = {"budget": 2048, "compress_ratio": 4, "head_dim": 128, "n_heads": 4}
+QSA_INDEXER_DEFAULT = {
+    "budget": 2048,
+    "compress_ratio": 4,
+    "head_dim": 128,
+    "n_heads": 4,
+}
 # qwen4_qsa_scores admission: head_dim 128 only, at most 32 query rows (rows
 # x indexer heads) per launch, and more pooled blocks than head_dim (the stock
 # GEMM routes N <= K elsewhere).
@@ -494,11 +601,15 @@ def _qsa_nax_prefill_unreachable(settings, env, indexer, mode):
         0
         if mode == "on"
         else _env_int(
-            env, "MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV", QSA_NAX_MIN_PHYSICAL_KV_DEFAULT
+            env,
+            "MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV",
+            QSA_NAX_MIN_PHYSICAL_KV_DEFAULT,
         )
     )
     ratio = int(indexer["geometry"]["compress_ratio"])
-    explicit_blocks = indexer["topk_blocks"] + 1 if indexer["global_shortcircuit"] else 1
+    explicit_blocks = (
+        indexer["topk_blocks"] + 1 if indexer["global_shortcircuit"] else 1
+    )
     floor = max(crossover, explicit_blocks * ratio)
     if indexer["probe_context"] < floor + min_query:
         return (
@@ -524,7 +635,9 @@ def _qsa_indexer_probe(settings, env):
     budget, ratio = int(geometry["budget"]), int(geometry["compress_ratio"])
     context = int(settings.get("max_context") or 0)
     probe = max(0, context - QUALIFIER_NEAR_LIMIT_HEADROOM)
-    global_shortcircuit = _environment_mode_enabled(env.get("MLX_QWEN4_QSA_DENSE_SHORTCIRCUIT"))
+    global_shortcircuit = _environment_mode_enabled(
+        env.get("MLX_QWEN4_QSA_DENSE_SHORTCIRCUIT")
+    )
     fused_shortcircuit = (
         not _environment_mode_enabled(env.get("MLX_QWEN4_QSA_GATHER_KV"))
         or global_shortcircuit
@@ -558,7 +671,8 @@ def _default_on_mechanisms(settings):
     required, not_observed = set(), {}
     speculation = settings.get("speculation")
     native_mtp = bool(settings.get("mtp")) and speculation not in {
-        "external_draft", "prompt_lookup"
+        "external_draft",
+        "prompt_lookup",
     }
     width = min(int(settings.get("max_lanes") or 1), QUALIFIER_BATCH_WIDTH)
     handoff = settings.get("mtp_ordinary_handoff") or {}
@@ -681,7 +795,9 @@ def _default_on_mechanisms(settings):
         # past the budget under fused rows, else from the first block.
         geometry = indexer["geometry"]
         shortcircuit = (
-            indexer["fused_shortcircuit"] if attn_rows else indexer["global_shortcircuit"]
+            indexer["fused_shortcircuit"]
+            if attn_rows
+            else indexer["global_shortcircuit"]
         )
         explicit_after = indexer["topk_blocks"] if shortcircuit else 0
         floor_blocks = max(explicit_after, QSA_FUSED_SCORES_HEAD_DIM)
@@ -806,7 +922,10 @@ def _default_on_mechanisms(settings):
             required.add("decode_fairness_slice_floor")
     policy = settings.get("execution_policy") or {}
     adapter_policy = settings.get("adapter_policy") or {}
-    if policy.get("fp32_head_logits") is True or adapter_policy.get("fp32_head_logits") is True:
+    if (
+        policy.get("fp32_head_logits") is True
+        or adapter_policy.get("fp32_head_logits") is True
+    ):
         required.add("fp32_head_logits")
     if (
         adapter_policy.get("gdn_state_dtype") == "float16"
@@ -903,9 +1022,9 @@ def _qsa_nax_prefill_host_gated(execution, initial_execution):
             "masked attention"
         )
     counts = status.get("counts") or {}
-    before = (
-        ((initial_execution or {}).get("qsa_nax_prefill") or {}).get("counts") or {}
-    )
+    before = ((initial_execution or {}).get("qsa_nax_prefill") or {}).get(
+        "counts"
+    ) or {}
     refused = counts.get("kernel_unavailable", 0)
     if type(refused) is int and refused > (before.get("kernel_unavailable", 0) or 0):
         return (
@@ -1055,7 +1174,9 @@ def _host_gated_exemption(record, name):
 # A run in which that never happened records the mechanism as "selected, not
 # observed" with the reason.  A run whose scheduler never reported the lift
 # counter at all (the floor was not constructed) stays a failed check.
-CONTENTION_GATED_FEATURES = frozenset({"decode_fairness", "decode_fairness_slice_floor"})
+CONTENTION_GATED_FEATURES = frozenset(
+    {"decode_fairness", "decode_fairness_slice_floor"}
+)
 SLICE_FLOOR_LIFTS = "decode_fairness_slice_floor_lifts"
 FAIRNESS_PREFILL_CHUNKS = "decode_fairness_prefill_chunks"
 
@@ -1117,7 +1238,11 @@ def _topk_fold_paths(settings, env, native_mtp, width, handoff_width):
     consumers = _window_consumers(env)
     num_draft = (settings.get("execution_policy") or {}).get("num_draft")
     verify_rows = int(num_draft) + 1 if type(num_draft) is int else None
-    if native_mtp and verify_rows is not None and 2 <= verify_rows <= MOE_TOPK_FOLD_MAX_ROWS:
+    if (
+        native_mtp
+        and verify_rows is not None
+        and 2 <= verify_rows <= MOE_TOPK_FOLD_MAX_ROWS
+    ):
         if "verify" in consumers:
             paths.append("verify")
         if "row_exact" in consumers:
@@ -1125,8 +1250,10 @@ def _topk_fold_paths(settings, env, native_mtp, width, handoff_width):
     if "batch_decode" in consumers and width >= 2:
         # Batched one-token decode of 2..width lanes; a native MTP route hands
         # off to it only above its handoff width.
-        smallest = 2 if not native_mtp else (
-            None if handoff_width is None else int(handoff_width) + 1
+        smallest = (
+            2
+            if not native_mtp
+            else (None if handoff_width is None else int(handoff_width) + 1)
         )
         if smallest is not None and smallest <= min(width, MOE_TOPK_FOLD_MAX_ROWS):
             paths.append("batch_decode")
@@ -1145,44 +1272,66 @@ def _route_feature_checks(settings):
     env = settings.get("environment", {})
     features = set(_default_on_mechanisms(settings)[0])
     if settings.get("speculation") == "external_draft":
-        features.update({"external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction"})
-        if type((settings.get("execution_policy") or {}).get(
-            "progressive_verification_tile"
-        )) is int:
+        features.update(
+            {
+                "external_draft",
+                "proposal_distribution",
+                "paired_draft_cache",
+                "segmented_transaction",
+            }
+        )
+        if (
+            type(
+                (settings.get("execution_policy") or {}).get(
+                    "progressive_verification_tile"
+                )
+            )
+            is int
+        ):
             # A selected progressive verifier must complete at least one
             # run-local, tile-spanning round.  Merely constructing the route
             # or executing only its fixed-verifier fallbacks proves neither
             # private target state nor atomic publication.
             features.add("progressive_verification")
-        if type((settings.get("execution_policy") or {}).get(
-            "progressive_multilane_draft_cap"
-        )) is int:
+        if (
+            type(
+                (settings.get("execution_policy") or {}).get(
+                    "progressive_multilane_draft_cap"
+                )
+            )
+            is int
+        ):
             # The width-aware cap is selected to preserve a physical cohort,
             # so it needs run-local capped-round evidence in addition to the
             # generic batch check's observed width.
             features.add("progressive_multilane_draft_cap")
         if (settings.get("fly_verification") or {}).get("enabled") is True:
             features.add("fly_verification")
-        if (settings.get("execution_policy") or {}).get("pairwise_selection") == "batched":
+        if (settings.get("execution_policy") or {}).get(
+            "pairwise_selection"
+        ) == "batched":
             features.add("external_pairwise_selection")
         if (settings.get("execution_policy") or {}).get(
             "batch_size_route"
         ) in QUALIFIABLE_BATCH_SIZE_ROUTES:
             features.add("external_tree")
-        if ((settings.get("execution_policy") or {}).get(
-            "external_varlen_prefill"
-        ) or {}).get("enabled") is True:
+        if (
+            (settings.get("execution_policy") or {}).get("external_varlen_prefill")
+            or {}
+        ).get("enabled") is True:
             features.add("external_varlen_prefill")
-        if ((settings.get("execution_policy") or {}).get(
-            "ingress_cohort"
-        ) or {}).get("enabled") is True:
+        if ((settings.get("execution_policy") or {}).get("ingress_cohort") or {}).get(
+            "enabled"
+        ) is True:
             features.add("ingress_cohort")
     elif settings.get("speculation") == "prompt_lookup":
-        features.update({
-            "prompt_lookup",
-            "prompt_lookup_proposals",
-            "prompt_lookup_rollback",
-        })
+        features.update(
+            {
+                "prompt_lookup",
+                "prompt_lookup_proposals",
+                "prompt_lookup_rollback",
+            }
+        )
         # The default-off rotating replay transaction is a selected mechanism
         # only when the served prompt-lookup policy turns it on.
         if (settings.get("prompt_lookup") or {}).get("rotating_replay") is True:
@@ -1207,8 +1356,10 @@ def _route_feature_checks(settings):
     if env.get("MLX2_EAGER_DISPATCH_STRIDE", "0") != "0":
         # Qwen3.8/3.6 adapter form of the same mechanism.
         features.add("eager_dispatch")
-    if (env.get("MLX_QWEN4_MOE_FUSED_GATE_UP") == "1"
-            and env.get("MLX_QWEN4_FUSED_EXPERT_KERNEL", "stock") != "stock"):
+    if (
+        env.get("MLX_QWEN4_MOE_FUSED_GATE_UP") == "1"
+        and env.get("MLX_QWEN4_FUSED_EXPERT_KERNEL", "stock") != "stock"
+    ):
         features.add("fused_moe")
     if (settings.get("spomin_live_surgery") or {}).get("enabled") is True:
         # Approximate compaction is selectable only with an observed edit.
@@ -1242,7 +1393,10 @@ def _route_feature_checks(settings):
         # Present only when the server-owned policy is selected; the harness
         # must observe an SRPT reorder or bypass-capped service to qualify it.
         features.add("prefill_scheduling")
-    if not settings.get("mtp") or settings.get("speculation") in {"external_draft", "prompt_lookup"}:
+    if not settings.get("mtp") or settings.get("speculation") in {
+        "external_draft",
+        "prompt_lookup",
+    }:
         return {"feature_" + name for name in features}
     if settings.get("adaptive_mtp_depth", {}).get("enabled") is True:
         features.add("adaptive_mtp_depth")
@@ -1258,14 +1412,18 @@ def _route_feature_checks(settings):
         features.add("self_mtp_copy_draft")
     if env.get("MLX_QWEN4_FUSED_GDN_VERIFY") == "1":
         features.add("fused_gdn_verify")
-    if (env.get("MLX_QWEN4_FUSED_GDN_VERIFY") == "1"
-            and env.get("MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK") == "1"):
+    if (
+        env.get("MLX_QWEN4_FUSED_GDN_VERIFY") == "1"
+        and env.get("MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK") == "1"
+    ):
         # Compact replay rollback is a distinct state path from verify; a
         # selected profile must show it actually rolled back at least once.
         features.add("fused_gdn_replay_rollback")
-    if (env.get("MLX_QWEN4_FUSED_GDN_VERIFY") == "1"
-            and env.get("MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK") == "1"
-            and env.get("MLX_QWEN4_FUSED_GDN_DYNAMIC_ACCEPT") == "1"):
+    if (
+        env.get("MLX_QWEN4_FUSED_GDN_VERIFY") == "1"
+        and env.get("MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK") == "1"
+        and env.get("MLX_QWEN4_FUSED_GDN_DYNAMIC_ACCEPT") == "1"
+    ):
         # Device-count reconstruction is a distinct kernel; a selected profile
         # must show at least one dynamic rollback.
         features.add("fused_gdn_dynamic_accept")
@@ -1273,11 +1431,22 @@ def _route_feature_checks(settings):
         features.add("async_promotion")
     if policy.get("prefetch_known_tail_ple"):
         features.add("known_tail_prefetch")
-    if _environment_mode_enabled(env.get("MLX_LM_SHARED_QSA_SUFFIX")) and context > int(env.get("MLX_LM_SHARED_QSA_SUFFIX_MIN_CONTEXT", "16380")) + 100:
+    if (
+        _environment_mode_enabled(env.get("MLX_LM_SHARED_QSA_SUFFIX"))
+        and context
+        > int(env.get("MLX_LM_SHARED_QSA_SUFFIX_MIN_CONTEXT", "16380")) + 100
+    ):
         features.add("shared_qsa")
-    if _environment_mode_enabled(env.get("MLX_QWEN4_QSA_INDEXED")) and context > int(env.get("MLX_QWEN4_QSA_INDEXED_MIN_CONTEXT", "16384")) + 100:
+    if (
+        _environment_mode_enabled(env.get("MLX_QWEN4_QSA_INDEXED"))
+        and context > int(env.get("MLX_QWEN4_QSA_INDEXED_MIN_CONTEXT", "16384")) + 100
+    ):
         features.add("indexed_qsa")
-    if "shared_qsa" in features and context > int(env.get("MLX_LM_QSA_PRIVATE_DELTA_MIN_CONTEXT_MN", "65536")) + 100:
+    if (
+        "shared_qsa" in features
+        and context
+        > int(env.get("MLX_LM_QSA_PRIVATE_DELTA_MIN_CONTEXT_MN", "65536")) + 100
+    ):
         features.add("private_delta")
     if env.get("MLX_QWEN4_QSA_INDEXED_FUSED_MERGE") == "1":
         features.add("indexed_fused_merge")
@@ -1299,6 +1468,7 @@ def required_descriptor_checks(descriptor):
         (Capability.VIDEO, "multimodal_video"),
         (Capability.AUDIO, "multimodal_audio_input"),
         (Capability.OUTPUT_AUDIO, "output_audio"),
+        (Capability.CONTINUOUS_BATCH, "multimodal_continuous_batch"),
     ):
         if capability in descriptor.capabilities:
             required.add(check)
@@ -1429,9 +1599,9 @@ def load_qualified_route(
         prompt_lookup=settings.get("speculation") == "prompt_lookup",
         max_lanes=settings.get("max_lanes", 2),
     )
-    required = required_generic_checks(
-        descriptor, capabilities=selected_for_checks
-    ) | ({"mtp_execution"} if settings["mtp"] else set())
+    required = required_generic_checks(descriptor, capabilities=selected_for_checks) | (
+        {"mtp_execution"} if settings["mtp"] else set()
+    )
     if Capability.GRAMMAR in descriptor.capabilities:
         required.add("structured_output")
     descriptor_checks = required_descriptor_checks(descriptor)
@@ -1443,8 +1613,11 @@ def load_qualified_route(
         )
     if descriptor_checks:
         validate_adapter_qualification(
-            record.get("adapter_qualification"), runtime=runtime,
-            artifact=artifact, settings=settings, descriptor=descriptor,
+            record.get("adapter_qualification"),
+            runtime=runtime,
+            artifact=artifact,
+            settings=settings,
+            descriptor=descriptor,
         )
     # A declared, artifact-scoped known model behaviour (never a pass) stands
     # in for its check only when the receipt's entry still names that exact
@@ -1460,9 +1633,7 @@ def load_qualified_route(
     def check_ok(name):
         return checks.get(name, {}).get("passed") is True or name in known
 
-    if record.get("passed") is not True or any(
-        not check_ok(c) for c in required
-    ):
+    if record.get("passed") is not True or any(not check_ok(c) for c in required):
         raise ValueError("qualification checks are missing or failed")
     # Every recorded gate, not only the required and feature ones: the loader
     # trusted the top-level flag for capability scope, quiescence, APCv2
@@ -1470,7 +1641,8 @@ def load_qualified_route(
     # written with any of them failed (python -O skips the producer's
     # asserts) still selected the route.
     failed = sorted(
-        name for name, value in checks.items()
+        name
+        for name, value in checks.items()
         if not (isinstance(value, dict) and value.get("passed") is True)
         and name not in known
     )
@@ -1563,8 +1735,8 @@ def load_qualified_route(
 
         decision = replace(
             decision,
-            receipt=decision.receipt + ";known_model_behaviour=" + ",".join(
-                f"{name}:{known[name]['id']}" for name in sorted(known)
-            ),
+            receipt=decision.receipt
+            + ";known_model_behaviour="
+            + ",".join(f"{name}:{known[name]['id']}" for name in sorted(known)),
         )
     return decision

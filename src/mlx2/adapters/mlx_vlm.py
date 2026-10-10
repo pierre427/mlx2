@@ -180,7 +180,9 @@ def audio_frontend_identity(processor) -> dict | None:
         tolist = getattr(value, "tolist", None)
         return tolist() if callable(tolist) else repr(value)
 
-    config = json.dumps(settings, sort_keys=True, default=canonical, separators=(",", ":"))
+    config = json.dumps(
+        settings, sort_keys=True, default=canonical, separators=(",", ":")
+    )
     kind = type(extractor)
     return {
         "class": f"{kind.__module__}.{kind.__qualname__}",
@@ -247,8 +249,11 @@ class _Gemma3nLogitsModel(_LogitsModel):
             inputs_embeds = features.inputs_embeds
             per_layer_inputs = features.per_layer_inputs
         output = self._model.language_model(
-            input_ids, inputs_embeds=inputs_embeds,
-            per_layer_inputs=per_layer_inputs, cache=cache, **kwargs,
+            input_ids,
+            inputs_embeds=inputs_embeds,
+            per_layer_inputs=per_layer_inputs,
+            cache=cache,
+            **kwargs,
         )
         return getattr(output, "logits", output)
 
@@ -413,7 +418,9 @@ class _MLXVLMAdapter:
         require_process_numerics(f"the {type(self).__name__} mlx-vlm adapter")
         if execution_policy:
             raise ValueError("mlx-vlm adapters do not accept speculative policy")
-        self.identity = inspect_artifact(model_path, expected=self.descriptor.model_type)
+        self.identity = inspect_artifact(
+            model_path, expected=self.descriptor.model_type
+        )
         self.environment = {}
         self.max_context = self.identity["max_context"]
         self.layout = self.descriptor.cache_layout
@@ -430,6 +437,7 @@ class _MLXVLMAdapter:
             config=self.identity["config"],
         )
         from ..runtime.chat_templates import secure_model_chat_templates
+
         secure_model_chat_templates(self.processor)
         self.model = self._wrap_model(model)
         self.media_feature_cache = MediaFeatureCache()
@@ -438,7 +446,9 @@ class _MLXVLMAdapter:
         from ..runtime.tokenizer_utils import TokenizerWrapper
 
         # transformers' Qwen2Tokenizer drops the declared combining-mark split rule.
-        self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, Path(model_path).resolve())
+        self.pretokenizer_receipt = repair_loaded_tokenizer(
+            tokenizer, Path(model_path).resolve()
+        )
 
         eos = getattr(getattr(self.model, "config", None), "eos_token_id", None)
         eos = {int(eos)} if isinstance(eos, int) else {int(v) for v in (eos or ())}
@@ -453,7 +463,9 @@ class _MLXVLMAdapter:
         tokenizer_renderer = getattr(
             getattr(self.processor, "tokenizer", None), "apply_chat_template", None
         )
-        if getattr(self.processor, "chat_template", None) and callable(processor_renderer):
+        if getattr(self.processor, "chat_template", None) and callable(
+            processor_renderer
+        ):
             renderer = processor_renderer
         elif callable(tokenizer_renderer):
             renderer = tokenizer_renderer
@@ -506,8 +518,21 @@ GEMMA3N = ModelDescriptor(
     model_type="gemma3n",
     family="gemma-3n",
     variant="mlx-vlm-native-video",
-    state_planes=frozenset({StatePlane.ATTENTION_KV, StatePlane.RNG, StatePlane.TRANSCRIPT}),
-    capabilities=frozenset({Capability.TEXT, Capability.VISION, Capability.VIDEO, Capability.AUDIO, Capability.STREAMING, Capability.CONTINUOUS_BATCH, Capability.PREFIX_REUSE, Capability.APC_V2}),
+    state_planes=frozenset(
+        {StatePlane.ATTENTION_KV, StatePlane.RNG, StatePlane.TRANSCRIPT}
+    ),
+    capabilities=frozenset(
+        {
+            Capability.TEXT,
+            Capability.VISION,
+            Capability.VIDEO,
+            Capability.AUDIO,
+            Capability.STREAMING,
+            Capability.CONTINUOUS_BATCH,
+            Capability.PREFIX_REUSE,
+            Capability.APC_V2,
+        }
+    ),
     cache_layout="gemma3n-mlx-vlm-media-v1",
     metadata={
         "execution": "mlx2.adapters.mlx_vlm.Gemma3nAdapter",
@@ -518,6 +543,7 @@ GEMMA3N = ModelDescriptor(
             "multimodal_video",
             "multimodal_audio_input",
             "multimodal_encoder_batching",
+            "multimodal_continuous_batch",
             "multimodal_apcv2_reuse",
         ),
     },
@@ -542,7 +568,8 @@ class Gemma3nAdapter(_MLXVLMAdapter):
         from .mlx_vlm_memory import SlidingKVCacheBudget
 
         return SlidingKVCacheBudget.from_gemma3n_config(
-            self._text_config(), mtp=mtp,
+            self._text_config(),
+            mtp=mtp,
             prefill_step=self._budget_prefill_step(),
             root_config=self.identity["config"],
         )
@@ -551,7 +578,9 @@ class Gemma3nAdapter(_MLXVLMAdapter):
         super().__init__(model_path, execution_policy=execution_policy)
         self.video_policy = Gemma3nVideoPolicy()
         install_gemma3n_vision_batching(self.model, self.video_policy)
-        install_media_feature_cache(self.model, self.media_feature_cache, family="gemma3n")
+        install_media_feature_cache(
+            self.model, self.media_feature_cache, family="gemma3n"
+        )
 
     def prepare_multimodal_request(self, request, *, file_loader=None):
         media, replacements, images, audios = [], [], [], []
@@ -561,27 +590,54 @@ class Gemma3nAdapter(_MLXVLMAdapter):
         extractor = getattr(self.processor, "feature_extractor", None)
         audio_sample_rate = int(getattr(extractor, "sampling_rate", None) or 16_000)
         for message in request["messages"]:
-            for part in message.get("content", ()) if isinstance(message.get("content"), list) else ():
-                kind = {"image_url": "image", "input_image": "image", "input_audio": "audio", "input_video": "video"}.get(part["type"])
+            for part in (
+                message.get("content", ())
+                if isinstance(message.get("content"), list)
+                else ()
+            ):
+                kind = {
+                    "image_url": "image",
+                    "input_image": "image",
+                    "input_audio": "audio",
+                    "input_video": "video",
+                }.get(part["type"])
                 if part["type"] == "text":
                     continue
                 if kind is None:
                     raise _unmapped_part("Gemma 3n", part["type"])
-                value = resolve_media(_source(part, kind), kind=kind, file_loader=file_loader, fps=self.video_policy.fps, max_frames=self.video_policy.max_frames) if kind == "video" else resolve_media(_source(part, kind), kind=kind, file_loader=file_loader)
+                value = (
+                    resolve_media(
+                        _source(part, kind),
+                        kind=kind,
+                        file_loader=file_loader,
+                        fps=self.video_policy.fps,
+                        max_frames=self.video_policy.max_frames,
+                    )
+                    if kind == "video"
+                    else resolve_media(
+                        _source(part, kind), kind=kind, file_loader=file_loader
+                    )
+                )
                 media.append(value)
                 if kind == "image":
-                    images.append(value.value); replacements.append(self.processor.tokenizer.image_token)
+                    images.append(value.value)
+                    replacements.append(self.processor.tokenizer.image_token)
                 elif kind == "audio":
                     from ..multimodal import pcm_to_float32
+
                     if int(value.metadata["sample_rate"]) != audio_sample_rate:
                         raise ValueError(
                             f"Gemma 3n requires {audio_sample_rate} Hz WAV audio; explicit resampling is required"
                         )
-                    audios.append(pcm_to_float32(value)); replacements.append(self.processor.tokenizer.audio_token)
+                    audios.append(pcm_to_float32(value))
+                    replacements.append(self.processor.tokenizer.audio_token)
                 else:
                     native = NativeVideoInput.from_media(value, self.video_policy)
-                    inputs = native.processor_inputs("", self.processor.tokenizer.image_token)
-                    images.extend(inputs["images"]); replacements.append(inputs["text"])
+                    inputs = native.processor_inputs(
+                        "", self.processor.tokenizer.image_token
+                    )
+                    images.extend(inputs["images"])
+                    replacements.append(inputs["text"])
                     video_requests += 1
                     video_frames += len(inputs["images"])
                     video_frame_batches += math.ceil(
@@ -596,7 +652,9 @@ class Gemma3nAdapter(_MLXVLMAdapter):
         # The Gemma 3n template emits <bos>; the tokenizer would add a second.
         bos = getattr(self.processor.tokenizer, "bos_token", None)
         processed = self.processor(
-            text=prompt, images=images or None, audio=audios or None,
+            text=prompt,
+            images=images or None,
+            audio=audios or None,
             sampling_rate=audio_sample_rate,
             add_special_tokens=not (bos and prompt.startswith(bos)),
         )
@@ -609,25 +667,74 @@ class Gemma3nAdapter(_MLXVLMAdapter):
         config = self.identity.get("config") or {}
         tokenizer = self.processor.tokenizer
         for name, token_id, per_input, inputs in (
-            ("image", tokenizer.image_token_id, config.get("vision_soft_tokens_per_image", 256), images),
-            ("audio", tokenizer.audio_token_id, config.get("audio_soft_tokens_per_image", 188), audios),
+            (
+                "image",
+                tokenizer.image_token_id,
+                config.get("vision_soft_tokens_per_image", 256),
+                images,
+            ),
+            (
+                "audio",
+                tokenizer.audio_token_id,
+                config.get("audio_soft_tokens_per_image", 188),
+                audios,
+            ),
         ):
-            if sum(1 for token in ids if token == token_id) != int(per_input) * len(inputs):
+            if sum(1 for token in ids if token == token_id) != int(per_input) * len(
+                inputs
+            ):
                 raise ValueError(
                     f"Gemma 3n {name} placeholders do not match its {name} inputs; "
                     "request text must not contain a media placeholder"
                 )
         if images:
-            kwargs["_mlx2_vision_cache_key"] = f"{self.identity['fingerprint']}:{media_fingerprint([value for value in media if value.kind in {'image', 'video'}], policy=asdict(self.video_policy))}"
-        return {**request, "messages": messages, "_mlx2_prompt_tokens": ids, "_mlx2_prefill_inputs": kwargs, "_mlx2_media_token_end": media_token_end, "_mlx2_media_fingerprint": media_fingerprint(media, policy={"family": "gemma3n", "video": asdict(self.video_policy), **({"audio_frontend": audio_frontend_identity(self.processor)} if audios else {})}), "_mlx2_multimodal_stats": {"gemma3n_video_requests": video_requests, "gemma3n_video_frames": video_frames, "gemma3n_video_frame_batches": video_frame_batches}}
+            kwargs["_mlx2_vision_cache_key"] = (
+                f"{self.identity['fingerprint']}:{media_fingerprint([value for value in media if value.kind in {'image', 'video'}], policy=asdict(self.video_policy))}"
+            )
+        return {
+            **request,
+            "messages": messages,
+            "_mlx2_prompt_tokens": ids,
+            "_mlx2_prefill_inputs": kwargs,
+            "_mlx2_media_token_end": media_token_end,
+            "_mlx2_media_fingerprint": media_fingerprint(
+                media,
+                policy={
+                    "family": "gemma3n",
+                    "video": asdict(self.video_policy),
+                    **(
+                        {"audio_frontend": audio_frontend_identity(self.processor)}
+                        if audios
+                        else {}
+                    ),
+                },
+            ),
+            "_mlx2_multimodal_stats": {
+                "gemma3n_video_requests": video_requests,
+                "gemma3n_video_frames": video_frames,
+                "gemma3n_video_frame_batches": video_frame_batches,
+            },
+        }
 
 
 MINICPMO = ModelDescriptor(
     model_type="minicpmo",
     family="minicpm-o",
     variant="mlx-vlm-optimized-media",
-    state_planes=frozenset({StatePlane.ATTENTION_KV, StatePlane.RNG, StatePlane.TRANSCRIPT}),
-    capabilities=frozenset({Capability.TEXT, Capability.VISION, Capability.AUDIO, Capability.STREAMING, Capability.CONTINUOUS_BATCH, Capability.PREFIX_REUSE, Capability.APC_V2}),
+    state_planes=frozenset(
+        {StatePlane.ATTENTION_KV, StatePlane.RNG, StatePlane.TRANSCRIPT}
+    ),
+    capabilities=frozenset(
+        {
+            Capability.TEXT,
+            Capability.VISION,
+            Capability.AUDIO,
+            Capability.STREAMING,
+            Capability.CONTINUOUS_BATCH,
+            Capability.PREFIX_REUSE,
+            Capability.APC_V2,
+        }
+    ),
     cache_layout="minicpmo-mlx-vlm-media-v1",
     metadata={
         "execution": "mlx2.adapters.mlx_vlm.MiniCPMOAdapter",
@@ -637,6 +744,7 @@ MINICPMO = ModelDescriptor(
             "multimodal_image",
             "multimodal_audio_input",
             "multimodal_encoder_batching",
+            "multimodal_continuous_batch",
             "multimodal_apcv2_reuse",
         ),
         "output_audio": "fail_closed_unqualified",
@@ -652,7 +760,8 @@ class MiniCPMOAdapter(_MLXVLMAdapter):
         from .mlx_vlm_memory import SlidingKVCacheBudget
 
         return SlidingKVCacheBudget.from_qwen2_config(
-            self._text_config(), mtp=mtp,
+            self._text_config(),
+            mtp=mtp,
             prefill_step=self._budget_prefill_step(),
             root_config=self.identity["config"],
         )
@@ -661,19 +770,31 @@ class MiniCPMOAdapter(_MLXVLMAdapter):
         super().__init__(model_path, execution_policy=execution_policy)
         self.media_policy = MiniCPMOExecutionPolicy.from_config(self.identity["config"])
         install_minicpmo_vision_batching(self.model, self.media_policy)
-        install_media_feature_cache(self.model, self.media_feature_cache, family="minicpmo")
+        install_media_feature_cache(
+            self.model, self.media_feature_cache, family="minicpmo"
+        )
 
     def prepare_multimodal_request(self, request, *, file_loader=None):
         media, replacements, images, audios = [], [], [], []
         vision_slices = audio_chunks = 0
         for message in request["messages"]:
-            for part in message.get("content", ()) if isinstance(message.get("content"), list) else ():
-                kind = {"image_url": "image", "input_image": "image", "input_audio": "audio"}.get(part["type"])
+            for part in (
+                message.get("content", ())
+                if isinstance(message.get("content"), list)
+                else ()
+            ):
+                kind = {
+                    "image_url": "image",
+                    "input_image": "image",
+                    "input_audio": "audio",
+                }.get(part["type"])
                 if part["type"] == "text":
                     continue
                 if kind is None:
                     raise _unmapped_part("MiniCPM-o", part["type"])
-                value = resolve_media(_source(part, kind), kind=kind, file_loader=file_loader)
+                value = resolve_media(
+                    _source(part, kind), kind=kind, file_loader=file_loader
+                )
                 media.append(value)
                 if kind == "image":
                     tiles = self.media_policy.slice_image(value.value)
@@ -688,14 +809,19 @@ class MiniCPMOAdapter(_MLXVLMAdapter):
         messages = _plain_messages(request["messages"], replacements)
         if not media:
             return {**request, "messages": messages}
-        processed = self.processor(text=self._render(messages), images=images or None, audios=audios or None)
+        processed = self.processor(
+            text=self._render(messages), images=images or None, audios=audios or None
+        )
         media_token_end = _media_token_end(processed)
         ids, kwargs = _ids_and_kwargs(processed)
         # The pinned processor computes bounds from token markers, while its
         # model silently clips feature insertion to the bounds it finds.
         # A literal marker in request text or processor drift can otherwise
         # shift or discard a later image/audio input without an error.
-        for name, expected in (("image_bound", len(images)), ("audio_bounds", len(audios))):
+        for name, expected in (
+            ("image_bound", len(images)),
+            ("audio_bounds", len(audios)),
+        ):
             bounds = processed.get(name)
             if bounds is None or len(bounds) != 1:
                 raise ValueError(f"MiniCPM-o processor returned invalid {name}")
@@ -706,11 +832,46 @@ class MiniCPMOAdapter(_MLXVLMAdapter):
                 int(start) < 0 or int(end) <= int(start) or int(end) > len(ids)
                 for start, end in pairs
             ):
-                raise ValueError(f"MiniCPM-o processor {name} does not match media inputs")
+                raise ValueError(
+                    f"MiniCPM-o processor {name} does not match media inputs"
+                )
         if images:
-            kwargs["_mlx2_vision_cache_key"] = f"{self.identity['fingerprint']}:{media_fingerprint([value for value in media if value.kind == 'image'], policy=self.media_policy.receipt())}"
-        vision_batches = math.ceil(vision_slices / self.media_policy.vision_batch_size) if self.media_policy.batch_vision_input else vision_slices
-        return {**request, "messages": messages, "_mlx2_prompt_tokens": ids, "_mlx2_prefill_inputs": kwargs, "_mlx2_media_token_end": media_token_end, "_mlx2_media_fingerprint": media_fingerprint(media, policy={"family": "minicpmo", **self.media_policy.receipt(), **({"audio_frontend": audio_frontend_identity(self.processor)} if audios else {})}), "_mlx2_multimodal_stats": {"minicpmo_vision_batches": vision_batches, "minicpmo_vision_slices": vision_slices, "minicpmo_audio_chunks": audio_chunks}}
+            kwargs["_mlx2_vision_cache_key"] = (
+                f"{self.identity['fingerprint']}:{media_fingerprint([value for value in media if value.kind == 'image'], policy=self.media_policy.receipt())}"
+            )
+        vision_batches = (
+            math.ceil(vision_slices / self.media_policy.vision_batch_size)
+            if self.media_policy.batch_vision_input
+            else vision_slices
+        )
+        return {
+            **request,
+            "messages": messages,
+            "_mlx2_prompt_tokens": ids,
+            "_mlx2_prefill_inputs": kwargs,
+            "_mlx2_media_token_end": media_token_end,
+            "_mlx2_media_fingerprint": media_fingerprint(
+                media,
+                policy={
+                    "family": "minicpmo",
+                    **self.media_policy.receipt(),
+                    **(
+                        {"audio_frontend": audio_frontend_identity(self.processor)}
+                        if audios
+                        else {}
+                    ),
+                },
+            ),
+            "_mlx2_multimodal_stats": {
+                "minicpmo_vision_batches": vision_batches,
+                "minicpmo_vision_slices": vision_slices,
+                "minicpmo_audio_chunks": audio_chunks,
+            },
+        }
 
     def diagnostics(self):
-        return {**super().diagnostics(), "media_policy": self.media_policy.receipt(), "output_audio": "unqualified_fail_closed"}
+        return {
+            **super().diagnostics(),
+            "media_policy": self.media_policy.receipt(),
+            "output_audio": "unqualified_fail_closed",
+        }
