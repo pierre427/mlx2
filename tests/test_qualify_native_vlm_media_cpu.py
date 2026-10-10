@@ -14,9 +14,11 @@ from mlx2.media_qualification import (
 )
 from scripts.qualify_native_vlm_media import (
     FAMILIES,
+    _batching_observation,
+    _drain,
+    _enable_batching_observer,
     _ordinary_bound_method,
     _parity_caches,
-    _drain,
     evaluate_native_report,
     main,
 )
@@ -177,6 +179,59 @@ def test_ordinary_method_binding_preserves_descriptors():
     assert _ordinary_bound_method(source, "missing") is None
 
 
+@pytest.mark.parametrize(
+    ("family", "policy_name", "policy", "expected_name", "expected_limit"),
+    [
+        (
+            "gemma3n",
+            "video_policy",
+            SimpleNamespace(frame_batch_size=16),
+            "_mlx2_gemma3n_vision_batching",
+            16,
+        ),
+        (
+            "minicpmo",
+            "media_policy",
+            SimpleNamespace(vision_batch_size=8),
+            "_mlx2_minicpmo_vision_batching",
+            8,
+        ),
+    ],
+)
+def test_batching_observer_reads_only_selected_family_policy(
+    family, policy_name, policy, expected_name, expected_limit
+):
+    model = SimpleNamespace()
+    adapter = SimpleNamespace(
+        model=SimpleNamespace(_model=model), **{policy_name: policy}
+    )
+
+    observed = _enable_batching_observer(adapter, family)
+
+    assert observed == {
+        "schema": "mlx2.encoder-batching-observation.v1",
+        "policy_limit": expected_limit,
+        "enabled": True,
+        "calls": [],
+    }
+    assert getattr(model, expected_name) is observed
+    assert _batching_observation(adapter, family) == observed
+    assert _batching_observation(adapter, family) is not observed
+
+
+@pytest.mark.parametrize("family", ["gemma4", "unknown"])
+def test_batching_observer_unsupported_family_does_not_mutate_adapter(family):
+    model = SimpleNamespace(existing="preserved")
+    adapter = SimpleNamespace(model=SimpleNamespace(_model=model))
+    unsupported_adapter = SimpleNamespace()
+
+    assert _enable_batching_observer(adapter, family) is None
+    assert _enable_batching_observer(unsupported_adapter, family) is None
+    assert vars(model) == {"existing": "preserved"}
+    assert _batching_observation(adapter, family) is None
+    assert _batching_observation(unsupported_adapter, family) is None
+
+
 def test_parity_cache_creation_uses_runtime_factory_for_independent_models():
     source, routed = object(), object()
     calls = []
@@ -209,18 +264,21 @@ def test_native_producer_error_keeps_bounded_traceback_without_checks(
         raise RuntimeError("simulated parity failure")
 
     monkeypatch.setattr("scripts.qualify_native_vlm_media.run_family", fail_run)
-    assert main(
-        [
-            "gemma3n",
-            str(model_path),
-            "--generation",
-            "1",
-            "--cpg-owner-lock",
-            str(tmp_path / "owner.lock"),
-            "--cpg-task",
-            "cpu-test",
-        ]
-    ) == 1
+    assert (
+        main(
+            [
+                "gemma3n",
+                str(model_path),
+                "--generation",
+                "1",
+                "--cpg-owner-lock",
+                str(tmp_path / "owner.lock"),
+                "--cpg-task",
+                "cpu-test",
+            ]
+        )
+        == 1
+    )
 
     report = json.loads(capsys.readouterr().out)
     assert report["status"] == "producer_error"

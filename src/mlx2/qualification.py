@@ -292,7 +292,7 @@ APPROVED_MEDIA_PRODUCERS = {
     "gemma3n": (
         {
             "name": "scripts/qualify_native_vlm_media.py",
-            "sha256": "c18c85b6cd588412ddddc6a03813a953bb3d55e5b5e5b020ad5ccd656b066573",
+            "sha256": "62394ca06722a588f7bf4cec91ec41e74e251fd7320cde25e5457738bcfbcd21",
             "evaluator_sha256": "c3ebee56e39c13c0fc2cc1b892379d541cee7523192780d37dc4daa9d43b210a",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "7c8383288b4e060f788d625a352f7e0e2592f844271a529af5a6f105205a6461",
@@ -305,7 +305,7 @@ APPROVED_MEDIA_PRODUCERS = {
     "gemma4": (
         {
             "name": "scripts/qualify_native_vlm_media.py",
-            "sha256": "c18c85b6cd588412ddddc6a03813a953bb3d55e5b5e5b020ad5ccd656b066573",
+            "sha256": "62394ca06722a588f7bf4cec91ec41e74e251fd7320cde25e5457738bcfbcd21",
             "evaluator_sha256": "c3ebee56e39c13c0fc2cc1b892379d541cee7523192780d37dc4daa9d43b210a",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "7c8383288b4e060f788d625a352f7e0e2592f844271a529af5a6f105205a6461",
@@ -318,7 +318,7 @@ APPROVED_MEDIA_PRODUCERS = {
     "minicpmo": (
         {
             "name": "scripts/qualify_native_vlm_media.py",
-            "sha256": "c18c85b6cd588412ddddc6a03813a953bb3d55e5b5e5b020ad5ccd656b066573",
+            "sha256": "62394ca06722a588f7bf4cec91ec41e74e251fd7320cde25e5457738bcfbcd21",
             "evaluator_sha256": "c3ebee56e39c13c0fc2cc1b892379d541cee7523192780d37dc4daa9d43b210a",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "7c8383288b4e060f788d625a352f7e0e2592f844271a529af5a6f105205a6461",

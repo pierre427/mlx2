@@ -245,17 +245,13 @@ def _feature_parity(mx, reference, route):
 
 
 def _enable_batching_observer(adapter, family):
-    name, limit = {
-        "gemma3n": (
-            "_mlx2_gemma3n_vision_batching",
-            adapter.video_policy.frame_batch_size,
-        ),
-        "minicpmo": (
-            "_mlx2_minicpmo_vision_batching",
-            adapter.media_policy.vision_batch_size,
-        ),
-    }.get(family, (None, None))
-    if name is None:
+    if family == "gemma3n":
+        name = "_mlx2_gemma3n_vision_batching"
+        limit = adapter.video_policy.frame_batch_size
+    elif family == "minicpmo":
+        name = "_mlx2_minicpmo_vision_batching"
+        limit = adapter.media_policy.vision_batch_size
+    else:
         return None
     value = {
         "schema": "mlx2.encoder-batching-observation.v1",
@@ -268,13 +264,13 @@ def _enable_batching_observer(adapter, family):
 
 
 def _batching_observation(adapter, family):
-    model = adapter.model._model
     name = {
         "gemma3n": "_mlx2_gemma3n_vision_batching",
         "minicpmo": "_mlx2_minicpmo_vision_batching",
     }.get(family)
     if name is None:
         return None
+    model = adapter.model._model
     value = getattr(model, name, None)
     return json.loads(json.dumps(value)) if isinstance(value, dict) else None
 
