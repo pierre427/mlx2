@@ -417,16 +417,14 @@ class _MLXVLMAdapter:
         self.environment = {}
         self.max_context = self.identity["max_context"]
         self.layout = self.descriptor.cache_layout
-        from .mlx_vlm_pin import require_pinned_mlx_vlm
+        from .vlm_runtime import bind_backend
 
-        self.mlx_vlm_runtime = require_pinned_mlx_vlm()
-        try:
-            from mlx_vlm import load
-        except ImportError as error:
-            raise RuntimeError("multimodal adapters require the optional mlx-vlm runtime") from error
+        self._vlm_backend = bind_backend(self.descriptor.model_type)
+        self.mlx_vlm_runtime = self._vlm_backend.identity
+        self.mlx_vlm_build = self._vlm_backend.provenance
         register_mlx_vlm_window_compaction()
         model, self.processor = _load_model(
-            load,
+            self._vlm_backend.load,
             Path(model_path).resolve(),
             expected=self.descriptor.model_type,
             config=self.identity["config"],

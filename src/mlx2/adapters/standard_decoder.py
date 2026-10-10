@@ -455,6 +455,12 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
     EXTERNAL_ROUTE_TAG = "external-xpress-qwen3-v1"
     EXTERNAL_PROFILE = "qwen3-apcv2-xpress"
 
+    def native_cohort_backend(self, kind):
+        if kind != "kv_pair":
+            raise ValueError("standard decoder has no requested native cohort capability")
+        from .native_qwen3 import Qwen3NativeCohort
+        return Qwen3NativeCohort()
+
     def prefill_step_default(self):
         """Keep the Qwen3 target's conservative chunk ownership in its adapter.
 
@@ -465,6 +471,31 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
         if self.config.get("model_type") in {"qwen3", "qwen3_moe"}:
             return QWEN3_PREFILL_STEP
         return None
+
+    def int8_prefill_supported(self):
+        """int8 prefill scopes for this artifact (``int8_prefill.adapter_scopes``).
+
+        Declared for the dense Qwen3 family only, the one measured on this
+        adapter (Qwen3-8B-8bit, qualification/runs/int8-dense8-e2e-20261009).
+        qwen2 and llama load the same module layout, but activation ranges
+        are a per-model property, so they stay undeclared until measured.
+        Qwen3 MoE is undeclared like the dedicated MoE adapters: routed
+        experts stay stock and there is no evidence for the attention-only
+        remainder.  The row-exact verify target declines: its contract is
+        stock arithmetic on native ``nn.Linear`` projections.  The default
+        path classifier selects the right modules here (``model.layers.*``
+        attention and MLP projections; ``lm_head`` and the embedding are
+        excluded by name and by size)."""
+        config = getattr(self, "config", None) or {}
+        if (
+            config.get("model_type") != "qwen3"
+            or config.get("num_experts")
+            or (getattr(self, "external_policy", None) or {}).get(
+                "target_verify_row_exact"
+            )
+        ):
+            return ()
+        return ("mlp", "all")
 
     def create_native_paged_qwen3_request(self, *, revision, prompt_tokens,
                                           max_tokens, apc_cache=None,

@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "dispatchers": {
+    "mlx2.adapters.registry": {
+      "sha256": "8d4b21cb78c0e19eee4a688c59b260ee080770bb8cd1df57d7daceb9ba3189a3",
+      "targets": [],
+      "reason": "selected-adapter dispatch"
+    },
+    "mlx2.runtime.models.cache": {
+      "sha256": "62df0a38e3972b1dbc694719a967d11b7012a86ab15cf3573e231d191f825afe",
+      "targets": [],
+      "reason": "revision-bound cache classes supplied by the selected adapter"
+    },
+    "mlx2.runtime.qwen38_tensorfold": {
+      "sha256": "1c7e5da699be05e9dd37be39587ba889878c7b36e9d66d9d41174e1a760ba101",
+      "targets": [
+        "mlx2.runtime.tensorfold_qwen38.inputs",
+        "mlx2.runtime.tensorfold_qwen38.lane_attention",
+        "mlx2.runtime.tensorfold_qwen38.lane_fuse",
+        "mlx2.runtime.tensorfold_qwen38.lane_glue",
+        "mlx2.runtime.tensorfold_qwen38.lane_multi",
+        "mlx2.runtime.tensorfold_qwen38.lane_qmm",
+        "mlx2.runtime.tensorfold_qwen38.lane_tree",
+        "mlx2.runtime.tensorfold_qwen38.lane_widen",
+        "mlx2.runtime.tensorfold_qwen38.stream_attention",
+        "mlx2.runtime.tensorfold_qwen38.stream_gdn"
+      ],
+      "reason": "validated vendored module list; external research sources retain their own exact source gate"
+    }
+  }
+}

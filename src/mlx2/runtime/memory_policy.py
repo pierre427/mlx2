@@ -247,7 +247,15 @@ class SelfMTPLaneAdmissionController:
     MIN_SERVICE_RESERVE_GIB = 3.0
     MIN_DRIVER_ALLOWANCE_GIB = 0.75
     CACHE_GIB_PER_1K_TOKENS = 0.44
-    TRANSIENT_SCALE = {0: 1.0 / 3.0, 1: 0.8, 2: 1.0, 3: 1.25, 4: 1.55}
+    # Depths 5-9 (draft-loop ceilings, MLX2_MTP_DEPTH_CAP): measured
+    # 2026-10-09 on an M3 Pro, B1 at 1K and 8K context, on Qwen3.8-27B dense
+    # (stock and lane-simd) and Qwen3.6-35B-A3B MoE.  Relative to depth 2 the
+    # transient stayed 0.79-1.27x at depths 5-9, so 1.6 is 1.25x the worst
+    # ratio and keeps the table monotone (provenance/lane-transient-deep-verify.json).
+    TRANSIENT_SCALE = {
+        0: 1.0 / 3.0, 1: 0.8, 2: 1.0, 3: 1.25, 4: 1.55,
+        5: 1.6, 6: 1.6, 7: 1.6, 8: 1.6, 9: 1.6,
+    }
     K2_TRANSIENT_GIB_PER_LANE = 1.76
     # Measured 2026-09-19 on an M3 Pro (36 GiB, Metal advisory 28.08 GiB) with
     # mx.get_peak_memory()/get_active_memory() around real verify forwards, on
@@ -522,6 +530,16 @@ class SelfMTPLaneAdmissionController:
             context_gib = envelope_gib
         transient_scale = self.TRANSIENT_SCALE[draft_depth]
         return context_gib + pending_gib + self.transient_gib_per_lane * transient_scale
+
+    @classmethod
+    def depth_transient_ratio(cls, base: int, ceiling: int) -> float:
+        """Transient at ``ceiling`` drafts relative to ``base`` (both calibrated)."""
+        if base not in cls.TRANSIENT_SCALE or ceiling not in cls.TRANSIENT_SCALE:
+            raise ValueError(
+                f"draft depths {base} and {ceiling} must both be calibrated: "
+                f"{sorted(cls.TRANSIENT_SCALE)}"
+            )
+        return max(1.0, cls.TRANSIENT_SCALE[ceiling] / cls.TRANSIENT_SCALE[base])
 
     def _fit(
         self,

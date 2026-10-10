@@ -451,6 +451,8 @@ def inspect_audio_model(model_path: str | Path) -> AdapterResolution:
     """Resolve an audio classifier without admitting it to text serving."""
     path = Path(model_path).expanduser().resolve()
     config = json.loads((path / "config.json").read_text())
+    if not isinstance(config, dict):
+        raise TypeError("Model config must be a JSON object")
     if config.get("model_type") == "nemotron3_diarization":
         module = importlib.import_module(".nemotron3_diarization", __package__)
         return AdapterResolution(

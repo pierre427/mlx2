@@ -64,7 +64,13 @@ import json
 import re
 import uuid
 
-from ..output import StopSequenceMatcher, _safe_prefix, within_parallel_bound
+from ..output import (
+    StopSequenceMatcher,
+    _safe_prefix,
+    truncated_tool_record,
+    within_parallel_bound,
+)
+from ..runtime.tool_parsers._partial_json import partial_json_name
 from ..runtime.tool_parsers._schema import json_native
 
 THINK_OPEN = "<think>"
@@ -334,6 +340,45 @@ def parse_tool_block(payload: str, tools: list[dict]) -> dict:
     return {"name": name, "arguments": arguments}
 
 
+def _partial_json_name(text):
+    return partial_json_name(text, context="Xing JSON tool call")
+
+
+def partial_function_names(partial: str, tools=None) -> list[str]:
+    """The function a cut-short tool-call body had committed to, if any.
+
+    The reader behind ``OutputParser``'s stop-cut record (see
+    :func:`mlx2.output.stop_cut_record`), by :func:`parse_tool_block`'s own
+    three forms.  ``name<param_key>``: the name is everything before the
+    marker, stripped.  ``{"name": ...}``: the top-level ``name`` member,
+    decoded incrementally (:func:`_partial_json_name`).  ``name{...}``: the
+    name before the brace; the parser binds it only when it is a declared
+    name, and the contract fails an undeclared one the same way.  A bare
+    name with no delimiter yet has committed to nothing (with no arguments
+    it names its function only when its block closes).  Raises ``ValueError``
+    when a delimiter came with no readable name: an empty name before
+    ``<param_key>``, a JSON ``name`` that is not a string, or a JSON body
+    that is not JSON.
+    """
+    body = partial.strip()
+    position = body.find(PARAM_KEY_OPEN)
+    if position >= 0:
+        name = body[:position].strip()
+        if not name:
+            raise ValueError("Xing tool call names no function")
+        return [name]
+    if body.startswith("{"):
+        name = _partial_json_name(body)
+        return [name] if name is not None else []
+    brace = body.find("{")
+    if brace < 0:
+        return []
+    return [body[:brace].rstrip()]
+
+
+parse_tool_block.partial_function_names = partial_function_names
+
+
 class XingOutputParser:
     """Streaming Xing4.0 channel parser; ``push`` returns mlx2 delta events."""
 
@@ -356,6 +401,7 @@ class XingOutputParser:
         self.stopped = False
         self.tool_count = 0
         self.turn_closed_tool_calls = 0
+        self.truncated_tool_call = None
         # Set only for the duration of :meth:`finish` on a ``length`` stop.
         self._length_finish = False
 
@@ -489,6 +535,10 @@ class XingOutputParser:
                         # max_tokens cut the block off: the model never
                         # finished it, so it is neither a call nor answer
                         # text.  Drop it; the finish reason stays ``length``.
+                        self.truncated_tool_call = truncated_tool_record(
+                            partial_function_names, self.buffer, self.tools,
+                            cause="max_tokens",
+                        )
                         self.buffer = ""
                         self.channel = "content"
                         events.extend(self._finish_visible())

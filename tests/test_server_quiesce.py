@@ -491,3 +491,66 @@ def test_signal_controller_coalesces_a_process_group_sigint_sigterm_pair():
     late(signal.SIGINT, None)
     assert late_server.stopped.wait(1)
     late_engine.release.set()
+
+
+def test_signal_controller_repeat_of_the_second_kind_escalates():
+    # Sweep 2026-10-09 (ops-cli#1): after a supervisor SIGTERM, the operator's
+    # first Ctrl-C inside the coalescing window is part of the same request,
+    # but a *repeat* of it is the operator insisting (docs/SERVING.md: "A
+    # second signal uses the immediate shutdown path").  Comparing every later
+    # signal against the first one only swallowed every SIGINT in the window.
+    import signal
+
+    class Server:
+        def __init__(self):
+            self.stopped = threading.Event()
+
+        def shutdown(self):
+            self.stopped.set()
+
+    class Engine:
+        def __init__(self):
+            self.calls = []
+            self.release = threading.Event()
+
+        def quiesce(self, **kwargs):
+            self.calls.append(kwargs)
+
+        def wait_for_quiesce(self, _timeout):
+            self.release.wait(2)
+
+    now = [100.0]
+    server, engine = Server(), Engine()
+    controller = SignalShutdownController(
+        server, engine, 3.0, clock=lambda: now[0]
+    )
+    controller(signal.SIGTERM, None)
+    deadline = time.monotonic() + 1
+    while not engine.calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert engine.calls == [{"drain_timeout_seconds": 3.0, "suspend": False}]
+    now[0] += 0.3
+    controller(signal.SIGINT, None)  # coalesced with the SIGTERM
+    assert not server.stopped.wait(0.2)
+    now[0] += 0.3
+    controller(signal.SIGINT, None)  # a repeat: escalate at once
+    assert server.stopped.wait(1)
+    engine.release.set()
+
+    # The same holds for a third kind: new kinds inside the window coalesce,
+    # any kind seen before escalates.
+    now[0] = 200.0
+    server, engine = Server(), Engine()
+    controller = SignalShutdownController(
+        server, engine, 3.0, clock=lambda: now[0]
+    )
+    controller(signal.SIGTERM, None)
+    now[0] += 0.2
+    controller(signal.SIGINT, None)
+    now[0] += 0.2
+    controller(signal.SIGHUP, None)
+    assert not server.stopped.wait(0.2)
+    now[0] += 0.2
+    controller(signal.SIGTERM, None)
+    assert server.stopped.wait(1)
+    engine.release.set()

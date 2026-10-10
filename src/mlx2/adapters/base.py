@@ -62,7 +62,11 @@ class AudioOutput:
 
 @runtime_checkable
 class ExecutionAdapter(Protocol):
-    """The only interface through which the scheduler executes model math."""
+    """Future narrow execution interface, retained as a public contract.
+
+    The serving runtime currently executes adapter-exposed models through its
+    batch generators; it does not call this protocol's batch methods.
+    """
 
     @property
     def descriptor(self) -> ModelDescriptor: ...

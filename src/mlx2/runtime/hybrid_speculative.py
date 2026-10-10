@@ -182,6 +182,11 @@ class SelfMTPLane:
     # Optional mtp_confidence.DraftConfidenceProbe: per-position draft
     # features (and greedy lookahead) for confidence-scheduled depth.
     confidence_probe: Optional[Any] = None
+    # Optional draft_loop.DraftLoopPolicy: stop drafting at a stage boundary
+    # when the stage's summed draft log-probability falls below a threshold.
+    draft_loop: Optional[Any] = None
+    draft_loop_decisions: int = 0
+    draft_loop_extensions: int = 0
 
 
 @dataclass
@@ -2258,6 +2263,60 @@ def _host_confidence_payload(payload, d_vector, probes, *, evaluated):
     return (tuple(host_features), tuple(host_tokens))
 
 
+def _gate_draft_loop(
+    lanes, loops, limits, depth, draft_tokens, draft_logprobs, d_vector, k_vector,
+    *, cohort_wide=False,
+):
+    """Decide, at ``depth`` drafted tokens, which gated lanes draft on.
+
+    A lane is at a decision point when ``depth`` ends one of its stages
+    (``DraftLoopPolicy.decision`` against the lane's own draft limit) and it
+    would otherwise draft further.  Its score is the summed log-probability
+    of that stage's drafted tokens under the same transformed draft law that
+    produced them.  One host readback serves every lane at a decision point.
+    A lane that stops keeps exactly ``depth`` drafts, all of which are
+    verified.  ``cohort_wide`` (lanes sharing QSA indices) keeps one depth:
+    the cohort continues only if every gated lane passes.
+    """
+    starts = {}
+    for row, loop in enumerate(loops):
+        if loop is None or depth >= d_vector[row]:
+            continue
+        start = loop.decision(depth, limits[row])
+        if start is not None:
+            starts[row] = start
+    rows = list(starts)
+    if not rows:
+        return
+    scores = []
+    for row in rows:
+        picked = [
+            mx.take(logprobs.reshape(-1), mx.array(token).reshape(-1).astype(mx.uint32))
+            for logprobs, token in zip(
+                draft_logprobs[row][starts[row] : depth],
+                draft_tokens[row][starts[row] : depth],
+            )
+        ]
+        scores.append(mx.sum(mx.concatenate(picked)).astype(mx.float32))
+    record_verify_sync("hybrid.draft_loop.gate")
+    values = mx.stack(scores).tolist()
+    passed = [value >= loops[row].threshold for row, value in zip(rows, values)]
+    if any(loops[row].cohort == "any" for row in rows):
+        # Padded verify rows are paid by every lane once one extends: let
+        # them all draft into those rows.
+        passed = [any(passed)] * len(rows)
+    elif cohort_wide:
+        passed = [all(passed)] * len(rows)
+    for row, keep in zip(rows, passed):
+        lane = lanes[row]
+        lane.draft_loop_decisions += 1
+        if keep:
+            lane.draft_loop_extensions += 1
+        else:
+            d_vector[row] = depth
+            k_vector[row] = min(k_vector[row], depth)
+
+
 def _propose_batched_self_mtp_round(
     model: nn.Module, batch: BatchedSelfMTPState
 ) -> SelfMTPCycleResult:
@@ -2269,9 +2328,18 @@ def _propose_batched_self_mtp_round(
     lane_uids = tuple((lane.uid for lane in batch.lanes))
     if len(set(lane_uids)) != n_lanes:
         raise ValueError("self-MTP batch contains duplicate lane uid values")
+    # A gated lane may draft past its configured depth up to the draft
+    # loop's ceiling (explicit stage boundaries); the gate trims it back.
     head_k_vector = tuple(
         (
-            min(lane.num_draft, max(lane.max_tokens - lane.ntoks - 1, 0))
+            min(
+                (
+                    lane.draft_loop.limit(lane.num_draft)
+                    if getattr(lane, "draft_loop", None) is not None
+                    else lane.num_draft
+                ),
+                max(lane.max_tokens - lane.ntoks - 1, 0),
+            )
             for lane in batch.lanes
         )
     )
@@ -2317,7 +2385,26 @@ def _propose_batched_self_mtp_round(
         for (k, probe) in zip(k_vector, probes)
     )
     draft_features: List[List[mx.array]] = [[] for _ in batch.lanes]
+    # Confidence-gated draft looping (runtime/draft_loop.py): a lane whose
+    # num_draft spans more than one stage decides at each stage boundary
+    # whether to keep drafting.  Lookahead probes are not combined with it.
+    loops = [
+        lane.draft_loop
+        if getattr(lane, "draft_loop", None) is not None
+        and k > 0
+        and not copy
+        and probe is None
+        and lane.draft_loop.applies(lane.num_draft)
+        and len(lane.draft_loop.ends(k)) > 1
+        else None
+        for (lane, k, copy, probe) in zip(batch.lanes, k_vector, copy_rows, probes)
+    ]
+    loop_limits = tuple(k_vector)
+    if any(loops):
+        d_vector = list(d_vector)
+        k_vector = list(k_vector)
     max_k = max(d_vector)
+    share_qsa_this_cycle = False
     if max_k > 0:
         start_cycle = getattr(model, "mtp_start_cycle", None)
         if start_cycle is not None:
@@ -2408,6 +2495,20 @@ def _propose_batched_self_mtp_round(
                     *(draft_h[row] for (row, k) in enumerate(k_vector) if k),
                 )
             for depth in range(1, max_k):
+                if any(loops):
+                    _gate_draft_loop(
+                        batch.lanes,
+                        loops,
+                        loop_limits,
+                        depth,
+                        draft_tokens,
+                        draft_logprobs,
+                        d_vector,
+                        k_vector,
+                        cohort_wide=share_qsa_this_cycle,
+                    )
+                    if depth >= max(d_vector):
+                        break
                 lengths = [1 if depth < k else 0 for k in d_vector]
                 right_padding = [1 - length for length in lengths]
                 hidden = mx.concatenate(draft_h)
@@ -2477,10 +2578,12 @@ def _propose_batched_self_mtp_round(
             end_cycle = getattr(model, "mtp_end_cycle", None)
             if end_cycle is not None:
                 end_cycle(batch.caches.draft)
-        if tuple(draft_steps) != d_vector:
+        if tuple(draft_steps) != tuple(d_vector):
             raise RuntimeError(
-                f"draft head advanced {tuple(draft_steps)}, expected {d_vector}"
+                f"draft head advanced {tuple(draft_steps)}, expected {tuple(d_vector)}"
             )
+    d_vector = tuple(d_vector)
+    k_vector = tuple(k_vector)
     device_drafted = [
         row for row in range(n_lanes) if device_rows[row] and draft_tokens[row]
     ]

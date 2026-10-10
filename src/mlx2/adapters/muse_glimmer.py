@@ -448,6 +448,43 @@ class MuseGlimmerAdapter:
 
         return 2048
 
+    def int8_prefill_supported(self):
+        """int8 prefill scopes (``int8_prefill.adapter_scopes``).
+
+        Text decoder attention (q/k/v/o and the attention output gate
+        ``self_attn.gate_proj``) and dense MLP projections.  The row-exact
+        verify target declines: it claims contextual prefix equivalence
+        between prefill and verify rows, which approximate prefill rows would
+        break.  Evidence: qualification/runs/int8-dense8-e2e-20261009/
+        Muse-Glimmer-30B-mlx-8bit."""
+        if (getattr(self, "external_policy", None) or {}).get("target_verify_row_exact"):
+            return ()
+        return ("mlp", "all")
+
+    @staticmethod
+    def int8_prefill_select(scope):
+        """Text decoder layers only (``model.layers.*``).
+
+        This adapter's model is the text-only port (``Model.sanitize`` drops
+        ``vision_tower`` / ``vision_adapter`` / ``vision_projection``), so the
+        default classifier would pick the same modules today; the explicit
+        prefix keeps a future vision bridge (whose projector names,
+        ``vision_adapter.fc1`` and ``vision_projection``, the default excluded
+        segments do not cover) and the head out of scope."""
+        from ..runtime.int8_prefill import EXCLUDED_SEGMENTS
+
+        def select(path, module):
+            segments = path.split(".")
+            if segments[:2] != ["model", "layers"]:
+                return False
+            if any(seg in EXCLUDED_SEGMENTS for seg in segments):
+                return False
+            if scope == "all":
+                return "self_attn" in segments or "mlp" in segments
+            return "mlp" in segments
+
+        return select
+
     def exact_prefix_cascade_contract(self):
         """Muse boundary for staged exact-prefix proposal verification.
 

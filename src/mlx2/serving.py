@@ -23,7 +23,7 @@ import threading
 import time
 import uuid
 
-from .logprobs import token_logprob, wants_logprobs
+from .logprobs import token_logprob, wants_logprobs, wants_logprobs_at
 from .request_limits import (
     DEFAULT_OUTPUT_TOKENS,
     resolve_output_limit,
@@ -1031,6 +1031,8 @@ class HostPromptCache:
             "stream_options",
             "logprobs",
             "top_logprobs",
+            "logprobs_start",
+            "logprobs_end",
             "logit_bias",
             "repetition_penalty",
             "presence_penalty",
@@ -1204,9 +1206,17 @@ def minimum_tokens_processor(array_module, eos_token_ids, prompt_tokens, minimum
 def runtime_identity() -> dict:
     root = Path(__file__).parent
     digest = hashlib.sha256()
-    for path in sorted(root.rglob("*.py")):
+    from .source_dependencies import add_resources
+    sources = sorted(root.rglob("*.py"))
+    for path in sources:
         digest.update(str(path.relative_to(root)).encode())
         digest.update(path.read_bytes())
+    resources = {path.relative_to(root).as_posix(): "" for path in sources}
+    add_resources(root, resources)
+    digest.update(json.dumps(
+        {name: value for name, value in resources.items() if not name.endswith(".py")},
+        sort_keys=True, separators=(",", ":"),
+    ).encode())
     native = hashlib.sha256()
     dist = importlib.metadata.distribution("mlx")
     for file in sorted(dist.files or [], key=str):
@@ -1239,11 +1249,47 @@ def persistent_runtime_revision(identity: dict) -> tuple:
     """Bind persistent APC state to the complete qualification runtime identity."""
     payload = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
     return (
-        "mlx2-qualified-runtime-v1",
+        "mlx2-route-runtime-v2" if identity.get("source_scope") else "mlx2-qualified-runtime-v1",
         identity["source_sha256"],
         identity.get("mlx_native_sha256", "unavailable"),
         identity.get("mlx", "unavailable"),
         hashlib.sha256(payload).hexdigest(),
+    )
+
+
+def draft_loop_transient_ratio(config):
+    """Verify-transient multiplier for a self-MTP policy with a draft loop."""
+    loop = (config or {}).get("draft_loop")
+    if not loop:
+        return 1.0
+    from .runtime.draft_loop import draft_depth_ceiling
+    from .runtime.memory_policy import SelfMTPLaneAdmissionController
+
+    base = int(config.get("num_draft") or 0)
+    return SelfMTPLaneAdmissionController.depth_transient_ratio(
+        base, draft_depth_ceiling(config)
+    )
+
+
+def self_mtp_verification_row_cap(config, *, max_lanes, copy_draft_policy=None):
+    """Most rows one scheduler round may execute under a self-MTP policy.
+
+    The admission controller charges every executing lane against this
+    budget: an MTP lane its draft depth + the pending target row, an
+    ordinary (plain) lane one row.  Per MTP cohort width ``w`` the round
+    may hold ``w`` lanes at the widest proposal a lane may carry at that
+    width (a draft loop's ceiling up to its ``max_width``, or the copied
+    span) beside ``max_lanes - w`` ordinary lanes; the cap is the widest
+    such round.  Sized from ``num_draft`` alone it under-stated a looped
+    or copying round."""
+    from .runtime.draft_loop import cohort_proposal_depths
+
+    max_lanes = int(max_lanes)
+    return max(
+        lanes * (depth + 1) + (max_lanes - lanes)
+        for lanes, depth in cohort_proposal_depths(
+            config, max_lanes=max_lanes, copy_draft_policy=copy_draft_policy
+        ).items()
     )
 
 
@@ -2092,11 +2138,29 @@ def is_weight_source_change(exc):
     return isinstance(exc, WeightSourceChanged)
 
 
+# Metal's command-buffer wording, then MLX's own allocator wording
+# (backend/metal/allocator.cpp) when no buffer could be made ("[malloc]
+# Unable to allocate N bytes.") or a strict memory limit was hit
+# ("[metal::malloc] Resource limit (N) exceeded.").  Exact prefixes, not
+# generic "out of memory" substrings: an unrelated step failure must not
+# be recovered as a memory fault.  A single buffer past the device's maximum
+# size ("[metal::malloc] Attempting to allocate ... greater than the maximum
+# allowed buffer size") is a geometry error that abandoning lanes cannot
+# cure, so it stays a plain step failure.
+_DEVICE_OUT_OF_MEMORY_MARKS = (
+    "OutOfMemory",
+    "Insufficient Memory",
+    "[malloc] Unable to allocate ",
+    "[metal::malloc] Resource limit (",
+)
+
+
 def is_device_out_of_memory(exc):
-    """A Metal command buffer that failed for lack of memory."""
+    """A Metal command buffer, or an MLX allocation, that failed for lack
+    of memory."""
     text = str(exc)
-    return isinstance(exc, RuntimeError) and (
-        "OutOfMemory" in text or "Insufficient Memory" in text
+    return isinstance(exc, RuntimeError) and any(
+        mark in text for mark in _DEVICE_OUT_OF_MEMORY_MARKS
     )
 
 
@@ -2506,9 +2570,9 @@ _NATIVE_ADMISSION_ORPHANS = []
 
 def _reap_native_admission_orphans():
     from .runtime.paged_native_retirement import reap_native_request_owner
-    from .runtime.qwen35_paged_graph_factory import reap_hybrid_admission_orphans
+    from .runtime.native_admission_retirement import reap_registered
 
-    reap_hybrid_admission_orphans()
+    reap_registered()
     for owner, writer, backend in tuple(_NATIVE_ADMISSION_ORPHANS):
         try:
             reap_native_request_owner(owner, writer, backend)
@@ -2746,22 +2810,13 @@ def install_explicit_native_hybrid_b2_cohort(
             raise ValueError("hybrid native B2 requires a pristine queued lane")
     if not all((profile_path,manifest_path,mlx_wheel_path)):
         raise ValueError("hybrid native B2 requires pinned profile/source/wheel paths")
-    from pathlib import Path
-    import _paged_kv_native
-    from .runtime.paged_price_identity import cached_live_price_identity
-    from .runtime.paged_hybrid_research_profile import load_hybrid_research_profile
-    identity = cached_live_price_identity(Path(manifest_path),Path(mlx_wheel_path),
-        Path(_paged_kv_native.__file__).resolve(),
-        adapter_artifact_root=Path(adapter.identity["path"]).resolve())
-    counts=tuple(len(job.native_b2_prompt) for job in jobs)
-    if packed:
-        from .runtime.paged_packed_prefill_serving_profile import load_profile, factory_profile
-        profile=load_profile(profile_path,live_identity=identity,context_lengths=counts,environment=os.environ)
-        cold_profile=factory_profile(profile,counts)
-    else:
-        profile = load_hybrid_research_profile(profile_path,live_identity=identity,
-            context_lengths=counts,environment=os.environ)
-        cold_profile=profile
+    from .adapters.native_cohort import backend_for
+    backend = backend_for(adapter, "packed_pair" if packed else "hybrid_pair")
+    preparation = backend.prepare(
+        adapter, profile_path=profile_path, manifest_path=manifest_path,
+        mlx_wheel_path=mlx_wheel_path,
+        tokens=tuple(job.native_b2_prompt for job in jobs), environment=os.environ)
+    profile = preparation.profile
     if packed and any(job.request.get('paged_native_long_cap20_research',False) is not profile.get('research_output_cap20',False) for job in jobs):
         raise ValueError('request/profile long cap20 research selection differs')
     if not _hybrid_output_caps_match(jobs, profile):
@@ -2769,11 +2824,10 @@ def install_explicit_native_hybrid_b2_cohort(
     cancelled = lambda:any(job.cancelled.is_set() for job in jobs)
     # Bootstrap remains private. The generator takes lifecycle_lock once when
     # it atomically replaces both queued lanes; engine.lock is nonreentrant.
-    owners,candidate,bootstrap = getattr(adapter,factory_name)(
-        tuple((job.uid,adapter.identity["fingerprint"],job.native_b2_prompt,
-               job.effective_max_tokens) for job in jobs),profile=cold_profile,
-        **({"live_identity":identity} if packed else {}),
-        permit_candidate=True,cancelled=cancelled)
+    owners,candidate,bootstrap = backend.allocate(
+        adapter, tuple((job.uid, adapter.identity["fingerprint"], job.native_b2_prompt,
+                        job.effective_max_tokens) for job in jobs),
+        preparation, cancelled=cancelled)
     installed = False
     try:
         candidate._b2_profile_id = profile["profile_id"]
@@ -2829,17 +2883,20 @@ def install_explicit_native_hybrid_n_cohort(batch,adapter,jobs,*,lifecycle_lock,
         sequence=batch._unprocessed_sequences[found[1]]
         validate_ordinary_processors(sequence[6],sampling,len(job.native_b2_prompt))
     if len({(job.tenant_id,job.request["batch_cohort"]["id"]) for job in jobs})!=1:raise ValueError("nativeN20 cohort identity differs")
-    from pathlib import Path
-    import _paged_kv_native
-    from .runtime.paged_price_identity import cached_live_price_identity
-    from .runtime.hybrid_packed_prefill_n import load_profile
-    identity=cached_live_price_identity(Path(manifest_path),Path(mlx_wheel_path),Path(_paged_kv_native.__file__).resolve(),adapter_artifact_root=Path(adapter.identity["path"]).resolve())
-    ids=tuple(job.request.get("native_research_input_id") for job in jobs);tokens=tuple(job.native_b2_prompt for job in jobs);counts=tuple(map(len,tokens))
-    profile=load_profile(profile_path,live_identity=identity,source_input_ids=ids,counts=counts,tokens=tokens,environment_values=os.environ)
+    from .adapters.native_cohort import backend_for
+    backend = backend_for(adapter, "packed_n")
+    ids = tuple(job.request.get("native_research_input_id") for job in jobs)
+    preparation = backend.prepare(
+        adapter, profile_path=profile_path, manifest_path=manifest_path,
+        mlx_wheel_path=mlx_wheel_path, input_ids=ids,
+        tokens=tuple(job.native_b2_prompt for job in jobs), environment=os.environ)
+    profile = preparation.profile
     if any(job.request.get("native_research_inputs_sha256")!=profile["inputs_sha256"] for job in jobs):raise ValueError("nativeN20 actualsuite input identity differs")
     cancelled=lambda:any(job.cancelled.is_set() for job in jobs)
-    owners,candidate,bootstrap=adapter.create_native_packed_prefill_n(tuple((job.uid,adapter.identity["fingerprint"],job.native_b2_prompt,job.effective_max_tokens) for job in jobs),
-        profile=profile,live_identity=identity,source_input_ids=ids,permit_candidate=True,cancelled=cancelled,phase_boundary=getattr(adapter,"_native_n20_phase_boundary",None))
+    owners,candidate,bootstrap = backend.allocate(
+        adapter, tuple((job.uid, adapter.identity["fingerprint"], job.native_b2_prompt,
+                        job.effective_max_tokens) for job in jobs),
+        preparation, cancelled=cancelled)
     installed=False
     try:
         candidate._serving_sampling_by_uid={job.uid:dict(job.effective_sampling) for job in jobs}
@@ -2916,32 +2973,19 @@ def install_explicit_native_qwen3_b2_cohort(
             raise ValueError("native B2 requires a pristine queued lane without processors")
     if not all((profile_path, manifest_path, mlx_wheel_path)):
         raise ValueError("native B2 requires pinned profile/source/wheel paths")
-    if any(os.environ.get(key) != "1" for key in (
-        "MLX2_PAGED_Q1_SIMD_TILE", "MLX2_PAGED_GROUPED_Q1_WRITE",
-        "MLX2_PAGED_PRIVATE_TAIL_REUSE")):
-        raise ValueError("native B2 physical kernel flags are disabled")
-    from pathlib import Path
-    import _paged_kv_native
-    from .runtime.paged_b2_research_profile import (
-        DIRECT_FENCE_FLAG, PACKED_FLAG,
-        SCHEMA, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7,
-        SUSTAINED_FLAG, VECTOR_ROPE_FLAG,
-        load_b2_research_profile, validate_combined_environment)
+    from .adapters.native_cohort import backend_for
     from .runtime.paged_native_batch_lifecycle import (
         prepare_queued_native_first_response, run_research_native_queued_qwen3,
         run_research_native_queued_qwen3_b2_packed)
-    from .runtime.paged_price_identity import cached_live_price_identity
     from .runtime.paged_request_transaction import CandidateRequest
-    from .runtime.qwen3_paged_graph_factory import create_shared_qwen3_graph_pack
 
-    identity = cached_live_price_identity(
-        Path(manifest_path), Path(mlx_wheel_path),
-        Path(_paged_kv_native.__file__).resolve(),
-        adapter_artifact_root=Path(adapter.identity["path"]).resolve())
-    profile = load_b2_research_profile(
-        profile_path, live_identity=identity, context_lengths=context_lengths)
-    combined = validate_combined_environment(profile, os.environ)
-    if profile["schema"] == SCHEMA and any(
+    backend = backend_for(adapter, "kv_pair")
+    preparation = backend.prepare(
+        adapter, profile_path=profile_path, manifest_path=manifest_path,
+        mlx_wheel_path=mlx_wheel_path,
+        tokens=tuple(job.native_b2_prompt for job in jobs), environment=os.environ)
+    profile = preparation.profile
+    if preparation.neutral_filters_required and any(
         (job.effective_sampling or {}).get(key) != value or
         job.request.get(key, value) != value
         for job in jobs for key, value in
@@ -2950,36 +2994,13 @@ def install_explicit_native_qwen3_b2_cohort(
         raise ValueError("native B2 v1 requires neutral sampling filters")
     if any(job.effective_max_tokens != profile["max_tokens"] for job in jobs):
         raise ValueError("native B2 output length differs from the pinned profile")
-    packed_prefill = profile["schema"] in (SCHEMA_V3, SCHEMA_V4, SCHEMA_V5,
-                                           SCHEMA_V6, SCHEMA_V7)
-    if packed_prefill and os.environ.get(PACKED_FLAG) != "1":
-        raise ValueError("native B2 packed prefill flag is disabled")
-    if profile["schema"] in (SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7) and os.environ.get(SUSTAINED_FLAG) != "1":
-        raise ValueError("native B2 sustained decode flag is disabled")
-    vector_q1_rope = profile["schema"] == SCHEMA_V5
-    if vector_q1_rope and os.environ.get(VECTOR_ROPE_FLAG) != "1":
-        raise ValueError("native B2 vector Q1 RoPE flag is disabled")
-    direct_grouped_fence = profile["schema"] in (SCHEMA_V6, SCHEMA_V7)
-    if direct_grouped_fence and os.environ.get(DIRECT_FENCE_FLAG) != "1":
-        raise ValueError("native B2 direct grouped fence flag is disabled")
+    packed_prefill = preparation.packed
     revision = adapter.identity["fingerprint"]
     _reap_native_admission_orphans()
-    owners, candidate = create_shared_qwen3_graph_pack(
-        adapter, tuple((revision, len(job.native_b2_prompt), profile["max_tokens"])
-                       for job in jobs),
-        permit_candidate=True, profile_host=True)
-    candidate._serving_b2 = True
-    candidate._b2_profile_id = profile["profile_id"]
-    candidate._b2_packed_prefill = packed_prefill
-    candidate._vector_q1_rope = vector_q1_rope
-    options = profile["combined_optimizations"] if combined else {}
-    candidate._defer_staged_q1_eval = options.get("deferred_eval", False)
-    candidate._defer_staged_q1_writes = options.get("deferred_write_eval", False)
-    candidate._b2_inline_metadata = options.get("inline_metadata", False)
-    candidate._b2_grouped_sampler = options.get("grouped_sampler", False)
-    candidate._b2_q1_stripes = profile["q1_simd_stripes"] if combined else 4
-    candidate._b2_stock_sdpa = options.get("stock_sdpa", False)
-    candidate.backend.direct_grouped_fence = direct_grouped_fence
+    owners, candidate, _bootstrap = backend.allocate(
+        adapter, tuple((job.uid, revision, job.native_b2_prompt, job.effective_max_tokens)
+                       for job in jobs), preparation,
+        cancelled=lambda: any(job.cancelled.is_set() for job in jobs))
     installed = set()
     try:
         probes = (run_research_native_queued_qwen3_b2_packed(
@@ -3199,6 +3220,7 @@ class Job:
     thinking_tokens: list[int] = field(default_factory=list)
     tool_parse_fallbacks_seen: int = 0
     tool_constraint_truncations_seen: int = 0
+    tool_call_id_replacements_seen: int = 0
     tool_grammar_status: str = "disabled"
     tool_grammar_receipt: dict | None = None
     # Automata of the request's grammar, compiled before publication.
@@ -3345,6 +3367,9 @@ class ServingEngine:
         thinking_auto_calibration=True,
         lane_matmul="auto",
         lane_policy=None,
+        draft_loop="auto",
+        draft_loop_threshold=None,
+        draft_loop_widths=None,
         cache_capsules=None,
         persistent_block_bytes=0,
         approximate_kv=None,
@@ -3602,6 +3627,42 @@ class ServingEngine:
         # Parse and validate overrides at startup, before any model loads.
         self.lane_policy_overrides = load_overrides(lane_policy)
         self.lane_matmul_receipt = None
+        if draft_loop not in ("auto", "off"):
+            raise ValueError("draft_loop must be auto or off")
+        self.draft_loop_mode = draft_loop
+        from .runtime import verify_topology as _vt
+
+        threshold = (
+            _vt.DEFAULT_THRESHOLD if draft_loop_threshold is None else draft_loop_threshold
+        )
+        low, high = _vt.threshold_range()
+        if (
+            isinstance(threshold, bool)
+            or not isinstance(threshold, (int, float))
+            or not math.isfinite(float(threshold))
+            or not low - 1e-9 <= float(threshold) <= high + 1e-9
+        ):
+            raise ValueError(
+                f"draft_loop_threshold must be a summed log-probability between "
+                f"{low:g} and {high:g} (the measured acceptance prior's range)"
+            )
+        self.draft_loop_threshold = float(threshold)
+        widths = _vt.PROBE_WIDTHS if draft_loop_widths is None else draft_loop_widths
+        if isinstance(widths, str):
+            try:
+                widths = [int(part) for part in widths.split(",") if part.strip()]
+            except ValueError:
+                raise ValueError("draft_loop_widths must be comma-separated integers") from None
+        widths = list(widths)
+        if not widths or any(
+            isinstance(w, bool) or not isinstance(w, int) or not 1 <= w <= _vt.MAX_PROBE_WIDTH
+            for w in widths
+        ):
+            raise ValueError(
+                f"draft_loop_widths must list widths between 1 and {_vt.MAX_PROBE_WIDTH}"
+            )
+        self.draft_loop_widths = sorted(set(widths))
+        self.verify_topology_receipt = None
         self._commit_direction = None
         self.thinking_steer_status = {"state": "off"}
         self.cache_capsule_policy = cache_capsule_policy(cache_capsules)
@@ -3707,11 +3768,21 @@ class ServingEngine:
                 raise ValueError("live Spomin surgery is incompatible with prompt lookup")
         if execution_policy and execution_policy.get("allow_unverified_indexed") and not qualification_mode:
             raise ValueError("unverified kernels are restricted to qualification mode")
-        from .runtime.int8_prefill import Int8PrefillPolicy
+        from .runtime.int8_prefill import AUTO as INT8_PREFILL_AUTO, Int8PrefillPolicy
 
         # W8A8 int8 NAX prefill: default off, approximate by construction.
         # The handle is bound in the worker once the adapter's model exists.
-        self.int8_prefill_policy = Int8PrefillPolicy.from_value(int8_prefill)
+        # ``auto`` stays disabled here and is resolved in the worker against
+        # the loaded checkpoint, device and qualification evidence
+        # (``int8_prefill.resolve_auto``); its receipt is ``int8_prefill_auto``.
+        self.int8_prefill_auto = (
+            {"requested": INT8_PREFILL_AUTO, "resolved": "pending"}
+            if int8_prefill == INT8_PREFILL_AUTO
+            else None
+        )
+        self.int8_prefill_policy = Int8PrefillPolicy.from_value(
+            None if self.int8_prefill_auto is not None else int8_prefill
+        )
         self.int8_prefill_handle = None
         if self.int8_prefill_policy.enabled and not qualification_mode and not qualification:
             # Approximate state may only be published through a qualified
@@ -3926,9 +3997,12 @@ class ServingEngine:
         self.counts = Counter(
             {
                 "thinking_budget_forced_closes": 0,
+                "apc_shutdown_parks_skipped": 0,
+                "apc_shutdown_pinned_parks_lost": 0,
                 "tool_call_parse_fallbacks": 0,
                 "tool_call_constraint_failures": 0,
                 "tool_call_constraint_truncations": 0,
+                "tool_call_id_replacements": 0,
                 "schema_ref_failures": 0,
                 "structured_output_dead_ends": 0,
                 "constrained_tool_grammar_engagements": 0,
@@ -3947,6 +4021,8 @@ class ServingEngine:
                 "resumes": 0,
                 "prefetches_queued": 0,
                 "prefetches_cancelled": 0,
+                "apc_invalidation_pinned_parks_lost": 0,
+                "apc_suspend_pinned_parks_lost": 0,
                 **(
                     {
                         "memory_preemptions": 0,
@@ -4368,6 +4444,50 @@ class ServingEngine:
             self._drain_suspend = False
             self._quiesce_worker_owned = False
             self._quiesce_complete.set()
+
+    def _resolve_int8_prefill_auto(self, adapter):
+        """Turn ``--int8-prefill auto`` into a policy (or off) for this model.
+
+        Runs in the worker after the adapter loads and before anything binds
+        prefill numerics.  Mechanisms that own the same projections, or that
+        refuse int8 prefill when selected explicitly, resolve it off."""
+        from .runtime.int8_prefill import resolve_auto
+
+        conflicts = [
+            name
+            for name in ("tensorfold_prefill", "tensorfold_qmv", "invariant_prefill")
+            if getattr(adapter, name, None)
+        ]
+        if self.sp_qmm_enabled:
+            conflicts.append("sp_qmm")
+        if self.multi_lora_policy is not None:
+            conflicts.append("concurrent multi-LoRA")
+        if self.weight_streaming_enabled():
+            conflicts.append("weight streaming")
+        if self.approximate_kv_policy.enabled:
+            # One approximate operation per route until a composed one is qualified.
+            conflicts.append("approximate KV")
+        qualified_settings = None
+        if self.qualification_state == "qualified" and self.qualification:
+            try:
+                record = json.loads(Path(self.qualification).read_text())
+            except (OSError, ValueError):
+                record = None
+            if isinstance(record, dict) and isinstance(record.get("settings"), dict):
+                qualified_settings = record["settings"]
+        policy, self.int8_prefill_auto = resolve_auto(
+            adapter,
+            qualification_mode=bool(self.qualification_mode),
+            qualified_settings=qualified_settings,
+            conflicts=conflicts,
+        )
+        if policy is not None:
+            self.int8_prefill_policy = policy
+        logging.getLogger("mlx2.serving").info(
+            "int8 prefill auto: %s (%s)",
+            self.int8_prefill_auto["resolved"],
+            self.int8_prefill_auto.get("evidence") or self.int8_prefill_auto.get("reason"),
+        )
 
     def submit(
         self,
@@ -5751,7 +5871,14 @@ class ServingEngine:
             raise ValueError("LoRA path must stay within the configured LoRA directory")
         return candidate
 
-    def _invalidate_model_state(self):
+    def _invalidate_model_state(self, reason: str = "model state change"):
+        """Drop every cached derivation of the model's state after a lever
+        (LoRA load/unload) changed what that state means.
+
+        The APC clear takes parked sessions with it; its report names them
+        and they are counted (``apc_invalidation_pinned_parks_lost``) and
+        logged with ``reason`` here, so the loss is visible to the service.
+        """
         self.model_revision += 1
         self.host_prompt_cache.clear()
         self.incremental_tokenizer_cache.clear()
@@ -5759,7 +5886,18 @@ class ServingEngine:
         if callable(invalidate_features):
             invalidate_features()
         if self.apc is not None:
-            self.apc.clear()
+            report = self.apc.clear()
+            lost = (
+                int(report.get("pinned_parks_lost", 0) or 0)
+                if isinstance(report, dict) else 0
+            )
+            if lost:
+                self.counts["apc_invalidation_pinned_parks_lost"] += lost
+                log.error(
+                    "APCv2 invalidation (%s) destroyed %d pinned session "
+                    "checkpoint(s) (sessions %s); those parked sessions are gone",
+                    reason, lost, report.get("lost_sessions", []),
+                )
         try:
             import mlx.core as mx
 
@@ -5841,7 +5979,7 @@ class ServingEngine:
             self.lora_session = install_lora(
                 adapter.model, name=name, path=candidate
             )
-            self._invalidate_model_state()
+            self._invalidate_model_state(reason="lora_load")
             return {
                 "status": "loaded",
                 "model_revision": self.model_revision,
@@ -5866,7 +6004,7 @@ class ServingEngine:
                 raise ValueError("LoRA adapter is not loaded")
             session.restore(adapter.model)
             self.lora_session = None
-            self._invalidate_model_state()
+            self._invalidate_model_state(reason="lora_unload")
             return {"status": "unloaded", "model_revision": self.model_revision}
 
         return self._exclusive_adapter_operation("lora_unload", remove)
@@ -7124,6 +7262,159 @@ class ServingEngine:
             service = getattr(apc, "service_pending_prefetch", None)
             return bool(callable(service) and service())
 
+
+    def _select_draft_loop(self, adapter, config):
+        """Default draft-loop topology when the lane matmul covers the model.
+
+        Runs the load-time verify-topology probe (cached per device, MLX
+        build, model and lane law) and adds the selected ``draft_loop`` to
+        the self-MTP execution policy.  An operator-supplied ``draft_loop``,
+        ``--draft-loop off``, a route other than self-MTP, or a model the
+        lane matmul does not cover leaves the policy unchanged.
+
+        An adapter that declares an exact self-MTP row window caps the end
+        depths the probe may consider (window - 1 drafts); an operator or
+        probed loop whose ceiling would verify past that window refuses the
+        route (``ValueError``), with the reason in the topology receipt.
+        """
+        self.verify_topology_receipt = None
+        if not self.mtp or config.get("backend") == "external_draft":
+            return config
+        from .adapters.self_mtp_rows import (
+            constrain_self_mtp_draft_loop,
+            declared_exact_self_mtp_rows,
+        )
+
+        # The adapter's exact verify/rollback window bounds every proposer
+        # width, the loop's ceiling included: the same declaration
+        # ``constrain_self_mtp_proposers`` clamps ``num_draft`` with.
+        exact_rows = declared_exact_self_mtp_rows(adapter)
+        if "draft_loop" in config:
+            # An operator loop wins over the probe but not over the window;
+            # a refusal leaves its reason in the receipt like a probed one.
+            try:
+                constrain_self_mtp_draft_loop(exact_rows, None, config)
+            except ValueError as error:
+                self.verify_topology_receipt = {
+                    "selected": None,
+                    "refused": str(error),
+                    "source": "operator",
+                }
+                raise
+            return config
+        if self.draft_loop_mode != "auto" or not (
+            self.lane_matmul_receipt or {}
+        ).get("covered"):
+            return config
+        base = int(config.get("num_draft") or 0)
+        from .runtime import verify_topology as vt
+
+        prior_base = int(vt.load_prior_grid()["base"])
+        if base != prior_base:
+            self.verify_topology_receipt = {
+                "selected": None,
+                "reason": f"no acceptance prior for base depth {base}",
+            }
+            return config
+        max_end = vt.MAX_END
+        if exact_rows is not None:
+            max_end = min(max_end, exact_rows.effective_max_self_mtp_proposer_depth)
+        if max_end <= base:
+            self.verify_topology_receipt = {
+                "selected": None,
+                "reason": (
+                    f"the adapter's exact self-MTP window of "
+                    f"{exact_rows.effective_max_self_mtp_rows} rows admits no end "
+                    f"depth above the base depth {base}"
+                ),
+            }
+            return config
+        import mlx.core as mx
+
+        try:
+            device = mx.metal.device_info().get("device_name", "unknown")
+        except Exception:  # pragma: no cover - non-Metal hosts
+            device = "unknown"
+        args = getattr(adapter.model, "args", None)
+        text = getattr(args, "text_config", None)
+        vocab = (
+            int(text["vocab_size"]) if isinstance(text, dict)
+            else int(getattr(adapter, "speculative_args", args).vocab_size)
+        )
+        tokenizer = adapter.tokenizer
+        prompt = list(tokenizer.encode(vt.PROBE_TEXT))
+        receipt = vt.resolve_topology(
+            adapter.model,
+            identity={
+                "device": device,
+                "mlx": mx.__version__,
+                "adapter": type(adapter).__name__,
+                "artifact": adapter.identity["fingerprint"],
+                "lane_law": self.lane_matmul_receipt.get("law_id"),
+                "exact_self_mtp_rows": (
+                    None if exact_rows is None
+                    else exact_rows.effective_max_self_mtp_rows
+                ),
+            },
+            base=base,
+            max_end=max_end,
+            widths=[w for w in self.draft_loop_widths if w <= max(1, int(self.max_lanes))] or [1],
+            threshold=self.draft_loop_threshold,
+            vocab_size=vocab,
+            prompt=prompt,
+            self_mtp=config,
+        )
+        self.verify_topology_receipt = receipt
+        selected = receipt.get("selected")
+        if selected is None:
+            return config
+        config = dict(config)
+        config["draft_loop"] = dict(selected)
+        try:
+            # Fail closed on a selection past the window, whatever answered
+            # (a probe, or a cache entry written under another ceiling).
+            constrain_self_mtp_draft_loop(exact_rows, None, config)
+        except ValueError as error:
+            self.verify_topology_receipt = {
+                **receipt, "selected": None, "refused": str(error),
+            }
+            raise
+        return config
+
+    def _close_apc_on_shutdown(self, apc):
+        """Close the APC at worker exit and surface what shutdown parking lost.
+
+        ``APCv2.close(persist_resident=True)`` returns ``park_all``'s report;
+        ``pinned_skipped`` counts parked session checkpoints left without a
+        disk copy, which will be missing after restart.  They are counted
+        (``apc_shutdown_pinned_parks_lost``) and logged here so the loss is
+        visible to the service, not only inside the cache's own log line.
+        """
+        close_apc = getattr(apc, "close", None)
+        report = None
+        if callable(close_apc):
+            report = close_apc(
+                persist_resident=self.apc_persist_on_shutdown,
+                time_budget_seconds=self.apc_persist_shutdown_seconds,
+            )
+        else:
+            apc.clear()
+        self.apc = None
+        if isinstance(report, dict):
+            skipped = int(report.get("skipped", 0) or 0)
+            lost = int(report.get("pinned_skipped", 0) or 0)
+            if skipped:
+                self.counts["apc_shutdown_parks_skipped"] += skipped
+            if lost:
+                self.counts["apc_shutdown_pinned_parks_lost"] += lost
+                log.error(
+                    "APCv2 shutdown parking left %d pinned session checkpoint(s) "
+                    "without a disk copy (spilled %d, skipped %d); those parked "
+                    "sessions will be missing after restart",
+                    lost, int(report.get("spilled", 0) or 0), skipped,
+                )
+        return report
+
     def _run(self):
         adapter = batch = apc = capsule_pool = None
         active = {}
@@ -7437,6 +7728,7 @@ class ServingEngine:
             identity = runtime_identity()
             self.max_context = min(self.max_context, adapter.max_context)
             from .adapters.self_mtp_rows import (
+                constrain_self_mtp_draft_loop,
                 constrain_self_mtp_proposers,
                 declared_exact_self_mtp_rows,
             )
@@ -7563,7 +7855,7 @@ class ServingEngine:
             }
             mlx_vlm_runtime = getattr(adapter, "mlx_vlm_runtime", None)
             if mlx_vlm_runtime is not None:
-                # Only routes that execute mlx-vlm code bind its revision, so
+                # Only routes that execute mlx-vlm bind its dependency content;
                 # installing the multimodal extra leaves text receipts valid.
                 settings["mlx_vlm"] = dict(mlx_vlm_runtime)
             if self.memory_preemption_policy["enabled"]:
@@ -7682,6 +7974,19 @@ class ServingEngine:
             ingress_cohort = ingress_cohort_policy(
                 config.get("ingress_cohort"), max_lanes=self.max_lanes
             )
+            config = self._select_draft_loop(adapter, config)
+            if self.mtp and exact_self_mtp_rows is not None:
+                # Report the ceiling the route verifies, loop included.
+                settings["exact_self_mtp_rows"] = constrain_self_mtp_draft_loop(
+                    exact_self_mtp_rows, settings["exact_self_mtp_rows"], config
+                )
+            if self.verify_topology_receipt is not None:
+                # Bound into route identity: what was selected, not timings.
+                settings["verify_topology"] = {
+                    "selected": self.verify_topology_receipt.get("selected"),
+                    "tile_edges": self.verify_topology_receipt.get("tile_edges"),
+                    "law_id": (self.lane_matmul_receipt or {}).get("law_id"),
+                }
             settings["execution_policy"] = dict(config)
             external_draft = config.get("backend") == "external_draft"
             if config.get("external_varlen_prefill"):
@@ -7891,11 +8196,6 @@ class ServingEngine:
                     )
                 settings["prefill_scheduling"] = dict(self.prefill_scheduling_policy)
             if self.decode_first_policy is not None:
-                if external_draft or prompt_lookup:
-                    raise ValueError(
-                        "decode_first requires the ordinary or native "
-                        "self-MTP route"
-                    )
                 settings["decode_first"] = dict(self.decode_first_policy)
             if self.gpu_keep_warm_policy.enabled:
                 # Provenance only (qualification.PROVENANCE_ONLY_SETTINGS):
@@ -8012,22 +8312,54 @@ class ServingEngine:
                     "modules": len(self.sp_qmm_handle),
                     "policy": "measured-m5max-20260925",
                 }
+            if self.int8_prefill_auto is not None:
+                self._resolve_int8_prefill_auto(adapter)
             if self.int8_prefill_policy.enabled:
                 # Fails closed (unsupported device, undeclared scope, or a
                 # decode/verify block that could reach the row threshold)
                 # before the route is qualified or published.  Recorded in
                 # settings only when enabled so default-off records match.
-                from .runtime.int8_prefill import bind_for_serving
+                from .runtime.int8_prefill import Int8PrefillError, bind_for_serving
 
-                self.int8_prefill_handle, settings["int8_prefill"] = bind_for_serving(
-                    adapter,
-                    self.int8_prefill_policy,
-                    max_lanes=self.max_lanes,
-                    config=config,
-                    speculation=settings["speculation"],
-                    prompt_lookup_policy=prompt_lookup_policy,
-                    copy_draft_policy=self.copy_draft_policy,
-                )
+                try:
+                    self.int8_prefill_handle, settings["int8_prefill"] = bind_for_serving(
+                        adapter,
+                        self.int8_prefill_policy,
+                        max_lanes=self.max_lanes,
+                        config=config,
+                        speculation=settings["speculation"],
+                        prompt_lookup_policy=prompt_lookup_policy,
+                        copy_draft_policy=self.copy_draft_policy,
+                    )
+                except (Int8PrefillError, ValueError, RuntimeError) as error:
+                    refusal = isinstance(error, (Int8PrefillError, ValueError))
+                    fault = None if refusal else device_fault_kind(error)
+                    if self.int8_prefill_auto is None or (not refusal and fault is None):
+                        raise
+                    # ``auto`` declines instead of refusing the model: the
+                    # route then runs stock prefill and says why.  A Metal
+                    # device fault in the kernel probe is not cached by the
+                    # probe (a later install may retry); this engine binds
+                    # once, so its receipt names the fault.
+                    from .runtime.int8_prefill import Int8PrefillPolicy
+
+                    self.int8_prefill_policy = Int8PrefillPolicy()
+                    self.int8_prefill_handle = None
+                    settings.pop("int8_prefill", None)
+                    self.int8_prefill_auto = {
+                        **self.int8_prefill_auto,
+                        "resolved": "off",
+                        "reason": (
+                            f"bind refused: {error}"
+                            if refusal
+                            else f"bind declined on a device fault ({fault}): {error}"
+                        ),
+                    }
+                    self.int8_prefill_auto.pop("evidence", None)
+                    logging.getLogger("mlx2.serving").warning(
+                        "int8 prefill auto: off (%s)",
+                        self.int8_prefill_auto["reason"],
+                    )
             from .runtime.apc_numerics import execution_numerics_identity
 
             # The exact same laws bind learning and both APCv2 namespaces.
@@ -8061,6 +8393,16 @@ class ServingEngine:
                         else ""
                     )
                     + (
+                        f"-q8a8-{self.int8_prefill_policy.act_scale}"
+                        if self.int8_prefill_policy.q8_inplace
+                        else ""
+                    )
+                    + (
+                        f"-q45a8-{self.int8_prefill_policy.act_scale}"
+                        if self.int8_prefill_policy.q45_inplace
+                        else ""
+                    )
+                    + (
                         "-verify-bitexact"
                         if self.verify_bitexact_policy.enabled
                         else ""
@@ -8078,6 +8420,12 @@ class ServingEngine:
                     )
                 )
 
+            from .route_identity import bind_route_runtime
+
+            build_identity = identity
+            identity, source_scope_status = bind_route_runtime(
+                build_identity, adapter, settings["speculation"]
+            )
             profile_name = None
             if (external_draft or prompt_lookup) and self.mtp:
                 raise ValueError("speculative routes are mutually exclusive")
@@ -8346,13 +8694,21 @@ class ServingEngine:
             controller = SelfMTPLaneAdmissionController(
                 host_memory_gib=host_memory_gib(),
                 advisory_gib=metal_advisory_gib(),
-                saturation_lane_cap=self.max_lanes, verification_row_cap=self.max_lanes * (config["num_draft"] + 1),
+                saturation_lane_cap=self.max_lanes,
+                verification_row_cap=self_mtp_verification_row_cap(
+                    config,
+                    max_lanes=self.max_lanes,
+                    copy_draft_policy=self.copy_draft_policy,
+                ),
                 cache_estimator=cache_budget.project if cache_budget else None,
                 transient_gib_per_lane=getattr(
                     cache_budget,
                     "transient_gib_per_lane",
                     SelfMTPLaneAdmissionController.K2_TRANSIENT_GIB_PER_LANE,
-                ),
+                )
+                # A draft loop verifies up to its ceiling while lanes stay
+                # admitted at the base depth: charge the deeper transient.
+                * draft_loop_transient_ratio(config),
                 # B_stream: the streaming reservation not yet resident,
                 # reserved once before lanes are costed and re-read at every
                 # decision (the filled cache is already in measured memory).
@@ -8707,6 +9063,7 @@ class ServingEngine:
                         stop_tokens=[[token] for token in stop_token_ids],
                         fly_verification=self.fly_verification_policy,
                         decode_time_fairness=settings["decode_time_fairness"],
+                        decode_first=self.decode_first_policy,
                     )
                 elif prompt_lookup:
                     from .runtime.pld import PromptLookupBatchGenerator
@@ -8720,6 +9077,7 @@ class ServingEngine:
                         recent_source_store=pld_recent_source_store,
                         stop_tokens=[[token] for token in stop_token_ids],
                         decode_time_fairness=settings["decode_time_fairness"],
+                        decode_first=self.decode_first_policy,
                     )
                 else:
                     return BatchGenerator(
@@ -8802,6 +9160,9 @@ class ServingEngine:
                     "state": "ready",
                     "model": Path(self.model_path).name,
                     "runtime": identity,
+                    "build_runtime": build_identity,
+                    "runtime_source_scope": source_scope_status,
+                    "dependency_builds": {"mlx_vlm": getattr(adapter, "mlx_vlm_build", None)},
                     "artifact": adapter.identity["fingerprint"],
                     "profile": profile_name,
                     "settings": settings,
@@ -9370,6 +9731,16 @@ class ServingEngine:
                             self.counts["suspend_failures"] += int(
                                 suspend_report["failures"]
                             )
+                            lost = int(suspend_report.get("pinned_lost", 0))
+                            if lost:
+                                # A suspend that dropped a live-pinned park:
+                                # the loss is counted like the shutdown and
+                                # invalidation losses, not read and dropped.
+                                self.counts["apc_suspend_pinned_parks_lost"] += lost
+                                log.error(
+                                    "apc suspend dropped %d pinned parked checkpoint(s)",
+                                    lost,
+                                )
                             with self.lock:
                                 self.snapshot.update(
                                     {
@@ -11485,7 +11856,7 @@ class ServingEngine:
                             )
                             del active[response.uid]
                             continue
-                        if wants_logprobs(job.request):
+                        if wants_logprobs_at(job.request, job.completion_tokens):
                             try:
                                 probability = token_logprob(
                                     response.logprobs, response.token, adapter.tokenizer,
@@ -11567,6 +11938,14 @@ class ServingEngine:
                                 truncations - job.tool_constraint_truncations_seen
                             )
                             job.tool_constraint_truncations_seen = truncations
+                        replaced_ids = int(
+                            getattr(job.output_parser, "tool_call_id_replacements", 0)
+                        )
+                        if replaced_ids > job.tool_call_id_replacements_seen:
+                            self.counts["tool_call_id_replacements"] += (
+                                replaced_ids - job.tool_call_id_replacements_seen
+                            )
+                            job.tool_call_id_replacements_seen = replaced_ids
                         stopped = job.output_parser.stopped
                         if stopped and not response.finish_reason:
                             batch.remove([response.uid])
@@ -11760,6 +12139,27 @@ class ServingEngine:
                                     "cache_checkpoint_role": job.cache_retention_role,
                                     "stop_sequence": getattr(
                                         job.output_parser, "stop_sequence", None
+                                    ),
+                                    **(
+                                        {"truncated_tool_call": tool_cut}
+                                        if (
+                                            tool_cut := getattr(
+                                                job.output_parser,
+                                                "truncated_tool_call", None,
+                                            )
+                                        )
+                                        else {}
+                                    ),
+                                    **(
+                                        {"stop_truncated_tool_call": stop_cut}
+                                        if (
+                                            stop_cut := getattr(
+                                                job.output_parser,
+                                                "stop_truncated_tool_call",
+                                                None,
+                                            )
+                                        )
+                                        else {}
                                     ),
                                     "parallel_prefill": (
                                         {
@@ -12054,12 +12454,18 @@ class ServingEngine:
                             # (OpenAI's "length" definition; vLLM's streaming
                             # path does the same).  A parser that stopped on
                             # its own (turn end, client stop) was not cut off.
-                            truncated = (
-                                response.finish_reason == "length" and not stopped
+                            tool_cut_cause = (
+                                getattr(job.output_parser, "truncated_tool_call", None)
+                                or {}
+                            ).get("cause")
+                            truncated = response.finish_reason == "length" and (
+                                not stopped or tool_cut_cause == "max_tokens"
                             )
                             reason = (
                                 "length"
                                 if truncated
+                                else "stop"
+                                if tool_cut_cause == "stop_sequence"
                                 else "tool_calls"
                                 if job.output_parser.tool_count
                                 else "stop"
@@ -12136,36 +12542,41 @@ class ServingEngine:
                     settler = getattr(self, "_footprint_settler", None)
                     if settler is not None:
                         settler.refresh(idle=not active)
-                    with self.lock:
-                        self.snapshot.update(
-                            {
-                                "apcv2": apc.apc_stats,
-                                "cache_capsules": (
-                                    capsule_pool.counters
-                                    if capsule_pool is not None
-                                    else None
-                                ),
-                                "scheduler": dict(batch.scheduler_stats),
-                                "segmented_self_mtp": segmented_self_mtp_stats(),
-                                "metal_active_bytes": mx.get_active_memory(),
-                                "metal_peak_bytes": mx.get_peak_memory(),
-                                "process_physical_footprint_bytes": physical_footprint_bytes(),
-                                "execution": _execution_diagnostics(adapter),
-                                "admission": dict(admission),
-                                "memory_waiting": sum(
-                                    waiting.admission_defer_reason
-                                    != "ingress_cohort_deadline"
-                                    for waiting in deferred
-                                ),
-                                "headroom_bytes": execution_headroom(),
-                                **self._host_memory_status(),
-                                "spomin_live_surgery": (
-                                    spomin_manager.snapshot()
-                                    if spomin_manager is not None
-                                    else {"enabled": False, "counts": {}}
-                                ),
-                            }
-                        )
+                    from .runtime.worker_snapshot import publish_worker_snapshot
+
+                    # These collectors remain on the model worker. Only the
+                    # completed snapshot's publication holds the admission lock.
+                    publish_worker_snapshot(
+                        self.lock,
+                        self.snapshot,
+                        lambda batch=batch: {
+                            "apcv2": apc.apc_stats,
+                            "cache_capsules": (
+                                dict(capsule_pool.counters)
+                                if capsule_pool is not None
+                                else None
+                            ),
+                            "scheduler": dict(batch.scheduler_stats),
+                            "segmented_self_mtp": segmented_self_mtp_stats(),
+                            "metal_active_bytes": mx.get_active_memory(),
+                            "metal_peak_bytes": mx.get_peak_memory(),
+                            "process_physical_footprint_bytes": physical_footprint_bytes(),
+                            "execution": _execution_diagnostics(adapter),
+                            "admission": dict(admission),
+                            "memory_waiting": sum(
+                                waiting.admission_defer_reason
+                                != "ingress_cohort_deadline"
+                                for waiting in deferred
+                            ),
+                            "headroom_bytes": execution_headroom(),
+                            **self._host_memory_status(),
+                            "spomin_live_surgery": (
+                                spomin_manager.snapshot()
+                                if spomin_manager is not None
+                                else {"enabled": False, "counts": {}}
+                            ),
+                        },
+                    )
                     last_snapshot = now
                     if _loop_trace.enabled():
                         trace_iteration["snapshot1"] = _loop_trace.now()
@@ -12190,15 +12601,7 @@ class ServingEngine:
             if capsule_pool is not None:
                 capsule_pool.close()
             if apc is not None:
-                close_apc = getattr(apc, "close", None)
-                if callable(close_apc):
-                    close_apc(
-                        persist_resident=self.apc_persist_on_shutdown,
-                        time_budget_seconds=self.apc_persist_shutdown_seconds,
-                    )
-                else:
-                    apc.clear()
-                self.apc = None
+                self._close_apc_on_shutdown(apc)
             self._parallel_sample_lane_gib = None
             previous_limit = getattr(self, "_mlx_memory_limit_previous", None)
             if previous_limit is not None:

@@ -112,6 +112,34 @@ def test_nemotron_b4_prompt_checkpoints_replay_exact_cold_tokens():
         apc.clear()
 
 
+def test_materialize_merged_cache_candidate_only_evaluates_nonempty_history(
+    monkeypatch,
+):
+    from mlx2.runtime import generate
+
+    class Plane:
+        def __init__(self, empty):
+            self._empty = empty
+            self.state = mx.array([1])
+
+        def empty(self):
+            return self._empty
+
+        @classmethod
+        def merge(cls, planes):
+            return cls(all(plane.empty() for plane in planes))
+
+    calls = []
+    real_eval = generate.mx.eval
+    monkeypatch.setattr(generate.mx, "eval", lambda value: calls.append(value))
+    monkeypatch.setenv("MLX2_MATERIALIZE_MERGED_CACHE", "1")
+    generate._merge_caches([[Plane(True)], [Plane(True)]])
+    assert calls == []
+    generate._merge_caches([[Plane(False)], [Plane(False)]])
+    assert len(calls) == 1
+    monkeypatch.setattr(generate.mx, "eval", real_eval)
+
+
 def _plain_greedy(model, prompt, count):
     from mlx2.runtime.models.cache import make_prompt_cache
 

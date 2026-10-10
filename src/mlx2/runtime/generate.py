@@ -46,6 +46,7 @@ from .prefill_plan import (
 )
 from .sample_utils import LaneRNG, draw_key
 from .state_boundaries import BoundaryPurpose, StateBoundary
+from .round_phases import drive_round as _drive_round, publish_round
 
 DEFAULT_MAX_TOKENS = 100
 MTP_STARVED_BOUNDARIES_BEFORE_PLAIN = 8
@@ -342,15 +343,6 @@ def maybe_quantize_kv_cache(
                 ) from exc
 
 
-def _drive_round(round_):
-    """Run a scheduler round generator to completion; return its result."""
-    try:
-        while True:
-            next(round_)
-    except StopIteration as stop:
-        return stop.value
-
-
 def _right_pad_prompts(prompts, max_length=None):
     if max_length is None:
         max_length = max((len(p) for p in prompts))
@@ -400,11 +392,27 @@ def _merge_caches(caches):
             raise ValueError(
                 f"{type(caches[0][i])} does not yet support batching with history"
             )
+    if (
+        os.environ.get("MLX2_MATERIALIZE_MERGED_CACHE", "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+        and any(
+            not bool(getattr(plane, "empty", lambda: False)())
+            for row in caches
+            for plane in row
+        )
+    ):
+        # An APCv2 restore is exact state, but merging request-private rows
+        # builds a fresh lazy concatenate/scatter graph.  Materializing the
+        # merged state before its first forward is a default-off diagnostic
+        # candidate for batch-sensitive hybrid/MoE numerics; cold caches stay
+        # on the ordinary path.
+        mx.eval([plane.state for plane in batch_cache])
     # A restored APCv2 row owns a lease on its immutable source until the row
-    # branch closes. Once every layer has been merged, the physical batch is
-    # authoritative and no longer reads those per-row descriptors. Release
-    # them only after the whole merge succeeds so a failed join retains its
-    # inputs for the caller's cleanup path.
+    # branch closes.  Once every layer has been merged, the physical batch is
+    # authoritative and no longer reads those per-row descriptors.  Release
+    # them here instead of leaving long-context sources pinned until Python's
+    # finalizer happens to run.  Do this only after the whole merge succeeds:
+    # a failed join still owns its inputs for the caller's cleanup path.
     seen = set()
     for source in caches:
         ident = id(source)
@@ -416,9 +424,9 @@ def _merge_caches(caches):
             callable(close)
             and hasattr(source, "cow_owner")
             and hasattr(source, "cow_generation")
-            # Frozen APC sources expose the lineage fields too, but close()
-            # invalidates the owner. Only mutable lease-bearing branches
-            # publish the idempotent ``closed`` lifetime contract.
+            # Frozen APC sources expose the two lineage fields too, but their
+            # close() invalidates the owner. Only mutable lease-bearing
+            # branches publish the idempotent ``closed`` lifetime contract.
             and hasattr(source, "closed")
         ):
             close()
@@ -998,7 +1006,7 @@ class GenerationBatch:
         # the same async graph as the step that sampled them.
         self._next_finite = None
         self._current_finite = None
-        # Each pending sample belongs to the forward that produced it. Keep
+        # Each pending sample belongs to the forward that produced it.  Keep
         # that width with the sample: a later ragged join/filter may change
         # the live batch before the output is consumed.
         self._next_execution_widths = [len(self.uids)] * len(self.uids)
@@ -1361,7 +1369,18 @@ class GenerationBatch:
         receipt["observed_compute_widths"] = sorted(observed)
 
     def _settle_budget_terminal_outputs(self):
-        """Retire pending final outputs without launching a discard forward."""
+        """Retire pending final outputs without launching a discard forward.
+
+        Ordinary decode carries exactly one sampled output ahead of the host.
+        When that pending output fills ``max_tokens``, its producing forward
+        already owns the authoritative cache prefix.  Feeding the output into
+        another forward only to discover the known length stop wastes work
+        and advances cache state past the checkpoint the response needs.
+
+        Return terminal responses and filter those rows before the survivors'
+        next forward.  Stop-token termination remains post-forward because it
+        is not known from the output budget alone.
+        """
         terminal = [
             index
             for index, maximum in enumerate(self.max_tokens)
@@ -1406,24 +1425,26 @@ class GenerationBatch:
             receipt = self.route_receipts[index]
             width = self._next_execution_widths[index]
             self._record_execution_width(receipt, width)
-            responses.append(
-                self.Response(
-                    uid=self.uids[index],
-                    token=token,
-                    logprobs=logprobs_by_index[index],
-                    finish_reason="stop" if matched else "length",
-                    prompt_cache=self.extract_cache(index),
-                    all_tokens=list(self.tokens[index]),
-                    lane_rng=self.lane_rngs[index],
-                    rng_draws=(
-                        self.lane_rngs[index].draws
-                        if self.lane_rngs[index] is not None
-                        else 0
-                    ),
-                    mtp_receipt=receipt,
-                    execution_width=width,
-                )
+            response = self.Response(
+                uid=self.uids[index],
+                token=token,
+                logprobs=logprobs_by_index[index],
+                finish_reason="stop" if matched else "length",
+                # The producing forward consumed the previous token.  Cache
+                # coverage therefore ends immediately before this response
+                # token, matching native/external speculative checkpoints.
+                prompt_cache=self.extract_cache(index),
+                all_tokens=list(self.tokens[index]),
+                lane_rng=self.lane_rngs[index],
+                rng_draws=(
+                    self.lane_rngs[index].draws
+                    if self.lane_rngs[index] is not None
+                    else 0
+                ),
+                mtp_receipt=receipt,
+                execution_width=width,
             )
+            responses.append(response)
 
         terminal_set = set(terminal)
         self.filter(
@@ -1738,6 +1759,7 @@ class MTPGenerationBatch:
         park_memory: Optional[Any] = None,
         scheduler_stats: Optional[Dict[str, Any]] = None,
         acceptance_logger: Optional[Any] = None,
+        draft_loop: Optional[Any] = None,
         mtp_admission: Optional[
             Callable[
                 [Sequence[Tuple[int, int, int, bool, float]]],
@@ -1805,6 +1827,7 @@ class MTPGenerationBatch:
         self.park_memory = park_memory
         self._last_round_proposal = False
         self.acceptance_logger = acceptance_logger
+        self.draft_loop = draft_loop
         self.scheduler_stats = scheduler_stats if scheduler_stats is not None else {}
         self._ordinary_handoff_latched = False
         self._adaptive_admitted_cap = min(
@@ -1842,6 +1865,35 @@ class MTPGenerationBatch:
         elif arm_async_qsa_promotion:
             self._arm_async_qsa_promotion()
 
+
+    def _async_qsa_reserve_tail(self) -> int:
+        """Rows the first commit after promotion may advance: each lane's
+        widest draft at this cohort width plus its pending target row.  A
+        draft loop widens lanes past ``num_draft`` (within its
+        ``max_width``) and a copy round commits its copied span; sizing the
+        tail from ``num_draft`` alone made every extended first commit
+        overrun the reservation and decline the promotion."""
+        loop = getattr(self, "draft_loop", None)
+        lanes = self.state.lanes
+        if loop is not None and loop.max_width is not None and len(lanes) > loop.max_width:
+            loop = None
+        depths = [
+            loop.limit(lane.num_draft) if loop is not None else int(lane.num_draft)
+            for lane in lanes
+        ]
+        widest = max(depths)
+        # A copy round commits the copied span in place of the head drafts.
+        for lane in lanes:
+            state = getattr(lane, "copy_draft", None)
+            if state is not None:
+                from .copy_draft import cohort_copy_cap
+
+                widest = max(
+                    widest,
+                    cohort_copy_cap(state.policy, lanes=len(lanes), head_depths=depths),
+                )
+        return widest + 1
+
     def _arm_async_qsa_promotion(self) -> None:
         """Queue immutable QSA-base formation once, before the first cycle."""
         if (
@@ -1873,7 +1925,7 @@ class MTPGenerationBatch:
         from .segmented_self_mtp import note_segmented_self_mtp
 
         note_segmented_self_mtp("async_qsa_promotion_requests")
-        reserve_tail = max((int(lane.num_draft) + 1 for lane in self.state.lanes))
+        reserve_tail = self._async_qsa_reserve_tail()
         try:
             self._async_qsa_ticket = begin_segmented_physical_promotion(
                 self.state,
@@ -2610,7 +2662,7 @@ class MTPGenerationBatch:
             if (
                 current_adaptive is None
                 or incoming_adaptive is None
-                # A greedy cohort gets a fresh fixed-depth controller. Its
+                # A greedy cohort gets a fresh fixed-depth controller.  Its
                 # verification width must not inherit timing/history from a
                 # completed request in this long-lived batch object.
                 or incoming_adaptive.reproducible_greedy
@@ -2657,12 +2709,15 @@ class MTPGenerationBatch:
             and batch.adaptive_depth_policy is not None
             and batch.adaptive_depth_policy.reproducible_greedy
         ):
-            # Depth is cohort-wide. If a greedy lane joins a live sampled
-            # cohort, pin the whole physical cohort rather than let sampled
-            # timing or acceptance alter the greedy lane's geometry.
+            # Depth is cohort-wide.  If a greedy lane joins a live sampled
+            # cohort, pin the whole physical cohort rather than let the
+            # sampled lanes' timing or acceptance alter the greedy lane's
+            # verification geometry.
             self.adaptive_depth_policy.reproducible_greedy = True
         if getattr(self, "acceptance_logger", None) is None:
             self.acceptance_logger = getattr(batch, "acceptance_logger", None)
+        if getattr(self, "draft_loop", None) is None:
+            self.draft_loop = getattr(batch, "draft_loop", None)
         if self.segmented_live_tip and was_empty:
             # Output-budget policy belongs to the incoming cohort. A completed
             # short response must not permanently disable future promotion.
@@ -2842,6 +2897,18 @@ class MTPGenerationBatch:
                     if getattr(lane, "copy_draft", None) is not None
                     else {}
                 ),
+                **(
+                    {
+                        "draft_loop": {
+                            **self.draft_loop.receipt(),
+                            "decisions": int(lane.draft_loop_decisions),
+                            "extensions": int(lane.draft_loop_extensions),
+                            "observed_used": lane.draft_loop_decisions > 0,
+                        }
+                    }
+                    if getattr(self, "draft_loop", None) is not None
+                    else {}
+                ),
                 "fly_disabled": bool(
                     lane.fly_verification is not None
                     and lane.fly_verification.enabled
@@ -2971,13 +3038,27 @@ class MTPGenerationBatch:
             probe = policy_probe()
         elif getattr(self, "acceptance_logger", None) is not None:
             probe = self.acceptance_logger.probe
+        loop = getattr(self, "draft_loop", None)
+        if loop is not None:
+            # A probed topology holds only at the widths it was measured at;
+            # by_width names one per width, max_width caps a single one.
+            loop = loop.for_width(len(self.state.lanes))
+        if probe is not None:
+            # A probe drafts its own lookahead; the two depth rules do not mix.
+            loop = None
         for lane in self.state.lanes:
             lane.confidence_probe = probe
+            if loop is not None or getattr(lane, "draft_loop", None) is not None:
+                lane.draft_loop = loop
 
-    def _observe_draft_confidence(self, proposal) -> None:
+    def _observe_draft_confidence(
+        self, proposal, delivered=None, positions=None, requests=None
+    ) -> None:
         from .mtp_confidence import rows_from_proposal
 
-        rows = rows_from_proposal(proposal, proposal._old_curs)
+        rows = rows_from_proposal(
+            proposal, proposal._old_curs, delivered, positions, requests
+        )
         if not rows:
             return
         _bump_bounded_counter(self.scheduler_stats, "mtp_confidence_feature_cycles")
@@ -3076,6 +3157,10 @@ class MTPGenerationBatch:
             terminal = []
             responses = []
             last = {}
+            # Per lane: tokens delivered this cycle and the request's token
+            # count before them, for the acceptance log's offline labels.
+            delivered = []
+            positions = []
             all_valid = _outputs_all_valid(
                 output for outputs in proposal.outputs for output in outputs
             )
@@ -3088,6 +3173,7 @@ class MTPGenerationBatch:
                         )
                 emitted = 0
                 is_terminal = False
+                positions.append(int(self._num_tokens[i]))
                 for output in outputs:
                     emitted += 1
                     self._num_tokens[i] += 1
@@ -3113,6 +3199,7 @@ class MTPGenerationBatch:
                         is_terminal = True
                         break
                 emitted_counts.append(emitted)
+                delivered.append(tuple(int(o.token) for o in outputs[:emitted]))
                 terminal.append(is_terminal)
             if not proposal.zero_fast_path:
                 commit_batched_self_mtp(
@@ -3152,7 +3239,12 @@ class MTPGenerationBatch:
                     **cost,
                 )
             if proposal.draft_features:
-                self._observe_draft_confidence(proposal)
+                self._observe_draft_confidence(
+                    proposal,
+                    delivered,
+                    positions,
+                    [int(self.uids[i]) for i in range(len(proposal.outputs))],
+                )
             if true_batched_segmented:
                 self._segmented_compute_width_locked = True
             ticket = self._async_qsa_ticket
@@ -3386,6 +3478,11 @@ class BatchGenerator:
                     )
                 )
             )
+        from .draft_loop import DraftLoopPolicy
+
+        self.mtp_draft_loop = DraftLoopPolicy.from_value(
+            (self.self_mtp or {}).get("draft_loop")
+        )
         from .speculative_sampling import FLyVerificationPolicy
 
         self.fly_verification = FLyVerificationPolicy.from_value(fly_verification)
@@ -5010,6 +5107,7 @@ class BatchGenerator:
                 park_memory=getattr(self, "mtp_park_memory", None),
                 scheduler_stats=self.scheduler_stats,
                 acceptance_logger=getattr(self, "mtp_acceptance_logger", None),
+                draft_loop=getattr(self, "mtp_draft_loop", None),
             ),
             progress,
         )
@@ -7958,71 +8056,7 @@ class BatchGenerator:
             self.scheduler_stats[f"decode_first_{key}"] = int(value)
 
     def _next_decode_first(self, mode: str):
-        """Return a round's decode responses before its prefill phase runs.
-
-        A call first finishes the previous round's pending prefill phase,
-        then runs the next round's decode phase and returns.  The device work
-        and its order are those of ``_next`` (decode k, prefill k, decode
-        k+1, ...); only the host return point moves so the serving loop can
-        deliver decode k's tokens while prefill k runs.  A round with no
-        decode output, a fused mixed round, or a round that ends before its
-        phase boundary (a deferred prefill or no admission) runs whole.
-        """
-        policy = self.decode_first
-        prompts, generations = [], []
-        resumed = self._decode_first_pending is not None
-        if resumed:
-            (pending, published) = self._decode_first_pending
-            self._decode_first_pending = None
-            (rest_prompts, rest_generations) = _drive_round(pending)
-            prompts.extend(rest_prompts)
-            generations.extend(rest_generations[published:])
-            policy.bump("prefill_phases_resumed")
-        if mode == "off":
-            # Kill switch flipped with a phase pending: finish whole rounds.
-            (more_prompts, more_generations) = self._next()
-            prompts.extend(more_prompts)
-            generations.extend(more_generations)
-            self._sync_decode_first_stats()
-            return (prompts, generations)
-        self._round_fused = False
-        round_ = self._round()
-        try:
-            decoded = next(round_)
-        except StopIteration as stop:
-            (more_prompts, more_generations) = stop.value
-            prompts.extend(more_prompts)
-            generations.extend(more_generations)
-            policy.bump(
-                "fused_rounds" if self._round_fused else "unsplit_rounds"
-            )
-            self._sync_decode_first_stats()
-            return (prompts, generations)
-        if decoded:
-            generations.extend(decoded)
-            # ``decoded`` is the round's own response list: the suspended
-            # frame would keep every published response, and a finished
-            # lane's cache with it, alive until the next call -- which never
-            # comes once the last request is done (Codex port review
-            # 2026-10-02 item 5).  Drop the references in place; the length
-            # and truthiness the prefill phase reads are kept, and the
-            # resumed phase's output is taken from index ``published`` on.
-            decoded[:] = [None] * len(decoded)
-            self._decode_first_pending = (round_, len(decoded))
-            policy.bump("published_rounds")
-            policy.bump("published_tokens", len(decoded))
-        elif prompts or generations:
-            # Nothing decoded, but the resumed phase produced output: keep
-            # one prefill phase per call, as ``_next`` does.
-            self._decode_first_pending = (round_, 0)
-            policy.bump("no_decode_rounds")
-        else:
-            (more_prompts, more_generations) = _drive_round(round_)
-            prompts.extend(more_prompts)
-            generations.extend(more_generations)
-            policy.bump("no_decode_rounds")
-        self._sync_decode_first_stats()
-        return (prompts, generations)
+        return publish_round(self, mode, self._round)
 
     def next(self):
         """

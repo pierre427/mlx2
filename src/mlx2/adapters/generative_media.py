@@ -346,7 +346,7 @@ def _qwen_bound_inputs(root):
 
 
 class QwenImage21Adapter(MediaLoRAControl):
-    """Direct generation/edit adapter using the pinned mlx-vlm Qwen backend."""
+    """Direct generation/edit adapter using a content-bound mlx-vlm Qwen backend."""
 
     def __init__(
         self,
@@ -396,7 +396,11 @@ class QwenImage21Adapter(MediaLoRAControl):
         if self._backend_factory is not None:
             candidate = self._backend_factory(self.artifact.path, edit=edit)
         else:
-            _verify_qwen_backend_revision()
+            from .vlm_runtime import bind_backend, verify_contract
+
+            backend = bind_backend("qwen_image")
+            self.mlx_vlm_runtime = backend.identity
+            self.mlx_vlm_build = backend.provenance
             from mlx_vlm.models.qwen_image.model import (
                 QwenImageEditModel,
                 QwenImageGenerationModel,
@@ -404,6 +408,7 @@ class QwenImage21Adapter(MediaLoRAControl):
 
             cls = QwenImageEditModel if edit else QwenImageGenerationModel
             candidate = cls.from_model_id(str(self.artifact.path), download=False)
+            verify_contract("qwen_image", backend.package_root)
         self._verify_input_identity()
         return candidate
 

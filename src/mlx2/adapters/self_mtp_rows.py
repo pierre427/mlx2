@@ -150,9 +150,51 @@ def constrain_self_mtp_proposers(
     )
 
 
+def constrain_self_mtp_draft_loop(
+    capabilities: ExactSelfMTPRows | None,
+    receipt: dict | None,
+    config: Any,
+) -> dict | None:
+    """Hold a self-MTP draft loop inside the declared exact row window.
+
+    ``constrain_self_mtp_proposers`` sizes ``num_draft`` and the copy span;
+    a ``draft_loop`` in the execution policy lets a lane draft past
+    ``num_draft`` to the loop's ceiling, and the verify forward then carries
+    ceiling + 1 rows.  Fails closed when that exceeds the window (the tensor
+    path and state rollback past it are not exact), otherwise returns the
+    receipt extended with the ceiling the route really verifies.
+    """
+    if capabilities is None:
+        return receipt
+    from ..runtime.draft_loop import draft_depth_ceiling
+
+    ceiling = draft_depth_ceiling(config)
+    verify_rows = ceiling + 1
+    if verify_rows > capabilities.effective_max_self_mtp_rows:
+        raise ValueError(
+            f"self-MTP draft_loop {dict((config or {}).get('draft_loop') or {})} "
+            f"lets a lane at num_draft {int((config or {}).get('num_draft') or 0)} "
+            f"draft {ceiling} tokens ({verify_rows} verify rows), past the adapter's "
+            f"exact self-MTP window of {capabilities.effective_max_self_mtp_rows} "
+            "rows; lower the loop's last boundary or declare a wider exact window"
+        )
+    if receipt is None:
+        return None
+    # A copy round verifies the copied span (already clamped to the window
+    # by constrain_self_mtp_proposers) in place of the head drafts, so the
+    # rows the route may verify are the wider of the two.
+    copy_span = int(receipt.get("effective_self_mtp_copy_max_span") or 0)
+    return {
+        **receipt,
+        "effective_self_mtp_draft_ceiling": int(ceiling),
+        "effective_self_mtp_verify_rows": int(max(ceiling, copy_span) + 1),
+    }
+
+
 __all__ = [
     "EXACT_SELF_MTP_ROWS_SCHEMA",
     "ExactSelfMTPRows",
+    "constrain_self_mtp_draft_loop",
     "constrain_self_mtp_proposers",
     "declared_exact_self_mtp_rows",
 ]

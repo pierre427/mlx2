@@ -41,6 +41,7 @@ from .serving import (
 )
 from .power_governor import PowerSignalUnavailable
 from .batch_metrics import http_metric_route
+from .runtime.int8_prefill import cli_value as int8_prefill_cli_value
 # The --cache-bytes default and its post-load clamp live in cache_sizing: pure
 # arithmetic with no MLX import, so the parser stays GPU-free.
 from .cache_sizing import (  # noqa: F401 - re-exported for callers and tests
@@ -78,9 +79,11 @@ from .openai_compat import (
 from .api_resources import (
     BatchManager,
     CapabilityUnavailable,
+    DuplicateKeyError,
     FileStore,
     ResourceNotFound,
     ResponseStore,
+    decode_request_json,
 )
 from .tool_backend import HostedToolError
 from .agent_compat import (
@@ -100,6 +103,7 @@ from .anthropic_compat import (
     MAX_STOP_SEQUENCES as ANTHROPIC_MAX_STOP_SEQUENCES,
     AnthropicStreamTranslator,
     ModelOutputError,
+    anthropic_request_model,
     anthropic_request_to_chat,
     api_error as translated_api_error,
     chat_result_to_anthropic,
@@ -634,6 +638,32 @@ def _canonical_json_order(value):
     return value
 
 
+def _required_first_order(value):
+    """Copy JSON-schema data with required properties ahead of optional ones.
+
+    The constrained-output compiler accepts required properties only ahead
+    of optional ones; strict tools reach it through ``_canonical_json_order``
+    while ``response_format`` compiled the schema as sent and refused a
+    declaration-ordered one (an optional field declared first).  This keeps
+    the declared order within each group, so a schema the compiler already
+    accepts is unchanged and the field order the client chose (reasoning
+    before answer, say) still shapes the output.
+    """
+    if isinstance(value, dict):
+        required = value.get("required")
+        ordered = {}
+        for key, child in value.items():
+            if key == "properties" and isinstance(child, dict) and isinstance(required, list):
+                names = [n for n in child if n in required] + [n for n in child if n not in required]
+                ordered[key] = {name: _required_first_order(child[name]) for name in names}
+            else:
+                ordered[key] = _required_first_order(child)
+        return ordered
+    if isinstance(value, list):
+        return [_required_first_order(item) for item in value]
+    return value
+
+
 def canonical_tool_definition(tool):
     """Copy one function tool with a canonical member order (omlx #4138).
 
@@ -707,6 +737,8 @@ def validate_request(
         "logit_bias",
         "logprobs",
         "top_logprobs",
+        "logprobs_start",
+        "logprobs_end",
         "response_format",
         "grammar",
         "batch_cohort",
@@ -737,6 +769,16 @@ def validate_request(
     unknown = set(body) - supported
     if unknown:
         raise ValueError(f"unsupported request fields: {', '.join(sorted(unknown))}")
+    # Each route owns one input field.  Every adapter decides between the chat
+    # template and the raw prompt by ``"messages" in request``, so the other
+    # route's field must not survive validation: a Completions body carrying
+    # ``messages`` would be rendered through the chat template.
+    other = "prompt" if chat else "messages"
+    if other in body:
+        raise ValueError(
+            f"{other} is not a {'Chat' if chat else 'Completions'} request field;"
+            f" use /v1/{'completions' if chat else 'chat/completions'}"
+        )
     if "user" in body:
         # End-user tag for the provider's abuse monitoring.  Validated and
         # ignored as Responses does: it never changes local execution.
@@ -788,6 +830,12 @@ def validate_request(
                 ):
                     raise ValueError("invalid multimodal content part")
                 for part in content:
+                    if part["type"] == "text" and not isinstance(part.get("text"), str):
+                        # The flattener's contract: a text part is its string.
+                        # Anything else would survive as list content and be
+                        # handled as media (501 on a text route, dropped on
+                        # a VLM route) instead of refused.
+                        raise ValueError("text content parts require a text string")
                     if part["type"] == "input_video":
                         refuse_video_sampling_options(part)
             elif not isinstance(content, str) and not (
@@ -855,7 +903,23 @@ def validate_request(
             raise ValueError("response_format and grammar are mutually exclusive")
         from .structured_output import compile_constraint
 
-        compile_constraint(body.get("response_format"), body.get("grammar"))
+        response_format = body.get("response_format")
+        if (
+            isinstance(response_format, dict)
+            and isinstance(response_format.get("json_schema"), dict)
+            and isinstance(response_format["json_schema"].get("schema"), dict)
+        ):
+            # Compile the member order the engaged grammar is built from: the
+            # body carries the required-first copy, as strict tools do.
+            response_format = {
+                **response_format,
+                "json_schema": {
+                    **response_format["json_schema"],
+                    "schema": _required_first_order(response_format["json_schema"]["schema"]),
+                },
+            }
+            body = {**body, "response_format": response_format}
+        compile_constraint(response_format, body.get("grammar"))
         if body.get("response_format") == {"type": "text"}:
             body = {k: v for k, v in body.items() if k != "response_format"}
         elif chat and body.get("enable_thinking") and not structured_thinking:
@@ -888,6 +952,19 @@ def validate_request(
     top_logprobs = body.get("top_logprobs", 0)
     if isinstance(top_logprobs, bool) or not isinstance(top_logprobs, int) or not 0 <= top_logprobs <= MAX_TOP_LOGPROBS:
         raise ValueError(f"top_logprobs must be an integer from 0 to {MAX_TOP_LOGPROBS}")
+    logprobs_start = body.get("logprobs_start", 1)
+    logprobs_end = body.get("logprobs_end", 2**63 - 1)
+    if (
+        isinstance(logprobs_start, bool)
+        or not isinstance(logprobs_start, int)
+        or logprobs_start < 1
+        or isinstance(logprobs_end, bool)
+        or not isinstance(logprobs_end, int)
+        or logprobs_end < logprobs_start
+    ):
+        raise ValueError("logprobs_start/end must be a positive ordered token window")
+    if ("logprobs_start" in body or "logprobs_end" in body) and not wants_logprobs(body):
+        raise ValueError("logprobs_start/end require logprobs")
     if "tools" in body:
         tools = body["tools"]
         if not chat or not isinstance(tools, list) or not 1 <= len(tools) <= max_tools:
@@ -1342,7 +1419,10 @@ def parse_multipart_form(content_type, raw):
 
 def _request_json(raw):
     try:
-        value = json.loads(raw)
+        # Duplicate keys are refused rather than silently collapsed last-wins
+        # (two ``messages`` or two ``max_tokens`` in one body), as the
+        # decisions server does; batch rows share the decoder.
+        value = decode_request_json(raw)
     except RecursionError as error:
         raise ValueError("request JSON is nested too deeply") from error
     if not isinstance(value, dict):
@@ -1378,7 +1458,9 @@ def embeddings_payload(
         raise ValueError("unsupported embedding fields: " + ", ".join(sorted(unknown)))
     status = engine.status()
     model = status.get("model")
-    if body.get("model", model) != model:
+    # A recognised null is an absent field: the loaded model.  Only the base
+    # model is served here (no LoRA selection), so any other value is unknown.
+    if body.get("model") is not None and body["model"] != model:
         raise ResourceNotFound("unknown model")
     raw_inputs = body.get("input")
     if isinstance(raw_inputs, str):
@@ -1451,7 +1533,9 @@ def rerank_payload(engine, body):
         raise ValueError("unsupported rerank fields: " + ", ".join(sorted(unknown)))
     status = engine.status()
     model = status.get("model")
-    if body.get("model", model) != model:
+    # A recognised null is an absent field: the loaded model.  Only the base
+    # model is served here (no LoRA selection), so any other value is unknown.
+    if body.get("model") is not None and body["model"] != model:
         raise ResourceNotFound("unknown model")
     query, documents = body.get("query"), body.get("documents")
     if not isinstance(query, str) or not query:
@@ -1491,10 +1575,15 @@ def rerank_payload(engine, body):
 
 
 def _generation_model(status, body):
-    """Resolve the base or an advertised concurrent LoRA generation model."""
+    """Resolve the base or an advertised concurrent LoRA generation model.
+
+    A recognised null is an absent field (``drop_null_fields``), so a raw
+    ``"model": null`` selects the loaded model exactly as the validated Chat
+    body does; callers that resolve before validation (Messages) agree.
+    """
     base = status.get("model")
-    selected = body.get("model", base)
-    if selected == base:
+    selected = body.get("model")
+    if selected is None or selected == base:
         return base
     registered = (status.get("multi_lora") or {}).get("registered") or ()
     if isinstance(selected, str) and selected in registered:
@@ -1513,11 +1602,12 @@ def prompt_render_payload(engine, body, path):
     if not isinstance(body, dict):
         raise ValueError("request must be a JSON object")
     status = engine.status()
-    _generation_model(status, body)
     with wrongly_typed_request_is_invalid():
         request = validate_request(
             body,
-            "messages" in body,
+            # A null ``messages`` is an absent one (``drop_null_fields``): the
+            # body is the Completions request it would generate as.
+            body.get("messages") is not None,
             structured_thinking=bool(
                 (status.get("structured_output") or {}).get("thinking_deferral")
             ),
@@ -1526,6 +1616,9 @@ def prompt_render_payload(engine, body, path):
                 (status.get("settings") or {}).get("constrained_tool_grammar")
             ),
         )
+    # After validation, as the generation routes do: an invalid body is a 400
+    # before an unknown model is a 404.
+    _generation_model(status, request)
     if any(
         isinstance(message.get("content"), list)
         for message in request.get("messages", ())
@@ -1717,6 +1810,12 @@ def collect_nonstream_job(job, body, *, chat, responses=False):
             body,
             message.get("tool_calls", []),
             finish_reason=event["finish_reason"],
+            stop_truncated_tool_call=(event.get("receipt") or {}).get(
+                "stop_truncated_tool_call"
+            ),
+            truncated_tool_call=(event.get("receipt") or {}).get(
+                "truncated_tool_call"
+            ),
         )
         choice.update({"message": message} if chat else {"text": "".join(parts)})
         return choice, {
@@ -3316,6 +3415,7 @@ def handler_for(
                     return
                 if anthropic:
                     anthropic_request = body
+                    anthropic_request_model(body, agent_compat=agent_compat)
                     status = engine.status()
                     model = _generation_model(status, body)
                     translation_metadata = {}
@@ -4061,6 +4161,12 @@ def handler_for(
                                 body,
                                 message.get("tool_calls", []),
                                 finish_reason=event["finish_reason"],
+                                stop_truncated_tool_call=(event.get("receipt") or {}).get(
+                                    "stop_truncated_tool_call"
+                                ),
+                                truncated_tool_call=(event.get("receipt") or {}).get(
+                                    "truncated_tool_call"
+                                ),
                             )
                             if not streaming:
                                 open_stream()
@@ -4135,6 +4241,12 @@ def handler_for(
                                     body,
                                     message.get("tool_calls", []),
                                     finish_reason=event["finish_reason"],
+                                    stop_truncated_tool_call=(event.get("receipt") or {}).get(
+                                        "stop_truncated_tool_call"
+                                    ),
+                                    truncated_tool_call=(event.get("receipt") or {}).get(
+                                        "truncated_tool_call"
+                                    ),
                                 )
                                 for final in anthropic_translator.finish(
                                     event["finish_reason"], usage, receipt
@@ -4156,6 +4268,12 @@ def handler_for(
                                     body,
                                     message.get("tool_calls", []),
                                     finish_reason=event["finish_reason"],
+                                    stop_truncated_tool_call=(event.get("receipt") or {}).get(
+                                        "stop_truncated_tool_call"
+                                    ),
+                                    truncated_tool_call=(event.get("receipt") or {}).get(
+                                        "truncated_tool_call"
+                                    ),
                                 )
                                 choice["message"] = message
                                 if wants_logprobs(body):
@@ -4406,9 +4524,24 @@ def handler_for(
                                     }
                                 )
                             else:
-                                if grammar_tool_stream:
+                                stop_cut = (event.get("receipt") or {}).get(
+                                    "stop_truncated_tool_call"
+                                )
+                                tool_cut = (event.get("receipt") or {}).get(
+                                    "truncated_tool_call"
+                                )
+                                if (
+                                    grammar_tool_stream or stop_cut is not None
+                                    or tool_cut is not None
+                                ):
                                     # Terminal contract before the final chunk;
                                     # a violation becomes an SSE error event.
+                                    # An unbuffered (auto) stream owes no call,
+                                    # but a stop-cut record is still judged:
+                                    # a cut call to an undeclared function, or
+                                    # one whose name the grammar could not
+                                    # read, fails here as the completed call
+                                    # would have.
                                     enforce_tool_contract(
                                         body,
                                         [
@@ -4416,6 +4549,8 @@ def handler_for(
                                             for c in calls
                                         ],
                                         finish_reason=event["finish_reason"],
+                                        stop_truncated_tool_call=stop_cut,
+                                        truncated_tool_call=tool_cut,
                                     )
                                 choice.update(
                                     {"delta": self._chat_delta({})}
@@ -4459,6 +4594,12 @@ def handler_for(
                                 body,
                                 message.get("tool_calls", []),
                                 finish_reason=event["finish_reason"],
+                                stop_truncated_tool_call=(event.get("receipt") or {}).get(
+                                    "stop_truncated_tool_call"
+                                ),
+                                truncated_tool_call=(event.get("receipt") or {}).get(
+                                    "truncated_tool_call"
+                                ),
                             )
                             choice.update(
                                 {"message": message}
@@ -5476,6 +5617,39 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--draft-loop",
+        choices=("auto", "off"),
+        default="auto",
+        help=(
+            "confidence-gated self-MTP draft looping when the lane matmul covers "
+            "the model. auto: at load, probe this host's verify-row cost "
+            "staircase and real self-MTP cycles (cached per device, MLX build, "
+            "model and lane law), then extend drafts to the tile edge that "
+            "predicts a gain, gated at a summed draft log-probability of -0.4; "
+            "no loop when nothing predicts a gain. off: fixed depth"
+        ),
+    )
+    parser.add_argument(
+        "--draft-loop-widths",
+        default=None,
+        help=(
+            "comma-separated cohort widths the --draft-loop auto probe considers "
+            "(default 1,2; capped by --max-lanes). Widths not listed, or not "
+            "selected by the probe, keep fixed depth"
+        ),
+    )
+    parser.add_argument(
+        "--draft-loop-threshold",
+        type=float,
+        default=None,
+        help=(
+            "gate for --draft-loop auto: a lane drafts its next stage while the "
+            "summed draft log-probability of the stage it just drafted is at "
+            "least this value (default -0.4; -0.3 extends less often, -0.5 "
+            "more). Must lie within the measured prior, -2.0 to -0.05"
+        ),
+    )
+    parser.add_argument(
         "--lane-policy",
         default=None,
         help=(
@@ -5495,13 +5669,31 @@ def build_parser():
     )
     parser.add_argument(
         "--int8-prefill",
-        choices=("off", "mlp", "all"),
-        default="off",
+        choices=("off", "auto", "mlp", "all"),
+        default="auto",
         help=(
             "W8A8 int8 NAX prefill on M5-class GPUs for prefill-sized calls "
             "(rows >= 512): 'mlp' = dense/shared-expert MLPs, 'all' adds "
             "attention projections.  Approximate fidelity; the adapter must "
-            "declare the scope; separate APCv2 namespace (default: off)"
+            "declare the scope; separate APCv2 namespace.  'auto' (default) "
+            "runs the in-place Q8 kernel with per-64-group activation scales "
+            "on the 8-bit gs64 projections of a declaring adapter on an M5 "
+            "GPU, only in qualification mode or under a qualification record "
+            "that includes it; otherwise it resolves off (the reason is in "
+            "/v1/status int8_prefill.auto)"
+        ),
+    )
+    parser.add_argument(
+        "--int8-prefill-q8",
+        choices=("off", "per_row", "group64"),
+        default="off",
+        help=(
+            "with --int8-prefill mlp|all: run 8-bit gs64 affine projections "
+            "through the in-place Q8 W8A8 kernel (packed weights read in "
+            "place, no int8 weight copy; omlx #4350 port) with per-row or "
+            "per-64-group activation scales.  Other projections keep the "
+            "requantization path.  Its own numerics revision and APCv2 "
+            "namespace (default: off)"
         ),
     )
     parser.add_argument(
@@ -5816,6 +6008,9 @@ def serving_engine_kwargs(
         "thinking_auto_calibration": not args.no_thinking_auto_calibration,
         "lane_matmul": args.lane_matmul,
         "lane_policy": args.lane_policy,
+        "draft_loop": args.draft_loop,
+        "draft_loop_threshold": args.draft_loop_threshold,
+        "draft_loop_widths": args.draft_loop_widths,
         "cache_capsules": {
             "enabled": args.cache_capsules,
             "backend": args.cache_capsule_backend,
@@ -5846,7 +6041,9 @@ def serving_engine_kwargs(
         ),
         "apc_quarantine_max_entries": args.apc_quarantine_max_entries,
         "apc_quarantine_max_bytes": args.apc_quarantine_max_bytes,
-        "int8_prefill": args.int8_prefill,
+        "int8_prefill": int8_prefill_cli_value(
+            args.int8_prefill, getattr(args, "int8_prefill_q8", "off")
+        ),
         "verify_bitexact": bool(getattr(args, "verify_bitexact", False)),
         "recurrent_state_codec": getattr(args, "recurrent_state_codec", "off"),
         "gpu_keep_warm": (
@@ -5887,9 +6084,9 @@ class SignalShutdownController:
 
     A supervisor that signals the whole process group can deliver SIGINT and
     SIGTERM together (sglang #35202).  That is one request to stop, so a
-    signal of a different kind within ``coalesce_seconds`` of the first is
-    ignored; a repeat of the same kind, or any signal after the window,
-    escalates to immediate shutdown.
+    signal of a kind not seen before within ``coalesce_seconds`` of the first
+    is ignored; a repeat of any kind already seen, or any signal after the
+    window, escalates to immediate shutdown.
     """
 
     def __init__(self, server, engine, drain_seconds=None, *,
@@ -5900,20 +6097,25 @@ class SignalShutdownController:
         self.coalesce_seconds = coalesce_seconds
         self._clock = clock
         self._first = None  # (signum, monotonic time) of the first signal
+        # Every kind delivered so far: a repeat of any of them is the operator
+        # insisting, whichever kind came first (a SIGTERM then two SIGINTs).
+        self._seen = set()
 
     def __call__(self, signum=None, _frame=None):
         now = self._clock()
         if self._first is None:
             self._first = (signum, now)
+            self._seen.add(signum)
             target = self._graceful if self.drain_seconds is not None else self.server.shutdown
         else:
             first_signum, first_at = self._first
             if (
                 signum is not None
                 and first_signum is not None
-                and signum != first_signum
+                and signum not in self._seen
                 and now - first_at < self.coalesce_seconds
             ):
+                self._seen.add(signum)
                 logging.getLogger("mlx2.server").info(
                     "signal %s arrived %.3fs after signal %s; treating both as "
                     "one shutdown request", signum, now - first_at, first_signum,
@@ -5959,6 +6161,7 @@ def main():
         max_request_bytes = request_body_limit(
             args.max_context, args.max_request_bytes
         )
+        int8_prefill_cli_value(args.int8_prefill, args.int8_prefill_q8)
     except ValueError as error:
         parser.error(str(error))
     if not math.isfinite(args.sse_keepalive_seconds) or not (
@@ -6025,11 +6228,24 @@ def main():
             PowerGovernorPolicy.from_value(power_governor_policy_value(args))
         except ValueError as error:
             parser.error(str(error))
-    policy = json.loads(args.execution_policy.read_text()) if args.execution_policy else None
+    policy = None
+    if args.execution_policy:
+        try:
+            policy = json.loads(args.execution_policy.read_text())
+        except (OSError, ValueError) as error:
+            parser.error(f"cannot read --execution-policy: {error}")
+        if not isinstance(policy, dict):
+            parser.error("--execution-policy must be a JSON object")
     try:
         from .adapters.registry import inspect_model
 
-        adapter_resolution = inspect_model(args.model)
+        try:
+            adapter_resolution = inspect_model(args.model)
+        except (OSError, TypeError, ValueError) as error:
+            # A missing directory or an unreadable, non-object or unsupported
+            # config.json is an operator mistake, not a fault: report it like
+            # any other flag (OSError and TypeError used to be tracebacks).
+            parser.error(f"cannot inspect --model {args.model}: {error}")
         route_selection = resolve_route_selection(args, policy, adapter_resolution)
         native_mtp = route_selection.native_mtp
         skipped_route_defaults = {}
@@ -6119,6 +6335,36 @@ def main():
         logging.getLogger("mlx2.server").info(
             "reasoning signing key persisted at %s", signing_key_path
         )
+    engine_kwargs = serving_engine_kwargs(
+        args,
+        policy,
+        native_mtp=native_mtp,
+        route_selection_source=route_selection.source,
+        approximate_kv=approximate_kv,
+        max_request_bytes=max_request_bytes,
+    )
+    # Out-of-range engine limits are usage errors; check them before the port
+    # is taken and before any weight is read, so they end in one line.  The
+    # validate-only prefix reports a wrongly shaped value as TypeError.
+    try:
+        ServingEngine.validate_arguments(args.model, **engine_kwargs)
+    except (ValueError, TypeError, OSError) as error:
+        parser.error(str(error))
+    # The same for the operator's JSON files: read them before the bind.
+    tool_backend = None
+    if args.tool_backend_config is not None:
+        from .tool_backend import ConfiguredToolBackend
+
+        try:
+            tool_backend = ConfiguredToolBackend(args.tool_backend_config)
+        except (OSError, ValueError) as error:
+            parser.error(f"cannot use --tool-backend-config: {error}")
+    agent_compat_tenants = None
+    if args.agent_compat_tenants:
+        try:
+            agent_compat_tenants = load_tenant_policy(args.agent_compat_tenants)
+        except (OSError, ValueError) as error:
+            parser.error(f"cannot use --agent-compat-tenants: {error}")
     server = BoundedHTTPServer(
         (args.host, args.port),
         BaseHTTPRequestHandler,
@@ -6131,37 +6377,38 @@ def main():
         from .tracing import OptionalRequestTracer
 
         request_tracer = OptionalRequestTracer(args.otlp_traces_endpoint)
-        engine = ServingEngine(
-            args.model,
-            **serving_engine_kwargs(
-                args,
-                policy,
-                native_mtp=native_mtp,
-                route_selection_source=route_selection.source,
-                approximate_kv=approximate_kv,
-                max_request_bytes=max_request_bytes,
-            ),
-        )
+        engine = ServingEngine(args.model, **engine_kwargs)
     except BaseException:
         if request_tracer is not None:
             request_tracer.close()
         server.server_close()
         raise
+
+    tensorfold_owned_router = None
+
+    def abort(message):
+        # Everything from here on runs with the engine and the socket open
+        # (and the TensorFold-owned router once it starts): a usage error
+        # must release all of them before it is reported, whichever close
+        # raises.
+        try:
+            if tensorfold_owned_router is not None:
+                tensorfold_owned_router.close()
+        finally:
+            try:
+                engine.close()
+            finally:
+                try:
+                    if request_tracer is not None:
+                        request_tracer.close()
+                finally:
+                    server.server_close()
+        parser.error(message)
+
     if tenant_authenticator is not None and tenant_authenticator.uses_secret(
         getattr(getattr(engine, "reasoning_signer", None), "_secret", None)
     ):
-        engine.close()
-        if request_tracer is not None:
-            request_tracer.close()
-        server.server_close()
-        parser.error(
-            "the tenant token secret must differ from the reasoning signing key"
-        )
-    tool_backend = None
-    if args.tool_backend_config is not None:
-        from .tool_backend import ConfiguredToolBackend
-
-        tool_backend = ConfiguredToolBackend(args.tool_backend_config)
+        abort("the tenant token secret must differ from the reasoning signing key")
     semantic_middleware = None
     if args.semantic_memory:
         from .semantic_sidecar import SemanticServingMiddleware
@@ -6176,21 +6423,20 @@ def main():
 
         try:
             artifact_binding = adapter_resolution.artifact_fingerprint
-        except ValueError as error:
-            engine.close()
-            if request_tracer is not None:
-                request_tracer.close()
-            server.server_close()
-            parser.error(str(error))
-        semantic_middleware = SemanticServingMiddleware.create(
-            root,
-            model_binding=artifact_binding,
-            tokenizer_binding=artifact_binding,
-            runtime_binding=runtime_identity()["source_sha256"],
-            retrieval_limit=args.semantic_retrieval_limit,
-            neural_artifact_root=args.neural_concept_artifact,
-            bridge_mode=args.semantic_bridge,
-        )
+            # The store needs the engine's bridge right after, so it cannot
+            # move before the bind; an unusable root or neural artifact is
+            # still a usage error and must release what is already open.
+            semantic_middleware = SemanticServingMiddleware.create(
+                root,
+                model_binding=artifact_binding,
+                tokenizer_binding=artifact_binding,
+                runtime_binding=runtime_identity()["source_sha256"],
+                retrieval_limit=args.semantic_retrieval_limit,
+                neural_artifact_root=args.neural_concept_artifact,
+                bridge_mode=args.semantic_bridge,
+            )
+        except (OSError, ValueError) as error:
+            abort(f"cannot start semantic memory: {error}")
         if semantic_middleware.neural_memory is not None:
             try:
                 engine.configure_neural_concept_bridge(
@@ -6203,12 +6449,7 @@ def main():
                     semantic_middleware.neural_memory.artifact
                 )
             except (RuntimeError, TimeoutError, ValueError) as error:
-                engine.close()
-                if request_tracer is not None:
-                    request_tracer.close()
-                server.server_close()
-                parser.error(str(error))
-    tensorfold_owned_router = None
+                abort(str(error))
     if args.tensorfold_owned_live:
         from .adapters.qwen38_tensorfold_owned import TensorfoldOwnedB1Profile
         from .runtime.tensorfold_owned_router import TensorfoldOwnedLiveRouter
@@ -6221,31 +6462,29 @@ def main():
                 ), max_streams=min(args.max_lanes, 8), max_context=args.max_context,
             )
         except (OSError, RuntimeError, ValueError) as error:
-            engine.close()
-            if request_tracer is not None:
-                request_tracer.close()
-            server.server_close()
-            parser.error(str(error))
-    server.RequestHandlerClass = handler_for(
-        engine,
-        max_request_bytes=max_request_bytes,
-        request_tracer=request_tracer,
-        api_state_dir=args.api_state_dir,
-        tool_backend=tool_backend,
-        admin_token=admin_token,
-        http_security=http_security,
-        tenant_authenticator=tenant_authenticator,
-        agent_compat=AgentCompatPolicy(
-            args.agent_compat,
-            args.custom_tool_grammar,
-            load_tenant_policy(args.agent_compat_tenants)
-            if args.agent_compat_tenants
-            else None,
-        ),
-        semantic_middleware=semantic_middleware,
-        tensorfold_owned_router=tensorfold_owned_router,
-        sse_keepalive_seconds=args.sse_keepalive_seconds or None,
-    )
+            abort(str(error))
+    try:
+        handler = handler_for(
+            engine,
+            max_request_bytes=max_request_bytes,
+            request_tracer=request_tracer,
+            api_state_dir=args.api_state_dir,
+            tool_backend=tool_backend,
+            admin_token=admin_token,
+            http_security=http_security,
+            tenant_authenticator=tenant_authenticator,
+            agent_compat=AgentCompatPolicy(
+                args.agent_compat, args.custom_tool_grammar, agent_compat_tenants
+            ),
+            semantic_middleware=semantic_middleware,
+            tensorfold_owned_router=tensorfold_owned_router,
+            sse_keepalive_seconds=args.sse_keepalive_seconds or None,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        # The handler opens the tenant file store and resolves the semantic
+        # classifier tokens: the last configuration that can refuse.
+        abort(str(error))
+    server.RequestHandlerClass = handler
 
     stop = SignalShutdownController(server, engine, args.drain_on_sigterm)
     exit_trace.install_shutdown_signals(stop)

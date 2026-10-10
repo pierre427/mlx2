@@ -400,6 +400,9 @@ def default_external_policy(policy: dict) -> dict:
 
 
 class Qwen3635BA3BAdapter(Qwen3827BAdapter):
+    # int8 prefill is declared for the dense Qwen3.8 layout only; the MoE
+    # family (and its 122B subclass) has no evidence with it.
+    int8_prefill_supported = None
     EXTERNAL_PROFILE = "qwen36-35b-a3b-apcv2-dflash2"
     EXTERNAL_ROUTE_TAG = "qwen36-dflash2-v1"
     # Native MTP, restored 2026-09-20 once the wide-cohort ordinary handoff

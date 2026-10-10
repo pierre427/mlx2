@@ -175,6 +175,33 @@ class _Gemma4Adapter(_MLXVLMAdapter):
         """Adapter-preferred prefill chunk; an explicit engine setting wins."""
         return int(type(self).default_prefill_step)
 
+    @staticmethod
+    def int8_prefill_select(scope):
+        """Text decoder projections only (``language_model.model.layers.*``).
+
+        The default path classifier would also take the quantized multimodal
+        projector ``embed_vision.embedding_projection`` under ``all``.  The
+        vision tower, the tied embedding head, the Gemma 3n-style per-layer
+        input projections (absent on the 31B, ``hidden_size_per_layer_input``
+        is 0) and the 26B router / experts stay stock.  Only declared on the
+        dense 31B (``Gemma431BAdapter.int8_prefill_supported``)."""
+        from ..runtime.int8_prefill import EXCLUDED_SEGMENTS
+
+        def select(path, module):
+            segments = path.split(".")
+            if segments[:3] != ["language_model", "model", "layers"]:
+                return False
+            if any(
+                seg in EXCLUDED_SEGMENTS or seg.startswith("per_layer")
+                for seg in segments
+            ):
+                return False
+            if scope == "all":
+                return "self_attn" in segments or "mlp" in segments
+            return "mlp" in segments
+
+        return select
+
     def exact_prefix_cascade_contract(self):
         """Gemma 4 ownership boundary for continuation-prefix reuse.
 
@@ -437,3 +464,12 @@ class Gemma431BAdapter(_Gemma4Adapter):
         SamplingDefaults(temperature=1.0, top_p=0.95, top_k=64, source=GENERATION_CONFIG),
         model="google/gemma-4-31B",
     )
+
+    @staticmethod
+    def int8_prefill_supported():
+        # Text decoder attention (q/k/v/o; full-attention layers share K and V
+        # and have no v_proj) and dense MLP projections, selected by
+        # ``int8_prefill_select``.  Approximate and qualification-gated like
+        # every int8 prefill route; evidence in
+        # qualification/runs/int8-dense8-e2e-20261009/gemma-4-31B-MLX-8bit.
+        return ("mlp", "all")

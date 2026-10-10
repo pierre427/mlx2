@@ -4,7 +4,12 @@ import json
 import re
 import uuid
 
-from ..output import StopSequenceMatcher, _safe_prefix, within_parallel_bound
+from ..output import (
+    StopSequenceMatcher,
+    _safe_prefix,
+    truncated_tool_record,
+    within_parallel_bound,
+)
 from ..runtime.tool_parsers._schema import (
     executable_schema,
     raw_string_pattern,
@@ -21,6 +26,15 @@ _INVOKE = re.compile(r'<atem:invoke name="([\w.-]+)">')
 _INVOKE_CLOSE = "</atem:invoke>"
 _PARAMETER = re.compile(r'<atem:parameter name="([\w.-]+)">')
 _PARAMETER_CLOSE = "</atem:parameter>"
+# What a raw ATEM value cannot contain: ``parse_atem`` ends it at the first
+# parameter closer and rejects an invoke closer inside it, and the output
+# parser ends the whole block at the first tool closer outside JSON strings
+# (a raw value cannot quote one).  Any other text, ``<`` included (code,
+# markup, shell redirects), is the value's own.
+_RAW_CLOSERS = (_PARAMETER_CLOSE, _INVOKE_CLOSE, _TOOL_CLOSE)
+# The raw-value language, defined once per grammar (``_RAW_TEXT_DEFINITION``)
+# and referenced per parameter: spelled out it is about a kilobyte.
+_RAW_TEXT = "(?&atem_text)"
 _JSON_STRING = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
 
 
@@ -106,7 +120,7 @@ def parse_atem(text: str, tools: list[dict]) -> list[dict]:
                 parameter_schema = {}
             expected = parameter_schema.get("type")
             if function.get("strict", False):
-                decode = raw_string_pattern(parameter_schema) is None
+                decode = raw_string_pattern(parameter_schema, forbidden=_RAW_CLOSERS) is None
             else:
                 # An untyped value is decoded best-effort, so it stays raw
                 # text up to the first closer.
@@ -118,7 +132,7 @@ def parse_atem(text: str, tools: list[dict]) -> list[dict]:
             if value_end < 0:
                 raise ValueError("Unclosed ATEM parameter")
             value = text[parameter.end() : value_end]
-            if not decode and _INVOKE_CLOSE in value:
+            if not decode and (_INVOKE_CLOSE in value or _TOOL_CLOSE in value):
                 raise ValueError("Unclosed ATEM parameter")
             if function.get("strict", False):
                 if decode:
@@ -178,6 +192,110 @@ def parse_atem(text: str, tools: list[dict]) -> list[dict]:
     return calls
 
 
+_INVOKE_NAME_OPEN = '<atem:invoke name="'
+_INVOKE_NAME = re.compile(r"[\w.-]+")
+
+
+def partial_function_names(partial, tools=None):
+    """The functions a cut-short ATEM block had committed to, in order.
+
+    The reader behind the stop-cut record (see
+    :func:`mlx2.output.truncated_tool_record`), by :func:`parse_atem`'s own rule
+    (``_INVOKE``): an invoke names its function between ``name="`` and
+    ``">``, and only ``[\\w.-]+`` is a name.  The name is committed at its
+    closing quote; a cut before it has committed to nothing.  Raises
+    ``ValueError`` for a closed name the rule does not admit (``db:lookup``,
+    an empty name, a quote not followed by ``>``): the parser would find no
+    invoke there and reject the block.
+
+    Past an invoke's name its parameter values are skipped as
+    :func:`parse_atem` reads them (a raw value runs to the first
+    ``</atem:parameter>``, a JSON-typed one to the first closer outside its
+    strings), so an invoke tag quoted inside a value is value text, not a
+    sibling invoke; a cut inside a value ends the walk.
+    """
+    definitions = {
+        tool["function"]["name"]: tool["function"] for tool in tools or ()
+    }
+    names, cursor = [], 0
+    while (start := partial.find(_INVOKE_NAME_OPEN, cursor)) >= 0:
+        body = start + len(_INVOKE_NAME_OPEN)
+        close = partial.find('"', body)
+        if close < 0:
+            break
+        name = partial[body:close]
+        if _INVOKE_NAME.fullmatch(name) is None or partial[close + 1 : close + 2] not in (
+            "",
+            ">",
+        ):
+            raise ValueError("Malformed ATEM invoke name")
+        names.append(name)
+        cursor = close + 1
+        end = _skip_parameter_values(partial, cursor, definitions.get(name))
+        if end < 0:
+            break
+        cursor = end
+    return names
+
+
+def _skip_parameter_values(text, start, function):
+    """Where the parameter walk of the invoke open at ``start`` leaves off.
+
+    Mirrors ``parse_atem``'s value rules for the committed-name reader:
+    each ``<atem:parameter name="…">`` value is skipped to its closer, raw
+    or JSON by the function's schema, so a quoted invoke inside it is never
+    read as a sibling.  Returns -1 when the text ends inside a value; the
+    position of the next invoke closer, invoke opener, or tag the parser
+    would reject otherwise (the caller looks for the next invoke from there).
+    """
+    schema = function.get("parameters", {}) if function else {}
+    strict = bool(function and function.get("strict", False))
+    if strict:
+        try:
+            schema = executable_schema(schema)
+        except ValueError:
+            schema = {}  # the parser fails the block
+    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    if not isinstance(properties, dict):
+        properties = {}
+    end = start
+    while (parameter := _PARAMETER.search(text, end)) is not None:
+        for tag in (_INVOKE_CLOSE, _INVOKE_NAME_OPEN):
+            position = text.find(tag, end)
+            if 0 <= position < parameter.start():
+                return position
+        parameter_schema = properties.get(parameter.group(1), {})
+        if not isinstance(parameter_schema, dict):
+            parameter_schema = {}
+        if strict:
+            try:
+                decode = raw_string_pattern(parameter_schema, forbidden=_RAW_CLOSERS) is None
+            except ValueError:
+                decode = False
+        else:
+            decode = parameter_schema.get("type") not in ("string", None)
+        if decode:
+            try:
+                value_end = _json_value_end(text, parameter.end())
+            except _UnclosedJSONString:
+                return -1  # cut inside a JSON string: value text
+        else:
+            # A raw value cannot contain any closer: the parser rejects an
+            # invoke or tool closer inside it, so the walk stops there.
+            closers = [
+                position
+                for position in (text.find(tag, parameter.end()) for tag in _RAW_CLOSERS)
+                if position >= 0
+            ]
+            value_end = min(closers) if closers else -1
+            if value_end >= 0 and not text.startswith(_PARAMETER_CLOSE, value_end):
+                return value_end
+        if value_end < 0:
+            return -1  # cut inside the value: the rest is value text
+        end = value_end + len(_PARAMETER_CLOSE)
+    return end
+
+
 def _non_strict_value(schema):
     """Value language ``parse_atem`` accepts for a non-strict parameter.
 
@@ -185,7 +303,8 @@ def _non_strict_value(schema):
     text and an untyped one is decoded best-effort, so both stay free text,
     unbounded like Qwen's: a ``{0,4096}`` run costs the exact automaton
     thousands of states per parameter (tens of seconds to compile one call),
-    and the parser has no length bound to agree with. Every other type,
+    and the parser has no length bound to agree with. Raw text excludes
+    only the closers (``_RAW_CLOSERS``), not ``<``. Every other type,
     a list of types included (``["integer", "null"]``), must decode as JSON,
     so the value is the union of the declared alternatives' JSON: free text
     there is admitted by the grammar and then rejected. Numbers are finite
@@ -199,7 +318,7 @@ def _non_strict_value(schema):
 
     expected = schema.get("type") if isinstance(schema, dict) else None
     if expected is None or expected == "string":
-        return "[^<]*"
+        return _RAW_TEXT
     patterns = {
         "integer": _INTEGER,
         "number": _FINITE_NUMBER,
@@ -257,7 +376,7 @@ def _non_strict_parameter_body(function):
     elif schema.get("additionalProperties") is not False:
         body += (
             r'(?:<atem:parameter name="[\w.-]{1,128}">'
-            rf"[^<]{{0,4096}}</atem:parameter>){{0,{max(0, 64 - len(required))}}}"
+            rf"{_non_strict_value(None)}</atem:parameter>){{0,{max(0, 64 - len(required))}}}"
         )
     return body
 
@@ -289,7 +408,9 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
                 if not re.fullmatch(r"[\w.-]+", key, re.ASCII):
                     raise ValueError("tool parameter name is not representable in ATEM")
                 subschema = properties[key]
-                value = raw_string_pattern(subschema)
+                value = raw_string_pattern(
+                    subschema, forbidden=_RAW_CLOSERS, free_text=_RAW_TEXT
+                )
                 if value is None:
                     # ``parse_atem`` decodes the value and rejects infinity.
                     value = _schema_pattern(subschema, finite_numbers=True)
@@ -307,11 +428,21 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
     invoke = "(?:" + "|".join(invocations) + ")"
     body = invoke if parallel_tool_calls is False else invoke + f"(?:{invoke})*"
     pattern = re.escape(_TOOL_OPEN) + body + re.escape(_TOOL_CLOSE)
+    if _RAW_TEXT in body:
+        pattern += _raw_text_definition()
     # Only a non-strict value lowered to JSON rules calls them; names are
-    # escaped and cannot spell a call.
-    if "(?&" in body:
+    # escaped and cannot spell a call.  The JSON block stays last: the
+    # whole-output composer strips and merges it with an answer's.
+    if re.search(r"\(\?&(?:value|object|array)\)", body):
         pattern += recursive_json_object_pattern(finite_numbers=True)[1]
     return pattern
+
+
+def _raw_text_definition():
+    """The ``atem_text`` rule: any text containing none of the closers."""
+    from ..tool_grammar import text_excluding
+
+    return "(?(DEFINE)(?P<atem_text>" + text_excluding(*_RAW_CLOSERS) + "))"
 
 
 class MuseOutputParser:
@@ -326,8 +457,21 @@ class MuseOutputParser:
         self.parallel_tool_calls = bool(parallel_tool_calls)
         self.stopped, self.tool_count = False, 0
         self.tool_call_constraint_truncations = 0
+        self.stop_truncated_tool_call = None  # legacy stop-only evidence
+        self.truncated_tool_call = None
         # Set only for the duration of :meth:`finish` on a ``length`` stop.
         self._length_finish = False
+
+    def _record_cut_call(self, partial, *, stop_hit):
+        self.truncated_tool_call = truncated_tool_record(
+            partial_function_names, partial, self.tools,
+            cause="stop_sequence" if stop_hit else "max_tokens",
+        )
+        if stop_hit:
+            self.stop_truncated_tool_call = {
+                key: value for key, value in self.truncated_tool_call.items()
+                if key != "cause"
+            }
 
     @property
     def stop_sequence(self):
@@ -400,6 +544,7 @@ class MuseOutputParser:
                     if truncated:
                         # Drop the partial call: it is neither a call nor
                         # answer text.  The finish reason stays as it was.
+                        self._record_cut_call(self.buffer, stop_hit=stop_hit)
                         self.buffer = ""
                         self.state, self.channel = "body", "content"
                         break
@@ -461,6 +606,9 @@ class MuseOutputParser:
                 break
         if final and self.state == "tool":
             if truncated:
+                # Nothing buffered after the opener: the loop never saw the
+                # call, but one was in progress when the stop cut it.
+                self._record_cut_call(self.buffer, stop_hit=stop_hit)
                 self.state, self.channel = "body", "content"
             else:
                 raise ValueError("Model produced an incomplete ATEM tool call")

@@ -6,7 +6,13 @@ import json
 import re
 import uuid
 
-from ..output import StopSequenceMatcher, _safe_prefix, within_parallel_bound
+from ..output import (
+    StopSequenceMatcher,
+    _safe_prefix,
+    truncated_tool_record,
+    within_parallel_bound,
+)
+from ..runtime.tool_parsers._partial_json import partial_json_name
 
 THINK_OPEN = "<|START_THINKING|>"
 THINK_CLOSE = "<|END_THINKING|>"
@@ -16,6 +22,26 @@ ACTION_OPEN = "<|START_ACTION|>"
 ACTION_CLOSE = "<|END_ACTION|>"
 TURN_END = "<|END_OF_TURN_TOKEN|>"
 _JSON_STRING = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
+# A model-written ``tool_call_id`` worth keeping: a short printable token.
+_CALL_ID = re.compile(r"[A-Za-z0-9_.-]{1,64}", re.ASCII)
+
+
+def _call_id(candidate, seen):
+    """``(id, replaced)``: the model's id when well formed and new, else ours.
+
+    mlx2 never renders ids to North, so the value is the model's invention;
+    Chat, Responses and Anthropic clients key tool results by id and require
+    them unique within a message, so a duplicate, an id with whitespace or
+    control characters, or an overlong one is replaced.
+    """
+    kept = (
+        isinstance(candidate, str)
+        and _CALL_ID.fullmatch(candidate) is not None
+        and candidate not in seen
+    )
+    call_id = candidate if kept else "call_" + uuid.uuid4().hex[:24]
+    seen.add(call_id)
+    return call_id, not kept
 
 
 def _action_end(text: str) -> int:
@@ -41,8 +67,10 @@ def _action_end(text: str) -> int:
         position = string.end()
 
 
-def parse_actions(text: str, tools: list[dict]) -> list[dict]:
+def parse_actions(text: str, tools: list[dict], *, seen_ids=None) -> list[dict]:
+    """Decode one action block; ``seen_ids`` keeps ids unique across blocks."""
     definitions = {tool["function"]["name"]: tool["function"] for tool in tools}
+    seen = set() if seen_ids is None else seen_ids
     try:
         value = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -69,14 +97,59 @@ def parse_actions(text: str, tools: list[dict]) -> list[dict]:
         ):
             raise ValueError("North tool call contains an undeclared parameter")
         json.dumps(arguments, allow_nan=False)
+        call_id, replaced = _call_id(item.get("tool_call_id"), seen)
         calls.append(
-            {
-                "id": str(item.get("tool_call_id") or ("call_" + uuid.uuid4().hex[:24])),
-                "name": name,
-                "arguments": arguments,
-            }
+            {"id": call_id, "name": name, "arguments": arguments, "id_replaced": replaced}
         )
     return calls
+
+
+def partial_function_names(partial, tools=None):
+    """Read only North's top-level action names, including array siblings."""
+    body = partial.strip()
+    if not body:
+        return []
+    if body.startswith("{"):
+        name = partial_json_name(body, field="tool_name", context="North action")
+        return [] if name is None else [name]
+    if not body.startswith("["):
+        raise ValueError("North action block must be a JSON array or object")
+    names, position = [], 1
+    decoder = json.JSONDecoder()
+    while True:
+        while position < len(body) and body[position] in " \t\n\r":
+            position += 1
+        if position == len(body):
+            return names
+        if body[position] == "]":
+            if body[position + 1:].strip():
+                raise ValueError("text after North action array")
+            return names
+        if body[position] != "{":
+            raise ValueError("North action entries must be objects")
+        try:
+            item, end = decoder.raw_decode(body, position)
+        except json.JSONDecodeError:
+            name = partial_json_name(
+                body[position:], field="tool_name", context="North action"
+            )
+            return names + ([] if name is None else [name])
+        name = item.get("tool_name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("North action needs a string tool_name")
+        names.append(name)
+        position = end
+        while position < len(body) and body[position] in " \t\n\r":
+            position += 1
+        if position == len(body):
+            return names
+        if body[position] == "]":
+            if body[position + 1:].strip():
+                raise ValueError("text after North action array")
+            return names
+        if body[position] != ",":
+            raise ValueError("North action entries need a comma")
+        position += 1
 
 
 def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
@@ -91,6 +164,7 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
         _STRING,
         _WS,
         _schema_pattern,
+        json_literal_pattern,
         recursive_json_object_pattern,
     )
 
@@ -115,7 +189,7 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
             required = required_parameter_names(function)
             if required:
                 members = [
-                    rf"{_WS}{regex.escape(json.dumps(key, ensure_ascii=True))}{_WS}:(?&value)"
+                    rf"{_WS}{json_literal_pattern(key)}{_WS}:(?&value)"
                     for key in required
                 ]
                 parameters = (
@@ -125,7 +199,9 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
             else:
                 parameters = generic_root
             needs_definitions = True
-        name = regex.escape(json.dumps(function["name"], ensure_ascii=True))
+        # Names reach the model through Jinja's ``tojson`` (escaped) and
+        # come back as its own JSON: either spelling decodes to the name.
+        name = json_literal_pattern(function["name"])
         calls.append(
             rf'\{{"tool_name":{name},"parameters":{parameters}\}}'
         )
@@ -148,6 +224,9 @@ class NorthOutputParser:
         self.stopped = False
         self.tool_count = 0
         self.tool_call_constraint_truncations = 0
+        self.tool_call_id_replacements = 0
+        self.truncated_tool_call = None
+        self._call_ids = set()  # ids emitted this turn, model-written or ours
         self.parallel_tool_calls = bool(parallel_tool_calls)
 
     @property
@@ -196,12 +275,27 @@ class NorthOutputParser:
                 if end < 0:
                     if final:
                         if allow_incomplete_action:
+                            self.truncated_tool_call = truncated_tool_record(
+                                partial_function_names, self.buffer, self.tools,
+                                cause="max_tokens",
+                            )
                             self.buffer = ""
+                            self.channel = "content"
                             break
                         raise ValueError("Model produced an incomplete North action block")
                     break
-                calls = parse_actions(self.buffer[:end], self.tools)
-                calls = within_parallel_bound(self, calls)
+                calls = parse_actions(
+                    self.buffer[:end], self.tools, seen_ids=self._call_ids
+                )
+                retained = within_parallel_bound(self, calls)
+                # Only emitted calls carry an id: a dropped call's does not
+                # count as a replacement nor stay reserved for the turn.
+                for call in calls[len(retained):]:
+                    self._call_ids.discard(call["id"])
+                calls = retained
+                self.tool_call_id_replacements += sum(
+                    1 for call in calls if call["id_replaced"]
+                )
                 for call in calls:
                     events.append(
                         {
@@ -256,6 +350,14 @@ class NorthOutputParser:
                     events.extend(self._emit(self.buffer[:end], final=final))
                 self.buffer = self.buffer[end:]
                 break
+        if final and self.channel == "tool":
+            if not allow_incomplete_action:
+                raise ValueError("Model produced an incomplete North action block")
+            self.truncated_tool_call = truncated_tool_record(
+                partial_function_names, self.buffer, self.tools, cause="max_tokens",
+            )
+            self.buffer = ""
+            self.channel = "content"
         if final and not self.buffer and not self.stopped:
             events.extend(self._emit("", final=True))
         return events

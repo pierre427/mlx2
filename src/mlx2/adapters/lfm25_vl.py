@@ -479,11 +479,13 @@ class LFM25VLAdapter:
             raise ValueError("LFM2.5-VL has no qualified execution policy")
         self._media_proof_key = secrets.token_bytes(32)
         self.identity = inspect_artifact(model_path)
-        self.environment = {"mlx_vlm_revision": SOURCE_REVISION}
-        self.mlx_vlm_runtime = _require_source_revision()
-        from mlx_vlm import load
+        from .vlm_runtime import bind_backend
+        self._vlm_backend = bind_backend("lfm2_vl")
+        self.mlx_vlm_runtime = self._vlm_backend.identity
+        self.mlx_vlm_build = self._vlm_backend.provenance
+        self.environment = {"mlx_vlm_contract": self.mlx_vlm_runtime["source_sha256"]}
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
-        self.model, self.processor = load(str(self.identity["path"]), lazy=False, strict=True, trust_remote_code=False)
+        self.model, self.processor = self._vlm_backend.load(str(self.identity["path"]), lazy=False, strict=True, trust_remote_code=False)
         from ..runtime.chat_templates import secure_model_chat_templates
         secure_model_chat_templates(self.processor)
         from .lfm25_fused_shortconv import (

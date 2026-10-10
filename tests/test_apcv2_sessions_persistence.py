@@ -894,7 +894,7 @@ def test_startup_rescan_is_manifest_only_and_bounded_for_eight_entries(tmp_path)
         tokens = [index + 100, *range(8)]
         first.store(key, tokens, [_state(len(tokens), index)])
     result = first.park_all(time_budget_seconds=5)
-    assert result == {"spilled": 8, "skipped": 0}
+    assert result == {"spilled": 8, "skipped": 0, "pinned_skipped": 0}
     first.close()
     second = _persistent(tmp_path)
     rescan = second.apc_stats["persistence"]["rescan"]
@@ -1153,3 +1153,579 @@ def test_restart_under_another_lane_law_discards_the_state(tmp_path):
         rescan = restarted.apc_stats["persistence"]["rescan"]
         assert rescan["registered"] == 0
         restarted.close()
+
+
+def test_republish_at_the_same_tokens_keeps_a_deferred_park_pending(tmp_path):
+    """apc-sessions#1: a park deferred behind a lease survives a republish.
+
+    The replacement inherits the disk pin; it must also inherit the pending
+    park so the worker's next idle scan writes the promised disk copy.
+    """
+    clock = [0.0]
+    wall = [1000.0]
+    apc = APCv2(
+        max_size=8,
+        layout_name="layout-a",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(tmp_path),
+        now_fn=lambda: clock[0],
+        wall_time_fn=lambda: wall[0],
+    )
+    key = _identity()
+    tag = ("tenant-a", "regenerate")
+    tokens = list(range(8))
+    apc.store(
+        key, tokens, [_state(8)], session_tag=tag,
+        retention_role="committed_prompt_boundary",
+    )
+    lease = apc.lookup(key, tokens + [99], allow_disk_restore=False)
+    parked = apc.park_session(*tag, ttl_seconds=60)
+    assert parked["state"] == "resident" and parked["park_pending"] == 1
+    lease.cache.close()
+    clock[0] = 1.0
+    # The regenerated prompt boundary republishes the same tokens.
+    apc.store(
+        key, tokens, [_state(8, 500)], session_tag=tag,
+        retention_role="committed_prompt_boundary",
+    )
+    state = apc.session_state(*tag)
+    assert state["disk_pin_expires_at"] == 1060.0
+    assert state["park_pending"] == 1, state
+    clock[0] = 2.0  # far below idle_disk_seconds: only the park spills it
+    assert apc.spill_idle_entries() == 1
+    state = apc.session_state(*tag)
+    assert (state["state"], state["disk_entries"], state["park_pending"]) == ("disk", 1, 0)
+    hit = apc.lookup(key, tokens + [99], session_tag=tag)
+    assert hit.hit and hit.cached_tokens == 8
+    keys, _values = hit.cache[0].state
+    assert keys[0, 0, :8, 0].tolist() == list(range(500, 508))
+    hit.cache.close()
+    apc.close()
+
+
+def test_persist_close_reports_a_pinned_session_it_could_not_park(tmp_path, monkeypatch, caplog):
+    """apc-sessions#1: close(persist_resident=True) must not drop a pinned
+    session silently when its shutdown spill fails."""
+    import logging
+
+    from mlx2.runtime import apc_v2 as apc_mod
+
+    clock = [0.0]
+    apc = _persistent(tmp_path, now_fn=lambda: clock[0])
+    key = _identity()
+    tag = ("tenant-a", "regenerate")
+    tokens = list(range(16))
+    apc.store(key, tokens, [_state(16)], session_tag=tag)
+    lease = apc.lookup(key, tokens + [99], allow_disk_restore=False)
+    assert apc.park_session(*tag, ttl_seconds=3600)["park_pending"] == 1
+    lease.cache.close()
+    clock[0] = 1.0
+    apc.store(key, tokens, [_state(16, 500)], session_tag=tag)
+    assert apc.session_state(*tag)["disk_pin_expires_at"]
+
+    def broken_write(job):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(apc_mod, "_write_spill_job", broken_write)
+    with caplog.at_level(logging.WARNING, logger=apc_mod.log.name):
+        report = apc.close(persist_resident=True, time_budget_seconds=5.0)
+    # Caller-visible: close() hands back the shutdown park report.
+    assert report == {"spilled": 0, "skipped": 1, "pinned_skipped": 1}
+    stats = apc._disk_stats
+    assert stats["shutdown_parks_skipped"] == 1
+    assert stats["pinned_parks_lost"] == 1
+    assert any(
+        "pinned" in record.getMessage() and "regenerate" in record.getMessage()
+        for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
+
+
+def test_idle_scan_reenforces_the_disk_cap_after_a_resident_pin_expires(tmp_path):
+    """apc-sessions#2: nothing calls back into APCv2 when a lease closes or a
+    pin expires, so the idle scan must re-check the cap even when it spilled
+    nothing.  A disk-only placeholder carrying a live prefetch pin (restored
+    by the restart rescan) is the one holder enforcement keeps while the pin
+    lasts; the overshoot must end with the pin."""
+    wall = [1000.0]
+    clock = [0.0]
+    key = _identity()
+    probe = _persistent(tmp_path / "probe", wall=wall, now_fn=lambda: clock[0])
+    probe.store(key, [10] * 8, [_state(8, 1)])
+    assert probe.park_all(time_budget_seconds=5)["spilled"] == 1
+    unit = int(probe._disk_bytes)
+    probe.close()
+    cap = int(unit * 1.5)
+
+    first = _persistent(
+        tmp_path, wall=wall, now_fn=lambda: clock[0], idle_disk_max_bytes=cap,
+    )
+    a_tag, b_tag = ("tenant-a", "a"), ("tenant-a", "b")
+    first.store(key, [10] * 8, [_state(8, 1)], session_tag=a_tag)
+    first.resume_session(*a_tag)  # prefetch pins the entry resident for 30 s
+    assert first.service_pending_prefetch()
+    assert first.session_state(*a_tag)["resident_pin_expires_at"] == 1030.0
+    first.close(persist_resident=True, time_budget_seconds=5.0)
+
+    second = _persistent(
+        tmp_path, wall=wall, now_fn=lambda: clock[0], idle_disk_max_bytes=cap,
+    )
+    state = second.session_state(*a_tag)
+    assert state["state"] == "disk" and state["resident_pin_expires_at"] == 1030.0
+    second.store(key, [20] * 8, [_state(8, 2)], session_tag=b_tag)
+    assert second.park_session(*b_tag, ttl_seconds=600)["state"] == "disk"
+    # Two units against a 1.5-unit cap: b is disk-pinned and a's placeholder
+    # is prefetch-pinned, so the overshoot is the pin semantics, not a bug.
+    assert second._disk_bytes == 2 * unit > cap
+    wall[0] = 1031.0  # a's prefetch pin expires; no APCv2 call observes it
+    clock[0] = 5.0
+    assert second.spill_idle_entries() == 0  # nothing idle, nothing spilled
+    assert second._disk_bytes <= cap, (second._disk_bytes, cap)
+    assert second.session_state(*b_tag)["state"] == "disk"
+    with pytest.raises(APCSessionNotFound):
+        second.session_state(*a_tag)
+    second.close()
+
+
+def test_suspend_reports_a_pinned_session_it_could_not_park(tmp_path, monkeypatch, caplog):
+    """Sibling of the shutdown path: suspend_resident drops an entry whose
+    spill failed; when that entry is a never-written parked session the loss
+    is counted and named, never silent."""
+    import logging
+
+    from mlx2.runtime import apc_v2 as apc_mod
+
+    apc = APCv2(
+        max_size=8,
+        layout_name="layout-a",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(tmp_path),
+    )
+    key = _identity()
+    tag = ("tenant-a", "suspended")
+    other = ("tenant-a", "shared-turn")
+    tokens = list(range(8))
+    apc.store(key, tokens, [_state(8)], session_tag=tag)
+    apc.store(key, tokens, [_state(8)], session_tag=other)
+    lease = apc.lookup(key, tokens + [99], allow_disk_restore=False)
+    assert apc.park_session(*tag, ttl_seconds=60)["park_pending"] == 1
+    assert apc.park_session(*other, ttl_seconds=60)["park_pending"] == 1
+    lease.cache.close()
+
+    def broken_write(job):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(apc_mod, "_write_spill_job", broken_write)
+    with caplog.at_level(logging.ERROR, logger=apc_mod.log.name):
+        report = apc.suspend_resident()
+    # One checkpoint, two sessions pinning it: counted once, both named.
+    assert report["failures"] == 1 and report["pinned_lost"] == 1
+    assert apc.apc_stats["idle_disk"]["pinned_parks_lost"] == 1
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "pinned" in message and "'suspended'" in message and "'shared-turn'" in message
+        for message in messages
+    ), messages
+    for lost in (tag, other):
+        with pytest.raises(APCSessionNotFound):
+            apc.session_state(*lost)
+    apc.close()
+
+
+def test_pressure_spill_at_republish_completes_the_deferred_park(tmp_path):
+    """A replacement the store itself spills under byte pressure has its disk
+    copy: the deferred park is complete, not left pending on a disk-only
+    entry (which would spill the next restored copy at once)."""
+    clock = [0.0]
+    probe = APCv2(max_size=8, layout_name="layout-a")
+    probe.store(_identity(), list(range(8)), [_state(8)])
+    unit = int(probe.nbytes)
+    probe.clear(release_memory=False)
+    apc = APCv2(
+        max_size=8,
+        max_bytes=int(unit * 2.5),
+        layout_name="layout-a",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(tmp_path),
+        now_fn=lambda: clock[0],
+    )
+    key = _identity()
+    tag = ("tenant-a", "pressured")
+    other, tokens = [20] * 8, list(range(8))
+    apc.store(key, other, [_state(8, 7)])
+    other_lease = apc.lookup(key, other + [99], allow_disk_restore=False)
+    clock[0] = 1.0
+    apc.store(key, tokens, [_state(8)], session_tag=tag)
+    lease = apc.lookup(key, tokens + [99], allow_disk_restore=False)
+    assert apc.park_session(*tag, ttl_seconds=60)["park_pending"] == 1
+    lease.cache.close()
+    clock[0] = 2.0
+    # The republish carries a draft sidecar and no longer fits beside the
+    # leased entry: the store itself spills the replacement.
+    from mlx2.runtime.apc_v2 import MTPAPCSidecar
+
+    hidden = mx.arange(4, dtype=mx.float32)
+    mx.eval(hidden)
+    sidecar = MTPAPCSidecar(([_state(8, 900)], hidden), covered_tokens=8)
+    apc.store(key, tokens, [_state(8, 500)], session_tag=tag, sidecar=sidecar)
+    assert apc.apc_stats["idle_disk"]["pressure_spills"] == 1
+    state = apc.session_state(*tag)
+    assert (state["state"], state["disk_entries"]) == ("disk", 1)
+    assert state["park_pending"] == 0, state
+    # The restored copy is not re-spilled by the next scan below the idle age.
+    other_lease.cache.close()
+    clock[0] = 3.0
+    hit = apc.lookup(key, tokens + [99], session_tag=tag)
+    assert hit.hit and hit.cached_tokens == 8
+    hit.cache.close()
+    clock[0] = 4.5
+    assert apc.spill_idle_entries() == 0
+    assert apc.session_state(*tag)["state"] == "resident"
+    apc.close()
+
+
+def test_republish_keeps_a_resumed_session_prefetch_expectation(tmp_path):
+    """The first tagged lookup after a resume settles the prefetch (hit or
+    miss) and releases its resident pin; a republish in between must not
+    strand the expectation on the replaced entry."""
+    wall = [1000.0]
+    apc = APCv2(
+        max_size=8,
+        layout_name="layout-a",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(tmp_path),
+        wall_time_fn=lambda: wall[0],
+    )
+    key = _identity()
+    tag = ("tenant-a", "resumed")
+    tokens = list(range(8))
+    apc.store(key, tokens, [_state(8)], session_tag=tag)
+    assert apc.park_session(*tag, ttl_seconds=600)["state"] == "disk"
+    apc.resume_session(*tag, ttl_seconds=30)
+    assert apc.service_pending_prefetch()
+    assert apc.session_state(*tag)["resident_pin_expires_at"] == 1030.0
+    apc.store(key, tokens, [_state(8, 500)], session_tag=tag)
+    hit = apc.lookup(key, tokens + [99], session_tag=tag)
+    assert hit.hit and hit.cached_tokens == 8
+    hit.cache.close()
+    disk = apc.apc_stats["idle_disk"]
+    assert disk["prefetch_hits"] + disk["prefetch_misses"] == 1
+    assert apc.session_state(*tag)["resident_pin_expires_at"] is None
+    apc.close()
+
+
+def test_republish_that_outgrows_the_pin_caps_keeps_the_parked_state(tmp_path, caplog):
+    """A replacement of a never-written parked entry whose projected snapshot
+    no longer fits the pinned caps is rejected (stored=False) and the parked
+    entry restored exactly, the same transaction the persisted-park republish
+    uses: the park is neither revoked nor left promising a copy a shutdown
+    spill cannot write."""
+    import logging
+
+    from mlx2.runtime import apc_v2 as apc_mod
+    from mlx2.runtime.apc_v2 import MTPAPCSidecar
+
+    key = _identity()
+    tokens = list(range(8))
+    probe = APCv2(max_size=8, layout_name="layout-a", idle_disk_seconds=3600,
+                  idle_disk_dir=str(tmp_path / "probe"))
+    probe.store(key, tokens, [_state(8)])
+    assert probe.park_all(time_budget_seconds=5)["spilled"] == 1
+    unit = int(probe._disk_bytes)
+    probe.close()
+    apc = APCv2(
+        max_size=8,
+        layout_name="layout-a",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(tmp_path),
+        pinned_disk_bytes_global=int(unit * 1.5),
+    )
+    tag = ("tenant-a", "grown")
+    apc.store(key, tokens, [_state(8)], session_tag=tag)
+    lease = apc.lookup(key, tokens + [99], allow_disk_restore=False)
+    assert apc.park_session(*tag, ttl_seconds=60)["park_pending"] == 1
+    lease.cache.close()
+    draft = _state(4, 900)
+    hidden = mx.arange(4, dtype=mx.float32)
+    mx.eval(hidden)
+    sidecar = MTPAPCSidecar(([draft], hidden), covered_tokens=8)
+    with caplog.at_level(logging.WARNING, logger=apc_mod.log.name):
+        receipt = apc.store(
+            key, tokens, [_state(8, 500)], session_tag=tag, sidecar=sidecar
+        )
+    assert receipt.stored is False
+    assert apc.apc_stats["idle_disk"]["pin_cap_rejections"] == 1
+    assert any("grown" in record.getMessage() for record in caplog.records)
+    state = apc.session_state(*tag)
+    assert state["disk_pin_expires_at"] and state["park_pending"] == 1, state
+    assert state["state"] == "resident" and state["entries"] == 1
+    # The parked (old) content is what is served and what the worker parks.
+    hit = apc.lookup(key, tokens + [99], session_tag=tag)
+    assert hit.hit and hit.sidecar is None
+    keys, _values = hit.cache[0].state
+    assert keys[0, 0, :8, 0].tolist() == list(range(8))
+    hit.cache.close()
+    assert apc.park_all(time_budget_seconds=5) == {
+        "spilled": 1, "skipped": 0, "pinned_skipped": 0,
+    }
+    assert apc.session_state(*tag)["state"] == "disk"
+    apc.close()
+
+
+def test_republish_rejected_by_the_resident_budget_keeps_the_parked_state(tmp_path, monkeypatch, caplog):
+    """The pending-park republish transaction also covers the resident
+    budget: a replacement that neither fits beside a leased entry nor spills
+    is rejected (stored=False) and the parked entry restored, not lost."""
+    import logging
+
+    from mlx2.runtime import apc_v2 as apc_mod
+    from mlx2.runtime.apc_v2 import MTPAPCSidecar
+
+    clock = [0.0]
+    probe = APCv2(max_size=8, layout_name="layout-a")
+    probe.store(_identity(), list(range(8)), [_state(8)])
+    unit = int(probe.nbytes)
+    probe.clear(release_memory=False)
+    apc = APCv2(
+        max_size=8,
+        max_bytes=int(unit * 2.5),
+        layout_name="layout-a",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(tmp_path),
+        now_fn=lambda: clock[0],
+    )
+    key = _identity()
+    tag = ("tenant-a", "budgeted")
+    other, tokens = [20] * 8, list(range(8))
+    apc.store(key, other, [_state(8, 7)])
+    other_lease = apc.lookup(key, other + [99], allow_disk_restore=False)
+    clock[0] = 1.0
+    apc.store(key, tokens, [_state(8)], session_tag=tag)
+    lease = apc.lookup(key, tokens + [99], allow_disk_restore=False)
+    assert apc.park_session(*tag, ttl_seconds=60)["park_pending"] == 1
+    lease.cache.close()
+    clock[0] = 2.0
+    hidden = mx.arange(4, dtype=mx.float32)
+    mx.eval(hidden)
+    sidecar = MTPAPCSidecar(([_state(8, 900)], hidden), covered_tokens=8)
+
+    def broken_write(job):
+        raise OSError("disk full")
+
+    # The replacement outgrows the budget beside the leased entry and its
+    # pressure spill fails: the publication is rejected.
+    monkeypatch.setattr(apc_mod, "_write_spill_job", broken_write)
+    with caplog.at_level(logging.ERROR, logger=apc_mod.log.name):
+        receipt = apc.store(
+            key, tokens, [_state(8, 500)], session_tag=tag, sidecar=sidecar
+        )
+    monkeypatch.setattr(apc_mod, "_write_spill_job", apc_mod._write_spill_job)
+    assert receipt.stored is False
+    disk = apc.apc_stats["idle_disk"]
+    assert disk["publication_rejections"] == 1
+    assert disk["pinned_parks_lost"] == 0, [r.getMessage() for r in caplog.records]
+    state = apc.session_state(*tag)
+    assert (state["state"], state["entries"], state["park_pending"]) == ("resident", 1, 1)
+    assert state["disk_pin_expires_at"]
+    hit = apc.lookup(key, tokens + [99], session_tag=tag)
+    assert hit.hit and hit.sidecar is None
+    keys, _values = hit.cache[0].state
+    assert keys[0, 0, :8, 0].tolist() == list(range(8))
+    hit.cache.close()
+    other_lease.cache.close()
+    apc.close()
+
+
+def test_retire_defers_while_a_parked_session_pins_the_checkpoint(tmp_path):
+    """A publisher's retirement of a disposable checkpoint must not drop a
+    parked session's state: a live disk pin defers it like a lease does."""
+    wall = [1000.0]
+    apc = APCv2(
+        max_size=8,
+        layout_name="layout-a",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(tmp_path),
+        wall_time_fn=lambda: wall[0],
+    )
+    key = _identity()
+    tag = ("tenant-a", "interior")
+    tokens = list(range(8))
+    apc.store(
+        key, tokens, [_state(8)], session_tag=tag, retention_role="interior_checkpoint"
+    )
+    assert apc.park_session(*tag, ttl_seconds=60)["state"] == "disk"
+    assert apc.retire(key, tokens, role="interior_checkpoint") is False
+    assert apc.session_state(*tag)["state"] == "disk"
+    assert apc.apc_stats["idle_disk"]["pinned_parks_lost"] == 0
+    # Once the pin has expired the deferred retirement completes.
+    wall[0] = 1061.0
+    apc.sweep_retirements()
+    with pytest.raises(APCSessionNotFound):
+        apc.session_state(*tag)
+    assert apc.retire(key, tokens, role="interior_checkpoint") is True
+    apc.close()
+
+
+def test_close_without_persist_resident_still_parks_pinned_sessions(tmp_path):
+    """persist_resident only governs ordinary residents: a never-written park
+    (deferred behind a lease) is written at close() whatever the policy,
+    because the park promised a disk copy; ordinary residents are not."""
+    clock = [0.0]
+    key = _identity()
+    tag = ("tenant-a", "promised")
+    tokens = list(range(16))
+    first = _persistent(tmp_path, now_fn=lambda: clock[0])
+    first.store(key, [30] * 8, [_state(8, 3)])  # ordinary resident
+    first.store(key, tokens, [_state(16)], session_tag=tag)
+    lease = first.lookup(key, tokens + [99], allow_disk_restore=False)
+    assert first.park_session(*tag, ttl_seconds=3600)["park_pending"] == 1
+    lease.cache.close()
+    report = first.close(time_budget_seconds=5.0)  # persist_resident=False
+    assert report == {"spilled": 1, "skipped": 0, "pinned_skipped": 0}
+
+    second = _persistent(tmp_path)
+    assert second.session_state(*tag)["state"] == "disk"
+    assert len(second) == 1  # the ordinary resident was not persisted
+    second.close()
+
+
+def test_rejected_republish_keeps_the_deferred_retirement(tmp_path):
+    """A republish pops the path's deferred retirement; when the publication
+    is rolled back the retirement is restored, so the retained checkpoint
+    still goes once its pin expires."""
+    from mlx2.runtime.apc_v2 import MTPAPCSidecar
+
+    wall = [1000.0]
+    key = _identity()
+    tokens = list(range(8))
+    probe = APCv2(max_size=8, layout_name="layout-a", idle_disk_seconds=3600,
+                  idle_disk_dir=str(tmp_path / "probe"))
+    probe.store(key, tokens, [_state(8)])
+    assert probe.park_all(time_budget_seconds=5)["spilled"] == 1
+    unit = int(probe._disk_bytes)
+    probe.close()
+    apc = APCv2(
+        max_size=8,
+        layout_name="layout-a",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(tmp_path),
+        pinned_disk_bytes_global=int(unit * 1.5),
+        wall_time_fn=lambda: wall[0],
+    )
+    tag = ("tenant-a", "retiring")
+    apc.store(
+        key, tokens, [_state(8)], session_tag=tag, retention_role="interior_checkpoint"
+    )
+    lease = apc.lookup(key, tokens + [99], allow_disk_restore=False)
+    assert apc.park_session(*tag, ttl_seconds=60)["park_pending"] == 1
+    lease.cache.close()
+    assert apc.retire(key, tokens, role="interior_checkpoint") is False  # deferred
+    hidden = mx.arange(4, dtype=mx.float32)
+    mx.eval(hidden)
+    sidecar = MTPAPCSidecar(([_state(8, 900)], hidden), covered_tokens=8)
+    receipt = apc.store(
+        key, tokens, [_state(8, 500)], session_tag=tag,
+        retention_role="interior_checkpoint", sidecar=sidecar,
+    )
+    assert receipt.stored is False  # the pin caps reject the larger replacement
+    assert apc.session_state(*tag)["park_pending"] == 1
+    wall[0] = 1061.0  # the pin expires: the deferred retirement completes
+    apc.sweep_retirements()
+    with pytest.raises(APCSessionNotFound):
+        apc.session_state(*tag)
+    apc.close()
+
+
+def test_idle_scan_pin_cap_rejection_reports_the_lost_park(tmp_path, caplog):
+    """integ-apc#4: a deferred park whose written snapshot violates the pin
+    caps is failed closed by the idle scan.  That breaks the park's promise,
+    so the loss is counted (``pinned_parks_lost``) and the session is named
+    at the moment it happens; shutdown then sees no pin and does not count
+    it again."""
+    import logging
+
+    from mlx2.runtime import apc_v2 as apc_mod
+
+    clock = [0.0]
+    key = _identity()
+    tag = ("tenant-a", "overgrown")
+    tokens = list(range(32))
+    apc = _persistent(
+        tmp_path, now_fn=lambda: clock[0],
+        pinned_disk_bytes_per_tenant=_state(32).nbytes,
+    )
+    apc.store(key, tokens, [_state(32)], session_tag=tag)
+    lease = apc.lookup(key, tokens + [99], allow_disk_restore=False)
+    assert apc.park_session(*tag, ttl_seconds=600)["park_pending"] == 1
+    lease.cache.close()
+    with caplog.at_level(logging.ERROR, logger=apc_mod.log.name):
+        for _ in range(3):
+            clock[0] += 2.0
+            apc.spill_idle_entries(now=clock[0])
+    disk = apc.apc_stats["idle_disk"]
+    assert disk["pin_cap_rejections"] == 1 and disk["spill_failures"] == 1
+    assert disk["pinned_parks_lost"] == 1
+    assert any(
+        "overgrown" in record.getMessage() and "pin cap" in record.getMessage()
+        for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
+    state = apc.session_state(*tag)
+    assert state["disk_pin_expires_at"] is None and state["park_pending"] == 0
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger=apc_mod.log.name):
+        report = apc.close(persist_resident=True, time_budget_seconds=5.0)
+    # Already counted and named once; shutdown parking has no pin left to
+    # report, and the lifetime counter keeps the loss.
+    assert report["pinned_skipped"] == 0
+    assert apc._disk_stats["pinned_parks_lost"] == 1
+    assert not caplog.records
+
+
+def test_clear_reports_the_parked_sessions_it_destroys(tmp_path, caplog):
+    """integ-apc#5: clear() (a model-state invalidation) drops every entry,
+    parked sessions included.  The loss is counted, named and returned in
+    the clear report for both a disk-only park and a park still pending
+    behind a lease."""
+    import logging
+
+    from mlx2.runtime import apc_v2 as apc_mod
+
+    clock = [0.0]
+    key = _identity()
+    apc = _persistent(tmp_path, now_fn=lambda: clock[0])
+    on_disk = ("tenant-a", "on-disk")
+    apc.store(key, list(range(16)), [_state(16)], session_tag=on_disk)
+    apc.park_session(*on_disk, ttl_seconds=600)
+    assert apc.session_state(*on_disk)["state"] == "disk"
+    pending = ("tenant-a", "pending")
+    tokens = [7] * 16
+    apc.store(key, tokens, [_state(16, 50)], session_tag=pending)
+    lease = apc.lookup(key, tokens + [99], allow_disk_restore=False)
+    assert apc.park_session(*pending, ttl_seconds=600)["park_pending"] == 1
+    lease.cache.close()
+    apc.store(key, [30] * 8, [_state(8, 3)])  # ordinary resident, no pin
+    with caplog.at_level(logging.ERROR, logger=apc_mod.log.name):
+        report = apc.clear()
+    assert report["entries"] == 3
+    assert report["pinned_parks_lost"] == 2
+    assert report["lost_sessions"] == ["on-disk", "pending"]
+    assert apc.apc_stats["idle_disk"]["pinned_parks_lost"] == 2
+    assert any(
+        "on-disk" in record.getMessage() and "pending" in record.getMessage()
+        for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
+    for tag in (on_disk, pending):
+        with pytest.raises(APCSessionNotFound):
+            apc.session_state(*tag)
+    assert not list(tmp_path.glob("apc-idle-*"))
+    # A clear with nothing parked reports zero, and the non-persistent
+    # close() path (its clear is the configured end of every park) stays
+    # quiet.
+    assert apc.clear()["pinned_parks_lost"] == 0
+    apc.close()
+    plain = _projected_park_apc(tmp_path / "plain", clock, 1 << 30)
+    plain.store(key, list(range(16)), [_state(16)], session_tag=on_disk)
+    plain.park_session(*on_disk, ttl_seconds=600)
+    with caplog.at_level(logging.ERROR, logger=apc_mod.log.name):
+        caplog.clear()
+        plain.close()
+    assert plain._disk_stats["pinned_parks_lost"] == 0 and not caplog.records

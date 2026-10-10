@@ -16,10 +16,9 @@ from .mlx_vlm import (
     _require_media_markers, _source,
 )
 
-# Not the project pin (mlx_vlm_pin.MLX_VLM_REVISION, which pyproject installs
-# and which does not descend from this revision): this adapter loads only when
-# a clean checkout of SOURCE_REVISION is first on PYTHONPATH, and fails closed
-# naming both revisions otherwise (sweep 2026-10-06 G2-04/G5-05).
+# Reference source for the family contracts. Equivalent dependency contents
+# may come from a different checkout; unrelated model changes do not repin
+# these adapters. Incompatible dependency contents still fail before loading.
 SOURCE_REVISION = "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5"
 
 TOPOLOGIES = {
@@ -172,22 +171,14 @@ class PinnedVisionCandidateAdapter:
         if execution_policy not in (None, {}):
             raise ValueError("vision candidate has no qualified execution policy")
         self.identity = inspect_vision_artifact(model_path, expected=self.model_type)
-        from .mlx_vlm_pin import mlx_vlm_runtime
-        runtime = mlx_vlm_runtime()
-        if runtime is None or runtime.get("revision") != SOURCE_REVISION:
-            from .mlx_vlm_pin import MLX_VLM_REVISION
+        from .vlm_runtime import bind_backend
 
-            raise RuntimeError(
-                f"vision candidate requires mlx-vlm revision {SOURCE_REVISION}, found "
-                f"{(runtime or {}).get('revision') or 'none'}; the project pin "
-                f"installs {MLX_VLM_REVISION[:8]}, which is not it, so put a clean "
-                f"{SOURCE_REVISION[:8]} checkout first on PYTHONPATH"
-            )
-        self.mlx_vlm_runtime = runtime
-        self.environment = {"mlx_vlm_revision": SOURCE_REVISION}
-        from mlx_vlm import load
+        self._vlm_backend = bind_backend(self.model_type)
+        self.mlx_vlm_runtime = self._vlm_backend.identity
+        self.mlx_vlm_build = self._vlm_backend.provenance
+        self.environment = {"mlx_vlm_contract": self.mlx_vlm_runtime["source_sha256"]}
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
-        model, self.processor = load(self.identity["path"], lazy=False, strict=True,
+        model, self.processor = self._vlm_backend.load(self.identity["path"], lazy=False, strict=True,
                                      trust_remote_code=False)
         from ..runtime.chat_templates import secure_model_chat_templates
         secure_model_chat_templates(self.processor)

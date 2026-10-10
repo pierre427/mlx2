@@ -165,7 +165,8 @@ class ServingInstallerLock(unittest.TestCase):
             self.assertFalse(raw.locked(),'private bootstrap must not hold publication lock')
             if cancel_after_bootstrap:jobs[0].cancelled.set()
             return self.owners,self.candidate,self.boot
-        adapter=NS(identity={'path':'/artifact','fingerprint':'rev'},create_native_paged_hybrid_b2=factory)
+        from mlx2.adapters.native_hybrid import HybridNativeCohort
+        adapter=NS(native_cohort_backend=HybridNativeCohort,identity={'path':'/artifact','fingerprint':'rev'},create_native_paged_hybrid_b2=factory)
         identity=ModuleType('mlx2.runtime.paged_price_identity');identity.cached_live_price_identity=lambda *args,**kw:{}
         profile=ModuleType('mlx2.runtime.paged_hybrid_research_profile')
         profile.load_hybrid_research_profile=lambda *args,**kw:{'max_tokens':4,'profile_id':'test','storage_dtype':'bfloat16','q1_simd_stripes':16}

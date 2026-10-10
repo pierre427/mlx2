@@ -774,6 +774,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         "combination": "activated_gate_times_up",
     }
 
+    def native_cohort_backend(self, kind):
+        from .native_hybrid import HybridNativeCohort
+        return HybridNativeCohort(kind)
+
     def create_native_paged_hybrid_b2(self, requests, *, profile,
                                        permit_candidate=False, cancelled=lambda: False):
         """Explicit default-off adapter capability; ordinary route remains available."""
@@ -1313,6 +1317,41 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         ):
             return None
         return {"max_rows": 128, "chunk_above_max": True}
+
+    @staticmethod
+    def int8_prefill_supported():
+        # Dense MLP and (with "all") attention / GDN input and output
+        # projections.  Heads, the MTP layer, the tiny GDN a/b projections
+        # (ineligible shapes) and any vision tower stay stock.  Declared so the
+        # 8-bit checkpoint can run the in-place Q8 W8A8 prefill (omlx #4350
+        # port); default off, approximate, qualification-gated like any
+        # int8 prefill route.  Dense subclasses share the module layout.
+        return ("mlp", "all")
+
+    def make_recurrent_depth_caches(self, passes: int):
+        """Allocate one independent Qwen cache stack per recurrent pass."""
+        if (
+            isinstance(passes, bool)
+            or not isinstance(passes, int)
+            or not 1 <= passes <= 8
+        ):
+            raise ValueError("recurrent-depth passes must be in 1..8")
+        return tuple(self.model.make_cache() for _ in range(passes))
+
+    def recurrent_depth_hidden(
+        self, inputs, *, cache, input_embeddings=None, **model_kwargs
+    ):
+        """Expose the adapter-owned embedding-to-final-hidden Qwen seam."""
+        return self.model.model(
+            inputs,
+            cache=cache,
+            input_embeddings=input_embeddings,
+            **model_kwargs,
+        )
+
+    def recurrent_depth_logits(self, hidden):
+        """Project an adapter-owned final hidden state through the LM head."""
+        return self.model.logits(hidden)
 
     def profile_name(self, mtp):
         if mtp and Capability.MTP not in self.descriptor.capabilities:

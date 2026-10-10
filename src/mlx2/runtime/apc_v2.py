@@ -795,6 +795,8 @@ class APCv2(PrefixIndex):
         "oversize_spills",
         "spill_capacity_skips",
         "park_deferred_to_worker",
+        "shutdown_parks_skipped",
+        "pinned_parks_lost",
         "disk_evictions",
         "bytes_written",
         "bytes_read",
@@ -818,6 +820,8 @@ class APCv2(PrefixIndex):
     )
     _PERSIST_SCHEMA = "mlx2.apcv2.persisted-entry.v1"
     _SESSION_TAG_LIMIT = 16
+    # Session ids a clear report names; the count is always complete.
+    _LOST_SESSIONS_REPORT_LIMIT = 32
     # Longest wait before an idle scan retries a snapshot that failed to spill.
     _SPILL_RETRY_MAX_SECONDS = 300.0
     # Instance value set in __init__; the class default keeps owners built
@@ -2225,13 +2229,38 @@ class APCv2(PrefixIndex):
         """The entry's footprint with nothing shared (a restored copy's size)."""
         return int(entry.nbytes) + int(getattr(entry, "_apc_unpaid_nbytes", 0))
 
-    def _drop_entry_locked(self, key, tokens, entry) -> None:
+    def _live_pin_sessions_locked(self, entry, *, now_wall=None) -> list:
+        """Session ids whose disk pin on ``entry`` is still live: the parked
+        sessions that lose their checkpoint if the entry goes."""
+        now_wall = self._wall_time() if now_wall is None else float(now_wall)
+        return sorted(
+            str(tag[1])
+            for tag, expiry in getattr(entry, "_apc_disk_pin_expiries", {}).items()
+            if float(expiry) > now_wall
+        )
+
+    def _drop_entry_locked(
+        self, key, tokens, entry, *, reason: str = "drop", loses_pins: bool = True
+    ) -> None:
         try:
             current = self._trie.pop(key, tokens)
         except KeyError:
             return  # already gone (pop raises before changing the trie)
         if current is None:
             return
+        # Pressure eviction skips disk-pinned entries and a session delete
+        # pops its pin first, so a drop that still carries a live disk pin
+        # loses a parked session (a failed restore, prefetch or suspend
+        # spill).  Count it and name it; never silent.  ``loses_pins=False``
+        # is for the one drop whose caller restores the pinned state itself.
+        lost_sessions = self._live_pin_sessions_locked(current) if loses_pins else []
+        if lost_sessions:
+            self._disk_stats["pinned_parks_lost"] += 1
+            log.error(
+                "APCv2 %s dropped a %d-token pinned session checkpoint "
+                "(sessions %s); the parked sessions are gone",
+                reason, len(tokens), lost_sessions,
+            )
         job = self._spill_job_of(current)
         if job is not None:
             # Its files are removed when the write is collected.
@@ -2475,6 +2504,10 @@ class APCv2(PrefixIndex):
         self, key, tokens, entry, *, reason: str, keep_resident: bool
     ) -> bool:
         """Release the resident copy of an entry whose disk record is published."""
+        # The disk copy a deferred park promised now exists, whichever path
+        # wrote it (idle scan, pressure, republish persist, shutdown); a flag
+        # left set would make the next resident copy spill at once.
+        entry._apc_park_pending = False
         if keep_resident:
             # Persist only: the caller keeps serving the resident copy and
             # needs a crash-safe snapshot of exactly this content.
@@ -2928,6 +2961,41 @@ class APCv2(PrefixIndex):
             else:
                 self._drop_entry_locked(key, tokens, entry)
             self._disk_stats["disk_evictions"] += 1
+        if self._disk_bytes <= self._idle_disk_max_bytes:
+            return
+        # Leased and prefetch-pinned residents are never pressure candidates,
+        # but a disk copy such an entry retained (from its restore, or from a
+        # background spill that found it leased) is redundant: the lease and
+        # the resident pin protect the resident state, not the copy.  Only a
+        # disk pin (a parked session) keeps a copy.  Drop the others, least
+        # recently used first, so the cap stays reachable while they are
+        # held instead of overshooting by their size until an unrelated
+        # spill.  A disk-only placeholder with a live resident pin is a
+        # prefetch's promise and is left alone until the pin expires.
+        now_wall = self._wall_time()
+        redundant = []
+        for key, tokens, entry in self._legacy_order_records_locked():
+            if (
+                entry is exclude
+                or not entry.prompt_cache
+                or not getattr(entry, "_apc_disk", None)
+            ):
+                continue
+            if not (
+                self._entry_pinned(entry) or self._resident_pin_live(entry, now_wall)
+            ):
+                continue
+            redundant.append(
+                (float(getattr(entry, "_apc_last_access_at", 0.0)), key, tokens, entry)
+            )
+        redundant.sort(key=lambda record: record[0])
+        for _last_access, key, tokens, entry in redundant:
+            if self._disk_bytes <= self._idle_disk_max_bytes:
+                break
+            if self._entry_disk_pinned_locked(key, tokens, entry):
+                continue
+            self._remove_disk_files_locked(entry)
+            self._disk_stats["disk_evictions"] += 1
 
     def _spill_resident_budget_locked(
         self, *, exclude=None, include_exclude: bool = True,
@@ -3107,7 +3175,13 @@ class APCv2(PrefixIndex):
             except KeyError:
                 current = None
             if current is entry:
-                self._drop_entry_locked(key, tokens, entry)
+                # A rejected replacement of a live-pinned entry is not a
+                # loss: _store_locked kept the parked entry it replaced out
+                # of the trie for this case and restores it.
+                self._drop_entry_locked(
+                    key, tokens, entry, reason="publication rejection",
+                    loses_pins=False,
+                )
                 self._disk_stats["publication_rejections"] += 1
                 publication_rejected = True
             fits = (
@@ -3384,7 +3458,7 @@ class APCv2(PrefixIndex):
             return False
         if not restored:
             self._disk_stats["prefetch_restores_failed"] += 1
-            self._drop_entry_locked(key, tokens, entry)
+            self._drop_entry_locked(key, tokens, entry, reason="prefetch restore failure")
             return False
         current = self._tenant_pin_bytes_locked(tag[0], resident=True)
         if (
@@ -3621,24 +3695,78 @@ class APCv2(PrefixIndex):
                 "deferred_leased_entries": deferred,
             }
 
-    def park_all(self, *, time_budget_seconds: float) -> dict:
+    def park_all(
+        self, *, time_budget_seconds: float, pinned_only: bool = False
+    ) -> dict:
+        """Spill every resident entry for shutdown; pinned sessions first.
+
+        ``pinned_skipped`` counts skipped checkpoints that carry a live disk
+        pin and have no disk copy: the sessions pinning them will be missing
+        after restart.  Each is counted (``pinned_parks_lost``) and the
+        session ids are logged, never dropped silently.  With
+        ``pinned_only`` ordinary residents are left alone and only the
+        checkpoints a parked session pins are written (a park promised a
+        disk copy whatever the shutdown policy for ordinary state is).
+        ``close()`` returns this report whenever a persistent directory is
+        configured.
+        """
         deadline = time.monotonic() + max(0.0, float(time_budget_seconds))
-        spilled = skipped = 0
+        spilled = skipped = unpersisted = pinned_skipped = 0
+        lost_sessions = set()
         with self._apc_lock:
-            for key, tokens, entry in tuple(self._entry_records_locked()):
-                if time.monotonic() >= deadline:
-                    skipped += 1
-                    continue
-                if not entry.prompt_cache:
-                    continue
-                if self._entry_pinned(entry):
-                    skipped += 1
-                    continue
-                if self._spill_entry_locked(key, tokens, entry, reason="shutdown"):
-                    spilled += 1
+            records = [
+                record
+                for record in self._entry_records_locked()
+                if record[2].prompt_cache
+                and (
+                    not pinned_only
+                    or self._entry_disk_pinned_locked(*record)
+                )
+            ]
+            # A parked session promised a crash-safe copy; spend the time
+            # budget on those before ordinary residents.
+            records.sort(
+                key=lambda record: not self._entry_disk_pinned_locked(*record)
+            )
+            for key, tokens, entry in records:
+                if time.monotonic() >= deadline or self._entry_pinned(entry):
+                    parked = False
                 else:
-                    skipped += 1
-        return {"spilled": spilled, "skipped": skipped}
+                    parked = self._spill_entry_locked(
+                        key, tokens, entry, reason="shutdown"
+                    )
+                if parked:
+                    spilled += 1
+                    continue
+                skipped += 1
+                if getattr(entry, "_apc_disk", None):
+                    # A retained disk copy is current; its manifest is
+                    # written at close, so this entry survives the restart.
+                    continue
+                unpersisted += 1
+                pins = getattr(entry, "_apc_disk_pin_expiries", {})
+                if pins:
+                    pinned_skipped += 1
+                    lost_sessions.update(str(tag[1]) for tag in pins)
+            if skipped:
+                self._disk_stats["shutdown_parks_skipped"] += skipped
+            if pinned_skipped:
+                self._disk_stats["pinned_parks_lost"] += pinned_skipped
+        if pinned_skipped:
+            log.error(
+                "APCv2 shutdown could not park %d pinned session checkpoint(s) "
+                "(sessions %s): no disk copy exists, so these parked sessions "
+                "will be missing after restart",
+                pinned_skipped, sorted(lost_sessions),
+            )
+        elif unpersisted:
+            log.warning(
+                "APCv2 shutdown left %d resident checkpoint(s) without a disk "
+                "copy; they are not persisted across restart", unpersisted,
+            )
+        return {
+            "spilled": spilled, "skipped": skipped, "pinned_skipped": pinned_skipped,
+        }
 
     def suspend_resident(self) -> dict:
         """Spill every exact resident entry, dropping only individual failures.
@@ -3673,6 +3801,7 @@ class APCv2(PrefixIndex):
             ]
             resident_bytes_before = sum(int(entry.nbytes) for _, _, entry in resident)
             spilled = failures = suspended_bytes = 0
+            pinned_lost_before = self._disk_stats["pinned_parks_lost"]
             for key, tokens, entry in resident:
                 entry_bytes = int(entry.nbytes)
                 if self._spill_entry_locked(key, tokens, entry, reason="suspend"):
@@ -3683,9 +3812,14 @@ class APCv2(PrefixIndex):
                 # service-level transition.  No live generation lease should
                 # remain here; if an invariant is violated, dropping the cache
                 # entry is safer than leaving device state resident while the
-                # service reports suspended.
+                # service reports suspended.  A drop that takes a parked
+                # session's only state with it is counted and named by
+                # _drop_entry_locked and reported here as pinned_lost.
                 failures += 1
-                self._drop_entry_locked(key, tokens, entry)
+                self._drop_entry_locked(
+                    key, tokens, entry, reason="suspend spill failure"
+                )
+            pinned_lost = self._disk_stats["pinned_parks_lost"] - pinned_lost_before
             self._enforce_disk_limit_locked()
             resident_entries_after = self._resident_entry_count_locked()
             resident_bytes_after = int(self._n_bytes)
@@ -3693,6 +3827,7 @@ class APCv2(PrefixIndex):
             "entries": spilled,
             "bytes": suspended_bytes,
             "failures": failures,
+            "pinned_lost": pinned_lost,
             "resident_entries_before": len(resident),
             "resident_bytes_before": resident_bytes_before,
             "resident_entries_after": resident_entries_after,
@@ -3741,10 +3876,24 @@ class APCv2(PrefixIndex):
                         # This entry was never on disk, so none of its pins was
                         # ever honored, and its real snapshot does not fit
                         # them.  Fail those parks closed instead of rewriting
-                        # and discarding the snapshot on every scan.
+                        # and discarding the snapshot on every scan.  The
+                        # pins promised a disk copy, so this is a lost park:
+                        # count it and name the sessions here, because once
+                        # the pins are gone shutdown has nothing to report.
+                        lost_sessions = self._live_pin_sessions_locked(entry)
                         entry._apc_disk_pin_expiries = {}
                         entry._apc_park_pending = False
                         self._disk_stats["pin_cap_rejections"] += 1
+                        if lost_sessions:
+                            self._disk_stats["pinned_parks_lost"] += 1
+                            log.error(
+                                "APCv2 idle scan failed a deferred park closed: "
+                                "the written %d-token snapshot violates the pin "
+                                "cap (%s); sessions %s lose their park and keep "
+                                "only unpinned resident state",
+                                len(tokens), self._spill_capacity_violation,
+                                lost_sessions,
+                            )
                     elif self._disk_stats["spill_failures"] > failures:
                         # A snapshot that failed to serialize almost always
                         # fails the same way on the next scan.  Retry it with
@@ -3759,7 +3908,10 @@ class APCv2(PrefixIndex):
                         )
             if spilled:
                 mx.clear_cache()
-                self._enforce_disk_limit_locked()
+            # Leases close and pins expire without calling back into APCv2,
+            # so the cap is re-checked at every scan, not only after a spill
+            # (O(1) while the tier is under it).
+            self._enforce_disk_limit_locked()
             return spilled
 
     def lookup(
@@ -4055,7 +4207,9 @@ class APCv2(PrefixIndex):
                         )
                         continue
                     if not restored:
-                        self._drop_entry_locked(trie_result.model, path, entry)
+                        self._drop_entry_locked(
+                            trie_result.model, path, entry, reason="disk restore failure"
+                        )
                         retry = True
                         break
             if not retry:
@@ -4432,7 +4586,9 @@ class APCv2(PrefixIndex):
                     deferred = deferred or "budget"
                     continue
                 if not outcome:
-                    self._drop_entry_locked(key, path, entry)
+                    self._drop_entry_locked(
+                        key, path, entry, reason="disk restore failure"
+                    )
                     continue
             sidecar = getattr(entry, "sidecar", None)
             if int(getattr(sidecar, "covered_tokens", 0) or 0) != covered:
@@ -4618,12 +4774,28 @@ class APCv2(PrefixIndex):
         removed_entries = []
         resident_limit = self.max_bytes
         sequence_limit = self.max_size
-        protected_republish = bool(
+        # A parked session's persisted snapshot is its only crash-safe copy:
+        # the replacement must be persisted before that snapshot is unlinked.
+        persisted_park = bool(
             replaced_entry is not None
             and existing_disk_pins
             and self._persist_dir is not None
             and getattr(replaced_entry, "_apc_disk", None)
         )
+        # A park still waiting for its disk copy (deferred behind a lease, or
+        # parked into a non-persistent tier whose copy this store unlinks):
+        # the replacement must fit the pin caps the park was admitted under,
+        # or the parked state is kept and the publication rejected.
+        now_wall = self._wall_time()
+        pending_park = bool(
+            replaced_entry is not None
+            and not persisted_park
+            and any(
+                float(expiry) > now_wall
+                for expiry in existing_disk_pins.values()
+            )
+        )
+        protected_republish = persisted_park or pending_park
         # PrefixIndex cannot see APC retention roles, session pins, or live
         # leases.  Subsumption is safe only for disposable ordinary prefixes;
         # APC still owns size/byte eviction after publication.  Only a
@@ -4678,25 +4850,14 @@ class APCv2(PrefixIndex):
                 job.cancel()  # files removed when collected
             if reason != "replaced":
                 self._record_entry_eviction_locked(entry)
-            if not (
-                reason == "replaced"
-                and existing_disk_pins
-                and self._persist_dir is not None
-                and getattr(entry, "_apc_disk", None)
-            ):
-                self._ledger_detach_locked(entry)
-            if (
-                reason == "replaced"
-                and existing_disk_pins
-                and self._persist_dir is not None
-                and getattr(entry, "_apc_disk", None)
-            ):
-                # A parked session's persisted snapshot is its only
-                # crash-safe copy.  The replacement inherits the disk pin, so
-                # unlink the old snapshot only once the replacement's own
-                # content has been persisted in its place.
+            if reason == "replaced" and protected_republish:
+                # The replacement inherits the disk pin.  Keep the parked
+                # entry (and its snapshot) until the replacement has been
+                # persisted in its place, or admitted under the pin caps,
+                # so a failure restores it exactly.
                 superseded_parks.append(entry)
                 continue
+            self._ledger_detach_locked(entry)
             if isinstance(entry.prompt_cache, COWFrozenPromptCache):
                 entry.prompt_cache.close()
             self._remove_disk_files_locked(entry)
@@ -4712,8 +4873,11 @@ class APCv2(PrefixIndex):
                 )
                 if prior_role != self._RETENTION_ROLLING:
                     retention_role = prior_role
-            # This publication supersedes any deferred retirement of the path.
-            self._pending_retirements.pop((key, tuple(survivor.exact)), None)
+            # This publication supersedes any deferred retirement of the path
+            # (restored if the publication is rolled back below).
+            deferred_retirement = self._pending_retirements.pop(
+                (key, tuple(survivor.exact)), None
+            )
             stored_entry._apc_retention_role = retention_role
             stored_entry._apc_inserted_at = getattr(
                 replaced_entry, "_apc_inserted_at", now
@@ -4742,6 +4906,13 @@ class APCv2(PrefixIndex):
             )
             stored_entry._apc_disk_pin_expiries = existing_disk_pins
             stored_entry._apc_resident_pin_expiries = existing_resident_pins
+            # A resumed session's prefetch is settled by its first tagged
+            # lookup; the replacement keeps the expectation with the pin it
+            # inherited, so that lookup still records a hit or miss and
+            # releases the pin instead of holding it to its TTL.
+            prior_expected = getattr(replaced_entry, "_apc_prefetch_expected", None)
+            if prior_expected:
+                stored_entry._apc_prefetch_expected = set(prior_expected)
             if (
                 retention_role == self._RETENTION_DEFAULT
                 and self._retention_policy is not None
@@ -4751,36 +4922,83 @@ class APCv2(PrefixIndex):
                 self._record_turn_supersession_locked(
                     key, list(survivor.exact), stored_entry
                 )
-            if superseded_parks:
+            def restore_previous():
+                # A failed save (or a replacement the pin caps cannot admit)
+                # must not destroy the parked session's only state or claim
+                # the new state was stored.  Prefix pruning was disabled for
+                # this transaction, so restoring the exact entry also
+                # restores all accounting.
+                previous = superseded_parks[0]
+                self._ledger_detach_locked(stored_entry)
+                self._trie.add(key, tokens, previous)
+                self._lru.remove(key, tokens)
+                self._lru.push(key, tokens, previous.cache_type)
+                self._n_bytes += previous.nbytes - stored_entry.nbytes
+                self._n_bytes_by_type[stored_entry.cache_type] -= stored_entry.nbytes
+                self._n_bytes_by_type[previous.cache_type] += previous.nbytes
+                if deferred_retirement is not None:
+                    self._pending_retirements[(key, tuple(tokens))] = deferred_retirement
+                if cow_source is not None:
+                    cow_source.close()
+                return replace(capabilities, stored=False)
+
+            if superseded_parks and persisted_park:
                 persisted = self._spill_entry_locked(
                     key, list(survivor.exact), stored_entry,
                     reason="republish", keep_resident=True,
                 )
                 if not persisted:
-                    # A failed save must not destroy the parked session's
-                    # only crash-safe state or claim the new state was stored.
-                    # Prefix pruning was disabled for this transaction, so
-                    # restoring the exact entry also restores all accounting.
-                    previous = superseded_parks[0]
-                    self._ledger_detach_locked(stored_entry)
-                    self._trie.add(key, tokens, previous)
-                    self._lru.remove(key, tokens)
-                    self._lru.push(key, tokens, previous.cache_type)
-                    self._n_bytes += previous.nbytes - stored_entry.nbytes
-                    self._n_bytes_by_type[stored_entry.cache_type] -= stored_entry.nbytes
-                    self._n_bytes_by_type[previous.cache_type] += previous.nbytes
-                    if cow_source is not None:
-                        cow_source.close()
-                    return replace(capabilities, stored=False)
+                    return restore_previous()
+            elif superseded_parks:
+                # The inherited pin promises a disk copy the replacement
+                # does not have yet.  Admit it under the pin caps with its
+                # own projected size (a republish may have gained a draft
+                # sidecar); then re-arm the deferred park so the worker's
+                # next idle scan writes this state at once.  Without the
+                # flag the pin reported a copy nobody wrote until the entry
+                # happened to go idle, and a failed shutdown spill lost the
+                # session.
+                violation = self._pin_limit_violation_locked()
+                if violation is not None:
+                    self._disk_stats["pin_cap_rejections"] += 1
+                    log.warning(
+                        "APCv2 republish of a %d-token parked checkpoint does "
+                        "not fit its pins (%s); the publication is rejected "
+                        "and the parked state kept for sessions %s",
+                        len(tokens), violation,
+                        sorted(str(tag[1]) for tag in existing_disk_pins),
+                    )
+                    return restore_previous()
+                stored_entry._apc_park_pending = True
+                self._last_idle_scan = float("-inf")
+        if survivor.exact is not None:
+            self._enforce_entry_limits_locked(
+                publication=(key, list(survivor.exact), stored_entry)
+            )
+        if superseded_parks:
+            try:
+                published = self._trie.get(key, tokens) is stored_entry
+            except KeyError:
+                published = False
+            if not published:
+                # The resident budget rejected the replacement (it could
+                # neither fit beside leased entries nor spill), so the drop
+                # already released its bytes and files.  The parked entry
+                # was kept out of the trie for exactly this case: put it
+                # back untouched rather than lose the session.
+                previous = superseded_parks[0]
+                self._trie.add(key, tokens, previous)
+                self._lru.push(key, tokens, previous.cache_type)
+                self._n_bytes += int(previous.nbytes)
+                self._n_bytes_by_type[previous.cache_type] += int(previous.nbytes)
+                if deferred_retirement is not None:
+                    self._pending_retirements[(key, tuple(tokens))] = deferred_retirement
+                return replace(capabilities, stored=False)
         for entry in superseded_parks:
             self._ledger_detach_locked(entry)
             if isinstance(entry.prompt_cache, COWFrozenPromptCache):
                 entry.prompt_cache.close()
             self._remove_disk_files_locked(entry)
-        if survivor.exact is not None:
-            self._enforce_entry_limits_locked(
-                publication=(key, list(survivor.exact), stored_entry)
-            )
         self._apc_stats["stores"] += 1
         survivor = self._trie.search(key, tokens)
         return replace(capabilities, stored=survivor.exact is not None)
@@ -4812,11 +5030,18 @@ class APCv2(PrefixIndex):
         ):
             self._pending_retirements.pop((key, tokens), None)
             return True
-        if self._entry_pinned(entry):
+        if (
+            self._entry_pinned(entry)
+            or self._entry_disk_pinned_locked(key, list(tokens), entry)
+            or self._resident_pin_live(entry, self._wall_time())
+        ):
+            # A lease, a parked session's disk pin or a prefetch's resident
+            # pin keeps this state; the publisher's retirement completes
+            # once they are gone, like any other deferred retirement.
             self._pending_retirements[(key, tokens)] = role
             return False
         self._pending_retirements.pop((key, tokens), None)
-        self._drop_entry_locked(key, list(tokens), entry)
+        self._drop_entry_locked(key, list(tokens), entry, reason="retirement")
         return True
 
     def sweep_retirements(self) -> None:
@@ -4842,6 +5067,13 @@ class APCv2(PrefixIndex):
         the empty one and never a half-emptied one.  It does not stop a
         request that is already generating from storing its own result
         afterwards; drain first when that matters.
+
+        Parked sessions go with everything else (their state is as invalid
+        as the rest), so the report carries ``pinned_parks_lost`` (the
+        checkpoints with a live disk pin that were destroyed, resident-pending
+        and disk-only alike) and ``lost_sessions`` (their session ids, at
+        most ``_LOST_SESSIONS_REPORT_LIMIT``); the caller is expected to
+        surface them.
         """
         self._wait_spill_jobs(_SPILL_DRAIN_SECONDS)
         with self._apc_lock:
@@ -4869,17 +5101,43 @@ class APCv2(PrefixIndex):
             )
         self._spill_jobs = []
 
-    def _clear_locked(self, *, release_memory: bool = True) -> dict:
+    def _clear_locked(
+        self, *, release_memory: bool = True, report_pinned_losses: bool = True
+    ) -> dict:
+        """``report_pinned_losses=False`` is for the non-persistent ``close()``:
+        without a persistent directory every park ends with the process by
+        contract, so that clear is not a loss to count."""
         self._abandon_spill_jobs_locked()
         self._turn_supersessions = {}
         entries = list(_iter_trie_entries(self._trie))
+        pinned_lost = 0
+        lost_sessions = set()
+        if report_pinned_losses:
+            now_wall = self._wall_time()
+            for entry in entries:
+                sessions = self._live_pin_sessions_locked(entry, now_wall=now_wall)
+                if sessions:
+                    pinned_lost += 1
+                    lost_sessions.update(sessions)
+        lost_sessions = sorted(lost_sessions)
         report = {
             "entries": len(entries),
             "sidecars": sum(
                 (1 for entry in entries if getattr(entry, "sidecar", None) is not None)
             ),
             "bytes": int(self._n_bytes),
+            "pinned_parks_lost": pinned_lost,
+            "lost_sessions": lost_sessions[: self._LOST_SESSIONS_REPORT_LIMIT],
         }
+        if pinned_lost:
+            self._disk_stats["pinned_parks_lost"] += pinned_lost
+            log.error(
+                "APCv2 clear destroyed %d pinned session checkpoint(s) "
+                "(sessions %s%s); those parked sessions are gone",
+                pinned_lost, report["lost_sessions"],
+                "" if len(lost_sessions) <= self._LOST_SESSIONS_REPORT_LIMIT
+                else f" and {len(lost_sessions) - self._LOST_SESSIONS_REPORT_LIMIT} more",
+            )
         self._pending_retirements.clear()
         fresh_trie = PromptTrie()
         fresh_lru = PrefixIndex.CacheOrder(list(self._lru._ordering))
@@ -5034,11 +5292,19 @@ class APCv2(PrefixIndex):
         persist_resident: bool = False,
         time_budget_seconds: float = 0.0,
         release_memory: bool = True,
-    ) -> None:
-        """Close APC ownership and release the persistent directory lock."""
+    ) -> Optional[dict]:
+        """Close APC ownership and release the persistent directory lock.
+
+        With a persistent directory the ``park_all`` report is returned so
+        the caller can see what shutdown parking skipped (``pinned_skipped``
+        is the count of parked session checkpoints that will be missing
+        after restart).  ``persist_resident`` decides whether ordinary
+        resident state is parked; a checkpoint a parked session pins is
+        always written (or reported) because the park promised a copy.
+        """
         with self._apc_lock:
             if self._closed:
-                return
+                return None
             self._closed = True
             self._capsule_generation.advance()
             self._cancel_pending_prefetch_locked()
@@ -5055,11 +5321,17 @@ class APCv2(PrefixIndex):
                 "keeping the persistent directory lock so no other owner "
                 "writes beside it", 2 * _SPILL_DRAIN_SECONDS,
             )
-        if self._persist_dir is not None and persist_resident:
-            self.park_all(time_budget_seconds=time_budget_seconds)
+        report = None
+        if self._persist_dir is not None:
+            report = self.park_all(
+                time_budget_seconds=time_budget_seconds,
+                pinned_only=not persist_resident,
+            )
         with self._apc_lock:
             if self._persist_dir is None:
-                self._clear_locked(release_memory=release_memory)
+                self._clear_locked(
+                    release_memory=release_memory, report_pinned_losses=False
+                )
             else:
                 entries = list(self._entry_records_locked())
                 for key, tokens, entry in entries:
@@ -5081,6 +5353,7 @@ class APCv2(PrefixIndex):
                     mx.clear_cache()
             if writer_stopped:
                 self._release_persist_lock()
+        return report
 
     def resident_nbytes(self) -> int:
         """Bytes of every resident checkpoint, leased or not."""

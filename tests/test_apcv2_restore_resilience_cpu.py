@@ -188,3 +188,88 @@ def test_strikes_are_consecutive_a_successful_restore_clears_them(parked, monkey
     # Three transient errors, but never three in a row: the park survives.
     assert _snapshots(path)
     assert apc.session_state(*TAG)["state"] == "disk"
+
+
+def _disk_unit(directory):
+    """On-disk size of one spilled 8-token entry."""
+    probe = APCv2(
+        max_size=8, layout_name="layout-a", idle_disk_seconds=3600,
+        idle_disk_dir=str(directory),
+    )
+    key = APCKey("probe")
+    probe.store(key, list(range(8)), [_state(8)])
+    with probe._apc_lock:
+        entry = probe._trie.get(key, list(range(8)))
+        assert probe._spill_entry_locked(key, list(range(8)), entry, reason="idle")
+    unit = int(probe._disk_bytes)
+    probe.close()
+    return unit
+
+
+def _restored_and_leased(apc, tokens, seed, clock):
+    clock[0] += 1
+    apc.store(KEY, tokens, [_state(8, seed)])
+    with apc._apc_lock:
+        entry = apc._trie.get(KEY, tokens)
+        assert apc._spill_entry_locked(KEY, tokens, entry, reason="idle")
+    clock[0] += 1
+    hit = apc.lookup(KEY, tokens + [1], allow_disk_restore=True)
+    assert hit.hit and hit.cached_tokens == 8
+    return hit.cache
+
+
+def test_disk_cap_reclaims_redundant_copies_of_leased_residents(tmp_path):
+    """apc-sessions#2: a restored entry keeps its disk copy while leased; that
+    copy is still a disk-tier eviction candidate (the lease protects the
+    resident state, the disk pin protects parked copies)."""
+    unit = _disk_unit(tmp_path / "probe")
+    clock = [0.0]
+    apc = APCv2(
+        max_size=8, layout_name="layout-a", idle_disk_seconds=1.0,
+        idle_disk_dir=str(tmp_path), idle_disk_max_bytes=int(unit * 2.5),
+        now_fn=lambda: clock[0],
+    )
+    a, b, c = [10] * 8, [20] * 8, [30] * 8
+    lease_a = _restored_and_leased(apc, a, 1, clock)
+    lease_b = _restored_and_leased(apc, b, 2, clock)
+    assert apc._disk_bytes == 2 * unit
+    clock[0] += 1
+    apc.store(KEY, c, [_state(8, 3)], session_tag=TAG)
+    assert apc.park_session(*TAG, ttl_seconds=600)["state"] == "disk"
+    # The park pushed the tier to 3 units against a 2.5-unit cap; the only
+    # unpinned disk records belong to the leased residents a and b.
+    assert apc._disk_bytes <= apc._idle_disk_max_bytes, (apc._disk_bytes, unit)
+    assert apc.apc_stats["idle_disk"]["disk_evictions"] == 1
+    with apc._apc_lock:
+        entry_a = apc._trie.get(KEY, a)
+        entry_b = apc._trie.get(KEY, b)
+        entry_c = apc._trie.get(KEY, c)
+        # The least recently used leased resident lost only its disk copy.
+        assert entry_a.prompt_cache and not entry_a._apc_disk
+        assert entry_b.prompt_cache and entry_b._apc_disk
+        assert not entry_c.prompt_cache and entry_c._apc_disk
+    assert apc.session_state(*TAG)["state"] == "disk"
+    keys, _values = lease_a[0].state
+    assert keys[0, 0, :8, 0].tolist() == list(range(1, 9))
+    lease_a.close()
+    lease_b.close()
+    apc.close()
+
+
+def test_failed_restore_of_a_parked_session_is_counted_as_a_lost_park(parked, monkeypatch, caplog):
+    """A corrupt snapshot drops the entry; when it carried a live disk pin the
+    parked session is gone, which is counted (pinned_parks_lost) and named."""
+    import logging
+
+    apc, path = parked
+    _failing_loader(monkeypatch, ValueError("invalid safetensors"), times=1)
+    with caplog.at_level(logging.ERROR, logger=apc_mod.log.name):
+        assert not apc.lookup(KEY, TOKENS + [99], session_tag=TAG).hit
+    assert _snapshots(path) == []
+    assert apc.apc_stats["idle_disk"]["pinned_parks_lost"] == 1
+    assert any(
+        "pinned session" in record.getMessage() and TAG[1] in record.getMessage()
+        for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
+    with pytest.raises(APCSessionNotFound):
+        apc.session_state(*TAG)

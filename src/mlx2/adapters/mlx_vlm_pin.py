@@ -51,7 +51,8 @@ def mlx_vlm_runtime() -> dict | None:
 
     Returns ``None`` when mlx-vlm is not installed.  ``revision`` comes from
     the VCS install record, or from the checkout of an editable install; it is
-    ``None`` when neither is available (a plain wheel).
+    ``None`` when neither is available (a plain wheel). When another package
+    shadows a VCS install, only that imported checkout can supply its revision.
     """
     try:
         dist = importlib.metadata.distribution("mlx-vlm")
@@ -64,10 +65,16 @@ def mlx_vlm_runtime() -> dict | None:
     except (OSError, ValueError):
         direct = {}
     revision = (direct.get("vcs_info") or {}).get("commit_id")
+    spec = importlib.util.find_spec("mlx_vlm")
+    origin = Path(spec.origin).resolve() if spec is not None and spec.origin else None
     if revision is None:
-        spec = importlib.util.find_spec("mlx_vlm")
-        if spec is not None and spec.origin is not None:
-            revision = _git_head(Path(spec.origin).resolve().parents[1])
+        if origin is not None:
+            revision = _git_head(origin.parents[1])
+    elif origin != Path(dist.locate_file("mlx_vlm/__init__.py")).resolve():
+        # direct_url describes this distribution, not whichever package wins
+        # Python's import resolution (including an already imported package).
+        # Preserve explicit clean-checkout overrides used by candidate routes.
+        revision = _git_head(origin.parents[1]) if origin is not None else None
     return {
         "version": dist.version,
         "source": direct.get("url", "index"),
