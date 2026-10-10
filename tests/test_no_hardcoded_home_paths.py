@@ -8,14 +8,26 @@ under the home directory are spelled Path.home() / ... instead.
 
 import ast
 import importlib.util
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Match actual home-directory paths, not every occurrence of a tilde in prose.
+# Keep this pattern independent of the current username so a public projection
+# does not turn a user-specific sentinel into a broad "~ in string" check.
+ABSOLUTE_HOME_PATH = re.compile(r"^/(?:Users/(?!Shared/)|home/)[^/]+/")
 
 # scripts/benchmark_adaptive_mtp.py is hash-pinned by scripts/qualify_serving.py
 # (APPROVED_ADAPTIVE_BENCHMARK_SHA256); only the qualifier lane may change it
 # and re-pin. Remove this entry when that lands.
 PINNED_EXCEPTIONS: set = set()
+
+
+def _is_home_path_literal(value):
+    if "[" in value or "/USER/" in value:
+        return False
+    return value.startswith("~/") or ABSOLUTE_HOME_PATH.match(value) is not None
 
 
 def _offending_literals(path):
@@ -34,9 +46,32 @@ def _offending_literals(path):
             continue
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             value = node.value
-            if "~" in value or value.startswith("~/"):
+            if _is_home_path_literal(value):
                 hits.append((node.lineno, value.splitlines()[0][:80]))
     return hits
+
+
+def test_literal_home_path_scanner_matches_paths_not_tilde_prose(tmp_path):
+    user_home = "/" + "Users/" + "sample/"
+    values = [
+        "a ~ character in technical prose",
+        "~30 tokens",
+        "~/models/model",
+        user_home + "models/model",
+        "/home/sample/models/model",
+        "/Users/Shared/models/model",
+        "prefix " + user_home + "models/model",
+        "/Users/[name]/models/model",
+        "/home/USER/models/model",
+    ]
+    source = tmp_path / "path_literals.py"
+    source.write_text("\n".join(f"VALUE_{i} = {value!r}" for i, value in enumerate(values, 1)))
+
+    assert _offending_literals(source) == [
+        (3, "~/models/model"),
+        (4, "/Users/sample/models/model"),
+        (5, "/home/sample/models/model"),
+    ]
 
 
 def test_no_hardcoded_home_paths_in_scripts_or_src():

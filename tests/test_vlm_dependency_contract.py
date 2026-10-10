@@ -305,32 +305,40 @@ def test_tower_reuse_bench_gates_on_the_dependency_contract(source, monkeypatch)
             ), label)
 
 
-def test_pre_contract_media_records_no_longer_match_the_served_identity():
-    """Every checked-in VLM companion was recorded with the legacy
-    ``settings.mlx_vlm`` shape.  The engine now publishes the dependency
-    content identity there, and ``mlx_vlm`` is deliberately not provenance
-    only, so those routes serve unqualified until the producers are re-run."""
+def test_legacy_media_record_is_refused_against_served_contract():
+    """A persisted pre-contract setting cannot be rebound to a current route."""
     from mlx2 import qualification
 
-    assert "mlx_vlm" not in qualification.PROVENANCE_ONLY_SETTINGS
-    records = sorted(
-        list((REPO / "docs/experiments").glob("*-M3-LIVE-MEDIA-QUALIFICATION-*.json"))
-        + list((REPO / "qualification/runs").glob("*/*/media-recert-*/*.json"))
+    family = "qwen2_5_vl"
+    revisions = getattr(qualification, "PINNED_MEDIA_SOURCE_REVISIONS", None)
+    source_revision = (
+        revisions[family]
+        if revisions is not None
+        else qualification.PINNED_MEDIA_SOURCE_REVISION
     )
-    assert records
-    legacy = []
-    for path in records:
-        record = json.loads(path.read_text())
-        recorded = record["settings"]["mlx_vlm"]
-        served = _content_identity(record["source_revision"], record["model_type"])
-        if recorded.get("schema") == served["schema"]:
-            continue
-        legacy.append(path.name)
-        rebound = {**record, "qualification_harness":
-                   qualification.APPROVED_MEDIA_PRODUCERS[record["model_type"]][0]}
-        with pytest.raises(ValueError, match="does not match serving settings"):
-            qualification.validate_adapter_qualification(
-                rebound, runtime=record["runtime"], artifact=record["artifact"],
-                settings={**record["settings"], "mlx_vlm": served},
-            )
-    assert legacy, "no legacy record left: drop this test with the requalification"
+    runtime = {"source_sha256": "a" * 64}
+    artifact = {"artifact_id": "unit-test"}
+    legacy_settings = {"mlx_vlm": _legacy_runtime(source_revision)}
+    report = {
+        "schema": "mlx2.media-serving-qualification.v1",
+        "model_type": family,
+        "source_revision": source_revision,
+        "qualification_harness": qualification.APPROVED_MEDIA_PRODUCERS[family][0],
+        "runtime": runtime,
+        "artifact": artifact,
+        "settings": legacy_settings,
+    }
+    served_settings = {
+        **legacy_settings,
+        "mlx_vlm": _content_identity(source_revision, family=family),
+    }
+
+    assert "mlx_vlm" not in qualification.PROVENANCE_ONLY_SETTINGS
+    assert "source_sha256" not in legacy_settings["mlx_vlm"]
+    with pytest.raises(ValueError, match="does not match serving settings"):
+        qualification.validate_adapter_qualification(
+            report,
+            runtime=runtime,
+            artifact=artifact,
+            settings=served_settings,
+        )
