@@ -739,6 +739,7 @@ def validate_request(
         "top_logprobs",
         "logprobs_start",
         "logprobs_end",
+        "return_token_trace",
         "response_format",
         "grammar",
         "batch_cohort",
@@ -949,6 +950,8 @@ def validate_request(
         body = {**body, "logprobs": True, "top_logprobs": legacy_count}
     if "verify_bitexact" in body and not isinstance(body["verify_bitexact"], bool):
         raise ValueError("verify_bitexact must be boolean")
+    if "return_token_trace" in body and type(body["return_token_trace"]) is not bool:
+        raise ValueError("return_token_trace must be boolean")
     top_logprobs = body.get("top_logprobs", 0)
     if isinstance(top_logprobs, bool) or not isinstance(top_logprobs, int) or not 0 <= top_logprobs <= MAX_TOP_LOGPROBS:
         raise ValueError(f"top_logprobs must be an integer from 0 to {MAX_TOP_LOGPROBS}")

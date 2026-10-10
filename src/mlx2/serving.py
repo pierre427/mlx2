@@ -24,6 +24,7 @@ import time
 import uuid
 
 from .logprobs import token_logprob, wants_logprobs, wants_logprobs_at
+from .generation_trace import GeneratedTokenTrace
 from .request_limits import (
     DEFAULT_OUTPUT_TOKENS,
     resolve_output_limit,
@@ -1033,6 +1034,7 @@ class HostPromptCache:
             "top_logprobs",
             "logprobs_start",
             "logprobs_end",
+            "return_token_trace",
             "logit_bias",
             "repetition_penalty",
             "presence_penalty",
@@ -1168,6 +1170,21 @@ def ordinary_compute_width(
         receipt = getattr(response, "speculative_receipt", None) or {}
         return observed_width if receipt.get("execution") == "ordinary_target" else None
     return observed_width if not mtp or response.mtp_receipt is None else None
+
+
+def record_generation_output(job, response, *, mtp, external_draft, prompt_lookup):
+    """Record host metadata at the sampled-output seam, before text parsing."""
+    width = int(response.execution_width)
+    ordinary_width = ordinary_compute_width(
+        response, width, mtp=mtp, external_draft=external_draft,
+        prompt_lookup=prompt_lookup,
+    )
+    if ordinary_width is not None:
+        job.ordinary_compute_widths.add(ordinary_width)
+    if job.request.get("return_token_trace") is True:
+        if job.token_trace is None:
+            job.token_trace = GeneratedTokenTrace()
+        job.token_trace.append(int(response.token), width, ordinary_width)
 
 
 def minimum_tokens_processor(array_module, eos_token_ids, prompt_tokens, minimum):
@@ -3200,6 +3217,8 @@ class Job:
     native_cohort_memory_receipt: dict | None = None
     last_progress: float = 0
     observed_width: int = 1
+    ordinary_compute_widths: set[int] = field(default_factory=set)
+    token_trace: GeneratedTokenTrace | None = None
     admission_hit: object = None
     admission_tokens: list | None = None
     prompt_tokenization_receipt: dict | None = None
@@ -11853,6 +11872,10 @@ class ServingEngine:
                         if job.first_token is None:
                             job.first_token = time.monotonic()
                         job.completion_tokens += 1
+                        record_generation_output(
+                            job, response, mtp=self.mtp,
+                            external_draft=external_draft, prompt_lookup=prompt_lookup,
+                        )
                         if job.completion_tokens == 1:
                             # The prompt frontier can no longer satisfy any
                             # unresolved dynamic boundary.  Waiting followers
@@ -12229,6 +12252,7 @@ class ServingEngine:
                                         "default_max_tokens": self.default_max_tokens,
                                         "logprobs": wants_logprobs(job.request),
                                         "top_logprobs": job.request.get("top_logprobs", 0),
+                                        "return_token_trace": job.request.get("return_token_trace", False),
                                         "logprob_semantics": (
                                             ("execution_target: external=transformed_target_verifier" if external_draft else "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier")
                                             if wants_logprobs(job.request) else None
@@ -12347,6 +12371,9 @@ class ServingEngine:
                                         ),
                                     },
                                     "ordinary_compute_width": ordinary_compute_width(response, job.observed_width, mtp=self.mtp, external_draft=external_draft, prompt_lookup=prompt_lookup),
+                                    "ordinary_compute_widths": sorted(job.ordinary_compute_widths),
+                                    **({"token_trace": job.token_trace.receipt()}
+                                       if job.token_trace is not None else {}),
                                     "mtp": response.mtp_receipt,
                                     "speculation": getattr(response, "speculative_receipt", None),
                                     "spomin_live_surgery": job.spomin_receipt,
