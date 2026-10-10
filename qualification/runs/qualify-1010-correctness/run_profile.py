@@ -114,11 +114,17 @@ def ladder_argv(options: dict, *, url: str, output: Path, server_pid: int) -> li
     argv = [sys.executable, str(THERMAL), "--url", url, "--output", str(output)]
     for key, value in options.items():
         flag = "--" + key
-        if isinstance(value, bool):
+        if key == "performance-mode":
+            if not isinstance(value, bool):
+                raise TypeError("performance-mode must be a JSON boolean")
             if value:
                 argv.append(flag)
-        elif isinstance(value, (dict, list)):
+        elif key == "mtp-policy" or isinstance(value, (dict, list)):
             argv.extend((flag, json.dumps(value, separators=(",", ":"))))
+        elif isinstance(value, bool):
+            raise TypeError(
+                f"{key} must use its explicit JSON or on/off representation"
+            )
         else:
             argv.extend((flag, str(value)))
     argv.extend(("--server-pid", str(server_pid)))
@@ -223,7 +229,9 @@ def main(argv=None):
         server_command = expand_server_argv(server_template, port)
         url = f"http://127.0.0.1:{port}"
         probe_url = url + "/v1/status"
-        run_command = None
+        # Check option names, required fields, and argument types before the
+        # server can load a model or acquire expensive device resources.
+        ladder_argv(ladder_options, url=url, output=args.output, server_pid=0)
     except (TypeError, ValueError) as error:
         parser.error(str(error))
 

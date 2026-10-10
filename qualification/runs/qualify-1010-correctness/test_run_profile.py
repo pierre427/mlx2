@@ -7,6 +7,7 @@ import pytest
 from run_profile import (
     expand_server_argv,
     ladder_argv,
+    main,
     validate_ladder_options,
     wait_ready,
 )
@@ -39,6 +40,7 @@ def test_ladder_command_uses_profile_args_without_shell():
         "apc-persist-on-shutdown": "off",
         "max-lanes": 2,
         "max-inflight": 4,
+        "wide": 2,
         "prefill-step": 1024,
         "prefill-policy": {
             "prefill_depth_budget": None,
@@ -50,7 +52,6 @@ def test_ladder_command_uses_profile_args_without_shell():
             "draft_loop_threshold": 0.2,
             "draft_loop_widths": "1,2",
         },
-        "wide": 2,
     }
     command = ladder_argv(
         profile, url="http://127.0.0.1:1234", output=Path("x.json"), server_pid=12
@@ -66,6 +67,164 @@ def test_ladder_command_uses_profile_args_without_shell():
             output=Path("x.json"),
             server_pid=12,
         )
+
+
+@pytest.mark.parametrize("mtp_policy", [True, False])
+@pytest.mark.parametrize("performance_mode", [True, False])
+def test_ladder_command_preserves_json_booleans_and_store_true_flag(
+    mtp_policy, performance_mode
+):
+    profile = {
+        "model": "Qwen3.8",
+        "model-id": "qwen",
+        "route": "self_mtp",
+        "artifact-identity": "fingerprint",
+        "max-context": 8192,
+        "cache-bytes": 4096,
+        "apc-persistence": "off",
+        "apc-persist-on-shutdown": "off",
+        "max-lanes": 2,
+        "max-inflight": 4,
+        "prefill-step": 1024,
+        "prefill-policy": {"prefill_step_autoscale": False},
+        "mtp-policy": mtp_policy,
+        "draft-loop-policy": {"draft_loop": "auto"},
+        "performance-mode": performance_mode,
+    }
+    command = ladder_argv(
+        profile, url="http://127.0.0.1:1234", output=Path("x.json"), server_pid=12
+    )
+
+    assert command[command.index("--mtp-policy") + 1] == json.dumps(mtp_policy)
+    assert ("--performance-mode" in command) is performance_mode
+
+
+def test_main_passes_profile_json_boolean_to_ladder_cli(tmp_path, monkeypatch):
+    import run_profile
+
+    server_args = tmp_path / "server.json"
+    server_args.write_text(
+        json.dumps(
+            ["python", "-m", "mlx2.server", "--host", "127.0.0.1", "--port", "@PORT@"]
+        )
+    )
+    options = {
+        "model": "Qwen3.8",
+        "model-id": "qwen",
+        "route": "self_mtp",
+        "artifact-identity": "fingerprint",
+        "max-context": 8192,
+        "cache-bytes": 4096,
+        "apc-persistence": "off",
+        "apc-persist-on-shutdown": "off",
+        "max-lanes": 2,
+        "max-inflight": 4,
+        "wide": 2,
+        "prefill-step": 1024,
+        "prefill-policy": {"prefill_step_autoscale": False},
+        "mtp-policy": False,
+        "draft-loop-policy": {"draft_loop": "auto"},
+        "performance-mode": True,
+    }
+    ladder_options = tmp_path / "ladder.json"
+    ladder_options.write_text(json.dumps(options))
+    output = tmp_path / "report.json"
+    server_log = tmp_path / "server.log"
+    monkeypatch.setattr(run_profile, "reserve_port", lambda: 12345)
+    monkeypatch.setattr(run_profile, "wait_ready", lambda *_args: {})
+    monkeypatch.setattr(run_profile, "stop_server", lambda *_args: None)
+    launched = []
+
+    class FinishedProcess:
+        pid = 2468
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(
+        run_profile.subprocess,
+        "Popen",
+        lambda command, **_kwargs: (launched.append(command) or FinishedProcess()),
+    )
+
+    assert main(
+        [
+            "--server-argv-json",
+            str(server_args),
+            "--ladder-options-json",
+            str(ladder_options),
+            "--output",
+            str(output),
+            "--server-log",
+            str(server_log),
+        ]
+    ) == 0
+    assert len(launched) == 2
+    assert launched[1][launched[1].index("--mtp-policy") + 1] == "false"
+    assert "--performance-mode" in launched[1]
+
+
+@pytest.mark.parametrize("invalid_profile", ["missing-required", "unexpected-boolean"])
+def test_main_rejects_invalid_profile_before_server_launch(
+    tmp_path, monkeypatch, invalid_profile
+):
+    import run_profile
+
+    server_args = tmp_path / "server.json"
+    server_args.write_text(
+        json.dumps(
+            ["python", "-m", "mlx2.server", "--host", "127.0.0.1", "--port", "@PORT@"]
+        )
+    )
+    options = {
+        "model": "Qwen3.8",
+        "model-id": "qwen",
+        "route": "self_mtp",
+        "artifact-identity": "fingerprint",
+        "max-context": 8192,
+        "cache-bytes": 4096,
+        "apc-persistence": "off",
+        "apc-persist-on-shutdown": "off",
+        "max-lanes": 2,
+        "max-inflight": 4,
+        "wide": 2,
+        "prefill-step": 1024,
+        "prefill-policy": {"prefill_step_autoscale": False},
+        "mtp-policy": False,
+        "draft-loop-policy": {"draft_loop": "auto"},
+    }
+    if invalid_profile == "missing-required":
+        options.pop("model")
+    else:
+        options["timeout"] = False
+    ladder_options = tmp_path / "ladder.json"
+    ladder_options.write_text(json.dumps(options))
+    launched = []
+    monkeypatch.setattr(run_profile, "reserve_port", lambda: 12345)
+    monkeypatch.setattr(
+        run_profile.subprocess,
+        "Popen",
+        lambda command, **_kwargs: launched.append(command),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                "--server-argv-json",
+                str(server_args),
+                "--ladder-options-json",
+                str(ladder_options),
+                "--output",
+                str(tmp_path / "report.json"),
+                "--server-log",
+                str(tmp_path / "server.log"),
+            ]
+        )
+    assert error.value.code == 2
+    assert launched == []
 
 
 def test_mock_local_status_readiness_is_cpu_only():

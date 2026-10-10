@@ -129,3 +129,55 @@ def test_foreign_snapshot_matches_decision_server_only_at_module_boundary(monkey
 
     assert set(snapshot) == {101, 105}
     assert snapshot[101]["command"].endswith("mlx2.decisions.server")
+
+
+@pytest.mark.parametrize("shutdown", [False, True])
+def test_cli_binds_shutdown_policy_before_requests(monkeypatch, tmp_path, shutdown):
+    import json
+    import thermal_ladder
+
+    class StopBeforeRequests(Exception):
+        pass
+
+    settings = {**PROFILE, "mtp": True, "apc_persist_on_shutdown": shutdown}
+
+    class StatusOnly:
+        def __init__(self, *args):
+            pass
+
+        def status(self):
+            return {
+                "settings": settings, "artifact": "a", "max_context": 8192,
+                "route_receipt": {"route": "self_mtp"},
+            }
+
+    original = thermal_ladder.validate_serving_profile
+
+    def stop_after_validation(status, **kwargs):
+        # Exercise the actual CLI caller and required-keyword contract, then
+        # stop before thermal admission, tokenization or inference requests.
+        result = original(status, **kwargs)
+        assert result["apc_persist_on_shutdown"] is shutdown
+        raise StopBeforeRequests
+
+    monkeypatch.setattr(thermal_ladder, "Stream", StatusOnly)
+    monkeypatch.setattr(
+        thermal_ladder, "validate_serving_profile", stop_after_validation
+    )
+    args = [
+        "--url", "http://127.0.0.1:1", "--output", str(tmp_path / "unused.json"),
+        "--model", "test", "--model-id", "test", "--route", "self_mtp",
+        "--artifact-identity", "a", "--max-context", "8192",
+        "--cache-bytes", str(4 << 30), "--max-lanes", "4", "--max-inflight", "8",
+        "--prefill-step", "2048", "--apc-persistence", "off",
+        "--apc-persist-on-shutdown", "on" if shutdown else "off",
+        "--mtp-policy", "true", "--server-pid", "123",
+        "--draft-loop-policy", json.dumps({key: PROFILE[key] for key in (
+            "draft_loop", "draft_loop_threshold", "draft_loop_widths"
+        )}),
+        "--prefill-policy", json.dumps({key: PROFILE[key] for key in (
+            "prefill_depth_budget", "prefill_step_autoscale"
+        )}),
+    ]
+    with pytest.raises(StopBeforeRequests):
+        thermal_ladder.main(args)

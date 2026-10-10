@@ -662,6 +662,7 @@ def main(argv=None):
             max_inflight=args.max_inflight,
             prefill_step=args.prefill_step,
             apc_persistence=args.apc_persistence == "on",
+            apc_persist_on_shutdown=args.apc_persist_on_shutdown == "on",
             mtp_policy=args.mtp_policy,
             draft_loop_policy=args.draft_loop_policy,
             prefill_policy=args.prefill_policy,
