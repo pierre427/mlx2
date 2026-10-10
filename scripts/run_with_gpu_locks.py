@@ -251,6 +251,13 @@ def main(argv: list[str] | None = None) -> int:
     rc = 1
     waiter.touch()
     save()
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    previous_handlers = {
+        signum: signal.signal(signum, interrupted)
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+    }
     try:
         while predecessor := earlier_waiter(waiter, created):
             receipt["waiting_behind"] = predecessor
@@ -307,6 +314,8 @@ def main(argv: list[str] | None = None) -> int:
         receipt["finished_at"] = time.time()
         receipt["updated_at"] = time.time()
         _save_terminal(args.receipt, immutable_receipt, receipt)
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
     return rc
 
 

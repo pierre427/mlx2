@@ -103,3 +103,62 @@ def test_retries_keep_immutable_attempts_and_update_legacy(
     assert json.loads(second_immutable.read_text()) == second
     assert json.loads(legacy.read_text()) == second
     assert not list(tmp_path.glob(".*.tmp.*"))
+
+
+@pytest.mark.parametrize("signum", [15, 1])
+def test_signal_stops_owned_child_before_restoring_locks(tmp_path, signum):
+    import os
+    import subprocess
+    import sys
+    import time
+
+    locks = (tmp_path / "shared.lock", tmp_path / "tmp.lock")
+    for lock in locks:
+        lock.touch()
+    ready = tmp_path / "child-ready"
+    receipt = tmp_path / "receipt.json"
+    child_code = (
+        "import os,time; from pathlib import Path; "
+        f"Path({str(ready)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    )
+    bootstrap = f"""
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("wrapper", {str(SCRIPT)!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.LOCKS = tuple(Path(p) for p in {tuple(map(str, locks))!r})
+module.WAITERS = Path({str(tmp_path / 'waiters')!r})
+module.foreign_model_processes = list
+raise SystemExit(module.main([
+    "--session", "cpu-signal-test", "--label", "cleanup", "--receipt", {str(receipt)!r},
+    "--", sys.executable, "-c", {child_code!r},
+]))
+"""
+    wrapper = subprocess.Popen([sys.executable, "-c", bootstrap])
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and wrapper.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "CPU child did not start"
+        child_pid = int(ready.read_text())
+        os.kill(wrapper.pid, signum)
+        assert wrapper.wait(timeout=15) == 130
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
+        assert all(lock.is_file() and lock.stat().st_size == 0 for lock in locks)
+        assert not list((tmp_path / "waiters").iterdir())
+        recorded = json.loads(receipt.read_text())
+        assert recorded["status"] == "interrupted"
+        assert recorded["child_terminated_by_wrapper"] is True
+        assert recorded["command_returncode"] < 0
+    finally:
+        if wrapper.poll() is None:
+            wrapper.kill()
+            wrapper.wait(timeout=10)
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, 9)
+            except ProcessLookupError:
+                pass
