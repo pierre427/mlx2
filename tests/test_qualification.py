@@ -12,6 +12,30 @@ from mlx2.qualification import (
 )
 
 
+def test_text_batching_does_not_require_multimodal_batch_evidence():
+    from mlx2.contracts import Capability
+    from mlx2.adapters.gemma4 import GEMMA4_A4B
+    from mlx2.adapters.lfm25_vl import LFM25_VL
+    from mlx2.adapters.mlx_vlm import GEMMA3N, MINICPMO
+    from mlx2.adapters.qwen25_vl import DESCRIPTOR as QWEN25_VL
+    from mlx2.adapters.smolvlm2 import DESCRIPTOR as SMOLVLM
+
+    # Text continuous batching is covered by the ordinary batch checks. Only
+    # media adapters that declare this probe require multimodal batch evidence.
+    assert {"batch", "mixed_warm"} <= required_generic_checks(QWEN4_FLASH_NEXT)
+    assert "multimodal_continuous_batch" not in required_descriptor_checks(
+        QWEN4_FLASH_NEXT
+    )
+    descriptors = (GEMMA3N, GEMMA4_A4B, MINICPMO, SMOLVLM, LFM25_VL, QWEN25_VL)
+    for descriptor in descriptors:
+        requires_media_batch = (
+            Capability.CONTINUOUS_BATCH in descriptor.capabilities
+        )
+        assert (
+            "multimodal_continuous_batch" in required_descriptor_checks(descriptor)
+        ) is requires_media_batch
+
+
 def test_generic_checks_follow_adapter_capabilities():
     from mlx2.adapters.lfm25_vl import LFM25_VL
 
@@ -119,6 +143,7 @@ def test_multimodal_descriptor_requires_adapter_owned_live_checks(tmp_path):
         "multimodal_video",
         "multimodal_audio_input",
         "multimodal_encoder_batching",
+        "multimodal_continuous_batch",
         "multimodal_apcv2_reuse",
     }
     path = tmp_path / "qualification.json"
@@ -140,11 +165,15 @@ def test_multimodal_descriptor_requires_adapter_owned_live_checks(tmp_path):
         descriptor=GEMMA3N,
         name="mlx-vlm-apcv2-ordinary",
     )
-    with pytest.raises(ValueError, match="cannot produce adapter checks"):
+    with pytest.raises(
+        ValueError, match="adapter qualification producer is unavailable"
+    ):
         load_qualified_route(path, **args)
     record["checks"].update({name: {"passed": True} for name in required})
     path.write_text(json.dumps(record))
-    with pytest.raises(ValueError, match="cannot produce adapter checks"):
+    with pytest.raises(
+        ValueError, match="adapter qualification producer is unavailable"
+    ):
         load_qualified_route(path, **args)
 
 

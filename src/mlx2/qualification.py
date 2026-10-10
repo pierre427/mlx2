@@ -1468,7 +1468,6 @@ def required_descriptor_checks(descriptor):
         (Capability.VIDEO, "multimodal_video"),
         (Capability.AUDIO, "multimodal_audio_input"),
         (Capability.OUTPUT_AUDIO, "output_audio"),
-        (Capability.CONTINUOUS_BATCH, "multimodal_continuous_batch"),
     ):
         if capability in descriptor.capabilities:
             required.add(check)
