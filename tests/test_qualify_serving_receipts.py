@@ -1854,3 +1854,29 @@ def test_cross_host_preflight_binds_both_interpreters(tmp_path, mutation):
     _write_cross_host(path, bundle)
     with pytest.raises(AssertionError, match="cross-host preflight"):
         qualify.validate_cross_host_preflight_receipt(path, **arguments)
+
+
+@pytest.mark.parametrize("mutate_identity", [False, True])
+def test_full_preflight_refuses_source_changes_during_passing_tests(tmp_path, mutate_identity):
+    identity = {"runtime": {"source_sha256": "old"}}
+    tree = {"tests/test_sample.py": "old"}
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if len(calls) == 1:
+            if mutate_identity:
+                identity["runtime"]["source_sha256"] = "new"
+            else:
+                tree["tests/test_sample.py"] = "new"
+        return __import__("subprocess").CompletedProcess(command, 0, "passed", "")
+
+    output = tmp_path / "preflight.json"
+    with pytest.raises(AssertionError, match="source changed"):
+        qualify.write_preflight_receipt(
+            output, run=run, identity_fn=lambda: identity, tree_fn=lambda: tree
+        )
+    receipt = json.loads(output.read_text())
+    assert receipt["passed"] is False
+    assert receipt["source_stable"] is False
+    assert receipt["returncode"] == receipt["guard_returncode"] == 0

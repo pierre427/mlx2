@@ -996,16 +996,26 @@ def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
         if source.exists():
             env.setdefault(name, str(source.resolve()))
     root = Path(__file__).resolve().parents[1]
+    # Bind the source that was present before execution, not only whatever
+    # happens to be on disk after a long suite completes.
+    identity_before = json.loads(json.dumps(identity_fn()))
+    tree_before = dict(tree_fn())
     completed = run(command, capture_output=True, text=True, env=env, cwd=root)
     guarded = run(guard_command, capture_output=True, text=True, env=env, cwd=root)
     output = completed.stdout + completed.stderr
     guard_output = guarded.stdout + guarded.stderr
+    identity_after = identity_fn()
+    tree_after = tree_fn()
+    source_stable = identity_before == identity_after and tree_before == tree_after
     receipt = {
         "schema": PREFLIGHT_SCHEMA,
-        "passed": _zero_returncode(completed.returncode) and _zero_returncode(guarded.returncode),
+        "passed": source_stable and _zero_returncode(completed.returncode) and _zero_returncode(guarded.returncode),
         "timestamp": time.time(),
-        "identity": identity_fn(),
-        "tree": tree_fn(),
+        "identity": identity_after,
+        "tree": tree_after,
+        "source_stable": source_stable,
+        "identity_before": identity_before,
+        "tree_before": tree_before,
         "test_command": command,
         "returncode": completed.returncode,
         "output_sha256": hashlib.sha256(output.encode()).hexdigest(),
@@ -1019,7 +1029,7 @@ def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     if not receipt["passed"]:
-        raise AssertionError(f"full unit suite or import guards failed; see {path}")
+        raise AssertionError(f"full unit suite/import guards failed or source changed during testing; see {path}")
     return receipt
 
 
