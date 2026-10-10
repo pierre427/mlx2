@@ -4,6 +4,10 @@
 Launch beneath cpg_job with its dedicated owner lock. The child command normally
 uses run_with_gpu_locks.py to own both host locks. Only an exact
 @CPG_GENERATION@ argument is substituted, from the validated owner receipt.
+
+This optional coordinator reuses the existing paired host-lock protocol; it
+adds no dependency to the serving runtime. The MCP client is needed only when
+this script is run against a configured coordinator endpoint.
 """
 
 # Invalid remote protocol types are operational lease failures.
