@@ -2,6 +2,7 @@
 
 from scripts.dloop_first_divergence_probe import (
     _first_difference,
+    _first_divergence_state_evidence,
     _scan_limits,
     _top_two_logprobs,
     _trace_window,
@@ -69,3 +70,53 @@ def test_trace_window_is_bounded_to_divergence_neighbors():
 def test_scan_limits_bound_known_short_and_late_divergences():
     assert _scan_limits([2, 7], 80, []) == {2: 8, 7: 80}
     assert _scan_limits([2, 7], 80, ["2=12", "7=76"]) == {2: 12, 7: 76}
+
+
+def test_boundary_rerun_mismatch_is_retained_without_state_claim(monkeypatch):
+    import scripts.dloop_first_divergence_probe as probe
+
+    monkeypatch.setattr(
+        probe,
+        "_run_arm",
+        lambda *args, **kwargs: {"tokens": [10, 99], "terminal_state": None},
+    )
+    report = _first_divergence_state_evidence(
+        model="model",
+        prompt_tokens=[1, 2],
+        prompt_index=2,
+        arms={"ordinary": None},
+        earliest=2,
+        expected_prefix=[10, 11],
+        n=16,
+    )
+    assert report == {
+        "status": "boundary_rerun_mismatch",
+        "arms": [
+            {
+                "arm": "ordinary",
+                "status": "boundary_rerun_failed",
+                "failure": "rerun_tokens_differ_from_scanned_common_prefix",
+                "boundary_tokens": 2,
+                "expected_common_prefix_tokens": [10, 11],
+                "actual_boundary_tokens": [10, 99],
+                "state_continuation": None,
+            }
+        ],
+    }
+
+
+def test_index_zero_divergence_records_unavailable_state_boundary():
+    result = _first_divergence_state_evidence(
+        model=None,
+        prompt_tokens=[1, 2],
+        prompt_index=2,
+        arms={},
+        earliest=0,
+        expected_prefix=[],
+        n=16,
+    )
+    assert result == {
+        "status": "unavailable_no_common_prefix_boundary",
+        "reason": "first_divergence_at_generated_token_index_0",
+        "arms": [],
+    }

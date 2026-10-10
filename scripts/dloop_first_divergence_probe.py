@@ -162,7 +162,15 @@ def _boundary_evidence(
         model, prompt_tokens, prompt_index, config, boundary, capture_state=True
     )
     if result["tokens"] != expected_prefix:
-        raise RuntimeError(f"{arm}: boundary rerun differs from scanned common prefix")
+        return {
+            "arm": arm,
+            "status": "boundary_rerun_failed",
+            "failure": "rerun_tokens_differ_from_scanned_common_prefix",
+            "boundary_tokens": boundary,
+            "expected_common_prefix_tokens": expected_prefix,
+            "actual_boundary_tokens": result["tokens"],
+            "state_continuation": None,
+        }
     state = result["terminal_state"]
     expected_history = [*prompt_tokens, *result["tokens"][:-1]]
     if (
@@ -181,6 +189,7 @@ def _boundary_evidence(
     cold_tokens = _cold_history(state)
     return {
         "arm": arm,
+        "status": "state_continuation_checked",
         "boundary_tokens": boundary,
         "history_tokens": expected_history,
         "history_sha256": hashlib.sha256(
@@ -198,6 +207,38 @@ def _boundary_evidence(
         "original_full_prefill_token_count": len(prompt_tokens),
         "state_continuation": evidence,
     }
+
+
+def _first_divergence_state_evidence(
+    model, prompt_tokens, prompt_index, arms, earliest, expected_prefix, n
+):
+    if earliest is None:
+        return {"status": "not_applicable_no_divergence", "arms": []}
+    if earliest == 0:
+        return {
+            "status": "unavailable_no_common_prefix_boundary",
+            "reason": "first_divergence_at_generated_token_index_0",
+            "arms": [],
+        }
+    results = [
+        _boundary_evidence(
+            model,
+            prompt_tokens,
+            prompt_index,
+            arm,
+            config,
+            earliest,
+            n,
+            expected_prefix,
+        )
+        for arm, config in arms.items()
+    ]
+    status = (
+        "boundary_rerun_mismatch"
+        if any(item["status"] == "boundary_rerun_failed" for item in results)
+        else "state_continuations_checked"
+    )
+    return {"status": status, "arms": results}
 
 
 def _validate_args(args, parser):
@@ -370,21 +411,18 @@ def main(argv=None):
                 ),
             }
         earliest = min(divergence_indices) if divergence_indices else None
-        state_evidence = []
-        if earliest is not None and earliest > 0:
-            for arm, config in ARMS.items():
-                state_evidence.append(
-                    _boundary_evidence(
-                        adapter.model,
-                        input_ids,
-                        index,
-                        arm,
-                        None if arm == "ordinary" else config,
-                        earliest,
-                        args.continuation_tokens,
-                        reference[:earliest],
-                    )
-                )
+        state_evidence = _first_divergence_state_evidence(
+            adapter.model,
+            input_ids,
+            index,
+            {
+                arm: None if arm == "ordinary" else config
+                for arm, config in ARMS.items()
+            },
+            earliest,
+            reference[:earliest] if earliest is not None else [],
+            args.continuation_tokens,
+        )
         result_prompts.append(
             {
                 "prompt_index": index,
@@ -412,7 +450,7 @@ def main(argv=None):
     args.out.write_text(
         json.dumps(
             {
-                "schema": "mlx2.dloop-first-divergence.v1",
+                "schema": "mlx2.dloop-first-divergence.v2",
                 "host": platform.node(),
                 "model": args.model,
                 "source_revision": git_revision,
