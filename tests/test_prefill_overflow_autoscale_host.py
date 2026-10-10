@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import ast
+import time
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from mlx2.runtime.prefill_plan import (
     checkpoint_bounded_prefill_rows,
@@ -42,6 +45,8 @@ def _batch_generator_harness():
             "_peek_interior_checkpoint",
             "_shared_prefill_width",
             "_admit_one_chunk_overflow",
+            "_round",
+            "_round_impl",
         }
     ]
     harness = ast.ClassDef(
@@ -53,6 +58,13 @@ def _batch_generator_harness():
     )
     module = ast.fix_missing_locations(ast.Module(body=[harness], type_ignores=[]))
     namespace = {
+        "time": time,
+        "PromptProcessingBatch": SimpleNamespace(
+            Response=lambda uid, progress, end_of_segment, end_of_prompt: SimpleNamespace(
+                uid=uid, progress=progress, end_of_segment=end_of_segment,
+                end_of_prompt=end_of_prompt,
+            )
+        ),
         "checkpoint_bounded_prefill_rows": checkpoint_bounded_prefill_rows,
         "next_prefill_checkpoint": next_prefill_checkpoint,
         "prefill_fits_one_chunk": prefill_fits_one_chunk,
@@ -207,20 +219,56 @@ def test_active_depth_and_checkpoint_clamps_do_not_block_safe_overflow():
             assert list(active._interior_checkpoint_positions[1]) == [128]
 
 
-def test_execution_checkpoint_clamp_follows_prefill_input_override():
-    generator = next(
-        node
-        for node in ast.parse(SOURCE.read_text()).body
-        if isinstance(node, ast.ClassDef) and node.name == "BatchGenerator"
+@pytest.mark.parametrize(
+    "prefill_input,checkpoint,expected_rows",
+    [(None, 80, 8), ({"media": True}, None, 100), ({"media": True}, 80, 32)],
+)
+def test_execution_checkpoint_clamp_follows_prefill_input_override(
+    prefill_input, checkpoint, expected_rows
+):
+    # Execute the real round and its delegation on host-only batch doubles.
+    # A media input overrides the ordinary eight-row slice, but must still
+    # stop at checkpoint 80 after 32 cached + 16 already-prefilled tokens.
+    host = _host(autoscale=False)
+    host.self_mtp = None
+    host.prefill_step_size = 8
+    host._unprocessed_sequences.clear()
+    host._currently_processing = [
+        [[list(range(100)), [100]], 16, 117, False, 32, 0.0, prefill_input]
+    ]
+    host._prompt_batch[:] = [0]
+    host._prompt_batch.uids = [1]
+    host._prompt_batch.prefill_inputs = [prefill_input]
+    forwards = []
+    host._prompt_batch.prompt = lambda rows: forwards.append(rows)
+    host._mixed_round_ready = lambda: False
+    host._should_defer_prefill = lambda: False
+    host._adaptive_prefill_decision = lambda *args, **kwargs: (False, 8, None)
+    host._has_active_decode = lambda: False
+    host._ordinary_prefill_indices = lambda n: []
+    host._budget_admissible = lambda n: n
+    host._promote_ready_prompts = lambda: []
+    host._sliced_prompt_rows = lambda: 1
+    host._prefill_depth = lambda: 48
+    host._depth_bounded_step = lambda width, covered: width
+    host._prompt_prefill_step = lambda length: 8
+    host._next_interior_checkpoint = lambda uid, covered: checkpoint
+    host._record_prefill_chunk = lambda uid, width: None
+    host._capture_plain_interior_checkpoints = lambda: None
+    host._prompt_tokens_counter = 0
+    host._prompt_time_counter = 0.0
+    host.scheduler_stats = {"prefill_rounds": 0, "prefill_only_rounds": 0}
+    host._fairness = lambda: SimpleNamespace(
+        enabled=False, observe_prefill=lambda *args, **kwargs: None
     )
-    round_method = next(
-        node
-        for node in generator.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_round"
-    )
-    source = ast.get_source_segment(SOURCE.read_text(), round_method)
-    media_override = 'if len(seq) > 6 and seq[6] is not None:'
-    row_limit = 'n = min(len(segments[0]), step_size)'
-    checkpoint_clamp = 'n = checkpoint_bounded_prefill_rows(n, covered, next_checkpoint)'
-    assert source.index(media_override) < source.index(row_limit)
-    assert source.index(row_limit) < source.index(checkpoint_clamp)
+    host._sync_decode_fairness_stats = lambda: None
+
+    round_iterator = host._round()
+    assert next(round_iterator) == []  # Decode-first publication seam.
+    with pytest.raises(StopIteration) as completed:
+        next(round_iterator)
+    prompts, generated = completed.value.value
+    assert generated == []
+    assert forwards == [[list(range(expected_rows))]]
+    assert prompts[0].progress == (16 + expected_rows, 117)
+    assert host._prompt_tokens_counter == expected_rows
