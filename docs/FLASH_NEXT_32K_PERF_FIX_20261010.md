@@ -114,6 +114,6 @@ nominal, swapouts were unchanged, and no foreign activity or refusal was
 recorded. This is one observation, not a replicated benchmark or qualification
 claim. Background qualification remains stopped.
 
-The detailed comparison includes prefill, cold/warm TTFT, per-request decode,
-and cold/warm concurrent HTTP wall-clock in
-`qualification/runs/flash-next-32k-w4-postfix-retest-20261010/report.md`.
+The post-fix comparison above includes prefill, cold/warm TTFT, per-request
+decode, and cold/warm concurrent HTTP wall-clock. Machine-local receipts and
+raw server logs remain in the private evidence repository.
