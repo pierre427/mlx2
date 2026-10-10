@@ -69,7 +69,7 @@ PROBE_TEXT = (
 # Two-stage acceptance prior for base depth 3 at gate thresholds -0.05 to
 # -2.0 in steps of 0.05: Qwen3.8-27B 4-bit + MTP, 917 exactly labelled greedy
 # cycles over the mixed prompt set (scripts/dloop_oracle.py --emit-prior-grid
-# on qualification/runs/dloop-untrained-20261009/phase0/accept-27b-la6.jsonl).
+# from aggregate measured acceptance counts in the mixed-prompt cohort.
 PRIOR_RESOURCE = "draft_loop_prior_qwen38_27b.json"
 
 
