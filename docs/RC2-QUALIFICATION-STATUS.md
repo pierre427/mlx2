@@ -6,23 +6,37 @@ production use. Qualification applies only to the exact tested runtime,
 artifact, settings, and host identity; this public summary is not a portable
 qualification receipt and does not certify another checkout or host.
 
+The current reviewed implementation snapshot is `b5a6e5a42`, with runtime
+source SHA-256
+`8792b04a1089306c92d98aef1fc606e10f63fbd4725b9715bcd356bf99b60109` and
+qualification-harness SHA-256
+`cddc61b8cea37e6277ce3b9ef8b41f78748ada4f037c560767525655da296ba8`. Its full
+CPU preflights passed on M3 and M5, including the default test suite and 64
+import guards on each host. This establishes source-stable CPU validation only.
+Model qualification has not been rerun against this source identity, so the
+model and profile outcomes below describe earlier, receipt-bound runs and do
+not qualify the current snapshot.
+
 ## Decision routes
 
 Four typed decision routes—Clef, Decision2, JEV, and the 27B decision route—each
-passed all 13 required functional gates on the internal validation snapshot.
+passed all 13 required functional gates on an earlier internal validation
+snapshot.
 The checks covered two connections, a 4 MiB request-body limit, the normal
 context-truncation default, and text, `noul`, choice, and score request paths. This establishes functional
-qualification for those exact tested routes and settings. It does not select
-them as defaults or establish that production traffic has used them.
+qualification only for those earlier source identities, exact tested routes,
+and settings. Requalification against the current source is pending. These
+results do not select the routes as defaults or establish that production
+traffic has used them.
 
 ## Vision and media routes
 
 | Route/profile | Evidence and current boundary |
 | --- | --- |
-| SmolVLM, LFM2.5-VL and Qwen2.5-VL ordinary decode | Three complete passes at the tested 4K context, one lane, 256-token prefill, and 1 GiB cache profile. The evidence is limited to that profile. |
-| Gemma 4 media | Media qualification passed. The generic Hermes literal-prompt probe remains unqualified, so this does not establish that probe's behavior. |
-| Gemma 3n media | Not qualified: the cold continuous-batch reference mismatched, and video-logit parity failed. |
-| MiniCPM-O media | Not qualified: image feature/token parity failed. Audio parity was exact, but the aggregate gate remains coupled and therefore does not pass. A separate diagnostic-only matrix first diverged at batched vision-tower output while sequential and count-one controls were exact; it does not change this status. |
+| SmolVLM, LFM2.5-VL and Qwen2.5-VL ordinary decode | Three complete passes on an earlier source identity at the tested 4K context, one lane, 256-token prefill, and 1 GiB cache profile. The evidence is limited to that identity and profile; current-source requalification is pending. |
+| Gemma 4 media | Media qualification passed on an earlier source identity. The generic Hermes literal-prompt probe remains unqualified, and current-source requalification is pending. |
+| Gemma 3n media | An earlier source-bound run was not qualified: the cold continuous-batch reference mismatched, and video-logit parity failed. Requalification against the current source is pending. |
+| MiniCPM-O media | Earlier runs did not qualify the route: image feature/token parity failed. Audio parity was exact, but the aggregate gate remained coupled and therefore did not pass. A separate diagnostic-only matrix on an earlier snapshot first diverged at batched vision-tower output while sequential and count-one controls were exact. The current implementation binds evidence to the selected adapter policy and passes CPU tests; model requalification against the current source is pending. |
 
 These results describe the tested cases only. A pass for one modality or probe
 does not override a failed or still-unqualified gate for the route as a whole.
@@ -31,7 +45,9 @@ does not override a failed or still-unqualified gate for the route as a whole.
 
 The public DLoop harness now rejects rows with no decode tokens instead of
 dividing by zero. This is a CPU-tested harness correctness fix; it is not model
-qualification or a performance result. A matched-Q4 width-one behavior run
+qualification or a performance result. The bounded first-divergence probe and
+its CPU tests also exist on the current snapshot. The GPU run below used an
+earlier frozen identity and does not qualify the current snapshot. A matched-Q4 width-one behavior run
 completed with loop8 extension/span engagement, but the independent audit
 rejected exact-token equivalence in 48 rows against the depth-one self-MTP
 control across fixed5–fixed8 and loop8. This is a self-MTP arm comparison, not
