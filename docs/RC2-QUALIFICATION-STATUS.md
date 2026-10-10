@@ -31,9 +31,18 @@ does not override a failed or still-unqualified gate for the route as a whole.
 
 The public DLoop harness now rejects rows with no decode tokens instead of
 dividing by zero. This is a CPU-tested harness correctness fix; it is not model
-qualification or a performance result. A matched-Q4 width-one run is in
-progress. Width two remains pending the width-one audit and a fresh admission
-check.
+qualification or a performance result. A matched-Q4 width-one behavior run
+completed with loop8 extension/span engagement, but the independent audit
+rejected exact-token equivalence in 48 rows against fixed1 across fixed5–fixed8
+and loop8. The run's process exit status does not override that correctness
+failure.
+
+The separate state-oracle findings were invalidated by a collector-boundary
+bug: the final `response.token` was omitted, so saved and cold continuations
+used different token tails. Those findings do not establish a runtime cache
+defect. Width two and wider, along with the second artifact's DLoop ladder,
+remain held pending collector correction, review, and fresh admission. This is
+correctness/state evidence only, not a performance result.
 
 Controlled performance runs and thermal ladders have not started. The release remains
 `0.1.0rc1`; `0.1.0rc2` is pending completion and review of the remaining
