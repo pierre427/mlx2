@@ -7,10 +7,12 @@ import argparse
 import base64
 import gc
 import hashlib
+import inspect
 import io
 import json
 import os
 import tempfile
+import traceback
 import wave
 from pathlib import Path
 
@@ -277,19 +279,31 @@ def _batching_observation(adapter, family):
     return json.loads(json.dumps(value)) if isinstance(value, dict) else None
 
 
+def _ordinary_bound_method(source, name):
+    """Bind the class descriptor without discarding its descriptor kind."""
+    descriptor = inspect.getattr_static(type(source), name, None)
+    if descriptor is None:
+        return None
+    getter = getattr(type(descriptor), "__get__", None)
+    return getter(descriptor, source, type(source)) if getter else descriptor
+
+
+def _parity_caches(source, routed, cache_factory=None):
+    """Build independent reference and route caches through the runtime policy."""
+    if cache_factory is None:
+        from mlx2.runtime.models.cache import make_prompt_cache
+
+        cache_factory = make_prompt_cache
+    return cache_factory(source), cache_factory(routed)
+
+
 def _parity(adapter, prepared, family):
     import mlx.core as mx
 
     source = adapter.model._model
     tokens = list(prepared["_mlx2_prompt_tokens"])
     ids = mx.array([tokens], dtype=mx.int32)
-    make_source = getattr(source, "make_cache", None)
-    if not callable(make_source):
-        make_source = source.language_model.make_cache
-    make_route = getattr(adapter.model, "make_cache", None)
-    if not callable(make_route):
-        make_route = source.language_model.make_cache
-    sc, rc = make_source(), make_route()
+    sc, rc = _parity_caches(source, adapter.model)
     kwargs = dict(prepared.get("_mlx2_prefill_inputs") or {})
     ordinary_kwargs = {
         key: value for key, value in kwargs.items() if not key.startswith("_mlx2_")
@@ -302,10 +316,10 @@ def _parity(adapter, prepared, family):
         method_names.append("get_vision_embedding")
     for name in method_names:
         current = getattr(source, name, None)
-        ordinary = getattr(type(source), name, None)
+        ordinary = _ordinary_bound_method(source, name)
         if callable(current) and callable(ordinary):
             patched[name] = current
-            setattr(source, name, ordinary.__get__(source, type(source)))
+            setattr(source, name, ordinary)
     try:
         if family == "gemma3n":
             features = source.get_input_embeddings(ids, **ordinary_kwargs)
@@ -327,9 +341,7 @@ def _parity(adapter, prepared, family):
     }.get(family)
     if feature_method and kwargs.get("pixel_values") is not None:
         route_method = getattr(source, feature_method)
-        ordinary_method = getattr(type(source), feature_method).__get__(
-            source, type(source)
-        )
+        ordinary_method = _ordinary_bound_method(source, feature_method)
         pixels = kwargs["pixel_values"]
         if feature_method == "get_image_features":
             args = (pixels, source.vision_tower, source.config, source.embed_vision)
@@ -382,16 +394,26 @@ def _media_start(adapter, tokens):
 
 
 def _drain(job):
-    events = []
+    content = []
     while True:
         event = job.events.get(timeout=120)
-        events.append(event)
         if "error" in event:
             raise RuntimeError(str(event))
+        delta = event.get("delta")
+        if isinstance(delta, dict):
+            piece = delta.get("content")
+            if piece is not None:
+                if not isinstance(piece, str):
+                    raise TypeError("serving delta content must be text")
+                content.append(piece)
+        elif isinstance(delta, str):
+            content.append(delta)
+        elif delta is not None:
+            raise TypeError("serving delta must be text or a content mapping")
         if "finish_reason" in event:
             return {
                 "finish_reason": event["finish_reason"],
-                "text": "".join(e.get("delta", "") for e in events),
+                "text": "".join(content),
                 "receipt": event.get("receipt"),
                 "request_id": getattr(job, "id", None),
             }
@@ -669,6 +691,7 @@ def main(argv=None):
                     "passed": False,
                     "status": "producer_error",
                     "error": f"{type(exc).__name__}: {exc}",
+                    "traceback": traceback.format_exc(limit=8),
                 },
                 indent=2,
             ),

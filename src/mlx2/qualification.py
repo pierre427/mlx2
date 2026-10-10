@@ -287,10 +287,12 @@ APPROVED_MEDIA_PRODUCERS = {
     ),
     # Producer closure independently reviewed 2026-10-10. This enables
     # evidence validation; models remain unqualified until real probes pass.
+    # Re-pinned 2026-10-10: preserve model method descriptors, use the runtime
+    # cache factory, parse content deltas, and retain bounded failure tracebacks.
     "gemma3n": (
         {
             "name": "scripts/qualify_native_vlm_media.py",
-            "sha256": "90a02d4a27cb6f77f602f2f2ae8c12f65537f46eb63878382bc9e711824029bb",
+            "sha256": "c18c85b6cd588412ddddc6a03813a953bb3d55e5b5e5b020ad5ccd656b066573",
             "evaluator_sha256": "c3ebee56e39c13c0fc2cc1b892379d541cee7523192780d37dc4daa9d43b210a",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "7c8383288b4e060f788d625a352f7e0e2592f844271a529af5a6f105205a6461",
@@ -303,7 +305,7 @@ APPROVED_MEDIA_PRODUCERS = {
     "gemma4": (
         {
             "name": "scripts/qualify_native_vlm_media.py",
-            "sha256": "90a02d4a27cb6f77f602f2f2ae8c12f65537f46eb63878382bc9e711824029bb",
+            "sha256": "c18c85b6cd588412ddddc6a03813a953bb3d55e5b5e5b020ad5ccd656b066573",
             "evaluator_sha256": "c3ebee56e39c13c0fc2cc1b892379d541cee7523192780d37dc4daa9d43b210a",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "7c8383288b4e060f788d625a352f7e0e2592f844271a529af5a6f105205a6461",
@@ -316,7 +318,7 @@ APPROVED_MEDIA_PRODUCERS = {
     "minicpmo": (
         {
             "name": "scripts/qualify_native_vlm_media.py",
-            "sha256": "90a02d4a27cb6f77f602f2f2ae8c12f65537f46eb63878382bc9e711824029bb",
+            "sha256": "c18c85b6cd588412ddddc6a03813a953bb3d55e5b5e5b020ad5ccd656b066573",
             "evaluator_sha256": "c3ebee56e39c13c0fc2cc1b892379d541cee7523192780d37dc4daa9d43b210a",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "7c8383288b4e060f788d625a352f7e0e2592f844271a529af5a6f105205a6461",

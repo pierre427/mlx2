@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import queue
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,7 +12,14 @@ from mlx2.media_qualification import (
     evaluate_encoder_batching_observation,
     evaluate_native_vlm_report,
 )
-from scripts.qualify_native_vlm_media import FAMILIES, evaluate_native_report
+from scripts.qualify_native_vlm_media import (
+    FAMILIES,
+    _ordinary_bound_method,
+    _parity_caches,
+    _drain,
+    evaluate_native_report,
+    main,
+)
 
 
 def _sha(data):
@@ -140,6 +150,134 @@ def _report(family):
 
 def _eval(r, e):
     return evaluate_native_report(r, **e)
+
+
+def test_ordinary_method_binding_preserves_descriptors():
+    class Parent:
+        @staticmethod
+        def static(value):
+            return "static", value
+
+        def instance(self, value):
+            return self.label, value
+
+        @classmethod
+        def class_method(cls, value):
+            return cls.__name__, value
+
+    class Child(Parent):
+        pass
+
+    source = Child()
+    source.label = "child instance"
+
+    assert _ordinary_bound_method(source, "static")("x") == ("static", "x")
+    assert _ordinary_bound_method(source, "instance")("x") == ("child instance", "x")
+    assert _ordinary_bound_method(source, "class_method")("x") == ("Child", "x")
+    assert _ordinary_bound_method(source, "missing") is None
+
+
+def test_parity_cache_creation_uses_runtime_factory_for_independent_models():
+    source, routed = object(), object()
+    calls = []
+
+    def cache_factory(model):
+        cache = object()
+        calls.append((model, cache))
+        return cache
+
+    reference_cache, route_cache = _parity_caches(source, routed, cache_factory)
+
+    assert [model for model, _ in calls] == [source, routed]
+    assert reference_cache is calls[0][1]
+    assert route_cache is calls[1][1]
+    assert reference_cache is not route_cache
+
+
+def test_native_producer_error_keeps_bounded_traceback_without_checks(
+    tmp_path, monkeypatch, capsys
+):
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+
+    monkeypatch.setattr(
+        "scripts.qualify_native_vlm_media._prove_lease",
+        lambda *args, **kwargs: "lease",
+    )
+
+    def fail_run(*args, **kwargs):
+        raise RuntimeError("simulated parity failure")
+
+    monkeypatch.setattr("scripts.qualify_native_vlm_media.run_family", fail_run)
+    assert main(
+        [
+            "gemma3n",
+            str(model_path),
+            "--generation",
+            "1",
+            "--cpg-owner-lock",
+            str(tmp_path / "owner.lock"),
+            "--cpg-task",
+            "cpu-test",
+        ]
+    ) == 1
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "producer_error"
+    assert report["passed"] is False
+    assert report["error"] == "RuntimeError: simulated parity failure"
+    assert "fail_run" in report["traceback"]
+    assert report["traceback"].count('File "') <= 8
+    assert "checks" not in report
+
+
+def test_native_stream_drain_collects_only_text_content_deltas():
+    events = queue.Queue()
+    for event in (
+        {"delta": {"role": "assistant"}},
+        {"delta": {"reasoning_content": "private reasoning"}},
+        {"delta": {"content": None, "reasoning_content": "more reasoning"}},
+        {"delta": {"content": "hel"}},
+        {"delta": "lo"},
+        {"finish_reason": "stop", "delta": {"content": "!"}, "receipt": {"ok": True}},
+    ):
+        events.put(event)
+
+    result = _drain(SimpleNamespace(events=events, id="req-1"))
+
+    assert result == {
+        "finish_reason": "stop",
+        "text": "hello!",
+        "receipt": {"ok": True},
+        "request_id": "req-1",
+    }
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"delta": {"content": {"text": "not text"}}, "finish_reason": "stop"},
+        {"delta": ["not text"], "finish_reason": "stop"},
+    ],
+)
+def test_native_stream_drain_rejects_invalid_content_types(event):
+    events = queue.Queue()
+    events.put(event)
+
+    with pytest.raises(TypeError, match="serving delta"):
+        _drain(SimpleNamespace(events=events, id="req-2"))
+
+
+def test_native_stream_drain_preserves_finish_only_and_error_semantics():
+    finish_events = queue.Queue()
+    finish_events.put({"delta": None})
+    finish_events.put({"finish_reason": "length"})
+    assert _drain(SimpleNamespace(events=finish_events, id="req-3"))["text"] == ""
+
+    error_events = queue.Queue()
+    error_events.put({"error": "upstream failure"})
+    with pytest.raises(RuntimeError, match="upstream failure"):
+        _drain(SimpleNamespace(events=error_events, id="req-4"))
 
 
 def test_native_report_evaluator_recomputes_all_supported_modalities():
