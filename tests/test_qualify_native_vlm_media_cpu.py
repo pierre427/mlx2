@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from mlx2.media_qualification import (
+    NATIVE_VLM_SOURCE_REVISIONS,
     evaluate_encoder_batching_observation,
     evaluate_native_vlm_report,
 )
@@ -194,7 +195,7 @@ def test_ordinary_method_binding_preserves_descriptors():
         (
             "minicpmo",
             "media_policy",
-            SimpleNamespace(vision_batch_size=8),
+            SimpleNamespace(batch_vision_input=True, vision_batch_size=8),
             "_mlx2_minicpmo_vision_batching",
             8,
         ),
@@ -232,6 +233,17 @@ def test_batching_observer_unsupported_family_does_not_mutate_adapter(family):
     assert vars(model) == {"existing": "preserved"}
     assert _batching_observation(adapter, family) is None
     assert _batching_observation(unsupported_adapter, family) is None
+
+
+def test_sequential_minicpmo_does_not_claim_a_batching_observer():
+    model = SimpleNamespace()
+    adapter = SimpleNamespace(
+        model=SimpleNamespace(_model=model),
+        media_policy=SimpleNamespace(batch_vision_input=False, vision_batch_size=1),
+    )
+
+    assert _enable_batching_observer(adapter, "minicpmo") is None
+    assert vars(model) == {}
 
 
 def test_parity_cache_creation_uses_runtime_factory_for_independent_models():
@@ -565,6 +577,129 @@ def test_native_family_feature_gate_requires_direct_and_serving_encoder_evidence
         report, expected_family="gemma3n", expected_harness=harness
     )
     assert checks["multimodal_encoder_batching"] is False
+
+
+def test_native_minicpmo_checkset_follows_selected_media_policy():
+    from mlx2.adapters.mlx_vlm import MINICPMO
+
+    revision = NATIVE_VLM_SOURCE_REVISIONS["minicpmo"]
+    source = "a" * 64
+    runtime = {
+        "schema": "mlx2.vlm-dependencies.v1",
+        "family": "minicpmo",
+        "source_sha256": source,
+        "dependency_files": 1,
+        "reference_revision": revision,
+    }
+    harness = {"name": "native", "sha256": "c" * 64}
+    rules = MINICPMO.metadata["conditional_qualification_checks"]
+
+    def report(policy):
+        settings = {"mlx_vlm": runtime, "adapter_policy": policy}
+        feature_parity = {
+            "passed": True,
+            "shapes_match": True,
+            "tensor_count": 1,
+            "max_abs": 0.0,
+        }
+        return {
+            "schema": "mlx2.media-serving-qualification.v1",
+            "family": "minicpmo",
+            "model_type": "minicpmo",
+            "producer_sha256": harness["sha256"],
+            "qualification_harness": harness,
+            "source_revision": revision,
+            "source_runtime": runtime,
+            "mlx_vlm_runtime": runtime,
+            "reference_revision": revision,
+            "reference_source_sha256": source,
+            "artifact": "b" * 64,
+            "artifact_sha256": "b" * 64,
+            "runtime": {"serving": "identity"},
+            "settings": settings,
+            "conditional_qualification_checks": [
+                {**rule, "setting": list(rule["setting"])} for rule in rules
+            ],
+            "ordinary_reference": {},
+            "direct": {
+                "image": {
+                    "parity": {
+                        "feature_parity": {
+                            **feature_parity,
+                            "encoder_execution": {
+                                "schema": "mlx2.encoder-execution-observation.v1",
+                                "policy": policy,
+                                "input_count": 2,
+                                "tower_call_batch_sizes": [1, 1],
+                            },
+                        },
+                    }
+                }
+            },
+            "serving_encoder_execution": {
+                "schema": "mlx2.encoder-execution-observation.v1",
+                "policy": policy,
+                "input_count": 2,
+                "tower_call_batch_sizes": [1, 1],
+            },
+            "arms": {},
+            "batch": {"rows": [], "reference_rows": []},
+            "passed": False,
+        }
+
+    sequential_policy = {
+        "batch_vision_input": False,
+        "vision_batch_size": 1,
+    }
+    seq_report = report(sequential_policy)
+    seq_checks = evaluate_native_vlm_report(
+        seq_report,
+        expected_family="minicpmo",
+        expected_harness=harness,
+        expected_policy_checks=rules,
+    )
+    assert seq_checks["multimodal_encoder_sequential"] is True
+    assert "multimodal_encoder_batching" not in seq_checks
+    without_serving = dict(seq_report)
+    without_serving.pop("serving_encoder_execution")
+    assert evaluate_native_vlm_report(
+        without_serving,
+        expected_family="minicpmo",
+        expected_harness=harness,
+        expected_policy_checks=rules,
+    )["multimodal_encoder_sequential"] is False
+    without_direct_parity = dict(seq_report)
+    without_direct_parity["direct"] = {"image": {"parity": {}}}
+    assert evaluate_native_vlm_report(
+        without_direct_parity,
+        expected_family="minicpmo",
+        expected_harness=harness,
+        expected_policy_checks=rules,
+    )["multimodal_encoder_sequential"] is False
+    without_feature_parity = dict(seq_report)
+    without_feature_parity["direct"] = {
+        "image": {
+            "parity": {
+                "feature_parity": None,
+            }
+        }
+    }
+    assert evaluate_native_vlm_report(
+        without_feature_parity,
+        expected_family="minicpmo",
+        expected_harness=harness,
+        expected_policy_checks=rules,
+    )["multimodal_encoder_sequential"] is False
+
+    batch_report = report({"batch_vision_input": True, "vision_batch_size": 2})
+    batch_checks = evaluate_native_vlm_report(
+        batch_report,
+        expected_family="minicpmo",
+        expected_harness=harness,
+        expected_policy_checks=rules,
+    )
+    assert batch_checks["multimodal_encoder_batching"] is False
+    assert "multimodal_encoder_sequential" not in batch_checks
 
 
 def test_native_continuous_batch_is_a_real_required_gate():

@@ -707,6 +707,7 @@ NATIVE_VLM_MEDIA_CHECKS = {
             "multimodal_image",
             "multimodal_audio_input",
             "multimodal_encoder_batching",
+            "multimodal_encoder_sequential",
             "multimodal_continuous_batch",
             "multimodal_apcv2_reuse",
         }
@@ -714,17 +715,103 @@ NATIVE_VLM_MEDIA_CHECKS = {
 }
 
 
-def evaluate_native_vlm_report(report, *, expected_family, expected_harness):
+def resolve_conditional_qualification_checks(rules, settings):
+    """Resolve descriptor-declared mechanism checks against exact settings."""
+    if not isinstance(rules, (list, tuple)) or not isinstance(settings, dict):
+        raise TypeError("conditional qualification policy is malformed")
+    selected = set()
+    by_path = {}
+    all_checks = set()
+    for rule in rules:
+        if not isinstance(rule, dict) or set(rule) != {"setting", "equals", "check"}:
+            raise ValueError("conditional qualification rule is malformed")
+        path, expected, check = rule["setting"], rule["equals"], rule["check"]
+        if (
+            not isinstance(path, (list, tuple))
+            or not path
+            or any(not isinstance(key, str) or not key for key in path)
+            or type(expected) is not bool
+            or not isinstance(check, str)
+            or not check
+        ):
+            raise ValueError("conditional qualification rule is malformed")
+        path = tuple(path)
+        if check in all_checks:
+            raise ValueError("conditional qualification checks must be unique")
+        all_checks.add(check)
+        by_path.setdefault(path, []).append((expected, check))
+    for path, cases in by_path.items():
+        value = settings
+        for key in path:
+            if not isinstance(value, dict) or key not in value:
+                raise ValueError("conditional qualification setting is missing")
+            value = value[key]
+        matches = [check for expected, check in cases if type(value) is bool and value is expected]
+        if len(matches) != 1 or len(cases) != 2 or {expected for expected, _ in cases} != {True, False}:
+            raise ValueError("conditional qualification setting is invalid or ambiguous")
+        selected.add(matches[0])
+    return selected
+
+
+def _canonical_policy_check_rules(rules):
+    if not isinstance(rules, (list, tuple)):
+        return None
+    canonical = []
+    for rule in rules:
+        if not isinstance(rule, dict) or set(rule) != {"setting", "equals", "check"}:
+            return None
+        path = rule.get("setting")
+        if not isinstance(path, (list, tuple)):
+            return None
+        canonical.append(
+            {
+                "setting": list(path),
+                "equals": rule.get("equals"),
+                "check": rule.get("check"),
+            }
+        )
+    return canonical
+
+
+def _native_vlm_check_names(family, report, expected_policy_checks):
+    checks = set(NATIVE_VLM_MEDIA_CHECKS[family])
+    if not expected_policy_checks:
+        return checks
+    all_conditional = {
+        rule.get("check")
+        for rule in expected_policy_checks
+        if isinstance(rule, dict) and isinstance(rule.get("check"), str)
+    }
+    checks.difference_update(all_conditional)
+    settings = report.get("settings") if isinstance(report, dict) else None
+    checks.update(
+        resolve_conditional_qualification_checks(expected_policy_checks, settings)
+    )
+    return checks
+
+
+def evaluate_native_vlm_report(
+    report, *, expected_family, expected_harness, expected_policy_checks=()
+):
     if expected_family not in NATIVE_VLM_MEDIA_CHECKS:
         raise ValueError(
             f"unsupported native VLM qualification family: {expected_family!r}"
         )
     try:
         return _evaluate_native_vlm_report_unchecked(
-            report, expected_family=expected_family, expected_harness=expected_harness
+            report,
+            expected_family=expected_family,
+            expected_harness=expected_harness,
+            expected_policy_checks=expected_policy_checks,
         )
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
-        return {name: False for name in NATIVE_VLM_MEDIA_CHECKS[expected_family]}
+        names = set(NATIVE_VLM_MEDIA_CHECKS[expected_family])
+        names.update(
+            rule.get("check")
+            for rule in expected_policy_checks
+            if isinstance(rule, dict) and isinstance(rule.get("check"), str)
+        )
+        return {name: False for name in names}
 
 
 NATIVE_VLM_SOURCE_REVISIONS = {
@@ -771,14 +858,54 @@ def evaluate_encoder_batching_observation(value):
     return observed_overflow
 
 
-def _evaluate_native_vlm_report_unchecked(report, *, expected_family, expected_harness):
+def evaluate_encoder_sequential_observation(observation, policy, feature_parity):
+    """Require the selected single-image path to execute and match source."""
+    if (
+        not isinstance(observation, dict)
+        or observation.get("schema") != "mlx2.encoder-execution-observation.v1"
+        or not isinstance(policy, dict)
+        or observation.get("policy") != policy
+        or policy.get("batch_vision_input") is not False
+        or type(policy.get("vision_batch_size")) is not int
+        or policy["vision_batch_size"] != 1
+        or type(observation.get("input_count")) is not int
+        or observation["input_count"] < 2
+        or not isinstance(observation.get("tower_call_batch_sizes"), list)
+        or len(observation["tower_call_batch_sizes"]) != observation["input_count"]
+        or any(type(size) is not int or size != 1 for size in observation["tower_call_batch_sizes"])
+    ):
+        return False
+    return feature_parity is None or not (
+        not isinstance(feature_parity, dict)
+        or feature_parity.get("passed") is not True
+        or feature_parity.get("shapes_match") is not True
+        or type(feature_parity.get("tensor_count")) is not int
+        or feature_parity["tensor_count"] < 1
+        or type(feature_parity.get("max_abs")) not in (int, float)
+        or not math.isfinite(feature_parity["max_abs"])
+        or not 0 <= feature_parity["max_abs"] <= 1e-4
+    )
+
+
+def _evaluate_native_vlm_report_unchecked(
+    report, *, expected_family, expected_harness, expected_policy_checks=()
+):
     """Recompute native VLM adapter checks from the source/media/cache traces."""
     if expected_family not in NATIVE_VLM_MEDIA_CHECKS:
         raise ValueError(
             f"unsupported native VLM qualification family: {expected_family!r}"
         )
-    checks = {name: False for name in NATIVE_VLM_MEDIA_CHECKS[expected_family]}
+    checks = {
+        name: False
+        for name in _native_vlm_check_names(
+            expected_family, report, expected_policy_checks
+        )
+    }
     if not isinstance(report, dict) or not isinstance(expected_harness, dict):
+        return checks
+    if _canonical_policy_check_rules(
+        report.get("conditional_qualification_checks", [])
+    ) != _canonical_policy_check_rules(expected_policy_checks):
         return checks
     runtime = report.get("source_runtime")
     revision = NATIVE_VLM_SOURCE_REVISIONS[expected_family]
@@ -829,6 +956,28 @@ def _evaluate_native_vlm_report_unchecked(report, *, expected_family, expected_h
             and type(feature_parity.get("max_abs")) in (int, float)
             and math.isfinite(feature_parity["max_abs"])
             and 0 <= feature_parity["max_abs"] <= 1e-4
+        )
+    if "multimodal_encoder_sequential" in checks:
+        probe = (report.get("direct") or {}).get("image") or {}
+        parity = probe.get("parity") or {}
+        feature_parity = parity.get("feature_parity")
+        direct_observation = (
+            feature_parity.get("encoder_execution")
+            if isinstance(feature_parity, dict)
+            else None
+        )
+        serving_observation = report.get("serving_encoder_execution") or {}
+        policy = (report.get("settings") or {}).get("adapter_policy") or {}
+        checks["multimodal_encoder_sequential"] = (
+            isinstance(feature_parity, dict)
+            and evaluate_encoder_sequential_observation(
+                direct_observation, policy, feature_parity
+            )
+            and evaluate_encoder_sequential_observation(
+                serving_observation,
+                policy,
+                None,
+            )
         )
     checks["multimodal_apcv2_reuse"] = (
         traces.get("prefix_reuse") is True

@@ -140,7 +140,8 @@ def test_minicpm_chunks_evaluate_and_restore_mixed_sample_image_order(monkeypatc
         config=SimpleNamespace(patch_size=1),
     )
     install_minicpmo_vision_batching(
-        model, MiniCPMOExecutionPolicy(vision_batch_size=2)
+        model,
+        MiniCPMOExecutionPolicy(batch_vision_input=True, vision_batch_size=2),
     )
     assert not hasattr(model, "_mlx2_minicpmo_vision_batching")
     model._mlx2_minicpmo_vision_batching = {"calls": []}

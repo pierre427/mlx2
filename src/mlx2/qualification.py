@@ -10,6 +10,7 @@ from .media_qualification import (
     NATIVE_VLM_MEDIA_CHECKS,
     NATIVE_VLM_SOURCE_REVISIONS,
     evaluate_native_vlm_report,
+    resolve_conditional_qualification_checks,
 )
 from .qwen25_media_qualification import (
     CHECKS as QWEN_MEDIA_CHECKS,
@@ -292,11 +293,11 @@ APPROVED_MEDIA_PRODUCERS = {
     "gemma3n": (
         {
             "name": "scripts/qualify_native_vlm_media.py",
-            "sha256": "c6aedd383359d34dbdacd46e22933e17a62769fa4f14e6eb0d233f06af2e6126",
-            "evaluator_sha256": "c3ebee56e39c13c0fc2cc1b892379d541cee7523192780d37dc4daa9d43b210a",
+            "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
+            "evaluator_sha256": "498ddd0dfbfeb9422f3e5b1b028857df66e7c813e8048b279a087be1ccc0fe7a",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
-            "adapter_batching_sha256": "7c8383288b4e060f788d625a352f7e0e2592f844271a529af5a6f105205a6461",
-            "adapter_contract_sha256": "a3fa6ae00b4f69ca08f02a212e48490e991daafa085761cf6f97f670c3abe08b",
+            "adapter_batching_sha256": "2b37a4bbaaae8ca4658104bea7d26ebe7909d7084dc2fa2c8f2c3b7b99d8706a",
+            "adapter_contract_sha256": "4896eaff85860c2913ad3fffbbbdeaf1e81e8201abe5345027688e7b6a7c1349",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["gemma3n"],
@@ -305,10 +306,10 @@ APPROVED_MEDIA_PRODUCERS = {
     "gemma4": (
         {
             "name": "scripts/qualify_native_vlm_media.py",
-            "sha256": "c6aedd383359d34dbdacd46e22933e17a62769fa4f14e6eb0d233f06af2e6126",
-            "evaluator_sha256": "c3ebee56e39c13c0fc2cc1b892379d541cee7523192780d37dc4daa9d43b210a",
+            "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
+            "evaluator_sha256": "498ddd0dfbfeb9422f3e5b1b028857df66e7c813e8048b279a087be1ccc0fe7a",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
-            "adapter_batching_sha256": "7c8383288b4e060f788d625a352f7e0e2592f844271a529af5a6f105205a6461",
+            "adapter_batching_sha256": "2b37a4bbaaae8ca4658104bea7d26ebe7909d7084dc2fa2c8f2c3b7b99d8706a",
             "adapter_contract_sha256": "5605b41a95a68adcb8f5632601a0b4dbd8d04a83a0871b6649afdc44ebe22df2",
         },
         evaluate_native_vlm_report,
@@ -318,11 +319,11 @@ APPROVED_MEDIA_PRODUCERS = {
     "minicpmo": (
         {
             "name": "scripts/qualify_native_vlm_media.py",
-            "sha256": "c6aedd383359d34dbdacd46e22933e17a62769fa4f14e6eb0d233f06af2e6126",
-            "evaluator_sha256": "c3ebee56e39c13c0fc2cc1b892379d541cee7523192780d37dc4daa9d43b210a",
+            "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
+            "evaluator_sha256": "498ddd0dfbfeb9422f3e5b1b028857df66e7c813e8048b279a087be1ccc0fe7a",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
-            "adapter_batching_sha256": "7c8383288b4e060f788d625a352f7e0e2592f844271a529af5a6f105205a6461",
-            "adapter_contract_sha256": "a3fa6ae00b4f69ca08f02a212e48490e991daafa085761cf6f97f670c3abe08b",
+            "adapter_batching_sha256": "2b37a4bbaaae8ca4658104bea7d26ebe7909d7084dc2fa2c8f2c3b7b99d8706a",
+            "adapter_contract_sha256": "4896eaff85860c2913ad3fffbbbdeaf1e81e8201abe5345027688e7b6a7c1349",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["minicpmo"],
@@ -360,6 +361,24 @@ def validate_adapter_qualification(
             )
     else:
         harness, evaluator, expected_checks = producer_entry
+    expected_checks = set(expected_checks)
+    policy_check_rules = ()
+    if descriptor is not None:
+        policy_check_rules = descriptor.metadata.get(
+            "conditional_qualification_checks", ()
+        )
+        if not isinstance(policy_check_rules, (list, tuple)):
+            raise ValueError("descriptor conditional qualification checks are malformed")
+        selected_policy_checks = resolve_conditional_qualification_checks(
+            policy_check_rules, settings
+        )
+        conditional_names = {
+            rule["check"]
+            for rule in policy_check_rules
+            if isinstance(rule, dict) and isinstance(rule.get("check"), str)
+        }
+        expected_checks.difference_update(conditional_names)
+        expected_checks.update(selected_policy_checks)
     source_revision = PINNED_MEDIA_SOURCE_REVISIONS[model_type]
     if (
         report.get("schema") != "mlx2.media-serving-qualification.v1"
@@ -389,7 +408,10 @@ def validate_adapter_qualification(
         raise ValueError("adapter qualification does not match serving settings")
     if model_type in NATIVE_VLM_MEDIA_CHECKS:
         observed = evaluator(
-            report, expected_family=model_type, expected_harness=harness
+            report,
+            expected_family=model_type,
+            expected_harness=harness,
+            expected_policy_checks=policy_check_rules,
         )
     else:
         observed = evaluator(report)
@@ -1459,7 +1481,7 @@ def _route_feature_checks(settings):
     return {"feature_" + name for name in features}
 
 
-def required_descriptor_checks(descriptor):
+def required_descriptor_checks(descriptor, settings=None):
     """Adapter-declared checks that a generic text receipt cannot satisfy."""
     checks = descriptor.metadata.get("required_qualification_checks", ())
     if not isinstance(checks, (list, tuple)) or any(
@@ -1475,6 +1497,13 @@ def required_descriptor_checks(descriptor):
     ):
         if capability in descriptor.capabilities:
             required.add(check)
+    rules = descriptor.metadata.get("conditional_qualification_checks", ())
+    if not isinstance(rules, (list, tuple)):
+        raise ValueError("descriptor conditional qualification checks are malformed")
+    if rules:
+        if settings is None:
+            raise ValueError("conditional qualification settings are required")
+        required.update(resolve_conditional_qualification_checks(rules, settings))
     return required
 
 
@@ -1607,7 +1636,7 @@ def load_qualified_route(
     )
     if Capability.GRAMMAR in descriptor.capabilities:
         required.add("structured_output")
-    descriptor_checks = required_descriptor_checks(descriptor)
+    descriptor_checks = required_descriptor_checks(descriptor, settings)
     unsupported = descriptor_checks - APPROVED_ADAPTER_CHECKS
     if unsupported:
         raise ValueError(

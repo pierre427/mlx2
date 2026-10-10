@@ -227,8 +227,11 @@ class NativeVideoInput:
 
 @dataclass(frozen=True, slots=True)
 class MiniCPMOExecutionPolicy:
-    batch_vision_input: bool = True
-    vision_batch_size: int = 16
+    # The upstream artifact flag describes an optimization preference, not a
+    # numerically qualified route default. Keep images on the ordinary
+    # sequential reference path unless an operator explicitly opts in.
+    batch_vision_input: bool = False
+    vision_batch_size: int = 1
     slice_mode: bool = True
     max_slice_nums: int = 9
     scale_resolution: int = 448
@@ -237,11 +240,43 @@ class MiniCPMOExecutionPolicy:
     audio_sample_rate: int = 16_000
 
     @classmethod
-    def from_config(cls, config: dict):
+    def from_config(cls, config: dict, *, media_options=None):
         slice_config = dict(config.get("slice_config") or {})
+        batch_vision_input = False
+        vision_batch_size = 1
+        if media_options is not None:
+            if not isinstance(media_options, dict):
+                raise ValueError("minicpm_o_media policy must be an object")
+            unknown = set(media_options) - {
+                "batch_vision_input",
+                "vision_batch_size",
+            }
+            if unknown:
+                raise ValueError(
+                    "unsupported minicpm_o_media controls: "
+                    + ", ".join(sorted(unknown))
+                )
+            if "batch_vision_input" in media_options:
+                value = media_options["batch_vision_input"]
+                if type(value) is not bool:
+                    raise ValueError("batch_vision_input must be a boolean")
+                batch_vision_input = value
+            if "vision_batch_size" in media_options:
+                value = media_options["vision_batch_size"]
+                if type(value) is not int or not 1 <= value <= 64:
+                    raise ValueError("vision_batch_size must be between 1 and 64")
+                vision_batch_size = value
+            if batch_vision_input and vision_batch_size < 2:
+                raise ValueError(
+                    "vision batching opt-in requires vision_batch_size >= 2"
+                )
+            if not batch_vision_input and vision_batch_size != 1:
+                raise ValueError(
+                    "vision_batch_size > 1 requires batch_vision_input=true"
+                )
         return cls(
-            batch_vision_input=bool(config.get("batch_vision_input", True)),
-            vision_batch_size=int(config.get("vision_batch_size", 16)),
+            batch_vision_input=batch_vision_input,
+            vision_batch_size=vision_batch_size,
             slice_mode=bool(config.get("slice_mode", True)),
             max_slice_nums=int(slice_config.get("max_slice_nums", 9)),
             scale_resolution=int(
@@ -257,12 +292,21 @@ class MiniCPMOExecutionPolicy:
         )
 
     def __post_init__(self):
+        if type(self.batch_vision_input) is not bool:
+            raise ValueError("MiniCPM-o batch_vision_input must be a boolean")
+        if type(self.vision_batch_size) is not int:
+            raise ValueError("MiniCPM-o vision_batch_size must be an integer")
         if (
             self.vision_batch_size < 1
+            or self.vision_batch_size > 64
             or self.max_slice_nums < 1
             or self.scale_resolution < 14
         ):
             raise ValueError("MiniCPM-o vision controls must be positive")
+        if self.batch_vision_input and self.vision_batch_size < 2:
+            raise ValueError("MiniCPM-o batching requires vision_batch_size >= 2")
+        if not self.batch_vision_input and self.vision_batch_size != 1:
+            raise ValueError("MiniCPM-o sequential mode requires batch size 1")
         if not math.isfinite(self.audio_chunk_length) or self.audio_chunk_length <= 0:
             raise ValueError("MiniCPM-o audio_chunk_length must be finite and positive")
         if self.audio_sample_rate < 1:
@@ -328,6 +372,10 @@ class MiniCPMOExecutionPolicy:
             "chunk_input": self.chunk_input,
             "audio_sample_rate": self.audio_sample_rate,
         }
+
+    def as_dict(self) -> dict:
+        """Return the effective adapter policy for route identity receipts."""
+        return self.receipt()
 
 
 def install_minicpmo_vision_batching(model, policy: MiniCPMOExecutionPolicy):

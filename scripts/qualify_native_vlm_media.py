@@ -156,7 +156,9 @@ def _request(
     }
 
 
-def _adapter(family, path):
+def _adapter(family, path, execution_policy=None):
+    if execution_policy is not None and family != "minicpmo":
+        raise ValueError("adapter execution policy is supported only for MiniCPM-o")
     if family == "gemma3n":
         from mlx2.adapters.mlx_vlm import Gemma3nAdapter
 
@@ -164,7 +166,7 @@ def _adapter(family, path):
     if family == "minicpmo":
         from mlx2.adapters.mlx_vlm import MiniCPMOAdapter
 
-        return MiniCPMOAdapter(path)
+        return MiniCPMOAdapter(path, execution_policy=execution_policy)
     from mlx2.adapters.gemma4 import (
         Gemma4A4BAdapter,
         Gemma431BAdapter,
@@ -248,7 +250,7 @@ def _enable_batching_observer(adapter, family):
     if family == "gemma3n":
         name = "_mlx2_gemma3n_vision_batching"
         limit = adapter.video_policy.frame_batch_size
-    elif family == "minicpmo":
+    elif family == "minicpmo" and adapter.media_policy.batch_vision_input:
         name = "_mlx2_minicpmo_vision_batching"
         limit = adapter.media_policy.vision_batch_size
     else:
@@ -273,6 +275,52 @@ def _batching_observation(adapter, family):
     model = adapter.model._model
     value = getattr(model, name, None)
     return json.loads(json.dumps(value)) if isinstance(value, dict) else None
+
+
+class _TowerCallObserver:
+    """Qualification-local proxy recording bounded tower batch dimensions."""
+
+    def __init__(self, wrapped):
+        self.wrapped = wrapped
+        self.batch_sizes = []
+
+    def __getattr__(self, name):
+        return getattr(self.wrapped, name)
+
+    def __call__(self, pixels, *args, **kwargs):
+        shape = getattr(pixels, "shape", ())
+        batch_size = int(shape[0]) if len(shape) >= 4 else 1
+        if len(self.batch_sizes) >= 512:
+            raise RuntimeError("qualification tower observer bound exceeded")
+        self.batch_sizes.append(batch_size)
+        return self.wrapped(pixels, *args, **kwargs)
+
+
+def _install_tower_call_observer(model):
+    wrapped = model.vision_tower
+    observer = _TowerCallObserver(wrapped)
+    model.vision_tower = observer
+
+    def restore():
+        model.vision_tower = wrapped
+
+    return observer, restore
+
+
+def _observe_minicpmo_route_features(source, route_method, args, policy, input_count):
+    """Observe only the routed image-feature call, excluding reference/forward."""
+    observer, restore_observer = _install_tower_call_observer(source)
+    try:
+        features = route_method(*args)
+    finally:
+        restore_observer()
+    observation = {
+        "schema": "mlx2.encoder-execution-observation.v1",
+        "policy": policy.receipt(),
+        "input_count": input_count,
+        "tower_call_batch_sizes": observer.batch_sizes,
+    }
+    return features, observation
 
 
 def _ordinary_bound_method(source, name):
@@ -345,8 +393,20 @@ def _parity(adapter, prepared, family):
             args = (pixels, kwargs.get("tgt_sizes"))
         reference_features = ordinary_method(*args)
         mx.eval(reference_features)
-        route_features = route_method(*args)
+        execution_observation = None
+        if family == "minicpmo":
+            route_features, execution_observation = _observe_minicpmo_route_features(
+                source,
+                route_method,
+                args,
+                adapter.media_policy,
+                sum(len(sample) for sample in pixels),
+            )
+        else:
+            route_features = route_method(*args)
         feature_parity = _feature_parity(mx, reference_features, route_features)
+        if execution_observation is not None:
+            feature_parity["encoder_execution"] = execution_observation
     forward = getattr(adapter.model, "prefill_forward", adapter.model)
     got = forward(
         ids, cache=rc, **adapter.validate_prefill_inputs(prepared, tokens, dict(kwargs))
@@ -490,11 +550,11 @@ def _clear_apc_for_isolated_baseline(engine):
     )
 
 
-def run_family(family, model_path):
+def run_family(family, model_path, *, adapter_execution_policy=None):
     if family not in FAMILIES:
         raise ValueError(f"unsupported native VLM family: {family}")
     path = Path(model_path).resolve()
-    adapter = _adapter(family, path)
+    adapter = _adapter(family, path, adapter_execution_policy)
     direct = {}
     fixtures = {}
     try:
@@ -505,7 +565,11 @@ def run_family(family, model_path):
         plain["_mlx2_prefill_inputs"] = {}
         direct["ordinary_text_parity"] = _parity(adapter, plain, family)
         repeated_images = (
-            adapter.media_policy.vision_batch_size + 1 if family == "minicpmo" else 1
+            adapter.media_policy.vision_batch_size + 1
+            if family == "minicpmo" and adapter.media_policy.batch_vision_input
+            else 2
+            if family == "minicpmo"
+            else 1
         )
         for kind in FAMILIES[family]:
             original, changed = _fixture(kind), _fixture(kind, True)
@@ -538,7 +602,9 @@ def run_family(family, model_path):
                     f"{kind} changed-media boundary/fingerprint missing"
                 )
             if (family == "gemma3n" and kind == "video") or (
-                family == "minicpmo" and kind == "image"
+                family == "minicpmo"
+                and kind == "image"
+                and adapter.media_policy.batch_vision_input
             ):
                 _enable_batching_observer(adapter, family)
             direct[kind] = {
@@ -574,6 +640,11 @@ def run_family(family, model_path):
         source_sha = runtime["source_sha256"]
         provenance = adapter.mlx_vlm_build
         defaults = adapter.sampling_defaults.as_dict()
+        conditional_check_rules = list(
+            getattr(adapter.descriptor, "metadata", {}).get(
+                "conditional_qualification_checks", ()
+            )
+        )
     finally:
         adapter.close()
     del adapter
@@ -583,7 +654,12 @@ def run_family(family, model_path):
     mx.clear_cache()
     from mlx2.serving import ServingEngine
 
-    engine = ServingEngine(str(path), **SETUP)
+    setup = dict(SETUP)
+    if adapter_execution_policy is not None:
+        setup["execution_policy"] = adapter_execution_policy
+    engine = ServingEngine(str(path), **setup)
+    serving_encoder_execution = None
+    restore_tower_observer = None
     try:
         if not engine.ready.wait(180) or engine.error:
             raise RuntimeError(f"engine load failed: {engine.error}")
@@ -639,19 +715,44 @@ def run_family(family, model_path):
         }
         arms = {}
         apc_before = dict(engine.apc.apc_stats)
-        serving_batching = _enable_batching_observer(engine.adapter, family)
+        serving_batching = (
+            _enable_batching_observer(engine.adapter, family)
+            if family != "minicpmo" or engine.adapter.media_policy.batch_vision_input
+            else None
+        )
+        tower_observer = None
+        if (
+            family == "minicpmo"
+            and not engine.adapter.media_policy.batch_vision_input
+        ):
+            tower_observer, restore_tower_observer = _install_tower_call_observer(
+                engine.adapter.model._model
+            )
         for kind in FAMILIES[family]:
             original, changed = fixtures[kind]
             body = _request(kind, original, repeat_images=repeated_images)
-            arms[kind] = {
-                name: _drain(engine.submit(req))
-                for name, req in (
-                    ("cold", body),
-                    ("warm", body),
-                    ("changed", _request(kind, changed, repeat_images=repeated_images)),
-                    ("return_original", body),
+            arms[kind] = {}
+            for name, req in (
+                ("cold", body),
+                ("warm", body),
+                ("changed", _request(kind, changed, repeat_images=repeated_images)),
+                ("return_original", body),
+            ):
+                calls_before = (
+                    len(tower_observer.batch_sizes)
+                    if tower_observer is not None
+                    else 0
                 )
-            }
+                arms[kind][name] = _drain(engine.submit(req))
+                if tower_observer is not None and kind == "image" and name == "cold":
+                    serving_encoder_execution = {
+                        "schema": "mlx2.encoder-execution-observation.v1",
+                        "policy": engine.adapter.media_policy.receipt(),
+                        "input_count": repeated_images,
+                        "tower_call_batch_sizes": tower_observer.batch_sizes[
+                            calls_before:
+                        ],
+                    }
         apc_after = dict(engine.apc.apc_stats)
         apc_delta = _apc_counter_delta(apc_before, apc_after, engine.apc._STAT_KEYS)
         settings = engine.snapshot.get("settings")
@@ -674,10 +775,12 @@ def run_family(family, model_path):
             "runtime": serving_runtime,
             "serving_runtime": serving_runtime,
             "settings": settings,
+            "conditional_qualification_checks": conditional_check_rules,
             "sampling_defaults": defaults,
             "ordinary_reference": ordinary,
             "batch": batch,
             "serving_encoder_batching": serving_batching,
+            "serving_encoder_execution": serving_encoder_execution,
             "direct": direct,
             "arms": arms,
             "apc_stats_delta": apc_delta,
@@ -686,6 +789,8 @@ def run_family(family, model_path):
             "status": "candidate_evidence",
         }
     finally:
+        if restore_tower_observer is not None:
+            restore_tower_observer()
         engine.close()
 
 
@@ -705,6 +810,24 @@ def _prove_lease(generation, *, owner_lock, task_id):
     )
 
 
+def _load_adapter_execution_policy(path, family):
+    if path is None:
+        return None
+    value = json.loads(Path(path).read_text())
+    if not isinstance(value, dict) or set(value) != {"minicpm_o_media"}:
+        raise ValueError(
+            "adapter execution policy file must contain only minicpm_o_media"
+        )
+    if family != "minicpmo":
+        raise ValueError("adapter execution policy is supported only for MiniCPM-o")
+    from mlx2.adapters.multimodal import MiniCPMOExecutionPolicy
+
+    MiniCPMOExecutionPolicy.from_config(
+        {}, media_options=value["minicpm_o_media"]
+    )
+    return value
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("family", choices=tuple(FAMILIES))
@@ -712,6 +835,7 @@ def main(argv=None):
     parser.add_argument("--generation", required=True, type=int)
     parser.add_argument("--cpg-owner-lock", required=True, type=Path)
     parser.add_argument("--cpg-task", required=True)
+    parser.add_argument("--adapter-execution-policy", type=Path)
     args = parser.parse_args(argv)
     try:
         owner = _prove_lease(
@@ -719,12 +843,18 @@ def main(argv=None):
         )
         if not args.model_path.is_dir():
             raise FileNotFoundError(f"model artifact missing: {args.model_path}")
+        adapter_execution_policy = _load_adapter_execution_policy(
+            args.adapter_execution_policy, args.family
+        )
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        result = run_family(args.family, str(args.model_path))
+        result = run_family(
+            args.family,
+            str(args.model_path),
+            adapter_execution_policy=adapter_execution_policy,
+        )
         result["gpu_lease_owner"] = owner
         from mlx2.media_qualification import (
-            NATIVE_VLM_MEDIA_CHECKS,
             evaluate_native_vlm_report,
         )
 
@@ -732,14 +862,13 @@ def main(argv=None):
             result,
             expected_family=args.family,
             expected_harness=_harness_identity(args.family),
+            expected_policy_checks=result.get("conditional_qualification_checks", ()),
         )
         result["checks"] = {
             name: {"passed": value, "evidence": "recomputed_from_native_trace"}
             for name, value in sorted(checks.items())
         }
-        result["passed"] = set(checks) == set(
-            NATIVE_VLM_MEDIA_CHECKS[args.family]
-        ) and all(checks.values())
+        result["passed"] = bool(checks) and all(checks.values())
         result["status"] = (
             "candidate_checks_passed" if result["passed"] else "candidate_checks_failed"
         )

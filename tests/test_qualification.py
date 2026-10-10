@@ -28,11 +28,15 @@ def test_text_batching_does_not_require_multimodal_batch_evidence():
     )
     descriptors = (GEMMA3N, GEMMA4_A4B, MINICPMO, SMOLVLM, LFM25_VL, QWEN25_VL)
     for descriptor in descriptors:
+        settings = {
+            "adapter_policy": {"batch_vision_input": False}
+        } if descriptor is MINICPMO else None
         requires_media_batch = (
             Capability.CONTINUOUS_BATCH in descriptor.capabilities
         )
         assert (
-            "multimodal_continuous_batch" in required_descriptor_checks(descriptor)
+            "multimodal_continuous_batch"
+            in required_descriptor_checks(descriptor, settings)
         ) is requires_media_batch
 
 
@@ -175,6 +179,31 @@ def test_multimodal_descriptor_requires_adapter_owned_live_checks(tmp_path):
         ValueError, match="adapter qualification producer is unavailable"
     ):
         load_qualified_route(path, **args)
+
+
+def test_minicpmo_mechanism_check_follows_resolved_adapter_policy():
+    from mlx2.adapters.mlx_vlm import MINICPMO
+
+    base = {
+        "multimodal_image",
+        "multimodal_audio_input",
+        "multimodal_continuous_batch",
+        "multimodal_apcv2_reuse",
+    }
+    sequential = required_descriptor_checks(
+        MINICPMO,
+        {"adapter_policy": {"batch_vision_input": False, "vision_batch_size": 1}},
+    )
+    batched = required_descriptor_checks(
+        MINICPMO,
+        {"adapter_policy": {"batch_vision_input": True, "vision_batch_size": 8}},
+    )
+    assert sequential == base | {"multimodal_encoder_sequential"}
+    assert batched == base | {"multimodal_encoder_batching"}
+    with pytest.raises(ValueError, match="settings are required"):
+        required_descriptor_checks(MINICPMO)
+    with pytest.raises(ValueError, match="setting is missing"):
+        required_descriptor_checks(MINICPMO, {"adapter_policy": {}})
 
 
 def _rebind_to_current_producer(companion):

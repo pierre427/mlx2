@@ -743,9 +743,20 @@ MINICPMO = ModelDescriptor(
         "required_qualification_checks": (
             "multimodal_image",
             "multimodal_audio_input",
-            "multimodal_encoder_batching",
             "multimodal_continuous_batch",
             "multimodal_apcv2_reuse",
+        ),
+        "conditional_qualification_checks": (
+            {
+                "setting": ("adapter_policy", "batch_vision_input"),
+                "equals": True,
+                "check": "multimodal_encoder_batching",
+            },
+            {
+                "setting": ("adapter_policy", "batch_vision_input"),
+                "equals": False,
+                "check": "multimodal_encoder_sequential",
+            },
         ),
         "output_audio": "fail_closed_unqualified",
     },
@@ -767,8 +778,34 @@ class MiniCPMOAdapter(_MLXVLMAdapter):
         )
 
     def __init__(self, model_path, *, execution_policy=None):
-        super().__init__(model_path, execution_policy=execution_policy)
-        self.media_policy = MiniCPMOExecutionPolicy.from_config(self.identity["config"])
+        media_options = None
+        if execution_policy is not None:
+            if not isinstance(execution_policy, dict):
+                raise ValueError("MiniCPM-o execution policy must be an object")
+            unknown = set(execution_policy) - {"minicpm_o_media"}
+            if unknown:
+                raise ValueError(
+                    "unsupported MiniCPM-o execution policy controls: "
+                    + ", ".join(sorted(unknown))
+                )
+            if "minicpm_o_media" in execution_policy:
+                media_options = execution_policy["minicpm_o_media"]
+                if not isinstance(media_options, dict):
+                    raise ValueError("minicpm_o_media policy must be an object")
+        # Validate every operator-supplied control before artifact inspection
+        # or model loading can consume memory or execute backend code.
+        MiniCPMOExecutionPolicy.from_config({}, media_options=media_options)
+        # The common mlx-vlm loader rejects arbitrary adapter policies. Parse
+        # this adapter's deliberately narrow media option above, then load
+        # through the unchanged common path.
+        super().__init__(model_path, execution_policy=None)
+        self.media_policy = MiniCPMOExecutionPolicy.from_config(
+            self.identity["config"], media_options=media_options
+        )
+        # serving.py includes adapter.policy.as_dict() in the effective route
+        # settings. This binds sequential defaults and explicit opt-ins to
+        # distinct qualification receipts.
+        self.policy = self.media_policy
         install_minicpmo_vision_batching(self.model, self.media_policy)
         install_media_feature_cache(
             self.model, self.media_feature_cache, family="minicpmo"

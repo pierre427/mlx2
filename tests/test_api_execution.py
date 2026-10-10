@@ -428,7 +428,8 @@ def test_minicpmo_policy_uses_slicing_batching_and_audio_chunk_controls():
             "audio_chunk_length": 1.0,
             "chunk_input": True,
             "audio_config": {"sampling_rate": 16_000},
-        }
+        },
+        media_options={"batch_vision_input": True, "vision_batch_size": 2},
     )
     batches = policy.vision_batches([Image.new("RGB", (256, 64))])
     assert len(batches) >= 2
