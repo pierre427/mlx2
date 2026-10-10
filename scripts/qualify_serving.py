@@ -1585,6 +1585,26 @@ def normalize_chat_content(value):
     return (value or "").strip()
 
 
+def stop_witness_response_matches(response, witness):
+    """Compare the observed stop prefix with symmetric whitespace normalization."""
+    if (
+        not isinstance(response, dict)
+        or not isinstance(witness, tuple)
+        or len(witness) != 2
+        or any(not isinstance(value, str) or not value for value in witness)
+    ):
+        return False
+    choices = response.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+        return False
+    message = choices[0].get("message")
+    if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+        return False
+    return (normalize_chat_content(message["content"])
+            == normalize_chat_content(witness[1])
+            and choices[0].get("finish_reason") == "stop")
+
+
 def observed_compute_widths(receipt):
     """Return actual execution widths across ordinary and speculative routes."""
     mtp = receipt.get("mtp") or {}
@@ -3433,8 +3453,10 @@ def main():
         check(
             "stop",
             (stop_witness is not None if source_cases is not None else True)
-            and content(stopped) == (stop_witness[1] if stop_witness else "MLX2")
-            and stopped["choices"][0]["finish_reason"] == "stop",
+            and (stop_witness_response_matches(stopped, stop_witness)
+                 if stop_witness else (
+                     content(stopped) == "MLX2"
+                     and stopped["choices"][0]["finish_reason"] == "stop")),
             stopped,
         )
         seeded = prompt(

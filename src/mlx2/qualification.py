@@ -239,7 +239,9 @@ APPROVED_QUALIFICATION_HARNESS = {
     # Re-pinned 2026-10-10: adaptive feature qualification depends on
     # correctness and observed policy behavior; speed/probe overhead are
     # separate performance evidence. Reject nonfinite confidence limits.
-    "sha256": "f993acfcb2ca64a31555c1a5c841d451008d285694a63a2a927e02b6fa90bd43",
+    # Re-pinned 2026-10-10: stop witness comparisons normalize expected and
+    # observed outer whitespace symmetrically.
+    "sha256": "cddc61b8cea37e6277ce3b9ef8b41f78748ada4f037c560767525655da296ba8",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A

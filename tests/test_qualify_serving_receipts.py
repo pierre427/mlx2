@@ -966,6 +966,32 @@ def test_source_text_stop_witness_is_interior_and_unique():
     assert qualify.interior_stop_witness("short") is None
 
 
+def test_stop_witness_response_normalizes_expected_and_observed_symmetrically():
+    # Captured SmolVLM cold prefix and the witness selected from it. The raw
+    # prefix ends in a space while HTTP content normalization strips it.
+    witness = ("find the v", "To solve the problem, we need to ")
+    response = {"choices": [{"finish_reason": "stop", "message": {
+        "content": "To solve the problem, we need to "
+    }}]}
+    assert qualify.stop_witness_response_matches(response, witness)
+    response["choices"][0]["message"]["content"] = "To solve the problem, we need to"
+    assert qualify.stop_witness_response_matches(response, witness)
+
+    changed = copy.deepcopy(response)
+    changed["choices"][0]["message"]["content"] += " changed"
+    assert not qualify.stop_witness_response_matches(changed, witness)
+    changed = copy.deepcopy(response)
+    changed["choices"][0]["message"]["content"] = "X" + changed["choices"][0]["message"]["content"][1:]
+    assert not qualify.stop_witness_response_matches(changed, witness)
+    changed = copy.deepcopy(response)
+    changed["choices"][0]["finish_reason"] = "length"
+    assert not qualify.stop_witness_response_matches(changed, witness)
+    assert not qualify.stop_witness_response_matches(response, None)
+    assert not qualify.stop_witness_response_matches(response, ("", "prefix"))
+    assert not qualify.stop_witness_response_matches(response, ("stop", ""))
+    assert not qualify.stop_witness_response_matches(response, ["stop", "prefix"])
+
+
 def test_long_context_probe_uses_one_consistent_safe_headroom():
     cap = 1024
     text = qualify.long_context_prompt(cap)
