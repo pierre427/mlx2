@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""In-process interleaved A/B: fixed self-MTP depth against the draft-loop gate.
+"""In-process interleaved A/B: ordinary decode, fixed self-MTP depth, and DLoop.
 
-One model load, one process.  Each arm is a ``BatchGenerator`` self-MTP
-configuration; arms run in the order A B C ... per pair, over the same
+One model load, one process.  The explicit ordinary arm uses an ordinary
+``BatchGenerator``; fixed and gated arms use self-MTP configurations. Arms run
+in the declared order per pair, over the same
 chat-templated prompt set (thinking off, greedy), one request at a time.
 Per request we time decode only (first emitted token to completion), so
 prefill does not dilute the comparison, and keep the exact token ids so
@@ -62,6 +63,10 @@ def _validate_arms(arms):
     for name, config in arms:
         if not name or not isinstance(config, dict):
             raise ValueError("each arm needs a name and object config")
+        if config.get("reference") == "ordinary_decode":
+            if config != {"reference": "ordinary_decode"}:
+                raise ValueError("ordinary reference arm cannot include MTP options")
+            continue
         depth = config.get("num_draft")
         if not isinstance(depth, int) or isinstance(depth, bool) or not 1 <= depth <= 8:
             raise ValueError(f"arm {name!r} num_draft must be in 1..8")
@@ -162,6 +167,8 @@ def parse_arm(text):
     """``name=num_draft``, ``name=num_draft:stage:threshold`` or
     ``name=num_draft:b1/b2/...:threshold`` (explicit stage boundaries)."""
     name, _, spec = text.partition("=")
+    if name == "ordinary" and spec == "ordinary":
+        return name, {"reference": "ordinary_decode"}
     if spec.startswith("{"):
         # Full self-MTP config as JSON, e.g. {"num_draft": 3, "draft_loop": {...}}.
         return name, json.loads(spec)
@@ -194,13 +201,10 @@ def _state_continuation(model, state, config, max_tokens):
     import copy
 
     import mlx.core as mx
-
     from mlx2.runtime.generate import BatchGenerator
     from mlx2.runtime.sample_utils import LaneRNG
 
-    history = [int(token) for token in state["all_tokens"]]
-    if len(history) < 2:
-        raise RuntimeError("state continuation needs a prompt prefix and final token")
+    prompt_tokens, history = _continuation_request(state)
     mtp = config is not None
     generator = BatchGenerator(
         model,
@@ -221,13 +225,13 @@ def _state_continuation(model, state, config, max_tokens):
     kwargs = {
         "max_tokens": [max_tokens],
         "caches": [copy.deepcopy(state["target_cache"])],
-        "all_tokens": [history[:-1]],
+        "all_tokens": [history],
         "lane_rngs": [LaneRNG(0)],
     }
     if mtp:
         kwargs["mtp_states"] = [copy.deepcopy(state["mtp_state"])]
         kwargs["self_mtp_configs"] = [{"sampling_temp": 0.0}]
-    uid = generator.insert([[history[-1]]], **kwargs)[0]
+    uid = generator.insert([prompt_tokens], **kwargs)[0]
     output, done = [], False
     while not done:
         _, responses = generator.next()
@@ -245,7 +249,6 @@ def _state_continuation(model, state, config, max_tokens):
 def _cold_continuation(model, history, max_tokens):
     """Recompute the full prefix with ordinary decode, then emit a continuation."""
     import mlx.core as mx
-
     from mlx2.runtime.generate import BatchGenerator
     from mlx2.runtime.sample_utils import LaneRNG
 
@@ -272,35 +275,81 @@ def _cold_continuation(model, history, max_tokens):
     return output
 
 
+def _terminal_state(response):
+    """Capture the token emitted with the terminal cache; all_tokens omits it."""
+    return {
+        "target_cache": response.prompt_cache,
+        "all_tokens": list(response.all_tokens),
+        "terminal_response_token": int(response.token),
+        "mtp_state": getattr(response, "mtp_state", None),
+    }
+
+
+def _continuation_prefix(state):
+    """Return full known history and the separately emitted terminal token."""
+    history = [int(token) for token in state["all_tokens"]]
+    terminal_token = state.get("terminal_response_token")
+    if len(history) < 2:
+        raise RuntimeError("state continuation needs a prompt prefix and token history")
+    if not isinstance(terminal_token, int) or isinstance(terminal_token, bool):
+        raise TypeError("state continuation is missing terminal response.token")
+    return history, terminal_token
+
+
+def _continuation_request(state):
+    """Cache-backed input boundary: known prefix in all_tokens, pending token in prompt."""
+    history, terminal_token = _continuation_prefix(state)
+    return [terminal_token], history
+
+
+def _cold_history(state):
+    """Cold ordinary decode recomputes the prefix through response.token."""
+    history, terminal_token = _continuation_prefix(state)
+    return [*history, terminal_token]
+
+
 def _state_evidence(model, state, config, max_tokens):
     import hashlib
     import json
 
-    history = [int(token) for token in state["all_tokens"]]
-    if len(history) < 2 or state["target_cache"] is None or state["mtp_state"] is None:
-        raise RuntimeError("extracted self-MTP state is not continuable")
+    history, terminal_token = _continuation_prefix(state)
+    continuation_history = _cold_history(state)
+    if state["target_cache"] is None:
+        raise RuntimeError("extracted terminal state has no target cache")
     ordinary = _state_continuation(model, state, None, max_tokens)
-    self_mtp = _state_continuation(model, state, config, max_tokens)
-    cold = _cold_continuation(model, history, max_tokens)
+    self_mtp = (
+        _state_continuation(model, state, config, max_tokens)
+        if state.get("mtp_state") is not None
+        else None
+    )
+    cold = _cold_continuation(model, continuation_history, max_tokens)
+    mtp_caches = state["mtp_state"][0] if state.get("mtp_state") is not None else []
     return {
-        "schema": "mlx2.dloop-state-continuation.v1",
+        "schema": "mlx2.dloop-state-continuation.v2",
         "prefix_tokens": len(history),
         "prefix_token_ids": history,
+        "terminal_response_token": terminal_token,
+        "continuation_history_token_ids": continuation_history,
+        "continuation_history_sha256": hashlib.sha256(
+            json.dumps(continuation_history, separators=(",", ":")).encode()
+        ).hexdigest(),
         "prefix_sha256": hashlib.sha256(
             json.dumps(history, separators=(",", ":")).encode()
         ).hexdigest(),
         "target_cache_offsets": _state_offsets(state["target_cache"]),
-        "mtp_cache_offsets": _state_offsets(state["mtp_state"][0]),
+        "mtp_cache_offsets": _state_offsets(mtp_caches),
         "saved_ordinary_tokens": ordinary,
         "saved_self_mtp_tokens": self_mtp,
         "cold_ordinary_tokens": cold,
+        "state_kind": "self_mtp"
+        if state.get("mtp_state") is not None
+        else "ordinary_decode",
     }
 
 
 def run_group(model, prompts, indices, config, max_tokens, state_oracle_tokens=0):
     """Decode ``indices`` together in one generator; return rows and engagement."""
     import mlx.core as mx
-
     from mlx2.runtime import segmented_self_mtp as seg
     from mlx2.runtime.generate import BatchGenerator
     from mlx2.runtime.sample_utils import LaneRNG
@@ -317,13 +366,17 @@ def run_group(model, prompts, indices, config, max_tokens, state_oracle_tokens=0
             "segment_aware_live_tip": True,
             "segment_aware_cohort_size": width,
             **config,
-        },
+        }
+        if config is not None
+        else None,
     )
     uids = gen.insert(
         [prompts[i] for i in indices],
         max_tokens=[max_tokens] * width,
         lane_rngs=[LaneRNG(i) for i in indices],
-        self_mtp_configs=[{"sampling_temp": 0.0}] * width,
+        self_mtp_configs=[{"sampling_temp": 0.0}] * width
+        if config is not None
+        else None,
     )
     tokens = {uid: [] for uid in uids}
     receipts, terminal_states, first, done = {}, {}, None, set()
@@ -339,11 +392,7 @@ def run_group(model, prompts, indices, config, max_tokens, state_oracle_tokens=0
             if response.finish_reason is not None:
                 done.add(response.uid)
                 if state_oracle_tokens:
-                    terminal_states[response.uid] = {
-                        "target_cache": response.prompt_cache,
-                        "all_tokens": response.all_tokens,
-                        "mtp_state": response.mtp_state,
-                    }
+                    terminal_states[response.uid] = _terminal_state(response)
     mx.synchronize()
     wall = time.perf_counter() - first
     gen.close()
@@ -384,10 +433,11 @@ def run_arm(
     model, tokenizer, prompts, config, max_tokens, width=1, state_oracle_tokens=0
 ):
     import mlx.core as mx
-
     from mlx2.runtime.generate import BatchGenerator
     from mlx2.runtime.sample_utils import LaneRNG
 
+    if config is not None and config.get("reference") == "ordinary_decode":
+        config = None
     if width > 1:
         rows = []
         for start in range(0, len(prompts), width):
@@ -410,13 +460,15 @@ def run_arm(
                 "segment_aware_live_tip": True,
                 "segment_aware_cohort_size": 1,
                 **config,
-            },
+            }
+            if config is not None
+            else None,
         )
         gen.insert(
             [prompt],
             max_tokens=[max_tokens],
             lane_rngs=[LaneRNG(index)],
-            self_mtp_configs=[{"sampling_temp": 0.0}],
+            self_mtp_configs=[{"sampling_temp": 0.0}] if config is not None else None,
         )
         tokens, receipt, terminal_state, first, done = [], None, None, None, False
         while not done:
@@ -431,11 +483,7 @@ def run_arm(
                 if response.finish_reason is not None:
                     done = True
                     if state_oracle_tokens:
-                        terminal_state = {
-                            "target_cache": response.prompt_cache,
-                            "all_tokens": response.all_tokens,
-                            "mtp_state": response.mtp_state,
-                        }
+                        terminal_state = _terminal_state(response)
         mx.synchronize()
         seconds = time.perf_counter() - first
         gen.close()
@@ -520,7 +568,7 @@ def main(argv=None):
         action="append",
         type=parse_arm,
         required=True,
-        help="name=num_draft[:stage:threshold]; the first arm is the baseline",
+        help="ordinary=ordinary or name=num_draft[:stage:threshold]; ordinary is the reference",
     )
     parser.add_argument("--pairs", type=int, default=3)
     parser.add_argument("--max-tokens", type=int, default=384)
@@ -552,6 +600,10 @@ def main(argv=None):
             args.source_revision, args.runtime_native_sha256, args.artifact_identity
         )
         _validate_arms(args.arm)
+        if dict(args.arm).get("ordinary") != {"reference": "ordinary_decode"}:
+            raise ValueError(
+                "an explicit --arm ordinary=ordinary decode reference is required"
+            )
         if args.out.exists():
             raise ValueError(f"output already exists: {args.out}")
         git_revision = _verify_frozen_git(args.source_revision)
@@ -606,7 +658,7 @@ def main(argv=None):
         for text in PROMPTS
     ]
     arms = dict(args.arm)
-    names = list(arms)
+    names = ["ordinary", *(name for name in arms if name != "ordinary")]
     results = []
     # Warm-up: one short pass per arm, discarded.
     for name in names:
@@ -654,11 +706,11 @@ def main(argv=None):
                 ),
                 flush=True,
             )
-    summary = summarize(results, names, names[0])
+    summary = summarize(results, names, "ordinary")
     args.out.write_text(
         json.dumps(
             {
-                "schema": "mlx2.dloop_ab.v1",
+                "schema": "mlx2.dloop_ab.v2",
                 "host": platform.node(),
                 "model": args.model,
                 "source_revision": git_revision,
