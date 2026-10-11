@@ -68,9 +68,49 @@ defect. Width two and wider, along with the second artifact's DLoop ladder,
 remain held pending collector correction, review, and fresh admission. This is
 correctness/state evidence only, not a performance result.
 
-Controlled performance runs and thermal ladders have not started. The release remains
-`0.1.0rc1`; `0.1.0rc2` is pending completion and review of the remaining
-qualification and release gates.
+The separate Flash Next 32K performance investigation is documented in
+`FLASH_NEXT_32K_PERF_FIX_20261010.md`. Release-wide thermally controlled
+ladders remain pending. The release remains `0.1.0rc1`; `0.1.0rc2` is pending
+completion and review of the remaining release gates.
+
+## Flash Next feature inventory
+
+The complete Flash Next feature inventory was exercised on an internal frozen
+source at `874030a82e37f859e2e45b22c93b31725fe4184f`. Its source-stable CPU
+preflight passed 13,823 tests, 813 skips, 118 subtests, and all 64 isolated
+import guards. This evidence does not transfer to the independently curated
+public checkout.
+
+Fifteen profiles qualified on that exact source, artifact, host, and serving
+shape: ordinary decode, fp32 head logits, APC junction checkpoints, persistent
+blocks, QSA sparse batching in gather and indexed modes, QSA direct selectors
+at widths four and eight, PLE serial and adaptive reads, GDN prefill chunks at
+eight and sixteen, invariant prefill, varlen sparse-MoE prefill, and fp16 GDN
+state. The fp16 state result is explicitly an approximate-operation
+qualification; it does not establish fp32 parity. Every profile retained its
+existing selection and default state, and observed use is limited to the
+qualification campaign.
+
+Sixteen profiles remained unqualified: native MTP, GDN dynamic accept,
+row-exact windows, indexed fused merge/output gating, batched QSA/NAX, PLE
+early dispatch, TensorFold QMV, native and Metal TensorFold prefill, adaptive
+MTP depth, Fly verification, prompt lookup, APC rolling, APC in-flight wait,
+cache capsules, and Spomin surgery. The recurring failure classes were missing
+run-local engagement, a missing MTP-to-ordinary handoff, unsupported projection
+topology, required baseline smoke failures, cold/warm equality failures, and
+bounded width-four admission refusals. No functional failure received an
+automatic retry.
+
+A controlled width-four investigation also corrected a receipt interpretation:
+a cold APCv2 miss correctly has no checkpoint role, while the matched warm
+lookup reports a committed prompt boundary. The preserved comparison passed
+strict token identity, streams, needles, producing width, and warm prefix reuse.
+That shared-gate correction is correctness evidence and does not convert any
+failed feature profile into a pass.
+
+These ladders were qualification runs. Thermal or swap contamination was
+retained as a performance exclusion rather than a correctness failure, and no
+ladder number is eligible for a performance claim.
 
 ## State terminology
 
