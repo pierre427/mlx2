@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 
 QUALIFICATION_HARNESS_SCHEMA = "mlx2.qualification-harness.v1"
 APPROVED_ADAPTIVE_BENCHMARK_SHA256 = (
-    "d7d2f51195008db855a942632ba0ab87cfa709ecf6d27996c824cc5aeacabd6f"
+    "6ea1cb49725e54d82dd607f804213baaaf207aa1af7e8d9d1652794c576544f8"
 )
 PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v2"
 PREFLIGHT_DELTA_SCHEMA = "mlx2.qualification-preflight-delta.v1"

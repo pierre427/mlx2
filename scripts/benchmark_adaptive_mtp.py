@@ -59,6 +59,9 @@ DEFAULT_ORDINARY_MARGIN_FAILURE_THRESHOLD_NATS = 0.5
 # correctness gate is the width-one exactness test in ``correctness()``, which
 # runs in the only regime where token identity is attainable.
 DEFAULT_DIFFERENTIAL_ALPHA = 0.05
+BENCHMARK_OWNED_MTP_POLICY_KEYS = frozenset(
+    {"num_draft", "adaptive_mtp_depth", "mtp_ordinary_handoff"}
+)
 
 PROMPTS = (
     "Explain how a compiler lowers a program, using numbered sections.",
@@ -868,7 +871,44 @@ def correctness(
     return result
 
 
-def _policy(arm: str, depth: int) -> dict:
+def load_mtp_policy_overlay(
+    path: Path | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Load a native-MTP policy overlay and its auditable source identity.
+
+    The benchmark owns the route-defining policy keys. An overlay that changes
+    any of those keys could silently turn an arm into a different experiment,
+    so reject it before the command plan can be launched.
+    """
+    if path is None:
+        return {}, None
+    try:
+        resolved = path.expanduser().resolve(strict=True)
+        raw = resolved.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"cannot read MTP policy overlay {path}: {exc}") from exc
+    try:
+        overlay = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"MTP policy overlay is not valid JSON: {resolved}: {exc}") from exc
+    if not isinstance(overlay, dict):
+        raise ValueError(
+            f"MTP policy overlay must contain a JSON object: {resolved}"
+        )
+    reserved = sorted(BENCHMARK_OWNED_MTP_POLICY_KEYS.intersection(overlay))
+    if reserved:
+        raise ValueError(
+            "MTP policy overlay cannot set benchmark-owned keys: "
+            + ", ".join(reserved)
+        )
+    return overlay, {
+        "path": str(resolved),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "content": overlay,
+    }
+
+
+def _policy(arm: str, depth: int, overlay: dict[str, Any] | None = None) -> dict:
     policy: dict[str, Any] = {"num_draft": depth}
     if arm in {"fixed", "adaptive"}:
         # Keep fixed/adaptive controls isolated from the adapter handoff default.
@@ -877,6 +917,8 @@ def _policy(arm: str, depth: int) -> dict:
         policy["adaptive_mtp_depth"] = {"enabled": True}
     if arm == "handoff":
         policy["adaptive_mtp_depth"] = False
+    if arm in {"fixed", "adaptive", "handoff"} and overlay:
+        policy.update(overlay)
     return policy
 
 
@@ -950,7 +992,7 @@ def commands_for_arm(args, arm: str, run_dir: Path, preset: ModelPreset) -> dict
     ]
     for capability in CAPABILITIES:
         smoke.extend(("--capability", capability))
-    policy = _policy(arm, args.depth)
+    policy = _policy(arm, args.depth, getattr(args, "mtp_policy_overlay", {}))
     if arm == "handoff":
         policy["mtp_ordinary_handoff"] = {
             "enabled": True,
@@ -1164,9 +1206,23 @@ def parse_args(argv=None):
             "MTP through this physical width."
         ),
     )
+    parser.add_argument(
+        "--mtp-policy-overlay",
+        type=Path,
+        help=(
+            "JSON object merged into fixed/adaptive/handoff native-MTP arm "
+            "policies (benchmark-owned MTP keys are rejected)."
+        ),
+    )
     parser.add_argument("--server-arg", action="append", default=[])
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    try:
+        args.mtp_policy_overlay, args.mtp_policy_overlay_audit = (
+            load_mtp_policy_overlay(args.mtp_policy_overlay)
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     preset = PRESETS[args.model]
     args.model_path = args.model_path or preset.path
     args.depth = args.depth or preset.depth
@@ -1495,6 +1551,11 @@ def main(argv=None) -> int:
         arm: commands_for_arm(args, arm, run_dir, preset)
         for arm in arm_order
     }
+    command_plan["mtp_policy_overlay"] = args.mtp_policy_overlay_audit
+    print(
+        "[mtp policy overlay] "
+        + json.dumps(args.mtp_policy_overlay_audit, sort_keys=True)
+    )
     for arm in arm_order:
         print(f"[{arm}] {shlex.join(command_plan[arm]['server'])}")
         if command_plan[arm]["feature_smoke"]:
@@ -1517,6 +1578,7 @@ def main(argv=None) -> int:
         },
         "model": args.model,
         "model_path": args.model_path,
+        "mtp_policy_overlay": args.mtp_policy_overlay_audit,
         "qualified_depth": args.depth,
         "max_tokens": args.max_tokens,
         "widths": args.widths,

@@ -1145,3 +1145,135 @@ def test_qualifier_accepts_explicit_performance_limits_without_weakening_correct
     path.write_text(json.dumps(report))
     _, evidence = qualify_serving.validate_adaptive_benchmark(path, candidate)
     assert evidence["adaptive_qualification"]["passed"]
+
+
+def test_mtp_policy_overlay_merges_only_into_native_mtp_arms(tmp_path):
+    from pathlib import Path
+
+    overlay_path = tmp_path / "policy.json"
+    overlay_path.write_text('{"moe_rhs_pad_policy":"floor"}\n')
+    args = benchmark.parse_args([
+        "--model", "qwen38",
+        "--output", str(tmp_path / "report.json"),
+        "--mtp-policy-overlay", str(overlay_path),
+    ])
+    preset = benchmark.PRESETS["qwen38"]
+
+    native_policies = {
+        arm: benchmark.commands_for_arm(
+            args, arm, Path(tmp_path / "run"), preset
+        )["policy"]
+        for arm in ("fixed", "adaptive", "handoff")
+    }
+    ordinary = benchmark.commands_for_arm(
+        args, "ordinary", Path(tmp_path / "run"), preset
+    )["policy"]
+
+    assert all(
+        policy["moe_rhs_pad_policy"] == "floor"
+        for policy in native_policies.values()
+    )
+    assert "moe_rhs_pad_policy" not in ordinary
+    assert native_policies["fixed"]["num_draft"] == 2
+    assert native_policies["adaptive"]["adaptive_mtp_depth"] == {"enabled": True}
+    assert native_policies["handoff"]["mtp_ordinary_handoff"] == {
+        "enabled": True,
+        "max_mtp_width": None,
+    }
+    assert ordinary == {"num_draft": 2}
+    assert args.mtp_policy_overlay_audit == {
+        "path": str(overlay_path.resolve()),
+        "sha256": benchmark.hashlib.sha256(overlay_path.read_bytes()).hexdigest(),
+        "content": {"moe_rhs_pad_policy": "floor"},
+    }
+
+
+def test_mtp_policy_overlay_absence_preserves_existing_arm_policies(tmp_path):
+    from pathlib import Path
+
+    args = benchmark.parse_args([
+        "--model", "qwen38", "--output", str(tmp_path / "report.json")
+    ])
+    preset = benchmark.PRESETS["qwen38"]
+    policies = {
+        arm: benchmark.commands_for_arm(
+            args, arm, Path(tmp_path / "run"), preset
+        )["policy"]
+        for arm in ("ordinary", "fixed", "adaptive", "handoff")
+    }
+    assert args.mtp_policy_overlay == {}
+    assert args.mtp_policy_overlay_audit is None
+    assert policies == {
+        "ordinary": {"num_draft": 2},
+        "fixed": {"num_draft": 2, "mtp_ordinary_handoff": False},
+        "adaptive": {
+            "num_draft": 2,
+            "mtp_ordinary_handoff": False,
+            "adaptive_mtp_depth": {"enabled": True},
+        },
+        "handoff": {
+            "num_draft": 2,
+            "adaptive_mtp_depth": False,
+            "mtp_ordinary_handoff": {
+                "enabled": True,
+                "max_mtp_width": None,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "reserved_key", ["num_draft", "adaptive_mtp_depth", "mtp_ordinary_handoff"]
+)
+def test_mtp_policy_overlay_rejects_benchmark_owned_keys(
+    tmp_path, reserved_key
+):
+    overlay = tmp_path / "policy.json"
+    overlay.write_text(json.dumps({reserved_key: {"enabled": True}}))
+    with pytest.raises(ValueError, match="benchmark-owned keys"):
+        benchmark.load_mtp_policy_overlay(overlay)
+
+
+@pytest.mark.parametrize("contents", ["{broken", "[]", "null", '"text"', "7"])
+def test_mtp_policy_overlay_fails_closed_for_invalid_or_non_object_json(
+    tmp_path, contents
+):
+    overlay = tmp_path / "policy.json"
+    overlay.write_text(contents)
+    with pytest.raises(ValueError, match="valid JSON|JSON object"):
+        benchmark.load_mtp_policy_overlay(overlay)
+
+
+def test_mtp_policy_overlay_missing_path_fails_before_dry_run_launch(
+    tmp_path, capsys
+):
+    missing = tmp_path / "missing.json"
+    with pytest.raises(SystemExit) as error:
+        benchmark.main([
+            "--model", "qwen38",
+            "--output", str(tmp_path / "report.json"),
+            "--mtp-policy-overlay", str(missing),
+            "--dry-run",
+        ])
+    assert error.value.code == 2
+    assert "cannot read MTP policy overlay" in capsys.readouterr().err
+
+
+def test_mtp_policy_overlay_audit_is_in_dry_run_command_plan(tmp_path, capsys):
+    overlay = tmp_path / "policy.json"
+    overlay.write_text('{"moe_rhs_pad_policy":"floor"}\n')
+    assert benchmark.main([
+        "--model", "qwen38",
+        "--output", str(tmp_path / "report.json"),
+        "--mtp-policy-overlay", str(overlay),
+        "--dry-run",
+    ]) == 0
+    output = capsys.readouterr().out
+    audit_line = next(
+        line for line in output.splitlines() if line.startswith("[mtp policy overlay]")
+    )
+    audit = json.loads(audit_line.split("] ", 1)[1])
+    assert audit["path"] == str(overlay.resolve())
+    assert audit["sha256"] == benchmark.hashlib.sha256(overlay.read_bytes()).hexdigest()
+    assert audit["content"] == {"moe_rhs_pad_policy": "floor"}
+    assert not (tmp_path / "report.json").exists()
