@@ -28,6 +28,7 @@ Differences from ``ladder.py`` (deliberate, recorded in every report):
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -38,7 +39,7 @@ import statistics
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -60,6 +61,65 @@ ADMISSION_POLICY = {
     "accepted_thermal_states": [0, 1],
 }
 _matrix_thermally_stable = matrix.thermally_stable
+
+MAX_CAPTURED_CONTENT_CHARS = 65536
+MAX_SSE_DIAGNOSTIC_EVENTS = 6
+MAX_SSE_DIAGNOSTIC_EVENT_CHARS = 320
+MAX_SSE_DIAGNOSTIC_TOTAL_CHARS = 12000
+MAX_RECEIPT_DIAGNOSTIC_CHARS = 4096
+MAX_ROW_DIAGNOSTIC_CHARS = 32768
+MAX_SERVER_ERROR_ITEMS = 8
+MAX_PROTOCOL_ERROR_ITEMS = 16
+MAX_TRANSPORT_ERROR_ITEMS = 4
+MAX_REASONABLE_TOKEN_COUNT = 2**31 - 1
+
+
+def _bounded(value, depth=0):
+    if value is None or isinstance(value, bool):
+        return value
+    if type(value) is int:
+        return value if abs(value) <= MAX_REASONABLE_TOKEN_COUNT else str(value)[:32]
+    if type(value) is float:
+        return value if math.isfinite(value) else str(value)[:32]
+    if isinstance(value, str):
+        return value[:256] + ("…" if len(value) > 256 else "")
+    if depth >= 2:
+        return {"type": "object", "keys": len(value)} if isinstance(value, dict) else {"type": type(value).__name__}
+    if isinstance(value, dict):
+        return {str(k)[:64]: _bounded(v, depth + 1) for k, v in list(value.items())[:8]}
+    if isinstance(value, list):
+        return [_bounded(v, depth + 1) for v in value[:8]]
+    return repr(value)[:256]
+
+
+def _excerpt(value, limit):
+    value = str(value)
+    return {"text": value[:limit], "truncated": len(value) > limit, "chars": len(value),
+            "sha256": hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()}
+
+
+def _append_bounded(items, value, limit, item_chars=512):
+    if len(items) < limit:
+        items.append(str(value)[:item_chars])
+
+
+def _persist_pending_attempt(cell, *, tag, measured, effective_target_tokens, width,
+                             prompt_recipes, needles, save):
+    cell["pending_attempt"] = {"tag": tag, "measured": measured,
+        "effective_target_tokens": effective_target_tokens, "width": width,
+        "started_at": time.time(), "captured_at": time.time(),
+        "prompt_recipes": prompt_recipes, "needles": needles, "requests": {},
+        "refusal_attempts": {"cold": [], "warm": []}}
+    save()
+    return cell["pending_attempt"]
+
+
+def _record_phase_refusal(pending, by_phase, phase, attempt, rows, status):
+    item = {"phase": phase, "attempt": attempt, "t": time.time(),
+            "rows": copy.deepcopy(rows), "status": _bounded(status)}
+    by_phase[phase].append(item)
+    pending["refusal_attempts"][phase] = copy.deepcopy(by_phase[phase])
+    return copy.deepcopy(by_phase[phase])
 
 
 def _admit(sample, policy):
@@ -251,130 +311,127 @@ def calibrate(
 
 
 class Stream(Client):
-    """ladder.Client with min_tokens and server receipts."""
-
+    """ladder.Client with bounded streaming and failure evidence."""
     min_tokens_supported = True
 
-    def request(self, text: str, max_tokens: int) -> dict:
-        body = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": text}],
-            "temperature": 0,
-            "enable_thinking": False,
-            "max_tokens": max_tokens,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-        if self.min_tokens_supported:
-            body["min_tokens"] = max_tokens
-        import urllib.request
+    @staticmethod
+    def _failed_row(index, kind, error, status=None, body=None):
+        return {"lane_index": index, "done": False, "content": "", "prompt_tokens": 0,
+          "completion_tokens": 0, "cached_tokens": 0, "failure_class": kind,
+          "failure_classes": [kind], "failure_detail": str(error)[:512], "http_status": status,
+          "error_body": _excerpt(body, 2048) if body else None, "server_errors": [],
+          "protocol_errors": [], "transport_errors": [], "harness_errors": [],
+          "raw_sse_diagnostics": {"event_count": 0, "samples": []}, "receipt": {}}
 
-        request = urllib.request.Request(
-            self.base + "/v1/chat/completions",
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
-        )
+    def request(self, text: str, max_tokens: int) -> dict:
+        body = {"model": self.model, "messages": [{"role": "user", "content": text}],
+          "temperature": 0, "enable_thinking": False, "max_tokens": max_tokens,
+          "stream": True, "stream_options": {"include_usage": True}}
+        if self.min_tokens_supported: body["min_tokens"] = max_tokens
+        import urllib.error, urllib.request
+        request = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
         started, first = time.monotonic(), None
         content, usage, receipt, done = [], {}, {}, False
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            for raw in response:
-                line = raw.decode(errors="replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == "[DONE]":
-                    done = True
-                    break
-                event = json.loads(payload)
-                usage = event.get("usage") or usage
-                receipt = event.get("mlx2") or receipt
-                for choice in event.get("choices", []):
-                    delta = choice.get("delta") or {}
-                    piece = (delta.get("reasoning_content") or "") + (
-                        delta.get("content") or ""
-                    )
-                    if piece and first is None:
-                        first = time.monotonic()
-                    content.append(delta.get("content") or "")
-        wall = time.monotonic() - started
-        client_ttft = (first - started) if first else wall
-        prompt_tokens = int(
-            usage.get("prompt_tokens") or receipt.get("prompt_tokens") or 0
-        )
-        completion = int(
-            usage.get("completion_tokens") or receipt.get("completion_tokens") or 0
-        )
-        cached = int(receipt.get("cached_tokens") or 0)
-        server_ttft = receipt.get("ttft_seconds")
-        elapsed = receipt.get("elapsed_seconds")
-        ttft = server_ttft if isinstance(server_ttft, (int, float)) else client_ttft
-        decode_window = (
-            (elapsed - server_ttft)
-            if isinstance(elapsed, (int, float))
-            and isinstance(server_ttft, (int, float))
-            else (wall - client_ttft)
-        )
-        return {
-            "done": done,
-            "content": "".join(content),
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion,
-            "cached_tokens": cached,
-            "client_ttft_seconds": client_ttft,
-            "server_ttft_seconds": server_ttft,
-            "server_elapsed_seconds": elapsed,
-            "wall_seconds": wall,
-            "prefill_tokens_per_second": ((prompt_tokens - cached) / ttft)
-            if ttft and ttft > 0
-            else None,
-            "decode_tokens_per_second": ((completion - 1) / decode_window)
-            if completion > 1 and decode_window > 0
-            else None,
-            "receipt": {
-                key: receipt.get(key)
-                for key in (
-                    "cache",
-                    "profile",
-                    "route",
-                    "cached_tokens",
-                    "ordinary_compute_width",
-                    "speculation",
-                    "qualification",
-                )
-            }
-            | {
-                "mtp": {
-                    key: (receipt.get("mtp") or {}).get(key)
-                    for key in (
-                        "route",
-                        "num_draft",
-                        "acceptance_rate",
-                        "observed_compute_widths",
-                    )
-                }
-                if receipt.get("mtp")
-                else None
-            },
-        }
+        kept, events, samples, server_errors, protocol_errors, transport_errors, harness_errors = 0, 0, [], [], [], [], []
+        finish, status = None, None
+        def diag(payload, event=None):
+            nonlocal events
+            events += 1
+            if len(samples) < MAX_SSE_DIAGNOSTIC_EVENTS:
+                item = {"event_index": events, "payload": _excerpt(payload, MAX_SSE_DIAGNOSTIC_EVENT_CHARS)}
+                if isinstance(event, dict):
+                    item["event_keys"] = [str(k)[:24] for k in list(event)[:8]]
+                    if "error" in event: item["error"] = _excerpt(json.dumps(_bounded(event["error"])), 160)
+                samples.append(item)
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                status = getattr(response, "status", 200)
+                for raw in response:
+                    line = raw.decode(errors="replace").strip()
+                    if not line.startswith("data:"): continue
+                    payload = line[5:].strip()
+                    if payload == "[DONE]": done = True; diag(payload); break
+                    try: event = json.loads(payload)
+                    except (TypeError, ValueError) as e: _append_bounded(protocol_errors, f"invalid SSE JSON: {e}", MAX_PROTOCOL_ERROR_ITEMS, 256); diag(payload); continue
+                    diag(payload, event)
+                    if not isinstance(event, dict): _append_bounded(protocol_errors, "SSE payload was not an object", MAX_PROTOCOL_ERROR_ITEMS); continue
+                    if event.get("error") is not None: _append_bounded(server_errors, json.dumps(_bounded(event["error"])), MAX_SERVER_ERROR_ITEMS)
+                    if event.get("usage") is not None:
+                        if isinstance(event["usage"], dict): usage = event["usage"]
+                        else: _append_bounded(protocol_errors, "usage was not an object", MAX_PROTOCOL_ERROR_ITEMS)
+                    if event.get("mlx2") is not None:
+                        if isinstance(event["mlx2"], dict): receipt = event["mlx2"]
+                        else: _append_bounded(protocol_errors, "mlx2 receipt was not an object", MAX_PROTOCOL_ERROR_ITEMS)
+                    choices = event.get("choices", [])
+                    if not isinstance(choices, list): _append_bounded(protocol_errors, "choices was not a list", MAX_PROTOCOL_ERROR_ITEMS); continue
+                    for choice in choices:
+                        if not isinstance(choice, dict): _append_bounded(protocol_errors, "choice was not an object", MAX_PROTOCOL_ERROR_ITEMS); continue
+                        if choice.get("finish_reason") is not None:
+                            finish = choice["finish_reason"]
+                            if not isinstance(finish, str): _append_bounded(protocol_errors, "finish_reason was not text", MAX_PROTOCOL_ERROR_ITEMS); finish = type(finish).__name__
+                        delta = choice.get("delta") or {}
+                        if not isinstance(delta, dict): _append_bounded(protocol_errors, "delta was not an object", MAX_PROTOCOL_ERROR_ITEMS); continue
+                        reasoning, piece = delta.get("reasoning_content") or "", delta.get("content") or ""
+                        if not isinstance(reasoning, str) or not isinstance(piece, str): _append_bounded(protocol_errors, "delta content was not text", MAX_PROTOCOL_ERROR_ITEMS); continue
+                        if (reasoning or piece) and first is None: first = time.monotonic()
+                        avail = max(0, MAX_CAPTURED_CONTENT_CHARS-kept); content.append(piece[:avail]); kept += min(len(piece), avail)
+        except urllib.error.HTTPError as e:
+            try: error_body = e.read(8192).decode(errors="replace")
+            except Exception: error_body = ""
+            return self._failed_row(None, "server", f"HTTP {e.code}: {e.reason}", e.code, error_body)
+        except (urllib.error.URLError, TimeoutError, OSError) as e: _append_bounded(transport_errors, f"{type(e).__name__}: {e}", MAX_TRANSPORT_ERROR_ITEMS)
+        except Exception as e: _append_bounded(harness_errors, f"{type(e).__name__}: {e}", 2)
+        wall=time.monotonic()-started; client_ttft=first-started if first else wall
+        def count(*vals):
+            for v in vals:
+                if v is None or v == "": continue
+                if type(v) is not int: _append_bounded(protocol_errors, "token count was not a strict integer", MAX_PROTOCOL_ERROR_ITEMS); return 0
+                if v < 0 or v > MAX_REASONABLE_TOKEN_COUNT: _append_bounded(protocol_errors, "token count outside supported range", MAX_PROTOCOL_ERROR_ITEMS); return 0
+                return v
+            return 0
+        pt=count(usage.get("prompt_tokens"), receipt.get("prompt_tokens")); ct=count(usage.get("completion_tokens"), receipt.get("completion_tokens")); cached=count(receipt.get("cached_tokens"))
+        ttft, elapsed=receipt.get("ttft_seconds"), receipt.get("elapsed_seconds")
+        for name,val in (("ttft_seconds",ttft),("elapsed_seconds",elapsed)):
+            if val is not None and not (type(val) in (int,float) and math.isfinite(val) and 0 <= val <= 86400):
+                _append_bounded(protocol_errors, f"receipt {name} was invalid", MAX_PROTOCOL_ERROR_ITEMS)
+                if name == "ttft_seconds": ttft=None
+                else: elapsed=None
+        if not done: _append_bounded(protocol_errors, "SSE stream ended without [DONE]", MAX_PROTOCOL_ERROR_ITEMS)
+        if finish is None and not server_errors: _append_bounded(protocol_errors, "no terminal finish_reason", MAX_PROTOCOL_ERROR_ITEMS)
+        classes=(["transport"] if transport_errors else [])+(["harness_error"] if harness_errors else [])+(["server"] if server_errors else [])+(["server_protocol"] if protocol_errors else [])
+        if not classes: classes=["complete"]
+        selected_ttft=ttft if isinstance(ttft,(int,float)) else client_ttft; window=elapsed-ttft if isinstance(elapsed,(int,float)) and isinstance(ttft,(int,float)) else wall-client_ttft
+        rendered="".join(content); diag_receipt=json.dumps(_bounded(receipt),ensure_ascii=False,separators=(",",":"))[:MAX_RECEIPT_DIAGNOSTIC_CHARS]
+        row = {"done":done,"content":rendered,"content_truncated":kept>=MAX_CAPTURED_CONTENT_CHARS,"prompt_tokens":pt,"completion_tokens":ct,"cached_tokens":cached,
+          "client_ttft_seconds":client_ttft,"server_ttft_seconds":ttft,"server_elapsed_seconds":elapsed,"wall_seconds":wall,
+          "prefill_tokens_per_second":((pt-cached)/selected_ttft) if selected_ttft and selected_ttft>0 else None,
+          "decode_tokens_per_second":((ct-1)/window) if ct>1 and window>0 else None,"finish_reason":str(finish)[:128] if finish is not None else None,
+          "failure_classes":classes,"failure_class":classes[0] if classes[0]!="complete" else None,"failure_detail":None,"http_status":status,
+          "server_errors":server_errors,"protocol_errors":protocol_errors,"transport_errors":transport_errors,"harness_errors":harness_errors,
+          "raw_sse_diagnostics":{"event_count":events,"samples":samples,"total_excerpt_chars":sum(len(x["payload"]["text"]) for x in samples)},
+          "terminal_receipt_diagnostics":{"keys":[str(k)[:64] for k in list(receipt)[:24]],"excerpt":diag_receipt},
+          "receipt":{k:_bounded(receipt.get(k)) for k in ("cache","profile","route","cached_tokens","ordinary_compute_width","speculation","qualification")} | {"mtp":_bounded(receipt.get("mtp")) if receipt.get("mtp") else None}}
+        diagnostic_fields={k:row[k] for k in ("failure_classes","failure_detail","server_errors","protocol_errors","transport_errors","harness_errors","raw_sse_diagnostics","terminal_receipt_diagnostics","receipt")}
+        row["diagnostic_chars"]=len(json.dumps(diagnostic_fields,ensure_ascii=False,separators=(",",":"),default=str))
+        if row["diagnostic_chars"] > MAX_ROW_DIAGNOSTIC_CHARS: raise ValueError("bounded request diagnostics exceeded the row budget")
+        return row
 
     def batch(self, prompts: list[str], max_tokens: int) -> dict:
-        started = time.monotonic()
-        with ThreadPoolExecutor(max_workers=len(prompts)) as pool:
-            rows = list(
-                pool.map(
-                    lambda text: self._guarded(lambda: self.request(text, max_tokens)),
-                    prompts,
-                )
-            )
-        elapsed = time.monotonic() - started
-        total_completion = sum(row["completion_tokens"] for row in rows)
-        return {
-            "rows": rows,
-            "elapsed_seconds": elapsed,
-            "aggregate_completion_tokens_per_second": total_completion / elapsed
-            if elapsed > 0
-            else None,
-        }
+        started=time.monotonic(); rows=[None]*len(prompts)
+        with ThreadPoolExecutor(max_workers=max(1,len(prompts))) as pool:
+            futures={pool.submit(self._guarded,lambda text=text:self.request(text,max_tokens)):i for i,text in enumerate(prompts)}
+            for future in as_completed(futures):
+                i=futures[future]
+                try: row=future.result()
+                except Exception as e:
+                    import urllib.error
+                    kind = ("server" if isinstance(e, RuntimeError) and str(e).startswith("server health error:")
+                            else "transport" if isinstance(e,(urllib.error.URLError,TimeoutError,OSError))
+                            else "harness_error")
+                    row=self._failed_row(i,kind,f"{type(e).__name__}: {e}")
+                row["lane_index"]=i; row.setdefault("prompt_sha256",hashlib.sha256(prompts[i].encode()).hexdigest()); rows[i]=row
+        elapsed=time.monotonic()-started; total=sum(r.get("completion_tokens",0) for r in rows)
+        return {"rows":rows,"elapsed_seconds":elapsed,"aggregate_completion_tokens_per_second":total/elapsed if elapsed>0 else None}
 
 
 # A warm request is an APCv2 hit only when it reused (nearly) its whole prompt.
@@ -398,64 +455,37 @@ def median(values):
 
 
 def summarize_run(cold: dict, warm: dict, needles: list[str]) -> dict:
-    lanes = len(needles)
-    cold_rows, warm_rows = cold["rows"], warm["rows"]
-    return {
-        "ttft_seconds": median(
-            [
-                row["server_ttft_seconds"] or row["client_ttft_seconds"]
-                for row in cold_rows
-            ]
-        ),
-        "warm_ttft_seconds": median(
-            [
-                row["server_ttft_seconds"] or row["client_ttft_seconds"]
-                for row in warm_rows
-            ]
-        ),
-        "prefill_tokens_per_second": median(
-            [row["prefill_tokens_per_second"] for row in cold_rows]
-        ),
-        "aggregate_prefill_tokens_per_second": (
-            sum(row["prompt_tokens"] - row["cached_tokens"] for row in cold_rows)
-            / max(
-                row["server_ttft_seconds"] or row["client_ttft_seconds"]
-                for row in cold_rows
-            )
-        )
-        if lanes > 1
-        else None,
-        "decode_tokens_per_second": median(
-            [row["decode_tokens_per_second"] for row in cold_rows]
-        ),
-        "warm_decode_tokens_per_second": median(
-            [row["decode_tokens_per_second"] for row in warm_rows]
-        ),
-        "aggregate_decode_tokens_per_second": cold[
-            "aggregate_completion_tokens_per_second"
-        ],
-        "needle_correct": sum(
-            needle in row["content"] for row, needle in zip(cold_rows, needles)
-        )
-        + sum(needle in row["content"] for row, needle in zip(warm_rows, needles)),
-        "needle_total": 2 * lanes,
-        "streams_done": all(row["done"] for row in cold_rows + warm_rows),
-        "cold_cached_max_tokens": max(row["cached_tokens"] for row in cold_rows),
-        "cold_cached_max_fraction": max(
-            row["cached_tokens"] / max(row["prompt_tokens"], 1) for row in cold_rows
-        ),
-        "warm_apc_hits": sum(warm_hit(row) for row in warm_rows),
-        "warm_hit_min_fraction": WARM_HIT_MIN_FRACTION,
-        "warm_cached_min_fraction": min(
-            (row["cached_tokens"] / max(row["prompt_tokens"], 1) for row in warm_rows),
-            default=None,
-        ),
-        "warm_equals_cold": sum(
-            a["content"] == b["content"] for a, b in zip(cold_rows, warm_rows)
-        ),
-        "prompt_tokens": [row["prompt_tokens"] for row in cold_rows],
-        "completion_tokens": [row["completion_tokens"] for row in cold_rows],
-    }
+    cold_rows, warm_rows = cold.get("rows", []), warm.get("rows", [])
+    request_failures, functional_failures = [], []
+    def complete(row):
+        return row.get("done") is True and not row.get("server_errors") and not row.get("protocol_errors") and not row.get("content_truncated")
+    for phase, rows in (("cold", cold_rows), ("warm", warm_rows)):
+        for lane, row in enumerate(rows):
+            for kind in row.get("failure_classes", []):
+                if kind in {"transport", "server", "server_protocol", "harness_error"}:
+                    request_failures.append({"phase": phase, "lane": row.get("lane_index", lane), "class": kind, "detail": row.get("failure_detail") or row.get(kind + "_errors")})
+            if lane < len(needles) and complete(row) and needles[lane] not in row.get("content", ""):
+                functional_failures.append(f"{phase} lane {row.get('lane_index', lane)} missed needle")
+    def vals(rows, key):
+        return [r.get(key) for r in rows if isinstance(r.get(key), (int,float)) and math.isfinite(r.get(key))]
+    def ttft(rows): return [r.get("server_ttft_seconds") or r.get("client_ttft_seconds") for r in rows if r.get("server_ttft_seconds") or r.get("client_ttft_seconds")]
+    cold_ttft, warm_ttft = ttft(cold_rows), ttft(warm_rows)
+    return {"ttft_seconds": median(cold_ttft), "warm_ttft_seconds": median(warm_ttft),
+      "prefill_tokens_per_second": median(vals(cold_rows,"prefill_tokens_per_second")),
+      "aggregate_prefill_tokens_per_second": (sum(r.get("prompt_tokens",0)-r.get("cached_tokens",0) for r in cold_rows)/max(cold_ttft)) if len(needles)>1 and cold_ttft else None,
+      "decode_tokens_per_second": median(vals(cold_rows,"decode_tokens_per_second")),
+      "warm_decode_tokens_per_second": median(vals(warm_rows,"decode_tokens_per_second")),
+      "aggregate_decode_tokens_per_second": cold.get("aggregate_completion_tokens_per_second"),
+      "needle_correct": sum(complete(r) and n in r.get("content","") for rows in (cold_rows,warm_rows) for r,n in zip(rows,needles)),
+      "needle_total":2*len(needles), "streams_done":all(complete(r) for r in cold_rows+warm_rows),
+      "cold_cached_max_tokens":max((r.get("cached_tokens",0) for r in cold_rows),default=0),
+      "cold_cached_max_fraction":max((r.get("cached_tokens",0)/max(r.get("prompt_tokens",1),1) for r in cold_rows),default=0),
+      "warm_apc_hits":sum(warm_hit(r) for r in warm_rows if r.get("prompt_tokens",0)>0),
+      "warm_hit_min_fraction":WARM_HIT_MIN_FRACTION,
+      "warm_cached_min_fraction":min((r.get("cached_tokens",0)/max(r.get("prompt_tokens",1),1) for r in warm_rows if r.get("prompt_tokens",0)>0),default=None),
+      "warm_equals_cold":sum(a.get("content")==b.get("content") for a,b in zip(cold_rows,warm_rows)),
+      "prompt_tokens":[r.get("prompt_tokens",0) for r in cold_rows],"completion_tokens":[r.get("completion_tokens",0) for r in cold_rows],
+      "request_failures":request_failures,"functional_failures":functional_failures}
 
 
 def spread(values):
@@ -731,7 +761,8 @@ def main(argv=None):
             prompts.append(text)
             needles.append(needle)
             counts.append(actual)
-        return prompts, needles, counts
+        recipes = [{"prompt_sha256": hashlib.sha256(text.encode()).hexdigest(), "prompt_tokens": count} for text, count in zip(prompts, counts)]
+        return prompts, needles, counts, recipes
 
     def one_run(effective: int, width: int, tag: str, measured: bool) -> dict:
         thermal_pre = None
@@ -761,42 +792,43 @@ def main(argv=None):
                     "contaminated": False,
                     "contamination": [],
                 }
-        prompts, needles, counts = make_prompts(effective, width, tag)
+        prompts, needles, counts, recipes = make_prompts(effective, width, tag)
+        _persist_pending_attempt(cell, tag=tag, measured=measured, effective_target_tokens=effective, width=width, prompt_recipes=recipes, needles=needles, save=save)
         own = process_tree(own_roots) | own_fixed | process_tree({os.getpid()})
         foreign_before = foreign_snapshot(own)
         swap_before, swap_used_before = swapouts(), matrix.sample_swap()
         owner_before = lock_owner()
         started = time.time()
-        refusals = []
+        refusals_by_phase = {"cold": [], "warm": []}
 
         def batch_with_refusal_retry(label):
-            # A 429 is the server's memory-admission refusal.  Record its body,
-            # wait past the APCv2 idle-disk window (180 s) once, and retry.
-            import urllib.error
-
             for attempt in range(2):
-                try:
-                    return client.batch(prompts, args.max_tokens)
-                except urllib.error.HTTPError as error:
-                    if error.code != 429 or attempt:
-                        raise
-                    try:
-                        body = error.read().decode(errors="replace")[:2000]
-                    except Exception:  # noqa: BLE001
-                        body = None
-                    refusals.append(
-                        {
-                            "phase": label,
-                            "t": time.time(),
-                            "body": body,
-                            "status": client.status(),
-                        }
-                    )
-                    print(f"  429 on {label}: {body}", flush=True)
-                    time.sleep(200)
+                result = client.batch(prompts, args.max_tokens)
+                pending = cell["pending_attempt"]
+                result["attempt"] = attempt + 1
+                pending["requests"][f"{label}_attempt{attempt+1}"] = result
+                pending["captured_at"] = time.time()
+                save()
+                rejected = [row for row in result["rows"] if row.get("http_status") == 429]
+                if rejected:
+                    try: refusal_status = client.status()
+                    except Exception as error: refusal_status = {"status_error": f"{type(error).__name__}: {error}"[:256]}
+                    _record_phase_refusal(pending, refusals_by_phase, label, attempt+1, rejected, refusal_status)
+                    save()
+                if not rejected or attempt:
+                    result["refusal_attempts"] = copy.deepcopy(refusals_by_phase[label])
+                    pending["requests"][label] = result
+                    save()
+                    return result
+                print(f"  429 on {label}: retained {len(rejected)} lane refusal(s)", flush=True)
+                time.sleep(200)
 
         cold = batch_with_refusal_retry("cold")
         warm = batch_with_refusal_retry("warm")
+        for batch in (cold, warm):
+            for row, recipe in zip(batch["rows"], recipes): row["prompt_sha256"] = recipe["prompt_sha256"]
+        cell["pending_attempt"]["requests"].update({"cold": cold, "warm": warm})
+        save()
         finished = time.time()
         swap_after, swap_used_after = swapouts(), matrix.sample_swap()
         own = process_tree(own_roots) | own_fixed | process_tree({os.getpid()})
@@ -811,7 +843,7 @@ def main(argv=None):
             thermal_post = post_run_thermal()
         summary = summarize_run(cold, warm, needles)
         contamination = []
-        functional_failures = []
+        functional_failures = list(summary["functional_failures"])
         if swap_after - swap_before > args.swapout_tolerance_pages:
             contamination.append(f"swapouts rose by {swap_after - swap_before} pages")
         if foreign:
@@ -828,7 +860,7 @@ def main(argv=None):
             contamination.append(
                 "throttling observed in two consecutive post-run samples"
             )
-        return {
+        result = {
             "tag": tag,
             "measured": measured,
             "started_at": started,
@@ -856,7 +888,8 @@ def main(argv=None):
                 "after": swap_used_after["used_bytes"],
             },
             "gpu_lock_owner": {"before": owner_before, "after": owner_after},
-            "refusals_429": refusals,
+            "refusals_429": copy.deepcopy(refusals_by_phase),
+            "request_failures": summary["request_failures"],
             "foreign_activity": foreign,
             "loadavg_after": os.getloadavg(),
             "contamination": contamination,
@@ -864,6 +897,8 @@ def main(argv=None):
             "functional_failures": functional_failures,
             "requests": {"cold": cold, "warm": warm},
         }
+        cell["pending_attempt"] = None
+        return result
 
     # Probe min_tokens support once with a tiny request.
     try:
@@ -893,6 +928,7 @@ def main(argv=None):
                 "runs": [],
                 "attempts": [],
                 "error": None,
+                "pending_attempt": None,
             }
             report["cells"].append(cell)
             print(f"CELL {requested} w{width} start {time.strftime('%T')}", flush=True)
