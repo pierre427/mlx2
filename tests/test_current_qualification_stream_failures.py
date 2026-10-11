@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,17 @@ def ladder(monkeypatch):
     sys.modules.pop(spec.name, None)
     if old_root is None: os.environ.pop("MLX2_CAMPAIGN_ROOT", None)
     else: os.environ["MLX2_CAMPAIGN_ROOT"] = old_root
+
+@pytest.fixture
+def verdict():
+    spec = importlib.util.spec_from_file_location(
+        "_test_public_current_verdict", RUN / "qualification_verdict.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    yield module
+    sys.modules.pop(spec.name, None)
 
 def response(monkeypatch, events):
     class Response:
@@ -84,6 +96,49 @@ def test_pending_attempt_saved_with_prompt_and_refusal_phase_snapshots(ladder):
     assert snapshots[0]["pending_attempt"]["requests"] == {}
     assert pending["refusal_attempts"]["cold"][0]["rows"][0]["http_status"] == 429
     assert pending["refusal_attempts"]["warm"] == []
+
+@pytest.mark.parametrize("retries", [0, 1])
+def test_admission_retry_is_explicit_and_preserves_first_refusal(
+    ladder, monkeypatch, retries
+):
+    calls, sleeps = [], []
+    refused = {"http_status": 429, "lane_index": 0}
+    pending = {"requests": {}, "refusal_attempts": {"cold": [], "warm": []}}
+    phases = {"cold": [], "warm": []}
+
+    def batch(_prompts, _maximum):
+        calls.append(True)
+        return {"rows": [refused if len(calls) == 1 else {"http_status": 200}]}
+
+    monkeypatch.setattr(ladder.time, "sleep", sleeps.append)
+    result = ladder._batch_with_refusal_retry(
+        SimpleNamespace(batch=batch, status=lambda: {"headroom": 1}),
+        ["prompt"], 128, phase="cold", pending=pending,
+        refusals_by_phase=phases, save=lambda: None,
+        admission_retries=retries,
+    )
+    row = {"refusals_429": phases}
+    assert len(calls) == 1 + retries
+    assert sleeps == ([200] if retries else [])
+    assert phases["cold"][0]["rows"][0]["http_status"] == 429
+    assert result["refusal_attempts"] == phases["cold"]
+    assert ladder._cell_admission_refused({"warmup": row, "attempts": [], "runs": []})
+
+def test_independent_verdict_rejects_refusal_in_discarded_attempt(verdict):
+    evidence = {
+        "model": "model", "route": "route", "host": "host",
+        "max_context": 1024, "runs_per_cell": 3, "finished_at": 1,
+        "initial": {"artifact": "artifact", "settings": {"mtp": True},
+                    "runtime": {"source_sha256": "a" * 64,
+                                "mlx_native_sha256": "b" * 64}},
+        "expected_cells": [{"requested_tokens": 1024, "width": 1}],
+        "cells": [{"requested_tokens": 1024, "width": 1, "warmup": {},
+                   "attempts": [{"refusals_429": {"cold": [{"attempt": 1}]}}],
+                   "runs": [], "error": None}],
+    }
+    result = verdict.verdict(evidence)
+    assert result["qualified"] is False
+    assert any("admission refusal" in failure for failure in result["failures"])
 
 def test_sse_and_terminal_diagnostics_stay_bounded(ladder, monkeypatch):
     client = ladder.Stream("http://example.invalid", 1, "model")

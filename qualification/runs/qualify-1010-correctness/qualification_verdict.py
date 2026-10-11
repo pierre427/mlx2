@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Correctness-only verdict for a frozen, planned context ladder.
 
-Admission is an execution safety gate: a refused start leaves the ladder
-pending. Throughput and environmental noise never decide qualification.
+Thermal admission is an execution safety gate: a refused start leaves the
+ladder pending. Request admission refusals fail qualification even if a later
+diagnostic retry succeeds. Throughput and environmental noise never decide
+qualification.
 """
 
 from __future__ import annotations
@@ -273,6 +275,15 @@ def verdict(ladder):
             runs, attempts = [], []
         if cell.get("error"):
             problems.append(f"cell error: {str(cell['error'])[:200]}")
+        for row in [cell.get("warmup"), *attempts, *runs]:
+            if not isinstance(row, dict):
+                continue
+            refusals = row.get("refusals_429")
+            if (
+                isinstance(refusals, dict)
+                and any(bool(value) for value in refusals.values())
+            ) or (refusals not in (None, [], {}) and not isinstance(refusals, dict)):
+                problems.append("HTTP 429 admission refusal recorded in cell")
         if len(runs) != 3:
             problems.append(f"{len(runs)}/3 valid measured runs completed")
         for index, row in enumerate(runs):

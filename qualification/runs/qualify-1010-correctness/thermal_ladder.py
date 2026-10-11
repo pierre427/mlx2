@@ -23,6 +23,9 @@ Differences from ``ladder.py`` (deliberate, recorded in every report):
   sampled around each measured run.  A run during which swap-outs rose or a
   foreign GPU process was active is marked contaminated and repeated (at most
   ``--max-retries`` times); the contaminated attempt is kept in the report.
+* HTTP 429 admission refusals are not retried by default. An explicit
+  ``--admission-retries 1`` can collect recovery diagnostics, but any refusal
+  still fails the cell, including one during warm-up or a discarded attempt.
 """
 
 from __future__ import annotations
@@ -120,6 +123,52 @@ def _record_phase_refusal(pending, by_phase, phase, attempt, rows, status):
     by_phase[phase].append(item)
     pending["refusal_attempts"][phase] = copy.deepcopy(by_phase[phase])
     return copy.deepcopy(by_phase[phase])
+
+
+def _batch_with_refusal_retry(
+    client, prompts, max_tokens, *, phase, pending, refusals_by_phase,
+    save, admission_retries=0,
+):
+    """Capture every phase attempt; opt-in recovery never erases a refusal."""
+    if type(admission_retries) is not int or admission_retries not in (0, 1):
+        raise ValueError("admission retries must be zero or one")
+    for attempt in range(admission_retries + 1):
+        result = client.batch(prompts, max_tokens)
+        result["attempt"] = attempt + 1
+        pending["requests"][f"{phase}_attempt{attempt + 1}"] = result
+        pending["captured_at"] = time.time()
+        save()
+        rejected = [row for row in result["rows"] if row.get("http_status") == 429]
+        if rejected:
+            try:
+                status = client.status()
+            except Exception as error:  # noqa: BLE001 - preserve refusal evidence
+                status = {"status_error": f"{type(error).__name__}: {error}"[:256]}
+            _record_phase_refusal(
+                pending, refusals_by_phase, phase, attempt + 1, rejected, status
+            )
+            save()
+        if not rejected or attempt == admission_retries:
+            result["refusal_attempts"] = copy.deepcopy(refusals_by_phase[phase])
+            save()
+            return result
+        print(f"  429 on {phase}: diagnostic retry; cell cannot qualify", flush=True)
+        time.sleep(200)
+
+
+def _cell_admission_refused(cell):
+    """A successful later run cannot hide a refused warm-up or attempt."""
+    rows = [cell.get("warmup"), *(cell.get("attempts") or []), *(cell.get("runs") or [])]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        refusals = row.get("refusals_429")
+        if isinstance(refusals, dict):
+            if any(bool(value) for value in refusals.values()):
+                return True
+        elif refusals not in (None, [], {}):
+            return True
+    return False
 
 
 def _admit(sample, policy):
@@ -648,6 +697,10 @@ def main(argv=None):
     parser.add_argument("--max-length", type=int, default=262144)
     parser.add_argument("--min-length", type=int, default=0)
     parser.add_argument("--max-retries", type=int, default=2)
+    parser.add_argument(
+        "--admission-retries", type=int, choices=(0, 1), default=0,
+        help="optional diagnostic retry count; any refusal still fails qualification",
+    )
     parser.add_argument("--foreign-cpu-threshold", type=float, default=2.0)
     parser.add_argument("--swapout-tolerance-pages", type=int, default=0)
     args = parser.parse_args(argv)
@@ -728,6 +781,11 @@ def main(argv=None):
         ).hexdigest(),
         "admission_policy": ADMISSION_POLICY,
         "performance_mode": args.performance_mode,
+        "retry_policy": {
+            "contamination_retries": args.max_retries,
+            "admission_retries": args.admission_retries,
+            "admission_refusal_fails_qualification": True,
+        },
         "expected_cells": expected_cells,
         "serving_profile": serving_profile,
         "settings": report_status.get("settings"),
@@ -802,26 +860,15 @@ def main(argv=None):
         refusals_by_phase = {"cold": [], "warm": []}
 
         def batch_with_refusal_retry(label):
-            for attempt in range(2):
-                result = client.batch(prompts, args.max_tokens)
-                pending = cell["pending_attempt"]
-                result["attempt"] = attempt + 1
-                pending["requests"][f"{label}_attempt{attempt+1}"] = result
-                pending["captured_at"] = time.time()
-                save()
-                rejected = [row for row in result["rows"] if row.get("http_status") == 429]
-                if rejected:
-                    try: refusal_status = client.status()
-                    except Exception as error: refusal_status = {"status_error": f"{type(error).__name__}: {error}"[:256]}
-                    _record_phase_refusal(pending, refusals_by_phase, label, attempt+1, rejected, refusal_status)
-                    save()
-                if not rejected or attempt:
-                    result["refusal_attempts"] = copy.deepcopy(refusals_by_phase[label])
-                    pending["requests"][label] = result
-                    save()
-                    return result
-                print(f"  429 on {label}: retained {len(rejected)} lane refusal(s)", flush=True)
-                time.sleep(200)
+            result = _batch_with_refusal_retry(
+                client, prompts, args.max_tokens, phase=label,
+                pending=cell["pending_attempt"],
+                refusals_by_phase=refusals_by_phase, save=save,
+                admission_retries=args.admission_retries,
+            )
+            cell["pending_attempt"]["requests"][label] = result
+            save()
+            return result
 
         cold = batch_with_refusal_retry("cold")
         warm = batch_with_refusal_retry("warm")
@@ -999,6 +1046,7 @@ def main(argv=None):
             )
             cell["passed"] = (
                 cell["error"] is None
+                and not _cell_admission_refused(cell)
                 and len(runs) == args.runs
                 and all(row["summary"]["streams_done"] for row in runs)
                 and all(
