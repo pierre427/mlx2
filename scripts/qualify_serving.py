@@ -2832,6 +2832,16 @@ def unobservable_features(features):
     return sorted(set(features) - observable)
 
 
+def require_mtp_policy_benchmark(features, adaptive_benchmark):
+    """Fail before serving requests if a required MTP policy lacks bound evidence."""
+    required = set(features) & {"adaptive_mtp_depth", "mtp_ordinary_handoff"}
+    if required and adaptive_benchmark is None:
+        raise SystemExit(
+            "--adaptive-benchmark is required to qualify selected MTP policy "
+            f"feature(s): {', '.join(sorted(required))}"
+        )
+
+
 def _adaptive_benchmark_evaluator():
     """Load the sibling benchmark both as a script and as a package module."""
     import importlib.util
@@ -3057,6 +3067,15 @@ def main():
     if not (initial["healthy"] and initial["inflight"] == 0):
         raise AssertionError("server must start healthy and idle")
     selected_capabilities, scope_valid = selected_capability_scope(initial)
+    from mlx2.qualification import required_feature_checks
+
+    selected_features = {
+        name.removeprefix("feature_")
+        for name in required_feature_checks(initial.get("settings") or {})
+    }
+    require_mtp_policy_benchmark(
+        selected_features | set(args.require_feature), args.adaptive_benchmark
+    )
     adaptive_benchmark = validate_adaptive_benchmark(
         args.adaptive_benchmark, initial
     )
@@ -3112,7 +3131,6 @@ def main():
         contention_gated_not_observed,
         host_gate_record,
         host_gated_not_observed,
-        required_feature_checks,
         selected_not_observed_features,
     )
 

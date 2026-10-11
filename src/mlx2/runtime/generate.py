@@ -3529,6 +3529,18 @@ class BatchGenerator:
         self.fly_verification = FLyVerificationPolicy.from_value(fly_verification)
         if self.fly_verification.enabled and self.self_mtp is None:
             raise ValueError("FLy verification requires a self-MTP route")
+        if self.fly_verification.enabled:
+            # FLy can relax a rejected draft only after ``window`` following
+            # draft decisions have passed ordinary verification.  A window
+            # as large as the route's maximum draft depth can therefore never
+            # engage.  Reject that dead configuration instead of advertising
+            # a selected verifier whose engagement counter must stay at zero.
+            max_draft = int(self.self_mtp.get("num_draft", 1))
+            if self.fly_verification.window >= max_draft:
+                raise ValueError(
+                    "FLy verification window must be smaller than self-MTP "
+                    f"num_draft ({self.fly_verification.window} >= {max_draft})"
+                )
         from .copy_draft import CopyDraftPolicy
 
         self.copy_draft = CopyDraftPolicy.from_value(copy_draft)

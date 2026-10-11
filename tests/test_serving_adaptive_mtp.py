@@ -59,6 +59,18 @@ def test_qualification_requires_observed_adaptive_mtp_engagement():
     )
 
 
+def test_qualification_requires_bound_mtp_policy_benchmark():
+    from scripts.qualify_serving import require_mtp_policy_benchmark
+
+    with pytest.raises(
+        SystemExit,
+        match="--adaptive-benchmark is required.*mtp_ordinary_handoff",
+    ):
+        require_mtp_policy_benchmark({"mtp_ordinary_handoff"}, None)
+    require_mtp_policy_benchmark({"adaptive_mtp_depth"}, object())
+    require_mtp_policy_benchmark({"fused_gdn_decode"}, None)
+
+
 def test_completed_adaptive_receipt_publishes_bounded_qualification_evidence():
     from scripts.qualify_serving import feature_observations
 

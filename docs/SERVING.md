@@ -1017,7 +1017,11 @@ before grammar-masked proposal scoring. Permanent ordinary external cohorts
 and depth-zero self-MTP use direct target paths; self-MTP still honors the
 true-batched knob. Default-off FLy relaxed verification requires execution
 policy selection and qualifier observation; structured and unsupported sampled
-lanes remain exact.
+lanes remain exact. Its verification `window` must be smaller than the
+configured self-MTP draft depth, because a window at least as large as the
+draft cannot observe enough following ordinary passes to relax any rejection.
+Startup rejects that permanently inactive configuration instead of advertising
+a selected verifier whose engagement counter can never advance.
 
 Default-off **self-MTP copy drafts** (`execution_policy.self_mtp_copy_draft`,
 e.g. `{"num_draft": 2, "self_mtp_copy_draft": {"enabled": true}}`) let a

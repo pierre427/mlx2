@@ -202,6 +202,20 @@ def test_serving_execution_policy_propagates_fly_and_rejects_invalid(monkeypatch
         engine.close()
 
 
+def test_batched_self_mtp_rejects_fly_window_that_cannot_engage():
+    from mlx2.runtime.generate import BatchGenerator
+
+    with pytest.raises(
+        ValueError,
+        match=r"FLy verification window must be smaller than self-MTP num_draft",
+    ):
+        BatchGenerator(
+            object(),
+            self_mtp={"num_draft": 2},
+            fly_verification={"enabled": True, "window": 2},
+        )
+
+
 def test_selected_fly_requires_observed_qualification():
     from mlx2.qualification import required_feature_checks
 
