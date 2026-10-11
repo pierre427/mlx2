@@ -242,7 +242,9 @@ APPROVED_QUALIFICATION_HARNESS = {
     # separate performance evidence. Reject nonfinite confidence limits.
     # Re-pinned 2026-10-10: stop witness comparisons normalize expected and
     # observed outer whitespace symmetrically.
-    "sha256": "cddc61b8cea37e6277ce3b9ef8b41f78748ada4f037c560767525655da296ba8",
+    # Re-pinned 2026-10-11: selected MTP policy qualification now fails before
+    # serving unless its source-bound adaptive/handoff benchmark is supplied.
+    "sha256": "7b1ca668b8e18dff63eeb8af585b313317d4944af3a6b8093e2ca222d82f8026",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
