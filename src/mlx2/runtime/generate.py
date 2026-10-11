@@ -2841,6 +2841,15 @@ class MTPGenerationBatch:
         requested = set(uids)
         drop = [i for (i, uid) in enumerate(self.uids) if uid in requested]
         packages = self._detach_packages(drop)
+        # A handed-off or demoted row remains ours until ordinary migration
+        # takes it. Remove cancelled rows before closing their ownership so a
+        # repeated removal or batch close cannot release the same row again.
+        ready, self._plain_ready = self._plain_ready, []
+        for package in ready:
+            if package.detached.lane.uid in requested:
+                packages.append(package)
+            else:
+                self._plain_ready.append(package)
         for package in packages:
             _close_segmented_detached(package.detached, release_cache=True)
         for uid in requested:

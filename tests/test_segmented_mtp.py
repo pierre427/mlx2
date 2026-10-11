@@ -2878,6 +2878,63 @@ def test_width_lock_handoff_moves_active_and_late_lanes_atomically():
     active.close()
 
 
+@pytest.mark.parametrize("cancelled", [(1,), (0, 1, 2)])
+def test_handoff_ready_cancellation_releases_only_removed_lanes(cancelled):
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import (
+        MTPGenerationBatch,
+        StopSequenceMatcher,
+        _close_segmented_detached,
+    )
+
+    class OwnedCacheList(_CloseableCacheList):
+        close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            assert self.close_calls == 1
+            super().close()
+
+    batch = MTPGenerationBatch(
+        object(), [_detached(uid) for uid in range(3)], [None] * 3,
+        [StopSequenceMatcher() for _ in range(3)],
+        segmented_live_tip=True,
+        ordinary_handoff_policy=MTPOrdinaryHandoffPolicy.from_value(
+            {"enabled": True, "max_mtp_width": 1}
+        ),
+    )
+    transferred = []
+    try:
+        assert batch._maybe_handoff_active_cohort()
+        packages = list(batch._plain_ready)
+        owners = []
+        for package in packages:
+            # Handoff closed the segmented transaction; cancellation still
+            # owns the target-cache lease until ordinary migration takes it.
+            assert package.detached.segment_transaction is None
+            owner = OwnedCacheList(package.detached.caches.target)
+            package.detached.caches.target = owner
+            owners.append(owner)
+        batch.remove_uids(cancelled)
+        batch.remove_uids(cancelled)
+        expected = [uid for uid in range(3) if uid not in cancelled]
+        assert [p.detached.lane.uid for p in batch._plain_ready] == expected
+        assert [owner.close_calls for owner in owners] == [
+            int(uid in cancelled) for uid in range(3)
+        ]
+        transferred = batch.take_plain_fallbacks()
+        assert transferred == [packages[uid] for uid in expected]
+        batch.close()
+        assert [owner.close_calls for owner in owners] == [
+            int(uid in cancelled) for uid in range(3)
+        ]
+    finally:
+        batch.close()
+        for package in transferred:
+            _close_segmented_detached(package.detached, release_cache=True)
+    assert all(owner.close_calls == 1 for owner in owners)
+
+
 def test_handoff_latch_release_never_raises_with_paused_lanes():
     from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
     from mlx2.runtime.generate import MTPGenerationBatch, StopSequenceMatcher

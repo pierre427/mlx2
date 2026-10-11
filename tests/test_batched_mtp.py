@@ -1296,6 +1296,53 @@ def test_width_lock_and_starved_fallbacks_migrate_in_one_plain_batch(
         mx.set_default_device(previous_device)
 
 
+def test_cancel_handoff_ready_lane_preserves_ordinary_continuation():
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import BatchGenerator
+
+    mx.random.seed(935)
+    model = _tiny_qwen4_model()
+    prompts = [[1, 7, 3, 9, 2], [4, 5, 6, 2, 8]]
+    ordinary = BatchGenerator(model, prefill_step_size=32)
+    handoff = BatchGenerator(
+        model, completion_batch_size=2, prefill_batch_size=2,
+        prefill_step_size=32,
+        self_mtp={"num_draft": 2, "persistent": True},
+        mtp_ordinary_handoff=MTPOrdinaryHandoffPolicy.from_value(
+            {"enabled": True, "max_mtp_width": 1}
+        ),
+    )
+
+    def finish(generator, uid, initial=()):
+        outputs = list(initial)
+        for _ in range(20):
+            _, responses = generator.next()
+            assert all(response.uid == uid for response in responses)
+            outputs.extend(response.token for response in responses)
+            if any(response.finish_reason for response in responses):
+                return outputs
+        raise AssertionError("remaining lane did not finish")
+
+    try:
+        (reference_uid,) = ordinary.insert([prompts[0]], max_tokens=[8])
+        expected = finish(ordinary, reference_uid)
+        keep_uid, cancel_uid = handoff.insert(
+            prompts, max_tokens=[8, 8],
+            lane_rngs=[LaneRNG(51), LaneRNG(52)],
+            self_mtp_configs=[{"sampling_temp": 0.0}] * 2,
+        )
+        _, responses = handoff.next()
+        assert responses == []
+        assert handoff._generation_batch._maybe_handoff_active_cohort()
+        handoff.remove([cancel_uid])
+        first = handoff._migrate_plain_fallbacks()
+        assert [response.uid for response in first] == [keep_uid]
+        assert finish(handoff, keep_uid, [response.token for response in first]) == expected
+    finally:
+        handoff.close()
+        ordinary.close()
+
+
 def test_handoff_preserves_logits_processor_and_partial_stop_state():
     from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
     from mlx2.runtime.generate import BatchGenerator, StopSequenceMatcher
