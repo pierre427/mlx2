@@ -1839,6 +1839,7 @@ class MTPGenerationBatch:
         # judged by the serving layer's memory-progress watchdog.
         self._memory_queued: set = set()
         self._atomic_memory_wait = None
+        self._atomic_handoff_pending = None
         # Consecutive width-lock deferrals per lane; bounded by
         # WIDTH_LOCK_DEFERRALS_BEFORE_PLAIN before the lane goes plain.
         self._width_lock_deferrals: Dict[int, int] = {}
@@ -2465,6 +2466,109 @@ class MTPGenerationBatch:
         self._handoff_all_to_plain(decision=decision, projected_width=width)
         return True
 
+    def _admit_atomic_ordinary_handoff(self) -> bool:
+        """Price an already selected handoff before buying unused MTP depth.
+
+        A declared cohort remains wholly owned here until its ordinary merge
+        and serial draft catch-up fit live headroom. No target/draft owner is
+        detached, and no handoff receipt is engaged, while the cohort waits.
+        """
+        admission = self.mtp_admission
+        policy = self.ordinary_handoff_policy
+        prepare_plain = getattr(admission, "ordinary_preparation", None)
+        if (
+            not getattr(admission, "atomic_cohort", False)
+            or policy is None or not policy.enabled
+            or self._ordinary_handoff_latched
+            or not callable(prepare_plain)
+        ):
+            return False
+        rows = tuple(self.mtp_cycle_state())
+        if not rows:
+            return False
+        width = len(rows) + _cohort_plain_width(self)
+        memory = getattr(self, "park_memory", None)
+        decision = (
+            memory.peek(width) if memory is not None else policy.decision(
+                width=width, width_locked=False, adaptive=self.adaptive_depth_policy,
+            )
+        )
+        if decision is None:
+            return False
+        if self.state.proposal_open:
+            raise RuntimeError("cannot admit ordinary handoff during an MTP proposal")
+        if self._async_qsa_ticket is not None:
+            self._decline_async_qsa_promotion("ordinary handoff selected")
+            rows = tuple(self.mtp_cycle_state())
+
+        # Merge pads every target layer to its largest row. Sum-of-row bytes
+        # underprices ragged cohorts. For an already physical batch each row
+        # owns an equal share of that layer's padded allocation.
+        target_sizes = []
+        if self.state.lanes:
+            if self.segmented_live_tip:
+                target_sizes.extend(
+                    [cache.nbytes for cache in pair.target]
+                    for pair in self.state.row_caches
+                )
+            else:
+                target_sizes.append([
+                    cache.nbytes / len(self.state.lanes)
+                    for cache in self.state.caches.target
+                ])
+        target_sizes.extend(
+            [cache.nbytes for cache in package.detached.caches.target]
+            for package in self._paused.values()
+        )
+        merge_gib = len(rows) * sum(map(max, zip(*target_sizes))) / float(1 << 30)
+        priced = [
+            (*row[:5], float(row[5]) + (merge_gib if index == 0 else 0.0))
+            for index, row in enumerate(rows)
+        ]
+        result = prepare_plain(priced)
+        actions = dict(result or {})
+        diagnostics = {
+            **(getattr(result, "diagnostics", None) or {}),
+            "boundary": "decode", "route": "ordinary_handoff",
+            "ordinary_merge_pending_gib": merge_gib,
+            "handoff_decision": dict(decision),
+        }
+        uids = tuple(row[0] for row in rows)
+        lanes = list(self.state.lanes) + [
+            package.detached.lane for package in self._paused.values()
+        ]
+        cohort = next(
+            (lane._batch_cohort for lane in lanes
+             if getattr(lane, "_batch_cohort", None) is not None), {},
+        )
+        if all(actions.get(uid) == "queue" for uid in uids):
+            self._atomic_memory_wait = _atomic_memory_wait(
+                self._atomic_memory_wait, uids, cohort, diagnostics, "decode",
+            )
+            self._memory_queued.update(uids)
+            _bump_bounded_counter(self.scheduler_stats, "atomic_cohort_memory_wait_rounds")
+            return True
+        previous_wait, self._atomic_memory_wait = self._atomic_memory_wait, None
+        if not all(actions.get(uid) == "plain" for uid in uids):
+            if previous_wait is not None:
+                diagnostics = _atomic_memory_wait_diagnostics(
+                    previous_wait, latest=diagnostics,
+                )
+            self._atomic_cohort_failure = {
+                "uids": uids, "cohort": dict(cohort),
+                "reason": "declared batch cohort was not wholly admitted for ordinary handoff",
+                "admission": diagnostics,
+            }
+            return True
+        self._memory_queued.difference_update(uids)
+        self._handoff_all_to_plain(decision=decision, projected_width=width)
+        self._atomic_handoff_pending = {
+            "uids": uids, "cohort": dict(cohort), "admission": diagnostics,
+        }
+        if memory is not None:
+            memory.commit(decision)
+        return True
+
     def release_ordinary_handoff_latch(self) -> bool:
         """Release safely once admitted migrated work is below the threshold."""
         if self.state.lanes or self._plain_ready:
@@ -2485,6 +2589,8 @@ class MTPGenerationBatch:
     def _apply_admission(self):
         if self.mtp_admission is None:
             return True
+        if self._admit_atomic_ordinary_handoff():
+            return False
         ticket = self._async_qsa_ticket
         def partition_rows():
             rows = tuple(self.mtp_cycle_state())
@@ -2675,6 +2781,7 @@ class MTPGenerationBatch:
 
     def take_plain_fallbacks(self):
         (ready, self._plain_ready) = (self._plain_ready, [])
+        self._atomic_handoff_pending = None
         self._normalize_empty_segmented_admission()
         return ready
 
@@ -2704,6 +2811,7 @@ class MTPGenerationBatch:
     def close(self):
         first_error = None
         self._atomic_memory_wait = None
+        self._atomic_handoff_pending = None
         if self._async_qsa_ticket is not None:
             self._decline_async_qsa_promotion("batch closed before promotion")
         else:
@@ -2893,6 +3001,16 @@ class MTPGenerationBatch:
 
     def remove_uids(self, uids):
         requested = set(uids)
+        pending = getattr(self, "_atomic_handoff_pending", None)
+        if pending is not None and requested.intersection(pending["uids"]):
+            survivors = set(pending["uids"]) - requested
+            if survivors:
+                self._atomic_cohort_failure = {
+                    **pending, "uids": tuple(sorted(survivors)),
+                    "reason": "declared batch cohort lost a member before ordinary handoff",
+                }
+            requested.update(pending["uids"])
+            self._atomic_handoff_pending = None
         wait = getattr(self, "_atomic_memory_wait", None)
         if wait is not None and requested.intersection(wait["uids"]):
             survivors = set(wait["uids"]) - requested
@@ -4871,18 +4989,25 @@ class BatchGenerator:
             admission_policy = getattr(admission_policy, "atomic", admission_policy)
         handoff = getattr(self, "mtp_ordinary_handoff", None)
         prepare_plain = getattr(admission_policy, "ordinary_preparation", None)
+        ordinary_preparation_selected = False
         if (
-            not cohort_uids and not rows and callable(prepare_plain)
+            not rows and callable(prepare_plain)
             and handoff is not None and handoff.enabled
             and getattr(self, "mtp_park_memory", None) is None
             and len(joining) + len(self._plain_fallback_batch) > handoff.max_mtp_width
         ):
             admission_policy = prepare_plain
+            ordinary_preparation_selected = True
             _bump_bounded_counter(
                 self.scheduler_stats, "mtp_ordinary_preparation_admissions"
             )
         admission_result = admission_policy(tuple(rows + joining))
         decisions = dict(admission_result or {})
+        admission_diagnostics = getattr(admission_result, "diagnostics", None)
+        if ordinary_preparation_selected and admission_diagnostics is not None:
+            admission_diagnostics = {
+                **admission_diagnostics, "route": "ordinary_handoff_preparation",
+            }
         if cohort_uids:
             waits = getattr(self, "_atomic_cohort_memory_waits", None)
             if waits is None:
@@ -4892,7 +5017,7 @@ class BatchGenerator:
             ):
                 waits[cohort_uids] = _atomic_memory_wait(
                     waits.get(cohort_uids), cohort_uids, cohort,
-                    getattr(admission_result, "diagnostics", None), "joining",
+                    admission_diagnostics, "joining",
                 )
                 memory_queued = getattr(self, "_memory_queued_prefill", None)
                 if memory_queued is None:
@@ -4902,8 +5027,12 @@ class BatchGenerator:
                 return 0
             previous_wait = waits.pop(cohort_uids, None)
             # Integer decisions are speculative depths. After the all-queue
-            # wait above, every member must receive one uniform valid depth;
-            # a partial/plain decision cannot split this strict-width group.
+            # wait above, every member must receive one uniform valid depth,
+            # or all plain when the handoff policy already selected ordinary.
+            # A partial decision cannot split this strict-width group.
+            ordinary_admitted = ordinary_preparation_selected and all(
+                decisions.get(uid) == "plain" for uid in cohort_uids
+            )
             selected_depths = {
                 decisions.get(uid)
                 for uid in cohort_uids
@@ -4911,14 +5040,15 @@ class BatchGenerator:
                 and not isinstance(decisions.get(uid), bool)
                 and decisions.get(uid) > 0
             }
-            if any(
-                uid in bound_violations
-                or not isinstance(decisions.get(uid), int)
-                or isinstance(decisions.get(uid), bool)
-                or decisions.get(uid) <= 0
+            speculative_admitted = len(selected_depths) == 1 and all(
+                isinstance(decisions.get(uid), int)
+                and not isinstance(decisions.get(uid), bool)
+                and decisions.get(uid) > 0
                 for uid in cohort_uids
-            ) or len(selected_depths) != 1:
-                diagnostics = getattr(admission_result, "diagnostics", None)
+            )
+            valid = ordinary_admitted if ordinary_preparation_selected else speculative_admitted
+            if bound_violations or not valid:
+                diagnostics = admission_diagnostics
                 if diagnostics is not None:
                     diagnostics = {
                         **diagnostics,
@@ -4935,7 +5065,6 @@ class BatchGenerator:
                     admission=diagnostics,
                 )
                 return 0
-            selected_depth = selected_depths.pop()
             requested_depth = max(
                 int(
                     self._mtp_configs[uid].get(
@@ -4944,10 +5073,12 @@ class BatchGenerator:
                 )
                 for uid in cohort_uids
             )
+            selected_depth = requested_depth if ordinary_admitted else selected_depths.pop()
             for uid in cohort_uids:
                 self._mtp_configs[uid]["num_draft"] = selected_depth
                 self._mtp_configs[uid]["cohort_admission_stage"] = (
-                    "lower_k" if selected_depth < requested_depth else "full"
+                    "ordinary_preparation" if ordinary_admitted
+                    else "lower_k" if selected_depth < requested_depth else "full"
                 )
                 self._mtp_configs[uid]["requested_num_draft"] = requested_depth
         admitted = {
@@ -6108,6 +6239,16 @@ class BatchGenerator:
 
     def remove(self, uids, return_prompt_caches=False):
         uids = set(uids)
+        pending = getattr(self._generation_batch, "_atomic_handoff_pending", None)
+        if pending is not None and uids.intersection(pending["uids"]):
+            survivors = set(pending["uids"]) - uids
+            if survivors:
+                self._record_atomic_cohort_failure(
+                    sorted(survivors), pending["cohort"],
+                    "declared batch cohort lost a member before ordinary handoff",
+                    admission=pending["admission"],
+                )
+            uids.update(pending["uids"])
         # Cancellation cannot leave a waiting strict-width cohort available
         # to resume as a smaller group before serving consumes its failure.
         for wait in self.atomic_memory_waits():

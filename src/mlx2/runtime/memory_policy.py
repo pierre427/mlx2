@@ -1192,7 +1192,7 @@ def _make_self_mtp_admission_callback(
             })
         return actions
 
-    def ordinary_preparation(rows):
+    def ordinary_preparation(rows, *, atomic_cohort=False):
         """Price a statically parked cohort plus one serial draft preparation.
 
         Preparation retains every lane's cache, but teacher-forces lanes one
@@ -1204,6 +1204,7 @@ def _make_self_mtp_admission_callback(
         if not rows:
             return {}
         depth = max_draft() if callable(max_draft) else max_draft
+        depth = max(depth, max(int(row[2]) for row in rows))
         speculative = controller.transient_gib_per_lane * controller.TRANSIENT_SCALE[depth]
         ordinary = len(rows) * controller.transient_gib_per_lane * controller.TRANSIENT_SCALE[0]
         extra = max(0.0, speculative - ordinary)
@@ -1212,9 +1213,12 @@ def _make_self_mtp_admission_callback(
             pending = float(row[5]) if len(row) > 5 else 0.0
             priced.append((*row[:5], pending + (extra if i == 0 else 0.0)))
         return _admit(
-            priced, max_draft_override=0,
+            priced, max_draft_override=0, atomic_cohort=atomic_cohort,
             hysteresis=ordinary_demoted, shortfall=ordinary_shortfall,
         )
+
+    def atomic_ordinary_preparation(rows):
+        return ordinary_preparation(rows, atomic_cohort=True)
 
     def admit(rows):
         return _admit(rows, atomic_cohort=False)
@@ -1263,6 +1267,7 @@ def _make_self_mtp_admission_callback(
         bounded.defer_optional = defer_optional_bounded
         bounded.atomic_cohort = True
         bounded.fixed_depth = depth
+        bounded.ordinary_preparation = atomic_ordinary_preparation
         return bounded
 
     def at_depth(depth):
@@ -1302,6 +1307,7 @@ def _make_self_mtp_admission_callback(
     admit.reclaim = reclaim_memory
     admit.atomic.reclaim = reclaim_memory
     admit.ordinary_preparation = ordinary_preparation
+    admit.atomic.ordinary_preparation = atomic_ordinary_preparation
     # Expose the adapter-qualified cache geometry to the sliced-prefill owner.
     # Keeping this in bytes avoids repeated GiB rounding while it binds one
     # final-context reservation for the lifetime of a queued continuation.
