@@ -13,6 +13,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Hashable, Iterable, Optional
 import mlx.core as mx
+from . import mtp_state_trace
 from .cache_planes import (
     CacheLayerSegment,
     CachePlaneFingerprint,
@@ -1534,6 +1535,7 @@ def snapshot_prompt_cache_descriptors(
     snapshot_sidecar = _clone_graph(
         sidecar, telemetry=telemetry, plane="draft_mtp", attach_tokens=False, memo=memo
     )
+    mtp_state_trace.sidecar_state("descriptor_capture", snapshot, snapshot_sidecar)
     return (
         snapshot,
         snapshot_sidecar,

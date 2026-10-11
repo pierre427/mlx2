@@ -26,6 +26,7 @@ from .models.cache import (
 from .processor_probe import VerifyWindow
 from .prompt_lookup import HybridStats as _PromptLookupStatsBase
 from . import round_levers
+from . import mtp_state_trace
 from . import verify_scope as _verify_scope
 from .sample_utils import LaneRNG, draw_key, make_transformed_logprobs
 from .verify_sync import record_verify_sync, verify_sync_round
@@ -342,6 +343,9 @@ def _restore_mtp_state(cache, mtp_state):
         raise ValueError(
             f"mtp_state carries a restored draft context ({mtp_offset} pairs, prev_tail_hidden {('set' if restored_seed_h is not None else 'unset')}) but the prompt_cache prefix is empty; the sidecar must cover exactly the cached tokens."
         )
+    mtp_state_trace.state(
+        "mtp_restore_validated", target=cache, draft=mtp_cache, seed=restored_seed_h
+    )
     return (mtp_cache, restored_seed_h)
 
 
@@ -933,6 +937,10 @@ def prepare_self_mtp_lane(
             if clear_cache:
                 mx.clear_cache()
             finish_diagnostic_stage("cache_clear_ms")
+        mtp_state_trace.state(
+            "prepare_catchup", target=target_cache, draft=draft_cache,
+            seed=prev_h, uid=int(uid),
+        )
         if prompt_boundary_out is not None and prev_h is not None:
             checkpoint = capture_self_mtp_checkpoint(
                 target_cache,
@@ -1014,6 +1022,11 @@ def prepare_self_mtp_lane(
     )
     _eval_self_mtp_lane_state(detached)
     _validate_detached_self_mtp(detached)
+    mtp_state_trace.state(
+        "lane_ready", target=target_cache, draft=draft_cache,
+        seed=seed_h, uid=int(uid), generated=1,
+    )
+    mtp_state_trace.initial_token(lane, first_lp)
     finish_diagnostic_stage("lane_finalize_ms")
     return (detached, MTPToken(cur, first_lp, False))
 
@@ -1069,6 +1082,9 @@ def advance_self_mtp_prefill(
         mx.eval([c.state for c in target_cache], [c.state for c in draft_cache])
         if clear_cache:
             mx.clear_cache()
+    mtp_state_trace.state(
+        "prefill_slice_catchup", target=target_cache, draft=draft_cache, seed=prev_h
+    )
     return (prompt[n:], target_cache, (draft_cache, prev_h), n)
 
 
@@ -1098,6 +1114,9 @@ def capture_self_mtp_checkpoint(
     if rng_key is not None:
         values.append(rng_key)
     mx.eval(*values)
+    mtp_state_trace.state(
+        "boundary_capture_source", target=target_cache, draft=draft_cache, seed=seed_h
+    )
     snapshot_started_ns = time.perf_counter_ns()
     snapshot_mode = "deepcopy_fallback"
     try:
@@ -1131,6 +1150,9 @@ def capture_self_mtp_checkpoint(
     if saved_rng_key is not None:
         saved_values.append(saved_rng_key)
     mx.eval(*saved_values)
+    mtp_state_trace.state(
+        "boundary_capture_saved", target=saved_target, draft=saved_draft, seed=saved_seed
+    )
     return {
         "target_cache": saved_target,
         "mtp_state": (saved_draft, saved_seed),
@@ -2960,7 +2982,11 @@ def _propose_batched_self_mtp_round(
             _apply_logits_processors(lane.logits_processors, histories[pos], raw[pos])
             window.mark()
     target_drops = tuple((k - a for (k, a) in zip(k_vector, accepted)))
+    mtp_state_trace.round_state(
+        "verify_before_rollback", batch, drafts, accepted, lane_logprobs, bonuses
+    )
     _trim_self_mtp_cache_group(batch.caches.target, target_drops, validate=False)
+    mtp_state_trace.round_state("verify_after_rollback", batch, drafts, accepted)
     (host_features, host_feature_tokens) = _host_confidence_payload(
         feature_payload, d_vector, probes, evaluated=greedy_cycle
     )
@@ -3276,6 +3302,7 @@ def commit_batched_self_mtp(
     batch.proposal_open = False
     batch._open_proposal = None
     _retire_committed_rollbacks(batch.caches.target)
+    mtp_state_trace.committed_state(batch, emitted)
 
 
 def _retire_committed_rollbacks(caches) -> None:

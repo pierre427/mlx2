@@ -2330,6 +2330,12 @@ class MTPGenerationBatch:
             lane_receipt["async_qsa_promotion_before_handoff"] = (
                 self._async_qsa_receipts_by_uid.pop(lane.uid, None)
             )
+            from . import mtp_state_trace
+            mtp_state_trace.state(
+                "ordinary_handoff", target=package.detached.caches.target,
+                draft=package.detached.caches.draft, seed=lane.seed_h,
+                uid=int(lane.uid), generated=int(lane.ntoks),
+            )
             package.handoff_receipt = lane_receipt
             # Draft and segmented transaction ownership end here. The target
             # cache remains alive for exact ordinary continuation.
@@ -5812,6 +5818,8 @@ class BatchGenerator:
             plain._matcher_states = [
                 matcher_state for (_, _, matcher_state, _, _) in continuing
             ]
+            from . import mtp_state_trace
+            mtp_state_trace.state("ordinary_batch_ready", target=plain.prompt_cache)
             self._plain_fallback_batch.extend(plain)
             for package, _, _, _, _ in continuing:
                 _close_segmented_detached(package.detached, release_cache=True)

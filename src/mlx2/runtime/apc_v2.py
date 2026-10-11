@@ -4330,6 +4330,10 @@ class APCv2(PrefixIndex):
                 if restored_sidecar is None:
                     restored_sidecar = copy.deepcopy(sidecar)
                 _mark_prompt_cache_restored(restored_sidecar.state[0])
+                from . import mtp_state_trace
+                mtp_state_trace.sidecar_state(
+                    "apc_sidecar_restore", restored_cache, restored_sidecar
+                )
                 return APCLookup(
                     restored_cache,
                     tokens[covered:],
