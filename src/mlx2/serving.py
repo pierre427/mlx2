@@ -11664,10 +11664,35 @@ class ServingEngine:
                         self.counts["batch_cohort_jobs_failed_closed"] += len(
                             failed_jobs
                         )
+                        # Bind the failed decision before another request
+                        # updates the global admission status. Error envelopes
+                        # already preserve mlx2 for streaming and nonstreaming
+                        # clients; keep their safe message unchanged.
+                        error_event = {
+                            "error": failure["reason"], "status": 429,
+                            "code": "batch_cohort_admission_failed",
+                        }
+                        if failure.get("admission") is not None:
+                            error_event["mlx2"] = {
+                                "admission_failure": {
+                                    **failure["admission"], "status": 429,
+                                }
+                            }
+                            log.warning("Atomic cohort admission refused: %s",
+                                        json.dumps(error_event["mlx2"], sort_keys=True))
                         for failed_job in failed_jobs:
+                            job_error = dict(error_event)
+                            if "mlx2" in error_event:
+                                job_error["mlx2"] = {
+                                    "admission_failure": {
+                                        **error_event["mlx2"]["admission_failure"],
+                                        "request_id": failed_job.id,
+                                        "uid": failed_job.uid,
+                                    }
+                                }
                             self._finish(
                                 failed_job,
-                                {"error": failure["reason"], "status": 429},
+                                job_error,
                             )
                     for failure in getattr(
                         batch, "take_mtp_prefill_failures", lambda: ()

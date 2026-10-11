@@ -293,6 +293,9 @@ def test_atomic_cohort_memory_loss_fails_before_plain_fallback(monkeypatch):
         assert failure["uids"] == tuple(uids)
         assert failure["cohort"] == cohort
         assert "remain wholly admitted" in failure["reason"]
+        assert failure["admission"]["boundary"] == "decode"
+        assert failure["admission"]["modes"] == ["queue"] * 4
+        assert failure["admission"]["final_free_gib"] == free[0]
         assert len(batch._plain_fallback_batch) == 0
         assert batch.scheduler_stats.get("starved_mtp_plain_fallbacks", 0) == 0
         assert not any(

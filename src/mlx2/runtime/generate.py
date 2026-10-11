@@ -2520,10 +2520,11 @@ class MTPGenerationBatch:
             else:
                 self._optional_reclaim_deadline = 0.0
         native_rows, handoff_rows = partition_rows()
-        decisions = (
-            dict(self.mtp_admission(native_rows) or {})
+        native_decision = (
+            self.mtp_admission(native_rows)
             if native_rows else {}
         )
+        decisions = dict(native_decision or {})
         if handoff_rows:
             at_depth = getattr(self.mtp_admission, "at_depth", None)
             ordinary_admission = at_depth(0) if callable(at_depth) else (
@@ -2580,6 +2581,11 @@ class MTPGenerationBatch:
                         "for segmented speculative decoding"
                     ),
                 }
+                diagnostics = getattr(native_decision, "diagnostics", None)
+                if diagnostics is not None:
+                    self._atomic_cohort_failure["admission"] = {
+                        **diagnostics, "boundary": "decode",
+                    }
                 return False
         drop = [
             i
@@ -4820,7 +4826,8 @@ class BatchGenerator:
             _bump_bounded_counter(
                 self.scheduler_stats, "mtp_ordinary_preparation_admissions"
             )
-        decisions = dict(admission_policy(tuple(rows + joining)) or {})
+        admission_result = admission_policy(tuple(rows + joining))
+        decisions = dict(admission_result or {})
         if cohort_uids:
             # Integer decisions are speculative depths.  A plain/queue action
             # for even one member would turn the declared cohort into two
@@ -4839,10 +4846,17 @@ class BatchGenerator:
                 or decisions.get(uid) <= 0
                 for uid in cohort_uids
             ) or len(selected_depths) != 1:
+                diagnostics = getattr(admission_result, "diagnostics", None)
+                if diagnostics is not None:
+                    diagnostics = {
+                        **diagnostics,
+                        "bound_violation_uids": sorted(bound_violations)[:64],
+                    }
                 self._record_atomic_cohort_failure(
                     cohort_uids,
                     cohort,
                     "declared batch cohort was not wholly admitted for speculative decoding",
+                    admission=diagnostics,
                 )
                 return 0
             selected_depth = selected_depths.pop()
@@ -4891,7 +4905,7 @@ class BatchGenerator:
             )
         return len(admitted)
 
-    def _record_atomic_cohort_failure(self, uids, cohort, reason):
+    def _record_atomic_cohort_failure(self, uids, cohort, reason, *, admission=None):
         failures = getattr(self, "_atomic_cohort_failures", None)
         if failures is None:
             failures = self._atomic_cohort_failures = []
@@ -4904,6 +4918,10 @@ class BatchGenerator:
                     "reason": str(reason),
                 }
             )
+            if admission is not None:
+                failures[-1]["admission"] = {
+                    "boundary": "joining", **admission,
+                }
             self.scheduler_stats["atomic_cohort_admission_failures"] = (
                 self.scheduler_stats.get("atomic_cohort_admission_failures", 0) + 1
             )
@@ -7032,6 +7050,7 @@ class BatchGenerator:
                 lifecycle_failure["uids"],
                 lifecycle_failure.get("cohort", {}),
                 lifecycle_failure["reason"],
+                admission=lifecycle_failure.get("admission"),
             )
         else:
             self._demote_starved_mtp_lane()

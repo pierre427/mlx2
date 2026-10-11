@@ -101,6 +101,14 @@ class SelfMTPLaneAdmission:
         return tuple((i for (i, mode) in enumerate(self.modes) if mode == "self_mtp"))
 
 
+class _SelfMTPAdmissionActions(dict):
+    """Atomic actions carrying their own decision, never a shared latest view."""
+
+    def __init__(self, actions, diagnostics):
+        super().__init__(actions)
+        self.diagnostics = diagnostics
+
+
 class SelfMTPLaneAdmissionController:
     """Fail-closed memory/context policy for the M=(k+1)N verify forward.
 
@@ -903,6 +911,11 @@ def _make_self_mtp_admission_callback(
             return {}
         current_free = free_memory()
         free = math.nan if current_free is None else current_free
+        initial_free = free
+        reclaim_calls = 0
+        eviction_attempts = 0
+        evicted_checkpoints = 0
+        settle_reports = []
         contexts = [int(row[1]) for row in rows]
         cache_gib = [float(row[4]) if len(row) > 4 else 0.0 for row in rows]
         pending_gib = [float(row[5]) if len(row) > 5 else 0.0 for row in rows]
@@ -987,7 +1000,14 @@ def _make_self_mtp_admission_callback(
             # short waits for them (bounded); nothing is credited.
             if settle_once is None or done(decision):
                 return (decision, free)
-            if settle_once() is None:
+            report = settle_once()
+            # The bounded wrapper returns None once its shared budget is
+            # spent. Keep that outcome too, without retaining callback state.
+            settle_reports.append(
+                {key: report[key] for key in ("exit", "waited", "released_bytes")
+                 if key in report} if isinstance(report, dict) else None
+            )
+            if report is None:
                 return (decision, free)
             free = remeasure()
             return (plan(free), free)
@@ -997,6 +1017,7 @@ def _make_self_mtp_admission_callback(
         # This does not credit hypothetical bytes or spend the hard reserve.
         if reclaimed:
             reclaim_memory()
+            reclaim_calls += 1
             free = remeasure()
             decision = plan(free)
             (decision, free) = settled(decision, free, fits)
@@ -1030,10 +1051,13 @@ def _make_self_mtp_admission_callback(
                     break
                 if (decision.modes, decision.draft_depths) == (ceiling.modes, ceiling.draft_depths):
                     break
+                eviction_attempts += 1
                 if not evict_unused_cache():
                     break
+                evicted_checkpoints += 1
                 if reclaim_memory is not None:
                     reclaim_memory()
+                    reclaim_calls += 1
                 free = remeasure()
                 decision = plan(free)
                 # Wait for the evicted pages before evicting the next entry.
@@ -1111,6 +1135,61 @@ def _make_self_mtp_admission_callback(
                 },
                 at=clock(),
             )
+        if atomic_cohort:
+            def finite(value):
+                try:
+                    value = float(value)
+                    return value if math.isfinite(value) else None
+                except (TypeError, ValueError, OverflowError):
+                    return None
+
+            required = {}
+            for depth in (range(depth_cap, 0, -1) if depth_cap else (0,)):
+                try:
+                    required[str(depth)] = finite(sum(
+                        controller.lane_gib(context, depth, cache,
+                            resident_cache=is_resident, pending_gib=pending)
+                        for context, cache, is_resident, pending in zip(
+                            contexts, cache_gib, resident, pending_gib)
+                    ))
+                except (TypeError, ValueError, OverflowError):
+                    required[str(depth)] = None
+            # Only scalar scheduler metadata; no prompts, cache objects or
+            # paths. The attempt is bounded to 32 evictions and one settle
+            # deadline, so a later admission cannot replace this evidence.
+            return _SelfMTPAdmissionActions(actions, {
+                "schema": "self_mtp_atomic_admission_failure_v1",
+                "row_count": len(rows),
+                "row_limit": 64,
+                "rows": [
+                    {"uid": uid, "context_tokens": context,
+                     "current_depth": state[0], "resident_cache": state[1],
+                     "cache_gib": finite(cache), "pending_gib": finite(pending)}
+                    for uid, context, state, cache, pending in zip(
+                        uids[:64], contexts[:64], row_states[:64],
+                        cache_gib[:64], pending_gib[:64])
+                ],
+                "stage": decision.stage,
+                "modes": list(decision.modes[:64]),
+                "draft_depths": list(decision.draft_depths[:64]),
+                "estimated_gib": finite(decision.estimated_gib),
+                "usable_gib": finite(decision.usable_gib),
+                "required_gib_by_depth": required,
+                "initial_free_gib": finite(initial_free),
+                "final_free_gib": finite(free),
+                "hard_reserve_gib": controller.hard_reserve_gib,
+                "max_draft": depth_cap,
+                "saturation_lane_cap": controller.saturation_lane_cap,
+                "verification_row_cap": controller.verification_row_cap,
+                "shortfall_held": bool(shortfall_held),
+                "reclaim_calls": reclaim_calls,
+                "eviction_attempts": eviction_attempts,
+                "evicted_checkpoints": evicted_checkpoints,
+                "eviction_attempt_cap": 32,
+                "settle_budget_seconds": getattr(settle_once, "settle_budget", None),
+                "settle_attempts": len(settle_reports),
+                "settle_reports": settle_reports,
+            })
         return actions
 
     def ordinary_preparation(rows):
