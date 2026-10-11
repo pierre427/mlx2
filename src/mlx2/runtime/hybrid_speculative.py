@@ -23,7 +23,7 @@ from .models.cache import (
     make_prompt_cache,
     trim_ragged_prompt_cache,
 )
-from .processor_probe import VerifyWindow
+from .processor_probe import VerifyWindow, copy_sharing, rollback_shared_memo
 from .prompt_lookup import HybridStats as _PromptLookupStatsBase
 from . import round_levers
 from . import mtp_state_trace
@@ -1590,8 +1590,6 @@ def _snapshot_segmented_recovery_row(value, memo=None):
     target, draft, borrowed = snapshot_recovery_descriptors(
         pair.target, pair.draft, memo=memo
     )
-    from .processor_probe import copy_sharing, rollback_shared_memo
-
     shared = rollback_shared_memo(getattr(lane, "logits_processors", ()))
     lane_fields = {}
     for name, current in vars(lane).items():
@@ -1615,10 +1613,11 @@ def _restore_segmented_recovery_row(snapshot, memo=None):
     restored_target, restored_draft = restore_recovery_descriptors(
         target, draft, borrowed, memo=memo
     )
+    shared = rollback_shared_memo(lane_fields.get("logits_processors"))
     restored_fields = {}
     for name, current in lane_fields.items():
         restored_fields[name] = (
-            current if name in _MTP_LANE_ARRAY_FIELDS else copy.deepcopy(current)
+            current if name in _MTP_LANE_ARRAY_FIELDS else copy_sharing(current, shared)
         )
     return restored_fields, SelfMTPCachePair(restored_target, restored_draft)
 
@@ -1703,6 +1702,20 @@ def _restore_segmented_recovery(batch: SegmentedSelfMTPState) -> None:
         restored_fields.append(fields)
         restored_pairs.append(pair)
     for lane, fields in zip(batch.lanes, restored_fields):
+        # Serving retains these objects for grammar failure latches and
+        # request-control receipts. Restore their committed state in place;
+        # replacing them would make failures after recovery invisible there.
+        processors = lane.logits_processors
+        restored_processors = fields["logits_processors"]
+        if len(processors) != len(restored_processors):
+            raise RuntimeError("processor count changed during segmented MTP recovery")
+        for original, saved in zip(processors, restored_processors):
+            if original is not saved:
+                if not hasattr(original, "__dict__") or not hasattr(saved, "__dict__"):
+                    raise TypeError("cannot restore processor identity in segmented MTP recovery")
+                original.__dict__.clear()
+                original.__dict__.update(saved.__dict__)
+        fields["logits_processors"] = list(processors)
         rng = lane.rng
         for name, current in fields.items():
             setattr(lane, name, current)
