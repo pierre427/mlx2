@@ -207,6 +207,58 @@ def test_reproducible_greedy_still_honors_admission_cap():
     assert policy.select(admitted_cap=2, width=8) == 2
 
 
+def test_greedy_cost_probes_require_explicit_qualification_override():
+    def sample(qualification_greedy_probes):
+        policy = CohortAdaptiveMTPDepth(
+            max_depth=2,
+            reproducible_greedy=True,
+            qualification_greedy_probes=qualification_greedy_probes,
+        )
+        selected = []
+        for _ in range(96):
+            depth = policy.select(width=4)
+            selected.append(depth)
+            policy.observe(
+                proposed=depth,
+                accepted=depth,
+                width=4,
+                committed=1,
+                elapsed_seconds=100.0,
+            )
+        return selected, policy
+
+    default_depths, default = sample(False)
+    assert set(default_depths) == {2}
+    assert default.counters["cost_probes"] == 0
+    assert default.diagnostics()["buckets"]["3-4"]["samples"] == {"2": 96}
+
+    sampled = [sample(True) for _ in range(2)]
+    assert sampled[0][0] == sampled[1][0]
+    assert sampled[0][1].diagnostics() == sampled[1][1].diagnostics()
+    policy = sampled[0][1]
+    bucket = policy.diagnostics()["buckets"]["3-4"]
+    assert bucket["samples"] == {"0": 3, "1": 3, "2": 90}
+    assert bucket["rounds"] == 96
+    assert bucket["probes"] == policy.counters["cost_probes"] == 6
+    assert bucket["probe_fraction"] == pytest.approx(0.0625)
+
+
+def test_qualification_greedy_probe_policy_is_explicit_and_strict():
+    enabled = AdaptiveMTPDepthPolicy.from_value(
+        {"enabled": True, "qualification_greedy_probes": True}
+    )
+    assert enabled.as_dict()["qualification_greedy_probes"] is True
+    assert enabled.controller_kwargs()["qualification_greedy_probes"] is True
+    with pytest.raises(ValueError, match="requires enabled=true"):
+        AdaptiveMTPDepthPolicy.from_value(
+            {"enabled": False, "qualification_greedy_probes": True}
+        )
+    with pytest.raises(ValueError, match="must be boolean"):
+        AdaptiveMTPDepthPolicy.from_value(
+            {"enabled": True, "qualification_greedy_probes": 1}
+        )
+
+
 def test_single_lane_mtp_latch_policy_is_explicit_and_strict():
     assert "adaptive_single_lane" not in AdaptiveMTPDepthPolicy(
         enabled=True

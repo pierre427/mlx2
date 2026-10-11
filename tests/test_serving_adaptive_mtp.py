@@ -169,6 +169,19 @@ def test_execution_policy_can_select_adaptive_mtp_and_is_fail_closed():
             adaptive_mtp_depth=True,
             execution_policy={"adaptive_mtp_depth": {"enabled": False}},
         )
+    greedy_probe_policy = {
+        "adaptive_mtp_depth": {
+            "enabled": True,
+            "qualification_greedy_probes": True,
+        }
+    }
+    with pytest.raises(ValueError, match="requires --qualification-mode"):
+        ServingEngine.validate_arguments(
+            "unused", execution_policy=greedy_probe_policy
+        )
+    ServingEngine.validate_arguments(
+        "unused", qualification_mode=True, execution_policy=greedy_probe_policy
+    )
 
 
 def test_mtp_ordinary_handoff_is_explicit_qualified_and_native_only():

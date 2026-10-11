@@ -934,6 +934,8 @@ def test_generation_batch_receipt_identifies_adaptive_depth_policy():
         loss_rounds=2,
         gain_rounds=4,
         park_rounds=3,
+        reproducible_greedy=True,
+        qualification_greedy_probes=True,
     )
     batch = MTPGenerationBatch(
         object(),
@@ -977,6 +979,8 @@ def test_generation_batch_receipt_identifies_adaptive_depth_policy():
 
     adaptive = responses[0].mtp_receipt["adaptive_depth"]
     assert adaptive["selected"] is True
+    assert adaptive["reproducible_greedy"] is True
+    assert adaptive["qualification_greedy_probes"] is True
     assert adaptive["max_depth"] == adaptive["current"] == 2
     assert adaptive["policy"] == {
         "ewma_alpha": 0.5,

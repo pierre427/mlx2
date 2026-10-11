@@ -1304,6 +1304,37 @@ def test_mtp_policy_overlay_absence_preserves_existing_arm_policies(tmp_path):
     }
 
 
+def test_qualification_greedy_probes_are_opt_in_and_adaptive_only(tmp_path):
+    args = benchmark.parse_args([
+        "--model", "flash-next",
+        "--output", str(tmp_path / "report.json"),
+        "--widths", "4",
+        "--qualification-greedy-probes",
+    ])
+    from pathlib import Path
+
+    run_dir = Path(tmp_path / "run")
+    preset = benchmark.PRESETS["flash-next"]
+    ordinary = benchmark.commands_for_arm(args, "ordinary", run_dir, preset)
+    fixed = benchmark.commands_for_arm(args, "fixed", run_dir, preset)
+    adaptive = benchmark.commands_for_arm(args, "adaptive", run_dir, preset)
+    assert "adaptive_mtp_depth" not in ordinary["policy"]
+    assert "qualification_greedy_probes" not in fixed["policy"]
+    assert adaptive["policy"]["adaptive_mtp_depth"] == {
+        "enabled": True,
+        "qualification_greedy_probes": True,
+    }
+    assert "--qualification-mode" in adaptive["server"]
+
+    with pytest.raises(SystemExit):
+        benchmark.parse_args([
+            "--model", "flash-next",
+            "--output", str(tmp_path / "handoff.json"),
+            "--qualification-greedy-probes",
+            "--mtp-ordinary-handoff-max-width", "4",
+        ])
+
+
 @pytest.mark.parametrize(
     "reserved_key", ["num_draft", "adaptive_mtp_depth", "mtp_ordinary_handoff"]
 )

@@ -6274,8 +6274,13 @@ def main():
             policy_adaptive is not None
             and AdaptiveMTPDepthPolicy.from_value(policy_adaptive).enabled
         )
+        adaptive_policy = AdaptiveMTPDepthPolicy.from_value(policy_adaptive)
     except ValueError as error:
         parser.error(str(error))
+    if adaptive_policy.qualification_greedy_probes and not args.qualification_mode:
+        parser.error(
+            "adaptive MTP qualification_greedy_probes requires --qualification-mode"
+        )
     if adaptive_selected and not native_mtp:
         parser.error("--adaptive-mtp-depth requires the native self-MTP route")
     try:

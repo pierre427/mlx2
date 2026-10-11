@@ -993,6 +993,8 @@ def commands_for_arm(args, arm: str, run_dir: Path, preset: ModelPreset) -> dict
     for capability in CAPABILITIES:
         smoke.extend(("--capability", capability))
     policy = _policy(arm, args.depth, getattr(args, "mtp_policy_overlay", {}))
+    if arm == "adaptive" and getattr(args, "qualification_greedy_probes", False):
+        policy["adaptive_mtp_depth"]["qualification_greedy_probes"] = True
     if arm == "handoff":
         policy["mtp_ordinary_handoff"] = {
             "enabled": True,
@@ -1214,6 +1216,14 @@ def parse_args(argv=None):
             "policies (benchmark-owned MTP keys are rejected)."
         ),
     )
+    parser.add_argument(
+        "--qualification-greedy-probes",
+        action="store_true",
+        help=(
+            "explicitly probe alternate depths in greedy decode for strict "
+            "qualification; exact-token gates remain unchanged"
+        ),
+    )
     parser.add_argument("--server-arg", action="append", default=[])
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -1255,6 +1265,13 @@ def parse_args(argv=None):
         and args.mtp_ordinary_handoff_max_width < 1
     ):
         parser.error("mtp-ordinary-handoff-max-width must be positive")
+    if (
+        args.qualification_greedy_probes
+        and args.mtp_ordinary_handoff_max_width is not None
+    ):
+        parser.error(
+            "qualification-greedy-probes applies only to the adaptive qualification arm"
+        )
     return args
 
 
@@ -1583,6 +1600,7 @@ def main(argv=None) -> int:
         "max_tokens": args.max_tokens,
         "widths": args.widths,
         "qualification_arm": qualification_arm,
+        "qualification_greedy_probes": bool(args.qualification_greedy_probes),
         "arm_order": list(arm_order),
         "prompts": {
             "sequential": list(PROMPTS),

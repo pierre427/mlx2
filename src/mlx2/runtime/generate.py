@@ -3167,6 +3167,9 @@ class MTPGenerationBatch:
                         "reproducible_greedy": bool(
                             self.adaptive_depth_policy.reproducible_greedy
                         ),
+                        "qualification_greedy_probes": bool(
+                            self.adaptive_depth_policy.qualification_greedy_probes
+                        ),
                         "max_depth": int(self.adaptive_depth_policy.max_depth),
                         "current": int(self.adaptive_depth_policy.current_depth),
                         "acceptance_ewma": self.adaptive_depth_policy.acceptance_ewma,
@@ -5993,6 +5996,10 @@ class BatchGenerator:
                 adaptive = self._generation_batch.adaptive_depth_policy
                 receipt["adaptive_depth"] = {
                     "selected": True,
+                    "reproducible_greedy": bool(adaptive.reproducible_greedy),
+                    "qualification_greedy_probes": bool(
+                        adaptive.qualification_greedy_probes
+                    ),
                     "max_depth": int(adaptive.max_depth),
                     "current": int(adaptive.current_depth),
                     "counters": dict(adaptive.counters),

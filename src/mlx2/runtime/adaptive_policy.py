@@ -1002,9 +1002,9 @@ class CohortAdaptiveMTPDepth:
 
     Depth zero is an exact ordinary target round over the still-owned target
     state.  Goodput is learned independently for bounded width buckets at
-    closed verification boundaries.  Concurrent buckets use infrequent,
-    deterministic one-round probes.  Width one remains at the model's
-    qualified depth by default as a correctness anchor.  An explicit
+    closed verification boundaries. Concurrent buckets use infrequent,
+    deterministic one-round probes. Width one remains at the model's
+    qualified depth by default as a correctness anchor. An explicit
     ``adaptive_single_lane`` selection lets the same bounded probes and
     park/re-entry gate apply to single-stream sections.
     """
@@ -1023,10 +1023,14 @@ class CohortAdaptiveMTPDepth:
     probe_interval: int = 16
     stale_rounds: int = 128
     adaptive_single_lane: bool = False
-    # Runtime-owned, not an operator policy knob.  Greedy lanes need one
-    # verification geometry for the request: different K+1 target widths can
-    # choose different near-tie argmaxes, so elapsed-time or prior-request
-    # history must not steer K while such a lane is present.
+    # Qualification-only escape hatch: allow deterministic cost probes to
+    # exercise alternate greedy verification widths. Strict token-correctness
+    # gates remain responsible for rejecting a route whose outputs change.
+    qualification_greedy_probes: bool = False
+    # Runtime-owned. By default, greedy lanes keep one verification geometry:
+    # different K+1 target widths can choose different near-tie argmaxes. The
+    # explicit qualification flag opts out only for qualification; exact token
+    # identity gates still decide whether that route is acceptable.
     reproducible_greedy: bool = False
     current_depth: int | None = None
     acceptance_ewma: float | None = None
@@ -1107,6 +1111,10 @@ class CohortAdaptiveMTPDepth:
             raise ValueError("adaptive MTP adaptive_single_lane must be boolean")
         if not isinstance(self.reproducible_greedy, bool):
             raise ValueError("adaptive MTP reproducible_greedy must be boolean")
+        if not isinstance(self.qualification_greedy_probes, bool):
+            raise ValueError(
+                "adaptive MTP qualification_greedy_probes must be boolean"
+            )
         if self.current_depth is not None and (
             isinstance(self.current_depth, bool)
             or not isinstance(self.current_depth, int)
@@ -1225,6 +1233,10 @@ class CohortAdaptiveMTPDepth:
         elif new > old and width == 1:
             _bump(self.counters, "depth_recoveries_alone")
 
+    @property
+    def _greedy_pinned(self) -> bool:
+        return self.reproducible_greedy and not self.qualification_greedy_probes
+
     def _changed(self, old: int, new: int, *, width: int) -> None:
         if new == old:
             return
@@ -1238,7 +1250,7 @@ class CohortAdaptiveMTPDepth:
         previous_label = self._active_bucket
         self._active_bucket = label
         state = self._bucket(label)
-        if self.reproducible_greedy:
+        if self._greedy_pinned:
             # Pin the qualified depth for every boundary of a greedy cohort.
             # Admission remains an independent upper bound.  In particular,
             # do not run deterministic-cadence cost probes: although their
@@ -1288,7 +1300,7 @@ class CohortAdaptiveMTPDepth:
                     _bump(self.counters, "probes")
                     probe_kind = "reentry"
         elif (
-            not self.reproducible_greedy
+            not self._greedy_pinned
             and (width > 1 or self.adaptive_single_lane)
             and int(state["rounds"]) % self.probe_interval == 0
         ):
@@ -1436,7 +1448,7 @@ class CohortAdaptiveMTPDepth:
             current = int(state["chosen_depth"])
             estimates = state["goodput"]
             if (
-                not self.reproducible_greedy
+                not self._greedy_pinned
                 and estimate_updated
                 and current in estimates
             ):
@@ -1498,7 +1510,7 @@ class CohortAdaptiveMTPDepth:
             else self.ewma_alpha * ratio
             + (1.0 - self.ewma_alpha) * state["acceptance_ewma"]
         )
-        if self.reproducible_greedy:
+        if self._greedy_pinned:
             # Acceptance remains observable, but it cannot change the target
             # forward width of this request.  This is deliberately a fixed-K
             # correctness mode, not a performance qualification claim.
@@ -1587,12 +1599,21 @@ class AdaptiveMTPDepthPolicy:
     probe_interval: int = 16
     stale_rounds: int = 128
     adaptive_single_lane: bool = False
+    qualification_greedy_probes: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("adaptive MTP enabled must be boolean")
         if not isinstance(self.adaptive_single_lane, bool):
             raise ValueError("adaptive MTP adaptive_single_lane must be boolean")
+        if not isinstance(self.qualification_greedy_probes, bool):
+            raise ValueError(
+                "adaptive MTP qualification_greedy_probes must be boolean"
+            )
+        if self.qualification_greedy_probes and not self.enabled:
+            raise ValueError(
+                "adaptive MTP qualification_greedy_probes requires enabled=true"
+            )
         # Reuse the executable controller's validation so the serving contract
         # cannot accept a policy that later fails after model allocation.
         CohortAdaptiveMTPDepth(max_depth=1, **self.controller_kwargs())
@@ -1624,6 +1645,7 @@ class AdaptiveMTPDepthPolicy:
             "probe_interval",
             "stale_rounds",
             "adaptive_single_lane",
+            "qualification_greedy_probes",
         }
         unknown = set(value) - allowed
         if unknown:
@@ -1647,6 +1669,8 @@ class AdaptiveMTPDepthPolicy:
         }
         if self.adaptive_single_lane:
             values["adaptive_single_lane"] = True
+        if self.qualification_greedy_probes:
+            values["qualification_greedy_probes"] = True
         return values
 
     def as_dict(self) -> dict[str, bool | float | int]:
@@ -1672,6 +1696,8 @@ class AdaptiveMTPDepthPolicy:
             )
             if self.adaptive_single_lane:
                 values["adaptive_single_lane"] = True
+            if self.qualification_greedy_probes:
+                values["qualification_greedy_probes"] = True
         return values
 
 

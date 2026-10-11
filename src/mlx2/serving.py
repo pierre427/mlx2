@@ -3598,6 +3598,13 @@ class ServingEngine:
         elif not adaptive_mtp_depth and policy_adaptive_mtp is not None:
             adaptive_mtp_depth = policy_adaptive_mtp
         self.adaptive_mtp_policy = AdaptiveMTPDepthPolicy.from_value(adaptive_mtp_depth)
+        if (
+            self.adaptive_mtp_policy.qualification_greedy_probes
+            and not qualification_mode
+        ):
+            raise ValueError(
+                "adaptive MTP qualification_greedy_probes requires --qualification-mode"
+            )
         self.mtp_ordinary_handoff_policy = MTPOrdinaryHandoffPolicy.from_value(
             (execution_policy or {}).get("mtp_ordinary_handoff")
         )
