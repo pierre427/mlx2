@@ -233,3 +233,70 @@ def test_hybrid_gdn_self_mtp_apc_hits_are_nonzero(host, factory):
     assert hits > 0 and cached > 0, apc
     # Correctness: warm-hit output equals a cold run.
     assert out_warm == out_cold
+
+
+def test_qwen4_self_mtp_exact_prompt_p1_hit_matches_long_cold_decode(
+    host, monkeypatch
+):
+    """An exact-prompt hit resumes at the MTP boundary before its final token."""
+    from mlx2.runtime.apc_v2 import APCv2
+
+    model, vocab = tiny_qwen4_mtp()
+    prompt = [(7 * i + 3) % (vocab - 2) + 1 for i in range(96)]
+    observed_hits = []
+    original_lookup = APCv2.lookup
+
+    def cache_offsets(caches):
+        offsets = []
+        for cache in caches:
+            children = getattr(cache, "caches", None)
+            if children is not None:
+                offsets.extend(cache_offsets(children))
+                continue
+            offset = getattr(cache, "offset", None)
+            if offset is None:
+                continue
+            if isinstance(offset, mx.array):
+                values = offset.tolist()
+                offsets.extend(int(value) for value in values)
+            else:
+                offsets.append(int(offset))
+        return offsets
+
+    def recording_lookup(apc, key, tokens, *args, **kwargs):
+        hit = original_lookup(apc, key, tokens, *args, **kwargs)
+        if hit.hit and list(tokens) == prompt:
+            sidecar = hit.sidecar
+            draft_cache, tail_hidden = sidecar.state
+            observed_hits.append(
+                {
+                    "hit_kind": hit.hit_kind,
+                    "cached_tokens": hit.cached_tokens,
+                    "covered_tokens": sidecar.covered_tokens,
+                    "target_offsets": cache_offsets(hit.cache),
+                    "draft_offsets": cache_offsets(draft_cache),
+                    "tail_hidden_shape": tuple(tail_hidden.shape),
+                }
+            )
+        return hit
+
+    monkeypatch.setattr(APCv2, "lookup", recording_lookup)
+    engine = make_engine(model, vocab)
+    try:
+        cold, _, cold_job = run(engine, prompt, max_tokens=128)
+        assert int(cold_job.cached_tokens or 0) == 0
+        warm, receipt, warm_job = run(engine, prompt, max_tokens=128)
+    finally:
+        engine.close()
+
+    assert int(warm_job.cached_tokens or 0) == len(prompt) - 1
+    assert receipt["mtp"]["route"] == "continuous_batched_self_mtp"
+    assert receipt["mtp"]["stats"]["draft_cycles"] > 0
+    assert len(observed_hits) == 1
+    hit = observed_hits[0]
+    assert hit["hit_kind"] == "mtp_sidecar"
+    assert hit["cached_tokens"] == hit["covered_tokens"] == len(prompt) - 1
+    assert max(hit["target_offsets"]) == len(prompt) - 1
+    assert max(hit["draft_offsets"]) == len(prompt) - 2
+    assert hit["tail_hidden_shape"][:2] == (1, 1)
+    assert warm == cold
