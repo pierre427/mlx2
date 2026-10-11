@@ -2858,7 +2858,7 @@ def _adaptive_benchmark_evaluator():
         spec.loader.exec_module(module)
     finally:
         sys.modules.pop(spec.name, None)
-    return module.adaptive_qualification_evidence
+    return module.correctness, module.adaptive_qualification_evidence
 
 
 def validate_adaptive_benchmark(path, initial):
@@ -2880,7 +2880,9 @@ def validate_adaptive_benchmark(path, initial):
         or harness.get("sha256") != source_sha256
     ):
         raise ValueError("adaptive benchmark harness is not the approved source")
-    adaptive_qualification_evidence = _adaptive_benchmark_evaluator()
+    qualification_arm = benchmark.get("qualification_arm", "adaptive")
+    if qualification_arm not in {"adaptive", "handoff"}:
+        raise ValueError("adaptive benchmark has an unsupported qualification arm")
     recorded = benchmark.get("adaptive_qualification") or {}
     throughput_tolerance = float(recorded.get("throughput_tolerance", 1.0))
     max_probe_fraction = float(recorded.get("max_probe_fraction", 1.0))
@@ -2906,6 +2908,33 @@ def validate_adaptive_benchmark(path, initial):
         or not 0.05 <= differential_alpha <= 1.0
     ):
         raise ValueError("adaptive benchmark used weaker qualification limits")
+    correctness_record = benchmark.get("correctness")
+    if not isinstance(correctness_record, dict):
+        raise ValueError("adaptive benchmark correctness evidence is missing")
+    try:
+        correctness_margin = float(
+            correctness_record["ordinary_margin_failure_threshold_nats"]
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("adaptive benchmark correctness evidence is malformed") from exc
+    if not math.isfinite(correctness_margin) or not 0.0 <= correctness_margin <= 0.5:
+        raise ValueError("adaptive benchmark used weaker correctness limits")
+    recompute_correctness, adaptive_qualification_evidence = (
+        _adaptive_benchmark_evaluator()
+    )
+    try:
+        correctness = recompute_correctness(
+            benchmark["arms"],
+            candidate_arm=qualification_arm,
+            fixed_depth=int(benchmark["qualified_depth"]),
+            ordinary_margin_threshold=correctness_margin,
+        )
+    except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
+        raise ValueError(
+            "adaptive benchmark correctness evidence could not be recomputed"
+        ) from exc
+    if correctness != correctness_record:
+        raise ValueError("adaptive benchmark correctness evidence was modified")
     recomputed = adaptive_qualification_evidence(
         benchmark,
         throughput_tolerance=throughput_tolerance,
@@ -2917,9 +2946,6 @@ def validate_adaptive_benchmark(path, initial):
         raise ValueError("adaptive benchmark qualification evidence was modified")
     if not benchmark.get("passed") or not recomputed.get("passed"):
         raise ValueError("adaptive benchmark did not pass its qualification gate")
-    qualification_arm = benchmark.get("qualification_arm", "adaptive")
-    if qualification_arm not in {"adaptive", "handoff"}:
-        raise ValueError("adaptive benchmark has an unsupported qualification arm")
     candidate_status = (
         benchmark.get("arms", {}).get(qualification_arm, {}).get("final_status")
         or {}

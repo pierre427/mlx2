@@ -1,9 +1,9 @@
+import json
 import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import json
 import pytest
 
 from scripts import benchmark_adaptive_mtp as benchmark
@@ -394,6 +394,50 @@ def _qualification_report(*, decreases=0, recoveries=0, d2_rate=104.8):
     }
 
 
+def _bind_correctness_samples(report, *, candidate_token=1):
+    """Give qualifier fixtures the same request-level evidence as a real run."""
+    candidate_arm = report.get("qualification_arm", "adaptive")
+
+    def request(token_id, *, adaptive=False):
+        mtp = {"num_draft": 2}
+        if adaptive:
+            mtp["adaptive_depth"] = {
+                "trace": [{"width": 1, "selected_depth": 2}]
+            }
+        return {
+            "prompt_sha256": "fixture-prompt",
+            "output": str(token_id),
+            "output_sha256": str(token_id),
+            "tokens": [{
+                "id": token_id,
+                "token": str(token_id),
+                "top_logprobs": [
+                    {"id": token_id, "logprob": -0.1},
+                    {"id": token_id + 10, "logprob": -0.2},
+                ],
+            }],
+            "receipt": {"mtp": mtp} if candidate_arm != "ordinary" else {},
+        }
+
+    report["arms"].setdefault("ordinary", {}).setdefault("sequential", {})[
+        "requests"
+    ] = [request(1)]
+    report["arms"]["fixed"].setdefault("sequential", {})["requests"] = [
+        request(1)
+    ]
+    report["arms"][candidate_arm].setdefault("sequential", {})["requests"] = [
+        request(candidate_token, adaptive=candidate_arm == "adaptive")
+    ]
+    threshold = report["correctness"]["ordinary_margin_failure_threshold_nats"]
+    report["correctness"] = benchmark.correctness(
+        report["arms"],
+        candidate_arm=candidate_arm,
+        fixed_depth=int(report["qualified_depth"]),
+        ordinary_margin_threshold=float(threshold),
+    )
+    return report
+
+
 def _handoff_only_report():
     report = _qualification_report()
     prompt = "handoff-prompt"
@@ -706,7 +750,7 @@ def test_handoff_gate_fails_closed_without_two_stable_width_one_references():
 def test_qualifier_binds_adaptive_benchmark_to_exact_candidate(tmp_path):
     from scripts.qualify_serving import validate_adaptive_benchmark
 
-    report = _qualification_report()
+    report = _bind_correctness_samples(_qualification_report())
     report.update(
         schema=benchmark.SCHEMA,
         passed=True,
@@ -733,7 +777,7 @@ def test_qualifier_binds_adaptive_benchmark_to_exact_candidate(tmp_path):
 def test_qualifier_binds_handoff_only_benchmark_to_handoff_arm(tmp_path):
     from scripts.qualify_serving import validate_adaptive_benchmark
 
-    report = _handoff_only_report()
+    report = _bind_correctness_samples(_handoff_only_report())
     report.update(
         schema=benchmark.SCHEMA,
         passed=True,
@@ -754,6 +798,43 @@ def test_qualifier_binds_handoff_only_benchmark_to_handoff_arm(tmp_path):
     assert evidence["adaptive_qualification"]["features"][
         "adaptive_mtp_depth"
     ]["selected"] is False
+
+
+def test_qualifier_recomputes_benchmark_correctness_from_arm_traces(tmp_path):
+    from scripts.qualify_serving import validate_adaptive_benchmark
+
+    report = _bind_correctness_samples(_qualification_report())
+    candidate = report["arms"]["adaptive"]["sequential"]["requests"][0]
+    candidate["tokens"][0]["id"] = 2
+    candidate["tokens"][0]["token"] = "2"
+    candidate["output"] = candidate["output_sha256"] = "2"
+    # Retain the prior passing summary to model an internally inconsistent
+    # or hand-edited report. The per-depth policy gate itself only consumes
+    # this summary's boolean today.
+    assert report["correctness"]["passed"]
+    report.update(
+        schema=benchmark.SCHEMA,
+        passed=True,
+        benchmark_harness={
+            "name": "scripts/benchmark_adaptive_mtp.py",
+            "sha256": benchmark.hashlib.sha256(
+                benchmark.Path(benchmark.__file__).read_bytes()
+            ).hexdigest(),
+        },
+        adaptive_qualification=benchmark.adaptive_qualification_evidence(report),
+    )
+    status = report["arms"]["adaptive"]["final_status"]
+    status.update(runtime={"source_sha256": "abc"}, artifact="weights")
+    path = tmp_path / "inconsistent.json"
+    path.write_text(json.dumps(report))
+
+    assert not benchmark.correctness(
+        report["arms"],
+        fixed_depth=2,
+        ordinary_margin_threshold=0.5,
+    )["passed"]
+    with pytest.raises(ValueError, match="correctness evidence was modified"):
+        validate_adaptive_benchmark(path, status)
 
 
 def test_qualifier_recomputes_the_local_benchmark_harness_hash(
@@ -829,6 +910,7 @@ def test_qualifier_script_loads_sibling_benchmark_from_documented_command(
             ],
             cwd=benchmark.ROOT,
             text=True,
+            check=False,
             capture_output=True,
         )
     finally:
@@ -1125,7 +1207,7 @@ def test_qualifier_rejects_invalid_or_weaker_confidence_parameters(tmp_path, key
 
 def test_qualifier_accepts_explicit_performance_limits_without_weakening_correctness(tmp_path):
     from scripts import qualify_serving
-    report = _qualification_report()
+    report = _bind_correctness_samples(_qualification_report())
     candidate = report["arms"]["adaptive"]["final_status"]
     recorded = benchmark.adaptive_qualification_evidence(
         report, throughput_tolerance=0.4, max_probe_fraction=0.5

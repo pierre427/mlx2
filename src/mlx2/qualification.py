@@ -244,7 +244,9 @@ APPROVED_QUALIFICATION_HARNESS = {
     # observed outer whitespace symmetrically.
     # Re-pinned 2026-10-11: selected MTP policy qualification now fails before
     # serving unless its source-bound adaptive/handoff benchmark is supplied.
-    "sha256": "7b1ca668b8e18dff63eeb8af585b313317d4944af3a6b8093e2ca222d82f8026",
+    # Re-pinned 2026-10-11: adaptive/handoff benchmark correctness is
+    # recomputed from its arm request traces before policy evidence is accepted.
+    "sha256": "12a2f8b9712fb725ec7e65217caad867e87d58b99dd5c1230ad67187f0b75333",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
