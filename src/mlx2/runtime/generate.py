@@ -218,6 +218,34 @@ def _bump_bounded_counter(counters, key, amount=1):
     )
 
 
+def _atomic_memory_wait(previous, uids, cohort, diagnostics, boundary):
+    """Keep the first refusal plus one latest scalar decision for this group."""
+    admission = {**(diagnostics or {}), "boundary": boundary}
+    if previous is None:
+        previous = {
+            "uids": tuple(uids), "cohort": dict(cohort),
+            "started_at": time.monotonic(), "attempts": 0,
+            "admission": admission,
+        }
+    previous["attempts"] = min(_COUNTER_MAX, previous["attempts"] + 1)
+    previous["latest_admission"] = admission
+    return previous
+
+
+def _atomic_memory_wait_diagnostics(wait, *, latest=None, now=None, timeout=None):
+    now = time.monotonic() if now is None else now
+    return {
+        **wait["admission"],
+        "latest_admission": wait["latest_admission"] if latest is None else latest,
+        "memory_wait": {
+            "started_at": wait["started_at"],
+            "elapsed_seconds": max(0.0, now - wait["started_at"]),
+            "attempts": wait["attempts"], "timeout_seconds": timeout,
+            "timed_out": timeout is not None,
+        },
+    }
+
+
 def _crossed_counter_interval(previous: int, current: int, interval: int) -> bool:
     """Return whether monotonically increasing work crossed a boundary.
 
@@ -1810,6 +1838,7 @@ class MTPGenerationBatch:
         # paused lane is waiting on the scheduler (width lock) and must not be
         # judged by the serving layer's memory-progress watchdog.
         self._memory_queued: set = set()
+        self._atomic_memory_wait = None
         # Consecutive width-lock deferrals per lane; bounded by
         # WIDTH_LOCK_DEFERRALS_BEFORE_PLAIN before the lane goes plain.
         self._width_lock_deferrals: Dict[int, int] = {}
@@ -2549,6 +2578,25 @@ class MTPGenerationBatch:
                 self._adaptive_admitted_cap = min(admitted_depths)
         if getattr(self.mtp_admission, "atomic_cohort", False) and native_rows:
             cohort_uids = tuple(row[0] for row in native_rows)
+            lanes = list(self.state.lanes) + [
+                package.detached.lane for package in self._paused.values()
+            ]
+            cohort = next(
+                (getattr(lane, "_batch_cohort", None) for lane in lanes
+                 if getattr(lane, "_batch_cohort", None) is not None), {},
+            )
+            if all(decisions.get(uid) == "queue" for uid in cohort_uids):
+                # Nothing was admitted: keep every owner at this closed
+                # boundary, including prepared rows still waiting to attach.
+                self._atomic_memory_wait = _atomic_memory_wait(
+                    self._atomic_memory_wait, cohort_uids, cohort,
+                    getattr(native_decision, "diagnostics", None), "decode",
+                )
+                self._memory_queued.update(cohort_uids)
+                _bump_bounded_counter(self.scheduler_stats, "atomic_cohort_memory_wait_rounds")
+                return False
+            previous_wait, self._atomic_memory_wait = self._atomic_memory_wait, None
+            self._memory_queued.difference_update(cohort_uids)
             depths = {
                 decisions.get(uid)
                 for uid in cohort_uids
@@ -2562,17 +2610,6 @@ class MTPGenerationBatch:
                 or decisions.get(uid) <= 0
                 for uid in cohort_uids
             ) or len(depths) != 1:
-                lanes = list(self.state.lanes) + [
-                    package.detached.lane for package in self._paused.values()
-                ]
-                cohort = next(
-                    (
-                        getattr(lane, "_batch_cohort", None)
-                        for lane in lanes
-                        if getattr(lane, "_batch_cohort", None) is not None
-                    ),
-                    {},
-                )
                 self._atomic_cohort_failure = {
                     "uids": cohort_uids,
                     "cohort": dict(cohort),
@@ -2582,6 +2619,10 @@ class MTPGenerationBatch:
                     ),
                 }
                 diagnostics = getattr(native_decision, "diagnostics", None)
+                if previous_wait is not None:
+                    diagnostics = _atomic_memory_wait_diagnostics(
+                        previous_wait, latest=diagnostics,
+                    )
                 if diagnostics is not None:
                     self._atomic_cohort_failure["admission"] = {
                         **diagnostics, "boundary": "decode",
@@ -2662,6 +2703,7 @@ class MTPGenerationBatch:
 
     def close(self):
         first_error = None
+        self._atomic_memory_wait = None
         if self._async_qsa_ticket is not None:
             self._decline_async_qsa_promotion("batch closed before promotion")
         else:
@@ -2851,6 +2893,17 @@ class MTPGenerationBatch:
 
     def remove_uids(self, uids):
         requested = set(uids)
+        wait = getattr(self, "_atomic_memory_wait", None)
+        if wait is not None and requested.intersection(wait["uids"]):
+            survivors = set(wait["uids"]) - requested
+            if survivors:
+                self._atomic_cohort_failure = {
+                    "uids": tuple(sorted(survivors)), "cohort": wait["cohort"],
+                    "reason": "declared batch cohort lost a member while waiting for memory",
+                    "admission": _atomic_memory_wait_diagnostics(wait),
+                }
+            requested.update(wait["uids"])
+            self._atomic_memory_wait = None
         drop = [i for (i, uid) in enumerate(self.uids) if uid in requested]
         packages = self._detach_packages(drop)
         # A handed-off or demoted row remains ours until ordinary migration
@@ -3841,6 +3894,7 @@ class BatchGenerator:
         # every request together; no lane from a rejected cohort may start a
         # smaller speculative decode batch.
         self._atomic_cohort_failures = []
+        self._atomic_cohort_memory_waits = {}
         # Declared ordinary cohorts own their frontier independently of MTP.
         self._ordinary_cohorts = {}
         self._ordinary_cohort_active = None
@@ -3915,6 +3969,7 @@ class BatchGenerator:
         )
 
     def close(self):
+        getattr(self, "_atomic_cohort_memory_waits", {}).clear()
         ordinary_uids = tuple(getattr(self, "_ordinary_cohorts", {}))
         if ordinary_uids:
             self.remove(ordinary_uids)
@@ -4829,9 +4884,26 @@ class BatchGenerator:
         admission_result = admission_policy(tuple(rows + joining))
         decisions = dict(admission_result or {})
         if cohort_uids:
-            # Integer decisions are speculative depths.  A plain/queue action
-            # for even one member would turn the declared cohort into two
-            # physical widths, so reject the entire group at this boundary.
+            waits = getattr(self, "_atomic_cohort_memory_waits", None)
+            if waits is None:
+                waits = self._atomic_cohort_memory_waits = {}
+            if not bound_violations and all(
+                decisions.get(uid) == "queue" for uid in cohort_uids
+            ):
+                waits[cohort_uids] = _atomic_memory_wait(
+                    waits.get(cohort_uids), cohort_uids, cohort,
+                    getattr(admission_result, "diagnostics", None), "joining",
+                )
+                memory_queued = getattr(self, "_memory_queued_prefill", None)
+                if memory_queued is None:
+                    memory_queued = self._memory_queued_prefill = set()
+                memory_queued.update(cohort_uids)
+                _bump_bounded_counter(self.scheduler_stats, "atomic_cohort_memory_wait_rounds")
+                return 0
+            previous_wait = waits.pop(cohort_uids, None)
+            # Integer decisions are speculative depths. After the all-queue
+            # wait above, every member must receive one uniform valid depth;
+            # a partial/plain decision cannot split this strict-width group.
             selected_depths = {
                 decisions.get(uid)
                 for uid in cohort_uids
@@ -4852,6 +4924,10 @@ class BatchGenerator:
                         **diagnostics,
                         "bound_violation_uids": sorted(bound_violations)[:64],
                     }
+                if previous_wait is not None:
+                    diagnostics = _atomic_memory_wait_diagnostics(
+                        previous_wait, latest=diagnostics,
+                    )
                 self._record_atomic_cohort_failure(
                     cohort_uids,
                     cohort,
@@ -4930,6 +5006,35 @@ class BatchGenerator:
         failures = list(getattr(self, "_atomic_cohort_failures", ()))
         getattr(self, "_atomic_cohort_failures", []).clear()
         return failures
+
+    def atomic_memory_waits(self):
+        waits = list(getattr(self, "_atomic_cohort_memory_waits", {}).values())
+        active = getattr(getattr(self, "_generation_batch", None), "_atomic_memory_wait", None)
+        if active is not None:
+            waits.append(active)
+        return waits
+
+    def expire_atomic_memory_waits(self, stalled, *, now, timeout):
+        """The serving watchdog retires a waiting cohort as one unit.
+
+        The first-wait deadline also bounds a cohort whose progress clock was
+        refreshed while an unrelated lane was preempted. Polls never extend it.
+        """
+        stalled = set(stalled)
+        expired = set()
+        for wait in self.atomic_memory_waits():
+            elapsed = max(0.0, now - wait["started_at"])
+            if not stalled.intersection(wait["uids"]) and elapsed <= timeout:
+                continue
+            admission = _atomic_memory_wait_diagnostics(wait, now=now, timeout=timeout)
+            self._record_atomic_cohort_failure(
+                wait["uids"], wait["cohort"],
+                "declared batch cohort memory admission did not permit progress",
+                admission=admission,
+            )
+            self.remove(wait["uids"])
+            expired.update(wait["uids"])
+        return expired
 
     def _mtp_prefill_resident_bytes(self, uid, prompt_cache):
         """Target + draft bytes a bounded self-MTP prefill currently holds."""
@@ -6003,6 +6108,20 @@ class BatchGenerator:
 
     def remove(self, uids, return_prompt_caches=False):
         uids = set(uids)
+        # Cancellation cannot leave a waiting strict-width cohort available
+        # to resume as a smaller group before serving consumes its failure.
+        for wait in self.atomic_memory_waits():
+            if not uids.intersection(wait["uids"]):
+                continue
+            survivors = set(wait["uids"]) - uids
+            if survivors:
+                self._record_atomic_cohort_failure(
+                    sorted(survivors), wait["cohort"],
+                    "declared batch cohort lost a member while waiting for memory",
+                    admission=_atomic_memory_wait_diagnostics(wait),
+                )
+            uids.update(wait["uids"])
+            getattr(self, "_atomic_cohort_memory_waits", {}).pop(wait["uids"], None)
         caches = {}
         if return_prompt_caches:
             caches = self.extract_cache(uids)
@@ -6838,6 +6957,7 @@ class BatchGenerator:
         paused = getattr(batch, "_paused", None)
         starved = bool(
             paused
+            and not getattr(getattr(batch, "mtp_admission", None), "atomic_cohort", False)
             and getattr(batch, "mtp_admission", None) is not None
             and not batch.state.lanes
             and not batch._plain_ready

@@ -106,13 +106,16 @@ def test_joining_failure_retains_exact_decision_after_later_admission():
     batch = _atomic_joining_batch({})
     batch.mtp_admission = callback
     assert batch._admit_mtp_joining(20) == 0
+    wait = batch.atomic_memory_waits()[0]
+    batch.remove = lambda _uids: None
+    batch.expire_atomic_memory_waits((), now=wait["started_at"] + 61, timeout=60)
     failure = batch.take_atomic_cohort_failures()[0]
     diagnostic = failure["admission"]
     assert diagnostic["boundary"] == "joining"
     assert diagnostic["row_count"] == 20
     assert [row["uid"] for row in diagnostic["rows"]] == list(failure["uids"])
     assert failure["reason"] == (
-        "declared batch cohort was not wholly admitted for speculative decoding"
+        "declared batch cohort memory admission did not permit progress"
     )
     snapshot = json.dumps(failure, sort_keys=True)
     free[0] = 100.0
@@ -151,6 +154,9 @@ def test_serving_atomic_failure_preserves_diagnostic_and_safe_message(monkeypatc
     engine = serving.ServingEngine(
         "tiny", adapter_factory=make_adapter(model, vocab), qualification_mode=True,
         mtp=True, max_lanes=4, prefill_step=16,
+        execution_policy={"memory_preemption": {
+            "enabled": True, "stall_seconds": 0.05, "on_pressure": False,
+        }},
     )
     try:
         assert engine.ready.wait(10), engine.error
@@ -164,7 +170,7 @@ def test_serving_atomic_failure_preserves_diagnostic_and_safe_message(monkeypatc
                 if "error" in event:
                     break
             assert event["error"] == (
-                "declared batch cohort was not wholly admitted for speculative decoding"
+                "declared batch cohort memory admission did not permit progress"
             )
             assert event["status"] == 429
             assert event["code"] == "batch_cohort_admission_failed"

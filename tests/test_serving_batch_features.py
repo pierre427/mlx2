@@ -285,14 +285,17 @@ def test_atomic_cohort_memory_loss_fails_before_plain_fallback(monkeypatch):
         for _ in range(12):
             _, step = batch.next()
             generated.extend(step)
-            failures = batch.take_atomic_cohort_failures()
-            if failures:
-                failure = failures[0]
+            waits = batch.atomic_memory_waits()
+            if waits:
+                batch.expire_atomic_memory_waits(
+                    (), now=waits[0]["started_at"] + 61, timeout=60,
+                )
+                failure = batch.take_atomic_cohort_failures()[0]
                 break
         assert failure is not None
         assert failure["uids"] == tuple(uids)
         assert failure["cohort"] == cohort
-        assert "remain wholly admitted" in failure["reason"]
+        assert "memory admission did not permit progress" in failure["reason"]
         assert failure["admission"]["boundary"] == "decode"
         assert failure["admission"]["modes"] == ["queue"] * 4
         assert failure["admission"]["final_free_gib"] == free[0]

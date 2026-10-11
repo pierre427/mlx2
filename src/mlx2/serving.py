@@ -11523,6 +11523,11 @@ class ServingEngine:
                             blockers=tuple(active[uid].id for uid in blockers),
                         )
                         stalled = []
+                expired_atomic = getattr(
+                    batch, "expire_atomic_memory_waits", lambda *args, **kwargs: ()
+                )(stalled, now=now, timeout=stall_seconds)
+                if expired_atomic:
+                    stalled = [uid for uid in stalled if uid not in expired_atomic]
                 if stalled:
                     batch.remove(stalled)
                     for uid in stalled:
