@@ -19,6 +19,12 @@ from typing import Any, Dict, List, Optional, Union
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
+from ..cache_operations import (
+    CheckpointPublicationCondition,
+    QSA_KV_OPERATIONS,
+    QSA_QUANTIZED_KV_OPERATIONS,
+    RECURRENT_OPERATIONS,
+)
 from .import_env import snapshot as _import_env_snapshot
 
 _import_env_snapshot(__name__)
@@ -59,6 +65,7 @@ from .qwen4_fused_gdn import (
     OUTPROJ_DISABLED,
     served_silu_refusal,
 )
+from .qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 from .qwen4_fused_gdn_verify import (
     admit_qwen4_fused_gdn_batch_verify,
     admit_qwen4_fused_gdn_verify,
@@ -1403,6 +1410,10 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             prefill_stats=getattr(self, "_prefill_scan_stats", None),
             prefill_segment_rows=getattr(self, "_prefill_scan_segment", 256),
             state_dtype=getattr(self, "_gdn_state_dtype", None),
+            # Qwen4-Exp declares an fp32 GDN state and its reference widens
+            # the dynamic decay inputs before addition/softplus.  Keep this
+            # model-owned instead of changing the shared Qwen3.5 law.
+            decay_input_float32=True,
         )
 
     def set_fused_gdn_decode_mode(self, mode: str):
@@ -1465,6 +1476,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             value_head_dim=self.head_v_dim,
             conv_kernel=self.conv_kernel_size,
             gate_activation=self.norm.activation,
+            contract=QWEN4_GDN_CONTRACT,
         )
         if not admission.accepted:
             return self._fused_gdn_batch_fallback(admission.reason)
@@ -1475,7 +1487,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             return self._fused_gdn_batch_fallback(refusal)
         try:
             threadgroup_y = probe_qwen4_fused_gdn_decode(
-                qkv.dtype, **_state_probe(cache[1])
+                qkv.dtype, contract=QWEN4_GDN_CONTRACT, **_state_probe(cache[1])
             )
             if threadgroup_y is None:
                 return self._fused_gdn_batch_fallback("Metal kernel probe declined")
@@ -1492,6 +1504,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 self.norm.weight,
                 self.norm.eps,
                 threadgroup_y=threadgroup_y,
+                contract=QWEN4_GDN_CONTRACT,
             )
         except Exception as exc:
             if is_device_fault(exc):
@@ -1570,6 +1583,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             value_head_dim=self.head_v_dim,
             conv_kernel=self.conv_kernel_size,
             gate_activation=self.norm.activation,
+            contract=QWEN4_GDN_CONTRACT,
         )
         if not admission.accepted:
             return fallback(admission.reason)
@@ -1591,6 +1605,9 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 if compact
                 else qwen4_fused_gdn_batch_verify
             )
+            kernel_kwargs = {"threadgroup_y": threadgroup_y}
+            if not compact:
+                kernel_kwargs["contract"] = QWEN4_GDN_CONTRACT
             outputs = kernel(
                 qkv,
                 z,
@@ -1604,7 +1621,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 self.norm.weight,
                 self.norm.eps,
                 row_steps,
-                threadgroup_y=threadgroup_y,
+                **kernel_kwargs,
             )
         except Exception as exc:
             if is_device_fault(exc):
@@ -1790,6 +1807,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             value_head_dim=self.head_v_dim,
             conv_kernel=self.conv_kernel_size,
             gate_activation=self.norm.activation,
+            contract=QWEN4_GDN_CONTRACT,
         )
         if not admission.accepted:
             return fallback(admission.reason)
@@ -1809,12 +1827,20 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 )
             )
             state_kw = _state_probe(cache[1])
-            if compact_replay and self.fused_gdn_dynamic_accept:
+            if compact_replay:
                 threadgroup_y = probe(
-                    qkv.dtype, steps, dynamic_accept=True, **state_kw
+                    qkv.dtype,
+                    steps,
+                    dynamic_accept=self.fused_gdn_dynamic_accept,
+                    **state_kw,
                 )
             else:
-                threadgroup_y = probe(qkv.dtype, steps, **state_kw)
+                threadgroup_y = probe(
+                    qkv.dtype,
+                    steps,
+                    contract=QWEN4_GDN_CONTRACT,
+                    **state_kw,
+                )
             if threadgroup_y is None:
                 return fallback("Metal kernel probe declined")
             kernel = qwen4_fused_gdn_catchup if catchup else (
@@ -1822,6 +1848,9 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 if compact_replay
                 else qwen4_fused_gdn_verify
             )
+            kernel_kwargs = {"threadgroup_y": threadgroup_y}
+            if not compact_replay:
+                kernel_kwargs["contract"] = QWEN4_GDN_CONTRACT
             outputs = kernel(
                 qkv,
                 z,
@@ -1834,7 +1863,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 cache[1],
                 self.norm.weight,
                 self.norm.eps,
-                threadgroup_y=threadgroup_y,
+                **kernel_kwargs,
             )
             (out, conv_state, recurrent_state) = outputs[:3]
             if not catchup:
@@ -2101,6 +2130,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             value_head_dim=self.head_v_dim,
             conv_kernel=self.conv_kernel_size,
             gate_activation=self.norm.activation,
+            contract=QWEN4_GDN_CONTRACT,
         )
         if not admission.accepted:
             return self._fused_gdn_fallback(admission.reason)
@@ -2115,7 +2145,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             return self._fused_gdn_fallback(OUTPROJ_DISABLED)
         try:
             threadgroup_y = probe_qwen4_fused_gdn_decode(
-                qkv.dtype, **_state_probe(cache[1])
+                qkv.dtype, contract=QWEN4_GDN_CONTRACT, **_state_probe(cache[1])
             )
             if threadgroup_y is None:
                 return self._fused_gdn_fallback("Metal kernel probe declined")
@@ -2162,6 +2192,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                     self.norm.weight,
                     self.norm.eps,
                     threadgroup_y=threadgroup_y,
+                    contract=QWEN4_GDN_CONTRACT,
                 )
         except Exception as exc:
             if is_device_fault(exc):
@@ -2484,8 +2515,23 @@ def qwen4_fused_gdn_stats(
     return stats
 
 
+QWEN4_RECURRENT_OPERATIONS = replace(
+    RECURRENT_OPERATIONS,
+    publication_conditions=RECURRENT_OPERATIONS.publication_conditions
+    + (
+        CheckpointPublicationCondition(
+            "_ple_rollback",
+            "not_none",
+            "a PLE temporal update is staged without its recurrent half",
+        ),
+    ),
+)
+
+
 class Qwen4ArraysCache(ArraysCache):
     """Four-state PLE+GDN cache with one atomic speculative rollback."""
+
+    cache_operations_contract = QWEN4_RECURRENT_OPERATIONS
 
     # Slot 3 is the PLE n-gram token history. The model reads None there as
     # an all-EOS history (``_ple_embedding``), not zeros, so a cold row that
@@ -4456,6 +4502,7 @@ class QSAKVCache(_StepGrownIndexLedger, KVCache):
     # Exact prefix trim settles KV, raw index keys and pooled summaries.
     # Subclasses must explicitly redeclare this transaction contract.
     supports_external_verify_transaction = True
+    cache_operations_contract = QSA_KV_OPERATIONS
 
     _RECOVERY_APPEND_ONLY_FIELDS = KVCache._RECOVERY_APPEND_ONLY_FIELDS + (
         ("_index_buffer", 1, "_index_width"),
@@ -4592,6 +4639,7 @@ class QSAQuantizedKVCache(QSAKVCache):
     """Quantized attention K/V plus QSA's native raw index-key ledger."""
 
     _registers_plain_mask = False
+    cache_operations_contract = QSA_QUANTIZED_KV_OPERATIONS
 
     _RECOVERY_APPEND_ONLY_FIELDS = QSAKVCache._RECOVERY_APPEND_ONLY_FIELDS
     _RECOVERY_DERIVED_FIELDS = QSAKVCache._RECOVERY_DERIVED_FIELDS
@@ -7407,6 +7455,12 @@ class Model(nn.Module):
     external_feature_convention = "post_layer_shared_hc_mixer"
     external_execution_receipt = TextModel.external_execution_receipt
 
+    @property
+    def state_plane_operations(self):
+        from .qwen4_state_plane import QWEN4_STATE_PLANE_OPERATIONS
+
+        return QWEN4_STATE_PLANE_OPERATIONS
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.args = args
@@ -7525,7 +7579,19 @@ class Model(nn.Module):
             elif isinstance(cache, QSAKVCache):
                 cache.release_qsa_cycle("Model.mtp_end_cycle")
 
-    def mtp_start_cycle(self, mtp_cache, share_qsa_indices: bool = False):
+    @staticmethod
+    def mtp_index_state_policy(config):
+        """Own QSA index-state selection for this model family."""
+        value = config.get("share_index_state", True)
+        if type(value) is not bool:
+            raise ValueError("share_index_state must be boolean")
+        return value
+
+    def mtp_start_cycle(
+        self,
+        mtp_cache,
+        share_index_state: bool = False,
+    ):
         """Reset optional QSA top-k sharing at an MTP draft-cycle boundary.
 
         Sharing is per lane under a batched head cache: the stored index set
@@ -7536,10 +7602,12 @@ class Model(nn.Module):
         leak its index set into this one, and its un-ledgered KV is reported
         here rather than several forwards later.
         """
+        if type(share_index_state) is not bool:
+            raise ValueError("share_index_state must be boolean")
         self.mtp_end_cycle(mtp_cache)
         for cache in mtp_cache:
             if isinstance(cache, (QSAKVCache, BatchQSAKVCache)):
-                cache._mtp_share_topk = bool(share_qsa_indices)
+                cache._mtp_share_topk = share_index_state
                 cache._mtp_shared_topk = None
                 cache._mtp_shared_topk_n_blocks = None
 

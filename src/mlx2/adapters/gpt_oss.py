@@ -13,14 +13,21 @@ from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..output import callable_tools
+from ..process_env import (
+    PROCESS_NUMERICS,
+    assert_process_profile_applied,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
-
 
 _COMMON = frozenset({
     Capability.TEXT, Capability.STREAMING, Capability.CONTINUOUS_BATCH,
     Capability.PREFIX_REUSE, Capability.APC_V2, Capability.LAYERED_CACHE,
     Capability.REASONING,
+    # Target-verified prompt lookup is model-neutral and rolls back only the
+    # cache planes already declared by this adapter.
+    Capability.PROMPT_LOOKUP,
 })
 # The template's ``Reasoning:`` levels for the server's reasoning_effort
 # values; "none" means thinking off (see ``thinking_enabled``).
@@ -49,7 +56,8 @@ def descriptor_for(model_type: str) -> ModelDescriptor:
             else "mlx2.adapters.gpt_oss.GptOssAdapter",
             "qualification": "pending",
             "scope": "ordinary text decode with harmony analysis/final channels; "
-                     "no tool or speculative route",
+                     "target-verified prompt lookup; no tool, external-draft, "
+                     "or proposal-composition route",
         },
     )
 
@@ -76,7 +84,7 @@ def _json(path: Path) -> dict:
         return result
     value = json.loads(path.read_text(), object_pairs_hook=unique)
     if not isinstance(value, dict):
-        raise ValueError(f"{path.name} must contain a JSON object")
+        raise TypeError(f"{path.name} must contain a JSON object")
     return value
 
 
@@ -186,8 +194,32 @@ def configure_environment() -> dict[str, str]:
     # (sweep 1002 review item 6).
     require_process_numerics("the gpt-oss profile")
     profile = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", **PROCESS_NUMERICS}
+    clear_inherited_profile(())
     os.environ.update(profile)
+    assert_process_profile_applied("the gpt-oss profile")
     return profile
+
+
+def _validate_execution_policy(execution_policy) -> None:
+    """Reject unsupported GPT-OSS routes before artifact or tensor access."""
+    if execution_policy in (None, {}):
+        return
+    if not isinstance(execution_policy, dict):
+        raise TypeError("GPT-OSS execution policy must be an object")
+    if execution_policy.get("draft_model"):
+        raise ValueError(
+            "GPT-OSS external drafting is not implemented: no compatible "
+            "artifact-bound drafter contract is declared"
+        )
+    if execution_policy.get("proposal_composition") not in (None, False):
+        raise ValueError(
+            "GPT-OSS proposal composition requires an external draft route, "
+            "which is not implemented"
+        )
+    raise ValueError(
+        "GPT-OSS supports ordinary decode and request-scoped prompt lookup; "
+        "it has no adapter execution-policy overrides"
+    )
 
 
 class _GptOssOrdinaryAdapter:
@@ -209,8 +241,7 @@ class _GptOssOrdinaryAdapter:
     def _init_gpt_oss(self, model_path: str, *, execution_policy=None):
         from .process_globals import claim_stock_moe
 
-        if execution_policy not in (None, {}):
-            raise ValueError("GPT-OSS supports only ordinary execution")
+        _validate_execution_policy(execution_policy)
         artifact = inspect_artifact(model_path, expected=self.expected_type)
         self.identity = artifact["identity"]
         self.descriptor = descriptor_for(self.expected_type)
@@ -225,6 +256,7 @@ class _GptOssOrdinaryAdapter:
         import mlx.core as mx
         from mlx import nn
         from transformers import AutoTokenizer
+
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         from ..runtime.ubc_evict import load_shards_evicting
         if self.expected_type == "gpt_oss_puzzle":
@@ -377,9 +409,56 @@ class _GptOssOrdinaryAdapter:
                 "prefill_step_size": prefill_step, "segment_aware_live_tip": False,
                 "segment_aware_cohort_size": max_lanes}
 
+    def capability_receipts(self):
+        """Adapter-local feature states; runtime receipts own observations."""
+        return {
+            "ordinary_reference": {
+                "implemented": True,
+                "qualified": False,
+                "selected": None,
+                "observed_used": False,
+                "default": True,
+                "selection_authority": "serving_route_receipt",
+                "profile": f"{self.expected_type}-apcv2-ordinary",
+            },
+            "apcv2": {
+                "implemented": True,
+                "qualified": False,
+                "selected": None,
+                "observed_used": False,
+                "selection_authority": "serving_route_receipt",
+                "observation_authority": "serving_route_receipt",
+                "cache_layout": self.layout,
+            },
+            "prompt_lookup": {
+                "implemented": True,
+                "qualified": False,
+                "selected": None,
+                "observed_used": False,
+                "selection": "request_scoped",
+                "selection_authority": "serving_route_receipt",
+                "observation_authority": "speculative_route_receipt",
+            },
+            "external_draft": {
+                "implemented": False,
+                "qualified": False,
+                "selected": False,
+                "observed_used": False,
+                "refusal": "no_compatible_artifact_bound_drafter_contract",
+            },
+            "proposal_composition": {
+                "implemented": False,
+                "qualified": False,
+                "selected": False,
+                "observed_used": False,
+                "refusal": "requires_external_draft_route",
+            },
+        }
+
     def diagnostics(self):
         return {"architecture": self.expected_type, "cache_layout": self.layout,
-                "qualification": "pending", "route": "ordinary"}
+                "qualification": "unqualified", "adapter_default_route": "ordinary",
+                "capability_receipts": self.capability_receipts()}
 
     def close(self):
         from .process_globals import release

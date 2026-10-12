@@ -1,0 +1,25 @@
+{
+  "component": "fail-closed compact recurrent checkpoint publication",
+  "source_repository": "sgl-project/sglang (design reference only; no code copied)",
+  "source_revision": "1d5ff765d34a63b186554d9dc2f6115cd3c8084f",
+  "source_paths": [
+    "python/sglang/srt/mem_cache/memory_pool.py",
+    "python/sglang/srt/mem_cache/unified_cache/components/mamba.py",
+    "test/registered/radix_cache/test_mamba_cache_kl.py",
+    "test/registered/unit/mem_cache/test_unified_radix_cache_unittest.py"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/runtime/checkpoint_publication.py",
+    "src/mlx2/runtime/cow_cache.py",
+    "src/mlx2/runtime/hybrid_speculative.py"
+  ],
+  "modifications": [
+    "Defined a model-neutral host-side checkpoint_publication_refusal protocol for compact recurrent and ring-state implementations.",
+    "Preserved the existing speculation, rollback, staged PLE and QSA/MTP transaction guards behind the shared protocol.",
+    "Required self-MTP checkpoint donation to prove a committed target and draft graph before choosing descriptor COW or deepcopy, so a safety refusal cannot become a deepcopy fallback."
+  ],
+  "validation": [
+    "tests/test_checkpoint_publication_safety_cpu.py"
+  ]
+}

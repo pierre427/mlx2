@@ -12,6 +12,7 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..process_env import (
     PROCESS_NUMERICS,
+    assert_process_profile_applied,
     clear_inherited_profile,
     require_process_numerics,
 )
@@ -48,6 +49,9 @@ MELLUM21_THINKING = ModelDescriptor(
         "qualification": "pending",
         "scope": "text-only ordinary decode",
         "speculation": "checkpoint has no MTP tensors",
+        "ordinary_reference": "implemented",
+        "prompt_lookup": "target-verified-exact-rollback",
+        "external_draft": "unsupported-no-bound-draft-artifact",
         "source_repository": SOURCE_REPOSITORY,
         "source_revision": SOURCE_REVISION,
     },
@@ -239,26 +243,42 @@ def configure_environment() -> dict[str, str]:
         "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
     }
     os.environ.update(profile)
+    assert_process_profile_applied("the Mellum 2.1 profile")
     return profile
 
 
 class Mellum21ThinkingAdapter:
     default_route = "ordinary"
+    default_mtp_ordinary_handoff_max_width = None
     descriptor = MELLUM21_THINKING
     sampling_defaults = MELLUM21_SAMPLING
     reasoning_effort_semantics = "thinking_toggle"
     tool_call_open_marker = "<tool_call>"
+    weight_streaming_modes = frozenset({"moe_experts"})
 
-    def __init__(self, model_path: str, *, execution_policy=None):
+    def __init__(self, model_path: str, *, execution_policy=None, weight_streaming=None):
         from .process_globals import guarded_construction
 
-        guarded_construction(
-            self,
-            lambda: self._initialize(model_path, execution_policy=execution_policy),
-        )
+        try:
+            guarded_construction(
+                self,
+                lambda: self._initialize(
+                    model_path,
+                    execution_policy=execution_policy,
+                    weight_streaming=weight_streaming,
+                ),
+            )
+        except BaseException:
+            self.close()
+            raise
 
-    def _initialize(self, model_path: str, *, execution_policy=None):
-        if execution_policy:
+    def _initialize(self, model_path: str, *, execution_policy=None, weight_streaming=None):
+        from ..runtime.streamed_load import require_declared
+
+        stream_request = require_declared(type(self), weight_streaming)
+        if execution_policy is not None and (
+            not isinstance(execution_policy, dict) or execution_policy
+        ):
             raise ValueError("Mellum 2.1 has no adapter execution-policy overrides")
         from .process_globals import claim_stock_moe
 
@@ -280,9 +300,11 @@ class Mellum21ThinkingAdapter:
 
         self.model = Model(ModelArgs.from_dict(self.config))
         files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-        weights = self.model.sanitize(load_shards_evicting(files), eager=True)
         quant = self.config.get("quantization", self.config.get("quantization_config"))
-        if quant:
+        def quantize(weights):
+            if not quant:
+                return
+
             base_predicate = self.model.quant_predicate
 
             def predicate(name, module):
@@ -300,7 +322,35 @@ class Mellum21ThinkingAdapter:
                 mode=quant.get("mode", "affine"),
                 class_predicate=predicate,
             )
-        self.model.load_weights(list(weights.items()), strict=True)
+
+        self.weight_stream = None
+        if stream_request is None:
+            weights = self.model.sanitize(load_shards_evicting(files), eager=True)
+            quantize(weights)
+            self.model.load_weights(list(weights.items()), strict=True)
+        else:
+            from ..runtime.streamed_load import (
+                force_stock_expert_arithmetic,
+                load_streamed,
+            )
+
+            def installed(manager):
+                manager.forced_stock = force_stock_expert_arithmetic(self.model)
+
+            loaded = load_streamed(
+                self.model,
+                path,
+                [file.name for file in files],
+                request=stream_request,
+                sanitize=lambda weights: self.model.sanitize(weights, eager=False),
+                quantize=quantize,
+                records=self.identity["files"],
+                weight_map=artifact["weight_map"],
+                top_k=int(self.config["num_experts_per_tok"]),
+                on_installed=installed,
+            )
+            weights = loaded.weights
+            self.weight_stream = loaded.manager
         self.model.eval()
         mx.eval(self.model.parameters())
         weights.clear()
@@ -320,8 +370,14 @@ class Mellum21ThinkingAdapter:
             eos_token_ids=artifact_eos_token_ids(path, self.config, tokenizer),
         )
         self.max_context = int(self.config["max_position_embeddings"])
+        if self.weight_stream is not None:
+            self.weight_stream.begin_serving()
 
     def close(self):
+        stream = getattr(self, "weight_stream", None)
+        if stream is not None:
+            stream.close()
+            self.weight_stream = None
         if getattr(self, "_process_claim", None) is not None:
             from .process_globals import release
 
@@ -394,6 +450,54 @@ class Mellum21ThinkingAdapter:
             tolerant_tool_markers=request.get("_tolerant_tool_markers", False),
         )
 
+    def route_capability_contract(self):
+        """Declare Mellum's ordinary-only exact serving boundary."""
+        return {
+            "schema": "mlx2.mellum21-route-capability-contract.v1",
+            "family": self.descriptor.family,
+            "variant": self.descriptor.variant,
+            "default_route": "ordinary",
+            "ordinary_reference_preserved": True,
+            "qualification": "unqualified",
+            "apcv2": {
+                "implemented": True,
+                "exact_only": True,
+                "qualified": False,
+                "selected": None,
+                "selection_authority": "serving_route_receipt",
+                "cache_layout": self.descriptor.cache_layout,
+                "state_planes": tuple(
+                    sorted(plane.value for plane in self.descriptor.state_planes)
+                ),
+            },
+            "prompt_lookup": {
+                "implemented": True,
+                "target_verified": True,
+                "rollback": "exact-mixed-kv-layer-segments",
+                "qualified": False,
+                "selected": None,
+                "selection_authority": "serving_route_receipt",
+            },
+            "moe_expert_streaming": {
+                "implemented": True,
+                "qualified": False,
+                "eligible": True,
+                "selected": None,
+                "observed_used": False,
+                "default": False,
+                "selection_authority": "server_weight_stream_receipt",
+                "observation_authority": "server_weight_stream_receipt",
+            },
+            "native_mtp": {
+                "implemented": False,
+                "reason": "released artifact contains no MTP tensors",
+            },
+            "external_draft": {
+                "implemented": False,
+                "reason": "no revision-bound draft artifact",
+            },
+        }
+
     def diagnostics(self):
         return {
             "architecture": "mellum",
@@ -406,8 +510,9 @@ class Mellum21ThinkingAdapter:
             },
             "experts": {"total": 64, "active": 8, "packed": True},
             "qualification": "unqualified",
-            "route": "ordinary",
-            "implemented": True,
-            "selected": True,
-            "observed_used": getattr(self.model, "completed_forwards", 0) > 0,
+            "adapter_default_route": "ordinary",
+            "adapter_implemented": True,
+            "selection_authority": "serving_route_receipt",
+            "target_forward_observed": getattr(self.model, "completed_forwards", 0) > 0,
+            "route_capability_contract": self.route_capability_contract(),
         }

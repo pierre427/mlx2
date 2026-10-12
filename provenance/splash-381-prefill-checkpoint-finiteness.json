@@ -1,0 +1,42 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "recorded_at": "2026-10-12",
+  "status": "implemented and focused CPU tested; unqualified, unselected; no GPU evidence",
+  "code_copied": false,
+  "source": {
+    "repository": "https://github.com/incoai/splash",
+    "pull_request": "https://github.com/incoai/splash/pull/381",
+    "revision": "2345a062baa343683583bf9afc0333a8a95e0a6f",
+    "state_when_read": "open",
+    "license": "Apache-2.0, license blob d645695673349e3947e8e5ae42332d0ac3164cd7",
+    "paths": [
+      "runtime/engine/Engine.cpp",
+      "runtime/engine/Cache.cpp",
+      "runtime/engine/KvPool.cpp",
+      "runtime/model/Runtime.cpp",
+      "runtime/model/QwenState.cpp",
+      "runtime/ops/PageStorage.cpp",
+      "dev/tests/engine/engine_cache_test.cpp",
+      "dev/tests/engine/engine_test.cpp"
+    ],
+    "use": "Design and defect witness only. Non-finite model results must fail the affected request before its state becomes cache-publishable, while healthy peers continue. No source copied."
+  },
+  "local": {
+    "paths": [
+      "src/mlx2/runtime/generate.py",
+      "src/mlx2/serving.py",
+      "tests/test_prefill_checkpoint_finiteness_cpu.py"
+    ],
+    "modifications": [
+      "Validate the last real output row for every prompt lane before recurrent checkpoints are recorded.",
+      "Allow negative-infinity vocabulary masks only when each row retains at least one finite logit; refuse NaN, positive infinity, and fully masked rows.",
+      "Refuse checkpoint publication when a production prefill returns no validation projection or an unfamiliar tensor shape; retain only an explicit test-double bypass.",
+      "Exclude right-padding rows and reuse the existing mixed-prefill projection for prompt-tail validation.",
+      "Fail only corrupt serving lanes and keep healthy peers and the worker alive."
+    ],
+    "validation": [
+      "tests/test_prefill_checkpoint_finiteness_cpu.py",
+      "Focused rolling-checkpoint, device-recovery, mixed-forward, serving-batch, and checkpoint-publication CPU tests"
+    ]
+  }
+}

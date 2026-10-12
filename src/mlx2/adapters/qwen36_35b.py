@@ -220,6 +220,8 @@ KERNEL_POLICY_ENV = {
     "moe_routed_decode": "MLX_QWEN4_MOE_ROUTED_DECODE",
     "moe_topk_fold": "MLX_QWEN4_MOE_TOPK_FOLD",
     "moe_window": "MLX_QWEN36_MOE_WINDOW",
+    "moe_window_batch_decode": "MLX_QWEN36_MOE_WINDOW_BATCH_DECODE",
+    "moe_window_verify": "MLX_QWEN36_MOE_WINDOW_VERIFY",
     "fused_gdn_batch_decode": "MLX_QWEN36_FUSED_GDN_BATCH_DECODE",
     "fused_gdn_verify": "MLX_QWEN36_FUSED_GDN_VERIFY",
     "fused_gdn_batch_verify": "MLX_QWEN36_FUSED_GDN_BATCH_VERIFY",
@@ -229,6 +231,8 @@ NEW_DECODE_KERNELS = frozenset(
         "moe_routed_decode",
         "moe_topk_fold",
         "moe_window",
+        "moe_window_batch_decode",
+        "moe_window_verify",
         "fused_gdn_batch_decode",
         "fused_gdn_verify",
         "fused_gdn_batch_verify",
@@ -264,10 +268,14 @@ LIVE_APPLIED_ENV = frozenset(
         "MLX_QWEN36_FUSED_GDN_VERIFY",
         "MLX_QWEN36_FUSED_GDN_BATCH_VERIFY",
         "MLX_QWEN36_MOE_WINDOW",
+        "MLX_QWEN36_MOE_WINDOW_BATCH_DECODE",
+        "MLX_QWEN36_MOE_WINDOW_VERIFY",
         "MLX_QWEN36_DECODE_WINS",
         # NAX sorted MoE gather: applied through moe_nax_gather.set_mode at
-        # load, as on Flash-Next.
+        # load, as on Flash-Next. The uncalibrated RHS pad policy is likewise
+        # claimed as floor and applied through switch_layers.set_pad_policy.
         "MLX2_MOE_NAX_GATHER",
+        "MLX2_MOE_RHS_PAD_POLICY",
     }
 )
 # oMLX #3995/#4022/#4029 NAX segmented sorted MoE gather
@@ -301,6 +309,34 @@ DEFAULT_DECODE_WINS = {
     "fused_gdn_verify": True,
 }
 
+MOE_WINDOW_POLICY_KEYS = frozenset(
+    {"moe_window", "moe_window_batch_decode", "moe_window_verify"}
+)
+
+
+def moe_window_consumers(kernels):
+    """Resolve the legacy umbrella or independent row-window consumers."""
+    if kernels.get("moe_window"):
+        return ("batch_decode", "verify", "row_exact")
+    return tuple(
+        consumer
+        for key, consumer in (
+            ("moe_window_batch_decode", "batch_decode"),
+            ("moe_window_verify", "verify"),
+        )
+        if kernels.get(key)
+    )
+
+
+def validate_moe_window_policy(kernels):
+    if kernels.get("moe_window") and any(
+        key in kernels for key in ("moe_window_batch_decode", "moe_window_verify")
+    ):
+        raise ValueError(
+            "Qwen3.6 moe_window compatibility umbrella cannot be mixed with "
+            "independent moe_window_batch_decode/moe_window_verify selections"
+        )
+
 
 def validate_kernel_choice(key, value):
     if key in ENUM_KERNELS:
@@ -322,6 +358,7 @@ def configure_environment(kernels=None, moe_nax_gather=None) -> dict[str, str]:
     require_process_numerics("the Qwen3.6 profile")
     if moe_nax_gather is not None and moe_nax_gather not in MOE_NAX_GATHER_MODES:
         raise ValueError(f"Qwen3.6 moe_nax_gather must be one of {MOE_NAX_GATHER_MODES}")
+    validate_moe_window_policy(kernels or {})
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
@@ -384,6 +421,7 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "draft_revision",
         "target_revision",
         "draft_quantization",
+        "cost_per_commit_handoff",
     }
 )
 
@@ -400,6 +438,11 @@ def default_external_policy(policy: dict) -> dict:
 
 
 class Qwen3635BA3BAdapter(Qwen3827BAdapter):
+    # Qwen3.6 inherits shared self-MTP machinery from the dense Qwen3.8
+    # adapter, but its proposal acceptance distribution has not been measured.
+    # Keep an explicitly configured loop available while refusing auto tuning
+    # from the Qwen3.8 prior.
+    draft_loop_prior_resource = None
     # int8 prefill is declared for the dense Qwen3.8 layout only; the MoE
     # family (and its 122B subclass) has no evidence with it.
     int8_prefill_supported = None
@@ -452,6 +495,36 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
     # Early-load MoE expert streaming (runtime/streamed_load.py).  Read from
     # this class's own __dict__: subclasses must declare it themselves.
     weight_streaming_modes = frozenset({"moe_experts"})
+
+    def attention_topology(self):
+        """Qwen3.6 35B full-KV/GDN state geometry, revision bound."""
+        from ..runtime.attention_topology import (
+            FULL_KV,
+            RECURRENT,
+            AttentionTopology,
+        )
+
+        config = self._attention_topology_config
+        count = int(config["num_hidden_layers"])
+        interval = int(config["full_attention_interval"])
+        expected = tuple(
+            "full_attention" if (index + 1) % interval == 0 else "linear_attention"
+            for index in range(count)
+        )
+        declared = config.get("layer_types")
+        if declared is not None and tuple(declared) != expected:
+            raise ValueError("unknown Qwen3.6 35B attention topology")
+        return AttentionTopology(
+            state_revision=self.identity["fingerprint"],
+            cache_layout=self.layout,
+            layers=tuple(
+                FULL_KV if kind == "full_attention" else RECURRENT
+                for kind in expected
+            ),
+            auxiliary_layers=(FULL_KV,)
+            * int(config.get("mtp_num_hidden_layers", 0)),
+            recurrent_layout="qwen36-gdn-32v16k-state-v1",
+        )
 
     def __init__(
         self,
@@ -546,6 +619,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         for key in KERNEL_POLICY_ENV:
             if key in policy:
                 self._kernels[key] = validate_kernel_choice(key, policy[key])
+        validate_moe_window_policy(self._kernels)
         for key, value in vars(type(self)).get("default_decode_wins", {}).items():
             if key in self._kernels:
                 continue
@@ -558,7 +632,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             self._kernels[key] = value
         if self._kernels.get("moe_routed_candidate") and (
             self._kernels.get("moe_routed_decode", "off") != "off"
-            or self._kernels.get("moe_window")
+            or any(self._kernels.get(key) for key in MOE_WINDOW_POLICY_KEYS)
         ):
             raise ValueError(
                 "historical routed candidate and new routed/window slices are exclusive"
@@ -568,7 +642,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             or any(
                 choice_selected(k, v)
                 for k, v in self._kernels.items()
-                if k in {"moe_routed_decode", "moe_window"}
+                if k in {"moe_routed_decode", *MOE_WINDOW_POLICY_KEYS}
             )
         ):
             raise ValueError(
@@ -614,6 +688,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         config["text_config"] = dict(config.get("text_config", config))
         if not artifact["has_mtp"] or draft_record is not None:
             config["text_config"]["mtp_num_hidden_layers"] = 0
+        self._attention_topology_config = dict(config["text_config"])
 
         from transformers import AutoTokenizer
 
@@ -642,11 +717,14 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
             # The official config names only <|endoftext|>; the tokenizer's chat
             # EOS <|im_end|> ends an assistant turn and must stop generation too.
-            eos = resolve_eos_token_ids(config, tokenizer)
+            eos = resolve_eos_token_ids(config, tokenizer, path)
             self.tokenizer = TokenizerWrapper(
                 tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
             )
             self.max_context = int(config["text_config"]["max_position_embeddings"])
+            from ..runtime.models.switch_layers import moe_pad_status
+
+            self._moe_pad_initial = moe_pad_status()
             if self.weight_stream is not None:
                 # The dtype probe above paged experts in as load evidence only.
                 self.weight_stream.begin_serving()
@@ -696,11 +774,35 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
 
     def execution_numerics_contract(self):
         """Bind the external route to this adapter's live target arithmetic."""
+        from ..runtime.models.qwen36_35b import GatedDeltaNet
+
+        modes = {
+            str(module.fused_gdn_decode_mode)
+            for _, module in self.model.named_modules()
+            if isinstance(module, GatedDeltaNet)
+        }
+        if len(modes) != 1 or not modes <= {"fused", "stock"}:
+            raise ValueError(
+                "Qwen3.6 target numerical contract requires one live fused-GDN "
+                "decode mode"
+            )
+        fused_gdn_decode = modes == {"fused"}
+        declared = self._kernels.get("fused_gdn_decode")
+        if declared is not None and bool(declared) is not fused_gdn_decode:
+            raise ValueError(
+                "selected Qwen3.6 fused_gdn_decode policy disagrees with live layers"
+            )
+        decode_kernels = dict(self._kernels)
+        # An operator may select this one legacy switch through the ambient
+        # environment when the execution policy omits it. Bind the installed
+        # live mode either way so APCv2 and external-learning identities never
+        # omit target arithmetic that actually ran.
+        decode_kernels["fused_gdn_decode"] = fused_gdn_decode
         return {
             "qwen36_target": {
                 "cache_layout": CACHE_LAYOUT,
                 "moe_nax_gather": self.moe_nax_gather,
-                "decode_kernels": dict(sorted(self._kernels.items())),
+                "decode_kernels": dict(sorted(decode_kernels.items())),
                 "proposal_state": "bound_source_only",
                 "target_state": "authoritative_exact",
             }
@@ -899,14 +1001,36 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                     self._kernels.get("moe_routed_decode", "off")
                 )
                 module.set_moe_topk_mode(self._kernels.get("moe_topk_fold", "off"))
-                module.set_moe_window_consumers(
-                    ("batch_decode", "verify", "row_exact")
-                    if self._kernels.get("moe_window")
-                    else ()
-                )
+                module.set_moe_window_consumers(moe_window_consumers(self._kernels))
 
     def diagnostics(self):
         result = super().diagnostics()
+        from ..runtime.models.switch_layers import moe_pad_reportable, moe_pad_status
+
+        pad_status = moe_pad_status()
+        initial_pad = getattr(self, "_moe_pad_initial", None)
+        if initial_pad is not None:
+            pad_status = {
+                **pad_status,
+                "padded_calls": max(
+                    0, pad_status.get("padded_calls", 0)
+                    - initial_pad.get("padded_calls", 0)
+                ),
+                "pad_rows": max(
+                    0, pad_status.get("pad_rows", 0)
+                    - initial_pad.get("pad_rows", 0)
+                ),
+                "choices": {
+                    key: max(0, value - initial_pad.get("choices", {}).get(key, 0))
+                    for key, value in pad_status.get("choices", {}).items()
+                    if value > initial_pad.get("choices", {}).get(key, 0)
+                },
+            }
+            pad_status["engaged"] = bool(
+                pad_status["padded_calls"] or pad_status["choices"]
+            )
+        if moe_pad_reportable(pad_status):
+            result["moe_pad"] = pad_status
         result["architecture"] = "sparse-moe-hybrid-gdn-gqa"
         result["layout"] = self.layout
         result["optimized_moe_selected"] = any(
@@ -917,6 +1041,8 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 "moe_routed_decode",
                 "moe_topk_fold",
                 "moe_window",
+                "moe_window_batch_decode",
+                "moe_window_verify",
                 "moe_routed_candidate",
             }
         )

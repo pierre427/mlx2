@@ -18,14 +18,15 @@ import struct
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from .artifact_paths import shard_within_artifact
-from .mtp_depth_cap import validate_self_mtp_num_draft
-from ..sampling_defaults import XING4_SAMPLING
 from ..process_env import (
     PROCESS_NUMERICS,
+    assert_process_profile_applied,
     clear_inherited_profile,
     require_process_numerics,
 )
+from ..sampling_defaults import XING4_SAMPLING
+from .artifact_paths import shard_within_artifact
+from .mtp_depth_cap import validate_self_mtp_num_draft
 
 CACHE_LAYOUT = "xing4-0-mla-latent-layer-segments-v1"
 CONVERSION_LAYOUT = "xing4_0-sanitized-v1"
@@ -104,6 +105,9 @@ def descriptor_for(*, has_mtp: bool) -> ModelDescriptor:
             "qualification": "pending",
             "scope": "text-only",
             "residual": "mhc-4-stream-sinkhorn",
+            "ordinary_reference": "implemented",
+            "prompt_lookup": "target-verified-exact-rollback",
+            "external_draft": "unsupported-no-bound-draft-artifact",
         },
     )
 
@@ -260,6 +264,7 @@ def configure_environment() -> dict[str, str]:
     }
     clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
+    assert_process_profile_applied("the Xing profile")
     return profile
 
 
@@ -428,18 +433,40 @@ class XingAdapter:
             paths, geometry=self.exact_prefix_reuse_geometry(cache)
         )
 
-    def __init__(self, model_path: str, *, require_mtp: bool = False, execution_policy=None):
+    weight_streaming_modes = frozenset({"moe_experts"})
+
+    def __init__(
+        self,
+        model_path: str,
+        *,
+        require_mtp: bool = False,
+        execution_policy=None,
+        weight_streaming=None,
+    ):
         from .process_globals import guarded_construction
 
         guarded_construction(
             self,
             lambda: self._init_xing(
-                model_path, require_mtp=require_mtp, execution_policy=execution_policy
+                model_path,
+                require_mtp=require_mtp,
+                execution_policy=execution_policy,
+                weight_streaming=weight_streaming,
             ),
         )
 
-    def _init_xing(self, model_path: str, *, require_mtp: bool = False, execution_policy=None):
+    def _init_xing(
+        self,
+        model_path: str,
+        *,
+        require_mtp: bool = False,
+        execution_policy=None,
+        weight_streaming=None,
+    ):
         from .process_globals import claim_stock_moe
+        from ..runtime.streamed_load import require_declared
+
+        stream_request = require_declared(type(self), weight_streaming)
 
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
@@ -470,7 +497,7 @@ class XingAdapter:
             config["num_nextn_predict_layers"] = 0
 
         import mlx.core as mx
-        import mlx.nn as nn
+        from mlx import nn
 
         from ..runtime.models.xing4_0 import Model, ModelArgs
         from ..runtime.ubc_evict import load_shards_evicting
@@ -478,14 +505,17 @@ class XingAdapter:
 
         self.model = None
         self.tokenizer = None
+        self.weight_stream = None
         try:
             self.model = Model(ModelArgs.from_dict(config))
             if self.model.apc_v2_layout != CACHE_LAYOUT:
                 raise ValueError("Xing4.0 model and adapter cache layouts disagree")
             files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-            weights = self.model.sanitize(load_shards_evicting(files))
             quant = config.get("quantization", config.get("quantization_config"))
-            if quant:
+            def quantize(weights):
+                if not quant:
+                    return
+
                 def predicate(name, module):
                     override = quant.get(name)
                     if isinstance(override, dict):
@@ -499,7 +529,34 @@ class XingAdapter:
                     mode=quant.get("mode", "affine"),
                     class_predicate=predicate,
                 )
-            self.model.load_weights(list(weights.items()), strict=True)
+
+            if stream_request is None:
+                weights = self.model.sanitize(load_shards_evicting(files))
+                quantize(weights)
+                self.model.load_weights(list(weights.items()), strict=True)
+            else:
+                from ..runtime.streamed_load import (
+                    force_stock_expert_arithmetic,
+                    load_streamed,
+                )
+
+                def installed(manager):
+                    manager.forced_stock = force_stock_expert_arithmetic(self.model)
+
+                loaded = load_streamed(
+                    self.model,
+                    path,
+                    [file.name for file in files],
+                    request=stream_request,
+                    sanitize=self.model.sanitize,
+                    quantize=quantize,
+                    records=self.identity["files"],
+                    weight_map=artifact["weight_map"],
+                    top_k=int(config["num_experts_per_tok"]),
+                    on_installed=installed,
+                )
+                weights = loaded.weights
+                self.weight_stream = loaded.manager
             self.model.eval()
             mx.eval(self.model.parameters())
             weights.clear()
@@ -511,6 +568,8 @@ class XingAdapter:
             self.tokenizer = make_tokenizer_wrapper(
                 tokenizer, eos_token_ids=[eos] if isinstance(eos, int) else list(eos)
             )
+            if self.weight_stream is not None:
+                self.weight_stream.begin_serving()
         except BaseException:
             self.close()
             raise
@@ -603,6 +662,66 @@ class XingAdapter:
 
         return XingCacheBudget.from_config(self.config, mtp=mtp)
 
+    def route_capability_contract(self):
+        """Declare Xing's exact ordinary/APCv2/native-MTP route boundary."""
+        has_mtp = Capability.MTP in self.descriptor.capabilities
+        return {
+            "schema": "mlx2.xing4-route-capability-contract.v1",
+            "family": self.descriptor.family,
+            "variant": self.descriptor.variant,
+            "default_route": "native_mtp" if has_mtp else "ordinary",
+            "ordinary_reference_preserved": True,
+            "qualification": "unqualified",
+            "apcv2": {
+                "implemented": True,
+                "exact_only": True,
+                "qualified": False,
+                "selected": None,
+                "selection_authority": "serving_route_receipt",
+                "cache_layout": self.descriptor.cache_layout,
+                "state_planes": tuple(
+                    sorted(plane.value for plane in self.descriptor.state_planes)
+                ),
+            },
+            "prompt_lookup": {
+                "implemented": True,
+                "target_verified": True,
+                "rollback": "exact-mla-latent-rows",
+                "qualified": False,
+                "selected": None,
+                "selection_authority": "serving_route_receipt",
+            },
+            "moe_expert_streaming": {
+                "implemented": True,
+                "qualified": False,
+                "eligible": True,
+                "selected": None,
+                "observed_used": False,
+                "default": False,
+                "selection_authority": "server_weight_stream_receipt",
+                "observation_authority": "server_weight_stream_receipt",
+                "mtp_resident_available": has_mtp,
+            },
+            "native_mtp": {
+                "implemented": has_mtp,
+                "artifact_bound": has_mtp,
+                "segmented": has_mtp,
+                "default_preferred": has_mtp,
+                "ordinary_handoff": (
+                    {"enabled": True, "max_mtp_width": self.default_mtp_ordinary_handoff_max_width}
+                    if has_mtp
+                    else None
+                ),
+                "qualified": False,
+                "selected": None,
+                "selection_authority": "serving_route_receipt",
+            },
+            "external_draft": {
+                "implemented": False,
+                "reason": "no revision-bound draft artifact",
+            },
+        }
+
     def diagnostics(self):
         from ..runtime.models.xing4_0 import mhc_stats
         from ..runtime.segmented_self_mtp import segmented_self_mtp_stats
@@ -616,6 +735,8 @@ class XingAdapter:
             "mhc": mhc_stats(),
             "segmented_mtp": segmented_self_mtp_stats(),
             "proposal_verification": self.proposal_verification_policy(),
+            "qualification": "unqualified",
+            "route_capability_contract": self.route_capability_contract(),
         }
 
     def close(self):
@@ -623,6 +744,10 @@ class XingAdapter:
         from .process_globals import release
 
         release(self)
+        stream = getattr(self, "weight_stream", None)
+        if stream is not None:
+            stream.close()
+            self.weight_stream = None
         had_resources = any(
             getattr(self, name, None) is not None for name in ("model", "tokenizer")
         )

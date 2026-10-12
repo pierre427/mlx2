@@ -1,0 +1,51 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "date": "2026-10-12",
+  "implementation": "Original mlx2 generalized runtime contracts and model-owned declarations; no external source code copied",
+  "repository": "https://github.com/pierre427/mlx2",
+  "revision_basis": "d661fd1cce683d7da4a2d2139f3883596a3955f7 plus the reviewed 2026-10-12 integration repair set",
+  "license": "Apache-2.0",
+  "paths": [
+    "src/mlx2/adapters/native_continuation.py",
+    "src/mlx2/runtime/attention_topology.py",
+    "src/mlx2/runtime/cache_operations.py",
+    "src/mlx2/runtime/models/gdn_kernel_contract.py",
+    "src/mlx2/runtime/models/moe_routing_contract.py",
+    "src/mlx2/runtime/models/qwen_gdn_contracts.py",
+    "src/mlx2/runtime/models/qwen_moe_contracts.py",
+    "src/mlx2/runtime/models/qwen4_state_plane.py",
+    "src/mlx2/runtime/native_continuation_provider.py",
+    "src/mlx2/runtime/quantized_dense_execution.py",
+    "src/mlx2/runtime/target_tree_executor.py"
+  ],
+  "related_provenance": [
+    "provenance/tensorfold-qwen38-vendored-executor.json",
+    "provenance/qwen4-gdn-precision-frontier-20261012.json",
+    "provenance/sglang-43749-compact-checkpoint-safety.json",
+    "provenance/mlx-serve-671-moe-rhs-pad.json"
+  ],
+  "modifications": [
+    "Replaced scheduler and cache inference from model or class names with immutable adapter-owned topology, cache-operation, state-plane, GDN and MoE contracts.",
+    "Separated generic target-tree and native-continuation lifecycle protocols from Qwen-specific provider implementations.",
+    "Separated quantized storage identity from explicitly admitted dense execution without changing the ordinary quantized reference path.",
+    "Required unsupported, stale or structurally incomplete provider capabilities to fail closed while preserving ordinary decode."
+  ],
+  "validation": {
+    "scope": "focused CPU contract, lifecycle and failure-closure tests; no GPU, performance or qualification claim",
+    "tests": [
+      "tests/test_attention_topology_contract_cpu.py",
+      "tests/test_cache_operations_contract_cpu.py",
+      "tests/test_executor_provider_generalization_cpu.py",
+      "tests/test_gdn_kernel_contract_cpu.py",
+      "tests/test_moe_routing_contract_cpu.py",
+      "tests/test_quantized_dense_execution_cpu.py",
+      "tests/test_runtime_provider_cleanup_cpu.py",
+      "tests/test_state_plane_operations_cpu.py"
+    ]
+  },
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "observed_used_gpu": false,
+  "performance_claim": false
+}

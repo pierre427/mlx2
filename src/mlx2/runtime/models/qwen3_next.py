@@ -18,6 +18,7 @@ _import_env_snapshot(__name__)
 from .activations import swiglu
 from .base import BaseModelArgs
 from .precise_ops import gate_sigmoid
+from .qwen_moe_contracts import QWEN4_E512_K10_ROUTING
 from .qwen4_moe_router import (
     admit_qwen4_moe_router,
     probe_qwen4_moe_router,
@@ -638,14 +639,17 @@ def _try_routed_decode(switch_mlp, x, indices, scores, do_sort, variant="scalar"
     if degraded:
         mode = "gate_up"
     split = "gate_up_proj" not in switch_mlp
+    contract = getattr(switch_mlp, "moe_routing_contract", None)
+    contract_kw = {} if contract is None else {"contract": contract}
     if split:
         admission = _routed.admit_split_routed_decode(
             x, indices, scores, switch_mlp.gate_proj, switch_mlp.up_proj,
-            switch_mlp.down_proj,
+            switch_mlp.down_proj, **contract_kw,
         )
     else:
         admission = _routed.admit_routed_decode(
-            x, indices, scores, switch_mlp.gate_up_proj, switch_mlp.down_proj
+            x, indices, scores, switch_mlp.gate_up_proj, switch_mlp.down_proj,
+            **contract_kw,
         )
     if admission.accepted and switch_mlp.training:
         admission = _routed.RoutedDecodeAdmission(False, "training")
@@ -705,8 +709,11 @@ def _shared_fold_refusal(block, x, inds, scores):
         return "fused [gate|up] table (fold is split-table only)"
     if not _routed.runtime_supported():
         return "Metal runtime unavailable"
+    contract = getattr(block, "moe_routing_contract", None)
+    contract_kw = {} if contract is None else {"contract": contract}
     admission = _routed.admit_split_routed_decode(
-        x, inds, scores, switch_mlp.gate_proj, switch_mlp.up_proj, switch_mlp.down_proj
+        x, inds, scores, switch_mlp.gate_proj, switch_mlp.up_proj,
+        switch_mlp.down_proj, **contract_kw,
     )
     if not admission.accepted:
         return admission.reason
@@ -837,10 +844,14 @@ def _moe_rows_refusal(block, x, rows):
         return "fused [gate|up] table (window is split-table only)"
     hidden = x.shape[-1]
     one_x = _ShapeOnly((hidden,), x.dtype)
-    one_idx = _ShapeOnly((1, _window.TOP_K), mx.uint32)
-    one_scores = _ShapeOnly((1, _window.TOP_K), x.dtype)
+    contract = getattr(block, "moe_routing_contract", None)
+    contract_kw = {} if contract is None else {"contract": contract}
+    top_k = block.top_k
+    one_idx = _ShapeOnly((1, top_k), mx.uint32)
+    one_scores = _ShapeOnly((1, top_k), x.dtype)
     admission = _routed.admit_split_routed_decode(
-        one_x, one_idx, one_scores, switch_mlp.gate_proj, switch_mlp.up_proj, switch_mlp.down_proj
+        one_x, one_idx, one_scores, switch_mlp.gate_proj, switch_mlp.up_proj,
+        switch_mlp.down_proj, **contract_kw,
     )
     if not admission.accepted:
         return admission.reason
@@ -856,7 +867,13 @@ def _moe_rows_refusal(block, x, rows):
             or _dense_gate_ok(block.get("shared_expert_gate"))):
         return "shared_expert_gate is not a QuantizedLinear or a plain bf16 Linear"
     refusal = _window.admit_router_topk(
-        _ShapeOnly((rows, block.num_experts), x.dtype), block.top_k, bool(block.norm_topk_prob)
+        _ShapeOnly((rows, block.num_experts), x.dtype), block.top_k,
+        bool(block.norm_topk_prob), **contract_kw,
+        **(
+            {"consumer": _moe_window_consumer(x)}
+            if rows > 1 and contract is not None
+            else {}
+        ),
     )
     if refusal is not None:
         return refusal
@@ -951,10 +968,12 @@ def _run_moe_window(block, x, rows, consumer):
     if mode == "fold" and rows > _window.topk_fold_max_rows():
         mode = "launch"
     if mode == "launch":
-        (inds, scores) = (
-        _window.router_topk(gates) if block.top_k == _window.TOP_K
-        else _window.router_topk(gates, top_k=block.top_k)
-    )
+        (inds, scores) = _window.router_topk(
+            gates,
+            top_k=block.top_k,
+            contract=block.moe_routing_contract,
+            consumer=consumer,
+        )
     elif mode == "off":
         (inds, scores) = _stock_routing(block, gates)
     else:
@@ -1021,7 +1040,8 @@ def _topk_refusal(block, x, gates_shape):
     if _MOE_GATE_COMPILE:
         return "compiled router selected"
     return _window.admit_router_topk(
-        _ShapeOnly(gates_shape, x.dtype), block.top_k, bool(block.norm_topk_prob)
+        _ShapeOnly(gates_shape, x.dtype), block.top_k,
+        bool(block.norm_topk_prob), contract=block.moe_routing_contract,
     )
 
 
@@ -1082,9 +1102,10 @@ def _try_topk_launch(block, x, gates):
         block.moe_topk_fallbacks += 1
         block.moe_topk_last_fallback = refusal
         return None
-    (inds, scores) = (
-        _window.router_topk(gates) if block.top_k == _window.TOP_K
-        else _window.router_topk(gates, top_k=block.top_k)
+    (inds, scores) = _window.router_topk(
+        gates,
+        top_k=block.top_k,
+        contract=block.moe_routing_contract,
     )
     block.moe_topk_calls["launch"] += 1
     block.moe_topk_last_fallback = None
@@ -1576,20 +1597,27 @@ class Qwen3NextMLP(nn.Module):
 
 def _prefill_bf16_projection(module, x):
     """Large-M research path: affine q4/g64 dequantization followed by BF16 GEMM."""
-    if (not isinstance(module, nn.QuantizedLinear) or
-            getattr(module, "group_size", None) != 64 or
-            getattr(module, "bits", None) != 4 or
-            getattr(module, "mode", None) != "affine" or
-            getattr(module, "biases", None) is None or
-            x.dtype != mx.bfloat16):
-        raise ValueError("BF16 prefill projection requires affine q4/g64 and BF16 input")
-    weight = mx.dequantize(
-        module.weight, scales=module.scales, biases=module.biases,
-        group_size=module.group_size, bits=module.bits, mode=module.mode)
-    result = x @ weight.T
-    if "bias" in module:
-        result = result + module.bias
-    return result
+    from ..quantized_dense_execution import (
+        QuantizedDenseExecutionPolicy,
+        dense_projection,
+    )
+
+    if x.dtype != mx.bfloat16:
+        raise ValueError("BF16 prefill projection requires BF16 input")
+    # Preserve the exact admitted Qwen3.8 experiment while moving its tensor
+    # law behind a model-neutral, fail-closed primitive.  The owning prefill
+    # policy remains responsible for selecting this route only at large M.
+    output_dims = int(module.weight.shape[0])
+    input_dims = int(x.shape[-1])
+    return dense_projection(
+        module,
+        x,
+        policy=QuantizedDenseExecutionPolicy(
+            minimum_rows=1,
+            max_dense_weight_bytes=output_dims * input_dims * 2,
+            formats=frozenset({("affine", 4, 64)}),
+        ),
+    )
 
 
 
@@ -1602,6 +1630,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.norm_topk_prob = args.norm_topk_prob
         self.num_experts = num_experts = args.num_experts
         self.top_k = args.num_experts_per_tok
+        self.moe_routing_contract = QWEN4_E512_K10_ROUTING
         self.gate = nn.Linear(dim, num_experts, bias=False)
         self.fused_gate_up = _MOE_FUSED_GATE_UP
         self.shared_folded = (
@@ -1622,6 +1651,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.switch_mlp = switch_cls(
             dim, intermediate_size, num_experts + (1 if self.shared_folded else 0)
         )
+        self.switch_mlp.moe_routing_contract = self.moe_routing_contract
         # The weighted sum needs scores inside the switch module; a folded
         # shared row weights its rows outside it, so it keeps the stock tail.
         self.moe_weighted_sum = _MOE_WEIGHTED_SUM and not self.shared_folded
@@ -1692,7 +1722,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         consumers = frozenset(consumers)
         if consumers and self.shared_folded:
             raise ValueError("MoE row windows do not support a folded shared row")
-        unknown = consumers - set(_window.CONSUMERS)
+        unknown = consumers - self.moe_routing_contract.allowed_row_consumers
         if unknown:
             raise ValueError(f"unknown MoE window consumers {sorted(unknown)}; expected {_window.CONSUMERS}")
         self.moe_window_consumers = consumers
@@ -1728,6 +1758,26 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 f"unknown MoE router mode {mode!r}; expected {_MOE_ROUTER_MODES}"
             )
         self.moe_router_mode = mode
+
+    def force_stock_for_expert_streaming(self) -> dict[str, int]:
+        """Select the only arithmetic allowed with nonresident expert tables.
+
+        This is the model-owned implementation of the runtime's single
+        ``ExpertStreamingArithmeticGuard`` protocol.  The streaming loader
+        does not know setter names, table layouts, or ``switch_mlp`` fields.
+        """
+        self.set_moe_routed_decode_mode("off")
+        self.set_moe_window_consumers(())
+        self.set_fused_expert_kernel_mode("stock")
+        candidate = int(hasattr(self.switch_mlp, "routed_candidate_mode"))
+        if candidate:
+            self.set_moe_routed_candidate_mode("off")
+        return {
+            "routed_decode": 1,
+            "window_consumers": 1,
+            "fused_expert_kernel": 1,
+            "routed_candidate": candidate,
+        }
 
     def __call__(self, x: mx.array) -> mx.array:
         from .varlen_dense_mlp import compact_rows

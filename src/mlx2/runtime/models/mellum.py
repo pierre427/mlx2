@@ -225,7 +225,11 @@ class Model(nn.Module):
                     raise ValueError(
                         f"Mellum layer {layer} has an incomplete {projection} expert table"
                     )
-                value = mx.stack([weights.pop(name) for name in names])
+                parts = [weights.pop(name) for name in names]
+                value = mx.stack(parts)
+                from ..weight_stream import record_stack
+
+                record_stack(value, parts)
                 weights[f"{prefix}.switch_mlp.{projection}.weight"] = value
                 packed.append(value)
             if eager and packed:

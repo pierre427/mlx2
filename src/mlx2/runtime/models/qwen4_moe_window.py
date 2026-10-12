@@ -59,6 +59,10 @@ import os
 import mlx.core as mx
 
 from . import qwen4_routed_decode as RD
+from .import_env import snapshot as _import_env_snapshot
+from .moe_routing_contract import MoeRoutingContract, contract_refusal
+
+_import_env_snapshot(__name__)
 
 WINDOW_ENV = "MLX_QWEN4_MOE_WINDOW"
 TOPK_ENV = "MLX_QWEN4_MOE_TOPK_FOLD"
@@ -149,17 +153,35 @@ def window_shared_enabled() -> bool:
     return _WINDOW_SHARED
 
 
-def admit_router_topk(logits, top_k: int, norm_topk_prob: bool) -> str | None:
+def admit_router_topk(
+    logits,
+    top_k: int,
+    norm_topk_prob: bool,
+    *,
+    contract: MoeRoutingContract | None,
+    consumer: str | None = None,
+) -> str | None:
     """Why the routing kernels may not stand in for the stock routing of
     ``logits`` ([..., NE] router gemv output), or None. Never evaluates."""
     ne = logits.shape[-1]
     rows = logits.size // ne if ne else 0
+    refusal = contract_refusal(contract)
+    if refusal is not None:
+        return refusal
+    assert isinstance(contract, MoeRoutingContract)
+    refusal = contract.routing_refusal(
+        expert_count=ne,
+        top_k=top_k,
+        normalize_topk=bool(norm_topk_prob),
+        activation_dtype=(
+            "bfloat16" if logits.dtype == mx.bfloat16 else str(logits.dtype)
+        ),
+        consumer=consumer,
+    )
+    if refusal is not None:
+        return refusal
     if logits.dtype != mx.bfloat16:
         return "router logits must be bfloat16"
-    if (ne, top_k) not in ((NUM_EXPERTS, TOP_K), (256, 8)):
-        return f"routing E{ne}/top-{top_k} is not E{NUM_EXPERTS}/top-{TOP_K} or E256/top-8"
-    if not norm_topk_prob:
-        return "only normalized top-k routing"
     if not 1 <= rows <= WINDOW_MAX_ROWS:
         return f"{rows} rows outside 1..{WINDOW_MAX_ROWS}"
     if not RD.runtime_supported():
@@ -420,9 +442,25 @@ def _rows(x) -> int:
     return int(x.size // x.shape[-1])
 
 
-def router_topk(logits, *, top_k: int = TOP_K):
+def router_topk(
+    logits,
+    *,
+    top_k: int = TOP_K,
+    contract: MoeRoutingContract | None,
+    consumer: str | None = None,
+):
     """Stock-identical ``(indices uint32, scores)`` [rows, 10] of bf16 router
-    logits [..., 512] in one launch. Admission is the caller's."""
+    logits [..., E] in one launch. Rechecks the model-owned contract so a
+    direct caller cannot bypass admission."""
+    refusal = admit_router_topk(
+        logits,
+        top_k,
+        True,
+        contract=contract,
+        consumer=consumer,
+    )
+    if refusal is not None:
+        raise ValueError(f"router_topk refused: {refusal}")
     ne = logits.shape[-1]
     rows = _rows(logits)
     return _kernel("router_topk")(

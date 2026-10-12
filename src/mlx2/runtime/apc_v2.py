@@ -9,7 +9,6 @@ import fcntl
 import hashlib
 import json
 import logging
-import math
 import os
 import queue
 import re
@@ -25,6 +24,7 @@ from typing import Any, Hashable, Iterable, List, Optional
 import mlx.core as mx
 from . import loop_trace as _loop_trace
 from .cache_capsule import CacheCapsuleGeneration, CacheCapsulePool
+from .cache_operations import cache_operations
 from .cache_planes import (
     CompiledScheduleMetadata,
     PLEResidencyHints,
@@ -40,12 +40,9 @@ from .cow_cache import (
     snapshot_token,
 )
 from .models.cache import (
-    ArraysCache,
     CacheList,
-    KVCache,
     PrefixIndex,
     PromptTrie,
-    RotatingKVCache,
     _copy_prompt_cache_for_restore,
     _mark_prompt_cache_restored,
     can_trim_prompt_cache,
@@ -460,8 +457,13 @@ def _positions_disagree(prompt_cache: Iterable[Any], length: int) -> bool:
     stored beside the KV it was captured with.
     """
     for cache in _walk_cache_entries(prompt_cache):
-        offset = getattr(cache, "offset", None)
-        if isinstance(offset, int) and not isinstance(offset, bool) and offset != length:
+        contract = cache_operations(
+            cache, capability="APCv2 exact-prefix position inspection", required=False
+        )
+        if contract is None:
+            return True
+        offset = contract.position(cache)
+        if offset is not None and offset != length:
             return True
     return False
 
@@ -483,23 +485,23 @@ def inspect_apc_capabilities(prompt_cache: List[Any]) -> APCCapabilities:
     leaves = list(_walk_cache_entries(prompt_cache))
     if not leaves:
         return APCCapabilities("empty", False, False, "empty_cache")
-    has_rotating = any((isinstance(c, RotatingKVCache) for c in leaves))
-    has_full = any((isinstance(c, KVCache) for c in leaves))
-    has_state = any((isinstance(c, ArraysCache) for c in leaves))
-    known = all(
-        (
-            isinstance(c, (KVCache, RotatingKVCache, ArraysCache))
-            or hasattr(c, "state")
-            for c in leaves
+    contracts = [
+        cache_operations(
+            cache, capability="APCv2 exact-prefix inspection", required=False
         )
-    )
-    if has_state:
+        for cache in leaves
+    ]
+    known = all(contract is not None and contract.exact_prefix for contract in contracts)
+    families = {
+        contract.family for contract in contracts if contract is not None
+    }
+    if "recurrent" in families or "indexed_kv" in families:
         topology = "checkpointed_hybrid"
-    elif has_rotating and has_full:
+    elif "rotating_kv" in families and "kv" in families:
         topology = "mixed_rotating_kv"
-    elif has_rotating:
+    elif "rotating_kv" in families:
         topology = "rotating_kv"
-    elif has_full:
+    elif families == {"kv"}:
         topology = "kv"
     else:
         topology = "custom"
@@ -512,7 +514,8 @@ def inspect_apc_capabilities(prompt_cache: List[Any]) -> APCCapabilities:
         arbitrary_branch=arbitrary_branch,
         reason=None if known else "unsupported_cache_entry",
         restores_at_checkpoints=any(
-            isinstance(c, (ArraysCache, RotatingKVCache)) for c in leaves
+            contract is not None and contract.restores_at_checkpoints
+            for contract in contracts
         ),
     )
 

@@ -77,5 +77,13 @@ def create_shared_qwen3_graph_pack(adapter, requests: tuple[tuple[str, int, int]
             owner.reap_retired()
         raise
     candidate = Qwen3PackedCandidate(model, backend)
+    revisions = {revision for revision, _, _ in requests}
+    if len(revisions) != 1:
+        raise ValueError("shared graph requires one adapter revision binding")
+    from ..adapters.native_continuation import bind_qwen_native_continuation_provider
+
+    bind_qwen_native_continuation_provider(
+        candidate, revisions.pop(), model, "native_qwen3_paged_b2"
+    )
     candidate._research_staged_graph = True
     return tuple(owners), candidate

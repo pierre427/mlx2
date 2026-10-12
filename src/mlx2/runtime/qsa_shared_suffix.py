@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 import mlx.core as mx
+from .cache_operations import SHARED_QSA_KV_OPERATIONS
 from .models.cache import KVCache
 from .models.base import create_causal_mask
 from .models.qwen4_exp import QSAKVCache, _StepGrownIndexLedger
@@ -133,6 +134,7 @@ class SharedSuffixQSAKVCache(_StepGrownIndexLedger):
     """One row-local, physically allocated suffix over an immutable QSA base."""
 
     supports_shared_qsa_suffix = True
+    cache_operations_contract = SHARED_QSA_KV_OPERATIONS
 
     def __init__(
         self, base: QSAImmutableBase, *, note: Callable[[str, int], None] | None = None

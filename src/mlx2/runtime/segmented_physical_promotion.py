@@ -1,26 +1,63 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from mlx-lm-unified; see docs/PROVENANCE.md and provenance/flashnext.json.
 from __future__ import annotations
-from collections import deque
-from contextlib import nullcontext
-from dataclasses import dataclass
+
 import logging
 import threading
 import time
+from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Any, Callable
+
 import mlx.core as mx
+
 from .hybrid_speculative import (
     BatchedSelfMTPState,
     DetachedSelfMTPLane,
     SegmentedSelfMTPState,
     SelfMTPCachePair,
 )
-from .models.qwen4_exp import BatchQSAKVCache, QSAKVCache, _qsa_merge_summaries
-from .segmented_batch_cache import (
-    SegmentedBatchArraysCache,
-    SegmentedBatchQSAKVCache,
-    build_segmented_batch_cache_pair,
+from .state_plane_operations import (
+    SegmentedPromotionOperations,
+    StatePlaneContractError,
+    StatePlaneOperationRefused,
+    StatePlaneOperations,
+    require_state_plane_contracts,
 )
+
+_REQUIRED_PROMOTION_OPERATIONS = (
+    "checkpoint",
+    "private_successor",
+    "rollback",
+    "promotion",
+)
+
+
+def _require_promotion_operations(operations: Any) -> StatePlaneOperations:
+    if not isinstance(operations, SegmentedPromotionOperations):
+        raise SegmentedPhysicalPromotionDeclined(
+            "segmented state has no promotion operations provider"
+        )
+    return operations
+
+
+def _provider_call(callable_, *args, **kwargs):
+    try:
+        return callable_(*args, **kwargs)
+    except StatePlaneOperationRefused as error:
+        raise SegmentedPhysicalPromotionDeclined(str(error)) from error
+
+
+def _promotion_contracts(provider, caches):
+    try:
+        return require_state_plane_contracts(
+            provider,
+            caches,
+            operations=_REQUIRED_PROMOTION_OPERATIONS,
+            fidelity="exact",
+        )
+    except StatePlaneContractError as error:
+        raise SegmentedPhysicalPromotionDeclined(str(error)) from error
 
 
 class SegmentedPhysicalPromotionDeclined(RuntimeError):
@@ -39,20 +76,9 @@ class SegmentedPhysicalPromotionReceipt:
     rows: int
     layers: int
     advance: int
-
-
-def _offset(cache: Any) -> int:
-    value = getattr(cache, "offset", None)
-    if isinstance(value, int):
-        return value
-    size = getattr(cache, "size", None)
-    if callable(size):
-        result = size()
-        if isinstance(result, int):
-            return result
-    raise SegmentedPhysicalPromotionDeclined(
-        f"{type(cache).__name__} has no host-readable scalar offset"
-    )
+    state_provider_revision: str = ""
+    state_layouts: tuple[str, ...] = ()
+    state_fidelity: str = ""
 
 
 def _state_signature(state: SegmentedSelfMTPState):
@@ -70,7 +96,7 @@ def _state_signature(state: SegmentedSelfMTPState):
     )
 
 
-def _validate_segmented_view(state, view):
+def _validate_segmented_view(state, view, operations):
     if not isinstance(state, SegmentedSelfMTPState):
         raise TypeError("physical promotion requires SegmentedSelfMTPState")
     if state.poisoned or state.proposal_open or (not state.lanes):
@@ -83,31 +109,14 @@ def _validate_segmented_view(state, view):
         )
     if view is not state._segmented_caches:
         raise SegmentedPhysicalPromotionDeclined("segmented compute view was replaced")
-    for name, group in (("target", view.target), ("draft", view.draft)):
-        if not group or any(
-            (
-                not isinstance(c, (SegmentedBatchQSAKVCache, SegmentedBatchArraysCache))
-                for c in group
-            )
-        ):
-            raise SegmentedPhysicalPromotionDeclined(
-                "promotion supports only Qwen4 segmented QSA/recurrent layers"
-            )
-        expected_groups = [getattr(pair, name) for pair in state.row_caches]
-        if any((len(row) != len(group) for row in expected_groups)):
-            raise SegmentedPhysicalPromotionDeclined(
-                f"segmented {name} layer width changed"
-            )
-        for layer, cache in enumerate(group):
-            expected_rows = tuple((id(row[layer]) for row in expected_groups))
-            if tuple((id(row) for row in cache.rows)) != expected_rows:
-                raise SegmentedPhysicalPromotionDeclined(
-                    f"segmented {name} view no longer owns the live rows"
-                )
+    _provider_call(operations.validate_segmented_view, view, state.row_caches)
 
 
 def ensure_segmented_compute_view(
-    state: SegmentedSelfMTPState, *, note: Callable[[str, int], None] | None = None
+    state: SegmentedSelfMTPState,
+    *,
+    operations: StatePlaneOperations,
+    note: Callable[[str, int], None] | None = None,
 ) -> SelfMTPCachePair:
     """Return and retain the exact segmented compute view for ``state``."""
     if state._segmented_caches is None:
@@ -115,170 +124,23 @@ def ensure_segmented_compute_view(
             raise SegmentedPhysicalPromotionDeclined(
                 "cannot build a compute view during an open proposal"
             )
-        state._segmented_caches = build_segmented_batch_cache_pair(
+        state._segmented_caches = _provider_call(
+            operations.build_segmented_view,
             state.row_caches,
             note=note,
-            shared_qsa_prefix=state.shared_qsa_prefix_id is not None,
+            shared_prefix=state.shared_state_identity is not None,
         )
-    _validate_segmented_view(state, state._segmented_caches)
+    _validate_segmented_view(state, state._segmented_caches, operations)
     return state._segmented_caches
-
-
-def _reserve_qsa_rows(
-    rows,
-    tail: int,
-    *,
-    shared_prefix: bool = False,
-    timing: dict[str, int] | None = None,
-):
-    started = time.perf_counter_ns() if timing is not None else 0
-    rows = tuple(rows)
-    starts = [_offset(row) for row in rows]
-    if len(set(starts)) != 1:
-        raise SegmentedPhysicalPromotionDeclined(
-            "suffix-only promotion requires equal starting QSA offsets"
-        )
-    start = starts[0]
-    if start <= 0 or tail < 0:
-        raise SegmentedPhysicalPromotionDeclined("invalid QSA base/tail geometry")
-    populated = next((row for row in rows if row.keys is not None), None)
-    if populated is None:
-        raise SegmentedPhysicalPromotionDeclined("cannot promote an empty QSA cache")
-    for row in rows:
-        if type(row) is not QSAKVCache or row.keys is None or row.values is None:
-            raise SegmentedPhysicalPromotionDeclined(
-                "physical promotion requires plain populated QSAKVCache rows"
-            )
-        if row.index_keys is None or row.index_keys.shape[1] < start:
-            raise SegmentedPhysicalPromotionDeclined(
-                "a QSA raw-key ledger is shorter than its base offset"
-            )
-    validated = time.perf_counter_ns() if timing is not None else 0
-    live_width = start + tail
-    step = int(BatchQSAKVCache.step)
-    slabs = max(1, (tail + step - 1) // step)
-    kv_width = start + slabs * step
-    index = rows[0].index_keys
-    batch = BatchQSAKVCache([0] * len(rows))
-    if shared_prefix:
-        if any((row is not rows[0] for row in rows[1:])):
-            raise SegmentedPhysicalPromotionDeclined(
-                "shared-prefix reservation requires one canonical source row"
-            )
-        batch.keys = mx.concatenate(
-            [
-                mx.broadcast_to(
-                    populated.keys[..., :start, :],
-                    (
-                        len(rows),
-                        populated.keys.shape[1],
-                        start,
-                        populated.keys.shape[3],
-                    ),
-                ),
-                mx.zeros(
-                    (
-                        len(rows),
-                        populated.keys.shape[1],
-                        kv_width - start,
-                        populated.keys.shape[3],
-                    ),
-                    dtype=populated.keys.dtype,
-                ),
-            ],
-            axis=2,
-        )
-        batch.values = mx.concatenate(
-            [
-                mx.broadcast_to(
-                    populated.values[..., :start, :],
-                    (
-                        len(rows),
-                        populated.values.shape[1],
-                        start,
-                        populated.values.shape[3],
-                    ),
-                ),
-                mx.zeros(
-                    (
-                        len(rows),
-                        populated.values.shape[1],
-                        kv_width - start,
-                        populated.values.shape[3],
-                    ),
-                    dtype=populated.values.dtype,
-                ),
-            ],
-            axis=2,
-        )
-        batch.index_keys = mx.concatenate(
-            [
-                mx.broadcast_to(index[:, :start], (len(rows), start, index.shape[2])),
-                mx.zeros(
-                    (len(rows), live_width - start, index.shape[2]), dtype=index.dtype
-                ),
-            ],
-            axis=1,
-        )
-    else:
-        batch.keys = mx.zeros(
-            (len(rows), populated.keys.shape[1], kv_width, populated.keys.shape[3]),
-            dtype=populated.keys.dtype,
-        )
-        batch.values = mx.zeros(
-            (len(rows), populated.values.shape[1], kv_width, populated.values.shape[3]),
-            dtype=populated.values.dtype,
-        )
-        batch.index_keys = mx.zeros(
-            (len(rows), live_width, index.shape[2]), dtype=index.dtype
-        )
-    allocated = time.perf_counter_ns() if timing is not None else 0
-    if not shared_prefix:
-        for i, row in enumerate(rows):
-            batch.keys[i : i + 1, :, :start, :] = row.keys[..., :start, :]
-            batch.values[i : i + 1, :, :start, :] = row.values[..., :start, :]
-            batch.index_keys[i : i + 1, :start] = row.index_keys[:, :start]
-    copied = time.perf_counter_ns() if timing is not None else 0
-    batch.offset = mx.array(starts)
-    batch.left_padding = mx.zeros((len(rows),), dtype=mx.int32)
-    batch._idx = start
-    if timing is not None:
-        finished = time.perf_counter_ns()
-        timing["validation_ns"] += validated - started
-        timing["allocation_graph_ns"] += allocated - validated
-        timing["copy_graph_ns"] += copied - allocated
-        timing["metadata_graph_ns"] += finished - copied
-        timing["reserve_total_ns"] += finished - started
-    return (batch, start)
-
-
-def _reserve_qsa(cache: SegmentedBatchQSAKVCache, tail: int):
-    return _reserve_qsa_rows(cache.rows, tail)
-
-
-def _unwrap_recurrent(cache: SegmentedBatchArraysCache):
-    row_types = {type(row) for row in cache.rows}
-    if len(row_types) != 1:
-        raise SegmentedPhysicalPromotionDeclined(
-            "segmented recurrent rows changed concrete cache type"
-        )
-    result = row_types.pop()(len(cache.cache))
-    result._adopt_empty_fill(cache.rows)
-    result.cache = list(cache.cache)
-    result.left_padding = cache.left_padding
-    result.lengths = cache.lengths
-    result._host_left_padding = cache._host_left_padding
-    result._host_lengths = cache._host_lengths
-    result._checkpoints = list(cache._checkpoints)
-    result._rollbacks = deque()
-    result.speculating = False
-    return result
 
 
 @dataclass
 class SegmentedPhysicalPromotionTicket:
     state: SegmentedSelfMTPState
     view: SelfMTPCachePair
+    operations: StatePlaneOperations
+    state_provider_revision: str
+    contracts: tuple
     stream: Any
     reserve_tail: int
     signature: tuple
@@ -348,7 +210,7 @@ class SegmentedPhysicalPromotionTicket:
         (epoch, uids, pairs, transactions, generations) = self.signature
         if (
             state.membership_epoch != epoch
-            or tuple((l.uid for l in state.lanes)) != uids
+            or tuple(lane.uid for lane in state.lanes) != uids
         ):
             raise SegmentedPhysicalPromotionDeclined(
                 "membership epoch or lane UID order changed"
@@ -361,6 +223,16 @@ class SegmentedPhysicalPromotionTicket:
         if state._segmented_caches is not self.view:
             raise SegmentedPhysicalPromotionDeclined(
                 "retained segmented compute view was replaced"
+            )
+        current_contracts = _promotion_contracts(
+            self.operations, (*self.view.target, *self.view.draft)
+        )
+        if (
+            str(self.operations.provider_revision) != self.state_provider_revision
+            or current_contracts != self.contracts
+        ):
+            raise SegmentedPhysicalPromotionDeclined(
+                "state-plane revision, layout, fidelity, or operations drifted"
             )
         advances = []
         for transaction, (generation, position) in zip(state.transactions, generations):
@@ -380,99 +252,41 @@ class SegmentedPhysicalPromotionTicket:
         recurrent_reused = 0
         target = []
         draft = []
+        evaluation_values = []
         context = mx.stream(self.stream) if self.stream is not None else nullcontext()
         with context:
             for source, candidate, base in zip(
                 self.view.target, self.physical.target, self.target_bases
             ):
-                if isinstance(source, SegmentedBatchQSAKVCache):
-                    stop = base + advance
-                    for i, row in enumerate(source.rows):
-                        if _offset(row) != stop:
-                            raise SegmentedPhysicalPromotionDeclined(
-                                "QSA target offset disagrees with committed advance"
-                            )
-                        candidate.keys[i : i + 1, :, base:stop, :] = row.keys[
-                            ..., base:stop, :
-                        ]
-                        candidate.values[i : i + 1, :, base:stop, :] = row.values[
-                            ..., base:stop, :
-                        ]
-                        candidate.index_keys[i : i + 1, base:stop] = row.index_keys[
-                            :, base:stop
-                        ]
-                    candidate._idx = stop
-                    candidate.index_keys = mx.contiguous(candidate.index_keys[:, :stop])
-                    candidate.offset = mx.array([stop] * len(source.rows))
-                    candidate.left_padding = mx.zeros(
-                        (len(source.rows),), dtype=mx.int32
-                    )
-                    (pooled, identity) = _qsa_merge_summaries(
-                        source.rows, [stop] * len(source.rows)
-                    )
-                    candidate._qsa_pooled_keys = pooled
-                    candidate._qsa_pooled_ratio = (
-                        None
-                        if pooled is None
-                        else int(source.rows[0]._qsa_pooled_ratio)
-                    )
-                    candidate._qsa_summary_identity = identity
-                    patched_bytes += sum(
-                        (
-                            int(row.keys[..., base:stop, :].nbytes)
-                            + int(row.values[..., base:stop, :].nbytes)
-                            + int(row.index_keys[:, base:stop].nbytes)
-                            for row in source.rows
-                        )
-                    )
-                    target.append(candidate)
-                else:
-                    unwrapped = _unwrap_recurrent(source)
-                    recurrent_reused += sum((v is not None for v in source.cache))
-                    target.append(unwrapped)
+                materialized = _provider_call(
+                    self.operations.materialize_promoted_layer,
+                    source,
+                    candidate,
+                    base,
+                    advance=advance,
+                    target=True,
+                )
+                patched_bytes += materialized.patched_bytes
+                recurrent_reused += materialized.recurrent_arrays_reused
+                target.append(materialized.cache)
+                evaluation_values.extend(materialized.evaluation_values)
             for source, candidate, base in zip(
                 self.view.draft, self.physical.draft, self.draft_bases
             ):
-                if isinstance(source, SegmentedBatchQSAKVCache):
-                    if any((_offset(row) != base for row in source.rows)):
-                        raise SegmentedPhysicalPromotionDeclined(
-                            "draft QSA changed across the first committed cycle"
-                        )
-                    (pooled, identity) = _qsa_merge_summaries(
-                        source.rows, [base] * len(source.rows)
-                    )
-                    candidate._qsa_pooled_keys = pooled
-                    candidate._qsa_pooled_ratio = (
-                        None
-                        if pooled is None
-                        else int(source.rows[0]._qsa_pooled_ratio)
-                    )
-                    candidate._qsa_summary_identity = identity
-                    draft.append(candidate)
-                else:
-                    unwrapped = _unwrap_recurrent(source)
-                    recurrent_reused += sum((v is not None for v in source.cache))
-                    draft.append(unwrapped)
-            mx.async_eval(
-                *[
-                    value
-                    for group in (target, draft)
-                    for cache in group
-                    for value in getattr(cache, "cache", ())
-                    if value is not None
-                ],
-                *[
-                    value
-                    for group in (target, draft)
-                    for cache in group
-                    for value in (
-                        getattr(cache, "keys", None),
-                        getattr(cache, "values", None),
-                        getattr(cache, "index_keys", None),
-                    )
-                    if value is not None
-                ],
-            )
+                materialized = _provider_call(
+                    self.operations.materialize_promoted_layer,
+                    source,
+                    candidate,
+                    base,
+                    advance=0,
+                    target=False,
+                )
+                patched_bytes += materialized.patched_bytes
+                recurrent_reused += materialized.recurrent_arrays_reused
+                draft.append(materialized.cache)
+                evaluation_values.extend(materialized.evaluation_values)
+            if evaluation_values:
+                mx.async_eval(*evaluation_values)
         wait_started = time.perf_counter_ns()
         if self.stream is not None:
             mx.synchronize(self.stream)
@@ -517,7 +331,8 @@ class SegmentedPhysicalPromotionTicket:
                 cleanup_errors.append(error)
         if cleanup_errors:
             logging.warning(
-                "physical promotion published with %d old-row cleanup errors; the replacement physical state remains authoritative",
+                "physical promotion published with %d old-row cleanup errors; "
+                "the replacement physical state remains authoritative",
                 len(cleanup_errors),
             )
         receipt = SegmentedPhysicalPromotionReceipt(
@@ -531,6 +346,9 @@ class SegmentedPhysicalPromotionTicket:
             rows=len(lanes),
             layers=len(target) + len(draft),
             advance=advance,
+            state_provider_revision=self.state_provider_revision,
+            state_layouts=tuple(contract.layout for contract in self.contracts),
+            state_fidelity="exact",
         )
         self.physical = None
         self.view = None
@@ -544,66 +362,66 @@ def begin_segmented_physical_promotion(
     reserve_tail: int,
     stream: Any,
     note: Callable[[str, int], None] | None = None,
+    operations: StatePlaneOperations | None = None,
 ) -> SegmentedPhysicalPromotionTicket:
     """Queue prefix-only physical formation without touching the B1 owners."""
     reserve_tail = int(reserve_tail)
     if reserve_tail <= 0:
         raise ValueError("reserve_tail must be positive")
-    view = ensure_segmented_compute_view(state, note=note)
+    operations = _require_promotion_operations(
+        operations or getattr(state, "state_plane_operations", None)
+    )
+    view = ensure_segmented_compute_view(state, operations=operations, note=note)
+    contracts = _promotion_contracts(operations, (*view.target, *view.draft))
     signature = _state_signature(state)
     started = time.perf_counter_ns()
     (target, draft) = ([], [])
     (target_bases, draft_bases) = ([], [])
     reserved_bytes = 0
+    evaluation_values = []
     with mx.stream(stream):
         for cache in view.target:
-            if isinstance(cache, SegmentedBatchQSAKVCache):
-                if state.shared_qsa_prefix_id is not None:
-                    (physical, base) = _reserve_qsa_rows(
-                        [cache.rows[0]] * len(cache.rows),
-                        reserve_tail,
-                        shared_prefix=True,
-                    )
-                    if note is not None:
-                        note("async_qsa_shared_prefix_fused_layers", 1)
-                else:
-                    (physical, base) = _reserve_qsa(cache, reserve_tail)
-                target.append(physical)
-                target_bases.append(base)
-                reserved_bytes += int(physical.keys.nbytes + physical.values.nbytes)
-                reserved_bytes += int(physical.index_keys.nbytes)
-            else:
-                target.append(None)
-                target_bases.append(None)
+            reservation = _provider_call(
+                operations.reserve_promotion_layer,
+                cache,
+                reserve_tail,
+                shared_prefix=state.shared_state_identity is not None,
+            )
+            target.append(reservation.cache)
+            target_bases.append(reservation.base)
+            reserved_bytes += reservation.reserved_bytes
+            evaluation_values.extend(reservation.evaluation_values)
+            if (
+                state.shared_state_identity is not None
+                and reservation.cache is not None
+                and note is not None
+            ):
+                note("async_shared_state_prefix_fused_layers", 1)
         for cache in view.draft:
-            if isinstance(cache, SegmentedBatchQSAKVCache):
-                if state.shared_qsa_prefix_id is not None:
-                    (physical, base) = _reserve_qsa_rows(
-                        [cache.rows[0]] * len(cache.rows), 0, shared_prefix=True
-                    )
-                    if note is not None:
-                        note("async_qsa_shared_prefix_fused_layers", 1)
-                else:
-                    (physical, base) = _reserve_qsa(cache, 0)
-                draft.append(physical)
-                draft_bases.append(base)
-                reserved_bytes += int(physical.keys.nbytes + physical.values.nbytes)
-                reserved_bytes += int(physical.index_keys.nbytes)
-            else:
-                draft.append(None)
-                draft_bases.append(None)
-        mx.async_eval(
-            *[
-                value
-                for group in (target, draft)
-                for cache in group
-                if cache is not None
-                for value in (cache.keys, cache.values, cache.index_keys)
-            ]
-        )
+            reservation = _provider_call(
+                operations.reserve_promotion_layer,
+                cache,
+                0,
+                shared_prefix=state.shared_state_identity is not None,
+            )
+            draft.append(reservation.cache)
+            draft_bases.append(reservation.base)
+            reserved_bytes += reservation.reserved_bytes
+            evaluation_values.extend(reservation.evaluation_values)
+            if (
+                state.shared_state_identity is not None
+                and reservation.cache is not None
+                and note is not None
+            ):
+                note("async_shared_state_prefix_fused_layers", 1)
+        if evaluation_values:
+            mx.async_eval(*evaluation_values)
     return SegmentedPhysicalPromotionTicket(
         state=state,
         view=view,
+        operations=operations,
+        state_provider_revision=str(operations.provider_revision),
+        contracts=contracts,
         stream=stream,
         reserve_tail=reserve_tail,
         signature=signature,
@@ -618,7 +436,7 @@ def begin_segmented_physical_promotion(
 
 @dataclass
 class SharedPrefixPhysicalPromotionPrequeue:
-    """Unpublished B2 QSA base staged before a two-row fan-out exists.
+    """Unpublished B2 shared-state base staged before a two-row fan-out exists.
 
     This narrow object is valid only when the eventual segmented cohort carries
     the same non-empty host attestation on every row.  Binding installs the
@@ -631,6 +449,9 @@ class SharedPrefixPhysicalPromotionPrequeue:
     stream: Any
     reserve_tail: int
     physical: SelfMTPCachePair
+    operations: StatePlaneOperations
+    state_provider_revision: str
+    contracts: tuple
     target_bases: tuple[int | None, ...]
     draft_bases: tuple[int | None, ...]
     creator_thread: int
@@ -661,7 +482,7 @@ class SharedPrefixPhysicalPromotionPrequeue:
         state: SegmentedSelfMTPState,
         *,
         note: Callable[[str, int], None] | None = None,
-    ) -> "SegmentedPhysicalPromotionTicket":
+    ) -> SegmentedPhysicalPromotionTicket:
         """Bind a staged shared-prefix candidate to the admitted cohort."""
 
         if self._finished:
@@ -670,7 +491,7 @@ class SharedPrefixPhysicalPromotionPrequeue:
             raise SegmentedPhysicalPromotionDeclined(
                 "promotion prequeue must bind on its creator thread"
             )
-        if not self.prefix_id or state.shared_qsa_prefix_id != self.prefix_id:
+        if not self.prefix_id or state.shared_state_identity != self.prefix_id:
             raise SegmentedPhysicalPromotionDeclined(
                 "admitted cohort lacks the staged shared-prefix attestation"
             )
@@ -678,7 +499,20 @@ class SharedPrefixPhysicalPromotionPrequeue:
             raise SegmentedPhysicalPromotionDeclined(
                 "admitted cohort width differs from the staged candidate"
             )
-        view = ensure_segmented_compute_view(state, note=note)
+        view = ensure_segmented_compute_view(
+            state, operations=self.operations, note=note
+        )
+        view_contracts = _promotion_contracts(
+            self.operations, (*view.target, *view.draft)
+        )
+        if (
+            str(self.operations.provider_revision) != self.state_provider_revision
+            or view_contracts != self.contracts
+        ):
+            raise SegmentedPhysicalPromotionDeclined(
+                "admitted state-plane revision, layout, fidelity, or operations "
+                "differ from the staged source"
+            )
         if len(view.target) != len(self.physical.target) or len(view.draft) != len(
             self.physical.draft
         ):
@@ -690,22 +524,18 @@ class SharedPrefixPhysicalPromotionPrequeue:
             (view.draft, self.physical.draft, self.draft_bases),
         ):
             for source, candidate, base in zip(sources, candidates, bases):
-                if isinstance(source, SegmentedBatchQSAKVCache):
-                    if candidate is None or base is None:
-                        raise SegmentedPhysicalPromotionDeclined(
-                            "staged QSA layer map differs from admitted state"
-                        )
-                    if any(_offset(row) != base for row in source.rows):
-                        raise SegmentedPhysicalPromotionDeclined(
-                            "admitted QSA offset differs from staged base"
-                        )
-                elif candidate is not None or base is not None:
-                    raise SegmentedPhysicalPromotionDeclined(
-                        "staged recurrent layer map differs from admitted state"
-                    )
+                _provider_call(
+                    self.operations.validate_staged_layer,
+                    source,
+                    candidate,
+                    base,
+                )
         ticket = SegmentedPhysicalPromotionTicket(
             state=state,
             view=view,
+            operations=self.operations,
+            state_provider_revision=self.state_provider_revision,
+            contracts=view_contracts,
             stream=self.stream,
             reserve_tail=self.reserve_tail,
             signature=_state_signature(state),
@@ -728,8 +558,9 @@ def begin_shared_prefix_physical_promotion(
     reserve_tail: int,
     stream: Any,
     diagnostic_timing: bool = False,
+    operations: StatePlaneOperations | None = None,
 ) -> SharedPrefixPhysicalPromotionPrequeue:
-    """Stage an immutable replicated QSA base before N=2 fan-out admission.
+    """Stage an immutable replicated shared-state base before N=2 fan-out admission.
 
     The source lane remains authoritative and is only read.  Recurrent state is
     deliberately omitted: it is adopted from the real segmented rows after the
@@ -744,15 +575,22 @@ def begin_shared_prefix_physical_promotion(
         )
     if reserve_tail <= 0:
         raise ValueError("reserve_tail must be positive")
-    prefix_id = lane.shared_qsa_prefix_id
+    prefix_id = lane.shared_state_identity
     if not prefix_id:
         raise SegmentedPhysicalPromotionDeclined(
             "shared-prefix prequeue requires a host prefix attestation"
         )
+    operations = _require_promotion_operations(
+        operations or getattr(lane, "state_plane_operations", None)
+    )
+    contracts = _promotion_contracts(
+        operations, (*lane.caches.target, *lane.caches.draft)
+    )
     started = time.perf_counter_ns()
     target, draft = [], []
     target_bases, draft_bases = [], []
     reserved_bytes = 0
+    evaluation_values = []
     timing = (
         {
             "reserve_total_ns": 0,
@@ -766,51 +604,44 @@ def begin_shared_prefix_physical_promotion(
     )
     with mx.stream(stream):
         for cache in lane.caches.target:
-            if isinstance(cache, QSAKVCache):
-                physical, base = _reserve_qsa_rows(
-                    [cache] * rows,
-                    reserve_tail,
-                    shared_prefix=True,
-                    timing=timing,
-                )
-                target.append(physical)
-                target_bases.append(base)
-                reserved_bytes += int(physical.keys.nbytes + physical.values.nbytes)
-                reserved_bytes += int(physical.index_keys.nbytes)
-            else:
-                target.append(None)
-                target_bases.append(None)
+            reservation = _provider_call(
+                operations.reserve_promotion_layer,
+                cache,
+                reserve_tail,
+                rows=rows,
+                shared_prefix=True,
+                timing=timing,
+            )
+            target.append(reservation.cache)
+            target_bases.append(reservation.base)
+            reserved_bytes += reservation.reserved_bytes
+            evaluation_values.extend(reservation.evaluation_values)
         for cache in lane.caches.draft:
-            if isinstance(cache, QSAKVCache):
-                physical, base = _reserve_qsa_rows(
-                    [cache] * rows, 0, shared_prefix=True, timing=timing
-                )
-                draft.append(physical)
-                draft_bases.append(base)
-                reserved_bytes += int(physical.keys.nbytes + physical.values.nbytes)
-                reserved_bytes += int(physical.index_keys.nbytes)
-            else:
-                draft.append(None)
-                draft_bases.append(None)
+            reservation = _provider_call(
+                operations.reserve_promotion_layer,
+                cache,
+                0,
+                rows=rows,
+                shared_prefix=True,
+                timing=timing,
+            )
+            draft.append(reservation.cache)
+            draft_bases.append(reservation.base)
+            reserved_bytes += reservation.reserved_bytes
+            evaluation_values.extend(reservation.evaluation_values)
         submit_started = time.perf_counter_ns() if diagnostic_timing else 0
-        mx.async_eval(
-            *[
-                value
-                for group in (target, draft)
-                for cache in group
-                if cache is not None
-                for value in (cache.keys, cache.values, cache.index_keys)
-            ]
-        )
-        submit_ns = (
-            time.perf_counter_ns() - submit_started if diagnostic_timing else 0
-        )
+        if evaluation_values:
+            mx.async_eval(*evaluation_values)
+        submit_ns = time.perf_counter_ns() - submit_started if diagnostic_timing else 0
     return SharedPrefixPhysicalPromotionPrequeue(
         prefix_id=str(prefix_id),
         rows=rows,
         stream=stream,
         reserve_tail=reserve_tail,
         physical=SelfMTPCachePair(target, draft),
+        operations=operations,
+        state_provider_revision=str(operations.provider_revision),
+        contracts=contracts,
         target_bases=tuple(target_bases),
         draft_bases=tuple(draft_bases),
         creator_thread=threading.get_ident(),

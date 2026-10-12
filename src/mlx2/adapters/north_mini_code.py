@@ -9,10 +9,12 @@ import math
 import os
 import struct
 from pathlib import Path
+from typing import ClassVar
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..process_env import (
     PROCESS_NUMERICS,
+    assert_process_profile_applied,
     clear_inherited_profile,
     require_process_numerics,
 )
@@ -23,6 +25,14 @@ from .external_draft_policy import ExternalDraftAdapterMixin
 CACHE_LAYOUT = "north-mini-code-layer-segments-v1"
 _SAFETENSORS_HEADER_LIMIT = 64 << 20
 _DTYPE_BYTES = {"BF16": 2, "U32": 4}
+_NORTH_COMPOSITION_REFUSAL = (
+    "Cohere EAGLE is context-paired and does not publish a proposal law "
+    "supported by exact proposal composition"
+)
+_NORTH_CONTINUATION_REFUSAL = (
+    "Cohere EAGLE is a context-paired stepwise drafter, not a complete-path "
+    "continuation provider"
+)
 
 NORTH_MINI_CODE = ModelDescriptor(
     model_type="cohere2_moe",
@@ -98,13 +108,13 @@ def _expected_weight_headers(config):
     dense_intermediate = int(config["prefix_dense_intermediate_size"])
     quant = config.get("quantization", config.get("quantization_config"))
     if not isinstance(quant, dict):
-        raise ValueError("North artifact must declare quantization metadata")
+        raise TypeError("North artifact must declare quantization metadata")
     expected = {}
 
     def add_quantized(name, shape):
         override = quant.get(name, quant)
         if not isinstance(override, dict):
-            raise ValueError(f"Invalid North quantization override: {name}")
+            raise TypeError(f"Invalid North quantization override: {name}")
         group_size = override.get("group_size")
         bits = override.get("bits")
         if type(group_size) is not int or type(bits) is not int or bits not in {4, 8}:
@@ -164,10 +174,10 @@ def _validate_weight_headers(path, index):
             raw_header = stream.read(length)
         header = json.loads(
             raw_header,
-            object_pairs_hook=lambda pairs: _unique_pairs(pairs, name),
+            object_pairs_hook=lambda pairs, name=name: _unique_pairs(pairs, name),
         )
         if not isinstance(header, dict):
-            raise ValueError(f"Invalid safetensors header object: {name}")
+            raise TypeError(f"Invalid safetensors header object: {name}")
         header_digests.append(hashlib.sha256(raw_header).hexdigest())
         payload_size = size - 8 - length
         ranges = []
@@ -354,6 +364,7 @@ def configure_environment() -> dict[str, str]:
     }
     clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
+    assert_process_profile_applied("the North-Mini-Code profile")
     return profile
 
 
@@ -677,7 +688,7 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
     # and accept a layer only if its cross-trace consistency is clearly positive
     # AND the same-schedule random control does not reproduce the effect.
     # ------------------------------------------------------------------
-    THINKING_GUARD_DEFAULTS = {
+    THINKING_GUARD_DEFAULTS: ClassVar[dict[str, float | int]] = {
         "thinking_budget": 512,          # medium-effort anchor; unspecified effort is "high" = 2048
         "thinking_steer_alpha": 0.0,     # off: lengthened reasoning on the corrected body
         "thinking_steer_hammer": 0.0,    # the two-mode hammer never fired in the grid; leave off
@@ -759,6 +770,92 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
     EXTERNAL_ROUTE_TAG = "external-cohere-eagle-v1"
     EXTERNAL_PROFILE = "north-mini-code-apcv2-cohere-eagle"
 
+    @staticmethod
+    def external_route_conflicts():
+        """Adapter-owned exclusions for the exact Cohere EAGLE route.
+
+        These are semantic conflicts, not qualification results.  Keep them
+        next to the adapter so the shared scheduler never branches on North.
+        """
+        return {
+            "expert_gather_sort": (
+                "ordinary-route arithmetic candidate; no external-route "
+                "numerical contract"
+            ),
+            "batch_row_exact_q4": (
+                "ordinary-route arithmetic candidate; no external-route "
+                "numerical contract"
+            ),
+            "proposal_composition": _NORTH_COMPOSITION_REFUSAL,
+            "continuation_pool": _NORTH_CONTINUATION_REFUSAL,
+            "continuation_strategy": _NORTH_CONTINUATION_REFUSAL,
+            "lilicorr_feedback": (
+                "requires a LiLiCoRR drafter; North binds a Cohere EAGLE head"
+            ),
+        }
+
+    def capability_receipts(self):
+        """Truthful adapter-local feature state for serving status receipts."""
+        external = getattr(self, "draft_model", None) is not None
+        return {
+            "ordinary_reference": {
+                "implemented": True,
+                "qualified": False,
+                "selected": None,
+                "observed_used": False,
+                "default": not external,
+                "selection_authority": "serving_route_receipt",
+                "profile": "north-mini-code-apcv2-ordinary",
+            },
+            "apcv2": {
+                "implemented": True,
+                "qualified": False,
+                "selected": None,
+                "observed_used": False,
+                "selection_authority": "serving_route_receipt",
+                "observation_authority": "serving_route_receipt",
+                "cache_layout": CACHE_LAYOUT,
+            },
+            "prompt_lookup": {
+                "implemented": True,
+                "qualified": False,
+                "selected": None,
+                "observed_used": False,
+                "selection": "request_scoped",
+                "selection_authority": "serving_route_receipt",
+                "observation_authority": "speculative_route_receipt",
+            },
+            "moe_expert_streaming": {
+                "implemented": True,
+                "qualified": False,
+                "eligible": True,
+                # Startup selection belongs to the server-owned weight-stream
+                # policy.  Adapter-local receipts cannot claim it before load.
+                "selected": None,
+                "observed_used": False,
+                "default": False,
+                "selection_authority": "server_weight_stream_receipt",
+                "observation_authority": "server_weight_stream_receipt",
+                "load_peak_bounded": True,
+            },
+            "external_draft": {
+                "implemented": True,
+                "qualified": False,
+                "selected": external,
+                "observed_used": False,
+                "observation_authority": "speculative_route_receipt",
+                "profile": self.EXTERNAL_PROFILE,
+                "drafter": "cohere_eagle",
+            },
+            "proposal_composition": {
+                "implemented": False,
+                "qualified": False,
+                "selected": False,
+                "observed_used": False,
+                "refusal": _NORTH_COMPOSITION_REFUSAL,
+            },
+        }
+
     def execution_config(self, *, max_lanes, prefill_step):
         if getattr(self, "batch_row_exact_q4", False) and max_lanes > 32:
             raise ValueError("North batch_row_exact_q4 supports at most 32 lanes")
@@ -818,19 +915,42 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
 
         claim_stock_moe(self, "the North Mini Code adapter")
 
-    def __init__(self, model_path: str, *, execution_policy=None):
+    # Early-load routed-expert streaming.  The declaration is intentionally
+    # owned by this concrete class: streamed_load.declared_stream_modes never
+    # inherits declarations into a subclass with a different tensor layout.
+    weight_streaming_modes = frozenset({"moe_experts"})
+
+    def __init__(self, model_path: str, *, execution_policy=None, weight_streaming=None):
         from .process_globals import guarded_construction
 
-        guarded_construction(
-            self,
-            lambda: self._init_north(model_path, execution_policy=execution_policy),
-        )
+        try:
+            guarded_construction(
+                self,
+                lambda: self._init_north(
+                    model_path,
+                    execution_policy=execution_policy,
+                    weight_streaming=weight_streaming,
+                ),
+            )
+        except BaseException:
+            # A tokenizer or drafter failure after early streaming installed
+            # must close the bound shard descriptors and reader pool too.
+            self.close()
+            raise
 
-    def _init_north(self, model_path: str, *, execution_policy=None):
+    def _init_north(self, model_path: str, *, execution_policy=None, weight_streaming=None):
+        from ..runtime.streamed_load import require_declared
+
+        stream_request = require_declared(type(self), weight_streaming)
         expert_sort, batch_row_exact, policy = _split_north_execution_policy(
             execution_policy
         )
         external = self._parse_external_policy(policy, family="North")
+        if external and stream_request is not None:
+            raise ValueError(
+                "North expert streaming refuses the external draft route: "
+                "the target and drafter do not share one proven weight budget"
+            )
         if external and expert_sort != "auto":
             raise ValueError(
                 "North expert_gather_sort is an ordinary-route candidate and "
@@ -846,6 +966,23 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
                 "North batch_row_exact_q4 cannot yet be combined with "
                 "expert_gather_sort"
             )
+        if external:
+            conflicts = self.external_route_conflicts()
+            for key in (
+                "proposal_composition",
+                "continuation_pool",
+                "continuation_strategy",
+                "lilicorr_feedback",
+            ):
+                if key in policy and policy[key] not in (None, False):
+                    raise ValueError(f"North {key} is unavailable: {conflicts[key]}")
+            if "proposal_composition" not in policy:
+                # The shared binder deliberately cannot attach its PLD default
+                # to a context-paired backend.  Publish that skipped default in
+                # the serving receipt instead of silently looking ordinary.
+                self.skipped_route_defaults = {
+                    "proposal_composition": _NORTH_COMPOSITION_REFUSAL
+                }
         self.expert_gather_sort = expert_sort
         self.batch_row_exact_q4 = batch_row_exact
         artifact = inspect_artifact(model_path)
@@ -882,9 +1019,11 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
 
         self.model = Model(ModelArgs.from_dict(config))
         files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-        weights = self.model.sanitize(load_shards_evicting(files))
         quant = config.get("quantization", config.get("quantization_config"))
-        if quant:
+        def quantize(weights):
+            if not quant:
+                return
+
             def predicate(name, module):
                 override = quant.get(name)
                 if isinstance(override, dict):
@@ -898,7 +1037,41 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
                 mode=quant.get("mode", "affine"),
                 class_predicate=predicate,
             )
-        self.model.load_weights(list(weights.items()), strict=True)
+
+        self.weight_stream = None
+        if stream_request is None:
+            weights = self.model.sanitize(load_shards_evicting(files))
+            quantize(weights)
+            self.model.load_weights(list(weights.items()), strict=True)
+        else:
+            from ..runtime.streamed_load import (
+                force_stock_expert_arithmetic,
+                load_streamed,
+            )
+
+            top_k = config.get("num_experts_per_tok")
+            if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+                raise ValueError(
+                    "North expert streaming needs num_experts_per_tok"
+                )
+
+            def installed(manager):
+                manager.forced_stock = force_stock_expert_arithmetic(self.model)
+
+            loaded = load_streamed(
+                self.model,
+                path,
+                [file.name for file in files],
+                request=stream_request,
+                sanitize=self.model.sanitize,
+                quantize=quantize,
+                records=self.identity["files"],
+                weight_map=artifact["weight_map"],
+                top_k=top_k,
+                on_installed=installed,
+            )
+            weights = loaded.weights
+            self.weight_stream = loaded.manager
         self.model.eval()
         self.model.configure_batch_row_exact_q4(self.batch_row_exact_q4)
         if self.batch_row_exact_q4:
@@ -931,6 +1104,8 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
             eos_token_ids=[eos] if isinstance(eos, int) else list(eos or []),
         )
         self.max_context = int(config["max_position_embeddings"])
+        if self.weight_stream is not None:
+            self.weight_stream.begin_serving()
         if draft_record is not None:
             from .cohere_eagle import load_drafter
 
@@ -1007,9 +1182,25 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
         for switch in getattr(self, "_north_expert_gathers", ()):
             for name, count in switch.sort_status()["counts"].items():
                 gather_counts[name] = gather_counts.get(name, 0) + int(count)
+        stream = getattr(self, "weight_stream", None)
+        try:
+            stream_counts = stream.counters() if stream is not None else {}
+        except Exception:
+            # Diagnostics must remain available while a stream is closing or
+            # after its bound source has failed closed.  The server receipt is
+            # still the authority for selection and observed use.
+            stream_counts = {}
         return {
             "architecture": "cohere2_moe",
             "cache_layout": self.layout,
+            "qualification": "unqualified",
+            "route": (
+                "external_draft"
+                if getattr(self, "draft_model", None) is not None
+                else "ordinary"
+            ),
+            "capability_receipts": self.capability_receipts(),
+            "external_route_conflicts": self.external_route_conflicts(),
             "sliding_layers": 36,
             "global_layers": 13,
             "sliding_window": 4096,
@@ -1034,6 +1225,19 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
                     "observed_used": False,
                 }
             ),
+            "moe_expert_streaming": {
+                "implemented": True,
+                "qualified": False,
+                "eligible": True,
+                "selected": stream is not None,
+                "observed_used": int(stream_counts.get("stream_page_ins_total", 0)) > 0,
+                "authority": "server_weight_stream_receipt",
+                "load_peak_bounded": (
+                    stream is not None
+                    and getattr(stream.plan, "load_phase", None)
+                    == "pre_materialization"
+                ),
+            },
             "speculation": (
                 "external-cohere-eagle-implemented-unqualified"
                 if getattr(self, "draft_model", None) is not None
@@ -1047,6 +1251,10 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
 
         release(self)
 
+        stream = getattr(self, "weight_stream", None)
+        if stream is not None:
+            stream.close()
+            self.weight_stream = None
         had_resources = any(
             getattr(self, name, None) is not None for name in ("model", "tokenizer")
         )

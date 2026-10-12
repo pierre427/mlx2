@@ -317,7 +317,11 @@ class Model(nn.Module):
                             weights.pop(f"{prefix}.experts.{e}.{m}.{k}")
                             for e in range(n_e)
                         ]
-                        weights[f"{prefix}.switch_mlp.{m}.{k}"] = mx.stack(to_join)
+                        stacked = mx.stack(to_join)
+                        from ..weight_stream import record_stack
+
+                        record_stack(stacked, to_join)
+                        weights[f"{prefix}.switch_mlp.{m}.{k}"] = stacked
 
         if self.args.tie_word_embeddings:
             weights.pop("lm_head.weight", None)

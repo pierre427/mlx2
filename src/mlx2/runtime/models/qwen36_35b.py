@@ -14,6 +14,7 @@ import mlx.nn as nn
 from . import moe_nax_gather as _moe_nax
 from . import qwen3_next
 from . import qwen4_fused_gdn_verify as _verify
+from .qwen_gdn_contracts import QWEN36_GDN_CONTRACT
 from .gdn_state import check_state
 from .import_env import snapshot as _import_env_snapshot
 from .pipeline import PipelineMixin
@@ -29,7 +30,6 @@ from .qwen4_fused_gdn import (
     qwen4_fused_gdn_decode,
     served_silu_refusal,
 )
-from .served_exp import is_device_fault
 from .qwen36_moe_decode import Qwen36SparseMoeBlock as Qwen3NextSparseMoeBlock
 from .qwen38_27b import (
     ModelArgs,
@@ -41,6 +41,7 @@ from .qwen38_27b import (
 from .qwen38_27b import (
     TextModel as DenseTextWrapper,
 )
+from .served_exp import is_device_fault
 
 _import_env_snapshot(__name__)
 _FUSED_GDN_DECODE = os.environ.get("MLX_QWEN36_FUSED_GDN_DECODE", "0") == "1"
@@ -81,7 +82,7 @@ def probe_qwen36_gdn(dtype, state_dtype, *, verify=False, rows=1, steps=1):
         if verify
         else (qwen4_fused_gdn_batch_decode if rows > 1 else qwen4_fused_gdn_decode)
     )
-    extra = dict(architecture="qwen35", num_value_heads=32)
+    extra = dict(contract=QWEN36_GDN_CONTRACT, num_value_heads=32)
     if verify and rows > 1:
         args += ((steps,) * rows,)
     for ty in _THREADGROUP_Y_CANDIDATES:
@@ -210,7 +211,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             value_head_dim=self.head_v_dim,
             conv_kernel=self.conv_kernel_size,
             gate_activation="swish",
-            architecture="qwen35",
+            contract=QWEN36_GDN_CONTRACT,
         )
         if not admission.accepted:
             return fallback(admission.reason)
@@ -237,7 +238,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                 self.norm.weight,
                 self.norm.eps,
                 threadgroup_y=threadgroup_y,
-                architecture="qwen35",
+                contract=QWEN36_GDN_CONTRACT,
                 num_key_heads=self.num_k_heads,
                 num_value_heads=self.num_v_heads,
                 key_head_dim=self.head_k_dim,
@@ -298,7 +299,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             value_head_dim=self.head_v_dim,
             conv_kernel=self.conv_kernel_size,
             gate_activation="swish",
-            architecture="qwen35",
+            contract=QWEN36_GDN_CONTRACT,
         )
         if not admission.accepted:
             return fallback(admission.reason)
@@ -340,7 +341,10 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             if batch:
                 args += (counts,)
             out, conv, state, states, convs = fn(
-                *args, threadgroup_y=ty, architecture="qwen35", num_value_heads=32
+                *args,
+                threadgroup_y=ty,
+                contract=QWEN36_GDN_CONTRACT,
+                num_value_heads=32,
             )
         except Exception as exc:
             if is_device_fault(exc):
@@ -621,6 +625,11 @@ def qwen36_decode_wins_stats(model, *, reset=False):
             "routed_gate_up_calls": 0,
             "topk_launch_calls": 0,
             "window_calls": 0,
+            "window_calls_by_consumer": {
+                "batch_decode": 0,
+                "verify": 0,
+                "row_exact": 0,
+            },
             "shared_calls": 0,
         },
     }
@@ -647,6 +656,10 @@ def qwen36_decode_wins_stats(model, *, reset=False):
             cell["routed_gate_up_calls"] += layer.switch_mlp.routed_decode_calls
             cell["topk_launch_calls"] += layer.moe_topk_calls["launch"]
             cell["window_calls"] += sum(layer.moe_window_calls.values())
+            for key, value in layer.moe_window_calls.items():
+                cell["window_calls_by_consumer"][key] = (
+                    cell["window_calls_by_consumer"].get(key, 0) + value
+                )
             cell["shared_calls"] += layer.shared_fold_calls
             for key, value in layer.qwen36_decode_reasons.items():
                 cell["reasons"][key] = cell["reasons"].get(key, 0) + value

@@ -942,7 +942,11 @@ class Model(nn.Module):
                         weights.pop(f"{prefix}.experts.{e}.{m}.weight")
                         for e in range(self.args.n_routed_experts)
                     ]
-                    weights[f"{prefix}.switch_mlp.{n}.weight"] = mx.stack(to_join)
+                    stacked = mx.stack(to_join)
+                    from ..weight_stream import record_stack
+
+                    record_stack(stacked, to_join)
+                    weights[f"{prefix}.switch_mlp.{n}.weight"] = stacked
 
         return weights
 

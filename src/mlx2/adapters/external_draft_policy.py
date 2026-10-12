@@ -27,6 +27,85 @@ COMPOSITION_DEFAULT_SKIPPED_NO_EXACT_LAW = (
 )
 
 
+def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposals=1):
+    """Validate shared external progressive-verification options."""
+    policy = dict(policy)
+    tile = policy.get("progressive_verification_tile")
+    fidelity = policy.get("progressive_verification_fidelity")
+    if tile is None and fidelity is not None:
+        raise ValueError(
+            "progressive_verification_fidelity requires progressive_verification_tile"
+        )
+    if tile is not None:
+        from ..runtime.progressive_external_verify import (
+            PROGRESSIVE_FIDELITIES,
+            PROGRESSIVE_FIDELITY_EXACT,
+        )
+
+        if type(tile) is not int or not 1 <= tile < num_draft:
+            raise ValueError(
+                "progressive_verification_tile must be an integer from 1 below num_draft"
+            )
+        if policy.get("proposal_composition") not in (None, False):
+            raise ValueError(
+                "progressive_verification_tile cannot combine with proposal composition"
+            )
+        # A requested tile must not silently acquire the PLD composition default.
+        policy["proposal_composition"] = False
+        if policy.get("adaptive_verification") is not None:
+            raise ValueError(
+                "progressive_verification_tile cannot combine with adaptive verification"
+            )
+        if policy.get("continuation_pool") is not None:
+            raise ValueError(
+                "progressive_verification_tile cannot combine with continuation_pool"
+            )
+        if policy.get("lilicorr_feedback") is not None:
+            raise ValueError(
+                "progressive_verification_tile cannot combine with LiLiCorr feedback"
+            )
+        if fidelity is None:
+            fidelity = PROGRESSIVE_FIDELITY_EXACT
+        if fidelity not in PROGRESSIVE_FIDELITIES:
+            raise ValueError("unsupported progressive verification fidelity")
+        policy["progressive_verification_fidelity"] = fidelity
+    cap = policy.get("progressive_multilane_draft_cap")
+    if cap is not None and (
+        tile is None
+        or type(cap) is not int
+        or not min(int(minimum_proposals), int(num_draft)) <= cap <= num_draft
+    ):
+        raise ValueError(
+            "progressive_multilane_draft_cap requires progressive verification "
+            "and must be between minimum proposals and num_draft"
+        )
+    return policy
+
+
+def progressive_external_identity(policy, binding=None):
+    tile = policy.get("progressive_verification_tile")
+    if tile is None:
+        return ""
+    from ..runtime.progressive_external_verify import (
+        PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
+    )
+
+    return json.dumps(
+        {
+            "algorithm": PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
+            "verification_tile": tile,
+            "multilane_draft_cap": policy.get("progressive_multilane_draft_cap"),
+            "target_protocol": (
+                None if binding is None else binding["target_protocol"]
+            ),
+            "fidelity": policy.get("progressive_verification_fidelity", "exact"),
+            "source_hashes": None if binding is None else binding["source_hashes"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 class ExternalDraftAdapterMixin:
     EXTERNAL_DEFAULT_NUM_DRAFT = 3
     EXTERNAL_ROUTE_TAG = "external-draft-v1"
@@ -43,6 +122,10 @@ class ExternalDraftAdapterMixin:
             "continuation_pool",
             "continuation_strategy",
             "lilicorr_feedback",
+            "progressive_verification_tile",
+            "progressive_multilane_draft_cap",
+            "progressive_verification_fidelity",
+            "cost_per_commit_handoff",
         } or (self.external_policy and not self.external_policy.get("draft_model")):
             raise ValueError(
                 f"{family} execution policy has no qualified overrides; only an "
@@ -56,11 +139,27 @@ class ExternalDraftAdapterMixin:
             raise ValueError(
                 "num_draft must be a positive integer below the draft block size"
             )
+        minimum = min(
+            int(getattr(record["args"], "minimum_proposal_length", 1)), count
+        )
+        self.external_policy = normalize_progressive_external_policy(
+            self.external_policy,
+            num_draft=count,
+            minimum_proposals=minimum,
+        )
         adaptive = self.external_policy.get("adaptive_verification")
         if adaptive is not None:
             from ..runtime.acceptance_estimator import AdaptiveVerificationPolicy
 
             AdaptiveVerificationPolicy.from_value(adaptive, count)
+        if self.external_policy.get("cost_per_commit_handoff") is not None:
+            from ..runtime.cost_per_commit_handoff import (
+                CostPerCommitHandoffSettings,
+            )
+
+            CostPerCommitHandoffSettings.from_value(
+                self.external_policy["cost_per_commit_handoff"]
+            )
         if self.external_policy.get("proposal_composition") is not False and (
             "proposal_composition" in self.external_policy
         ):
@@ -106,6 +205,16 @@ class ExternalDraftAdapterMixin:
                 )
 
     def _bind_external_drafter(self, record, loader, base_descriptor):
+        self._progressive_external_binding = None
+        if self.external_policy.get("progressive_verification_tile") is not None:
+            from ..runtime.progressive_external_verify import (
+                progressive_target_protocol_binding,
+            )
+
+            self._progressive_external_binding = progressive_target_protocol_binding(
+                self.model,
+                self.external_policy.get("progressive_verification_fidelity", "exact"),
+            )
         self.draft_model = loader(record, self.model)
         if (
             "proposal_composition" not in self.external_policy
@@ -113,6 +222,7 @@ class ExternalDraftAdapterMixin:
             # Composition verifies chains; a tree route (e.g. the pinned
             # Qwen3.8 pair's tree15 batch-size route) keeps its own drafts.
             and self.external_policy.get("batch_size_route") is None
+            and self.external_policy.get("progressive_verification_tile") is None
             and not bool(getattr(self.draft_model, "requires_context_tokens", False))
             and callable(getattr(self.draft_model, "draft_distributions", None))
         ):
@@ -250,6 +360,9 @@ class ExternalDraftAdapterMixin:
                 tokenizer_revision=target_artifact_revision,
                 session_revision=session_revision,
             )
+        composition_identity += progressive_external_identity(
+            self.external_policy, self._progressive_external_binding
+        )
         if "lilicorr_feedback" in self.external_policy:
             from ..runtime.lilicorr_feedback import LiLiCorrFeedbackPolicy
 
@@ -288,6 +401,40 @@ class ExternalDraftAdapterMixin:
             capabilities=base_descriptor.capabilities | {Capability.EXTERNAL_DRAFT},
             state_planes=base_descriptor.state_planes | {StatePlane.DRAFT},
             cache_layout=self.layout,
+            metadata={
+                **(base_descriptor.metadata or {}),
+                **(
+                    {
+                        "progressive_verification": {
+                            "implemented": True,
+                            "qualified": False,
+                            "selected": True,
+                            "verification_tile": self.external_policy[
+                                "progressive_verification_tile"
+                            ],
+                            "multilane_draft_cap": self.external_policy.get(
+                                "progressive_multilane_draft_cap"
+                            ),
+                            "algorithm": self._progressive_external_binding[
+                                "algorithm"
+                            ],
+                            "target_protocol": self._progressive_external_binding[
+                                "target_protocol"
+                            ],
+                            "fidelity": self._progressive_external_binding[
+                                "fidelity"
+                            ],
+                            "source_hashes": self._progressive_external_binding[
+                                "source_hashes"
+                            ],
+                            "performance_claim": False,
+                        }
+                    }
+                    if self.external_policy.get("progressive_verification_tile")
+                    is not None
+                    else {}
+                ),
+            },
         )
 
     @classmethod
@@ -301,6 +448,19 @@ class ExternalDraftAdapterMixin:
 
     def _external_execution_config(self, *, max_lanes, prefill_step):
         """Only the external route adds keys; the ordinary config is unchanged."""
+        progressive_binding = getattr(self, "_progressive_external_binding", None)
+        progressive_fidelity = self.external_policy.get(
+            "progressive_verification_fidelity", "exact"
+        )
+        if (
+            self.external_policy.get("progressive_verification_tile") is not None
+            and progressive_fidelity != "exact"
+            and progressive_binding is None
+        ):
+            raise ValueError(
+                "approximate progressive verification requires a bound target "
+                "protocol before execution configuration"
+            )
         return {
             "persistent": True,
             "num_draft": self._external_num_draft(),
@@ -309,6 +469,39 @@ class ExternalDraftAdapterMixin:
             "prefill_step_size": prefill_step,
             "segment_aware_live_tip": False,
             "segment_aware_cohort_size": max_lanes,
+            **(
+                {
+                    "cost_per_commit_handoff": self.external_policy[
+                        "cost_per_commit_handoff"
+                    ]
+                }
+                if self.external_policy.get("cost_per_commit_handoff") is not None
+                else {}
+            ),
+            **(
+                {
+                    "progressive_verification_tile": self.external_policy[
+                        "progressive_verification_tile"
+                    ],
+                    "progressive_multilane_draft_cap": self.external_policy.get(
+                        "progressive_multilane_draft_cap"
+                    ),
+                    "progressive_verification_fidelity": progressive_fidelity,
+                    **(
+                        {
+                            "progressive_target_protocol": progressive_binding[
+                                "target_protocol"
+                            ],
+                            "progressive_protocol_binding": progressive_binding,
+                        }
+                        if progressive_binding is not None
+                        else {}
+                    ),
+                }
+                if self.external_policy.get("progressive_verification_tile")
+                is not None
+                else {}
+            ),
         }
 
     def create_external_batch(self, **kwargs):
@@ -332,6 +525,31 @@ class ExternalDraftAdapterMixin:
         adaptive = self.external_policy.get("adaptive_verification")
         if adaptive is not None:
             kwargs.setdefault("adaptive_verification", adaptive)
+        if self.external_policy.get("cost_per_commit_handoff") is not None:
+            kwargs.setdefault(
+                "cost_per_commit_handoff",
+                self.external_policy["cost_per_commit_handoff"],
+            )
+        if self.external_policy.get("progressive_verification_tile") is not None:
+            kwargs.setdefault(
+                "progressive_verification_tile",
+                self.external_policy["progressive_verification_tile"],
+            )
+            kwargs.setdefault(
+                "multilane_draft_cap",
+                self.external_policy.get("progressive_multilane_draft_cap"),
+            )
+            kwargs.setdefault(
+                "progressive_verification_fidelity",
+                self.external_policy.get("progressive_verification_fidelity", "exact"),
+            )
+            kwargs.setdefault(
+                "progressive_target_protocol",
+                self._progressive_external_binding["target_protocol"],
+            )
+            kwargs.setdefault(
+                "progressive_protocol_binding", self._progressive_external_binding
+            )
         return ExternalDraftBatchGenerator(
             self.model,
             draft_model=self.draft_model,
@@ -454,4 +672,8 @@ class ExternalDraftAdapterMixin:
                 parent_close()
 
 
-__all__ = ["ExternalDraftAdapterMixin"]
+__all__ = [
+    "ExternalDraftAdapterMixin",
+    "normalize_progressive_external_policy",
+    "progressive_external_identity",
+]

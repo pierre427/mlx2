@@ -533,6 +533,9 @@ class BoundShards:
 _CONCAT_LEDGER: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "mlx2_weight_stream_concat_ledger", default=None
 )
+_STACK_LEDGER: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "mlx2_weight_stream_stack_ledger", default=None
+)
 
 
 def record_concat(result, parts, axis) -> None:
@@ -547,12 +550,29 @@ def record_concat(result, parts, axis) -> None:
         ledger[id(result)] = (result, tuple(parts), int(axis))
 
 
+def record_stack(result, parts, axis=0) -> None:
+    """Record an exact ``stack(parts, axis=0)`` sanitize transform.
+
+    Each part must remain an untransformed checkpoint tensor.  The expert
+    streamer later reads the selected part as a whole tensor, preserving the
+    native router and arithmetic while avoiding materialization of the other
+    experts.  Other stack axes are deliberately unsupported.
+    """
+    ledger = _STACK_LEDGER.get()
+    if ledger is not None:
+        ledger[id(result)] = (result, tuple(parts), int(axis))
+
+
 @contextmanager
-def concat_ledger(target: dict):
+def concat_ledger(target: dict, stack_target: Optional[dict] = None):
     token = _CONCAT_LEDGER.set(target)
+    if stack_target is None:
+        stack_target = {}
+    stack_token = _STACK_LEDGER.set(stack_target)
     try:
         yield target
     finally:
+        _STACK_LEDGER.reset(stack_token)
         _CONCAT_LEDGER.reset(token)
 
 
@@ -598,6 +618,7 @@ class TensorOrigins:
         self._name_of = name_of
         self._arrays: Dict[int, Tuple[object, TensorLocation]] = {}
         self.concats: dict = {}
+        self.stacks: dict = {}
 
     def record_shard(self, shard_path: Path, arrays: dict) -> None:
         shard_path = Path(shard_path)
@@ -644,6 +665,39 @@ class TensorOrigins:
             if tuple(array.shape) != (spec.num_experts, *spec.expert_shape_concat()):
                 raise StreamingUnavailable(f"{where}: concatenated geometry mismatch")
             return spec
+        stack = self.stacks.get(id(array))
+        if stack is not None and stack[0] is array:
+            (_, parts, axis) = stack
+            if axis != 0 or len(array.shape) < 2:
+                raise StreamingUnavailable(
+                    f"{where}: only an expert-axis-0 stack is streamable"
+                )
+            located = []
+            for part in parts:
+                part_location = self.locate(part)
+                if part_location is None:
+                    raise StreamingUnavailable(
+                        f"{where}: a stacked expert was itself transformed"
+                    )
+                _check_location(where, part_location, part)
+                located.append(part_location)
+            if not located or tuple(array.shape) != (
+                len(located), *tuple(located[0].shape)
+            ):
+                raise StreamingUnavailable(f"{where}: stacked expert geometry mismatch")
+            if any(
+                location.shape != located[0].shape
+                or location.dtype != located[0].dtype
+                for location in located[1:]
+            ):
+                raise StreamingUnavailable(
+                    f"{where}: stacked experts disagree in shape or dtype"
+                )
+            return ExpertSliceSpec(
+                key=key,
+                parts=(located[0],),
+                expert_parts=tuple((location,) for location in located),
+            )
         raise StreamingUnavailable(
             f"{where} was transformed during sanitize (not a rename and not a "
             "ledgered output-axis concatenation); it cannot be streamed"
@@ -682,6 +736,7 @@ class ExpertSliceSpec:
     key: str
     parts: Tuple[TensorLocation, ...]
     concat_axis: int = 0
+    expert_parts: Optional[Tuple[Tuple[TensorLocation, ...], ...]] = None
 
     @classmethod
     def single(cls, key: str, location: TensorLocation) -> "ExpertSliceSpec":
@@ -693,18 +748,40 @@ class ExpertSliceSpec:
 
     @property
     def num_experts(self) -> int:
+        if self.expert_parts is not None:
+            return len(self.expert_parts)
         return int(self.parts[0].shape[0])
 
     def row_bytes(self) -> int:
+        if self.expert_parts is not None:
+            sizes = {sum(part.nbytes for part in row) for row in self.expert_parts}
+            if len(sizes) != 1:
+                raise StreamingUnavailable("stacked expert rows disagree in size")
+            return sizes.pop()
         return sum(part.row_bytes() for part in self.parts)
 
     @property
     def expert_shape(self) -> Tuple[int, ...]:
+        if self.expert_parts is not None:
+            return tuple(self.expert_parts[0][0].shape)
         return tuple(self.location.shape[1:])
+
+    def locations_for(self, expert: int) -> Tuple[TensorLocation, ...]:
+        if self.expert_parts is not None:
+            return self.expert_parts[expert]
+        return self.parts
+
+    def source_locations(self) -> Tuple[TensorLocation, ...]:
+        if self.expert_parts is not None:
+            return tuple(part for row in self.expert_parts for part in row)
+        return self.parts
 
     def expert_shape_concat(self) -> Tuple[int, ...]:
         """One expert's live row shape after the parts are concatenated."""
-        shapes = [tuple(part.shape[1:]) for part in self.parts]
+        if self.expert_parts is not None:
+            shapes = [tuple(part.shape) for part in self.expert_parts[0]]
+        else:
+            shapes = [tuple(part.shape[1:]) for part in self.parts]
         head = list(shapes[0])
         if not head:
             raise StreamingUnavailable("expert rows have no axes")
@@ -740,13 +817,15 @@ class ExpertSliceReader:
         self._handles = handles
         self._pool = pool
         self.window = int(window) if window else 0
-        counts = {part.shape[0] for spec in self.specs for part in spec.parts}
+        counts = {spec.num_experts for spec in self.specs}
         if len(counts) != 1:
             raise StreamingUnavailable("projection tensors disagree on expert count")
         self.num_experts = int(counts.pop())
         self.expert_bytes = sum(spec.row_bytes() for spec in self.specs)
         self.source_paths = tuple(
-            dict.fromkeys(part.path for spec in self.specs for part in spec.parts)
+            dict.fromkeys(
+                part.path for spec in self.specs for part in spec.source_locations()
+            )
         )
         self._outstanding = 0
 
@@ -765,8 +844,11 @@ class ExpertSliceReader:
         out = []
         for spec in self.specs:
             blobs = []
-            for part in spec.parts:
-                (offset, length) = part.row_range(expert)
+            for part in spec.locations_for(expert):
+                if spec.expert_parts is None:
+                    (offset, length) = part.row_range(expert)
+                else:
+                    (offset, length) = (part.begin, part.nbytes)
                 blobs.append(self._handles.pread(part.path, offset, length))
             out.append(tuple(blobs))
         return tuple(out)
@@ -838,7 +920,8 @@ class ExpertSliceReader:
         arrays = []
         for (spec, blobs) in zip(self.specs, payload):
             pieces = []
-            for (part, blob) in zip(spec.parts, blobs):
+            locations = spec.locations_for(0) if spec.expert_parts is not None else spec.parts
+            for (part, blob) in zip(locations, blobs):
                 dtype = _SAFETENSORS_DTYPES.get(part.dtype)
                 if dtype is None:
                     raise StreamingUnavailable(
@@ -850,7 +933,8 @@ class ExpertSliceReader:
                 target = getattr(mx, mlx_name)
                 if array.dtype != target:
                     array = array.view(target)
-                pieces.append(array.reshape(tuple(part.shape[1:])))
+                shape = part.shape if spec.expert_parts is not None else part.shape[1:]
+                pieces.append(array.reshape(tuple(shape)))
             arrays.append(
                 pieces[0]
                 if len(pieces) == 1
@@ -1527,7 +1611,7 @@ def _check_expert_geometry(path: str, module, specs: Sequence[ExpertSliceSpec]) 
                 f"{where}: live expert row shape {tuple(live.shape[1:])} != "
                 f"checkpoint rows {spec.expert_shape_concat()}"
             )
-        for part in spec.parts:
+        for part in spec.source_locations():
             target = _mx_dtype(part.dtype)
             if target is None:
                 raise StreamingUnavailable(
@@ -1686,7 +1770,13 @@ def install_expert_streaming(
         )
         manifest = _manifest(
             [
-                [path, spec.key, [_location_entry(p) for p in spec.parts], spec.concat_axis]
+                [
+                    path,
+                    spec.key,
+                    [_location_entry(p) for p in spec.source_locations()],
+                    spec.concat_axis,
+                    spec.expert_parts is not None,
+                ]
                 for (path, _, specs) in targets
                 for spec in specs
             ],

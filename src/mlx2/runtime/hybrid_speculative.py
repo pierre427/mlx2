@@ -6,9 +6,10 @@ import os
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Sequence, Tuple, Union
 import mlx.core as mx
 import mlx.nn as nn
+from .cache_operations import CacheOperationsUnsupported, cache_operations
 from .committed_recovery import CommittedRecoverySlot
 from .cow_cache import (
     mtp_boundary_cow_enabled,
@@ -17,6 +18,7 @@ from .cow_cache import (
     snapshot_recovery_descriptors,
 )
 import numpy as np
+from .speculative_sampling import count_delivered_relaxed_accepts
 from .generate import generation_stream
 from .models.cache import (
     can_trim_prompt_cache,
@@ -33,6 +35,13 @@ from .verify_sync import record_verify_sync, verify_sync_round
 from .ragged_verify_layout import RaggedVerifyLayout, padded_capabilities
 from .ragged_verify_observation import activate as activate_ragged_observer
 from .ragged_verify_observation import observed_stage, observer_from_environment
+from .state_plane_operations import (
+    SegmentedAttachOperations,
+    SegmentedViewOperations,
+    StatePlaneBinding,
+    StatePlaneOperations,
+    StatePlaneOperationRefused,
+)
 
 
 def _start_speculation_or_cleanup(caches, required_caches, error_message):
@@ -174,7 +183,7 @@ class SelfMTPLane:
     logprob_transform: Optional[Callable]
     logits_processors: List[Callable]
     stats: HybridStats
-    share_qsa_indices: bool = False
+    share_index_state: bool = False
     fly_verification: Optional[Any] = None
     relaxed_accepts: int = 0
     # Default-off copy-draft state (runtime/copy_draft.py).  None keeps the
@@ -192,10 +201,26 @@ class SelfMTPLane:
 
 @dataclass
 class DetachedSelfMTPLane:
+    schema_version: ClassVar[int] = 2
     lane: SelfMTPLane
     caches: SelfMTPCachePair
     segment_transaction: Optional[Any] = field(default=None, repr=False, compare=False)
-    shared_qsa_prefix_id: Optional[str] = field(default=None, repr=False, compare=False)
+    shared_state_identity: Optional[str] = field(default=None, repr=False, compare=False)
+    state_plane_operations: Optional[Any] = field(
+        default=None, repr=False, compare=False
+    )
+    state_plane_binding: Optional[StatePlaneBinding] = field(
+        default=None, repr=False, compare=False
+    )
+
+    @property
+    def shared_qsa_prefix_id(self):
+        """One-cycle compatibility alias for ``shared_state_identity``."""
+        return self.shared_state_identity
+
+    @shared_qsa_prefix_id.setter
+    def shared_qsa_prefix_id(self, value):
+        self.shared_state_identity = value
 
 
 @dataclass
@@ -220,11 +245,12 @@ class SegmentedSelfMTPState:
     plane transaction used only at commit.
     """
 
+    schema_version: ClassVar[int] = 2
     lanes: List[SelfMTPLane]
     row_caches: List[SelfMTPCachePair]
     transactions: List[Any]
     membership_epoch: int
-    shared_qsa_prefix_id: Optional[str] = field(default=None, repr=False, compare=False)
+    shared_state_identity: Optional[str] = field(default=None, repr=False, compare=False)
     proposal_open: bool = False
     poisoned: bool = False
     poison_reason: Optional[str] = None
@@ -249,6 +275,21 @@ class SegmentedSelfMTPState:
     _recovery_checkpoints: List[Any] = field(
         default_factory=list, repr=False, compare=False
     )
+    state_plane_operations: Optional[Any] = field(
+        default=None, repr=False, compare=False
+    )
+    state_plane_binding: Optional[StatePlaneBinding] = field(
+        default=None, repr=False, compare=False
+    )
+
+    @property
+    def shared_qsa_prefix_id(self):
+        """One-cycle compatibility alias for ``shared_state_identity``."""
+        return self.shared_state_identity
+
+    @shared_qsa_prefix_id.setter
+    def shared_qsa_prefix_id(self, value):
+        self.shared_state_identity = value
 
 
 @dataclass(frozen=True)
@@ -274,6 +315,10 @@ class SelfMTPCycleResult:
         default=None, repr=False, compare=False
     )
     relaxed_accepts: Tuple[int, ...] = ()
+    # Per lane: proposal positions admitted by FLy. Commit counts only those
+    # inside the delivered prefix, so stop/max-token truncation cannot become
+    # observed-use evidence for an undelivered relaxed token.
+    relaxed_positions: Tuple[Tuple[int, ...], ...] = ()
     # Per lane: copied-span length verified this round (0 = MTP-head lane)
     # and the copy gate's decision ("off" when the lane has no copy state).
     copy_spans: Tuple[int, ...] = ()
@@ -301,8 +346,8 @@ def _settle_verify_windows(proposal, used_rows) -> None:
 def _mtp_backbone(model, tokens, cache):
     """Return (LM-head hidden, MTP seed hidden) for one trunk forward.
 
-    Conventional MTP models use the same post-norm hidden for both. Qwen4
-    scheme A keeps its pre-final-mixer HC multi-stream tensor for drafting.
+    Conventional MTP models use the same post-norm hidden for both. A model
+    provider may instead preserve a pre-final-mixer multi-stream tensor.
     """
     if hasattr(model, "mtp_backbone"):
         return model.mtp_backbone(tokens, cache=cache)
@@ -328,8 +373,8 @@ def _restore_mtp_state(cache, mtp_state):
     pair.  Validate this relationship before mutating either cache.
     """
     (mtp_cache, restored_seed_h) = mtp_state
-    prefix_len = max((getattr(c, "offset", 0) for c in cache), default=0)
-    mtp_offset = max((getattr(c, "offset", 0) for c in mtp_cache), default=0)
+    prefix_len = _self_mtp_group_offset(cache)
+    mtp_offset = _self_mtp_group_offset(mtp_cache)
     if prefix_len > 0:
         if restored_seed_h is None:
             raise ValueError(
@@ -589,15 +634,36 @@ def _self_mtp_cache_offset(cache) -> int:
 
 
 def _self_mtp_group_offset(caches: Sequence[Any]) -> int:
-    return max((_self_mtp_cache_offset(c) for c in caches), default=0)
+    # Cache planes without a positional cursor (for example recurrent state)
+    # are paired with KV planes at the group's committed boundary. Every
+    # plane that does expose a cursor must agree; taking only the maximum can
+    # admit a sidecar whose earlier draft layer is one or more tokens behind.
+    positions = [
+        _self_mtp_cache_offset(cache)
+        for cache in caches
+        if getattr(cache, "offset", None) is not None
+    ]
+    if positions and any(position != positions[0] for position in positions[1:]):
+        raise ValueError("self-MTP cache group offsets are not aligned")
+    return positions[0] if positions else 0
 
 
 def _reject_unsupported_self_mtp_caches(caches: Sequence[Any]) -> None:
-    unsupported = [
-        type(cache).__name__
-        for cache in caches
-        if "SinkWindow" in type(cache).__name__ or "Rotating" in type(cache).__name__
-    ]
+    unsupported = []
+    for cache in caches:
+        try:
+            operations = cache_operations(
+                cache, capability="batched self-MTP cache admission"
+            )
+        except CacheOperationsUnsupported as error:
+            raise ValueError(
+                "batched self-MTP requires an explicit cache operations contract"
+            ) from error
+        if operations.topology == "rotating_kv":
+            unsupported.append(
+                f"{type(cache).__module__}.{type(cache).__qualname__} "
+                f"(family={operations.family})"
+            )
     if unsupported:
         raise ValueError(
             "batched self-MTP excludes windowed caches; got " + ", ".join(unsupported)
@@ -620,6 +686,61 @@ def _validate_detached_self_mtp(detached: DetachedSelfMTPLane) -> None:
         raise ValueError(
             f"detached self-MTP cache mismatch: target covers {covered} tokens but draft covers {draft_offset} pairs"
         )
+
+
+def _bind_segmented_state_plane(
+    model: nn.Module,
+    operations: Any,
+    row_caches: Sequence[SelfMTPCachePair],
+) -> StatePlaneBinding | None:
+    """Return an exact model/cache binding when the model declares one."""
+    if operations is None:
+        return None
+    if isinstance(operations, SegmentedAttachOperations):
+        binding = operations.bind_loaded_state(model, tuple(row_caches))
+    elif isinstance(operations, StatePlaneOperations):
+        row_keys = []
+        for pair in row_caches:
+            groups = []
+            for caches in (pair.target, pair.draft):
+                contracts = tuple(operations.contract(cache) for cache in caches)
+                if any(contract is None for contract in contracts):
+                    raise StatePlaneOperationRefused(
+                        "cache lacks an exact state-plane contract"
+                    )
+                groups.append(
+                    tuple(
+                        (contract.revision, contract.layout, contract.fidelity)
+                        for contract in contracts
+                    )
+                )
+            row_keys.append(tuple(groups))
+        if any(key != row_keys[0] for key in row_keys[1:]):
+            raise StatePlaneOperationRefused("state-plane cache row layouts differ")
+        binding = StatePlaneBinding(
+            provider_revision=operations.provider_revision,
+            artifact_key=(
+                type(model).__module__,
+                type(model).__qualname__,
+                id(model),
+                id(getattr(model, "language_model", None)),
+                id(getattr(model, "mtp", None)),
+            ),
+            cache_key=row_keys[0],
+            numerics_key=(
+                repr(getattr(model, "args", None)),
+                repr(getattr(model, "norm_convention", None)),
+            ),
+        )
+    else:
+        raise StatePlaneOperationRefused("state-plane provider protocol is missing")
+    if not isinstance(binding, StatePlaneBinding):
+        raise StatePlaneOperationRefused(
+            "state-plane provider returned no exact loaded-state binding"
+        )
+    if binding.provider_revision != operations.provider_revision:
+        raise StatePlaneOperationRefused("state-plane provider binding drifted")
+    return binding
 
 
 def _merge_self_mtp_cache_groups(groups: Sequence[Sequence[Any]]) -> List[Any]:
@@ -834,7 +955,7 @@ def prepare_self_mtp_lane(
     accept_rule: str,
     logits_processors: List[Callable],
     prefill_step_size: int,
-    share_qsa_indices: bool,
+    share_index_state: bool,
     record_prefix_fanout: bool = False,
     diagnostic_stages: Optional[Dict[str, float]] = None,
     fused_gdn_catchup: bool = False,
@@ -1014,11 +1135,16 @@ def prepare_self_mtp_lane(
         logprob_transform=transform,
         logits_processors=list(logits_processors or []),
         stats=stats,
-        share_qsa_indices=bool(share_qsa_indices),
+        share_index_state=bool(share_index_state),
         fly_verification=FLyVerificationPolicy.from_value(fly_verification),
     )
     detached = DetachedSelfMTPLane(
-        lane=lane, caches=SelfMTPCachePair(target=target_cache, draft=draft_cache)
+        lane=lane,
+        caches=SelfMTPCachePair(target=target_cache, draft=draft_cache),
+        state_plane_operations=getattr(model, "state_plane_operations", None),
+    )
+    detached.state_plane_binding = _bind_segmented_state_plane(
+        model, detached.state_plane_operations, [detached.caches]
     )
     _eval_self_mtp_lane_state(detached)
     _validate_detached_self_mtp(detached)
@@ -1104,8 +1230,17 @@ def capture_self_mtp_checkpoint(
     boundary contract when descriptor capture is unavailable.
     """
     (draft_cache, seed_h) = mtp_state
-    covered_tokens = _self_mtp_group_offset(target_cache)
-    draft_covered = _self_mtp_group_offset(draft_cache)
+    # A descriptor refusal caused by an open recurrent/ring transaction must
+    # not degrade to deepcopy: that would preserve the same ahead-of-commit
+    # state and publish it as an exact MTP boundary.
+    from .checkpoint_publication import require_checkpoint_publishable
+
+    require_checkpoint_publishable((target_cache, draft_cache))
+    try:
+        covered_tokens = _self_mtp_group_offset(target_cache)
+        draft_covered = _self_mtp_group_offset(draft_cache)
+    except ValueError:
+        return None
     if covered_tokens <= 0 or seed_h is None or draft_covered != covered_tokens - 1:
         return None
     values = [c.state for c in target_cache]
@@ -1190,10 +1325,10 @@ def attach_self_mtp_lanes(
     configured.update((item.lane.num_draft for item in joining))
     if len(configured) != 1:
         raise ValueError("adaptive per-lane self-MTP depth is excluded")
-    share_modes = {lane.share_qsa_indices for lane in old_lanes}
-    share_modes.update((item.lane.share_qsa_indices for item in joining))
+    share_modes = {lane.share_index_state for lane in old_lanes}
+    share_modes.update((item.lane.share_index_state for item in joining))
     if len(share_modes) != 1:
-        raise ValueError("mixed shared-QSA modes cannot enter one self-MTP batch")
+        raise ValueError("mixed shared index-state modes cannot enter one self-MTP batch")
     if batch is None or not batch.lanes:
         incoming = _copy_build_self_mtp_cache_pair(
             None, 0, [item.caches for item in joining]
@@ -1256,8 +1391,8 @@ def attach_prebatched_self_mtp_lanes(
         raise ValueError("self-MTP lane uid values must be unique")
     if len({lane.num_draft for lane in lanes}) != 1:
         raise ValueError("adaptive per-lane self-MTP depth is excluded")
-    if len({lane.share_qsa_indices for lane in lanes}) != 1:
-        raise ValueError("mixed shared-QSA modes cannot enter one self-MTP batch")
+    if len({lane.share_index_state for lane in lanes}) != 1:
+        raise ValueError("mixed shared index-state modes cannot enter one self-MTP batch")
     if not caches.target or not caches.draft:
         raise ValueError("prebatched self-MTP needs target and draft cache groups")
     _reject_unsupported_self_mtp_caches(caches.target)
@@ -1321,10 +1456,14 @@ def attach_segmented_self_mtp_lanes(
     batch: Optional[SegmentedSelfMTPState],
     joining: Sequence[DetachedSelfMTPLane],
 ) -> SegmentedSelfMTPState:
-    """Attach request-private B1 rows without constructing a merged cache."""
+    """Attach private B1 rows through one validated atomic publication."""
     from .segmented_self_mtp import SegmentedLaneTransaction, note_segmented_self_mtp
 
     joining = list(joining)
+    operations = getattr(model, "state_plane_operations", None)
+    attach_operations = (
+        operations if isinstance(operations, SegmentedAttachOperations) else None
+    )
     if batch is not None:
         if not isinstance(batch, SegmentedSelfMTPState):
             raise TypeError("cannot mix segmented and physically batched MTP state")
@@ -1333,142 +1472,27 @@ def attach_segmented_self_mtp_lanes(
             raise RuntimeError("cannot attach self-MTP lanes during a proposal")
     if not joining:
         if batch is None:
-            return SegmentedSelfMTPState([], [], [], 0)
+            return SegmentedSelfMTPState([], [], [], 0, state_plane_operations=operations)
         return batch
-    for detached in joining:
-        _validate_detached_self_mtp(detached)
-    prefix_ids = [item.shared_qsa_prefix_id for item in joining]
-    initial_shared_qsa_prefix_id = (
-        prefix_ids[0]
-        if batch is None
-        and len(prefix_ids) >= 2
-        and (prefix_ids[0] is not None)
-        and all((value == prefix_ids[0] for value in prefix_ids[1:]))
-        else None
-    )
-    if initial_shared_qsa_prefix_id is not None:
-        from .models.qwen4_exp import QSAKVCache
-        from .qsa_shared_suffix import split_attested_qsa_rows
-        from .segmented_self_mtp import (
-            qsa_private_delta_enabled,
-            shared_qsa_suffix_admission,
-        )
 
-        target_groups = [item.caches.target for item in joining]
-        qsa_contexts = [
-            int(layer_rows[0].offset)
-            for layer_rows in zip(*target_groups)
-            if all((type(row) is QSAKVCache for row in layer_rows))
-        ]
-        base_tokens = min(qsa_contexts, default=0)
-        remaining_tokens = max(
-            (item.lane.max_tokens - item.lane.ntoks for item in joining)
-        )
-        (admitted, _reason, cutoff) = shared_qsa_suffix_admission(
-            base_tokens=base_tokens, remaining_tokens=remaining_tokens
-        )
-        note_segmented_self_mtp("shared_qsa_policy_checks")
-        note_segmented_self_mtp(
-            "shared_qsa_policy_admitted" if admitted else "shared_qsa_policy_declined"
-        )
-        note_segmented_self_mtp(
-            "shared_qsa_policy_context_tokens_cumulative", base_tokens
-        )
-        note_segmented_self_mtp(
-            "shared_qsa_policy_remaining_tokens_cumulative", remaining_tokens
-        )
-        note_segmented_self_mtp("shared_qsa_policy_cutoff_tokens_cumulative", cutoff)
-        if admitted and qsa_private_delta_enabled():
-            updates = []
-            for layer_index, layer_rows in enumerate(zip(*target_groups)):
-                if all((type(row) is QSAKVCache for row in layer_rows)):
-                    updates.append(
-                        (
-                            layer_index,
-                            split_attested_qsa_rows(
-                                layer_rows,
-                                layout_id=f"qwen4-shared-qsa-v1:{layer_index}",
-                                note=note_segmented_self_mtp,
-                            ),
-                        )
-                    )
-            # Scheduler transfers already own a revision-bound transaction.
-            # Validate it before replacing the physical layout, then bind a
-            # successor to the exact shared representation at the same position.
-            predecessors = []
-            for item in joining:
-                old = item.segment_transaction
-                position = _self_mtp_group_offset(item.caches.target)
-                if old is not None:
-                    old.validate(item.caches, item.lane, position)
-                predecessors.append((item, old, position))
-            for layer_index, rows in updates:
-                for item, row in zip(joining, rows):
-                    item.caches.target[layer_index] = row
-            for item, old, position in predecessors:
-                if old is not None and updates:
-                    successor = SegmentedLaneTransaction(item.caches, item.lane, position)
-                    successor.predecessor_lineage_id = old.lineage.lineage_id
-                    item.segment_transaction = successor
-                    old.close()
-                    note_segmented_self_mtp("transaction_canonicalizations")
-    if batch is not None and any(
-        (
-            getattr(cache, "supports_shared_qsa_suffix", False)
-            for pair in batch.row_caches
-            for cache in pair.target
-        )
-    ):
-        replacements = []
-        try:
-            for pair, lane, transaction in zip(
-                batch.row_caches, batch.lanes, batch.transactions
-            ):
-                position = transaction.position
-                transaction.validate(pair, lane, position)
-                target = list(pair.target)
-                changed = False
-                for layer_index, cache in enumerate(target):
-                    if getattr(cache, "supports_shared_qsa_suffix", False):
-                        (target[layer_index], _) = cache.materialize_to_qsa()
-                        changed = True
-                if changed:
-                    _stop_all_speculation(pair.target)
-                    pair.target = target
-                    _start_speculation_or_cleanup(
-                        pair.target,
-                        pair.target,
-                        "materialized shared-QSA rows must remain trimmable",
-                    )
-                    successor = SegmentedLaneTransaction(pair, lane, position)
-                    successor.predecessor_lineage_id = transaction.lineage.lineage_id
-                    replacements.append((transaction, successor))
-                else:
-                    replacements.append((transaction, transaction))
-        except BaseException as error:
-            _poison_self_mtp_batch(
-                batch, f"shared-QSA membership materialization failed: {error}"
-            )
-            note_segmented_self_mtp("failures")
-            raise
-        batch.transactions = [successor for (_, successor) in replacements]
-        for previous, successor in replacements:
-            if previous is not successor:
-                previous.close()
-                note_segmented_self_mtp("transaction_canonicalizations")
+    # Complete every pure refusal check before touching caches or transactions.
+    for item in joining:
+        _validate_detached_self_mtp(item)
     existing_lanes = [] if batch is None else batch.lanes
-    uids = [lane.uid for lane in existing_lanes]
-    uids.extend((item.lane.uid for item in joining))
+    uids = [lane.uid for lane in existing_lanes] + [item.lane.uid for item in joining]
     if len(set(uids)) != len(uids):
         raise ValueError("self-MTP lane uid values must be unique")
-    depths = {lane.num_draft for lane in existing_lanes}
-    depths.update((item.lane.num_draft for item in joining))
+    depths = {lane.num_draft for lane in existing_lanes} | {
+        item.lane.num_draft for item in joining
+    }
     if len(depths) != 1:
         raise ValueError("adaptive per-lane self-MTP depth is excluded")
-    share_modes = {lane.share_qsa_indices for lane in existing_lanes}
-    share_modes.update((item.lane.share_qsa_indices for item in joining))
+    share_modes = {lane.share_index_state for lane in existing_lanes} | {
+        item.lane.share_index_state for item in joining
+    }
     if len(share_modes) != 1:
-        raise ValueError("mixed shared-QSA modes cannot enter one MTP cohort")
+        raise ValueError("mixed shared index-state modes cannot enter one MTP cohort")
+
     existing_objects = {
         id(cache)
         for pair in ([] if batch is None else batch.row_caches)
@@ -1477,70 +1501,240 @@ def attach_segmented_self_mtp_lanes(
     joining_objects = []
     for item in joining:
         objects = {id(cache) for cache in [*item.caches.target, *item.caches.draft]}
-        if existing_objects.intersection(objects):
+        if len(objects) != len(item.caches.target) + len(item.caches.draft):
+            raise ValueError("a segmented self-MTP lane aliases one cache object")
+        if existing_objects & objects:
             raise ValueError("segmented self-MTP lanes must own distinct cache objects")
-        if any((objects.intersection(previous) for previous in joining_objects)):
+        if any(objects & previous for previous in joining_objects):
             raise ValueError("segmented self-MTP lanes alias one cache object")
         joining_objects.append(objects)
-    started = []
-    transactions = []
-    created_transactions = []
+
+    all_pairs = ([] if batch is None else list(batch.row_caches)) + [
+        item.caches for item in joining
+    ]
+    binding = _bind_segmented_state_plane(model, operations, all_pairs)
+    if batch is not None:
+        empty_batch = not batch.lanes
+        if not empty_batch and batch.state_plane_operations is not operations:
+            raise RuntimeError("segmented state-plane provider identity changed")
+        if not empty_batch and batch.state_plane_binding != binding:
+            raise RuntimeError("segmented loaded-state binding changed")
+    for item in joining:
+        if item.state_plane_operations is not operations:
+            raise RuntimeError("detached state-plane provider identity changed")
+        if item.state_plane_binding != binding:
+            raise RuntimeError("detached loaded-state binding changed")
+
+    existing_positions = []
+    if batch is not None:
+        for pair, lane, transaction in zip(
+            batch.row_caches, batch.lanes, batch.transactions
+        ):
+            position = _self_mtp_group_offset(pair.target)
+            transaction.validate(pair, lane, position)
+            if transaction.position != position:
+                raise ValueError("segmented cache transaction position disagrees with target cache")
+            existing_positions.append(position)
+    joining_positions = []
+    for item in joining:
+        position = _self_mtp_group_offset(item.caches.target)
+        if item.segment_transaction is not None:
+            item.segment_transaction.validate(item.caches, item.lane, position)
+            if item.segment_transaction.position != position:
+                raise ValueError("segmented cache transaction position disagrees with target cache")
+        joining_positions.append(position)
+
+    prefix_ids = [item.shared_state_identity for item in joining]
+    shared_prefix_id = (
+        prefix_ids[0]
+        if batch is None
+        and len(prefix_ids) >= 2
+        and prefix_ids[0] is not None
+        and all(value == prefix_ids[0] for value in prefix_ids[1:])
+        else None
+    )
+    plan = materialization = None
+    shared_prefix_telemetry = ()
+    if shared_prefix_id is not None and attach_operations is not None:
+        remaining = max(item.lane.max_tokens - item.lane.ntoks for item in joining)
+        plan = attach_operations.plan_shared_prefix(
+            [item.caches for item in joining],
+            binding=binding,
+            prefix_id=shared_prefix_id,
+            remaining_tokens=remaining,
+            note=note_segmented_self_mtp,
+        )
+        if plan.binding != binding:
+            raise StatePlaneOperationRefused("shared-prefix plan binding drifted")
+        materialization = attach_operations.materialize_shared_prefix(plan)
+        if len(materialization.target_rows) != len(joining):
+            raise StatePlaneOperationRefused("shared-prefix row width changed")
+        shared_prefix_telemetry = tuple(
+            (*plan.telemetry, *materialization.telemetry)
+        )
+        for item in shared_prefix_telemetry:
+            if (
+                not isinstance(item, tuple)
+                or len(item) != 2
+                or not isinstance(item[0], str)
+                or not item[0]
+                or type(item[1]) is not int
+                or item[1] < 0
+            ):
+                raise StatePlaneOperationRefused(
+                    "shared-prefix provider returned invalid telemetry"
+                )
+
+    staged_existing, existing_replaced = [], []
+    for pair in ([] if batch is None else batch.row_caches):
+        target, changed = list(pair.target), False
+        if attach_operations is not None:
+            for layer, cache in enumerate(target):
+                if attach_operations.is_shared_prefix_cache(cache):
+                    replacement = attach_operations.materialize_private_prefix(cache)
+                    if replacement is cache:
+                        raise StatePlaneOperationRefused(
+                            "shared-prefix provider did not materialize a private row"
+                        )
+                    target[layer], changed = replacement, True
+        staged_existing.append(
+            SelfMTPCachePair(target=target, draft=pair.draft) if changed else pair
+        )
+        existing_replaced.append(changed)
+
+    staged_joining, joining_replaced = [], []
+    for index, item in enumerate(joining):
+        target = item.caches.target
+        if materialization is not None and plan.admitted:
+            target = list(materialization.target_rows[index])
+        changed = target is not item.caches.target
+        staged_joining.append(
+            SelfMTPCachePair(target=target, draft=item.caches.draft)
+            if changed
+            else item.caches
+        )
+        joining_replaced.append(changed)
+
+    started, created = [], []
+    staged_existing_transactions, staged_joining_transactions = [], []
     try:
-        for item in joining:
+        if batch is not None:
+            for pair, lane, previous, position, changed in zip(
+                staged_existing, batch.lanes, batch.transactions,
+                existing_positions, existing_replaced,
+            ):
+                if changed:
+                    _start_speculation_or_cleanup(
+                        pair.target, pair.target,
+                        "materialized shared-prefix rows must remain trimmable",
+                    )
+                    started.append(pair.target)
+                    successor = SegmentedLaneTransaction(pair, lane, position)
+                    successor.predecessor_lineage_id = previous.lineage.lineage_id
+                    created.append(successor)
+                    staged_existing_transactions.append(successor)
+                else:
+                    staged_existing_transactions.append(previous)
+        for item, pair, position, changed in zip(
+            joining, staged_joining, joining_positions, joining_replaced
+        ):
             _start_speculation_or_cleanup(
-                item.caches.target,
-                item.caches.target,
+                pair.target, pair.target,
                 "segmented self-MTP requires trimmable B1 target caches",
             )
-            started.append(item.caches.target)
-            position = _self_mtp_group_offset(item.caches.target)
-            transaction = item.segment_transaction
-            if transaction is None:
-                transaction = SegmentedLaneTransaction(item.caches, item.lane, position)
-                created_transactions.append((item, transaction))
+            started.append(pair.target)
+            previous = item.segment_transaction
+            if previous is None or changed:
+                successor = SegmentedLaneTransaction(pair, item.lane, position)
+                if previous is not None:
+                    successor.predecessor_lineage_id = previous.lineage.lineage_id
+                created.append(successor)
+                staged_joining_transactions.append(successor)
             else:
-                transaction.validate(item.caches, item.lane, position)
-                if transaction.position != position:
-                    raise ValueError(
-                        "segmented cache transaction position disagrees with target cache"
-                    )
-            item.segment_transaction = transaction
-            transactions.append(transaction)
+                staged_joining_transactions.append(previous)
     except BaseException:
-        for caches in started:
+        for caches in reversed(started):
             try:
                 _stop_all_speculation(caches)
             except BaseException:
                 pass
-        for item, transaction in created_transactions:
+        for transaction in reversed(created):
             try:
                 transaction.close()
             except BaseException:
                 pass
-            if item.segment_transaction is transaction:
-                item.segment_transaction = None
         note_segmented_self_mtp("failures")
         raise
-    if batch is None:
-        result = SegmentedSelfMTPState(
-            lanes=[item.lane for item in joining],
-            row_caches=[item.caches for item in joining],
-            transactions=transactions,
-            membership_epoch=1,
-            shared_qsa_prefix_id=initial_shared_qsa_prefix_id,
-        )
-        note_segmented_self_mtp("requests")
-        note_segmented_self_mtp("engaged")
-    else:
-        batch._segmented_caches = None
-        batch.shared_qsa_prefix_id = None
-        batch.lanes.extend((item.lane for item in joining))
-        batch.row_caches.extend((item.caches for item in joining))
-        batch.transactions.extend(transactions)
-        batch.membership_epoch += 1
-        result = batch
-    return result
 
+    old_existing_pairs = [] if batch is None else list(batch.row_caches)
+    old_existing_transactions = [] if batch is None else list(batch.transactions)
+    old_joining_pairs = [item.caches for item in joining]
+    old_joining_transactions = [item.segment_transaction for item in joining]
+    result = None
+    # Publication and every fallible post-publication operation share one
+    # poison boundary.  In particular, a telemetry callback may never escape
+    # after shared-prefix rows have been installed while leaving the cohort
+    # eligible for another request.
+    try:
+        if batch is None:
+            result = SegmentedSelfMTPState(
+                lanes=[item.lane for item in joining],
+                row_caches=staged_joining,
+                transactions=staged_joining_transactions,
+                membership_epoch=1,
+                shared_state_identity=shared_prefix_id,
+                state_plane_operations=operations,
+                state_plane_binding=binding,
+            )
+            note_segmented_self_mtp("requests")
+            note_segmented_self_mtp("engaged")
+        else:
+            batch._segmented_caches = None
+            batch.shared_state_identity = None
+            batch.state_plane_operations = operations
+            batch.state_plane_binding = binding
+            batch.lanes = list(batch.lanes) + [item.lane for item in joining]
+            batch.row_caches = staged_existing + staged_joining
+            batch.transactions = staged_existing_transactions + staged_joining_transactions
+            batch.membership_epoch += 1
+            result = batch
+        for item, pair, transaction in zip(
+            joining, staged_joining, staged_joining_transactions
+        ):
+            item.caches = pair
+            item.segment_transaction = transaction
+            item.state_plane_binding = binding
+        for key, amount in shared_prefix_telemetry:
+            note_segmented_self_mtp(key, amount)
+
+        # Publication is complete. Only now retire predecessor ownership.
+        for old_pair, changed in zip(old_existing_pairs, existing_replaced):
+            if changed:
+                _stop_all_speculation(old_pair.target)
+        for old_pair, changed in zip(old_joining_pairs, joining_replaced):
+            if changed:
+                _stop_all_speculation(old_pair.target)
+        for previous, successor in zip(
+            old_existing_transactions, staged_existing_transactions
+        ):
+            if previous is not successor:
+                previous.close()
+                note_segmented_self_mtp("transaction_canonicalizations")
+        for previous, successor in zip(
+            old_joining_transactions, staged_joining_transactions
+        ):
+            if previous is not None and previous is not successor:
+                previous.close()
+                note_segmented_self_mtp("transaction_canonicalizations")
+    except BaseException as error:
+        if result is not None:
+            _poison_self_mtp_batch(result, f"published attach failed: {error}")
+        try:
+            note_segmented_self_mtp("failures")
+        except BaseException:
+            pass
+        raise
+    return result
 
 def close_segmented_self_mtp_state(batch: SegmentedSelfMTPState) -> None:
     """Stop rollback and release every transaction lineage exactly once."""
@@ -1627,7 +1821,7 @@ def _capture_segmented_recovery(batch: SegmentedSelfMTPState) -> None:
 
     checkpoints = []
     # One clone memo for the whole cohort keeps what rows share, such as one
-    # immutable QSA base, shared in the checkpoint: the segmented view refuses
+    # immutable provider state base, shared in the checkpoint: the segmented view refuses
     # rows whose bases are separate copies. The memo is keyed by live object
     # ids, so no row restarts speculation, which may replace objects, until
     # every row has been captured.
@@ -1787,22 +1981,25 @@ def _propose_segmented_self_mtp(
             note_segmented_self_mtp("true_batched_declined")
             true_batched = False
         if true_batched:
-            from .segmented_batch_cache import (
-                SegmentedBatchUnsupported,
-                build_segmented_batch_cache_pair,
-            )
-
             note_segmented_self_mtp("true_batched_requests")
             compute_caches = batch._segmented_caches
             if compute_caches is None:
-                try:
-                    compute_caches = build_segmented_batch_cache_pair(
+                operations = batch.state_plane_operations
+                if not isinstance(operations, SegmentedViewOperations):
+                    note_segmented_self_mtp("true_batched_declined")
+                else:
+                    try:
+                        compute_caches = operations.build_segmented_view(
                         batch.row_caches,
                         note=note_segmented_self_mtp,
-                        shared_qsa_prefix=batch.shared_qsa_prefix_id is not None,
-                    )
-                except SegmentedBatchUnsupported:
-                    note_segmented_self_mtp("true_batched_declined")
+                            shared_prefix=batch.shared_state_identity is not None,
+                        )
+                        operations.validate_segmented_view(
+                            compute_caches, batch.row_caches
+                        )
+                    except (StatePlaneOperationRefused, ValueError, TypeError):
+                        note_segmented_self_mtp("true_batched_declined")
+                        compute_caches = None
             if compute_caches is not None:
                 batch._segmented_caches = compute_caches
                 batched_state = BatchedSelfMTPState(
@@ -1829,7 +2026,7 @@ def _propose_segmented_self_mtp(
                 return proposal
         else:
             batch._segmented_caches = None
-        batch.shared_qsa_prefix_id = None
+        batch.shared_state_identity = None
         for lane, pair, transaction in zip(
             batch.lanes, batch.row_caches, batch.transactions
         ):
@@ -1876,6 +2073,10 @@ def _propose_segmented_self_mtp(
         _bonuses=tuple((item._bonuses[0] for item in row_proposals)),
         relaxed_accepts=tuple(
             item.relaxed_accepts[0] if item.relaxed_accepts else 0
+            for item in row_proposals
+        ),
+        relaxed_positions=tuple(
+            item.relaxed_positions[0] if item.relaxed_positions else ()
             for item in row_proposals
         ),
         copy_spans=tuple(
@@ -2047,10 +2248,6 @@ def advance_batched_self_mtp_zero(
     branches = []
     true_batched = False
     if segmented:
-        from .segmented_batch_cache import (
-            SegmentedBatchUnsupported,
-            build_segmented_batch_cache_pair,
-        )
         from .segmented_self_mtp import (
             note_segmented_self_mtp,
             true_batched_segmented_self_mtp_enabled,
@@ -2076,13 +2273,21 @@ def advance_batched_self_mtp_zero(
             transaction.validate(pair, lane, transaction.position)
         compute_caches = batch._segmented_caches
         if compute_caches is None:
+            operations = batch.state_plane_operations
+            if not isinstance(operations, SegmentedViewOperations):
+                raise ZeroDepthFastUnavailable(
+                    "segmented K=0 fast path has no state-plane provider"
+                )
             try:
-                compute_caches = build_segmented_batch_cache_pair(
+                compute_caches = operations.build_segmented_view(
                     batch.row_caches,
                     note=note_segmented_self_mtp,
-                    shared_qsa_prefix=batch.shared_qsa_prefix_id is not None,
+                    shared_prefix=batch.shared_state_identity is not None,
                 )
-            except SegmentedBatchUnsupported as error:
+                operations.validate_segmented_view(
+                    compute_caches, batch.row_caches
+                )
+            except (StatePlaneOperationRefused, ValueError, TypeError) as error:
                 raise ZeroDepthFastUnavailable(
                     "segmented K=0 fast path requires a batched cache view"
                 ) from error
@@ -2310,7 +2515,7 @@ def _gate_draft_loop(
     of that stage's drafted tokens under the same transformed draft law that
     produced them.  One host readback serves every lane at a decision point.
     A lane that stops keeps exactly ``depth`` drafts, all of which are
-    verified.  ``cohort_wide`` (lanes sharing QSA indices) keeps one depth:
+    verified.  ``cohort_wide`` (lanes sharing provider index state) keeps one depth:
     the cohort continues only if every gated lane passes.
     """
     starts = {}
@@ -2385,10 +2590,10 @@ def _propose_batched_self_mtp_round(
         )
     k_vector = head_k_vector
     active_share_modes = {
-        lane.share_qsa_indices for (lane, k) in zip(batch.lanes, k_vector) if k > 1
+        lane.share_index_state for (lane, k) in zip(batch.lanes, k_vector) if k > 1
     }
     if len(active_share_modes) > 1:
-        raise ValueError("mixed shared-QSA modes cannot share a draft cycle")
+        raise ValueError("mixed shared index-state modes cannot share a draft cycle")
     drafts: List[List[int]] = [[] for _ in batch.lanes]
     draft_tokens: List[List[mx.array]] = [[] for _ in batch.lanes]
     draft_logprobs: List[List[mx.array]] = [[] for _ in batch.lanes]
@@ -2439,16 +2644,16 @@ def _propose_batched_self_mtp_round(
         d_vector = list(d_vector)
         k_vector = list(k_vector)
     max_k = max(d_vector)
-    share_qsa_this_cycle = False
+    share_index_state_this_cycle = False
     if max_k > 0:
         start_cycle = getattr(model, "mtp_start_cycle", None)
         if start_cycle is not None:
-            share_qsa_this_cycle = bool(
+            share_index_state_this_cycle = bool(
                 active_share_modes
                 and next(iter(active_share_modes))
                 and (len(set(d_vector)) == 1)
             )
-            start_cycle(batch.caches.draft, share_qsa_this_cycle)
+            start_cycle(batch.caches.draft, share_index_state_this_cycle)
         try:
             first_lengths = [
                 len(lane.pending_ts) + 1 if k > 0 else 0
@@ -2540,7 +2745,7 @@ def _propose_batched_self_mtp_round(
                         draft_logprobs,
                         d_vector,
                         k_vector,
-                        cohort_wide=share_qsa_this_cycle,
+                        cohort_wide=share_index_state_this_cycle,
                     )
                     if depth >= max(d_vector):
                         break
@@ -2863,11 +3068,13 @@ def _propose_batched_self_mtp_round(
             drafts = [row[:k] for (row, k) in zip(hosted_drafts, k_vector)]
     accepted: List[int] = []
     relaxed_accepts: List[int] = []
+    relaxed_positions: List[Tuple[int, ...]] = []
     bonuses: List[int] = []
     output_rows: List[Tuple[MTPToken, ...]] = []
     for row, (lane, k) in enumerate(zip(batch.lanes, k_vector)):
         logprobs = lane_logprobs[row]
         relaxed = 0
+        relaxed_at: Tuple[int, ...] = ()
         if k == 0:
             if greedy_cycle:
                 n_accept = 0
@@ -2953,12 +3160,12 @@ def _propose_batched_self_mtp_round(
                 and k > 0
                 and not copy_rows[row]
             ):
-                from .speculative_sampling import apply_fly_relaxation
+                from .speculative_sampling import apply_fly_relaxation_positions
 
                 target_laws = np.asarray(
                     mx.exp(logprobs[:k]).astype(mx.float32)
                 )
-                n_accept, relaxed = apply_fly_relaxation(
+                n_accept, relaxed_at = apply_fly_relaxation_positions(
                     drafts[row],
                     target_laws,
                     [
@@ -2967,13 +3174,16 @@ def _propose_batched_self_mtp_round(
                     ],
                     fly,
                 )
+                relaxed = len(relaxed_at)
             else:
                 n_accept = 0
                 while n_accept < k and targets[n_accept] == drafts[row][n_accept]:
                     n_accept += 1
+                relaxed_at = ()
             bonus = int(targets[n_accept])
         accepted.append(n_accept)
         relaxed_accepts.append(relaxed)
+        relaxed_positions.append(tuple(relaxed_at))
         bonuses.append(bonus)
         output_rows.append(
             tuple(
@@ -3018,6 +3228,7 @@ def _propose_batched_self_mtp_round(
         _logprobs=tuple(lane_logprobs),
         _bonuses=tuple(bonuses),
         relaxed_accepts=tuple(relaxed_accepts),
+        relaxed_positions=tuple(relaxed_positions),
         copy_spans=tuple(len(copy) for copy in copy_rows),
         copy_decisions=copy_decisions,
         draft_features=host_features,
@@ -3302,9 +3513,17 @@ def commit_batched_self_mtp(
                     emitted=count,
                     committed=committed,
                 )
-            lane.relaxed_accepts += (
-                proposal.relaxed_accepts[row] if proposal.relaxed_accepts else 0
+            committed_relaxed = count_delivered_relaxed_accepts(
+                (
+                    proposal.relaxed_positions[row]
+                    if proposal.relaxed_positions
+                    else ()
+                ),
+                proposal.relaxed_accepts[row] if proposal.relaxed_accepts else 0,
+                delivered=count,
+                accepted=accepted,
             )
+            lane.relaxed_accepts += committed_relaxed
             if count > accepted:
                 lane.stats.bonus_tokens += 1
     except BaseException as error:
@@ -3407,8 +3626,12 @@ def detach_self_mtp_lanes(
             note_segmented_self_mtp,
         )
 
+        operations = batch.state_plane_operations
+        attach_operations = (
+            operations if isinstance(operations, SegmentedAttachOperations) else None
+        )
         batch._segmented_caches = None
-        batch.shared_qsa_prefix_id = None
+        batch.shared_state_identity = None
         leaving = set(requested)
         keep = [index for index in range(len(batch.lanes)) if index not in leaving]
         detached = []
@@ -3432,8 +3655,13 @@ def detach_self_mtp_lanes(
                 shared_materialized = False
                 target = list(pair.target)
                 for layer_index, cache in enumerate(target):
-                    if getattr(cache, "supports_shared_qsa_suffix", False):
-                        (target[layer_index], _) = cache.materialize_to_qsa()
+                    if (
+                        attach_operations is not None
+                        and attach_operations.is_shared_prefix_cache(cache)
+                    ):
+                        target[layer_index] = (
+                            attach_operations.materialize_private_prefix(cache)
+                        )
                         shared_materialized = True
                 if shared_materialized:
                     pair.target = target
@@ -3448,7 +3676,11 @@ def detach_self_mtp_lanes(
                     )
                 successor_transactions.append(transaction)
                 item = DetachedSelfMTPLane(
-                    lane=lane, caches=pair, segment_transaction=transaction
+                    lane=lane,
+                    caches=pair,
+                    segment_transaction=transaction,
+                    state_plane_operations=batch.state_plane_operations,
+                    state_plane_binding=batch.state_plane_binding,
                 )
                 _eval_self_mtp_lane_state(item)
                 _validate_detached_self_mtp(item)
@@ -3486,7 +3718,14 @@ def detach_self_mtp_lanes(
                 )
             lane.pending_hs = None
             lane.pending_ts = []
-            item = DetachedSelfMTPLane(lane=lane, caches=caches)
+            item = DetachedSelfMTPLane(
+                lane=lane,
+                caches=caches,
+                state_plane_operations=getattr(model, "state_plane_operations", None),
+            )
+            item.state_plane_binding = _bind_segmented_state_plane(
+                model, item.state_plane_operations, [item.caches]
+            )
             _eval_self_mtp_lane_state(item)
             _validate_detached_self_mtp(item)
             detached.append(item)

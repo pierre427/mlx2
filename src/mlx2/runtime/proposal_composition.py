@@ -10,6 +10,7 @@ accepted state.
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -27,12 +28,16 @@ class ProposalCompositionPolicy:
     max_sources: int = 8
     native_mtp: bool = False
     mtp_max_history: int = 4096
+    score_decay_per_token: float = 0.9
     trusted_pld: bool = False
     trusted_pld_min_score: float = 0.9
     trusted_pld_min_verified_tokens: int = 32
     trusted_pld_min_match: int = 4
     trusted_pld_max_span: int = 8
-    trusted_pld_audit_interval: int = 0
+    # Trusted copies remain default-off.  When explicitly enabled, every
+    # eighth otherwise-trusted selection is target-audited.  Zero may be kept
+    # in an inactive policy for compatibility, but cannot enable trusted PLD.
+    trusted_pld_audit_interval: int = 8
 
     @classmethod
     def from_value(cls, value):
@@ -57,6 +62,15 @@ class ProposalCompositionPolicy:
                 raise ValueError(
                     f"proposal_composition {name} must be nonnegative integer"
                 )
+        if (
+            isinstance(policy.score_decay_per_token, bool)
+            or not isinstance(policy.score_decay_per_token, (int, float))
+            or not math.isfinite(float(policy.score_decay_per_token))
+            or not 0.0 <= float(policy.score_decay_per_token) < 1.0
+        ):
+            raise ValueError(
+                "proposal_composition score_decay_per_token must be finite in [0, 1)"
+            )
         if policy.min_context_match > 64:
             raise ValueError(
                 "proposal_composition min_context_match must be at most 64"
@@ -88,6 +102,8 @@ class ProposalCompositionPolicy:
             )
             if type(value) is not int or value < minimum:
                 raise ValueError(f"proposal_composition {name} is invalid")
+        if policy.trusted_pld and policy.trusted_pld_audit_interval < 1:
+            raise ValueError("trusted PLD requires a positive audit interval")
         return policy
 
     def as_dict(self):
@@ -112,6 +128,12 @@ class ComposedDraftModel:
     # draft groups (by pending-tail length), so ``len(anchors)`` is not the
     # verify width; the executor passes the physical cohort width.
     requires_cohort_width = True
+    # The executor must pass one mutable, rollback-snapshotted score table per
+    # request lane. Serving never uses adapter-global score state.
+    requires_proposal_score_states = True
+    # Audit cadence, revocation and recovery are request state, never resident
+    # adapter state.  The executor snapshots this mapping with its lane.
+    requires_proposal_trust_states = True
     _supported_proposal_distributions = frozenset(
         {"deterministic_point_mass", "stochastic_exact_law"}
     )
@@ -152,10 +174,10 @@ class ComposedDraftModel:
         self.last_proposal_sources = ()
         self.last_proposal_score_keys = ()
         self.last_proposal_scores = ()
+        self.last_proposal_trust_keys = ()
         self.last_proposal_trusted = ()
         self.last_proposal_audits = ()
-        self._score_counts = {}
-        self._trusted_pld_selections = 0
+        self.last_proposal_periodic_audits = ()
         self._trusted_stats = {
             "blind_rounds": 0,
             "blind_tokens": 0,
@@ -171,26 +193,30 @@ class ComposedDraftModel:
     _SCORE_PRIOR_STRENGTH = 8.0
     _SOURCE_ORDER = {"prompt_lookup": 0, "native_mtp": 1, "external": 2}
 
-    def _proposal_score(self, key):
-        accepted, proposed = self._score_counts.get(key, (0, 0))
+    def _proposal_score(self, key, score_state):
+        accepted, proposed = score_state.get(key, (0, 0))
         strength = self._SCORE_PRIOR_STRENGTH
         return (
             accepted + self._SCORE_PRIOR_ACCEPTANCE * strength
         ) / (proposed + strength)
 
-    def _select_candidate(self, candidates, external_span):
+    def _select_candidate(self, candidates, external_span, score_state=None):
         """Rank by committed score, usable span, then stable source order."""
+        score_state = {} if score_state is None else score_state
         return min(
             candidates,
             key=lambda item: (
-                -self._proposal_score(item[2]),
+                -self._proposal_score(item[2], score_state),
                 -(len(item[1]) if item[1] is not None else external_span),
                 self._SOURCE_ORDER[item[0]],
             ),
         )
 
-    def observe_proposal_feedback(self, key, proposed, accepted):
-        """Publish one committed verifier label set to the lagged scorer."""
+    @staticmethod
+    def observe_proposal_feedback(
+        score_state, key, proposed, accepted, decay_per_token=0.9
+    ):
+        """Publish committed verifier labels into the owning request lane."""
         if (
             not isinstance(key, str)
             or not key
@@ -200,26 +226,85 @@ class ComposedDraftModel:
             or proposed < 1
         ):
             raise ValueError("invalid committed proposal-composition feedback")
-        old_accepted, old_proposed = self._score_counts.get(key, (0, 0))
-        self._score_counts[key] = (
-            old_accepted + accepted,
-            old_proposed + proposed,
+        if not isinstance(score_state, dict):
+            raise ValueError("proposal feedback requires a lane-owned score state")
+        old_accepted, old_proposed = score_state.get(key, (0, 0))
+        # Decay by proposed-token mass so different K values have comparable
+        # memory. Values are weighted effective token counts.
+        decay = float(decay_per_token) ** proposed
+        score_state[key] = (
+            min(1000.0, old_accepted * decay + accepted),
+            min(1000.0, old_proposed * decay + proposed),
         )
 
-    def observe_trusted_pld(self, *, proposed, audited, accepted=0):
+    def observe_trusted_pld(
+        self,
+        trust_state,
+        key,
+        *,
+        proposed,
+        audited,
+        periodic_audit=False,
+        accepted=0,
+    ):
         if (
-            type(proposed) is not int
+            not isinstance(trust_state, dict)
+            or not isinstance(key, str)
+            or not key
+            or type(proposed) is not int
             or proposed < 1
             or type(audited) is not bool
+            or type(periodic_audit) is not bool
+            or periodic_audit and not audited
             or type(accepted) is not int
             or not 0 <= accepted <= proposed
         ):
             raise ValueError("invalid trusted PLD observation")
+        defaults = {
+            "blind_rounds": 0,
+            "blind_tokens": 0,
+            "blind_since_audit": 0,
+            "audit_rounds": 0,
+            "audit_proposed_tokens": 0,
+            "audit_accepted_tokens": 0,
+            "audit_failures": 0,
+            "periodic_audit_rounds": 0,
+            "revoked": False,
+            # Active trust evidence contains exact target-audited labels only.
+            # It is reset on every mismatch; ranking EWMA never enters here.
+            "exact_accepted_tokens": 0,
+            "exact_proposed_tokens": 0,
+        }
+        record = trust_state.setdefault(key, dict(defaults))
+        for name, value in defaults.items():
+            record.setdefault(name, value)
         if audited:
+            record["blind_since_audit"] = 0
+            record["audit_rounds"] += 1
+            record["audit_proposed_tokens"] += proposed
+            record["audit_accepted_tokens"] += accepted
+            record["periodic_audit_rounds"] += int(periodic_audit)
             self._trusted_stats["audit_rounds"] += 1
             self._trusted_stats["audit_proposed_tokens"] += proposed
             self._trusted_stats["audit_accepted_tokens"] += accepted
+            if accepted != proposed:
+                # Any target disagreement immediately revokes blind trust for
+                # this request and source bucket.  Exact audits continue until
+                # a fresh, bounded body of fully accepted target labels has
+                # rebuilt the minimum evidence.
+                record["audit_failures"] += 1
+                record["revoked"] = True
+                record["exact_accepted_tokens"] = 0
+                record["exact_proposed_tokens"] = 0
+            else:
+                record["exact_accepted_tokens"] += accepted
+                record["exact_proposed_tokens"] += proposed
+                if self._trusted_evidence_sufficient(record):
+                    record["revoked"] = False
         else:
+            record["blind_since_audit"] += 1
+            record["blind_rounds"] += 1
+            record["blind_tokens"] += proposed
             self._trusted_stats["blind_rounds"] += 1
             self._trusted_stats["blind_tokens"] += proposed
 
@@ -235,6 +320,33 @@ class ComposedDraftModel:
         else:
             raise ValueError("prompt lookup proposal has an unknown source")
         return f"prompt_lookup:match_{int(match)}"
+
+    @staticmethod
+    def _trusted_pld_key(score_key, copied_span):
+        """Bind trust to both source-match strength and copied span length."""
+        return f"{score_key}:span_{int(copied_span)}"
+
+    def _trusted_evidence_sufficient(self, record):
+        """Whether exact lane-owned evidence meets the configured thresholds."""
+        if not isinstance(record, dict):
+            return False
+        proposed = int(record.get("exact_proposed_tokens", 0))
+        accepted = int(record.get("exact_accepted_tokens", 0))
+        # Even an explicit zero-token threshold cannot make a cold bucket
+        # trusted: at least one exact target label is always required.
+        required = max(1, self.policy.trusted_pld_min_verified_tokens)
+        return (
+            proposed >= required
+            and 0 <= accepted <= proposed
+            and accepted / proposed >= self.policy.trusted_pld_min_score
+        )
+
+    def _trusted_evidence_ready(self, record):
+        """Whether exact evidence currently permits blind copying."""
+        return (
+            not bool(record.get("revoked", False))
+            and self._trusted_evidence_sufficient(record)
+        ) if isinstance(record, dict) else False
 
     def __getattr__(self, name):
         return getattr(self.backend, name)
@@ -267,6 +379,8 @@ class ComposedDraftModel:
                     "min_match": self.policy.trusted_pld_min_match,
                     "max_span": self.policy.trusted_pld_max_span,
                     "audit_interval": self.policy.trusted_pld_audit_interval,
+                    "trust_state": "request_lane_source_bucket",
+                    "audit_failure": "revoke_until_fresh_exact_recovery",
                     "execution": "teacher_force_target_body_project_bonus_row_only",
                     "rng": "copied_rows_consume_no_target_draws",
                     "scope": "B1_unprocessed_rows_only",
@@ -282,12 +396,19 @@ class ComposedDraftModel:
             "selected": True,
             "qualified": False,
             "authority": "diagnostic_proposal_attempts_only",
-            "proposal_attempt_rows": dict(self.composition_stats),
-            "score_counts": {
-                key: {"accepted_tokens": value[0], "proposed_tokens": value[1]}
-                for key, value in sorted(self._score_counts.items())
+            # These counters belong to the resident adapter, so keep them in
+            # an explicitly process-global diagnostic namespace.  Request
+            # receipts use the lane-owned committed counters instead.
+            "adapter_diagnostics": {
+                "scope": "process_global",
+                "proposal_attempt_rows": dict(self.composition_stats),
+                "trusted_pld": dict(self._trusted_stats),
             },
-            "trusted_pld": dict(self._trusted_stats),
+            "score_counts": {
+                # Request-local values are attached to response receipts by
+                # ExternalDraftBatchGenerator; never aggregate them here.
+                "scope": "request_lane"
+            },
         }
 
     def draft_distributions(
@@ -301,6 +422,8 @@ class ComposedDraftModel:
         *,
         logits_processors=None,
         processor_histories=None,
+        proposal_score_states=None,
+        proposal_trust_states=None,
         cohort_width=None,
         **kwargs,
     ):
@@ -308,6 +431,25 @@ class ComposedDraftModel:
             raise ValueError(
                 "proposal composition requires committed histories per row"
             )
+        if proposal_score_states is None:
+            # Direct CPU harness compatibility only. Serving declares the
+            # requires_proposal_score_states contract and always supplies its
+            # lane-owned tables; these transient maps do not survive this call.
+            proposal_score_states = [{} for _ in anchors]
+        if len(proposal_score_states) != len(anchors) or any(
+            not isinstance(state, dict) for state in proposal_score_states
+        ):
+            raise ValueError("proposal composition requires one lane-owned score state per row")
+        if proposal_trust_states is None:
+            proposal_trust_states = [{} for _ in anchors]
+        if len(proposal_trust_states) != len(anchors) or any(
+            not isinstance(state, dict) for state in proposal_trust_states
+        ):
+            raise ValueError(
+                "proposal composition requires one lane-owned trust state per row"
+            )
+        if cohort_width is None:
+            cohort_width = len(anchors)
         histories = [list(history) for history in processor_histories]
         # Determine host copies before opening the backend call; indexes see
         # committed tokens and the current anchor exactly once.  ``propose``
@@ -323,7 +465,14 @@ class ComposedDraftModel:
             self.policy.ngram_max, self.policy.min_context_match
         )
         candidates = []
-        for history, anchor in zip(histories, anchors):
+        for row_index, (history, anchor, score_state, trust_state) in enumerate(
+            zip(
+                histories,
+                anchors,
+                proposal_score_states,
+                proposal_trust_states,
+            )
+        ):
             copied = []
             row = []
             if self.policy.prompt_lookup and proposal_length:
@@ -369,15 +518,24 @@ class ComposedDraftModel:
                     for candidate in row
                     if candidate[0] == "prompt_lookup"
                     and self.policy.trusted_pld
-                    and self._score_counts.get(candidate[2], (0, 0))[1]
-                    < self.policy.trusted_pld_min_verified_tokens
+                    and cohort_width == 1
+                    and not (logits_processors or [[]])[row_index]
+                    and int(candidate[2].rsplit("_", 1)[1])
+                    >= self.policy.trusted_pld_min_match
+                    and len(candidate[1]) <= self.policy.trusted_pld_max_span
+                    and not self._trusted_evidence_ready(
+                        trust_state.get(
+                            self._trusted_pld_key(candidate[2], len(candidate[1])),
+                            {},
+                        )
+                    )
                 ),
                 None,
             )
             selected = (
                 calibration
                 if calibration is not None
-                else self._select_candidate(row, proposal_length)
+                else self._select_candidate(row, proposal_length, score_state)
                 if row
                 else ("external", None, "external")
             )
@@ -397,34 +555,39 @@ class ComposedDraftModel:
         confidence = (
             list(confidence) if confidence is not None else [None] * len(anchors)
         )
-        if cohort_width is None:
-            cohort_width = len(anchors)
         sources = []
-        score_keys, scores, trusted_rows, audit_rows = [], [], [], []
+        score_keys, scores, trust_keys, trusted_rows, audit_rows = [], [], [], [], []
+        periodic_audit_rows = []
         for row, (source, copied, score_key) in enumerate(candidates):
-            score = self._proposal_score(score_key)
+            score_state = proposal_score_states[row]
+            trust_state = proposal_trust_states[row]
+            score = self._proposal_score(score_key, score_state)
             trusted = False
             audited = False
+            periodic_audit = False
+            trust_key = None
             if source == "prompt_lookup" and copied and self.policy.trusted_pld:
                 match = int(score_key.rsplit("_", 1)[1])
-                _accepted, verified = self._score_counts.get(score_key, (0, 0))
-                calibrating = verified < self.policy.trusted_pld_min_verified_tokens
-                eligible = (
+                trust_key = self._trusted_pld_key(score_key, len(copied))
+                trust_record = trust_state.get(trust_key, {})
+                static_eligible = (
                     cohort_width == 1
                     and not (logits_processors or [[]])[row]
-                    and score >= self.policy.trusted_pld_min_score
-                    and verified >= self.policy.trusted_pld_min_verified_tokens
                     and match >= self.policy.trusted_pld_min_match
                     and len(copied) <= self.policy.trusted_pld_max_span
                 )
-                if calibrating:
+                ready = self._trusted_evidence_ready(trust_record)
+                if static_eligible and not ready:
+                    # Cold and revoked buckets always take the exact target
+                    # verifier. Ranking EWMA is intentionally irrelevant.
                     audited = True
-                elif eligible:
-                    self._trusted_pld_selections += 1
+                elif static_eligible:
                     interval = self.policy.trusted_pld_audit_interval
-                    audited = bool(
-                        interval and self._trusted_pld_selections % interval == 0
+                    periodic_audit = (
+                        int(trust_record.get("blind_since_audit", 0))
+                        >= interval - 1
                     )
+                    audited = periodic_audit
                     trusted = not audited
             if copied:
                 if not 0 < len(copied) <= proposal_length:
@@ -446,14 +609,18 @@ class ComposedDraftModel:
             sources.append(source)
             score_keys.append(score_key)
             scores.append(score)
+            trust_keys.append(trust_key)
             trusted_rows.append(trusted)
             audit_rows.append(audited)
+            periodic_audit_rows.append(periodic_audit)
         self.adaptive_confidence_features = confidence
         self.last_proposal_sources = tuple(sources)
         self.last_proposal_score_keys = tuple(score_keys)
         self.last_proposal_scores = tuple(scores)
+        self.last_proposal_trust_keys = tuple(trust_keys)
         self.last_proposal_trusted = tuple(trusted_rows)
         self.last_proposal_audits = tuple(audit_rows)
+        self.last_proposal_periodic_audits = tuple(periodic_audit_rows)
         if proposal_length:
             for source in sources:
                 self.composition_stats[source] += 1

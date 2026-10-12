@@ -81,7 +81,11 @@ from dataclasses import dataclass
 
 import mlx.core as mx
 
+from .import_env import snapshot as _import_env_snapshot
+from .moe_routing_contract import MoeRoutingContract, contract_refusal
 from .served_exp import ServedExpGate
+
+_import_env_snapshot(__name__)
 
 ROUTED_DECODE_ENV = "MLX_QWEN4_MOE_ROUTED_DECODE"
 VIEWS_ENV = "MLX_QWEN4_MOE_ROUTED_VIEWS"
@@ -183,17 +187,40 @@ def _quantized_ok(layer) -> str | None:
     return None
 
 
-def admit_routed_decode(x, indices, scores, gate_up, down) -> RoutedDecodeAdmission:
+def admit_routed_decode(
+    x,
+    indices,
+    scores,
+    gate_up,
+    down,
+    *,
+    contract: MoeRoutingContract | None,
+) -> RoutedDecodeAdmission:
     """Structural check; never evaluates an array (no device sync)."""
     hidden = x.shape[-1]
+    refusal = contract_refusal(contract)
+    if refusal is not None:
+        return RoutedDecodeAdmission(False, refusal)
+    assert isinstance(contract, MoeRoutingContract)
+    experts = down["weight"].shape[0]
+    top_k = indices.shape[-1]
+    refusal = contract.routing_refusal(
+        expert_count=experts,
+        top_k=top_k,
+        normalize_topk=True,
+        activation_dtype="bfloat16" if x.dtype == mx.bfloat16 else str(x.dtype),
+        projection_layout="fused_gate_up",
+    )
+    if refusal is not None:
+        return RoutedDecodeAdmission(False, refusal)
     if x.size != hidden:
         return RoutedDecodeAdmission(False, "not one token")
     if x.dtype != mx.bfloat16:
         return RoutedDecodeAdmission(False, "activation must be bfloat16")
-    if indices.size != TOP_K or indices.shape[-1] != TOP_K:
-        return RoutedDecodeAdmission(False, f"top-k must be {TOP_K}")
-    if scores is not None and (scores.size != TOP_K or scores.dtype != x.dtype):
-        return RoutedDecodeAdmission(False, "scores must be [10] in the activation dtype")
+    if indices.size != top_k:
+        return RoutedDecodeAdmission(False, "indices must hold one routed row")
+    if scores is not None and (scores.size != top_k or scores.dtype != x.dtype):
+        return RoutedDecodeAdmission(False, "scores must be [top-k] in the activation dtype")
     for name, layer in (("gate_up", gate_up), ("down", down)):
         reason = _quantized_ok(layer)
         if reason is not None:
@@ -212,20 +239,43 @@ def admit_routed_decode(x, indices, scores, gate_up, down) -> RoutedDecodeAdmiss
     return RoutedDecodeAdmission(True, "eligible")
 
 
-def admit_split_routed_decode(x, indices, scores, gate, up, down) -> RoutedDecodeAdmission:
+def admit_split_routed_decode(
+    x,
+    indices,
+    scores,
+    gate,
+    up,
+    down,
+    *,
+    contract: MoeRoutingContract | None,
+) -> RoutedDecodeAdmission:
     """``admit_routed_decode`` for separate gate and up expert tables.
 
     Same geometry; the gate and up tables must each be ``[E, inter, hidden]``
     packed like the down table's experts. Never evaluates an array.
     """
     hidden = x.shape[-1]
+    refusal = contract_refusal(contract)
+    if refusal is not None:
+        return RoutedDecodeAdmission(False, refusal)
+    assert isinstance(contract, MoeRoutingContract)
     if x.size != hidden:
         return RoutedDecodeAdmission(False, "not one token")
     if x.dtype != mx.bfloat16:
         return RoutedDecodeAdmission(False, "activation must be bfloat16")
     top_k = indices.shape[-1]
-    if top_k not in (8, TOP_K) or indices.size != top_k:
-        return RoutedDecodeAdmission(False, "top-k must be 8 or 10")
+    experts = down["weight"].shape[0]
+    refusal = contract.routing_refusal(
+        expert_count=experts,
+        top_k=top_k,
+        normalize_topk=True,
+        activation_dtype="bfloat16" if x.dtype == mx.bfloat16 else str(x.dtype),
+        projection_layout="split_gate_up",
+    )
+    if refusal is not None:
+        return RoutedDecodeAdmission(False, refusal)
+    if indices.size != top_k:
+        return RoutedDecodeAdmission(False, "indices must hold one routed row")
     if scores is not None and (scores.size != top_k or scores.dtype != x.dtype):
         return RoutedDecodeAdmission(False, "scores must be [top-k] in the activation dtype")
     from .switch_layers import QuantizedSwitchLinear
@@ -238,15 +288,15 @@ def admit_split_routed_decode(x, indices, scores, gate, up, down) -> RoutedDecod
         reason = _quantized_ok(layer)
         if reason is not None:
             return RoutedDecodeAdmission(False, f"{name}: {reason}")
-    experts = down["weight"].shape[0]
     inter = down["weight"].shape[-1] * 32 // BITS
     if hidden % 512:
         return RoutedDecodeAdmission(False, "hidden % 512 != 0 (MLX would not pick qmv_fast)")
-    qwen36 = (experts, hidden, inter, top_k) == (256, 2048, 512, 8)
-    if (inter % 512 == 0 and not qwen36) or inter % GROUP_SIZE:
+    compact_intermediate = (
+        contract.expert_kernel_layout == "qmv_fast_down_h2048_i512"
+        and (hidden, inter) == (2048, 512)
+    )
+    if (inter % 512 == 0 and not compact_intermediate) or inter % GROUP_SIZE:
         return RoutedDecodeAdmission(False, "intermediate must be a non-multiple of 512, multiple of 64")
-    if top_k == 8 and not qwen36:
-        return RoutedDecodeAdmission(False, "unsupported top-8 geometry")
     table = (experts, inter, hidden * BITS // 32)
     if tuple(gate["weight"].shape) != table or tuple(up["weight"].shape) != table:
         return RoutedDecodeAdmission(False, "gate/up tables do not match down")

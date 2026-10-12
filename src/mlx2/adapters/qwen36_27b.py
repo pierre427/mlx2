@@ -178,6 +178,16 @@ def configure_environment() -> dict[str, str]:
 class Qwen3627BAdapter(Qwen3827BAdapter):
     """Dense Qwen3.6 adapter with family-owned serving decisions."""
 
+    # Explicit operator-selected continuation strategies remain available,
+    # but automatic draft-loop selection needs a family-bound acceptance
+    # prior.  Never consume the Qwen3.8 prior inherited from the code-sharing
+    # base class.
+    draft_loop_prior_resource = None
+    # The target/draft pins remain mandatory, but route identity is family
+    # owned. Code-sharing must not publish Qwen3.8 names for Qwen3.6 state.
+    EXTERNAL_DEFAULT_NUM_DRAFT = 7
+    EXTERNAL_ROUTE_TAG = "external-dflash2-qwen36-27b-v1"
+    EXTERNAL_PROFILE = "qwen36-27b-apcv2-dflash2"
     default_route = "ordinary"
     default_route_execution_policy: ClassVar[dict] = {}
     descriptor = QWEN36_27B

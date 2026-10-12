@@ -10,6 +10,12 @@ from dataclasses import replace
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from ..process_env import (
+    PROCESS_NUMERICS,
+    assert_process_profile_applied,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 from .external_draft_policy import ExternalDraftAdapterMixin
 
 FAMILIES = frozenset({"qwen3", "qwen3_moe", "qwen2", "llama"})
@@ -455,6 +461,16 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
     EXTERNAL_ROUTE_TAG = "external-xpress-qwen3-v1"
     EXTERNAL_PROFILE = "qwen3-apcv2-xpress"
 
+    def attention_topology(self):
+        """Revision-bound full-KV contract for standard decoder state."""
+        from ..runtime.attention_topology import FULL_KV, AttentionTopology
+
+        return AttentionTopology(
+            state_revision=self.identity["fingerprint"],
+            cache_layout=self.layout,
+            layers=(FULL_KV,) * int(self.config["num_hidden_layers"]),
+        )
+
     def native_cohort_backend(self, kind):
         if kind != "kv_pair":
             raise ValueError("standard decoder has no requested native cohort capability")
@@ -579,7 +595,13 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
                 for layer in public:
                     layer.close()
             raise
-        return owner, Qwen3PackedCandidate(self.model, backend)
+        candidate = Qwen3PackedCandidate(self.model, backend)
+        from .native_continuation import bind_qwen_native_continuation_provider
+
+        bind_qwen_native_continuation_provider(
+            candidate, revision, self.model, "native_qwen3_paged"
+        )
+        return owner, candidate
 
     def paged_candidate_forward(self, lanes, *, backend=None, permit_candidate=False,
                                 requested_capabilities=frozenset({"text"})):
@@ -630,21 +652,15 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
                 release(self)
 
     def __init__(self, model_path: str, *, execution_policy=None):
-        # Quantized MoE experts consult two live process-wide selectors. Keep
-        # the ordinary Qwen3 MoE route on stock selectors throughout its life.
-        # Dense and other standard decoders do not call SwitchGLU.
-        family = _json(Path(model_path).expanduser().resolve() / "config.json").get(
-            "model_type"
-        )
-        if family == "qwen3_moe":
-            from .process_globals import guarded_construction
+        # Every standard family pins process numerics and clears inherited
+        # model selectors.  Keep that transition rollback-safe even for dense
+        # models that do not need a process-global MoE claim.
+        from .process_globals import guarded_construction
 
-            guarded_construction(
-                self,
-                lambda: self._initialize(model_path, execution_policy=execution_policy),
-            )
-        else:
-            self._initialize(model_path, execution_policy=execution_policy)
+        guarded_construction(
+            self,
+            lambda: self._initialize(model_path, execution_policy=execution_policy),
+        )
 
     def _claim_moe_globals(self):
         from .process_globals import claim_stock_moe
@@ -657,8 +673,6 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
         # pins no profile, so such a value used to run fp32 matmuls at TF32
         # while nothing in the receipt said so.  With it refused, the process
         # runs the package default "0", which receipts assume.
-        from ..process_env import require_process_numerics
-
         require_process_numerics("the standard decoder adapter")
         self.external_policy = dict(execution_policy or {})
         self.draft_model = None
@@ -701,6 +715,14 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
                 "standard decoder execution policy requires a supported draft_model"
             )
         artifact = inspect_artifact(model_path)
+        self.environment = {
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            **PROCESS_NUMERICS,
+        }
+        clear_inherited_profile(())
+        os.environ.update(self.environment)
+        assert_process_profile_applied("the standard decoder adapter")
         if artifact["config"]["model_type"] == "qwen3_moe":
             self._claim_moe_globals()
         if row_exact:
@@ -794,7 +816,6 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
         ):
             self.sampling_defaults = artifact_vendor_sampling(artifact)
         self.layout = CACHE_LAYOUT
-        self.environment = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
         path = Path(self.identity["path"])
         import mlx.core as mx
         from mlx import nn

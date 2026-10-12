@@ -8,6 +8,7 @@ see provenance/gemma4-mlx-vlm.json.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
@@ -31,6 +32,11 @@ _TOPOLOGIES = {
 _SOURCE_REVISIONS = {
     "26b-a4b": ("google/gemma-4-26B-A4B", "24548b62aa021d562695c04aaf7758a1ea47990b"),
     "31b": ("google/gemma-4-31B", "5bbc2fb1c1b2c611d06e3d9f23c170ba21659d89"),
+}
+_MEDIA_POLICY = {
+    "family": "gemma4",
+    "video_fps": 2.0,
+    "video_max_frames": 32,
 }
 
 
@@ -148,6 +154,9 @@ def _descriptor(variant, adapter_name):
         metadata={
             "execution": f"mlx2.adapters.gemma4.{adapter_name}",
             "qualification": "pending",
+            "ordinary_reference": "b1",
+            "topology_kind": "sparse_moe" if _TOPOLOGIES[variant]["moe"] else "dense",
+            "media_apcv2_identity": "artifact+ordered_media+processor_policy+lora",
             "required_qualification_checks": (
                 "multimodal_image",
                 "multimodal_video",
@@ -192,26 +201,154 @@ class _Gemma4Adapter(_MLXVLMAdapter):
     def _wrap_model(model):
         return _Gemma4LogitsModel(model)
 
-    def __init__(self, model_path, *, execution_policy=None):
+    @classmethod
+    def _inspect_adapter_artifact(cls, model_path):
         artifact = inspect_gemma4_artifact(model_path)
-        if artifact["variant"] != self.descriptor.variant:
+        if artifact["variant"] != cls.descriptor.variant:
             raise ValueError("Gemma 4 adapter variant does not match the artifact")
-        super().__init__(model_path, execution_policy=execution_policy)
-        self.identity.update(
-            {
-                key: artifact[key]
-                for key in (
-                    "variant",
-                    "precision",
-                    "full_attention_layers",
-                    "sliding_attention_layers",
-                )
-            }
-        )
+        return artifact
 
     def prefill_step_default(self):
         """Adapter-preferred prefill chunk; an explicit engine setting wins."""
         return int(type(self).default_prefill_step)
+
+    def optimization_eligibility(self):
+        """Declare variant-specific optimization surfaces without guessing.
+
+        The two Gemma 4 artifacts share request/cache policy, but their tensor
+        math is different.  The dense 31B may use the existing dense int8
+        projection-prefill path.  The A4B router and experts remain entirely
+        adapter-owned until a sparse-MoE implementation has its own geometry,
+        engagement, and qualification evidence.
+        """
+
+        topology = _TOPOLOGIES[self.descriptor.variant]
+        dense = not topology["moe"]
+        return {
+            "schema": "mlx2.gemma4-optimization-eligibility.v1",
+            "variant": self.descriptor.variant,
+            "topology_kind": "dense" if dense else "sparse_moe",
+            "ordinary_b1": {
+                "eligible": True,
+                "reference": True,
+                "default": True,
+                "selected": None,
+                "selection_authority": "serving_route_receipt",
+            },
+            "dense_int8_prefill": {
+                "eligible": dense,
+                "scopes": ("mlp", "all") if dense else (),
+                "reason": (
+                    "dense_decoder_projections_only"
+                    if dense
+                    else "sparse_router_and_experts_are_not_dense_projections"
+                ),
+                "qualified": False,
+                "selected": False,
+            },
+            "sparse_moe_prefill": {
+                "eligible": False,
+                "reason": (
+                    "no_gemma4_sparse_moe_kernel_declared"
+                    if topology["moe"]
+                    else "dense_variant_has_no_experts"
+                ),
+                "qualified": False,
+                "selected": False,
+            },
+            "speculative_decode": {
+                "eligible": False,
+                "reason": "no_bound_draft_artifact_or_verified_state_operation",
+                "qualified": False,
+                "selected": False,
+            },
+        }
+
+    def route_capability_contract(self):
+        """Return the adapter-owned ordinary/media/APCv2 route boundary."""
+
+        return {
+            "schema": "mlx2.gemma4-route-capability-contract.v1",
+            "family": "gemma-4",
+            "variant": self.descriptor.variant,
+            "route": "ordinary",
+            "ordinary_reference_preserved": True,
+            "capabilities": tuple(
+                sorted(capability.value for capability in self.descriptor.capabilities)
+            ),
+            "unsupported_capabilities": ("audio", "mtp", "external_draft"),
+            "apcv2": {
+                "exact_only": True,
+                "cache_layout": self.descriptor.cache_layout,
+                "state_planes": tuple(
+                    sorted(plane.value for plane in self.descriptor.state_planes)
+                ),
+                "media_semantic_identity": (
+                    "artifact_fingerprint",
+                    "ordered_media_fingerprint",
+                    "media_processor_policy",
+                    "lora_fingerprint",
+                ),
+                "publication": "ordinary_route_only_after_complete_media_prefill",
+                "candidate_verify_publication": False,
+            },
+            "media": {
+                "modalities": ("image", "video"),
+                "audio": False,
+                "policy": dict(_MEDIA_POLICY),
+                "required_internal_fields": (
+                    "_mlx2_prompt_tokens",
+                    "_mlx2_prefill_inputs",
+                    "_mlx2_media_token_end",
+                    "_mlx2_media_fingerprint",
+                ),
+            },
+            "optimization": self.optimization_eligibility(),
+            "qualified": False,
+        }
+
+    def validate_prepared_media_route(self, request):
+        """Fail closed on incomplete internal media/APCv2 identity.
+
+        This validates adapter-produced request metadata before prompt tokens
+        can enter the ordinary route.  It does not accept or manufacture an
+        alternate media route.
+        """
+
+        if not isinstance(request, Mapping):
+            raise TypeError("Gemma 4 prepared media request must be a mapping")
+        required = self.route_capability_contract()["media"][
+            "required_internal_fields"
+        ]
+        missing = [name for name in required if name not in request]
+        if missing:
+            raise ValueError(
+                "Gemma 4 prepared media route is incomplete: " + ", ".join(missing)
+            )
+        tokens = request["_mlx2_prompt_tokens"]
+        inputs = request["_mlx2_prefill_inputs"]
+        media_end = request["_mlx2_media_token_end"]
+        fingerprint = request["_mlx2_media_fingerprint"]
+        if not isinstance(tokens, (tuple, list)) or not tokens:
+            raise ValueError("Gemma 4 prepared media tokens are missing")
+        if not isinstance(inputs, Mapping):
+            raise TypeError("Gemma 4 prepared media inputs must be a mapping")
+        if type(media_end) is not int or media_end < 1 or media_end > len(tokens):
+            raise ValueError("Gemma 4 media boundary is outside the prompt")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise ValueError("Gemma 4 media fingerprint is missing")
+        if not any(
+            inputs.get(name) is not None
+            for name in ("pixel_values", "pixel_values_videos")
+        ):
+            raise ValueError("Gemma 4 prepared media payload is missing")
+        return {
+            "route": "ordinary",
+            "cache_layout": self.descriptor.cache_layout,
+            "media_token_end": media_end,
+            "media_fingerprint": fingerprint,
+            "apcv2_exact": True,
+        }
 
     @staticmethod
     def int8_prefill_select(scope):
@@ -373,9 +510,10 @@ class _Gemma4Adapter(_MLXVLMAdapter):
         A prompt that already starts with ``<bos>`` (an instruct template, or
         a client that sent it) is left unchanged.
         """
-        ids = super().prompt_tokens(request)
         if "_mlx2_prompt_tokens" in request:
-            return ids
+            self.validate_prepared_media_route(request)
+            return super().prompt_tokens(request)
+        ids = super().prompt_tokens(request)
         bos = getattr(self.processor.tokenizer, "bos_token_id", None)
         if bos is not None and (not ids or ids[0] != bos):
             ids = [int(bos), *ids]
@@ -458,8 +596,7 @@ class _Gemma4Adapter(_MLXVLMAdapter):
             name: mx.array(value) if isinstance(value, np.ndarray) else value
             for name, value in kwargs.items()
         }
-        policy = {"family": "gemma4", "video_fps": 2.0, "video_max_frames": 32}
-        fingerprint = media_fingerprint(media, policy=policy)
+        fingerprint = media_fingerprint(media, policy=_MEDIA_POLICY)
         kwargs["vision_cache"] = self.media_feature_cache
         if images:
             kwargs["_image_key"] = f"{self.identity['fingerprint']}:{fingerprint}:image"
@@ -481,6 +618,7 @@ class _Gemma4Adapter(_MLXVLMAdapter):
             "precision": self.identity["precision"],
             "full_attention_layers": self.identity["full_attention_layers"],
             "sliding_attention_layers": self.identity["sliding_attention_layers"],
+            "route_capability_contract": self.route_capability_contract(),
         }
 
 

@@ -1,0 +1,64 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "date": "2026-10-12",
+  "implementation": "Original mlx2 model-neutral request-local cost-per-committed-token handoff; no paper or external repository code copied",
+  "research_source": {
+    "title": "Speedbumps: Rejection Attacks on Speculative Decoding",
+    "authors": [
+      "Adam Y. J. Jones",
+      "Yu Yuan",
+      "Sergio Maffeis"
+    ],
+    "revision": "arXiv:2610.10929v1",
+    "url": "https://arxiv.org/abs/2610.10929v1",
+    "license": "arXiv.org perpetual non-exclusive license",
+    "relationship": "Threat-model and measurement motivation only: adversarial rejection can make speculation cost more per committed token than ordinary decoding. The paper did not supply this handoff implementation."
+  },
+  "owned_source": {
+    "repository": "https://github.com/pierre427/mlx2",
+    "revision": "d661fd1cce683d7da4a2d2139f3883596a3955f7",
+    "license": "Apache-2.0",
+    "paths": [
+      "src/mlx2/runtime/cost_per_commit_handoff.py",
+      "src/mlx2/runtime/adaptive_policy.py",
+      "src/mlx2/runtime/generate.py",
+      "src/mlx2/runtime/external_speculative.py",
+      "src/mlx2/runtime/prompt_lookup.py",
+      "src/mlx2/runtime/pld.py",
+      "src/mlx2/adapters/external_draft_policy.py",
+      "tests/test_cost_per_commit_handoff_cpu.py"
+    ]
+  },
+  "mined_internal_mechanisms": [
+    {
+      "revision": "d661fd1cce683d7da4a2d2139f3883596a3955f7",
+      "path": "src/mlx2/runtime/prompt_lookup.py",
+      "mechanism": "request-local ordinary and speculative timing windows in CostAwarePLDLatch"
+    },
+    {
+      "revision": "d661fd1cce683d7da4a2d2139f3883596a3955f7",
+      "path": "src/mlx2/runtime/mtp_park_memory.py",
+      "mechanism": "same-timing-domain comparison and conservative sustained-loss policy"
+    }
+  ],
+  "modifications": [
+    "Centralize strict lane-owned, width-separated cost-per-committed-token evidence behind one default-off policy contract.",
+    "Give late-joining lanes a bounded ordinary baseline without replacing established peers' speculative evidence.",
+    "Apply one-way per-lane handoff only after a closed committed boundary across native MTP, external and composed drafting, and prompt lookup drafting.",
+    "Preserve exact target state, RNG ownership, cancellation, ordinary reference routes, and existing static width policy.",
+    "Emit receipts that distinguish selected sampling from a terminal handoff decision."
+  ],
+  "validation": {
+    "scope": "focused CPU policy and lifecycle tests only; no GPU, performance, qualification or default-selection claim",
+    "tests": [
+      "tests/test_cost_per_commit_handoff_cpu.py",
+      "tests/test_external_dflash2_cpu.py",
+      "tests/test_prompt_lookup_core.py",
+      "tests/test_pld_live.py"
+    ]
+  },
+  "implemented": true,
+  "qualified": false,
+  "new_defaults_selected": false,
+  "performance_claim": false
+}

@@ -20,12 +20,19 @@
     "src/tensorfold/kernels/qwen/dense/v1/stream_gdn.py"
   ],
   "destination": "src/mlx2/runtime/tensorfold_qwen38",
+  "destination_paths": [
+    "src/mlx2/runtime/tensorfold_qwen38",
+    "src/mlx2/runtime/qwen38_tensorfold.py",
+    "src/mlx2/runtime/target_tree_executor.py",
+    "src/mlx2/adapters/qwen38_target_tree_executor.py"
+  ],
   "modifications": [
     "Rewrote package imports from tensorfold.kernels.qwen.dense.v1 to the private mlx2 runtime package.",
     "Hash-bound every shipped module to the reviewed projection before route construction.",
     "Replaced the vendored stream GDN entry points with mlx2.runtime.models.qwen38_tree_gdn after validation.",
     "Removed the production dependency on MLX2_TENSORFOLD_SOURCE and a separate TensorFold checkout.",
-    "Kept ordinary reference decoding available and kept the route labelled unqualified."
+    "Kept ordinary reference decoding available and kept the route labelled unqualified.",
+    "Moved source validation, revision binding and dispatch facts behind a Qwen3.8-owned provider while keeping the scheduler executor-neutral."
   ],
   "validation": [
     "Focused default-policy, adapter, external-tree transaction and failure-closure CPU suites.",

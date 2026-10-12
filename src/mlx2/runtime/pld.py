@@ -16,6 +16,11 @@ from typing import Any
 import mlx.core as mx
 
 from .committed_recovery import CommittedRecoverySlot, RecoveryCheckpointMismatch
+from .cache_operations import (
+    CacheOperationsUnsupported,
+    cache_evaluation_values,
+    cache_operations,
+)
 from .cow_cache import (
     restore_recovery_descriptors,
     snapshot_committed_cache,
@@ -29,7 +34,7 @@ from .generate import (
     generation_stream,
 )
 from .models import cache as cache_module
-from .models.cache import ArraysCache, CacheList, KVCache, RotatingKVCache
+from .models.cache import CacheList, KVCache
 from .prefill_plan import prompt_length_prefill_step
 from . import round_phases
 from .prompt_lookup import (
@@ -90,7 +95,17 @@ def _finite_at(row, token):
 
 
 def _walk_state(caches):
-    return [entry.state for entry in caches]
+    values = []
+    for entry in caches:
+        if isinstance(entry, CacheList):
+            values.extend(_walk_state(entry.caches))
+        else:
+            values.extend(
+                cache_evaluation_values(
+                    entry, capability="PLD speculative state evaluation"
+                )
+            )
+    return values
 
 
 def _steer_slice(steer, start, stop):
@@ -108,12 +123,20 @@ def _validate_cache(caches):
         if isinstance(entry, CacheList):
             for child in entry.caches:
                 visit(child)
-        elif isinstance(entry, (ArraysCache, RotatingKVCache, KVCache)):
             return
-        elif not (hasattr(entry, "offset") and hasattr(entry, "trim")):
+        try:
+            contract = cache_operations(
+                entry, capability="PLD speculative rollback"
+            )
+        except CacheOperationsUnsupported as error:
             raise NotImplementedError(
-                "prompt lookup requires exact rollback-capable caches; "
+                "prompt lookup requires a declared exact rollback contract; "
                 f"{type(entry).__name__} is unsupported"
+            ) from error
+        if contract.rollback is None:
+            raise NotImplementedError(
+                "prompt lookup requires a declared exact rollback operation; "
+                f"{type(entry).__name__} does not declare one"
             )
 
     for entry in caches:
@@ -184,7 +207,12 @@ def _rotating_leaves(caches):
         entry = stack.pop()
         if isinstance(entry, CacheList):
             stack.extend(reversed(entry.caches))
-        elif isinstance(entry, RotatingKVCache):
+        elif (
+            cache_operations(
+                entry, capability="PLD rotating replay", required=False
+            )
+            or SimpleNamespace(family=None)
+        ).family == "rotating_kv":
             leaves.append(entry)
     return leaves
 
@@ -198,48 +226,52 @@ def _snapshot(caches, *, skip_rotating=False):
     """
 
     def one(entry):
-        if isinstance(entry, CacheList):
+        if type(entry) is CacheList:
             return ("list", [one(child) for child in entry.caches])
-        if isinstance(entry, ArraysCache):
-            if not entry.is_trimmable():
-                raise RuntimeError("ArraysCache rollback epoch is not active")
-            return ("array", entry.rollback_marker())
-        if isinstance(entry, RotatingKVCache):
-            if skip_rotating:
-                return ("replay",)
-            return (
-                "rotating",
-                None if entry.keys is None else mx.array(entry.keys),
-                None if entry.values is None else mx.array(entry.values),
-                entry.offset,
-                getattr(entry, "_idx", None),
-            )
-        if isinstance(entry, KVCache) or (
-            hasattr(entry, "offset") and hasattr(entry, "trim")
-        ):
-            return ("trim", entry.offset)
-        raise NotImplementedError(type(entry).__name__)
+        contract = cache_operations(entry, capability="PLD rollback capture")
+        return contract.capture_rollback(entry, skip_rotating=skip_rotating)
 
     return [one(entry) for entry in caches]
 
 
 def _rewind(caches, snapshots):
+    def validate(entry, snapshot):
+        if isinstance(snapshot, tuple) and snapshot and snapshot[0] == "list":
+            if (
+                len(snapshot) != 2
+                or not isinstance(snapshot[1], list)
+                or type(entry) is not CacheList
+                or len(entry.caches) != len(snapshot[1])
+            ):
+                raise CacheOperationsUnsupported(
+                    "PLD rollback cache container changed before restore"
+                )
+            for child, child_snapshot in zip(entry.caches, snapshot[1]):
+                validate(child, child_snapshot)
+            return
+        if type(entry) is CacheList:
+            raise CacheOperationsUnsupported(
+                "PLD rollback cache container changed before restore"
+            )
+        cache_operations(
+            entry, capability="PLD rollback preflight"
+        ).validate_rollback_snapshot(snapshot, cache=entry)
+
     def one(entry, snapshot):
-        if snapshot[0] == "list":
+        if isinstance(snapshot, tuple) and snapshot and snapshot[0] == "list":
             for child, child_snapshot in zip(entry.caches, snapshot[1]):
                 one(child, child_snapshot)
-        elif snapshot[0] == "array":
-            entry.rewind_to_rollback_marker(snapshot[1])
-        elif snapshot[0] == "trim":
-            entry.trim(int(entry.offset) - int(snapshot[1]))
-        elif snapshot[0] == "replay":
-            return
         else:
-            _, keys, values, offset, index = snapshot
-            entry.keys, entry.values, entry.offset = keys, values, offset
-            if index is not None:
-                entry._idx = index
+            cache_operations(
+                entry, capability="PLD rollback restore"
+            ).restore_rollback(entry, snapshot)
 
+    if len(caches) != len(snapshots):
+        raise CacheOperationsUnsupported(
+            "PLD rollback cache width changed before restore"
+        )
+    for entry, snapshot in zip(caches, snapshots):
+        validate(entry, snapshot)
     for entry, snapshot in zip(caches, snapshots):
         one(entry, snapshot)
 
@@ -387,6 +419,7 @@ class PromptLookupBatchGenerator:
             "admission_reprobe_interval",
             "admission_probe_stride",
             "cost_aware_admission",
+            "cost_one_way_handoff",
             "cost_shadow_span",
             "cost_probe_stride",
             "cost_shadow_window",
@@ -474,6 +507,7 @@ class PromptLookupBatchGenerator:
             "adaptive",
             "deferred_admission",
             "cost_aware_admission",
+            "cost_one_way_handoff",
             "cliff_aware_span",
             "rotating_replay",
             "batched_verify",
@@ -508,6 +542,12 @@ class PromptLookupBatchGenerator:
             raise ValueError("prompt_lookup cost_aware_admission and deferred_admission are exclusive")
         if validated.get("cost_aware_admission") and validated.get("cost_shadow_span", 4) > validated.get("num_draft", 8):
             raise ValueError("prompt_lookup cost_shadow_span exceeds num_draft")
+        if validated.get("cost_one_way_handoff") and not validated.get(
+            "cost_aware_admission"
+        ):
+            raise ValueError(
+                "prompt_lookup cost_one_way_handoff requires cost_aware_admission"
+            )
         if "lookback_ladder" in validated:
             ladder = validated["lookback_ladder"]
             if (
@@ -907,6 +947,9 @@ class PromptLookupBatchGenerator:
                     cost_margin=config.get("cost_margin", 0.05),
                     reprobe_interval=config.get("cost_reprobe_interval", 32),
                     park_rounds=config.get("cost_park_rounds", 4),
+                    one_way_handoff=config.get("cost_one_way_handoff", False),
+                    lane_uid=uid,
+                    owner_scope=source_scope,
                 ) if config.get("cost_aware_admission", False) else None),
                 source_scope=source_scope,
                 source_stats={
@@ -1384,14 +1427,22 @@ class PromptLookupBatchGenerator:
         """
         from .hybrid_verify_rows import is_hybrid_rows
 
-        return (
-            isinstance(cache, list)
-            and bool(cache)
-            and (
-                all(type(entry) in (KVCache, RotatingKVCache) for entry in cache)
-                or is_hybrid_rows([cache])
+        if not isinstance(cache, list) or not cache:
+            return False
+        contracts = [
+            cache_operations(
+                entry, capability="PLD batched speculative rollback", required=False
             )
+            for entry in cache
+        ]
+        if any(contract is None or contract.rollback is None for contract in contracts):
+            return False
+        plain = all(
+            contract.rollback == "kv_trim"
+            and contract.family in {"kv", "rotating_kv"}
+            for contract in contracts
         )
+        return plain or is_hybrid_rows([cache])
 
     def _begin_verify(self, lanes, lengths):
         """Open the verify transaction chosen by cache topology, never by model.
@@ -1947,7 +1998,7 @@ class PromptLookupBatchGenerator:
         if cost is not None and round_started_ns is not None:
             duration_ns = time.perf_counter_ns() - round_started_ns
             cost.observe_round(duration_ns, len(delivered), len(proposal), lane.generated)
-            lane.ordinary = cost.state == "parked"
+            lane.ordinary = cost.state in {"parked", "handed_off"}
             lane.stats.latched = lane.ordinary
         if probing and delivered:
             lane.admission_matches += probe_matched

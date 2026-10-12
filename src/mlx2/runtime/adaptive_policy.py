@@ -1717,6 +1717,9 @@ class MTPOrdinaryHandoffPolicy:
     # decides instead of the fixed width; ``max_mtp_width`` remains its
     # cold-start threshold.  Mined from oMLX #4112.
     adaptive_park: Any = None
+    # Default off.  Request-owned evidence may hand individual lanes to the
+    # ordinary decoder after comparing like-width cost per committed token.
+    cost_per_commit: Any = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -1726,8 +1729,23 @@ class MTPOrdinaryHandoffPolicy:
         object.__setattr__(
             self, "adaptive_park", AdaptiveParkSettings.from_value(self.adaptive_park)
         )
+        from .cost_per_commit_handoff import CostPerCommitHandoffSettings
+
+        object.__setattr__(
+            self,
+            "cost_per_commit",
+            CostPerCommitHandoffSettings.from_value(self.cost_per_commit),
+        )
         if self.adaptive_park is not None and not self.enabled:
             raise ValueError("adaptive_park requires an enabled MTP ordinary handoff")
+        if self.cost_per_commit is not None and not self.enabled:
+            raise ValueError(
+                "cost_per_commit requires an enabled MTP ordinary handoff"
+            )
+        if self.adaptive_park is not None and self.cost_per_commit is not None:
+            raise ValueError(
+                "adaptive_park and per-lane cost_per_commit are mutually exclusive"
+            )
         if self.max_mtp_width is not None:
             _positive_integer(
                 self.max_mtp_width, name="MTP ordinary handoff max_mtp_width"
@@ -1752,7 +1770,12 @@ class MTPOrdinaryHandoffPolicy:
             return value
         if not isinstance(value, Mapping):
             raise ValueError("mtp_ordinary_handoff must be an object")
-        allowed = {"enabled", "max_mtp_width", "adaptive_park"}
+        allowed = {
+            "enabled",
+            "max_mtp_width",
+            "adaptive_park",
+            "cost_per_commit",
+        }
         unknown = set(value) - allowed
         if unknown:
             raise ValueError(
@@ -1772,6 +1795,8 @@ class MTPOrdinaryHandoffPolicy:
         # Present only when selected: default receipts keep their settings.
         if self.adaptive_park is not None:
             values["adaptive_park"] = self.adaptive_park.as_dict()
+        if self.cost_per_commit is not None:
+            values["cost_per_commit"] = self.cost_per_commit.as_dict()
         return values
 
     def decision(

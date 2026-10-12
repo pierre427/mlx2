@@ -495,6 +495,10 @@ def create_cold_packed_hybrid(adapter, requests, *, profile, live_identity,
         for boot in boots:boot.receipt.update(receipt)
         candidate._hybrid_bootstrap_receipts=tuple(boot.receipt for boot in boots)
         candidate._packed_prefill_receipt=receipt
+        from ..adapters.native_continuation import bind_qwen_native_continuation_provider
+        bind_qwen_native_continuation_provider(
+            candidate, adapter.identity['fingerprint'], adapter.model,
+            'native_hybrid_paged_b2')
         return tuple(resources.owners),candidate,tuple(boots)
     except BaseException:
         try:

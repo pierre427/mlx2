@@ -1,0 +1,49 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "date": "2026-10-12",
+  "implementation": "Original mlx2 model-neutral declared-cohort ownership integration; no external code copied",
+  "owned_source": {
+    "repository": "https://github.com/pierre427/mlx2",
+    "revision": "d661fd1cce683d7da4a2d2139f3883596a3955f7",
+    "license": "Apache-2.0",
+    "paths": [
+      "src/mlx2/runtime/cohort_ownership.py",
+      "src/mlx2/runtime/external_speculative.py",
+      "src/mlx2/runtime/generate.py",
+      "tests/test_external_dflash2_cpu.py",
+      "tests/test_declared_cohort_ownership_cpu.py",
+      "tests/test_ordinary_cohort_frontier.py"
+    ]
+  },
+  "mined_internal_mechanisms": [
+    {
+      "revision": "f300cc82c38e19687152e1ec76cf1621d98dfcc1",
+      "path": "src/mlx2/runtime/generate.py",
+      "mechanism": "ordinary declared-cohort ownership through the complete decode frontier"
+    },
+    {
+      "revision": "673aa9fe08a512a19d6bbe4c22c39a131a40ca9d",
+      "path": "src/mlx2/runtime/external_speculative.py",
+      "mechanism": "external executor atomic prefill frontier hold"
+    }
+  ],
+  "modifications": [
+    "Centralize strict tenant, cohort id and declared-width identity parsing so malformed declarations cannot silently become undeclared work.",
+    "Keep external speculative cohort ownership atomic until every member reaches the first complete decode frontier.",
+    "Fail incomplete declarations and pre-frontier member loss as a whole through the existing serving atomic-failure channel while preserving unrelated work.",
+    "Permit normal dynamic width shrink after the complete frontier is observed.",
+    "Emit an external route receipt that distinguishes implemented, selected, qualified and observed-used state."
+  ],
+  "validation": {
+    "scope": "focused CPU lifecycle and source checks only; no GPU, performance or qualification claim",
+    "tests": [
+      "tests/test_external_dflash2_cpu.py -k external_atomic_cohort",
+      "tests/test_declared_cohort_ownership_cpu.py",
+      "tests/test_ordinary_cohort_frontier.py"
+    ]
+  },
+  "implemented": true,
+  "qualified": false,
+  "new_defaults_selected": false,
+  "performance_claim": false
+}

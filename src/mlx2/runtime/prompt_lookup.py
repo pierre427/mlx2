@@ -80,6 +80,7 @@ class CostAwarePLDLatch:
         self, *, shadow_span=4, probe_stride=4, shadow_window=2,
         shadow_gate=0.75, plain_rounds=8, explore_rounds=2,
         cost_margin=0.05, reprobe_interval=32, park_rounds=4,
+        one_way_handoff=False, lane_uid=None, owner_scope=None,
     ):
         self.shadow_span = shadow_span
         self.probe_stride = probe_stride
@@ -103,6 +104,27 @@ class CostAwarePLDLatch:
         self.memory_parks = self.memory_blocked_rounds = 0
         self.plain_ns = self.verify_ns = 0
         self.plain_tokens = self.verify_tokens = 0
+        self.handoff_state = None
+        if one_way_handoff:
+            from .cost_per_commit_handoff import (
+                CostPerCommitHandoffSettings,
+                CostPerCommitLaneState,
+            )
+
+            self.handoff_state = CostPerCommitLaneState(
+                CostPerCommitHandoffSettings(
+                    enabled=True,
+                    ordinary_samples=plain_rounds,
+                    speculative_samples=park_rounds,
+                    loss_ratio=max(1.0 - float(cost_margin), 1e-9),
+                    loss_decisions=1,
+                    window=max(plain_rounds, park_rounds, 16),
+                ),
+                lane_uid=lane_uid,
+                owner_scope=owner_scope,
+            )
+            self._handoff_lane_uid = lane_uid
+            self._handoff_owner_scope = owner_scope
 
     def should_probe(self, generated):
         return (
@@ -135,6 +157,8 @@ class CostAwarePLDLatch:
         return sum(ns for ns, _count in samples) / tokens if tokens else None
 
     def _park(self, generated, *, width=False):
+        if self.state == "handed_off":
+            return
         if self.state != "parked":
             self.parks += 1
             self.width_parks += int(width)
@@ -196,9 +220,23 @@ class CostAwarePLDLatch:
                 self.empty_rounds += 1
                 if self.empty_rounds >= self.park_rounds:
                     self._park(generated)
+        if self.handoff_state is not None:
+            decision = self.handoff_state.observe(
+                kind="speculative" if proposed else "ordinary",
+                elapsed_ns=int(duration_ns),
+                committed_tokens=int(delivered),
+                execution_width=1,
+                lane_uid=self._handoff_lane_uid,
+                owner_scope=self._handoff_owner_scope,
+            )
+            if decision is not None:
+                self.state = "handed_off"
+                self.reprobe_at = (1 << 62) - 1
+                self.shadow = ()
+                self.shadow_hits.clear()
 
     def receipt(self):
-        return {
+        receipt = {
             "state": self.state,
             "shadow_lookups": self.shadow_lookups,
             "shadow_trials": self.shadow_trials,
@@ -214,6 +252,9 @@ class CostAwarePLDLatch:
             "verify_ns": self.verify_ns,
             "verify_tokens": self.verify_tokens,
         }
+        if self.handoff_state is not None:
+            receipt["cost_per_commit_handoff"] = self.handoff_state.receipt()
+        return receipt
 
 
 def normalize_ladder(values: Sequence[int]) -> tuple[int, ...]:

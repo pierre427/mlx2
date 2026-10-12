@@ -329,6 +329,31 @@ class FlashNextAdapter:
             recurrent_state_bytes=gdn_state_bytes(self),
         )
 
+    def attention_topology(self):
+        """Revision-bound QSA/GDN layer contract for state capabilities."""
+        from ..runtime.attention_topology import (
+            INDEXED_KV,
+            RECURRENT,
+            AttentionTopology,
+        )
+
+        config = self._attention_topology_config
+        layer_types = tuple(config["layer_types"])
+        mapping = {"full_attention": INDEXED_KV, "linear_attention": RECURRENT}
+        try:
+            layers = tuple(mapping[kind] for kind in layer_types)
+        except KeyError as error:
+            raise ValueError("unknown Flash-Next attention topology") from error
+        auxiliary = (INDEXED_KV,) * int(config.get("mtp_num_hidden_layers", 0))
+        return AttentionTopology(
+            state_revision=self.identity["fingerprint"],
+            cache_layout=self.layout,
+            layers=layers,
+            auxiliary_layers=auxiliary,
+            indexed_layout="qwen4-qsa-raw-pooled-index-v1",
+            recurrent_layout="gated-delta-state-v1",
+        )
+
     def prefill_step_default(self):
         """Adapter-preferred prefill chunk; an explicit engine setting wins.
 
@@ -459,6 +484,7 @@ class FlashNextAdapter:
             raise ValueError(
                 "This profile requires the unified-layout Flash-Next artifact with ple_rows.bin"
             )
+        self._attention_topology_config = dict(config.get("text_config", config))
         self.model = Model(ModelArgs.from_dict(config))
         # The QSA indexer geometry decides which contexts reach the fused
         # indexer query, block scorer and QSA mask; qualification derives
@@ -620,7 +646,7 @@ class FlashNextAdapter:
             # chat EOS joins the config's <|endoftext|>, as for Qwen3.8.
             from .qwen38_27b import resolve_eos_token_ids
 
-            eos = resolve_eos_token_ids(config, tokenizer)
+            eos = resolve_eos_token_ids(config, tokenizer, path)
             self.tokenizer = TokenizerWrapper(
                 tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
             )

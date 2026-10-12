@@ -9,7 +9,12 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..process_env import (
+    PROCESS_NUMERICS,
+    assert_process_profile_applied,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 from .artifact_paths import shard_within_artifact
 from .ordinary_text import OrdinaryTextAdapter
 
@@ -22,7 +27,9 @@ DESCRIPTOR = ModelDescriptor(
     capabilities=frozenset({Capability.TEXT, Capability.STREAMING}),
     cache_layout=None,
     metadata={"execution": "mlx2.adapters.olmo_hils.OlmoHiLSAdapter",
-              "qualification": "pending", "scope": "plain text batch width one; no APCv2 publication"},
+              "qualification": "pending", "scope": "plain text batch width one; no APCv2 publication",
+              "ordinary_reference": "b1",
+              "apcv2_state_operation": "descriptor_only_fail_closed"},
 )
 
 
@@ -111,8 +118,10 @@ class OlmoHiLSAdapter(OrdinaryTextAdapter):
         self.layout = LIVE_CACHE_LAYOUT
         # Refuse an explicit TF32 value before the profile overwrites it.
         require_process_numerics("the OLMo HiLS profile")
+        clear_inherited_profile(())
         self.environment = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", **PROCESS_NUMERICS}
         os.environ.update(self.environment)
+        assert_process_profile_applied("the OLMo HiLS profile")
         path = Path(self.identity["path"])
         import mlx.core as mx
         from mlx import nn
@@ -197,6 +206,96 @@ class OlmoHiLSAdapter(OrdinaryTextAdapter):
             "selected": False,
             "observed_used": False,
         }
+
+    def apcv2_state_operation_descriptor(self):
+        """Describe the exact HiLS state needed before APCv2 can be enabled.
+
+        HiLS inserts one landmark row per 63 real tokens and carries pooled
+        landmark tensors in only eight layers.  Publishing only conventional
+        K/V would create a coherent-looking but false checkpoint.  Expose the
+        complete adapter-owned plane inventory now and keep publication
+        unavailable until atomic serialization, restoration, and route
+        qualification exist.
+        """
+
+        return {
+            "schema": "mlx2.hils-apcv2-state-operation.v1",
+            "operation": "hils_landmark_exact_checkpoint",
+            "fidelity": "exact",
+            "source_cache_layout": LIVE_CACHE_LAYOUT,
+            "target_cache_layout": None,
+            "execution_domain": "ordinary_s1",
+            "required_state_planes": (
+                "attention_kv",
+                "landmark_inserted_coordinates",
+                "landmark_pooled_keys",
+                "landmark_prior_bias",
+                "rng",
+                "transcript",
+            ),
+            "required_layer_state": {
+                "all_32": (
+                    "keys",
+                    "values",
+                    "offset",
+                    "inserted_offset",
+                    "start_position",
+                    "chunk_size",
+                ),
+                "hils_8": ("num_pooled_chunks", "landmark_keys", "prior_bias"),
+                "sliding_24": ("window",),
+            },
+            "atomic_publication_required": True,
+            "source_revision_required": True,
+            "request_private_source": True,
+            "ordinary_reference_preserved": True,
+            "implemented": True,
+            "implementation_scope": "descriptor_and_source_geometry_gate",
+            "serialization_implemented": False,
+            "restore_implemented": False,
+            "publication_allowed": False,
+            "qualified": False,
+            "selected": False,
+            "observed_used": False,
+            "blockers": (
+                "atomic_landmark_state_serializer",
+                "revision_bound_restore",
+                "cold_warm_state_parity",
+                "source_bound_route_qualification",
+            ),
+        }
+
+    def prepare_apcv2_publication(self, state_binding):
+        """Validate the live source geometry, then refuse unpublished state.
+
+        The validation makes later serializer work start from a complete exact
+        source rather than conventional K/V alone.  No object returned from
+        this method can be inserted into APCv2 on today's route.
+        """
+
+        if not isinstance(state_binding, Mapping):
+            raise TypeError("HiLS APCv2 publication requires a state binding")
+        expected_revision = getattr(self, "identity", {}).get("fingerprint")
+        if state_binding.get("state_revision") != expected_revision:
+            raise ValueError("HiLS APCv2 source revision differs")
+        if state_binding.get("cache_layout") != LIVE_CACHE_LAYOUT:
+            raise ValueError("HiLS APCv2 source cache layout differs")
+        if state_binding.get("execution_domain") != "ordinary_s1":
+            raise ValueError("HiLS APCv2 source must be ordinary B1 state")
+        if state_binding.get("checkpoint_kind") != "live_authoritative_exact":
+            raise ValueError("HiLS APCv2 source checkpoint is not authoritative")
+        checkpoint = state_binding.get("checkpoint_position")
+        geometry = self.exact_shared_prefix_geometry(
+            state_binding.get("caches", ()), checkpoint
+        )
+        if geometry.get("eligible") is not True:
+            raise ValueError(
+                "HiLS APCv2 source cache differs: " + str(geometry.get("reason"))
+            )
+        raise RuntimeError(
+            "HiLS APCv2 publication is unavailable until the complete landmark "
+            "state operation is implemented and qualified"
+        )
 
     def exact_shared_prefix_geometry(self, caches, checkpoint_position):
         """Validate one live authoritative HiLS cache boundary.
@@ -359,6 +458,7 @@ class OlmoHiLSAdapter(OrdinaryTextAdapter):
             "route": "ordinary",
             "qualification": "pending",
             "prefix_candidate_verification": self.exact_prefix_cascade_contract(),
+            "apcv2_state_operation": self.apcv2_state_operation_descriptor(),
         }
 
     def close(self):

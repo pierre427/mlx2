@@ -51,6 +51,9 @@ def descriptor_for(*, has_mtp: bool) -> ModelDescriptor:
             "qualification": "pending",
             "scope": "text-only",
             "external_mtp": "implemented-candidate" if has_mtp else "absent",
+            "ordinary_reference": "implemented",
+            "prompt_lookup": "unsupported-unverified-hybrid-checkpoint",
+            "external_draft": "unsupported-no-bound-draft-artifact",
         },
     )
 
@@ -224,6 +227,9 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
     sampling_defaults = SAMPLING
     artifact_inspector = staticmethod(inspect_artifact)
     default_route = "ordinary"
+    # This subclass must never inherit Flash-Next's measured width threshold.
+    # No Lightning-specific native-MTP/ordinary handoff has been selected.
+    default_mtp_ordinary_handoff_max_width = None
     think_close_separator = ""
 
     def __init__(self, model_path: str, *, execution_policy=None):
@@ -291,10 +297,65 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
         self._has_mtp = artifact["has_mtp"]
 
     def profile_name(self, mtp):
+        if mtp and not self._has_mtp:
+            raise ValueError("Nemotron 3.5 Lightning MTP head is absent")
         return (
             f"nemotron35-lightning-q8-apcv2-mtp{self._num_draft}"
             if mtp else "nemotron35-lightning-q8-apcv2-ordinary"
         )
+
+    def execution_config(self, *, max_lanes, prefill_step):
+        """Expose draft depth only when the verified sidecar is present."""
+        return {
+            "persistent": True,
+            "num_draft": self._num_draft if self._has_mtp else 0,
+            "rate_gate": False,
+            "prefill_step_size": prefill_step,
+            "segment_aware_live_tip": True,
+            "segment_aware_cohort_size": max_lanes,
+        }
+
+    def route_capability_contract(self):
+        """Declare the artifact-bound serving boundary without selecting it."""
+        has_mtp = Capability.MTP in self.descriptor.capabilities
+        return {
+            "schema": "mlx2.nemotron35-lightning-route-capability-contract.v1",
+            "family": self.descriptor.family,
+            "variant": self.descriptor.variant,
+            "default_route": "ordinary",
+            "ordinary_reference_preserved": True,
+            "qualification": "unqualified",
+            "apcv2": {
+                "implemented": True,
+                "exact_only": True,
+                "qualified": False,
+                "selected": None,
+                "selection_authority": "serving_route_receipt",
+                "cache_layout": self.descriptor.cache_layout,
+                "state_planes": tuple(
+                    sorted(plane.value for plane in self.descriptor.state_planes)
+                ),
+            },
+            "prompt_lookup": {
+                "implemented": False,
+                "reason": "hybrid checkpoint publication is not verified",
+                "qualified": False,
+                "selected": False,
+            },
+            "native_mtp": {
+                "implemented": has_mtp,
+                "artifact_bound": has_mtp,
+                "default": False,
+                "ordinary_handoff": None,
+                "qualified": False,
+                "selected": None,
+                "selection_authority": "serving_route_receipt",
+            },
+            "external_draft": {
+                "implemented": False,
+                "reason": "no revision-bound draft artifact",
+            },
+        }
 
     def cache_budget(self, *, mtp):
         from .nemotron35_lightning_memory import LightningCacheBudget
@@ -308,4 +369,6 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
             "layout": self.layout,
             "mtp_head_present": self._has_mtp,
             "mtp_candidate": self._has_mtp,
+            "qualification": "unqualified",
+            "route_capability_contract": self.route_capability_contract(),
         }

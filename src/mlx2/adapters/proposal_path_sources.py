@@ -298,7 +298,7 @@ class NativeMTPContinuationSource:
         end = getattr(model, "mtp_end_cycle", None)
         if callable(start):
             # As native_mtp_source: the drafted steps form one head cycle.
-            start(head_cache, share_qsa_indices=False)
+            start(head_cache, share_index_state=False)
         hidden = hidden[:, -1:]
         beams = [(0.0, (), hidden, head_cache, ())]
         # Every branch holds its own copy of the cycle ledger, so pruned

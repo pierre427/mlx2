@@ -43,7 +43,7 @@ def native_mtp_source(model):
             if len(history) > 1:
                 step(hidden[:, :-1], tokens[:, 1:], head_cache)
             if callable(start):
-                start(head_cache, share_qsa_indices=False)
+                start(head_cache, share_index_state=False)
             hidden = hidden[:, -1:]
             current, out = int(anchor), []
             for _ in range(count):

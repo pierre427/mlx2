@@ -14,6 +14,11 @@ from dataclasses import dataclass
 from typing import Any, Hashable, Iterable, Optional
 import mlx.core as mx
 from . import mtp_state_trace
+from .checkpoint_publication import (
+    CheckpointPublicationUnsafe,
+    require_checkpoint_publishable,
+)
+from .cache_operations import CacheOperationsUnsupported, cache_operations
 from .cache_planes import (
     CacheLayerSegment,
     CachePlaneFingerprint,
@@ -39,6 +44,10 @@ class COWCacheStale(COWCacheError):
 
 class COWCacheUnsupported(COWCacheError):
     """A cache graph cannot be cloned without speculative semantics."""
+
+
+class COWCheckpointPublicationUnsafe(COWCacheUnsupported):
+    """A descriptor graph is cloneable but is not a committed boundary."""
 
 
 
@@ -236,18 +245,18 @@ def _tree_array_metrics(value: Any) -> tuple[int, int]:
 def _plane_for_cache(cache: Any, *, draft: bool = False) -> str:
     if draft:
         return "draft_mtp"
-    name = type(cache).__name__.lower()
-    if "qsa" in name:
+    try:
+        contract = cache_operations(cache, capability="APCv2 COW plane classification")
+    except CacheOperationsUnsupported as error:
+        raise COWCacheUnsupported(str(error)) from error
+    kinds = tuple(plane.kind for plane in contract.planes)
+    if "qsa_summary" in kinds:
         return "qsa_summary"
-    if "arrayscache" in name or (
-        hasattr(cache, "cache") and (not hasattr(cache, "keys"))
-    ):
-        return "gdn_recurrent"
-    if "ring" in name or "rotating" in name:
-        return "attention_ring"
-    if hasattr(cache, "keys") or "kv" in name or "qsa" in name:
-        return "attention_kv"
-    return "cache_other"
+    if len(kinds) != 1:
+        raise COWCacheUnsupported(
+            "APCv2 COW needs one primary cache plane or the declared QSA split"
+        )
+    return kinds[0]
 
 
 def _plane_kind(name: str) -> CachePlaneKind | None:
@@ -264,24 +273,21 @@ def _qsa_plane_projection(
     cache: Any, kind: CachePlaneKind
 ) -> tuple[tuple[Any, ...], tuple[tuple[str, str], ...]]:
     """Return non-overlapping QSA arrays plus format compatibility fields."""
-    if kind == CachePlaneKind.ATTENTION_KV:
-        values = (
-            getattr(cache, "keys", None),
-            getattr(cache, "values", None),
-            getattr(cache, "key_scale", None),
-            getattr(cache, "value_scale", None),
+    contract = cache_operations(cache, capability="APCv2 COW QSA plane projection")
+    declaration = next(
+        (plane for plane in contract.planes if plane.kind == kind.value), None
+    )
+    if declaration is None:
+        raise COWCacheUnsupported(
+            f"cache provider does not declare the {kind.value} plane"
         )
-        names = ("group_size", "bits", "key_bits", "value_bits", "rotate", "normalize")
-    elif kind == CachePlaneKind.QSA_SUMMARY:
-        values = (
-            getattr(cache, "index_keys", None),
-            getattr(cache, "_qsa_pooled_keys", None),
-        )
-        names = ("_qsa_pooled_ratio", "_qsa_summary_identity", "_qsa_summary_restored")
-    else:
-        raise ValueError(f"not a QSA plane: {kind.value}")
-    compatibility = tuple(((name, repr(getattr(cache, name, None))) for name in names))
-    return (values, compatibility)
+    return (
+        contract.projection(cache, declaration),
+        (
+            ("cache_operations_fingerprint", contract.fingerprint),
+            *contract.compatibility(cache, declaration),
+        ),
+    )
 
 
 def _layout_identity(values: Iterable[Any]) -> str:
@@ -333,8 +339,12 @@ def _layer_segment_specs(
             kinds.append((kind, projection, compatibility))
     else:
         kind = _plane_kind(plane_name)
-        kinds = [] if kind is None else [(kind, cache, ())]
-    offset = int(getattr(cache, "offset", covered_tokens) or covered_tokens)
+        contract = cache_operations(cache, capability="APCv2 COW segment projection")
+        compatibility = (("cache_operations_fingerprint", contract.fingerprint),)
+        kinds = [] if kind is None else [(kind, cache, compatibility)]
+    contract = cache_operations(cache, capability="APCv2 COW segment position")
+    position = contract.position(cache)
+    offset = int(covered_tokens if position is None else position)
     offset = max(offset, 0)
     specs = []
     for kind, projection, compatibility in kinds:
@@ -460,35 +470,16 @@ def _build_layer_segment_manifest(
 
 def _validate_stable_source(prompt_cache: Iterable[Any]) -> None:
     """Reject state whose temporary transaction semantics cannot be frozen."""
-    stack = list(prompt_cache)
-    while stack:
-        cache = stack.pop()
-        children = getattr(cache, "caches", None)
-        if children is not None:
-            stack.extend(children)
-            continue
-        if isinstance(cache, (list, tuple)):
-            stack.extend(cache)
-            continue
-        if getattr(cache, "speculating", False):
-            raise COWCacheUnsupported(
-                f"{type(cache).__name__} is inside a speculation transaction"
-            )
-        if getattr(cache, "_rollbacks", None):
-            raise COWCacheUnsupported(
-                f"{type(cache).__name__} has live rollback records"
-            )
-        if getattr(cache, "_ple_rollback", None) is not None:
-            raise COWCacheUnsupported(
-                f"{type(cache).__name__} has a staged PLE rollback"
-            )
-        if (
-            getattr(cache, "_mtp_share_topk", False)
-            or getattr(cache, "_mtp_shared_topk", None) is not None
-        ):
-            raise COWCacheUnsupported(
-                f"{type(cache).__name__} has a live QSA/MTP cycle"
-            )
+    prompt_cache = list(prompt_cache)
+    try:
+        require_checkpoint_publishable(prompt_cache)
+    except CheckpointPublicationUnsafe as error:
+        raise COWCheckpointPublicationUnsafe(str(error)) from error
+    for cache in _iter_cache_objects(prompt_cache):
+        try:
+            cache_operations(cache, capability="APCv2 COW checkpoint publication")
+        except CacheOperationsUnsupported as error:
+            raise COWCacheUnsupported(str(error)) from error
 
 
 def _iter_cache_objects(prompt_cache: Iterable[Any]):
@@ -819,7 +810,18 @@ def _clone_graph(
             f"cannot copy {type(value).__module__}.{type(value).__name__}"
         ) from error
     memo[ident] = clone
-    clone_plane = _plane_for_cache(value, draft=plane == "draft_mtp")
+    nested_contract = cache_operations(
+        value, capability="APCv2 COW nested plane classification", required=False
+    )
+    if nested_contract is None:
+        clone_plane = plane
+    else:
+        nested_kinds = tuple(item.kind for item in nested_contract.planes)
+        clone_plane = (
+            "qsa_summary"
+            if "qsa_summary" in nested_kinds
+            else nested_kinds[0]
+        )
     ephemeral = {
         "_cow_segment_token",
         "_cow_segment_tokens",
@@ -832,8 +834,17 @@ def _clone_graph(
         if name in ephemeral:
             continue
         item_plane = clone_plane
-        if clone_plane == "qsa_summary" and name in {"keys", "values"}:
-            item_plane = "attention_kv"
+        if nested_contract is not None:
+            declared = {
+                declaration.kind
+                for declaration in nested_contract.planes
+                if any(
+                    field == name or field.startswith(f"{name}.")
+                    for field in declaration.fields
+                )
+            }
+            if len(declared) == 1:
+                item_plane = next(iter(declared))
         cloned = _clone_graph(
             item,
             telemetry=telemetry,
@@ -924,7 +935,16 @@ class COWCacheOwner:
             else:
                 kind = _plane_kind(plane)
                 if kind is not None:
-                    grouped.setdefault(kind, []).append((cache, cache, ()))
+                    contract = cache_operations(
+                        cache, capability="APCv2 COW owner plane binding"
+                    )
+                    grouped.setdefault(kind, []).append(
+                        (
+                            cache,
+                            cache,
+                            (("cache_operations_fingerprint", contract.fingerprint),),
+                        )
+                    )
         if source_sidecar is not None:
             grouped[CachePlaneKind.MTP_DRAFT] = [(source_sidecar, source_sidecar, ())]
         owners = []
@@ -1503,6 +1523,7 @@ def snapshot_prompt_cache_descriptors(
     sidecar: Any = None,
     *,
     memo: Optional[dict[int, Any]] = None,
+    require_committed: bool = True,
 ) -> tuple[list[Any], Any, dict[str, int]]:
     """Capture one committed boundary as independent plane descriptors.
 
@@ -1515,12 +1536,14 @@ def snapshot_prompt_cache_descriptors(
     telemetry = COWCacheTelemetry()
     started = time.perf_counter_ns()
     prompt_cache = list(prompt_cache)
-    _validate_stable_source(prompt_cache)
+    if require_committed:
+        _validate_stable_source(prompt_cache)
     sidecar_state = getattr(sidecar, "state", sidecar)
     if isinstance(sidecar_state, (list, tuple)) and sidecar_state:
         draft_cache = sidecar_state[0]
         if isinstance(draft_cache, (list, tuple)):
-            _validate_stable_source(draft_cache)
+            if require_committed:
+                _validate_stable_source(draft_cache)
     memo = {} if memo is None else memo
     snapshot = [
         _clone_graph(
@@ -1607,7 +1630,7 @@ def snapshot_recovery_descriptors(
     memo = {} if memo is None else memo
     prompt_cache = list(prompt_cache)
     snapshot, snapshot_sidecar, _receipt = snapshot_prompt_cache_descriptors(
-        prompt_cache, sidecar, memo=memo
+        prompt_cache, sidecar, memo=memo, require_committed=False
     )
     roots = [prompt_cache]
     if isinstance(sidecar, (list, tuple)):
@@ -1675,7 +1698,7 @@ def restore_recovery_descriptors(
     """
     memo = {} if memo is None else memo
     restored, restored_sidecar, _receipt = snapshot_prompt_cache_descriptors(
-        snapshot, sidecar, memo=memo
+        snapshot, sidecar, memo=memo, require_committed=False
     )
     pending = []
     for plane in borrowed:

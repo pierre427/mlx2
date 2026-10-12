@@ -37,6 +37,7 @@ _EXTERNAL_KERNEL_MODULES = tuple(
 
 # One validated vendored lane_tree module (MLX2_TENSORFOLD_CACHE_EXECUTOR).
 _EXECUTORS = {}
+_VALIDATED_EXECUTORS = {}
 
 # The imported TensorFold tree kernel owns a B1 cache record.  mlx2 may queue
 # several independent records before one evaluation fence, but deliberately
@@ -110,16 +111,36 @@ def _import(root, names):
     return modules[0]
 
 
-def _modules(source_root=None, *, cached=False):
+def prepare_validated_source(revision_token: str):
+    """Cold-path source validation and eager import for an adapter binding."""
+    if not isinstance(revision_token, str) or not revision_token:
+        raise ValueError("TensorFold source revision token must be non-empty")
+    module, _hit = _modules(None, cached=True)
+    bound = _VALIDATED_EXECUTORS.setdefault(revision_token, module)
+    if bound is not module:
+        raise RuntimeError("TensorFold revision token was rebound to another executor")
+    return module
+
+
+def _modules(source_root=None, *, cached=False, validated_token=None):
     """Return ``(lane_tree, cache_hit)`` for the hash-checked vendored source.
 
-    Uncached (the default) rechecks the vendored module digests on every call.
-    Cached validates each resolved root once, imports the lazy kernel
+    Direct uncached callers recheck vendored module digests on every call.
+    Adapter providers pass a construction-time immutable token prepared by
+    :func:`prepare_validated_source`, avoiding filesystem hashing in decode.
+    Cached direct callers validate each resolved root once, import the lazy kernel
     dependencies up front, and then reuses those imported module objects.
     Both paths install the owned GDN overrides.
     """
 
     root = None if source_root is None else Path(source_root).resolve()
+    if validated_token is not None:
+        if root is not None:
+            raise ValueError("validated TensorFold tokens bind only the vendored source")
+        module = _VALIDATED_EXECUTORS.get(validated_token)
+        if module is None:
+            raise RuntimeError("TensorFold source revision token is not prepared")
+        return module, True
     key = "vendored" if root is None else root
     names = _KERNEL_MODULES if root is None else _EXTERNAL_KERNEL_MODULES
     if cached:
@@ -306,11 +327,14 @@ def _forward(lane_tree, model, tokens, parents, cache, capture_layers, *, cached
 
 
 def forward(
-    model, tokens, parents, cache, capture_layers, source_root=None, *, cached=False
+    model, tokens, parents, cache, capture_layers, source_root=None, *, cached=False,
+    validated_token=None,
 ):
     """Return logits, target taps, and an exact arbitrary-path transaction."""
 
-    lane_tree, hit = _modules(source_root, cached=cached)
+    lane_tree, hit = _modules(
+        source_root, cached=cached, validated_token=validated_token
+    )
     logits, features, transaction = _forward(
         lane_tree, model, tokens, parents, cache, capture_layers, cached=cached
     )
@@ -327,6 +351,7 @@ def forward_many(
     source_root=None,
     *,
     cached=False,
+    validated_token=None,
 ):
     """Execute a bounded cohort as one packed, lane-owned target trunk.
 
@@ -357,7 +382,9 @@ def forward_many(
         raise ValueError("TensorFold cohort requires uniform token/parent widths")
 
     root = None if source_root is None else Path(source_root).resolve()
-    lane_tree, hit = _modules(root, cached=cached)
+    lane_tree, hit = _modules(
+        root, cached=cached, validated_token=validated_token
+    )
     lane_multi = _import(
         root,
         (
@@ -416,4 +443,5 @@ __all__ = [
     "forward",
     "forward_many",
     "gdn_backend_stats",
+    "prepare_validated_source",
 ]

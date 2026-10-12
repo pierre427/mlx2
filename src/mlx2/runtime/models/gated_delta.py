@@ -208,6 +208,14 @@ def compute_g(A_log, a, dt_bias):
 
 
 @partial(mx.compile, shapeless=True)
+def compute_g_float32_inputs(A_log, a, dt_bias):
+    """Qwen4-Exp decay: widen before the dynamic addition and softplus."""
+    a = a.astype(mx.float32)
+    dt_bias = dt_bias.astype(mx.float32)
+    return mx.exp(-mx.exp(A_log.astype(mx.float32)) * nn.softplus(a + dt_bias))
+
+
+@partial(mx.compile, shapeless=True)
 def compute_lower_bound_g(A_log, a, dt_bias, lower_bound):
     return mx.exp(
         lower_bound
@@ -567,13 +575,18 @@ def gated_delta_update(
     prefill_segment_rows: int = 256,
     prefill_stats=None,
     state_dtype=None,
+    decay_input_float32: bool = False,
 ) -> Tuple[mx.array, mx.array]:
     """``state_dtype``: the layer's storage class (``gdn_state``); ``None``
     is fp32.  A fresh state is created in it and a carried state of the
     other class is refused."""
     beta = gate_sigmoid(b) if beta_input_dtype else gate_sigmoid(b.astype(mx.float32))
     if lower_bound is None:
-        g = compute_g(A_log, a, dt_bias)
+        g = (
+            compute_g_float32_inputs(A_log, a, dt_bias)
+            if decay_input_float32
+            else compute_g(A_log, a, dt_bias)
+        )
     else:
         g = compute_lower_bound_g(A_log, a, dt_bias, lower_bound)
     if state is None:

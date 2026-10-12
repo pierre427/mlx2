@@ -556,6 +556,12 @@ _SCHEDULER_EVENTS = frozenset(
         "atomic_cohort_lifecycle_failures",
         "atomic_cohort_prefill_holds",
         "starved_mtp_plain_fallbacks",
+        "mtp_plain_fallback_events",
+        "mtp_plain_fallback_lanes",
+        "mtp_plain_fallback_width_lock_deferral_limit",
+        "mtp_plain_fallback_starvation_boundary_limit",
+        "mtp_plain_fallback_admission_plain",
+        "mtp_plain_fallback_other",
         "external_rounds",
         "accepted_proposals",
         "proposed_tokens",
@@ -767,7 +773,8 @@ _SEGMENTED_MTP_EVENTS = frozenset(
         "async_qsa_promotion_declined_memory", "async_qsa_admission_settled",
         "async_qsa_promotion_failures", "async_qsa_prequeue_requests",
         "async_qsa_prequeue_queued", "async_qsa_prequeue_bound",
-        "async_qsa_prequeue_declined", "async_qsa_shared_prefix_fused_layers",
+        "async_qsa_prequeue_declined", "async_shared_state_prefix_fused_layers",
+        "async_qsa_shared_prefix_fused_layers",
         "async_qsa_budget_checks", "async_qsa_budget_retained_segmented",
         "async_qsa_budget_promotions", "async_qsa_budget_remaining_tokens_cumulative",
         "async_qsa_budget_cutoff_tokens_cumulative", "device_synchronizations",
@@ -1197,6 +1204,8 @@ def _add_apcv2(
 def _scheduler_mechanism(key: str) -> str:
     if key.startswith("pld_"):
         return "prompt_lookup"
+    if key.startswith("mtp_plain_fallback_"):
+        return "mtp_plain_fallback"
     if key.startswith("mtp_ordinary_handoff_"):
         return "mtp_ordinary_handoff"
     if key.startswith("mtp_adaptive_park_"):
@@ -1272,8 +1281,35 @@ def _scheduler_mechanism(key: str) -> str:
     return "scheduler"
 
 
+_TARGET_TREE_METRIC_COMPATIBILITY = {
+    "external_target_tree_target_rounds": "external_tensorfold_target_rounds",
+    "external_target_tree_cohort_rounds": "external_tensorfold_cohort_rounds",
+    "external_target_tree_cohort_lanes": "external_tensorfold_cohort_lanes",
+    "external_target_tree_cohort_max_width": "external_tensorfold_cohort_max_width",
+    "external_target_tree_cohort_limit": "external_tensorfold_cohort_limit",
+    "external_target_tree_packed_target_rounds": (
+        "external_tensorfold_packed_target_rounds"
+    ),
+    "external_target_tree_packed_target_lanes": (
+        "external_tensorfold_packed_target_lanes"
+    ),
+    "external_target_tree_physical_target_forwards": (
+        "external_tensorfold_physical_target_forwards"
+    ),
+    "external_target_tree_executor_validations": (
+        "external_tensorfold_executor_validations"
+    ),
+    "external_target_tree_executor_cache_hits": (
+        "external_tensorfold_executor_cache_hits"
+    ),
+}
+
+
 def _add_scheduler(builder: PrometheusBuilder, scheduler: Mapping[str, Any]) -> None:
-    for key, raw in sorted(scheduler.items()):
+    for internal_key, raw in sorted(scheduler.items()):
+        # Compatibility is confined to this public export edge. Runtime
+        # scheduler state remains model/provider neutral.
+        key = _TARGET_TREE_METRIC_COMPATIBILITY.get(internal_key, internal_key)
         if key == "adaptive_mtp_cost_model":
             buckets = (raw or {}).get("buckets", {}) if isinstance(raw, Mapping) else {}
             for width_bucket, state in sorted(buckets.items()):

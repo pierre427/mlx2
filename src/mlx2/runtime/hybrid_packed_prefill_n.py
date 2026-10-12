@@ -287,6 +287,10 @@ def create_cold_packed_hybrid_n(adapter,requests,*,profile,live_identity,source_
         for boot in boots:boot.receipt.update(receipt)
         candidate._packed_prefill_receipt=receipt;candidate._hybrid_bootstrap_receipts=tuple(b.receipt for b in boots)
         bootstrap_attribution(candidate)
+        from ..adapters.native_continuation import bind_qwen_native_continuation_provider
+        bind_qwen_native_continuation_provider(
+            candidate, adapter.identity['fingerprint'], adapter.model,
+            'native_hybrid_packed_n20_research')
         return tuple(resources.owners),candidate,tuple(boots)
     except BaseException:
         try:resources.abort()

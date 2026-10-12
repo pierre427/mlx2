@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import gc
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Sequence
+from typing import Callable, Dict, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 from .weight_stream import (
     DEFAULT_READ_WORKERS,
@@ -159,7 +159,7 @@ def load_streamed(
             origins.record_shard(path, arrays)
             raw.update(arrays)
         arrays = None  # no loop-local reference to a raw shard dict survives
-        with concat_ledger(origins.concats):
+        with concat_ledger(origins.concats, origins.stacks):
             weights = sanitize(dict(raw))
         del raw
         quantize(weights)
@@ -241,13 +241,11 @@ def trunk_mlp_targets(model, *, layers_prefix: str,
     return sorted(selected)
 
 
-# Live setters on routed MoE blocks whose non-stock modes read expert tables.
-_STOCK_SETTERS = (
-    ("set_moe_routed_decode_mode", "off", "routed_decode"),
-    ("set_moe_window_consumers", (), "window_consumers"),
-    ("set_fused_expert_kernel_mode", "stock", "fused_expert_kernel"),
-    ("set_moe_routed_candidate_mode", "off", "routed_candidate"),
-)
+@runtime_checkable
+class ExpertStreamingArithmeticGuard(Protocol):
+    """A routed block that can atomically select stream-safe arithmetic."""
+
+    def force_stock_for_expert_streaming(self) -> Mapping[str, int]: ...
 
 
 def force_stock_expert_arithmetic(model) -> Dict[str, int]:
@@ -257,16 +255,17 @@ def force_stock_expert_arithmetic(model) -> Dict[str, int]:
     makes the selection explicit, so the route runs (and records) the same
     arithmetic as a resident stock reference rather than a counted fallback.
     """
-    counts = {label: 0 for (_, _, label) in _STOCK_SETTERS}
+    counts: Dict[str, int] = {}
     for (_, module) in model.named_modules():
-        for (setter, value, label) in _STOCK_SETTERS:
-            method = getattr(module, setter, None)
-            if not callable(method):
-                continue
-            if setter == "set_moe_routed_candidate_mode" and not hasattr(
-                getattr(module, "switch_mlp", None), "routed_candidate_mode"
-            ):
-                continue
-            method(value)
-            counts[label] += 1
+        if not isinstance(module, ExpertStreamingArithmeticGuard):
+            continue
+        selected = module.force_stock_for_expert_streaming()
+        if not isinstance(selected, Mapping):
+            raise TypeError("expert streaming arithmetic guard must return a mapping")
+        for label, count in selected.items():
+            if not isinstance(label, str) or not label:
+                raise TypeError("expert streaming arithmetic guard labels must be strings")
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise TypeError("expert streaming arithmetic guard counts must be non-negative ints")
+            counts[label] = counts.get(label, 0) + count
     return counts

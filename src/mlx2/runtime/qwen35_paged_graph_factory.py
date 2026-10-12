@@ -217,6 +217,10 @@ def create_shared_hybrid_graph_pack(adapter, requests, *, profile,
             bootstrap.append(boot)
         if cancelled(): raise ValueError('hybrid cohort cancelled after bootstrap')
         candidate._hybrid_bootstrap_receipts = tuple(boot.receipt for boot in bootstrap)
+        from ..adapters.native_continuation import bind_qwen_native_continuation_provider
+        bind_qwen_native_continuation_provider(
+            candidate, adapter.identity['fingerprint'], adapter.model,
+            'native_hybrid_paged_b2')
         return tuple(resources.owners), candidate, tuple(bootstrap)
     except BaseException:
         try: resources.abort()

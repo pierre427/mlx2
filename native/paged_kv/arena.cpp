@@ -665,6 +665,29 @@ class GroupedN20WritePrimitive final : public mx::Primitive {
   uint64_t epoch_;
 };
 
+class CopyTimingReservation final {
+ public:
+  explicit CopyTimingReservation(std::shared_ptr<Arena> owner)
+      : owner_(std::move(owner)), enabled_(owner_->reserve_copy_timing()) {}
+
+  CopyTimingReservation(const CopyTimingReservation&) = delete;
+  CopyTimingReservation& operator=(const CopyTimingReservation&) = delete;
+
+  ~CopyTimingReservation() {
+    if (enabled_ && !callback_owns_) {
+      owner_->rollback_copy_timing_reservation();
+    }
+  }
+
+  bool enabled() const { return enabled_; }
+  void hand_off_to_callback() { callback_owns_ = enabled_; }
+
+ private:
+  std::shared_ptr<Arena> owner_;
+  bool enabled_{false};
+  bool callback_owns_{false};
+};
+
 class CopyPrimitive final : public mx::Primitive {
  public:
   CopyPrimitive(std::shared_ptr<Arena> arena, size_t source, size_t destination,
@@ -693,13 +716,39 @@ class CopyPrimitive final : public mx::Primitive {
     encoder.set_bytes(static_cast<uint32_t>(count_), 5);
     auto owner = arena_;
     const auto epoch = epoch_;
+    CopyTimingReservation timing(owner);
+    const bool timing_enabled = timing.enabled();
     auto dispatched = std::make_shared<std::atomic<bool>>(false);
+    if (timing_enabled && owner->consume_copy_timing_fault(
+                              CopyTimingFaultInjection::HandlerRegistration)) {
+      throw std::runtime_error(
+          "injected paged KV copy timing handler registration failure");
+    }
     encoder.get_command_buffer()->addCompletedHandler(^(MTL::CommandBuffer* buffer) {
-      owner->completed(epoch, dispatched->load(std::memory_order_acquire) &&
-                                buffer->status() == MTL::CommandBufferStatusCompleted);
+      const bool succeeded = dispatched->load(std::memory_order_acquire) &&
+          buffer->status() == MTL::CommandBufferStatusCompleted;
+      owner->completed(epoch, succeeded);
+      if (timing_enabled) {
+        const auto completed_host_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        owner->complete_copy_timing_reservation(
+            epoch, succeeded, dispatched->load(std::memory_order_acquire),
+            completed_host_ns, buffer->GPUStartTime(), buffer->GPUEndTime());
+      }
     });
-    encoder.dispatch_threads(MTL::Size(count_, 1, 1), MTL::Size(256, 1, 1));
-    dispatched->store(true, std::memory_order_release);
+    timing.hand_off_to_callback();
+    try {
+      if (timing_enabled && owner->consume_copy_timing_fault(
+                                CopyTimingFaultInjection::Dispatch)) {
+        throw std::runtime_error("injected paged KV copy timing dispatch failure");
+      }
+      encoder.dispatch_threads(MTL::Size(count_, 1, 1), MTL::Size(256, 1, 1));
+      dispatched->store(true, std::memory_order_release);
+    } catch (...) {
+      if (timing_enabled) owner->poison_copy_timing_session();
+      throw;
+    }
   }
 
  private:
@@ -1645,6 +1694,144 @@ std::vector<Completion> Arena::wait_read_completions(double timeout_seconds) {
   std::vector<Completion> result(read_completions_.begin(), read_completions_.end());
   read_completions_.clear();
   return result;
+}
+
+bool Arena::reserve_copy_timing() {
+  std::lock_guard lock(copy_timing_mutex_);
+  if (!copy_timing_active_) return false;
+  if (copy_timing_faulted_) {
+    throw std::runtime_error("copy timing session is poisoned");
+  }
+  const auto retained = copy_timing_pending_ + copy_timings_.size();
+  if (retained >= copy_timing_capacity_) {
+    throw std::runtime_error("paged KV copy timing capacity exhausted");
+  }
+  ++copy_timing_pending_;
+  if (copy_timing_fault_injection_ == CopyTimingFaultInjection::Reservation) {
+    copy_timing_fault_injection_ = CopyTimingFaultInjection::None;
+    --copy_timing_pending_;
+    throw std::runtime_error("injected paged KV copy timing reservation failure");
+  }
+  return true;
+}
+
+void Arena::rollback_copy_timing_reservation() {
+  std::lock_guard lock(copy_timing_mutex_);
+  if (copy_timing_pending_ == 0) {
+    copy_timing_faulted_ = true;
+    return;
+  }
+  --copy_timing_pending_;
+}
+
+void Arena::complete_copy_timing_reservation(
+    uint64_t epoch, bool succeeded, bool publish,
+    uint64_t completed_host_ns, double gpu_start_seconds,
+    double gpu_end_seconds) {
+  std::lock_guard lock(copy_timing_mutex_);
+  if (copy_timing_pending_ == 0) {
+    copy_timing_faulted_ = true;
+    return;
+  }
+  --copy_timing_pending_;
+  if (publish && !copy_timing_faulted_) {
+    copy_timings_.push_back({
+        epoch, succeeded, completed_host_ns, gpu_start_seconds,
+        gpu_end_seconds});
+  }
+}
+
+void Arena::poison_copy_timing_session() {
+  std::lock_guard lock(copy_timing_mutex_);
+  if (copy_timing_active_) copy_timing_faulted_ = true;
+}
+
+bool Arena::consume_copy_timing_fault(CopyTimingFaultInjection stage) {
+  std::lock_guard lock(copy_timing_mutex_);
+  if (copy_timing_fault_injection_ != stage) return false;
+  copy_timing_fault_injection_ = CopyTimingFaultInjection::None;
+  return true;
+}
+
+void Arena::testing_set_copy_timing_fault_injection(
+    CopyTimingFaultInjection stage) {
+  if (stage == CopyTimingFaultInjection::None) {
+    throw std::invalid_argument("copy timing fault injection requires a boundary");
+  }
+  std::lock_guard lock(copy_timing_mutex_);
+  if (!copy_timing_active_ || copy_timing_faulted_ ||
+      copy_timing_fault_injection_ != CopyTimingFaultInjection::None) {
+    throw std::runtime_error("copy timing fault injection requires an idle active session");
+  }
+  copy_timing_fault_injection_ = stage;
+}
+
+bool Arena::copy_timing_poisoned() const {
+  std::lock_guard lock(copy_timing_mutex_);
+  return copy_timing_active_ && copy_timing_faulted_;
+}
+
+size_t Arena::abort_copy_timing_after_terminal(bool terminal_proved) {
+  if (!terminal_proved) {
+    throw std::invalid_argument("copy timing abort requires terminal stream proof");
+  }
+  std::lock_guard lock(copy_timing_mutex_);
+  if (!copy_timing_active_ || !copy_timing_faulted_) {
+    throw std::runtime_error("copy timing abort requires a poisoned active session");
+  }
+  if (copy_timing_pending_ != 0) {
+    throw std::runtime_error("copy timing abort still has pending callbacks");
+  }
+  const size_t discarded = copy_timings_.size();
+  copy_timings_.clear();
+  copy_timing_active_ = false;
+  copy_timing_faulted_ = false;
+  copy_timing_capacity_ = 0;
+  copy_timing_fault_injection_ = CopyTimingFaultInjection::None;
+  return discarded;
+}
+
+void Arena::begin_copy_timing(size_t capacity) {
+  if (capacity == 0 || capacity > 4096) {
+    throw std::invalid_argument("copy timing capacity must be in [1, 4096]");
+  }
+  std::lock_guard lock(copy_timing_mutex_);
+  if (copy_timing_active_ || copy_timing_faulted_ || copy_timing_pending_ != 0 ||
+      !copy_timings_.empty()) {
+    throw std::runtime_error("copy timing session is not idle");
+  }
+  copy_timing_capacity_ = capacity;
+  copy_timing_fault_injection_ = CopyTimingFaultInjection::None;
+  copy_timing_active_ = true;
+}
+
+std::vector<CopyTiming> Arena::poll_copy_timings() {
+  std::lock_guard lock(copy_timing_mutex_);
+  if (!copy_timing_active_) {
+    throw std::runtime_error("copy timing session is not active");
+  }
+  if (copy_timing_faulted_) {
+    throw std::runtime_error("copy timing session has an internal lifecycle fault");
+  }
+  std::vector<CopyTiming> result(copy_timings_.begin(), copy_timings_.end());
+  copy_timings_.clear();
+  return result;
+}
+
+void Arena::end_copy_timing() {
+  std::lock_guard lock(copy_timing_mutex_);
+  if (!copy_timing_active_) {
+    throw std::runtime_error("copy timing session is not active");
+  }
+  if (copy_timing_faulted_) {
+    throw std::runtime_error("copy timing session has an internal lifecycle fault");
+  }
+  if (copy_timing_pending_ != 0 || !copy_timings_.empty()) {
+    throw std::runtime_error("copy timing session has pending or unread events");
+  }
+  copy_timing_active_ = false;
+  copy_timing_capacity_ = 0;
+  copy_timing_fault_injection_ = CopyTimingFaultInjection::None;
 }
 
 } // namespace mlx2::paged_kv

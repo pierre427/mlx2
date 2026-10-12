@@ -1097,7 +1097,12 @@ class Model(nn.Module):
                 missing = [k for k in keys if k not in weights]
                 if missing:
                     raise ValueError(f"missing expert tensors, e.g. {missing[0]}")
-                weights[f"{prefix}.mlp.switch_mlp.{name}.{kind}"] = mx.stack([weights.pop(k) for k in keys])
+                parts = [weights.pop(k) for k in keys]
+                stacked = mx.stack(parts)
+                from ..weight_stream import record_stack
+
+                record_stack(stacked, parts)
+                weights[f"{prefix}.mlp.switch_mlp.{name}.{kind}"] = stacked
 
     def _fold_kv_b(self, weights, prefix):
         key = f"{prefix}.kv_b_proj.weight"

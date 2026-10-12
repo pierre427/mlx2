@@ -20,6 +20,7 @@ import numpy as np
 
 from ..thinking_guard import stack_block_steer, verify_block_steer
 from . import round_phases
+from .cohort_ownership import declared_cohort_key
 from .committed_recovery import CommittedRecoverySlot
 from .cow_cache import (
     COWCacheUnsupported,
@@ -37,13 +38,17 @@ from .generate import (
 from .prefill_plan import prompt_length_prefill_step
 from .processor_probe import VerifyWindow, copy_sharing, rollback_shared_memo
 from .progressive_external_verify import (
+    PROGRESSIVE_APPROXIMATE_TARGET_PROTOCOL_VERSION,
     PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
-    PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    PROGRESSIVE_FIDELITY_EXACT,
+    PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED,
+    progressive_target_protocol_binding,
     verify_proposal_tile,
 )
 from .speculative_sampling import (
     FLyVerificationPolicy,
     RequestRNG,
+    count_delivered_relaxed_accepts,
     probability,
     validate_compact_proposal_laws,
     validate_proposal_laws,
@@ -82,7 +87,7 @@ def _history_window(history, suffix, context_size, generation_start):
     return history[start:] + suffix if start < boundary else suffix[start - boundary:]
 
 
-# Tree15 round-cost gates (TensorFold parity bridge).  Off on an explicit
+# Tree15 round-cost gates (target-tree provider bridge). Off on an explicit
 # tree15 topology unless set; on by default for a selected bounded tree route
 # (``dynamic_singleton_tree``, the Qwen3.8 DFlash2 default policy since
 # 187c6aa23), where ``0`` turns one off.  Each maps to its environment
@@ -98,8 +103,8 @@ _TREE_GATES = {
 # Bounded integer engagement counters each enabled gate publishes.
 _TREE_GATE_COUNTERS = {
     "cache_executor": (
-        "external_tensorfold_executor_validations",
-        "external_tensorfold_executor_cache_hits",
+        "external_target_tree_executor_validations",
+        "external_target_tree_executor_cache_hits",
     ),
     "codebook_cache": ("external_tree_codebook_cache_hits",),
     "batched_laws": (
@@ -146,9 +151,9 @@ def _tree_gates(topology, target_execution, *, default_on=False):
         gates[gate] = value == enabled or (not value and default_on)
     if any(gates.values()) and topology != "tree15":
         raise ValueError("tree experiment gates require MLX2_DFLASH_TOPOLOGY=tree15")
-    if gates["cache_executor"] and target_execution != "tensorfold":
+    if gates["cache_executor"] and target_execution != "provider":
         raise ValueError(
-            "MLX2_TENSORFOLD_CACHE_EXECUTOR requires MLX2_QWEN_TARGET_EXECUTION=tensorfold"
+            "MLX2_TENSORFOLD_CACHE_EXECUTOR requires target-tree provider execution"
         )
     if gates["single_fence"] and not gates["batched_laws"]:
         raise ValueError(
@@ -157,12 +162,10 @@ def _tree_gates(topology, target_execution, *, default_on=False):
     return gates
 
 
-def _tensorfold_cohort_limit(
-    target_execution, capacity, *, default=1, selected=None
+def _target_tree_cohort_limit(
+    target_execution, capacity, *, default=1, selected=None, maximum=4
 ):
-    """Return the explicit bounded TensorFold cohort limit (singleton default)."""
-
-    from .qwen38_tensorfold import MAX_COHORT_LANES
+    """Return the explicit bounded provider cohort limit (singleton default)."""
 
     name = "MLX2_TENSORFOLD_COHORT_LIMIT"
     raw = os.environ.get(name)
@@ -176,12 +179,37 @@ def _tensorfold_cohort_limit(
         raw = str(selected)
     if raw is None:
         return min(int(capacity), int(default))
-    if target_execution != "tensorfold":
-        raise ValueError(f"{name} requires MLX2_QWEN_TARGET_EXECUTION=tensorfold")
-    allowed = {str(value) for value in range(1, MAX_COHORT_LANES + 1)}
+    if target_execution != "provider":
+        raise ValueError(f"{name} requires target-tree provider execution")
+    allowed = {str(value) for value in range(1, maximum + 1)}
     if raw not in allowed:
         raise ValueError(f"{name} must be one of {', '.join(sorted(allowed))}")
     return min(int(capacity), int(raw))
+
+
+def _target_tree_execution_mode(*, default_provider=False):
+    """Translate public and legacy ingress values into scheduler-owned modes."""
+
+    public_name = "MLX2_TARGET_TREE_EXECUTION"
+    legacy_name = "MLX2_QWEN_TARGET_EXECUTION"
+    public = os.environ.get(public_name)
+    legacy = os.environ.get(legacy_name)
+    if public is not None and legacy is not None:
+        translated_legacy = "provider" if legacy == "tensorfold" else legacy
+        if public != translated_legacy:
+            raise ValueError(
+                f"{public_name} conflicts with legacy {legacy_name}"
+            )
+    raw = public if public is not None else legacy
+    if raw is None:
+        return "provider" if default_provider else "reference"
+    mode = "provider" if raw == "tensorfold" else raw
+    if mode not in ("reference", "provider"):
+        raise ValueError(
+            f"{public_name} must be reference or provider "
+            f"({legacy_name}=tensorfold remains an ingress alias)"
+        )
+    return mode
 
 
 # Laws with at most this many top-k survivors are read back sparsely.
@@ -286,12 +314,20 @@ class Lane:
     # occurred in a full tree round; this receipt makes planted and live
     # partial-commit gates unambiguous without retaining per-round records.
     verify_accept_span_hist: dict = field(default_factory=dict)
-    # Committed TensorFold target geometry for this request.  The bounded
+    # Lagged proposal-source scores belong to this request's verification
+    # history. This state is copied by the normal round recovery snapshot.
+    proposal_score_counts: dict = field(default_factory=dict)
+    # Per-source trusted-PLD cadence/revocation state. Request ownership makes
+    # it tenant-isolated; round snapshots restore it and lane removal discards it.
+    proposal_trust_states: dict = field(default_factory=dict)
+    # Committed target-tree geometry for this request. The bounded
     # trace makes allocator/formation-sensitive output drift diagnosable
     # without retaining tokens, prompts, timestamps, or unbounded history.
-    tensorfold_target_width_hist: dict = field(default_factory=dict)
-    tensorfold_target_width_trace: list = field(default_factory=list)
-    tensorfold_target_width_trace_overflow: int = 0
+    target_tree_width_hist: dict = field(default_factory=dict)
+    target_tree_width_trace: list = field(default_factory=list)
+    target_tree_width_trace_overflow: int = 0
+    cost_handoff_state: object | None = None
+    cost_handoff_receipt: dict | None = None
 
 
 # History changes only by append inside a decode round.  Keep its committed
@@ -324,8 +360,10 @@ class HostDraftRow:
     proposal_source: str | None = None
     proposal_score_key: str | None = None
     proposal_score: float | None = None
+    proposal_trust_key: str | None = None
     proposal_trusted: bool = False
     proposal_audit: bool = False
+    proposal_periodic_audit: bool = False
     continuation_selection: object = None
     feedback_payload: object = None
 
@@ -347,8 +385,10 @@ class CompactDraftRow:
     proposal_source: str | None = None
     proposal_score_key: str | None = None
     proposal_score: float | None = None
+    proposal_trust_key: str | None = None
     proposal_trusted: bool = False
     proposal_audit: bool = False
+    proposal_periodic_audit: bool = False
 
     @property
     def lengths(self):
@@ -390,6 +430,7 @@ class RoundDecision:
     continuation_semantic_index: int | None = None
     commit_count: int | None = None
     committed_inputs: object = None
+    relaxed_positions: tuple[int, ...] = ()
 
 
 def _greedy_proposal_supported(block, laws, drafts, vocab):
@@ -460,7 +501,7 @@ class _ReferenceTreeTransaction:
 class ExternalDraftBatchGenerator:
     """Same request-lifecycle seam as BatchGenerator, distinct external protocol.
 
-    The ordinary target trunk is evaluated at cohort width B. TensorFold keeps
+    The ordinary target trunk is evaluated at cohort width B. The provider keeps
     B1 state records but queues up to four lane trees behind one evaluation
     fence. Draft trunk forwards group lanes by pending-context length;
     attention remains per-row SDPA. Receipts report actual target and draft
@@ -484,13 +525,18 @@ class ExternalDraftBatchGenerator:
                  dynamic_tree_max_width=1, external_varlen_prefill=False,
                  tree_node_budget_by_lanes=None,
                  tensorfold_cohort_limit=None,
+                 target_tree_executor_provider=None,
                  minimum_draft_proposals=None,
                  external_prefill_coalesce_ms=0,
                  external_prefill_coalesce_min_tokens=1,
                  exact_verification="token",
                  progressive_verification_tile=None,
                  multilane_draft_cap=None,
+                 progressive_verification_fidelity=None,
+                 progressive_target_protocol=None,
+                 progressive_protocol_binding=None,
                  decode_time_fairness=None, decode_first=None,
+                 cost_per_commit_handoff=None,
                  **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
@@ -502,6 +548,11 @@ class ExternalDraftBatchGenerator:
         self._emitted_responses = 0
         self.binding = binding; self.capacity = completion_batch_size
         self._generator_revision = uuid.uuid4().hex
+        from .cost_per_commit_handoff import CostPerCommitHandoffSettings
+
+        self.cost_per_commit_handoff = (
+            CostPerCommitHandoffSettings.from_value(cost_per_commit_handoff)
+        )
         self._feedback_outbox = None
         self.continuation_policy = None
         if continuation_pool is not None:
@@ -639,29 +690,46 @@ class ExternalDraftBatchGenerator:
         self.draft_topology = os.environ.get(
             "MLX2_DFLASH_TOPOLOGY", "tree15" if dynamic_singleton_tree else "chain"
         )
-        self.target_execution = os.environ.get(
-            "MLX2_QWEN_TARGET_EXECUTION", "tensorfold" if dynamic_singleton_tree else "reference"
+        self.target_execution = _target_tree_execution_mode(
+            default_provider=dynamic_singleton_tree
         )
         if dynamic_singleton_tree and (
-            self.draft_topology != "tree15" or self.target_execution != "tensorfold"
+            self.draft_topology != "tree15" or self.target_execution != "provider"
         ):
-            raise ValueError("dynamic singleton tree requires tree15 and TensorFold target")
+            raise ValueError("dynamic singleton tree requires tree15 and a target-tree provider")
+        if self.cost_per_commit_handoff is not None and dynamic_singleton_tree:
+            raise ValueError(
+                "cost-per-commit handoff requires a fixed external route"
+            )
         if self.draft_topology not in ("chain", "tree15"):
             raise ValueError("MLX2_DFLASH_TOPOLOGY must be chain or tree15")
         if hasattr(draft_model, "last_proposal_sources") and self.draft_topology != "chain":
             raise ValueError("proposal composition requires chain verification")
         if self.continuation_policy is not None and (self.target_execution != "reference" or self.fly_verification.enabled or self.pairwise_selection != "host"):
             raise ValueError("complete continuation verification requires exact reference target execution and host proposals")
-        # The reference tree remains one lane per round.  TensorFold cohorts
-        # independent B1 records under its fixed four-lane ownership bound.
-        if self.target_execution not in ("reference", "tensorfold"):
+        # The reference tree remains one lane per round. Providers may cohort
+        # independent B1 records under their declared ownership bound.
+        if self.target_execution not in ("reference", "provider"):
             raise ValueError(
-                "MLX2_QWEN_TARGET_EXECUTION must be reference or tensorfold"
+                "target-tree execution must be reference or provider"
             )
-        if self.target_execution == "tensorfold":
-            from ..adapters.qwen38_tensorfold_source import validate_source
+        if self.target_execution == "provider":
+            from .target_tree_executor import TargetTreeExecutorProvider
 
-            validate_source()
+            if target_tree_executor_provider is None:
+                raise ValueError(
+                    "target-tree execution requires an adapter-owned provider"
+                )
+            if not isinstance(
+                target_tree_executor_provider, TargetTreeExecutorProvider
+            ):
+                raise TypeError("incomplete target-tree executor provider")
+            target_tree_executor_provider.validate_cohort(1, 1)
+        elif target_tree_executor_provider is not None:
+            raise ValueError(
+                "target-tree executor provider requires provider execution"
+            )
+        self.target_tree_executor_provider = target_tree_executor_provider
         self.tree_gates = _tree_gates(
             self.draft_topology, self.target_execution,
             default_on=dynamic_singleton_tree,
@@ -710,6 +778,17 @@ class ExternalDraftBatchGenerator:
             raise ValueError(
                 "progressive_verification_tile must be an integer from 1 below num_draft"
             )
+        if progressive_verification_tile is None and any(
+            value is not None
+            for value in (
+                progressive_verification_fidelity,
+                progressive_target_protocol,
+                progressive_protocol_binding,
+            )
+        ):
+            raise ValueError(
+                "progressive protocol selectors require progressive_verification_tile"
+            )
         if progressive_verification_tile is not None and (
             self.target_execution != "reference"
             or self.draft_topology != "chain"
@@ -720,15 +799,47 @@ class ExternalDraftBatchGenerator:
             or self.adaptive_policy is not None
             or dynamic_singleton_tree
             or hasattr(draft_model, "last_proposal_sources")
-            or getattr(model, "progressive_external_verify_protocol", None)
-            != PROGRESSIVE_TARGET_PROTOCOL_VERSION
         ):
             raise ValueError(
                 "progressive verification requires an exact reference chain "
-                "with host proposals, a row-exact progressive target protocol, "
-                "and no FLy, tree, continuation, composition, or adaptive route; "
+                "with host proposals and no FLy, tree, continuation, composition, "
+                "or adaptive route; "
                 "only B1 cohorts use the progressive transaction"
             )
+        self.progressive_verification_fidelity = None
+        self.progressive_target_protocol = None
+        self.progressive_protocol_binding = None
+        if progressive_verification_tile is not None:
+            fidelity = (
+                PROGRESSIVE_FIDELITY_EXACT
+                if progressive_verification_fidelity is None
+                else progressive_verification_fidelity
+            )
+            resolved = progressive_target_protocol_binding(model, fidelity)
+            if progressive_target_protocol is not None and (
+                progressive_target_protocol != resolved["target_protocol"]
+            ):
+                raise ValueError("progressive target protocol binding mismatch")
+            if fidelity == PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED:
+                if progressive_target_protocol != (
+                    PROGRESSIVE_APPROXIMATE_TARGET_PROTOCOL_VERSION
+                ):
+                    raise ValueError(
+                        "near-tie-bounded progressive verification requires its "
+                        "explicit target protocol"
+                    )
+                if progressive_protocol_binding != resolved:
+                    raise ValueError(
+                        "near-tie-bounded progressive verification requires an "
+                        "exact source-hashed protocol binding"
+                    )
+            elif progressive_protocol_binding is not None and (
+                progressive_protocol_binding != resolved
+            ):
+                raise ValueError("progressive protocol source binding mismatch")
+            self.progressive_verification_fidelity = fidelity
+            self.progressive_target_protocol = resolved["target_protocol"]
+            self.progressive_protocol_binding = resolved
         self.progressive_verification_tile = progressive_verification_tile
         if multilane_draft_cap is not None and (
             type(multilane_draft_cap) is not int
@@ -756,9 +867,15 @@ class ExternalDraftBatchGenerator:
         self.layers = tuple(draft_model.config.target_layer_ids)
         self.lanes = {}; self.next_uid = 0; self.boundaries = {}
         self._lane_failures = []
+        # Client-declared cohorts own every member until their first complete
+        # decode frontier.  Cancellation/removal before that boundary fails
+        # the surviving owners together through ServingEngine's existing
+        # atomic-failure channel.
+        self._atomic_cohort_failures = []
+        self._released_atomic_cohorts = set()
         self._memory_waiting_uids = set()
         self._atomic_prefill_waiting_uids = set()
-        self.scheduler_stats = {"external_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0, "external_context_token_pairings": 0, "external_verify_steer_rounds": 0, "external_verify_steered_lanes": 0, "external_allocator_reclaims": 0, "external_idle_allocator_reclaims": 0, "external_atomic_cohort_prefill_holds": 0}
+        self.scheduler_stats = {"external_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0, "external_context_token_pairings": 0, "external_verify_steer_rounds": 0, "external_verify_steered_lanes": 0, "external_allocator_reclaims": 0, "external_idle_allocator_reclaims": 0, "external_atomic_cohort_prefill_holds": 0, "external_atomic_cohort_releases": 0, "external_atomic_cohort_failures": 0}
         self.scheduler_stats.update(
             external_minimum_draft_proposals=self.minimum_draft_proposals,
             external_proposal_floor_raises=0,
@@ -838,30 +955,31 @@ class ExternalDraftBatchGenerator:
                 external_tree_node_budget_last=0,
                 external_tree_node_budget_histogram={},
             )
-        if self.target_execution == "tensorfold":
-            self.tensorfold_target_selected = True
-            self.tensorfold_cohort_limit = _tensorfold_cohort_limit(
+        if self.target_execution == "provider":
+            self.target_tree_selected = True
+            self.target_tree_cohort_limit = _target_tree_cohort_limit(
                 self.target_execution, self.capacity,
                 default=self.dynamic_tree_max_width if dynamic_singleton_tree else 1,
                 selected=tensorfold_cohort_limit,
+                maximum=self.target_tree_executor_provider.maximum_cohort_width,
             )
             self.scheduler_stats.update(
-                external_tensorfold_target_rounds=0,
-                external_tensorfold_cohort_rounds=0,
-                external_tensorfold_cohort_lanes=0,
-                external_tensorfold_cohort_max_width=0,
-                external_tensorfold_cohort_limit=self.tensorfold_cohort_limit,
-                external_tensorfold_packed_target_rounds=0,
-                external_tensorfold_packed_target_lanes=0,
-                external_tensorfold_physical_target_forwards=0,
+                external_target_tree_target_rounds=0,
+                external_target_tree_cohort_rounds=0,
+                external_target_tree_cohort_lanes=0,
+                external_target_tree_cohort_max_width=0,
+                external_target_tree_cohort_limit=self.target_tree_cohort_limit,
+                external_target_tree_packed_target_rounds=0,
+                external_target_tree_packed_target_lanes=0,
+                external_target_tree_physical_target_forwards=0,
             )
-            for width in range(1, self.tensorfold_cohort_limit + 1):
+            for width in range(1, self.target_tree_cohort_limit + 1):
                 self.scheduler_stats[
-                    f"external_tensorfold_target_width_{width}_rounds"
+                    f"external_target_tree_target_width_{width}_rounds"
                 ] = 0
         else:
-            self.tensorfold_target_selected = False
-            self.tensorfold_cohort_limit = _tensorfold_cohort_limit(
+            self.target_tree_selected = False
+            self.target_tree_cohort_limit = _target_tree_cohort_limit(
                 self.target_execution, self.capacity
             )
         for gate, counters in _TREE_GATE_COUNTERS.items():
@@ -1032,6 +1150,14 @@ class ExternalDraftBatchGenerator:
             lane.proposal_request_id = self._generator_revision + ":" + str(uid)
             lane.session_scope_hash = ((session_keys or [None] * len(prompts))[i]
                 or hashlib.sha256(json.dumps([self.binding, lane.proposal_request_id]).encode()).hexdigest())
+            if self.cost_per_commit_handoff is not None:
+                from .cost_per_commit_handoff import CostPerCommitLaneState
+
+                lane.cost_handoff_state = CostPerCommitLaneState(
+                    self.cost_per_commit_handoff,
+                    lane_uid=uid,
+                    owner_scope=(self.binding, lane.session_scope_hash),
+                )
             self.lanes[uid] = lane; uids.append(uid)
         return uids
 
@@ -1318,8 +1444,23 @@ class ExternalDraftBatchGenerator:
             **hists,
         }
         if self.progressive_verification_tile is not None:
+            approximate = (
+                self.progressive_verification_fidelity
+                == PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED
+            )
+            if approximate:
+                result["verification"] = "approximate_progressive_near_tie_bounded"
+                result["approximate"] = True
             result["progressive_verification"] = {
                 "algorithm": PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
+                "target_protocol": self.progressive_target_protocol,
+                "fidelity": self.progressive_verification_fidelity,
+                "source_hashes": self.progressive_protocol_binding[
+                    "source_hashes"
+                ],
+                "qualification_gate_schema": self.progressive_protocol_binding[
+                    "qualification_gate_schema"
+                ],
                 "implemented": True,
                 "qualified": False,
                 "selected": True,
@@ -1362,6 +1503,22 @@ class ExternalDraftBatchGenerator:
     def _target_execution_receipt(self, lane=None):
         model_receipt = getattr(self.model, "external_execution_receipt", None)
         result = {"target_protocol": dict(model_receipt)} if model_receipt else {}
+        cohort_key = self._batch_cohort_key(lane) if lane is not None else None
+        if cohort_key is not None:
+            result["declared_cohort_frontier"] = {
+                "implemented": True,
+                "selected": True,
+                "qualified": False,
+                "observed_used": cohort_key in self._released_atomic_cohorts,
+                "declared_width": cohort_key[2],
+                "ownership": "atomic_until_complete_decode_frontier",
+            }
+        if lane is not None and lane.cost_handoff_state is not None:
+            result["cost_per_commit_handoff"] = (
+                lane.cost_handoff_state.receipt()
+                if lane.cost_handoff_receipt is None
+                else copy.deepcopy(lane.cost_handoff_receipt)
+            )
         if getattr(self, "external_varlen_prefill", False):
             result["external_varlen_prefill"] = {
                 "implemented": True,
@@ -1429,7 +1586,7 @@ class ExternalDraftBatchGenerator:
                 "active_lanes": self._auto_active_width,
                 "cohort_width": self._auto_cohort_width,
                 "current": (
-                    "tree15_tensorfold"
+                    "tree15_provider"
                     if self.draft_topology == "tree15"
                     else "chain_reference"
                 ),
@@ -1439,78 +1596,239 @@ class ExternalDraftBatchGenerator:
                 result["batch_size_route"]["chain_draft_cap"] = _chain_draft_cap(
                     tree_budgets, 4, self._auto_active_width
                 )
-        tensorfold_selected = getattr(
+        provider_selected = getattr(
             self,
-            "tensorfold_target_selected",
-            self.target_execution == "tensorfold",
+            "target_tree_selected",
+            self.target_execution == "provider",
         )
-        if not tensorfold_selected:
+        if not provider_selected:
             return result
         width_rounds = {
             str(width): self.scheduler_stats.get(
-                f"external_tensorfold_target_width_{width}_rounds", 0
+                f"external_target_tree_target_width_{width}_rounds", 0
             )
-            for width in range(1, self.tensorfold_cohort_limit + 1)
+            for width in range(1, self.target_tree_cohort_limit + 1)
         }
-        result["tensorfold_target"] = {
-            "cohort_limit": self.tensorfold_cohort_limit,
+        result["target_tree"] = {
+            "cohort_limit": self.target_tree_cohort_limit,
             "cohort_max_width": self.scheduler_stats[
-                "external_tensorfold_cohort_max_width"
+                "external_target_tree_cohort_max_width"
             ],
             "cohort_rounds": self.scheduler_stats[
-                "external_tensorfold_cohort_rounds"
+                "external_target_tree_cohort_rounds"
             ],
             "packed_target_rounds": self.scheduler_stats.get(
-                "external_tensorfold_packed_target_rounds", 0
+                "external_target_tree_packed_target_rounds", 0
             ),
             "packed_target_lanes": self.scheduler_stats.get(
-                "external_tensorfold_packed_target_lanes", 0
+                "external_target_tree_packed_target_lanes", 0
             ),
             "physical_target_forwards": self.scheduler_stats.get(
-                "external_tensorfold_physical_target_forwards", 0
+                "external_target_tree_physical_target_forwards", 0
             ),
             "target_width_rounds": width_rounds,
         }
-        from .qwen38_tensorfold import gdn_backend_stats
-
-        result["tensorfold_target"]["gdn_backend"] = gdn_backend_stats()
+        result["target_tree"].update(
+            self.target_tree_executor_provider.receipt()
+        )
         if lane is not None:
-            result["tensorfold_target"].update(
+            result["target_tree"].update(
                 lane_width_histogram={
                     str(width): int(rounds)
                     for width, rounds in sorted(
-                        lane.tensorfold_target_width_hist.items()
+                        lane.target_tree_width_hist.items()
                     )
                 },
-                lane_width_trace=list(lane.tensorfold_target_width_trace),
+                lane_width_trace=list(lane.target_tree_width_trace),
                 lane_width_trace_overflow=(
-                    lane.tensorfold_target_width_trace_overflow
+                    lane.target_tree_width_trace_overflow
                 ),
             )
+        # Receipt compatibility only. Scheduler state and counters stay
+        # provider-neutral; older observers may still consume this key.
+        result["tensorfold_target"] = copy.deepcopy(result["target_tree"])
         return result
 
-    def _record_tensorfold_dispatch(self, cohort):
-        """Record one successful physical TensorFold target dispatch.
+    def _apply_target_tree_dispatch_metrics(self, cohort, event):
+        """Apply provider-described metrics without delegating scheduler state.
 
-        Lane fields participate in the normal round snapshot and are restored
-        on abort.  Scheduler width counters are scalars, so the existing stats
-        snapshot also rolls them back; do not use a nested mutable histogram.
+        The provider callback used to mutate this scheduler after returning an
+        open target-cache transaction.  A callback failure then prevented the
+        caller from receiving (and aborting) that transaction.  Validate and
+        stage every update here before publishing any of them.
         """
-        width = len(cohort)
-        key = f"external_tensorfold_target_width_{width}_rounds"
+        from .target_tree_executor import TargetTreeDispatchMetrics
+
+        if not isinstance(event, TargetTreeDispatchMetrics):
+            raise TypeError("target-tree provider returned invalid dispatch metrics")
+        width = event.width
+        if type(width) is not int or width != len(cohort) or width <= 0:
+            raise ValueError("target-tree dispatch metric width disagrees with cohort")
+        key = f"external_target_tree_target_width_{width}_rounds"
         if key not in self.scheduler_stats:
             raise RuntimeError(
-                f"TensorFold target width {width} exceeds configured receipt bounds"
+                f"target-tree width {width} exceeds configured receipt bounds"
             )
-        _bump(self.scheduler_stats, key)
+        required = {
+            key,
+            "external_target_tree_target_rounds",
+            "external_target_tree_physical_target_forwards",
+        }
+        if width > 1:
+            required.update({
+                "external_target_tree_cohort_rounds",
+                "external_target_tree_cohort_lanes",
+                "external_target_tree_cohort_max_width",
+            })
+            if event.physical_packed:
+                required.update({
+                    "external_target_tree_packed_target_rounds",
+                    "external_target_tree_packed_target_lanes",
+                })
+        cache_key = None
+        if event.cached:
+            cache_key = (
+                "external_target_tree_executor_cache_hits"
+                if event.executor_cached
+                else "external_target_tree_executor_validations"
+            )
+            required.add(cache_key)
+        missing = required.difference(self.scheduler_stats)
+        if missing:
+            raise RuntimeError(
+                f"target-tree dispatch metrics are not declared: {sorted(missing)!r}"
+            )
+        for name in required:
+            if type(self.scheduler_stats[name]) is not int:
+                raise TypeError(f"target-tree scheduler metric {name} is not an integer")
+        lane_updates = []
         for lane in cohort:
-            lane.tensorfold_target_width_hist[width] = (
-                lane.tensorfold_target_width_hist.get(width, 0) + 1
-            )
-            if len(lane.tensorfold_target_width_trace) < 128:
-                lane.tensorfold_target_width_trace.append(width)
+            histogram = dict(lane.target_tree_width_hist)
+            histogram[width] = histogram.get(width, 0) + 1
+            trace = list(lane.target_tree_width_trace)
+            overflow = int(lane.target_tree_width_trace_overflow)
+            if len(trace) < 128:
+                trace.append(width)
             else:
-                lane.tensorfold_target_width_trace_overflow += 1
+                overflow += 1
+            lane_updates.append((lane, histogram, trace, overflow))
+
+        stats = dict(self.scheduler_stats)
+        stats[key] += 1
+        stats["external_target_tree_target_rounds"] += 1
+        stats["external_target_tree_physical_target_forwards"] += 1
+        if width > 1:
+            stats["external_target_tree_cohort_rounds"] += 1
+            stats["external_target_tree_cohort_lanes"] += width
+            stats["external_target_tree_cohort_max_width"] = max(
+                stats["external_target_tree_cohort_max_width"], width
+            )
+            if event.physical_packed:
+                stats["external_target_tree_packed_target_rounds"] += 1
+                stats["external_target_tree_packed_target_lanes"] += width
+        if cache_key is not None:
+            stats[cache_key] += 1
+
+        previous_stats = self.scheduler_stats
+        previous_lanes = [
+            (
+                lane,
+                lane.target_tree_width_hist,
+                lane.target_tree_width_trace,
+                lane.target_tree_width_trace_overflow,
+            )
+            for lane in cohort
+        ]
+        try:
+            self.scheduler_stats = stats
+            for lane, histogram, trace, overflow in lane_updates:
+                lane.target_tree_width_hist = histogram
+                lane.target_tree_width_trace = trace
+                lane.target_tree_width_trace_overflow = overflow
+        except BaseException:
+            self.scheduler_stats = previous_stats
+            for lane, histogram, trace, overflow in previous_lanes:
+                lane.target_tree_width_hist = histogram
+                lane.target_tree_width_trace = trace
+                lane.target_tree_width_trace_overflow = overflow
+            raise
+
+    def _finish_target_tree_dispatch(self, cohort, result, *, cached):
+        """Publish metrics or abort the still-open target transaction."""
+        if not isinstance(result, tuple) or len(result) != 3:
+            raise TypeError("target-tree executor must return logits, features, transaction")
+        transaction = result[2]
+        from .target_tree_executor import TargetTreeTransaction
+
+        if not isinstance(transaction, TargetTreeTransaction):
+            abort = getattr(transaction, "abort", None)
+            # An invalid provider may also supply a malformed truthy `closed`
+            # value. Only exact True proves cleanup already completed.
+            if callable(abort) and getattr(transaction, "closed", None) is not True:
+                try:
+                    abort()
+                except BaseException:
+                    pass
+            raise TypeError("target-tree executor returned an invalid transaction")
+        if type(transaction.closed) is not bool:
+            try:
+                transaction.abort()
+            except BaseException:
+                # Preserve the protocol diagnostic. The caller's authoritative
+                # round snapshot remains the final recovery boundary.
+                pass
+            raise TypeError("target-tree transaction closed state must be boolean")
+        if transaction.closed:
+            raise RuntimeError("target-tree executor returned a closed transaction")
+        if not (
+            callable(getattr(transaction, "commit", None))
+            or callable(getattr(transaction, "commit_paths", None))
+        ):
+            try:
+                transaction.abort()
+            except BaseException:
+                pass
+            raise TypeError("target-tree transaction has no commit operation")
+        if (
+            transaction.provider_protocol
+            != self.target_tree_executor_provider.protocol
+            or transaction.provider_revision_token
+            != self.target_tree_executor_provider.source_revision_token
+        ):
+            try:
+                transaction.abort()
+            except BaseException:
+                pass
+            raise RuntimeError("target-tree transaction provider binding mismatch")
+        try:
+            event = self.target_tree_executor_provider.dispatch_metrics(
+                len(cohort), transaction, cached=cached
+            )
+            if event.provider_protocol != self.target_tree_executor_provider.protocol:
+                raise RuntimeError("target-tree dispatch provider identity mismatch")
+            if type(event.cached) is not bool or event.cached is not cached:
+                raise RuntimeError("target-tree dispatch cache selection mismatch")
+            if type(event.executor_cached) is not bool:
+                raise TypeError("target-tree executor cache metric must be boolean")
+            if event.executor_cached and not event.cached:
+                raise RuntimeError("uncached target-tree dispatch reported a cache hit")
+            if type(event.physical_packed) is not bool:
+                raise TypeError("target-tree packed-dispatch metric must be boolean")
+            self._apply_target_tree_dispatch_metrics(cohort, event)
+        except BaseException:
+            # Provider callbacks are untrusted and may corrupt `closed` before
+            # failing. Only exact True is sufficient evidence that abort is no
+            # longer required.
+            if (
+                transaction is not None
+                and getattr(transaction, "closed", None) is not True
+            ):
+                try:
+                    transaction.abort()
+                except BaseException:
+                    pass
+            raise
+        return result
 
     def _propose_pairwise(self, lanes, arguments):
         """Batched DFlash2 selection: one pair-table walk, one host read.
@@ -1698,7 +2016,7 @@ class ExternalDraftBatchGenerator:
             declared=bool(getattr(self.draft, "supports_logits_processors", False)),
         )
 
-    def _propose(self, cohort, *, adaptive_depth=None):
+    def _propose(self, cohort, *, adaptive_depth=None, force_zero=False):
         """Draft phase: one proposal block per cohort row, ``None`` for no draft.
 
         A zero-count round only appends pending draft context so the draft
@@ -1743,7 +2061,9 @@ class ExternalDraftBatchGenerator:
             histogram = self.scheduler_stats["external_tree_node_budget_histogram"]
             key = str(requested_count)
             histogram[key] = int(histogram.get(key, 0)) + len(cohort)
-        if adaptive_depth is not None:
+        if force_zero:
+            requested_count = 0
+        elif adaptive_depth is not None:
             adaptive_count = min(requested_count, int(adaptive_depth))
             requested_count = self._proposal_depth(adaptive_count, requested_count)
         if any(l.ordinary for l in cohort): requested_count = 0
@@ -1793,6 +2113,14 @@ class ExternalDraftBatchGenerator:
                     # Draft groups split a cohort by tail length; B1-only
                     # proposal modes must see the verify cohort's width.
                     extra["cohort_width"] = len(cohort)
+                if getattr(self.draft, "requires_proposal_score_states", False):
+                    extra["proposal_score_states"] = [
+                        lane.proposal_score_counts for lane in lanes
+                    ]
+                if getattr(self.draft, "requires_proposal_trust_states", False):
+                    extra["proposal_trust_states"] = [
+                        lane.proposal_trust_states for lane in lanes
+                    ]
                 if self.draft_topology == "tree15":
                     if self.pair_context_tokens:
                         raise ValueError("tree15 is unavailable for paired-context drafters")
@@ -1890,8 +2218,12 @@ class ExternalDraftBatchGenerator:
             scored_composition = hasattr(self.draft, "last_proposal_score_keys")
             score_keys = getattr(self.draft, "last_proposal_score_keys", None)
             scores = getattr(self.draft, "last_proposal_scores", None)
+            trust_keys = getattr(self.draft, "last_proposal_trust_keys", None)
             trusted_rows = getattr(self.draft, "last_proposal_trusted", None)
             audit_rows = getattr(self.draft, "last_proposal_audits", None)
+            periodic_audit_rows = getattr(
+                self.draft, "last_proposal_periodic_audits", None
+            )
             selections = getattr(self.draft, "last_continuation_selections", None) if self.continuation_policy is not None else None
             payloads = getattr(self.draft, "draft_feedback_payloads", None)
             if selections is not None and len(selections) != len(lanes):
@@ -1910,15 +2242,22 @@ class ExternalDraftBatchGenerator:
                 or scores is None
                 or len(score_keys) != len(lanes)
                 or len(scores) != len(lanes)
+                or trust_keys is None
+                or len(trust_keys) != len(lanes)
                 or trusted_rows is None
                 or audit_rows is None
+                or periodic_audit_rows is None
                 or len(trusted_rows) != len(lanes)
                 or len(audit_rows) != len(lanes)
+                or len(periodic_audit_rows) != len(lanes)
                 or any(type(key) is not str or not key for key in score_keys)
                 or any(not np.isfinite(score) for score in scores)
+                or any(key is not None and (type(key) is not str or not key) for key in trust_keys)
                 or any(type(value) is not bool for value in trusted_rows)
                 or any(type(value) is not bool for value in audit_rows)
+                or any(type(value) is not bool for value in periodic_audit_rows)
                 or any(audit and trusted for audit, trusted in zip(audit_rows, trusted_rows))
+                or any(periodic and not audit for periodic, audit in zip(periodic_audit_rows, audit_rows))
             ):
                 raise ValueError("invalid composed proposal score rows")
             for j,row in enumerate(indices):
@@ -1960,8 +2299,10 @@ class ExternalDraftBatchGenerator:
                     if scored_composition:
                         blocks[row].proposal_score_key = score_keys[j]
                         blocks[row].proposal_score = float(scores[j])
+                        blocks[row].proposal_trust_key = trust_keys[j]
                         blocks[row].proposal_trusted = trusted_rows[j]
                         blocks[row].proposal_audit = audit_rows[j]
+                        blocks[row].proposal_periodic_audit = periodic_audit_rows[j]
                 if selections is not None:
                     if not isinstance(blocks[row], HostDraftRow) or selections[j] is None:
                         raise ValueError("continuation requires host complete-path selections")
@@ -1990,6 +2331,15 @@ class ExternalDraftBatchGenerator:
 
         if self.progressive_verification_tile is None:
             raise RuntimeError("progressive verification is not selected")
+        if (
+            self.progressive_verification_fidelity
+            == PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED
+            and float(lane.sampling.get("sampling_temp", 0)) != 0.0
+        ):
+            raise LaneFailure(
+                lane.uid,
+                "near-tie-bounded progressive verification is greedy-only",
+            )
         if lane.processors:
             raise LaneFailure(
                 lane.uid,
@@ -2007,7 +2357,10 @@ class ExternalDraftBatchGenerator:
                 lane.uid,
                 "progressive verification requires one law per proposal token",
             )
-        vocab = int(self.model.args.vocab_size)
+        # The proposal-law shape is the shared executor contract. Model
+        # families store the same vocabulary metadata in different argument
+        # layouts (for example Qwen3.8 nests it under ``text_config``).
+        vocab = len(laws[0])
         validate_proposal_laws(drafts, laws, vocab)
 
         private_cache = self._copy_reference_cache(lane.cache)
@@ -2220,6 +2573,7 @@ class ExternalDraftBatchGenerator:
                     result.relaxed_accepts,
                     response_rows,
                     window,
+                    relaxed_positions=result.relaxed_positions,
                 )
             )
         return decisions
@@ -2314,10 +2668,8 @@ class ExternalDraftBatchGenerator:
     def _target_tree_forward(self, lane, inputs, parents):
         if self.target_execution == "reference":
             return self._reference_tree_forward(lane, inputs, parents)
-        from .qwen38_tensorfold import forward
-
         cached = self.tree_gates["cache_executor"]
-        result = forward(
+        result = self.target_tree_executor_provider.forward(
             self.model,
             inputs,
             parents,
@@ -2325,61 +2677,28 @@ class ExternalDraftBatchGenerator:
             self.layers,
             cached=cached,
         )
-        self._record_tensorfold_dispatch([lane])
-        _bump(self.scheduler_stats, "external_tensorfold_target_rounds")
-        _bump(self.scheduler_stats, "external_tensorfold_physical_target_forwards")
-        if cached:
-            _bump(
-                self.scheduler_stats,
-                "external_tensorfold_executor_cache_hits"
-                if result[2].executor_cached
-                else "external_tensorfold_executor_validations",
-            )
-        return result
+        return self._finish_target_tree_dispatch([lane], result, cached=cached)
 
     def _target_tree_forward_many(self, cohort, inputs, parents):
-        """Queue one independent TensorFold tree per lane as one cohort."""
+        """Queue one independent provider tree per lane as one cohort."""
 
         if len(cohort) == 1:
             return self._target_tree_forward(cohort[0], inputs[0], parents[0])
-        if self.target_execution != "tensorfold":
-            raise ValueError("multi-lane tree execution requires TensorFold")
-        if len(cohort) > self.tensorfold_cohort_limit:
-            raise ValueError("TensorFold target cohort exceeds its bounded lane limit")
-        from .qwen38_tensorfold import forward_many
-
+        if self.target_execution != "provider":
+            raise ValueError("multi-lane tree execution requires a target-tree provider")
+        if len(cohort) > self.target_tree_cohort_limit:
+            raise ValueError("target-tree cohort exceeds its bounded lane limit")
         cached = self.tree_gates["cache_executor"]
-        result = forward_many(
+        result = self.target_tree_executor_provider.forward_many(
             self.model,
             inputs,
             parents,
             [lane.cache for lane in cohort],
             self.layers,
             cached=cached,
+            configured_limit=self.target_tree_cohort_limit,
         )
-        self._record_tensorfold_dispatch(cohort)
-        _bump(self.scheduler_stats, "external_tensorfold_target_rounds")
-        _bump(self.scheduler_stats, "external_tensorfold_cohort_rounds")
-        _bump(self.scheduler_stats, "external_tensorfold_cohort_lanes", len(cohort))
-        _bump(self.scheduler_stats, "external_tensorfold_physical_target_forwards")
-        if getattr(result[2], "physical_packed", False):
-            _bump(self.scheduler_stats, "external_tensorfold_packed_target_rounds")
-            _bump(
-                self.scheduler_stats,
-                "external_tensorfold_packed_target_lanes",
-                len(cohort),
-            )
-        self.scheduler_stats["external_tensorfold_cohort_max_width"] = max(
-            self.scheduler_stats["external_tensorfold_cohort_max_width"], len(cohort)
-        )
-        if cached:
-            _bump(
-                self.scheduler_stats,
-                "external_tensorfold_executor_cache_hits"
-                if result[2].executor_cached
-                else "external_tensorfold_executor_validations",
-            )
-        return result
+        return self._finish_target_tree_dispatch(cohort, result, cached=cached)
 
     @staticmethod
     def _tree_forbidden(lane):
@@ -2889,11 +3208,18 @@ class ExternalDraftBatchGenerator:
                 lane.proposal_composition_current_score = (
                     blocks[row].proposal_score if count else None
                 )
+                lane.proposal_composition_current_trust_key = (
+                    blocks[row].proposal_trust_key if count else None
+                )
                 lane.proposal_composition_current_trusted = bool(
                     count and getattr(blocks[row], "proposal_trusted", False)
                 )
                 lane.proposal_composition_current_audit = bool(
                     count and getattr(blocks[row], "proposal_audit", False)
+                )
+                lane.proposal_composition_current_periodic_audit = bool(
+                    count
+                    and getattr(blocks[row], "proposal_periodic_audit", False)
                 )
                 if source is not None and count:
                     counters = getattr(lane, "proposal_composition_counts", {})
@@ -2931,11 +3257,17 @@ class ExternalDraftBatchGenerator:
                 lane.verify_accept_span_hist[pair] = (
                     lane.verify_accept_span_hist.get(pair, 0) + 1
                 )
-            lane.relaxed_accepts += decision.relaxed
+            committed_relaxed = count_delivered_relaxed_accepts(
+                decision.relaxed_positions,
+                decision.relaxed,
+                delivered=len(emitted),
+                accepted=decision.accepted,
+            )
+            lane.relaxed_accepts += committed_relaxed
             _bump(
                 self.scheduler_stats,
                 "fly_relaxed_accepts",
-                decision.relaxed,
+                committed_relaxed,
             )
             lane.target_max_width = max(lane.target_max_width, len(cohort))
             if decision.continuation_outcome is not None:
@@ -3120,6 +3452,17 @@ class ExternalDraftBatchGenerator:
             return {}
         counters = getattr(lane, "proposal_composition_counts", {})
         scoring = getattr(self.draft, "proposal_composition_receipt", {})
+        preselection_ranking = {
+            "order": "score_then_span_then_source",
+            "authority": "lagged_committed_verification_only",
+            "score_counts": {
+                key: {
+                    "weighted_accepted_tokens": value[0],
+                    "weighted_proposed_tokens": value[1],
+                }
+                for key, value in sorted(lane.proposal_score_counts.items())
+            },
+        }
         return {"proposal_composition": {
             "selected": True, "qualified": False,
             "observed_used": any(counters.get(source, {}).get("verified_rounds", 0)
@@ -3131,20 +3474,78 @@ class ExternalDraftBatchGenerator:
             "current_score": getattr(
                 lane, "proposal_composition_current_score", None
             ),
+            "current_trust_key": getattr(
+                lane, "proposal_composition_current_trust_key", None
+            ),
             "current_trusted": getattr(
                 lane, "proposal_composition_current_trusted", False
             ),
             "current_audit": getattr(
                 lane, "proposal_composition_current_audit", False
             ),
-            "ranking": {
-                "order": "score_then_span_then_source",
-                "authority": "lagged_committed_verification_only",
-                "score_counts": copy.deepcopy(scoring.get("score_counts", {})),
+            "current_periodic_audit": getattr(
+                lane, "proposal_composition_current_periodic_audit", False
+            ),
+            # Compatibility alias plus an explicit phase name. Both are frozen
+            # before this round's committed feedback is published.
+            "ranking": copy.deepcopy(preselection_ranking),
+            "preselection_ranking": preselection_ranking,
+            "trusted_pld": {
+                "scope": "request_lane",
+                "sources": copy.deepcopy(lane.proposal_trust_states),
             },
-            "trusted_pld": copy.deepcopy(scoring.get("trusted_pld", {})),
+            "adapter_diagnostics": copy.deepcopy(
+                scoring.get("adapter_diagnostics", {})
+            ),
+            # A depth-zero terminal response has no new outbox item; carry the
+            # latest committed learning snapshot so its final receipt is not
+            # stale or empty.
+            "postcommit_learning": copy.deepcopy(
+                getattr(lane, "proposal_postcommit_learning", None)
+            ),
             "committed_verification": copy.deepcopy(counters),
         }}
+
+    @staticmethod
+    def _proposal_postcommit_snapshot(lane, block, *, proposed, accepted):
+        return {
+            "scope": "request_lane",
+            "observed_proposed_tokens": proposed,
+            "observed_accepted_tokens": accepted,
+            "score_key": block.proposal_score_key,
+            "trust_key": block.proposal_trust_key,
+            "audited": bool(block.proposal_audit),
+            "periodic_audit": bool(block.proposal_periodic_audit),
+            "trusted": bool(block.proposal_trusted),
+            "ranking": {
+                "authority": "postcommit_observed_prefix",
+                "score_counts": {
+                    key: {
+                        "weighted_accepted_tokens": value[0],
+                        "weighted_proposed_tokens": value[1],
+                    }
+                    for key, value in sorted(lane.proposal_score_counts.items())
+                },
+            },
+            "trusted_pld": {
+                "scope": "request_lane",
+                "sources": copy.deepcopy(lane.proposal_trust_states),
+            },
+        }
+
+    def _attach_postcommit_proposal_receipts(
+        self, lane, block, decision, *, proposed, accepted
+    ):
+        if not decision.emitted:
+            return
+        snapshot = self._proposal_postcommit_snapshot(
+            lane, block, proposed=proposed, accepted=accepted
+        )
+        lane.proposal_postcommit_learning = copy.deepcopy(snapshot)
+        for response in list(lane.ready)[-len(decision.emitted):]:
+            composition = response.speculative_receipt.get("proposal_composition")
+            if composition is not None:
+                composition["postcommit_learning"] = copy.deepcopy(snapshot)
 
     def _draft_settings_receipt(self):
         settings = getattr(getattr(self, "draft", None), "receipt_settings", None)
@@ -3247,8 +3648,10 @@ class ExternalDraftBatchGenerator:
                                    proposal_source=block.proposal_source,
                                    proposal_score_key=block.proposal_score_key,
                                    proposal_score=block.proposal_score,
+                                   proposal_trust_key=block.proposal_trust_key,
                                    proposal_trusted=block.proposal_trusted,
-                                   proposal_audit=block.proposal_audit)
+                                   proposal_audit=block.proposal_audit,
+                                   proposal_periodic_audit=block.proposal_periodic_audit)
         if isinstance(block, HostDraftRow):
             confidence = block.confidence_features
             return HostDraftRow(block.tokens[:depth], block.laws[:depth], block.width,
@@ -3256,8 +3659,10 @@ class ExternalDraftBatchGenerator:
                                 proposal_source=block.proposal_source,
                                 proposal_score_key=block.proposal_score_key,
                                 proposal_score=block.proposal_score,
+                                proposal_trust_key=block.proposal_trust_key,
                                 proposal_trusted=block.proposal_trusted,
                                 proposal_audit=block.proposal_audit,
+                                proposal_periodic_audit=block.proposal_periodic_audit,
                                 continuation_selection=block.continuation_selection,
                                 feedback_payload=block.feedback_payload)
         raise ValueError("adaptive chain trimming requires a supported proposal block")
@@ -3357,7 +3762,7 @@ class ExternalDraftBatchGenerator:
                 if steer is not None:
                     taps.steer = steer
                 try:
-                    if self.target_execution == "tensorfold":
+                    if self.target_execution == "provider":
                         parents = [list(range(-1, len(row) - 1)) for row in inputs]
                         logits, hidden, transaction = self._target_tree_forward_many(lanes, inputs, parents)
                     else:
@@ -3390,12 +3795,19 @@ class ExternalDraftBatchGenerator:
         finally:
             self._open = False
 
-    def _round(self, cohort):
+    def _round(self, cohort, *, forced_depth=None):
         """Publish learning observations only after every request commits."""
         self._feedback_outbox = []
         self._continuation_open_selections = []
         try:
-            self._run_round(cohort)
+            if forced_depth is None:
+                # Keep compatibility with lightweight observers that wrap the
+                # historical one-argument call shape. A requested forced
+                # depth is always passed through below, so signature errors
+                # remain visible instead of being mistaken for compatibility.
+                self._run_round(cohort)
+            else:
+                self._run_round(cohort, forced_depth=forced_depth)
         except BaseException:
             if self.continuation_policy is not None:
                 pool = self.draft.proposal_pool
@@ -3417,31 +3829,48 @@ class ExternalDraftBatchGenerator:
             for lane, block, decision, round_id in self._feedback_outbox:
                 selection = block.continuation_selection
                 try:
-                    observer = getattr(
-                        self.draft, "observe_proposal_feedback", None
-                    )
+                    observer = getattr(self.draft, "observe_proposal_feedback", None)
                     trusted_observer = getattr(
                         self.draft, "observe_trusted_pld", None
                     )
                     accepted = _delivered_accepts(decision)
+                    # Stop/budget truncation censors an unobserved proposal
+                    # suffix. Learn only from the draft prefix the committed
+                    # response actually reached.
+                    observed_proposed = min(
+                        len(block.tokens), len(decision.emitted)
+                    )
                     if (
                         callable(observer)
                         and block.proposal_score_key is not None
                         and not block.proposal_trusted
+                        and observed_proposed
                     ):
                         observer(
+                            lane.proposal_score_counts,
                             block.proposal_score_key,
-                            len(block.tokens),
+                            observed_proposed,
                             accepted,
+                            self.draft.policy.score_decay_per_token,
                         )
                     if callable(trusted_observer) and (
                         block.proposal_trusted or block.proposal_audit
-                    ):
+                    ) and observed_proposed:
                         trusted_observer(
-                            proposed=len(block.tokens),
+                            lane.proposal_trust_states,
+                            block.proposal_trust_key,
+                            proposed=observed_proposed,
                             audited=bool(block.proposal_audit),
+                            periodic_audit=bool(block.proposal_periodic_audit),
                             accepted=accepted if block.proposal_audit else 0,
                         )
+                    self._attach_postcommit_proposal_receipts(
+                        lane,
+                        block,
+                        decision,
+                        proposed=observed_proposed,
+                        accepted=accepted,
+                    )
                     if selection is not None:
                         coverage = getattr(lane, "continuation_coverage", {})
                         # Each top-W subset is ranked before target draws. A
@@ -3511,8 +3940,34 @@ class ExternalDraftBatchGenerator:
         A prelaunched tree proposal belongs to the previous boundary and must
         be discarded before a concurrent chain round can advance it.
         """
+        states = [lane.cost_handoff_state for lane in cohort]
+        width = len(cohort)
+        from .cost_per_commit_handoff import cohort_needs_ordinary_probe
+
+        ordinary_probe = cohort_needs_ordinary_probe(states, width)
+        ordinary_probe_uids = {
+            lane.uid
+            for lane, state in zip(cohort, states, strict=True)
+            if state is not None and state.needs_ordinary_probe(width)
+        }
+        # Keep the default route free of timing calls.  ``states`` has one
+        # entry per lane even when the capability was not selected.
+        started_ns = (
+            time.perf_counter_ns()
+            if any(state is not None for state in states)
+            else None
+        )
+        generated_before = [lane.generated for lane in cohort]
         if not self.dynamic_singleton_tree:
-            return self._round(cohort)
+            self._round(cohort, forced_depth=0 if ordinary_probe else None)
+            self._observe_cost_handoff_round(
+                cohort,
+                generated_before,
+                started_ns,
+                ordinary_probe=ordinary_probe,
+                ordinary_probe_uids=ordinary_probe_uids,
+            )
+            return
         mode = "chain" if concurrent else "tree15"
         saved = (self.draft_topology, self.target_execution)
         saved_widths = (self._auto_active_width, self._auto_cohort_width)
@@ -3523,7 +3978,14 @@ class ExternalDraftBatchGenerator:
             self.draft_topology = "chain"
             self.target_execution = "reference"
         try:
-            self._round(cohort)
+            self._round(cohort, forced_depth=0 if ordinary_probe else None)
+            self._observe_cost_handoff_round(
+                cohort,
+                generated_before,
+                started_ns,
+                ordinary_probe=ordinary_probe,
+                ordinary_probe_uids=ordinary_probe_uids,
+            )
             if mode != self._auto_last_mode and self._auto_last_mode is not None:
                 _bump(self.scheduler_stats, "external_auto_mode_switches")
             self._auto_last_mode = mode
@@ -3538,6 +4000,47 @@ class ExternalDraftBatchGenerator:
         finally:
             self.draft_topology, self.target_execution = saved
             self._auto_active_width, self._auto_cohort_width = saved_widths
+
+    def _observe_cost_handoff_round(
+        self,
+        cohort,
+        generated_before,
+        started_ns,
+        *,
+        ordinary_probe,
+        ordinary_probe_uids=(),
+    ):
+        """Publish request-local timing only after a complete round commit."""
+        if started_ns is None:
+            return
+        elapsed_ns = max(time.perf_counter_ns() - started_ns, 1)
+        width = len(cohort)
+        for lane, before in zip(cohort, generated_before, strict=True):
+            state = lane.cost_handoff_state
+            if state is None or lane.cancelled:
+                continue
+            if ordinary_probe and lane.uid not in ordinary_probe_uids:
+                continue
+            decision = state.observe(
+                kind="ordinary" if ordinary_probe else "speculative",
+                elapsed_ns=elapsed_ns,
+                committed_tokens=lane.generated - before,
+                execution_width=width,
+                lane_uid=lane.uid,
+                owner_scope=(self.binding, lane.session_scope_hash),
+            )
+            if decision is None:
+                continue
+            # The target and draft transaction already committed.  Marking
+            # this lane ordinary only affects the next closed boundary.
+            lane.ordinary = True
+            lane.cost_handoff_receipt = state.receipt()
+            _bump(self.scheduler_stats, "external_cost_handoff_events")
+            _bump(self.scheduler_stats, "external_cost_handoff_lanes")
+            for response in lane.ready:
+                response.speculative_receipt["cost_per_commit_handoff"] = (
+                    copy.deepcopy(lane.cost_handoff_receipt)
+                )
 
     def _pool_round(self, cohort):
         from .continuation_verification import (
@@ -3848,13 +4351,15 @@ class ExternalDraftBatchGenerator:
             inverse.append(physical)
         return tuple(unique), tuple(representatives), tuple(inverse)
 
-    def _run_round(self, cohort):
-        if cohort and all(lane.ordinary for lane in cohort):
+    def _run_round(self, cohort, *, forced_depth=None):
+        if forced_depth not in (None, 0):
+            raise ValueError("external forced draft depth must be zero or absent")
+        if forced_depth is None and cohort and all(lane.ordinary for lane in cohort):
             return self._ordinary_round(cohort)
-        if self.continuation_policy is not None and all(
+        if forced_depth is None and self.continuation_policy is not None and all(
                 not lane.ordinary and lane.maximum - lane.generated > 1 for lane in cohort):
             return self._pool_round(cohort)
-        if self.draft_topology == "tree15" and all(
+        if forced_depth is None and self.draft_topology == "tree15" and all(
             lane.maximum - lane.generated > 1 for lane in cohort
         ):
             # A lane's last budget token takes the chain body's zero-count
@@ -3877,7 +4382,10 @@ class ExternalDraftBatchGenerator:
         self._open = True
         transaction = None
         try:
-            if self.adaptive_policy is None:
+            if forced_depth is not None:
+                blocks = self._propose(cohort, force_zero=True)
+                fixed_depth = forced_depth
+            elif self.adaptive_policy is None:
                 blocks = self._propose(cohort)
                 fixed_depth = None
             else:
@@ -4031,7 +4539,7 @@ class ExternalDraftBatchGenerator:
             if steer is not None:
                 taps.steer = steer
             try:
-                if self.target_execution == "tensorfold":
+                if self.target_execution == "provider":
                     parents = [
                         list(range(-1, len(row) - 1)) for row in inputs
                     ]
@@ -4085,9 +4593,9 @@ class ExternalDraftBatchGenerator:
     def _tree_round(self, cohort):
         if not cohort:
             return
-        if len(cohort) > 1 and self.target_execution != "tensorfold":
-            raise ValueError("multi-lane tree15 requires TensorFold target execution")
-        if len(cohort) > self.tensorfold_cohort_limit:
+        if len(cohort) > 1 and self.target_execution != "provider":
+            raise ValueError("multi-lane tree15 requires target-tree provider execution")
+        if len(cohort) > self.target_tree_cohort_limit:
             raise ValueError("tree15 cohort exceeds its bounded lane limit")
         clock = time.perf_counter() if self.round_timing else None
         phase = _PhaseClock(self) if self.round_timing else None
@@ -4181,7 +4689,7 @@ class ExternalDraftBatchGenerator:
                 phase.skip()
             # ``_propose`` adopts a queued lattice only for a singleton group,
             # so a multi-lane cohort's prelaunches were built and thrown away
-            # every round (SPEC-01, packed TensorFold B2-B4).
+            # every round (SPEC-01, packed provider B2-B4).
             if self.tree_gates["pipeline_draft"] and len(cohort) == 1:
                 self._prelaunch_tree(cohort[0], decisions[0])
                 if phase is not None:
@@ -4448,13 +4956,23 @@ class ExternalDraftBatchGenerator:
 
     @staticmethod
     def _batch_cohort_key(lane):
-        cohort = lane.sampling.get("batch_cohort")
-        if not isinstance(cohort, dict):
-            return None
-        size = cohort.get("size")
-        if type(size) is not int or size < 1:
-            return None
-        return (str(cohort.get("tenant_id")), str(cohort.get("id")), size)
+        return declared_cohort_key(lane.sampling.get("batch_cohort"))
+
+    def _record_atomic_cohort_failure(self, uids, cohort, reason):
+        uids = tuple(int(uid) for uid in uids)
+        if not uids:
+            return
+        self._atomic_cohort_failures.append(
+            {"uids": uids, "cohort": dict(cohort), "reason": str(reason)}
+        )
+        _bump(self.scheduler_stats, "external_atomic_cohort_failures")
+
+    def take_atomic_cohort_failures(self):
+        failures, self._atomic_cohort_failures = (
+            self._atomic_cohort_failures,
+            [],
+        )
+        return failures
 
     def _atomic_cohort_prefill_ready(self, lane):
         """Hold a completed short prompt until its declared peers are ready.
@@ -4462,13 +4980,13 @@ class ExternalDraftBatchGenerator:
         Ingress publishes a complete ``batch_cohort`` atomically, but uneven
         external prompts reach their final prompt token on different polls.
         Letting the short member decode immediately turns the cohort into a
-        prefill/decode staircase and leaves TensorFold no sustained batch to
+        prefill/decode staircase and leaves the provider no sustained batch to
         execute.  The ordinary/self-MTP path already applies this boundary
         hold; external DFlash must honor the same request contract.
 
-        A cohort that lost a member after admission is released rather than
-        deadlocked.  Serving owns cancellation/failure reporting for that
-        degraded case.
+        A cohort that loses a member before this boundary is failed as a whole
+        by ``remove``.  Once the complete frontier exists, normal dynamic
+        decode membership resumes and early completion may shrink width.
         """
         key = self._batch_cohort_key(lane)
         if key is None:
@@ -4479,12 +4997,54 @@ class ExternalDraftBatchGenerator:
             if not candidate.cancelled and self._batch_cohort_key(candidate) == key
         ]
         if len(members) != key[2]:
-            return True
+            # Ingress normally makes this impossible.  Hold rather than run a
+            # smaller width if a direct/runtime caller violates publication;
+            # explicit cancellation takes the fail-closed path in ``remove``.
+            self._atomic_prefill_waiting_uids.add(lane.uid)
+            _bump(self.scheduler_stats, "external_atomic_cohort_prefill_holds")
+            return False
         if all(candidate.anchor is not None for candidate in members):
+            if key not in self._released_atomic_cohorts:
+                self._released_atomic_cohorts.add(key)
+                _bump(self.scheduler_stats, "external_atomic_cohort_releases")
             return True
         self._atomic_prefill_waiting_uids.add(lane.uid)
         _bump(self.scheduler_stats, "external_atomic_cohort_prefill_holds")
         return False
+
+    def _refuse_incomplete_atomic_cohorts(self):
+        """Retire declarations that cannot own their promised frontier.
+
+        Serving attaches every member before polling the executor.  A short
+        group here therefore means either a direct caller supplied an
+        incomplete declaration or membership was lost outside ``remove``.
+        Both must fail closed rather than wait forever or decode at a smaller
+        physical width.
+        """
+
+        groups = {}
+        for lane in self.lanes.values():
+            key = self._batch_cohort_key(lane)
+            if key is not None and key not in self._released_atomic_cohorts:
+                groups.setdefault(key, []).append(lane)
+        failed = set()
+        for key, members in groups.items():
+            if len(members) == key[2]:
+                continue
+            uids = tuple(sorted(lane.uid for lane in members))
+            cohort = members[0].sampling["batch_cohort"]
+            # Temporarily mark the identity released so the retirement itself
+            # does not recursively classify the same incomplete declaration.
+            self._released_atomic_cohorts.add(key)
+            self.remove(uids, cancelled=False)
+            self._released_atomic_cohorts.discard(key)
+            self._record_atomic_cohort_failure(
+                uids,
+                cohort,
+                "declared external cohort cannot form its complete decode frontier",
+            )
+            failed.update(uids)
+        return failed
 
     def scheduler_waiting_uids(self):
         """Lanes intentionally paused by scheduling, not memory admission.
@@ -4647,6 +5207,10 @@ class ExternalDraftBatchGenerator:
 
     def _scheduler_round(self, mode):
         prompts, responses = [], []
+        # Ingress attaches a declared group completely before the first poll.
+        # Refuse any incomplete direct/runtime declaration before it can run a
+        # prefill forward or publish a prompt boundary.
+        self._refuse_incomplete_atomic_cohorts()
         # A pending prefill may have just failed admission. Keep that evidence
         # until this lane's next admission attempt; clearing it here would hide
         # memory stalls behind the decode-first publication boundary.
@@ -4681,7 +5245,8 @@ class ExternalDraftBatchGenerator:
         ready = [
             lane
             for lane in ordered
-            if lane.anchor is not None
+            if lane.uid in self.lanes
+            and lane.anchor is not None
             and not lane.ready
             and not lane.cancelled
             and self._atomic_cohort_prefill_ready(lane)
@@ -4708,8 +5273,8 @@ class ExternalDraftBatchGenerator:
             groups.setdefault((count, lane.ordinary),[]).append(lane)
         decode_started = time.perf_counter()
         for (count, _ordinary), candidates in groups.items():
-            if self.target_execution == "tensorfold" and not concurrent:
-                candidates = candidates[: self.tensorfold_cohort_limit]
+            if self.target_execution == "provider" and not concurrent:
+                candidates = candidates[: self.target_tree_cohort_limit]
             # Bound total target rows as lane pressure rises.  The adapter
             # declares the tree-node budget; admission prices that exact
             # verify shape rather than assuming 16 rows for every lane.
@@ -4722,7 +5287,7 @@ class ExternalDraftBatchGenerator:
             if not cohort:
                 self._memory_waiting_uids.update(lane.uid for lane in candidates)
                 continue
-            if self.draft_topology == "tree15" and self.target_execution != "tensorfold":
+            if self.draft_topology == "tree15" and self.target_execution != "provider":
                 pending = [[lane] for lane in reversed(cohort)]
             else:
                 pending = [cohort]
@@ -4791,6 +5356,36 @@ class ExternalDraftBatchGenerator:
 
     def remove(self, uids, return_prompt_caches=False, *, cancelled=True, keep_boundary=False):
         if self._open: raise RuntimeError("Cannot remove during external transaction")
+        requested_uids = {int(uid) for uid in uids}
+        uids = set(requested_uids)
+        # Before the first complete decode frontier, membership is owned by
+        # the declaration rather than by individual lanes.  Removing one
+        # member retires every surviving sibling and reports those survivors
+        # through the atomic-failure channel.  After release, ordinary dynamic
+        # width shrink is legal and remains unchanged.
+        owned_failures = []
+        for uid in tuple(uids):
+            lane = self.lanes.get(uid)
+            if lane is None:
+                continue
+            key = self._batch_cohort_key(lane)
+            if key is None or key in self._released_atomic_cohorts:
+                continue
+            members = {
+                candidate.uid
+                for candidate in self.lanes.values()
+                if self._batch_cohort_key(candidate) == key
+            }
+            survivors = members - uids
+            if survivors:
+                owned_failures.append(
+                    (
+                        tuple(sorted(survivors)),
+                        lane.sampling["batch_cohort"],
+                        "declared external cohort lost a member before its decode frontier",
+                    )
+                )
+            uids.update(members)
         result = {}
         removed = False
         self._discard_prelaunched(uids)
@@ -4799,9 +5394,20 @@ class ExternalDraftBatchGenerator:
             if not keep_boundary: self.boundaries.pop(uid,None)
             if lane is not None:
                 removed = True
+                if lane.cost_handoff_state is not None:
+                    lane.cost_handoff_state.cancel()
                 lane.cancelled = bool(cancelled); self.scheduler_stats["cancelled"] += int(cancelled)
-                if return_prompt_caches: result[uid] = self._freeze_cache(lane.cache)
+                if return_prompt_caches and uid in requested_uids:
+                    result[uid] = self._freeze_cache(lane.cache)
                 lane.ready.clear()
+        for failed_uids, cohort, reason in owned_failures:
+            self._record_atomic_cohort_failure(failed_uids, cohort, reason)
+        live_keys = {
+            key
+            for lane in self.lanes.values()
+            if (key := self._batch_cohort_key(lane)) is not None
+        }
+        self._released_atomic_cohorts.intersection_update(live_keys)
         if removed and not self.lanes:
             # No request state can reference verify/prefill scratch now.  Free
             # the allocator pool before the next atomic cohort is admitted;

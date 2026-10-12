@@ -16,6 +16,7 @@ from .cache_branch_transaction import (
     create_cache_delta_lineage,
 )
 from .cache_planes import CachePlaneKind
+from .cache_operations import CacheOperationsUnsupported, cache_operations
 from .ragged_verify_layout import RaggedVerifyLayout
 
 _ZERO = {
@@ -109,7 +110,7 @@ _ZERO = {
     "async_qsa_prequeue_queued": 0,
     "async_qsa_prequeue_bound": 0,
     "async_qsa_prequeue_declined": 0,
-    "async_qsa_shared_prefix_fused_layers": 0,
+    "async_shared_state_prefix_fused_layers": 0,
     "async_qsa_budget_checks": 0,
     "async_qsa_budget_retained_segmented": 0,
     "async_qsa_budget_promotions": 0,
@@ -131,6 +132,9 @@ for _event in ("requests", "engaged", "declined"):
     _ZERO[f"private_delta_width_other_{_event}"] = 0
 _STATS = dict(_ZERO)
 _STATS_LOCK = threading.Lock()
+_COUNTER_ALIASES = {
+    "async_qsa_shared_prefix_fused_layers": "async_shared_state_prefix_fused_layers",
+}
 _PRIVATE_DELTA_DECLINE_REASONS: dict[str, int] = {}
 _EXACT_SET_FOLD_DECLINE_REASONS: dict[str, int] = {}
 
@@ -238,6 +242,7 @@ def shared_qsa_suffix_admission(
 
 
 def note_segmented_self_mtp(key: str, amount: int = 1) -> None:
+    key = _COUNTER_ALIASES.get(key, key)
     if key not in _STATS:
         raise KeyError(f"unknown segmented self-MTP counter: {key}")
     with _STATS_LOCK:
@@ -354,31 +359,36 @@ def _tree_nbytes(value: Any, seen: set[int] | None = None) -> int:
 def _plane_groups(pair: Any) -> dict[CachePlaneKind, tuple[Any, ...]]:
     groups: dict[CachePlaneKind, list[Any]] = {}
     for cache in pair.target:
-        name = type(cache).__name__.lower()
-        if "ring" in name or "rotating" in name:
-            groups.setdefault(CachePlaneKind.ATTENTION_RING, []).append(cache)
-        elif hasattr(cache, "keys") or "kv" in name or "qsa" in name:
-            groups.setdefault(CachePlaneKind.ATTENTION_KV, []).append(cache)
-        if "qsa" in name or hasattr(cache, "index_keys"):
-            groups.setdefault(CachePlaneKind.QSA_SUMMARY, []).append(cache)
-        if "arrayscache" in name or (
-            hasattr(cache, "cache") and (not hasattr(cache, "keys"))
-        ):
-            groups.setdefault(CachePlaneKind.GDN_RECURRENT, []).append(cache)
+        operations = cache_operations(cache, capability="segmented MTP publication")
+        for plane in operations.planes:
+            try:
+                kind = CachePlaneKind(plane.kind)
+            except ValueError as exc:
+                raise CacheOperationsUnsupported(
+                    f"segmented MTP does not recognize declared plane {plane.kind!r}"
+                ) from exc
+            groups.setdefault(kind, []).append(cache)
     groups[CachePlaneKind.MTP_DRAFT] = list(pair.draft)
-    if not groups.get(CachePlaneKind.ATTENTION_KV) and (
-        not groups.get(CachePlaneKind.ATTENTION_RING)
-    ):
-        groups[CachePlaneKind.ATTENTION_KV] = list(pair.target)
     return {kind: tuple(caches) for (kind, caches) in groups.items() if caches}
 
 
 def _ring_capacity(caches: tuple[Any, ...]) -> int | None:
-    capacities = {
-        int(getattr(cache, "max_size"))
-        for cache in caches
-        if getattr(cache, "max_size", None) is not None
-    }
+    capacities = set()
+    for cache in caches:
+        operations = cache_operations(cache, capability="segmented ring layout")
+        plane = next(
+            (item for item in operations.planes if item.kind == "attention_ring"), None
+        )
+        if plane is None:
+            raise CacheOperationsUnsupported(
+                "segmented ring cache lacks an attention_ring declaration"
+            )
+        values = dict(operations.compatibility(cache, plane))
+        if "max_size" not in values:
+            raise CacheOperationsUnsupported(
+                "segmented ring cache lacks a declared max_size"
+            )
+        capacities.add(int(values["max_size"]))
     if not capacities:
         return None
     if len(capacities) != 1:
@@ -386,67 +396,46 @@ def _ring_capacity(caches: tuple[Any, ...]) -> int | None:
     return capacities.pop()
 
 
-_QSA_ATTENTION_FIELDS = ("keys", "values", "key_scale", "value_scale")
-_QSA_SUMMARY_FIELDS = (
-    "index_keys",
-    "_qsa_pooled_keys",
-    "_qsa_pooled_ratio",
-    "_qsa_summary_identity",
-    "_qsa_summary_restored",
-    "_qsa_pending_pooled",
-    "_mtp_share_topk",
-    "_mtp_shared_topk",
-)
-_GDN_FIELDS = ("cache", "left_padding", "lengths")
-_FORMAT_FIELDS = ("group_size", "bits", "key_bits", "value_bits", "rotate", "normalize")
-
-
-def _component_fields(kind: CachePlaneKind, cache: Any) -> tuple[str, ...]:
-    is_qsa = "qsa" in type(cache).__name__.lower() or hasattr(cache, "index_keys")
-    if getattr(cache, "supports_shared_qsa_suffix", False):
-        return ("state",)
-    if kind == CachePlaneKind.MTP_DRAFT and is_qsa:
-        return _QSA_ATTENTION_FIELDS + _QSA_SUMMARY_FIELDS
-    if is_qsa and kind == CachePlaneKind.ATTENTION_KV:
-        return _QSA_ATTENTION_FIELDS
-    if is_qsa and kind == CachePlaneKind.QSA_SUMMARY:
-        return _QSA_SUMMARY_FIELDS
-    if kind == CachePlaneKind.GDN_RECURRENT and hasattr(cache, "cache"):
-        return _GDN_FIELDS
-    if hasattr(cache, "keys"):
-        return _QSA_ATTENTION_FIELDS
-    return ("*",)
+def _component_declarations(kind: CachePlaneKind, cache: Any):
+    operations = cache_operations(cache, capability="segmented MTP state identity")
+    if kind == CachePlaneKind.MTP_DRAFT:
+        return operations, operations.planes
+    planes = tuple((plane for plane in operations.planes if plane.kind == kind.value))
+    if len(planes) != 1:
+        raise CacheOperationsUnsupported(
+            f"cache provider must declare exactly one {kind.value!r} plane"
+        )
+    return operations, planes
 
 
 def _fingerprint(kind: CachePlaneKind, caches: tuple[Any, ...]) -> tuple[Any, ...]:
     return tuple(
         (
-            (
-                _cache_type(cache),
-                id(cache),
-                _component_fields(kind, cache),
-                tuple(
-                    (
-                        (name, repr(getattr(cache, name, None)))
-                        for name in _FORMAT_FIELDS
-                    )
-                ),
-            )
-            for cache in caches
+            _cache_type(cache),
+            id(cache),
+            tuple(
+                field
+                for plane in planes
+                for field in (*plane.fields, *plane.compatibility_fields)
+            ),
+            operations.fingerprint,
+            tuple(
+                (plane.kind, plane.fields, operations.compatibility(cache, plane))
+                for plane in planes
+            ),
         )
+        for cache in caches
+        for operations, planes in (_component_declarations(kind, cache),)
     )
 
 
 def _plane_logical_bytes(kind: CachePlaneKind, caches: tuple[Any, ...]) -> int:
     total = 0
     for cache in caches:
-        fields = _component_fields(kind, cache)
-        if fields == ("*",):
-            total += int(getattr(cache, "nbytes", 0))
-        else:
-            total += _tree_nbytes(
-                tuple((getattr(cache, name, None) for name in fields))
-            )
+        operations, planes = _component_declarations(kind, cache)
+        total += _tree_nbytes(
+            tuple((operations.projection(cache, plane) for plane in planes))
+        )
     return total
 
 
@@ -475,28 +464,27 @@ def _state_identity(value: Any) -> Any:
 def _component_state(kind: CachePlaneKind, caches: tuple[Any, ...]) -> tuple[Any, ...]:
     result = []
     for cache in caches:
-        fields = _component_fields(kind, cache)
-        values = (
-            getattr(cache, "state", None)
-            if fields == ("*",)
-            else tuple((getattr(cache, name, None) for name in fields))
+        operations, planes = _component_declarations(kind, cache)
+        values = tuple(
+            (operations.projection(cache, plane) for plane in planes)
         )
-        result.append((_cache_type(cache), fields, _state_identity(values)))
+        result.append(
+            (
+                _cache_type(cache),
+                tuple((plane.fields for plane in planes)),
+                _state_identity(values),
+            )
+        )
     return tuple(result)
 
 
 def _group_positions(caches: Iterable[Any]) -> tuple[int, ...]:
     positions = []
     for cache in caches:
-        offset = getattr(cache, "offset", None)
-        if isinstance(offset, Integral) and (not isinstance(offset, bool)):
+        operations = cache_operations(cache, capability="segmented MTP position")
+        offset = operations.position(cache)
+        if offset is not None:
             positions.append(int(offset))
-            continue
-        size = type(cache).__dict__.get("size")
-        if callable(size):
-            value = size(cache)
-            if isinstance(value, Integral) and (not isinstance(value, bool)):
-                positions.append(int(value))
     return tuple(positions)
 
 
@@ -521,18 +509,7 @@ def _layout_id(kind: CachePlaneKind, caches: tuple[Any, ...]) -> str:
     geometry = (
         kind.value,
         tuple((_cache_type(cache) for cache in caches)),
-        tuple((_component_fields(kind, cache) for cache in caches)),
-        tuple(
-            (
-                tuple(
-                    (
-                        (name, repr(getattr(cache, name, None)))
-                        for name in _FORMAT_FIELDS
-                    )
-                )
-                for cache in caches
-            )
-        ),
+        tuple((_fingerprint(kind, (cache,))[0][3:] for cache in caches)),
         _ring_capacity(caches) if kind == CachePlaneKind.ATTENTION_RING else None,
     )
     return hashlib.sha256(repr(geometry).encode()).hexdigest()
@@ -542,16 +519,8 @@ def _stamp(
     kind: CachePlaneKind, caches: tuple[Any, ...], lane: Any, logical_position: int
 ) -> _PlaneStamp:
     for cache in caches:
-        is_qsa = "qsa" in type(cache).__name__.lower() or hasattr(cache, "index_keys")
-        if (
-            is_qsa
-            and kind in (CachePlaneKind.QSA_SUMMARY, CachePlaneKind.MTP_DRAFT)
-            and (
-                bool(getattr(cache, "_mtp_share_topk", False))
-                or getattr(cache, "_mtp_shared_topk", None) is not None
-            )
-        ):
-            raise ValueError("QSA shared-top-k cycle is not closed at publication")
+        operations = cache_operations(cache, capability="segmented MTP publication")
+        operations.validate_segmented_publication(cache)
     if kind != CachePlaneKind.MTP_DRAFT:
         _require_group_position(kind, caches, int(logical_position))
         return _PlaneStamp(
@@ -770,6 +739,10 @@ class SegmentedLaneTransaction:
 def segmented_self_mtp_stats(*, reset: bool = False) -> dict[str, Any]:
     with _STATS_LOCK:
         result = dict(_STATS)
+        result["async_qsa_shared_prefix_fused_layers"] = result[
+            "async_shared_state_prefix_fused_layers"
+        ]
+        result["schema_version"] = 2
         result["private_delta_decline_reasons"] = dict(_PRIVATE_DELTA_DECLINE_REASONS)
         result["exact_set_fold_decline_reasons"] = dict(_EXACT_SET_FOLD_DECLINE_REASONS)
         if reset:

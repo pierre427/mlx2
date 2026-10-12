@@ -409,6 +409,17 @@ class _MLXVLMAdapter:
     def _wrap_model(model):
         return _LogitsModel(model)
 
+    @classmethod
+    def _inspect_adapter_artifact(cls, model_path):
+        """Inspect one adapter artifact before any backend or tensor load.
+
+        Families with stricter topology or provenance rules override this
+        hook.  Keeping the inspection adapter-owned avoids a second generic
+        read and keeps model-specific artifact policy out of the lifecycle.
+        """
+
+        return inspect_artifact(model_path, expected=cls.descriptor.model_type)
+
     def __init__(self, model_path, *, execution_policy=None):
         # Refuse an explicitly enabled TF32 switch like the standard decoder
         # (process_env.require_process_numerics): MLX latches it, and these
@@ -418,9 +429,7 @@ class _MLXVLMAdapter:
         require_process_numerics(f"the {type(self).__name__} mlx-vlm adapter")
         if execution_policy:
             raise ValueError("mlx-vlm adapters do not accept speculative policy")
-        self.identity = inspect_artifact(
-            model_path, expected=self.descriptor.model_type
-        )
+        self.identity = self._inspect_adapter_artifact(model_path)
         self.environment = {}
         self.max_context = self.identity["max_context"]
         self.layout = self.descriptor.cache_layout

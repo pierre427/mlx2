@@ -16,11 +16,16 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..process_env import (
     PROCESS_NUMERICS,
+    assert_process_profile_applied,
     clear_inherited_profile,
     require_process_numerics,
 )
 from ..sampling_defaults import SamplingDefaults, VendorSampling
 from .artifact_paths import shard_within_artifact
+from .external_draft_policy import (
+    normalize_progressive_external_policy,
+    progressive_external_identity,
+)
 from .muse_glimmer_config import ModelArgs
 
 MUSE_GLIMMER = ModelDescriptor(
@@ -132,9 +137,28 @@ def configure_environment() -> dict[str, str]:
         **PROCESS_NUMERICS, "MLX_LM_COMPILED_DECODE": "0",
         "MLX_LM_SEGMENTED_SELF_MTP": "0",
         "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
+        "MLX2_QWEN_TARGET_EXECUTION": "reference",
     }
-    clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_"))
+    # ExternalDraftBatchGenerator is shared with Qwen3.8 and reads these
+    # selectors directly.  A previous Qwen tree route must not silently turn
+    # Muse's chain/reference route into tree15 or enable TensorFold gates.
+    clear_inherited_profile(
+        (
+            "MLX_QWEN",
+            "MLX_LM_",
+            "MLXUAG_",
+            "MLX2_DFLASH_",
+            "MLX2_QWEN_",
+            "MLX2_TENSORFOLD_",
+            "MLX2_TREE_",
+        )
+    )
+    # The shared helper preserves this operator-owned source binding for a
+    # Qwen TensorFold route. Muse cannot select that route, so retaining it
+    # would expose unrelated source ownership in this process.
+    os.environ.pop("MLX2_TENSORFOLD_SOURCE", None)
     os.environ.update(profile)
+    assert_process_profile_applied("the Muse-Glimmer profile")
     return profile
 
 
@@ -153,7 +177,7 @@ def normalize_messages(messages: list[dict]) -> list[dict]:
             if isinstance(arguments, str):
                 arguments = json.loads(arguments)
             if not isinstance(arguments, dict):
-                raise ValueError("Tool arguments must be a JSON object")
+                raise TypeError("Tool arguments must be a JSON object")
             function["arguments"] = arguments
     return messages
 
@@ -364,6 +388,7 @@ def normalize_external_policy(value):
         "target_verify_row_exact",
         "progressive_verification_tile",
         "progressive_multilane_draft_cap",
+        "cost_per_commit_handoff",
     }
     if set(policy) - allowed:
         raise ValueError("Unsupported Muse execution policy")
@@ -382,6 +407,14 @@ def normalize_external_policy(value):
     pairwise = policy.get("pairwise_selection", "host")
     if pairwise not in ("host", "batched"):
         raise ValueError("pairwise_selection must be 'host' or 'batched'")
+    if policy.get("cost_per_commit_handoff") is not None:
+        from ..runtime.cost_per_commit_handoff import (
+            CostPerCommitHandoffSettings,
+        )
+
+        CostPerCommitHandoffSettings.from_value(
+            policy["cost_per_commit_handoff"]
+        )
     if progressive_tile is not None:
         if not row_exact or pairwise != "host":
             raise ValueError(
@@ -430,6 +463,11 @@ def normalize_external_policy(value):
                 "proposal_composition cannot combine with batched pairwise selection"
             )
         ProposalCompositionPolicy.from_value(composition)
+    policy = normalize_progressive_external_policy(
+        policy,
+        num_draft=policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT),
+        minimum_proposals=DFLASH2_MINIMUM_PROPOSAL_LENGTH,
+    )
     return policy
 
 class MuseGlimmerAdapter:
@@ -437,6 +475,30 @@ class MuseGlimmerAdapter:
     descriptor = MUSE_GLIMMER
     sampling_defaults = MUSE_GLIMMER_SAMPLING
     reasoning_effort_semantics = "reasoning_strength"
+
+    def attention_topology(self):
+        """Revision-bound global/sliding KV contract for state capabilities."""
+        from ..runtime.attention_topology import (
+            FULL_KV,
+            SLIDING_KV,
+            AttentionTopology,
+        )
+
+        config = self._config.get("text_config", self._config)
+        mapping = {
+            "full_attention": FULL_KV,
+            "sliding_attention": SLIDING_KV,
+        }
+        try:
+            layers = tuple(mapping[kind] for kind in config["layer_types"])
+        except KeyError as error:
+            raise ValueError("unknown Muse attention topology") from error
+        return AttentionTopology(
+            state_revision=self.identity["fingerprint"],
+            cache_layout=self.layout,
+            layers=layers,
+            sliding_window=int(config["sliding_window"]),
+        )
 
     def prefill_step_default(self):
         """Adapter-owned Muse chunk; an explicit engine value still wins.
@@ -601,6 +663,11 @@ class MuseGlimmerAdapter:
         )
         if multilane_cap is not None:
             config["progressive_multilane_draft_cap"] = multilane_cap
+        cost_handoff = (getattr(self, "external_policy", None) or {}).get(
+            "cost_per_commit_handoff"
+        )
+        if cost_handoff is not None:
+            config["cost_per_commit_handoff"] = cost_handoff
         return config
 
     def __init__(self, model_path: str, *, execution_policy=None):
@@ -704,6 +771,7 @@ class MuseGlimmerAdapter:
             from dataclasses import replace
 
             from .dflash2 import load_drafter
+
             self.draft_model = load_drafter(draft_record, self.model)
             composition_identity = ""
             composition = self.external_policy.get("proposal_composition")
@@ -719,26 +787,12 @@ class MuseGlimmerAdapter:
                     separators=(",", ":"),
                 )
             self.profile_name = self.external_profile_name
-            progressive_identity = ""
+            progressive_identity = progressive_external_identity(
+                self.external_policy
+            )
             progressive_tile = self.external_policy.get(
                 "progressive_verification_tile"
             )
-            if progressive_tile is not None:
-                from ..runtime.progressive_external_verify import (
-                    PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
-                )
-
-                progressive_identity = json.dumps(
-                    {
-                        "algorithm": PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
-                        "verification_tile": progressive_tile,
-                        "multilane_draft_cap": self.external_policy.get(
-                            "progressive_multilane_draft_cap"
-                        ),
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
             digest = hashlib.sha256((self.identity["fingerprint"] + draft_record["fingerprint"] + "external-dflash2-v1" + composition_identity + progressive_identity).encode()).hexdigest()
             self.identity = {**self.identity, "target_fingerprint": self.identity["fingerprint"], "draft_fingerprint": draft_record["fingerprint"], "fingerprint": digest}
             self.layout += ":external-dflash2-v1:" + digest
@@ -760,6 +814,10 @@ class MuseGlimmerAdapter:
                     "performance_claim": False,
                 }
             if progressive_tile is not None:
+                from ..runtime.progressive_external_verify import (
+                    PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
+                )
+
                 metadata["progressive_verification"] = {
                     "algorithm": PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
                     "implemented": True,
@@ -791,7 +849,7 @@ class MuseGlimmerAdapter:
         if self.draft_model is None:
             raise ValueError("No external draft model bound")
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
-        return ExternalDraftBatchGenerator(self.model, draft_model=self.draft_model, binding=self.identity["fingerprint"], num_draft=self.external_policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT), pairwise_selection=self.external_policy.get("pairwise_selection","host"), progressive_verification_tile=self.external_policy.get("progressive_verification_tile"), multilane_draft_cap=self.external_policy.get("progressive_multilane_draft_cap"), **kwargs)
+        return ExternalDraftBatchGenerator(self.model, draft_model=self.draft_model, binding=self.identity["fingerprint"], num_draft=self.external_policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT), pairwise_selection=self.external_policy.get("pairwise_selection","host"), progressive_verification_tile=self.external_policy.get("progressive_verification_tile"), multilane_draft_cap=self.external_policy.get("progressive_multilane_draft_cap"), cost_per_commit_handoff=self.external_policy.get("cost_per_commit_handoff"), **kwargs)
 
     def prompt_tokens(self, request: dict) -> list[int]:
         return self.tokenizer.encode(

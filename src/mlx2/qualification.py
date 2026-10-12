@@ -81,6 +81,13 @@ def required_generic_checks(descriptor, *, capabilities=None):
 # qualify_serving.py intentionally requires a source/runtime re-freeze and an
 # explicit update here; a receipt may not authorize its own producer.
 APPROVED_QUALIFICATION_HARNESS = {
+    # Re-pinned 2026-10-10: cache capsules and persistent blocks now require
+    # run-local preparation and disk-lifecycle evidence, and a selected cache
+    # capsule route runs an exact three-sample fanout oracle. Receipts from
+    # 2b97ae12... must be regenerated.
+    # Re-pinned 2026-10-10: selected default-off Flash-Next mechanisms now
+    # require run-local engagement instead of passing from policy presence.
+    # Receipts from 7d0330f8... must be regenerated.
     # Re-pinned 2026-10-09: route source stability is recomputed independently;
     # full-suite preflight receipts retain their whole-build source binding.
     "schema": "mlx2.qualification-harness.v1",
@@ -241,12 +248,16 @@ APPROVED_QUALIFICATION_HARNESS = {
     # correctness and observed policy behavior; speed/probe overhead are
     # separate performance evidence. Reject nonfinite confidence limits.
     # Re-pinned 2026-10-10: stop witness comparisons normalize expected and
-    # observed outer whitespace symmetrically.
+    # observed outer whitespace symmetrically; live media checks now receive
+    # the selected source-owned descriptor contract through route settings.
     # Re-pinned 2026-10-11: selected MTP policy qualification now fails before
     # serving unless its source-bound adaptive/handoff benchmark is supplied.
     # Re-pinned 2026-10-11: adaptive/handoff benchmark correctness is
     # recomputed from its arm request traces before policy evidence is accepted.
-    "sha256": "12a2f8b9712fb725ec7e65217caad867e87d58b99dd5c1230ad67187f0b75333",
+    # Re-pinned 2026-10-11: proposal-composition claims now require frozen
+    # source settings and run-local lane receipts for each selected source,
+    # ranking, and the complete trusted-PLD lifecycle.
+    "sha256": "ac82fa9e08e790592810ad1e2da602a302708b5b05f4c5b9800bd1fdbcb15f6b",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -345,15 +356,91 @@ PINNED_MEDIA_SOURCE_REVISIONS = {
 }
 
 
+def adapter_qualification_descriptor_snapshot(descriptor):
+    """Return the source-owned media gate contract for a live adapter route."""
+    if descriptor is None or not isinstance(getattr(descriptor, "model_type", None), str):
+        raise ValueError("adapter qualification descriptor is unavailable")
+    metadata = getattr(descriptor, "metadata", None)
+    if not hasattr(metadata, "get"):
+        raise ValueError("adapter qualification descriptor metadata is malformed")
+    required = metadata.get("required_qualification_checks")
+    conditional = metadata.get("conditional_qualification_checks", ())
+    if not isinstance(required, (list, tuple)) or not isinstance(
+        conditional, (list, tuple)
+    ):
+        raise ValueError("adapter qualification descriptor checks are malformed")
+    if any(type(name) is not str or not name for name in required) or len(
+        set(required)
+    ) != len(required):
+        raise ValueError("adapter qualification descriptor required checks are malformed")
+    rules = []
+    for rule in conditional:
+        if (
+            not isinstance(rule, dict)
+            or set(rule) != {"setting", "equals", "check"}
+            or not isinstance(rule["setting"], (tuple, list))
+            or type(rule["equals"]) is not bool
+            or type(rule["check"]) is not str
+            or not rule["check"]
+        ):
+            raise ValueError("adapter qualification descriptor policy is malformed")
+        rules.append(
+            {
+                "setting": list(rule["setting"]),
+                "equals": rule["equals"],
+                "check": rule["check"],
+            }
+        )
+    return {
+        "schema": "mlx2.adapter-qualification-descriptor.v1",
+        "model_type": descriptor.model_type,
+        "required_qualification_checks": list(required),
+        "conditional_qualification_checks": rules,
+    }
+
+
 def validate_adapter_qualification(
     report, *, runtime, artifact, settings, descriptor=None
 ):
     """Bind a companion producer's traces to the same exact serving route."""
     if not isinstance(report, dict):
         raise ValueError("adapter qualification producer is unavailable")
+    descriptor_metadata = None
+    if isinstance(descriptor, dict):
+        if (
+            descriptor.get("schema")
+            != "mlx2.adapter-qualification-descriptor.v1"
+            or not isinstance(descriptor.get("model_type"), str)
+            or not isinstance(descriptor.get("required_qualification_checks"), list)
+            or not isinstance(descriptor.get("conditional_qualification_checks"), list)
+        ):
+            raise ValueError("live adapter qualification descriptor is malformed")
+        if any(
+            type(name) is not str or not name
+            for name in descriptor["required_qualification_checks"]
+        ):
+            raise ValueError("live adapter qualification descriptor is malformed")
+        descriptor_model_type = descriptor["model_type"]
+        descriptor_metadata = {
+            "required_qualification_checks": descriptor[
+                "required_qualification_checks"
+            ],
+            "conditional_qualification_checks": descriptor[
+                "conditional_qualification_checks"
+            ],
+        }
+    elif descriptor is not None:
+        descriptor_model_type = getattr(descriptor, "model_type", None)
+        descriptor_metadata = getattr(descriptor, "metadata", None)
+        if not isinstance(descriptor_metadata, dict) and not hasattr(
+            descriptor_metadata, "get"
+        ):
+            raise ValueError("live adapter qualification descriptor is malformed")
+    else:
+        descriptor_model_type = None
     model_type = report.get("model_type")
     if (
-        descriptor is not None and model_type != descriptor.model_type
+        descriptor is not None and model_type != descriptor_model_type
     ) or model_type not in APPROVED_MEDIA_PRODUCERS:
         raise ValueError("adapter qualification producer is unavailable")
     producer_entry = APPROVED_MEDIA_PRODUCERS[model_type]
@@ -367,10 +454,8 @@ def validate_adapter_qualification(
         harness, evaluator, expected_checks = producer_entry
     expected_checks = set(expected_checks)
     policy_check_rules = ()
-    if descriptor is not None:
-        policy_check_rules = descriptor.metadata.get(
-            "conditional_qualification_checks", ()
-        )
+    if descriptor_metadata is not None:
+        policy_check_rules = descriptor_metadata.get("conditional_qualification_checks", ())
         if not isinstance(policy_check_rules, (list, tuple)):
             raise ValueError("descriptor conditional qualification checks are malformed")
         selected_policy_checks = resolve_conditional_qualification_checks(
@@ -390,8 +475,8 @@ def validate_adapter_qualification(
         or report.get("source_revision") != source_revision
         or (
             descriptor is not None
-            and descriptor.metadata.get("source_revision") is not None
-            and descriptor.metadata.get("source_revision") != source_revision
+            and descriptor_metadata.get("source_revision") is not None
+            and descriptor_metadata.get("source_revision") != source_revision
         )
         or report.get("runtime") != runtime
         or report.get("artifact") != artifact
@@ -473,6 +558,18 @@ def moe_rhs_pad_selection(settings):
 def required_feature_checks(settings):
     """Demand observed execution for selected mechanisms in the served domain."""
     features = _route_feature_checks(settings)
+    if (settings.get("cache_capsules") or {}).get("enabled") is True:
+        # Selection alone is not useful: an incompatible cache layout can
+        # leave every fanout on the ordinary merge path.
+        features.add("feature_cache_capsules")
+    persistent_block_bytes = settings.get("persistent_block_bytes")
+    if (
+        isinstance(persistent_block_bytes, int)
+        and not isinstance(persistent_block_bytes, bool)
+        and persistent_block_bytes > 0
+    ):
+        # Persistent blocks must complete a real park/restore/resume cycle.
+        features.add("feature_persistent_blocks")
     if settings.get("disk_cache") is True:
         features.add("feature_apc_sessions")
     if settings.get("apc_persistence") is True:
@@ -789,6 +886,13 @@ def _default_on_mechanisms(settings):
                 f"max_lanes {settings.get('max_lanes')} on a route without MTP "
                 "verify: no multi-row MoE window"
             )
+    if env.get("MLX_QWEN36_MOE_WINDOW_BATCH_DECODE") == "1":
+        batch_decode("moe_window_batch_decode")
+    if env.get("MLX_QWEN36_MOE_WINDOW_VERIFY") == "1":
+        if native_mtp:
+            required.add("moe_window_verify")
+        else:
+            not_observed["moe_window_verify"] = "route has no native MTP verify"
     if attn_rows:
         # Grouped projection, norm+RoPE prep and the vector SDPA rows engage
         # on every one-request decode.  The fused indexer query (index_q) and
@@ -952,6 +1056,59 @@ def _default_on_mechanisms(settings):
             required.add("decode_fairness_slice_floor")
     policy = settings.get("execution_policy") or {}
     adapter_policy = settings.get("adapter_policy") or {}
+    # Default-off Flash-Next mechanisms still need run-local engagement when
+    # an exact route selects them.  Binding the policy in settings is not
+    # enough: an unsupported geometry may silently keep the reference path.
+    if adapter_policy.get("ple_early_dispatch") is True:
+        required.add("ple_early_dispatch")
+    if adapter_policy.get("qsa_stage1_direct_selector") in {
+        "direct8",
+        "direct4",
+        "gvr",
+    }:
+        required.add("qsa_stage1_direct_selector")
+    if adapter_policy.get("ple_read_policy") in {"serial", "adaptive"}:
+        required.add("ple_read_policy")
+    if adapter_policy.get("tensorfold_qmv_rows") is True:
+        required.add("tensorfold_qmv_rows")
+    if adapter_policy.get("row_exact_verify") is True:
+        if native_mtp:
+            required.add("row_exact_verify")
+            if adapter_policy.get("row_exact_window_kernels") is True:
+                required.add("row_exact_attn_window")
+            if adapter_policy.get("moe_window_row_exact") is True:
+                required.add("moe_window_row_exact")
+        else:
+            not_observed["row_exact_verify"] = "route has no native MTP verify"
+    if adapter_policy.get("moe_window_batch_decode") is True:
+        batch_decode("moe_window_batch_decode")
+    if adapter_policy.get("moe_window_verify") is True:
+        if native_mtp:
+            required.add("moe_window_verify")
+        else:
+            not_observed["moe_window_verify"] = "route has no native MTP verify"
+    sparse_qsa = adapter_policy.get("qsa_batch_decode_sparse")
+    if sparse_qsa in {"gather", "indexed"}:
+        minimum = int(adapter_policy.get("qsa_batch_decode_sparse_min_context", 32768))
+        if int(settings.get("max_context") or 0) < minimum:
+            not_observed["qsa_batch_decode_sparse"] = (
+                f"max_context {settings.get('max_context')} is below its "
+                f"selected {minimum}-token floor"
+            )
+        else:
+            batch_decode("qsa_batch_decode_sparse")
+    if adapter_policy.get("qsa_nax_batched") is True:
+        if width < 2:
+            not_observed["qsa_nax_batched"] = (
+                f"max_lanes {settings.get('max_lanes')}: no batched prefill"
+            )
+        else:
+            required.add("qsa_nax_batched")
+    if adapter_policy.get("mtp_draft_vocab") is True:
+        if native_mtp:
+            required.add("mtp_draft_vocab")
+        else:
+            not_observed["mtp_draft_vocab"] = "route has no native MTP draft head"
     if (
         policy.get("fp32_head_logits") is True
         or adapter_policy.get("fp32_head_logits") is True
@@ -1310,6 +1467,44 @@ def _route_feature_checks(settings):
                 "segmented_transaction",
             }
         )
+        composition = (settings.get("execution_policy") or {}).get(
+            "proposal_composition"
+        )
+        if isinstance(composition, dict):
+            # Construction is not engagement.  Composition qualification is
+            # source-specific and lane-owned: the harness must bind the
+            # effective policy from the response receipt, observe each
+            # selected source commit proposals, and see a request-local score
+            # table that actually ranked competing sources.
+            features.update(
+                {
+                    "proposal_composition",
+                    "proposal_composition_external_source",
+                    "proposal_composition_lane_ranking",
+                }
+            )
+            if composition.get("prompt_lookup", True) is True:
+                features.add("proposal_composition_pld")
+            if composition.get("native_mtp", False) is True:
+                features.add("proposal_composition_native_mtp")
+            trusted = composition.get("trusted_pld", False)
+            if (
+                trusted is True
+                or isinstance(trusted, dict)
+                and trusted.get("enabled") is True
+            ):
+                # Trusted PLD is approximate publication.  Its qualification
+                # must exercise the whole lane-local lifecycle, including the
+                # negative transition and fresh exact-evidence recovery.
+                features.update(
+                    {
+                        "trusted_pld_calibration",
+                        "trusted_pld_blind",
+                        "trusted_pld_periodic_audit",
+                        "trusted_pld_revocation",
+                        "trusted_pld_recovery",
+                    }
+                )
         if (
             type(
                 (settings.get("execution_policy") or {}).get(

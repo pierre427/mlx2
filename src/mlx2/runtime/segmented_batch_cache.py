@@ -776,6 +776,10 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
 class SegmentedBatchArraysCache(Qwen4ArraysCache):
     """Coherent recurrent-state compute view whose writes split into B1 rows."""
 
+    # The view is a distinct cache owner.  Redeclare the model-owned
+    # recurrent operations rather than relying on an inherited declaration.
+    cache_operations_contract = Qwen4ArraysCache.cache_operations_contract
+
     def __init__(self, rows: Sequence[ArraysCache], note=None):
         if not rows or not all((isinstance(row, ArraysCache) for row in rows)):
             names = ", ".join((type(row).__name__ for row in rows))

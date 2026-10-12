@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -40,6 +41,27 @@ class WriteBackend(Protocol):
     def wait_completions(self, timeout_seconds: float) -> list[tuple[int, bool]]: ...
 
     def close_after_terminal(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class CopyTimingRecord:
+    """One opt-in copy observation; command-buffer time is not kernel time."""
+
+    epoch: int
+    enqueue_elapsed_ns: int
+    completed_host_ns: int
+    command_buffer_gpu_start_seconds: float
+    command_buffer_gpu_end_seconds: float
+    succeeded: bool
+
+    @property
+    def command_buffer_gpu_ns(self) -> int | None:
+        if not self.succeeded:
+            return None
+        return round(
+            (self.command_buffer_gpu_end_seconds - self.command_buffer_gpu_start_seconds)
+            * 1_000_000_000
+        )
 
 
 class NativeWriteBackend:
@@ -81,6 +103,128 @@ class NativeWriteBackend:
         self.deferred_q1_read_roots = 0
         self.deferred_q1_final_evals = 0
         self.deferred_q1_failure_flushes = 0
+        self._copy_timing_active = False
+        self._copy_timing_capacity = 0
+        self._copy_timing_enqueue_ns: dict[int, int] = {}
+        self._copy_timing_abort_receipt: dict[str, object] | None = None
+
+    @staticmethod
+    def copy_timing_capability() -> dict[str, object]:
+        """Describe the model-free diagnostic without claiming kernel timing."""
+        return {
+            "schema": "mlx2.native-copy-command-buffer-timing.v1",
+            "default": False,
+            "max_events": 4096,
+            "host_measurement": "copy_page_call_plus_async_eval_elapsed_ns",
+            "gpu_measurement": "metal_command_buffer_start_to_end",
+            "global_wait_inserted": False,
+            "performance_claim": False,
+        }
+
+    def begin_copy_timing(self, *, capacity: int = 64) -> None:
+        """Begin a bounded default-off session; nested sessions are refused."""
+        if self._closed:
+            raise RuntimeError("native paged arena has been torn down")
+        if type(capacity) is not int or not 1 <= capacity <= 4096:
+            raise ValueError("copy timing capacity must be an integer in [1, 4096]")
+        if self._copy_timing_active:
+            raise RuntimeError("copy timing session is already active")
+        if self._copy_timing_enqueue_ns:
+            raise RuntimeError("copy timing host state is not idle")
+        self._native.begin_copy_timing(self._arena, capacity)
+        self._copy_timing_capacity = capacity
+        self._copy_timing_active = True
+        self._copy_timing_abort_receipt = None
+
+    def _testing_set_copy_timing_fault_injection(self, stage: str) -> None:
+        """Arm one native timing boundary fault for focused lifecycle tests."""
+        if not self._copy_timing_active:
+            raise RuntimeError("copy timing session is not active")
+        if stage not in {"reservation", "handler_registration", "dispatch"}:
+            raise ValueError("unknown copy timing fault injection boundary")
+        self._native._testing_set_copy_timing_fault_injection(self._arena, stage)
+
+    def copy_timing_abort_receipt(self) -> dict[str, object] | None:
+        """Return the last terminal-proved poisoned-session teardown receipt."""
+        if self._copy_timing_abort_receipt is None:
+            return None
+        return dict(self._copy_timing_abort_receipt)
+
+    def abort_poisoned_copy_timing_after_terminal(self) -> dict[str, object]:
+        """Synchronize and tear down a poisoned diagnostic timing session."""
+        if not self._copy_timing_active:
+            raise RuntimeError("copy timing session is not active")
+        if not self._native.copy_timing_poisoned(self._arena):
+            raise RuntimeError("copy timing session is not poisoned")
+        # Synchronization is the proof that every handler owning a native
+        # reservation has run. Native teardown refuses while any callback is
+        # still pending, so host counters cannot be cleared prematurely.
+        self._mx.synchronize(self.stream)
+        discarded = int(self._native.abort_copy_timing_after_terminal(
+            self._arena, terminal_proved=True,
+        ))
+        host_submissions = len(self._copy_timing_enqueue_ns)
+        self._copy_timing_enqueue_ns.clear()
+        self._copy_timing_active = False
+        self._copy_timing_capacity = 0
+        self._copy_timing_abort_receipt = {
+            "schema": "mlx2.native-copy-command-buffer-timing-abort.v1",
+            "terminal_stream_proved": True,
+            "poisoned_session_aborted": True,
+            "native_events_discarded": discarded,
+            "host_submissions_discarded": host_submissions,
+            "timing_result_published": False,
+            "performance_claim": False,
+        }
+        return dict(self._copy_timing_abort_receipt)
+
+    def poll_copy_timings(self) -> tuple[CopyTimingRecord, ...]:
+        """Drain terminal observations without synchronizing the MLX stream."""
+        if not self._copy_timing_active:
+            raise RuntimeError("copy timing session is not active")
+        events = self._native.poll_copy_timings(self._arena)
+        records = []
+        seen: set[int] = set()
+        required = {
+            "epoch", "succeeded", "completed_host_ns",
+            "command_buffer_gpu_start_seconds", "command_buffer_gpu_end_seconds",
+        }
+        for event in events:
+            if type(event) is not dict or set(event) != required:
+                raise RuntimeError("invalid native copy timing event")
+            epoch = event["epoch"]
+            succeeded = event["succeeded"]
+            completed_host_ns = event["completed_host_ns"]
+            gpu_start = event["command_buffer_gpu_start_seconds"]
+            gpu_end = event["command_buffer_gpu_end_seconds"]
+            if (type(epoch) is not int or epoch in seen or
+                    epoch not in self._copy_timing_enqueue_ns or
+                    type(succeeded) is not bool or
+                    type(completed_host_ns) is not int or completed_host_ns < 0 or
+                    type(gpu_start) is not float or type(gpu_end) is not float or
+                    not math.isfinite(gpu_start) or not math.isfinite(gpu_end) or
+                    gpu_start < 0 or gpu_end < gpu_start):
+                raise RuntimeError("invalid native copy timing event")
+            seen.add(epoch)
+            records.append(CopyTimingRecord(
+                epoch=epoch,
+                enqueue_elapsed_ns=self._copy_timing_enqueue_ns.pop(epoch),
+                completed_host_ns=completed_host_ns,
+                command_buffer_gpu_start_seconds=gpu_start,
+                command_buffer_gpu_end_seconds=gpu_end,
+                succeeded=succeeded,
+            ))
+        return tuple(records)
+
+    def end_copy_timing(self) -> None:
+        """End only after every submitted copy and timing result was drained."""
+        if not self._copy_timing_active:
+            raise RuntimeError("copy timing session is not active")
+        if self._copy_timing_enqueue_ns:
+            raise RuntimeError("copy timing session still has undrained host submissions")
+        self._native.end_copy_timing(self._arena)
+        self._copy_timing_active = False
+        self._copy_timing_capacity = 0
 
     def eval_submission_snapshot(self) -> dict[str, int]:
         return {
@@ -308,10 +452,24 @@ class NativeWriteBackend:
     ) -> object:
         if self._closed:
             raise RuntimeError("native paged arena has been torn down")
-        dependency = self._native.copy_page(
-            self._arena, source_offset, destination_offset, byte_count, epoch, self.stream
-        )
-        self._mx.async_eval(dependency)
+        timing = self._copy_timing_active
+        if timing:
+            if epoch in self._copy_timing_enqueue_ns:
+                raise RuntimeError("copy timing epoch is already pending")
+            if len(self._copy_timing_enqueue_ns) >= self._copy_timing_capacity:
+                raise RuntimeError("copy timing capacity exhausted")
+            started = time.perf_counter_ns()
+        try:
+            dependency = self._native.copy_page(
+                self._arena, source_offset, destination_offset, byte_count, epoch, self.stream
+            )
+            self._mx.async_eval(dependency)
+        except Exception:
+            if timing and self._native.copy_timing_poisoned(self._arena):
+                self.abort_poisoned_copy_timing_after_terminal()
+            raise
+        if timing:
+            self._copy_timing_enqueue_ns[epoch] = time.perf_counter_ns() - started
         return dependency
 
     def poll_completions(self) -> list[tuple[int, bool]]:
@@ -333,6 +491,8 @@ class NativeWriteBackend:
         """
         if self._closed:
             return
+        if getattr(self, "_copy_timing_active", False):
+            raise RuntimeError("active copy timing session must be ended before arena close")
         self._mx.synchronize(self.stream)
         self._arena = None
         self._closed = True

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mlx2"
-version = "0.1.0rc1"
+version = "0.1.0rc2"
 description = "Capability-driven MLX inference runtime for Apple Silicon"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -42,6 +42,7 @@ multimodal = [
 radio = ["mlx>=0.32", "numpy>=2", "pillow>=10"]
 image-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
 gguf-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
+image-mcp = ["fastmcp>=2.2,<3", "pillow>=10.4,<13"]
 
 [project.scripts]
 mlx2-serve = "mlx2.server:main"
@@ -50,6 +51,7 @@ mlx2-decisions = "mlx2.decisions.server:main"
 mlx2-diarize = "mlx2.diarize_cli:main"
 mlx2-radio = "mlx2.radio_cli:main"
 mlx2-top = "mlx2.top:main"
+mlx2-image-mcp = "mlx2.image_mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

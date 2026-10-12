@@ -38,18 +38,11 @@ from .sampling_defaults import (
 from .batch_metrics import BatchFaultSpec, BatchRuntimeMetrics, HttpRuntimeMetrics
 from .power_governor import PowerGovernor, PowerGovernorPolicy
 from .power_telemetry import PowerTelemetry, PowerTelemetryPolicy
-from .runtime.apc_numerics import MOE_RHS_PAD_DEFAULT as _MOE_RHS_PAD_DEFAULT
 from .runtime.apc_numerics import moe_rhs_pad_identity as _moe_rhs_pad_identity
 from .runtime import loop_trace as _loop_trace
 from .runtime.gpu_keep_warm import GpuKeepWarm, GpuKeepWarmPolicy
 
 log = logging.getLogger(__name__)
-
-_MOE_NAX_GATHER_MODULE = "mlx2.runtime.models.moe_nax_gather"
-_SWITCH_LAYERS_MODULE = "mlx2.runtime.models.switch_layers"
-_GATED_DELTA_MODULE = "mlx2.runtime.models.gated_delta"
-_MOE_RHS_PAD_DEFAULT_FLOOR = _MOE_RHS_PAD_DEFAULT["min_rows_per_expert"]
-
 
 # Execution-policy keys the serving engine owns; every other key is passed to
 # the adapter factory, which validates it.  One list so offline tools (the
@@ -83,70 +76,11 @@ SERVER_OWNED_EXECUTION_POLICY_KEYS = frozenset(
 )
 
 
-def _moe_nax_gather_mode() -> str:
-    """The NAX MoE gather mode in force (the module's, else the environment)."""
-    import sys
-
-    module = sys.modules.get(_MOE_NAX_GATHER_MODULE)
-    if module is not None:
-        return str(module.MODE)
-    return (os.environ.get("MLX2_MOE_NAX_GATHER", "off") or "off").strip().lower()
-
-
-def _moe_nax_gather_setting(environment) -> dict:
-    """Route identity of a NAX gather selection the adapter profile omits.
-
-    Flash-Next pins ``MLX2_MOE_NAX_GATHER`` in its profile.  Other adapters
-    (Qwen3.6) inherit the process value, which then ran behind a receipt that
-    did not name it (options-sweep-qwen36-20261002 bug 3).  Absent while off,
-    so default receipts are unchanged.
-    """
-    if "MLX2_MOE_NAX_GATHER" in (environment or {}):
-        return {}
-    mode = _moe_nax_gather_mode()
-    return {} if mode == "off" else {"moe_nax_gather": mode}
-
-
 def _execution_diagnostics(adapter) -> dict:
-    """``adapter.diagnostics()`` plus process-wide engagement counters the
-    adapter does not report itself, so the qualifier can observe a selected
-    mechanism on every model (NAX MoE gather, sorted-MoE pad choice, MLX's
-    GDN core).  Each is added only while selected or used, so default status
-    snapshots are unchanged."""
-    import sys
+    """Read diagnostics through the route-owned provider boundary only."""
+    from .adapters.base import route_diagnostics_snapshot
 
-    execution = adapter.diagnostics()
-    if not isinstance(execution, dict):
-        return execution
-    nax = sys.modules.get(_MOE_NAX_GATHER_MODULE)
-    if (
-        "moe_nax_gather" not in execution
-        and nax is not None
-        and (nax.MODE != "off" or any(nax.calls.values()))
-    ):
-        execution["moe_nax_gather"] = nax.status()
-    switch = sys.modules.get(_SWITCH_LAYERS_MODULE)
-    if "moe_pad" not in execution and switch is not None:
-        pad = switch.moe_pad_status()
-        # The default floor pads (bit-changing, unqualified) too: name the
-        # pad whenever one ran or the law is not the module default.
-        if (
-            pad["policy"] != "floor"
-            or pad.get("padded_calls")
-            or pad.get("floor_rows_per_expert", _MOE_RHS_PAD_DEFAULT_FLOOR)
-            != _MOE_RHS_PAD_DEFAULT_FLOOR
-        ):
-            execution["moe_pad"] = pad
-    gdn = sys.modules.get(_GATED_DELTA_MODULE)
-    if (
-        "gdn_core" not in execution
-        and gdn is not None
-        and hasattr(gdn, "gdn_core_status")
-    ):
-        core = gdn.gdn_core_status()
-        if core["enabled"] or core["calls"]:
-            execution["gdn_core"] = core
-    return execution
+    return route_diagnostics_snapshot(adapter)
 
 
 def validated_adapter_prefill_inputs(adapter, request, remaining_tokens, prefill_input):
@@ -1169,7 +1103,18 @@ def ordinary_compute_width(
     if external_draft or prompt_lookup:
         receipt = getattr(response, "speculative_receipt", None) or {}
         return observed_width if receipt.get("execution") == "ordinary_target" else None
-    return observed_width if not mtp or response.mtp_receipt is None else None
+    if not mtp:
+        return observed_width
+    # Self-MTP can transfer a live request to ordinary decoding.  Attribute
+    # each sampled output by the path that produced it; the request-level MTP
+    # receipt remains attached after the one-way transition and is therefore
+    # insufficient on its own.  In particular, a prepared initial MTP output
+    # delivered at the migration boundary must stay classified as MTP.
+    return (
+        observed_width
+        if getattr(response, "ordinary_execution", False) is True
+        else None
+    )
 
 
 def record_generation_output(job, response, *, mtp, external_draft, prompt_lookup):
@@ -2666,9 +2611,6 @@ def install_explicit_native_qwen3_request(
     except ImportError as exc:
         raise ValueError("native paged Qwen3 kernel is unavailable") from exc
 
-    from .runtime.paged_native_batch_lifecycle import (
-        prepare_queued_native_first_response, probe_queued_native_qwen3,
-    )
     from .runtime.paged_pack_price import (
         ResearchCalibratedPrice, ResearchWarmCalibratedPrice, load_price,
         load_research_calibration, load_research_warm_calibration,
@@ -2720,14 +2662,19 @@ def install_explicit_native_qwen3_request(
         revision=revision, prompt_tokens=len(prompt_tokens),
         max_tokens=maximum, apc_cache=apc_cache,
         cached_tokens=cached_tokens, permit_candidate=True)
+    provider = getattr(candidate, "_native_continuation_provider", None)
+    from .runtime.native_continuation_provider import NativeContinuationProvider
+    if not isinstance(provider, NativeContinuationProvider):
+        raise ValueError("adapter did not bind a native continuation provider")
+    provider.validate_candidate(candidate)
     installed = False
     try:
         uid = job.uid
         offer = PrefillOffer(uid, (PrefillOption(suffix_rows, 0),))
-        probe = probe_queued_native_qwen3(
+        probe = provider.probe(
             batch, lifecycle_lock,
             CandidateRequest(uid, revision, suffix_rows, ("kv",)),
-            owner, candidate,
+            owner,
             RouteCapability(True, False, ("kv",), price.profile_id),
             (), (offer,), price=price, live_identity=identity,
             context_tokens=(len(prompt_tokens),), row_capacity=suffix_rows,
@@ -2735,10 +2682,11 @@ def install_explicit_native_qwen3_request(
             permit_native_probe=True, cancelled=job.cancelled.is_set,
             permit_research_calibration=type(price) in (
                 ResearchCalibratedPrice, ResearchWarmCalibratedPrice),
+            candidate=candidate,
         )
         if not probe.native_probe or not probe.native_probe.published:
-            raise ValueError(f"native paged Qwen3 refused: {probe.reason}")
-        prepared = prepare_queued_native_first_response(
+            raise ValueError(f"adapter native continuation refused: {probe.reason}")
+        prepared = provider.prepare(
             batch, lifecycle_lock, owner, probe, cancelled=job.cancelled.is_set)
         result = batch.install_native_queued(
             prepared, owner, candidate, lifecycle_lock,
@@ -2750,7 +2698,9 @@ def install_explicit_native_qwen3_request(
                 ResearchCalibratedPrice, ResearchWarmCalibratedPrice)
                                    else price.complete_request_evidence_sha256))
         if not result["selected"]:
-            raise ValueError(f"native paged Qwen3 handoff refused: {result['reason']}")
+            raise ValueError(
+                f"adapter native continuation handoff refused: {result['reason']}"
+            )
         installed = True
         result["price_provenance"] = (
             "research_calibrated" if type(price) in (
@@ -3011,9 +2961,6 @@ def install_explicit_native_qwen3_b2_cohort(
     if not all((profile_path, manifest_path, mlx_wheel_path)):
         raise ValueError("native B2 requires pinned profile/source/wheel paths")
     from .adapters.native_cohort import backend_for
-    from .runtime.paged_native_batch_lifecycle import (
-        prepare_queued_native_first_response, run_research_native_queued_qwen3,
-        run_research_native_queued_qwen3_b2_packed)
     from .runtime.paged_request_transaction import CandidateRequest
 
     backend = backend_for(adapter, "kv_pair")
@@ -3038,24 +2985,29 @@ def install_explicit_native_qwen3_b2_cohort(
         adapter, tuple((job.uid, revision, job.native_b2_prompt, job.effective_max_tokens)
                        for job in jobs), preparation,
         cancelled=lambda: any(job.cancelled.is_set() for job in jobs))
+    provider = getattr(candidate, "_native_continuation_provider", None)
+    from .runtime.native_continuation_provider import NativeContinuationProvider
+    if not isinstance(provider, NativeContinuationProvider):
+        raise ValueError("adapter did not bind a native continuation provider")
+    provider.validate_candidate(candidate)
     installed = set()
     try:
-        probes = (run_research_native_queued_qwen3_b2_packed(
+        probes = (provider.run_research_pair(
             batch, lifecycle_lock,
             tuple(CandidateRequest(job.uid, revision, len(job.native_b2_prompt), ("kv",))
-                  for job in jobs), owners, candidate, research_permit=True,
-            cancelled=tuple(job.cancelled.is_set for job in jobs))
+                  for job in jobs), owners, research_permit=True,
+            cancelled=tuple(job.cancelled.is_set for job in jobs), candidate=candidate)
             if packed_prefill else None)
         for index, (job, owner) in enumerate(zip(jobs, owners)):
             probe = (probes[index] if probes is not None else
-                     run_research_native_queued_qwen3(
+                     provider.run_research(
                          batch, lifecycle_lock,
                          CandidateRequest(job.uid, revision, len(job.native_b2_prompt), ("kv",)),
-                         owner, candidate, research_permit=True,
-                         cancelled=job.cancelled.is_set))
+                         owner, research_permit=True,
+                         cancelled=job.cancelled.is_set, candidate=candidate))
             if probe.reason != "research_executed" or not probe.research_executed:
                 raise ValueError(f"native B2 prompt refused: {probe.reason}")
-            prepared = prepare_queued_native_first_response(
+            prepared = provider.prepare(
                 batch, lifecycle_lock, owner, probe, cancelled=job.cancelled.is_set)
             result = batch.install_native_queued(
                 prepared, owner, candidate, lifecycle_lock,
@@ -7356,7 +7308,19 @@ class ServingEngine:
         base = int(config.get("num_draft") or 0)
         from .runtime import verify_topology as vt
 
-        prior_base = int(vt.load_prior_grid()["base"])
+        prior_resource = getattr(adapter, "draft_loop_prior_resource", None)
+        if not isinstance(prior_resource, str) or not prior_resource:
+            self.verify_topology_receipt = {
+                "selected": None,
+                "reason": (
+                    "adapter declares no source-bound draft-loop acceptance prior; "
+                    "auto selection is unavailable"
+                ),
+                "source": "adapter",
+            }
+            return config
+        prior = vt.load_prior_grid(prior_resource)
+        prior_base = int(prior["base"])
         if base != prior_base:
             self.verify_topology_receipt = {
                 "selected": None,
@@ -7398,6 +7362,7 @@ class ServingEngine:
                 "adapter": type(adapter).__name__,
                 "artifact": adapter.identity["fingerprint"],
                 "lane_law": self.lane_matmul_receipt.get("law_id"),
+                "draft_loop_prior_resource": prior_resource,
                 "exact_self_mtp_rows": (
                     None if exact_rows is None
                     else exact_rows.effective_max_self_mtp_rows
@@ -7409,6 +7374,7 @@ class ServingEngine:
             threshold=self.draft_loop_threshold,
             vocab_size=vocab,
             prompt=prompt,
+            prior=prior,
             self_mtp=config,
         )
         self.verify_topology_receipt = receipt
@@ -7741,7 +7707,7 @@ class ServingEngine:
                 MTPAPCSidecar,
                 inspect_apc_capabilities,
             )
-            from .runtime.generate import BatchGenerator
+            from .runtime.generate import BatchGenerator, PromptChunkCorruption
             from .runtime.interior_placement import (
                 cold_prefill_cuts,
                 generation_prompt_boundary,
@@ -7862,10 +7828,10 @@ class ServingEngine:
                     if callable(getattr(getattr(adapter, "policy", None), "as_dict", None))
                     else {}
                 ),
-                # Process-wide sorted-MoE kernel choice (switch_layers): an
-                # adaptive or always-pad policy, or another floor, runs other
-                # kernels than the default floor, so a floor receipt must not
-                # qualify it.  Absent at the default so receipts are unchanged.
+                # Adapter-bound sorted-MoE kernel choice: an adaptive or
+                # always-pad policy, or another floor, runs other kernels than
+                # the default floor. Absent at the default so receipts remain
+                # compact; never infer this identity from process globals.
                 # Flash-Next QSA indexer geometry: qualification derives the
                 # contexts that reach the fused indexer query, scorer and QSA
                 # mask from it.  Only adapters that record one carry it.
@@ -7879,7 +7845,6 @@ class ServingEngine:
                     if (moe_rhs_pad := _moe_rhs_pad_identity()) is not None
                     else {}
                 ),
-                **_moe_nax_gather_setting(adapter.environment),
                 "adaptive_mtp_depth": self.adaptive_mtp_policy.as_dict(),
                 "mtp_acceptance_log": (
                     None if self.mtp_acceptance_log is None else {"enabled": True}
@@ -7900,6 +7865,25 @@ class ServingEngine:
                 "persistent_block_bytes": self.persistent_block_bytes,
                 "apc_interior_checkpoints": dict(self.apc_interior_checkpoint_policy),
             }
+            descriptor = getattr(adapter, "descriptor", None)
+            descriptor_metadata = getattr(descriptor, "metadata", {})
+            required_media_checks = descriptor_metadata.get(
+                "required_qualification_checks"
+            )
+            conditional_media_checks = descriptor_metadata.get(
+                "conditional_qualification_checks"
+            )
+            if required_media_checks is not None or conditional_media_checks is not None:
+                # The media companion validator needs the selected adapter's
+                # source-owned check contract. Binding it into route settings
+                # intentionally invalidates older receipts without this
+                # identity. Gate rules must come from the live descriptor,
+                # never from the companion report being validated.
+                from .qualification import adapter_qualification_descriptor_snapshot
+
+                settings["adapter_qualification_descriptor"] = (
+                    adapter_qualification_descriptor_snapshot(descriptor)
+                )
             mlx_vlm_runtime = getattr(adapter, "mlx_vlm_runtime", None)
             if mlx_vlm_runtime is not None:
                 # Only routes that execute mlx-vlm bind its dependency content;
@@ -8615,12 +8599,17 @@ class ServingEngine:
             # with the historical 16-entry floor deterministically evicts four
             # warm prompts while the cohort is being primed, so those lanes
             # cannot compose batching with APCv2 reuse.
+            from .runtime.attention_topology import (
+                apcv2_cache_layout_fingerprint,
+            )
+
+            cache_layout_fingerprint = apcv2_cache_layout_fingerprint(adapter)
             persistent_identity = APCv2.key(
                 adapter.identity["fingerprint"],
                 revision=persistent_runtime_revision(identity),
                 adapter=adapter.identity["fingerprint"],
                 tokenizer_fingerprint=adapter.identity["fingerprint"],
-                cache_layout_fingerprint=adapter.layout,
+                cache_layout_fingerprint=cache_layout_fingerprint,
                 semantic_fingerprint=apc_semantic_namespace(
                     cache_semantic_fingerprint(
                         "__tenant_template__" if self.tenant_scoped_cache else None
@@ -8708,7 +8697,7 @@ class ServingEngine:
                         revision=persistent_runtime_revision(identity),
                         adapter=adapter.identity["fingerprint"],
                         tokenizer_fingerprint=adapter.identity["fingerprint"],
-                        cache_layout_fingerprint=adapter.layout,
+                        cache_layout_fingerprint=cache_layout_fingerprint,
                         # Every numerical law (int8 prefill, lane matmul,
                         # prefill execution, process numerics) has its own
                         # namespace in memory and on disk; identity when off.
@@ -11629,6 +11618,34 @@ class ServingEngine:
                                 [int(r.uid), bool(r.end_of_prompt)] for r in prompts
                             ]
                             trace_iteration["responses"] = len(responses)
+                    except PromptChunkCorruption as exc:
+                        # The prompt forward completed, but its last committed
+                        # row cannot authorize an APCv2/recurrent checkpoint.
+                        # Remove only those lanes before the next scheduler
+                        # round; healthy rows in the same physical prefill
+                        # keep their evaluated private state and make progress.
+                        failed_uids = tuple(
+                            uid for uid in exc.uids if uid in active
+                        )
+                        if not failed_uids:
+                            raise
+                        batch.remove(failed_uids)
+                        self.counts["prefill_output_corruption_events"] += 1
+                        self.counts["prefill_output_corruption_failed_requests"] += len(
+                            failed_uids
+                        )
+                        for uid in failed_uids:
+                            failed_job = active.pop(uid, None)
+                            if failed_job is not None:
+                                self._finish(
+                                    failed_job,
+                                    {
+                                        "error": str(exc),
+                                        "status": 500,
+                                        "code": "prefill_output_corruption",
+                                    },
+                                )
+                        continue
                     except RuntimeError as exc:
                         fault = device_fault_kind(exc)
                         if fault is None:

@@ -137,6 +137,46 @@ NB_MODULE(_paged_kv_native, module) {
         source_offset, destination_offset, byte_count, epoch, stream);
   }, "arena"_a, "source_offset"_a, "destination_offset"_a,
      "byte_count"_a, "epoch"_a, "stream"_a);
+  module.def("begin_copy_timing", [](const nb::capsule& capsule, size_t capacity) {
+    arena_from(capsule)->begin_copy_timing(capacity);
+  }, "arena"_a, "capacity"_a);
+  module.def("poll_copy_timings", [](const nb::capsule& capsule) {
+    nb::list result;
+    for (const auto& event : arena_from(capsule)->poll_copy_timings()) {
+      nb::dict item;
+      item["epoch"] = event.epoch;
+      item["succeeded"] = event.succeeded;
+      item["completed_host_ns"] = event.completed_host_ns;
+      item["command_buffer_gpu_start_seconds"] = event.command_buffer_gpu_start_seconds;
+      item["command_buffer_gpu_end_seconds"] = event.command_buffer_gpu_end_seconds;
+      result.append(std::move(item));
+    }
+    return result;
+  }, "arena"_a);
+  module.def("end_copy_timing", [](const nb::capsule& capsule) {
+    arena_from(capsule)->end_copy_timing();
+  }, "arena"_a);
+  module.def("copy_timing_poisoned", [](const nb::capsule& capsule) {
+    return arena_from(capsule)->copy_timing_poisoned();
+  }, "arena"_a);
+  module.def("abort_copy_timing_after_terminal", [](
+      const nb::capsule& capsule, bool terminal_proved) {
+    return arena_from(capsule)->abort_copy_timing_after_terminal(terminal_proved);
+  }, "arena"_a, "terminal_proved"_a);
+  module.def("_testing_set_copy_timing_fault_injection", [](
+      const nb::capsule& capsule, const std::string& stage) {
+    mlx2::paged_kv::CopyTimingFaultInjection parsed;
+    if (stage == "reservation") {
+      parsed = mlx2::paged_kv::CopyTimingFaultInjection::Reservation;
+    } else if (stage == "handler_registration") {
+      parsed = mlx2::paged_kv::CopyTimingFaultInjection::HandlerRegistration;
+    } else if (stage == "dispatch") {
+      parsed = mlx2::paged_kv::CopyTimingFaultInjection::Dispatch;
+    } else {
+      throw std::invalid_argument("unknown copy timing fault injection boundary");
+    }
+    arena_from(capsule)->testing_set_copy_timing_fault_injection(parsed);
+  }, "arena"_a, "stage"_a);
   module.def("validate_source_types", [](const mx::array& key, const mx::array& value,
                                          mx::Stream stream) {
     return key.dtype() == mx::uint8 && value.dtype() == mx::uint8 &&

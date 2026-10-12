@@ -1,0 +1,42 @@
+{
+  "component": "Qwen3.8 27B exact compact GDN speculative rollback",
+  "date": "2026-10-12",
+  "status": "implemented_focused_cpu_source_tested_unqualified_unselected_default_off",
+  "code_copied": false,
+  "source_repository": "https://github.com/pierre427/mlx2",
+  "source_revision": "d661fd1cce683d7da4a2d2139f3883596a3955f7",
+  "source_paths": [
+    "src/mlx2/runtime/models/qwen4_fused_gdn_verify.py",
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "tests/test_qwen4_gdn_batch_verify.py"
+  ],
+  "license": "MIT",
+  "destination_paths": [
+    "src/mlx2/runtime/state_plane_operations.py",
+    "src/mlx2/runtime/models/qwen38_state_plane.py",
+    "src/mlx2/runtime/models/qwen38_27b.py",
+    "src/mlx2/runtime/models/qwen38_fused_gdn.py",
+    "src/mlx2/runtime/models/qwen4_fused_gdn_verify.py",
+    "src/mlx2/adapters/qwen38_27b.py",
+    "tests/test_qwen38_compact_gdn_replay_cpu.py"
+  ],
+  "modifications": [
+    "Generalized the existing correction-tape verify source to select arithmetic through an explicit typed fused-GDN contract; Qwen3.8 uses its existing Qwen3.5 swish and decay profile.",
+    "Added a Qwen3.8-owned exact state-plane provider that validates live ArraysCache ownership, cache geometry, speculative epoch, contract identity and memory benefit before compact replay runs.",
+    "Replaced S-1 full recurrent-state restore snapshots with one immutable pre-verify checkpoint, the final recurrent state, and a key/correction/decay tape. Partial acceptance reconstructs exactly from the checkpoint; full rejection and cancellation restore the checkpoint; full acceptance publishes the final state.",
+    "Kept selection adapter-owned, default-off, unqualified and separate from ordinary/reference decode. Unsupported or drifting state contracts refuse the compact path before publication.",
+    "Kept APCv2 persistent layout and namespace unchanged because the compact tape is transaction-local and never published as persistent approximate state."
+  ],
+  "validation": [
+    "tests/test_qwen38_compact_gdn_replay_cpu.py",
+    "tests/test_qwen38_fused_gdn_host.py",
+    "tests/test_gdn_state_fp16_cpu.py",
+    "tests/test_gdn_kernel_contract_cpu.py",
+    "tests/test_qwen38_27b_port.py",
+    "tests/test_qwen38_27b_native_cpu.py",
+    "tests/test_qwen4_gdn_batch_verify.py",
+    "tests/test_qwen4_fused_gdn_verify_cap.py",
+    "tests/test_state_plane_operations_cpu.py"
+  ],
+  "boundaries": "No GPU evidence, route qualification, default selection, full preflight, commit or publication is claimed. B1 Qwen3.8 compact replay is implemented; batched Qwen3.8 compact replay remains unimplemented."
+}

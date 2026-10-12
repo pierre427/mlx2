@@ -503,6 +503,15 @@ def _trunk_mixed(trunk, segments):
 
 
 class TextModel(nn.Module):
+    @property
+    def state_plane_operations(self):
+        # Serving adapters expose TextModel directly as well as through the
+        # HF-style wrapper below. Both loaded shapes own the same cache planes
+        # and must bind the same provider contract.
+        from .qwen38_state_plane import QWEN38_STATE_PLANE_OPERATIONS
+
+        return QWEN38_STATE_PLANE_OPERATIONS
+
     def __init__(self, args: TextModelArgs):
         super().__init__()
         self.args = args
@@ -718,6 +727,35 @@ class Model(nn.Module):
     apc_v2_layout = "qwen38-27b-hybrid-layer-segments-v1"
     supports_speculative_rollback = True
     supports_trusted_pld = True
+
+    @property
+    def state_plane_operations(self):
+        from .qwen38_state_plane import QWEN38_STATE_PLANE_OPERATIONS
+
+        return QWEN38_STATE_PLANE_OPERATIONS
+
+    @property
+    def progressive_external_approximate_protocols(self):
+        """Default-off Qwen3.8-only declaration; selection stays policy-owned."""
+
+        from ..progressive_external_verify import (
+            PROGRESSIVE_APPROXIMATE_TARGET_PROTOCOL_VERSION,
+            PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED,
+        )
+
+        return {
+            PROGRESSIVE_APPROXIMATE_TARGET_PROTOCOL_VERSION: {
+                "fidelity": PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED,
+                "source_paths": (
+                    "src/mlx2/adapters/qwen38_27b.py",
+                    "src/mlx2/runtime/models/qwen38_27b.py",
+                    "src/mlx2/runtime/models/qwen3_next.py",
+                ),
+                "implemented": True,
+                "qualified": False,
+                "selected": False,
+            }
+        }
 
     def __init__(self, args: ModelArgs):
         super().__init__()

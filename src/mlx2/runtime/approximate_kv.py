@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Mapping, Protocol, runtime_checkable
 
 from .approximate_state import ApproximateStateError
 
@@ -66,6 +66,12 @@ class KVQuantizationDescriptor:
             "start": self.start,
         }
 
+    def build_operation(self, name: str, *, adapter_fingerprint: str):
+        """Build this adapter-supplied operation without a runtime type switch."""
+        return KVQuantizationOperation(
+            name, self, adapter_fingerprint=adapter_fingerprint
+        )
+
 
 def standard_kv_quantization_operations(*, group_size: int = 64) -> dict:
     """The two named operations an eligible adapter may declare."""
@@ -99,12 +105,29 @@ class XingLatentKV8Descriptor:
             "positional_dtype": self.positional_dtype,
         }
 
+    def build_operation(self, name: str, *, adapter_fingerprint: str):
+        operation = XingLatentKV8Operation(
+            name=name, adapter_fingerprint=adapter_fingerprint
+        )
+        if operation.descriptor != self:
+            raise ValueError("Xing latent KV8 factory descriptor mismatch")
+        return operation
+
+
+@runtime_checkable
+class ApproximateKVOperationFactory(Protocol):
+    """Adapter-owned construction boundary for approximate state operations."""
+
+    def build_operation(self, name: str, *, adapter_fingerprint: str): ...
+
 
 class XingLatentKV8Operation:
     """Revision-bound, private exact-to-approximate Xing cache transform."""
 
-    def __init__(self, *, adapter_fingerprint):
-        self.name = "xing_latent_kv8"
+    def __init__(self, *, adapter_fingerprint, name="xing_latent_kv8"):
+        if name != "xing_latent_kv8":
+            raise ValueError("Xing latent KV8 operation name is fixed")
+        self.name = name
         self.descriptor = XingLatentKV8Descriptor()
         self.revision = operation_revision(adapter_fingerprint, self.name, self.descriptor)
 
@@ -348,14 +371,17 @@ def declared_operations(adapter, *, adapter_fingerprint) -> dict:
     from ..adapters.base import approximate_kv_operations
 
     operations = {}
-    for name, descriptor in approximate_kv_operations(adapter).items():
-        if isinstance(descriptor, XingLatentKV8Descriptor):
-            operation = XingLatentKV8Operation(adapter_fingerprint=adapter_fingerprint)
-            if name != operation.name or descriptor != operation.descriptor:
-                raise ValueError("invalid Xing latent KV8 operation declaration")
-        else:
-            operation = KVQuantizationOperation(
-                name, descriptor, adapter_fingerprint=adapter_fingerprint
+    for name, factory in approximate_kv_operations(adapter).items():
+        if not isinstance(factory, ApproximateKVOperationFactory):
+            raise ValueError(
+                f"approximate KV operation {name!r} lacks an adapter-owned factory"
             )
+        operation = factory.build_operation(
+            name, adapter_fingerprint=adapter_fingerprint
+        )
+        if getattr(operation, "name", None) != name:
+            raise ValueError("approximate KV factory returned the wrong operation")
+        if getattr(operation, "descriptor", None) != factory:
+            raise ValueError("approximate KV factory returned the wrong descriptor")
         operations[name] = operation
     return operations

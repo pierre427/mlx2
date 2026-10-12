@@ -22,6 +22,21 @@ struct Completion {
   bool succeeded;
 };
 
+struct CopyTiming {
+  uint64_t epoch;
+  bool succeeded;
+  uint64_t completed_host_ns;
+  double command_buffer_gpu_start_seconds;
+  double command_buffer_gpu_end_seconds;
+};
+
+enum class CopyTimingFaultInjection : uint8_t {
+  None = 0,
+  Reservation = 1,
+  HandlerRegistration = 2,
+  Dispatch = 3,
+};
+
 class Arena : public std::enable_shared_from_this<Arena> {
  public:
   static std::shared_ptr<Arena> create(size_t plane_bytes);
@@ -40,6 +55,12 @@ class Arena : public std::enable_shared_from_this<Arena> {
   std::vector<Completion> wait_completions(double timeout_seconds);
   std::vector<Completion> poll_read_completions();
   std::vector<Completion> wait_read_completions(double timeout_seconds);
+  void begin_copy_timing(size_t capacity);
+  std::vector<CopyTiming> poll_copy_timings();
+  void end_copy_timing();
+  bool copy_timing_poisoned() const;
+  size_t abort_copy_timing_after_terminal(bool terminal_proved);
+  void testing_set_copy_timing_fault_injection(CopyTimingFaultInjection stage);
 
   // Internal only. Caller owns generation validation and a host completion
   // lease before evaluating this graph node on the same explicit GPU stream.
@@ -186,6 +207,14 @@ class Arena : public std::enable_shared_from_this<Arena> {
   Arena(size_t plane_bytes, mlx::core::array keys, mlx::core::array values, StorageDtype storage_dtype);
   void completed(uint64_t epoch, bool succeeded);
   void read_completed(uint64_t epoch, bool succeeded);
+  bool reserve_copy_timing();
+  void rollback_copy_timing_reservation();
+  void complete_copy_timing_reservation(
+      uint64_t epoch, bool succeeded, bool publish,
+      uint64_t completed_host_ns, double gpu_start_seconds,
+      double gpu_end_seconds);
+  void poison_copy_timing_session();
+  bool consume_copy_timing_fault(CopyTimingFaultInjection stage);
 
   size_t plane_bytes_;
   const StorageDtype storage_dtype_;
@@ -218,9 +247,18 @@ class Arena : public std::enable_shared_from_this<Arena> {
   std::condition_variable completions_ready_;
   std::deque<Completion> completions_;
   std::deque<Completion> read_completions_;
+  mutable std::mutex copy_timing_mutex_;
+  bool copy_timing_active_{false};
+  bool copy_timing_faulted_{false};
+  size_t copy_timing_capacity_{0};
+  size_t copy_timing_pending_{0};
+  std::deque<CopyTiming> copy_timings_;
+  CopyTimingFaultInjection copy_timing_fault_injection_{
+      CopyTimingFaultInjection::None};
 
   friend class WritePrimitive;
   friend class CopyPrimitive;
+  friend class CopyTimingReservation;
   friend class DiagnosticReadPrimitive;
   friend class AttentionReadPrimitive;
   friend class Q1GatherPrimitive;

@@ -1,14 +1,24 @@
 # SPDX-License-Identifier: MIT
 # Adapted from mlx-lm-unified; see docs/PROVENANCE.md and provenance/flashnext.json.
 from __future__ import annotations
+
 import logging
 from dataclasses import dataclass
 from functools import lru_cache
 from threading import Lock
 from typing import Any, Optional
+
 import mlx.core as mx
 
 from . import gdn_state as _gdn_state
+from .gdn_kernel_contract import (
+    FusedGdnContract,
+)
+from .qwen_gdn_contracts import (
+    QWEN4_GDN_CONTRACT,
+    resolve_qwen_gdn_contract,
+    uses_activation_dtype_arithmetic,
+)
 
 logger = logging.getLogger(__name__)
 NUM_KEY_HEADS = 16
@@ -96,7 +106,8 @@ def admit_qwen4_fused_gdn_decode(
     value_head_dim: int,
     conv_kernel: int,
     gate_activation: str,
-    architecture: str = "qwen4",
+    contract: Optional[FusedGdnContract] = None,
+    architecture: Optional[str] = None,
 ) -> FusedGdnAdmission:
     """Pure structural admission check; safe to exercise without MLX eval.
 
@@ -134,6 +145,7 @@ def admit_qwen4_fused_gdn_decode(
         value_head_dim=value_head_dim,
         conv_kernel=conv_kernel,
         gate_activation=gate_activation,
+        contract=contract,
         architecture=architecture,
     )
 
@@ -157,20 +169,16 @@ def _admit_decode_operands(
     value_head_dim: int,
     conv_kernel: int,
     gate_activation: str,
-    architecture: str,
+    contract: Optional[FusedGdnContract] = None,
+    architecture: Optional[str] = None,
 ) -> FusedGdnAdmission:
     """Gate, geometry, shape and dtype checks shared by the B=1 and batched
     one-token kernels; ``rows`` is the leading extent every activation and
     state operand must carry."""
-    expected_gate = {
-        "qwen4": "sigmoid",
-        "agnes": "swish",
-        "qwen35": "swish",
-        "qwen38": "swish",
-    }.get(architecture)
-    if expected_gate is None:
-        return FusedGdnAdmission(False, f"unsupported architecture {architecture!r}")
-    if gate_activation != expected_gate:
+    selected, refusal = resolve_qwen_gdn_contract(contract, architecture)
+    if refusal is not None or selected is None:
+        return FusedGdnAdmission(False, refusal or "missing fused GDN contract")
+    if gate_activation != selected.output_gate:
         return FusedGdnAdmission(False, f"output gate {gate_activation!r}")
     geometry = (
         num_key_heads,
@@ -180,9 +188,11 @@ def _admit_decode_operands(
         conv_kernel,
     )
     expected_geometry = (
-        (16, 32, 128, 128, 4)
-        if architecture == "qwen35"
-        else (NUM_KEY_HEADS, NUM_VALUE_HEADS, KEY_HEAD_DIM, VALUE_HEAD_DIM, CONV_KERNEL)
+        selected.geometry.num_key_heads,
+        selected.geometry.num_value_heads,
+        selected.geometry.key_head_dim,
+        selected.geometry.value_head_dim,
+        selected.geometry.conv_kernel,
     )
     if geometry != expected_geometry:
         return FusedGdnAdmission(False, f"unsupported geometry {geometry}")
@@ -289,7 +299,8 @@ def admit_qwen4_fused_gdn_batch_decode(
     value_head_dim: int,
     conv_kernel: int,
     gate_activation: str,
-    architecture: str = "qwen4",
+    contract: Optional[FusedGdnContract] = None,
+    architecture: Optional[str] = None,
     max_rows: int = BATCH_DECODE_MAX_ROWS,
 ) -> FusedGdnAdmission:
     """Structural admission for the batched one-token kernel (2..max rows).
@@ -335,13 +346,14 @@ def admit_qwen4_fused_gdn_batch_decode(
         value_head_dim=value_head_dim,
         conv_kernel=conv_kernel,
         gate_activation=gate_activation,
+        contract=contract,
         architecture=architecture,
     )
 
 
 _HEADER = "\n#include <metal_atomic>\ntemplate <typename U>\ninline U mlx_sigmoid_precise(U x) {\n  U e = static_cast<U>(metal::precise::exp(metal::abs(x)));\n  U y = static_cast<U>(1) / (static_cast<U>(1) + e);\n  return (x < 0) ? y : (static_cast<U>(1) - y);\n}\n\ntemplate <typename U>\ninline U mlx_sigmoid_fast(U x) {\n  U e = static_cast<U>(metal::exp(metal::abs(x)));\n  U y = static_cast<U>(1) / (static_cast<U>(1) + e);\n  return (x < 0) ? y : (static_cast<U>(1) - y);\n}\n\ntemplate <typename U>\ninline U mlx_log1p_fast(U x) {\n  float xf = float(x);\n  float xp1 = 1.0f + xf;\n  float out = xp1 == 1.0f ? xf : xf * (metal::log(xp1) / (xp1 - 1.0f));\n  return static_cast<U>(out);\n}\n\ntemplate <typename U>\ninline U mlx_softplus_fast(U x) {\n  if (metal::isnan(x))\n    return metal::numeric_limits<U>::quiet_NaN();\n  constexpr U inf = metal::numeric_limits<U>::infinity();\n  U zero = static_cast<U>(0);\n  U hi = metal::max(x, zero);\n  U lo = metal::min(x, zero);\n  return (lo == -inf || hi == inf)\n      ? hi\n      : (hi + mlx_log1p_fast(static_cast<U>(metal::exp(lo - hi))));\n}\n\n"
-_SOURCE = "\n  const uint hv = threadgroup_position_in_grid.z;\n  const uint hk = hv / RATIO;\n  const uint lane = thread_position_in_threadgroup.x;\n  const uint ty = thread_position_in_threadgroup.y;\n  const uint tid = thread_index_in_threadgroup;\n\n  constexpr int NT = 32 * TY;\n  constexpr int NDK = DK / 32;\n  constexpr int NDV = DV / TY;\n  constexpr uint KD = (uint)(HK * DK);\n  constexpr uint VD = (uint)(HV * DV);\n  constexpr uint CD = 2u * KD + VD;\n\n  threadgroup float sq[DK];\n  threadgroup float sk[DK];\n  // Float storage can represent the Qwen4 bf16 squares exactly after their\n  // explicit cast while also serving Agnes' float-accumulating fast RMSNorm.\n  threadgroup float sq_squared[DK];\n  threadgroup float sk_squared[DK];\n  threadgroup float sv[DV];\n  threadgroup float sy[DV];\n  threadgroup float shr[4];\n\n  device const float* si = recurrent_state + (size_t)hv * DV * DK;\n  device float* so = recurrent_state_out + (size_t)hv * DV * DK;\n  float st[NDV][NDK];\n  for (int j = 0; j < NDV; ++j) {\n    uint dv = ty + (uint)TY * (uint)j;\n    for (int i = 0; i < NDK; ++i)\n      st[j][i] = si[(size_t)dv * DK + NDK * lane + i];\n  }\n\n  // q/k channels are shared by three value heads.  All three compute the\n  // identical values locally, but only the first writes their cache channels.\n  for (uint idx = tid; idx < (uint)(2 * DK + DV); idx += NT) {\n    uint part = idx / (uint)DK;\n    uint d = idx - part * (uint)DK;\n    uint c = part == 0u ? hk * DK + d\n           : (part == 1u ? KD + hk * DK + d : 2u * KD + hv * DV + d);\n    device const T* wc = conv_weight + (size_t)c * K;\n    float acc = 0.0f;\n    for (uint tap = 0; tap + 1 < (uint)K; ++tap)\n      acc += float(conv_state[(size_t)tap * CD + c]) * float(wc[tap]);\n    acc += float(qkv[c]) * float(wc[K - 1]);\n    T xb = static_cast<T>(acc);\n    T sl = xb * mlx_sigmoid_fast(xb);\n    if (part == 0u) sq[d] = float(sl);\n    else if (part == 1u) sk[d] = float(sl);\n    else sv[d] = float(sl);\n\n    if (part == 2u || (hv % RATIO) == 0u) {\n      for (uint tap = 0; tap + 2 < (uint)K; ++tap)\n        conv_state_out[(size_t)tap * CD + c] =\n            conv_state[(size_t)(tap + 1) * CD + c];\n      conv_state_out[(size_t)(K - 2) * CD + c] = qkv[c];\n    }\n  }\n\n  if (tid == 0u) {\n    T av = a[hv] + dt_bias[hv];\n    T sp = mlx_softplus_fast(av);\n    shr[2] = metal::precise::exp(\n        -metal::precise::exp(float(A_log[hv])) * float(sp));\n    if constexpr (AGNES_NUMERICS) {\n      // Shared Qwen3.5 widens b before the eager sigmoid.\n      shr[3] = mlx_sigmoid_precise<float>(float(b[hv]));\n    } else {\n      // Qwen4 materializes beta in the activation dtype.\n      shr[3] = float(mlx_sigmoid_precise(b[hv]));\n    }\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n\n  for (uint d = tid; d < (uint)DK; d += NT) {\n    if constexpr (AGNES_NUMERICS) {\n      float qv = sq[d];\n      float kv = sk[d];\n      sq_squared[d] = qv * qv;\n      sk_squared[d] = kv * kv;\n    } else {\n      T qv = static_cast<T>(sq[d]);\n      T kv = static_cast<T>(sk[d]);\n      sq_squared[d] = float(static_cast<T>(qv * qv));\n      sk_squared[d] = float(static_cast<T>(kv * kv));\n    }\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n\n  if (simdgroup_index_in_threadgroup == 0u) {\n    uint base = 4u * lane;\n    if constexpr (AGNES_NUMERICS) {\n      // This mirrors MLX rms_single_row for axis_size=128/N_READS=4:\n      // four float products per lane, then one simd_sum in float32.\n      float pq = 0.0f, pk = 0.0f;\n      for (int i = 0; i < 4; ++i) {\n        pq += sq_squared[base + i];\n        pk += sk_squared[base + i];\n      }\n      pq = simd_sum(pq);\n      pk = simd_sum(pk);\n      if (lane == 0u) {\n        constexpr float rms_eps = 1.0e-6f / float(DK);\n        shr[0] = metal::precise::rsqrt(pq / float(DK) + rms_eps);\n        shr[1] = metal::precise::rsqrt(pk / float(DK) + rms_eps);\n      }\n    } else {\n      T pq = static_cast<T>(0), pk = static_cast<T>(0);\n      for (int i = 0; i < 4; ++i) {\n        pq = static_cast<T>(static_cast<T>(sq_squared[base + i]) + pq);\n        pk = static_cast<T>(static_cast<T>(sk_squared[base + i]) + pk);\n      }\n      pq = static_cast<T>(simd_sum(float(pq)));\n      pk = static_cast<T>(simd_sum(float(pk)));\n      if (lane == 0u) {\n        T eps = static_cast<T>(1.0e-6f);\n        T qdenom = pq + eps;\n        T kdenom = pk + eps;\n        shr[0] = float(static_cast<T>(metal::precise::rsqrt(qdenom)));\n        shr[1] = float(static_cast<T>(metal::precise::rsqrt(kdenom)));\n      }\n    }\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n  for (uint d = tid; d < (uint)DK; d += NT) {\n    if constexpr (AGNES_NUMERICS) {\n      // normalize_gdn_qk expresses L2 normalization through fast RMSNorm,\n      // then applies 1/DK to q and 1/sqrt(DK) to k in activation dtype.\n      T q_rms = static_cast<T>(sq[d] * shr[0]);\n      T k_rms = static_cast<T>(sk[d] * shr[1]);\n      sq[d] = float(static_cast<T>(q_rms * static_cast<T>(1.0f / float(DK))));\n      sk[d] = float(static_cast<T>(\n          k_rms * static_cast<T>(0.08838834764831845f)));\n    } else {\n      T qscale = static_cast<T>(0.08838834764831845f);\n      T q_normalized = static_cast<T>(\n          static_cast<T>(sq[d]) * static_cast<T>(shr[0]));\n      T k_normalized = static_cast<T>(\n          static_cast<T>(sk[d]) * static_cast<T>(shr[1]));\n      sq[d] = float(static_cast<T>(q_normalized * qscale));\n      sk[d] = float(k_normalized);\n    }\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n\n  for (int j = 0; j < NDV; ++j) {\n    uint dv = ty + (uint)TY * (uint)j;\n    float kv = 0.0f;\n    for (int i = 0; i < NDK; ++i) {\n      uint s = NDK * lane + i;\n      st[j][i] = st[j][i] * shr[2];\n      kv += st[j][i] * sk[s];\n    }\n    kv = simd_sum(kv);\n    float delta = (sv[dv] - kv) * shr[3];\n    float out = 0.0f;\n    for (int i = 0; i < NDK; ++i) {\n      uint s = NDK * lane + i;\n      st[j][i] = st[j][i] + sk[s] * delta;\n      out += st[j][i] * sq[s];\n    }\n    out = simd_sum(out);\n    if (thread_index_in_simdgroup == 0u)\n      sy[dv] = float(static_cast<T>(out));\n    for (int i = 0; i < NDK; ++i)\n      so[(size_t)dv * DK + NDK * lane + i] = st[j][i];\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n\n  if (simdgroup_index_in_threadgroup == 0u) {\n    float po = 0.0f;\n    uint base = 4u * lane;\n    for (int i = 0; i < 4; ++i) po += sy[base + i] * sy[base + i];\n    po = simd_sum(po);\n    if (lane == 0u)\n      shr[0] = metal::precise::rsqrt(po / (float)DV + norm_eps);\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n  for (uint d = tid; d < (uint)DV; d += NT) {\n    T normalized = static_cast<T>(sy[d] * shr[0]);\n    normalized = norm_weight[d] * normalized;\n    float zv = float(z[hv * DV + d]);\n    float gate = mlx_sigmoid_precise<float>(zv);\n    if constexpr (AGNES_NUMERICS) {\n      // Agnes' compiled _precise_swiglu uses nn.silu in float32. Runtime-built\n      // compiled spans lower that sigmoid to metal::exp, hence the fast form.\n      gate = zv * mlx_sigmoid_fast<float>(zv);\n    }\n    float x = float(normalized) * gate;\n    output[hv * DV + d] = static_cast<T>(x);\n  }\n"
-_SOURCE_OUTPROJ = "\n  const uint lane = thread_position_in_threadgroup.x;\n  const uint ty = thread_position_in_threadgroup.y;\n  const uint tid = thread_index_in_threadgroup;\n  const uint sg = simdgroup_index_in_threadgroup;\n\n  constexpr int NT = 32 * TY;\n  constexpr int NDK = DK / 32;\n  constexpr int NDV = DV / TY;\n  constexpr uint KD = (uint)(HK * DK);\n  constexpr uint VD = (uint)(HV * DV);\n  constexpr uint CD = 2u * KD + VD;\n\n  threadgroup float sq[DK];\n  threadgroup float sk[DK];\n  threadgroup T sq_squared[DK];\n  threadgroup T sk_squared[DK];\n  threadgroup float sv[DV];\n  threadgroup float sy[DV];\n  threadgroup float shr[4];\n  constexpr uint HEADS_PER_BLOCK = 4u;\n  constexpr uint QBLOCK = HEADS_PER_BLOCK * DV;\n  constexpr uint NBLOCKS = HV / HEADS_PER_BLOCK;\n  const uint block = threadgroup_position_in_grid.z;\n  const uint epoch_value = epoch[0];\n  device atomic_uint* barrier =\n      reinterpret_cast<device atomic_uint*>(const_cast<device uint*>(control));\n\n  // The control array is resident per layer.  Epochs are supplied by the\n  // Python caller, so no stale value can release a later invocation.\n  if (block == 0u) {\n    if (tid == 0u) {\n      atomic_store_explicit(barrier + 1, 0u, memory_order_relaxed);\n      atomic_store_explicit(barrier, epoch_value, memory_order_relaxed);\n    }\n  } else if (tid == 0u) {\n    while (atomic_load_explicit(barrier, memory_order_relaxed)\n           != epoch_value) {}\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n\n  threadgroup T all_y[QBLOCK];\n\n  for (uint local_hv = 0; local_hv < HEADS_PER_BLOCK; ++local_hv) {\n    const uint hv = block * HEADS_PER_BLOCK + local_hv;\n    const uint hk = hv / RATIO;\n    device const float* si = recurrent_state + (size_t)hv * DV * DK;\n    device float* so = recurrent_state_out + (size_t)hv * DV * DK;\n    float st[NDV][NDK];\n    for (int j = 0; j < NDV; ++j) {\n      uint dv = ty + (uint)TY * (uint)j;\n      for (int i = 0; i < NDK; ++i)\n        st[j][i] = si[(size_t)dv * DK + NDK * lane + i];\n    }\n\n    for (uint idx = tid; idx < (uint)(2 * DK + DV); idx += NT) {\n      uint part = idx / (uint)DK;\n      uint d = idx - part * (uint)DK;\n      uint c = part == 0u ? hk * DK + d\n             : (part == 1u ? KD + hk * DK + d : 2u * KD + hv * DV + d);\n      device const T* wc = conv_weight + (size_t)c * K;\n      float acc = 0.0f;\n      for (uint tap = 0; tap + 1 < (uint)K; ++tap)\n        acc += float(conv_state[(size_t)tap * CD + c]) * float(wc[tap]);\n      acc += float(qkv[c]) * float(wc[K - 1]);\n      T xb = static_cast<T>(acc);\n      T sl = xb * mlx_sigmoid_fast(xb);\n      if (part == 0u) sq[d] = float(sl);\n      else if (part == 1u) sk[d] = float(sl);\n      else sv[d] = float(sl);\n\n      if (part == 2u || (hv % RATIO) == 0u) {\n        for (uint tap = 0; tap + 2 < (uint)K; ++tap)\n          conv_state_out[(size_t)tap * CD + c] =\n              conv_state[(size_t)(tap + 1) * CD + c];\n        conv_state_out[(size_t)(K - 2) * CD + c] = qkv[c];\n      }\n    }\n\n    if (tid == 0u) {\n      T av = a[hv] + dt_bias[hv];\n      T sp = mlx_softplus_fast(av);\n      shr[2] = metal::precise::exp(\n          -metal::precise::exp(float(A_log[hv])) * float(sp));\n      // Exhaustive bf16 sweep: mlx_sigmoid_precise<T> equals mx.sigmoid on\n      // every finite bf16 input; the fast form differs on one (x ~ -6.85).\n      shr[3] = float(mlx_sigmoid_precise(b[hv]));\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    for (uint d = tid; d < (uint)DK; d += NT) {\n      T qv = static_cast<T>(sq[d]);\n      T kv = static_cast<T>(sk[d]);\n      sq_squared[d] = static_cast<T>(qv * qv);\n      sk_squared[d] = static_cast<T>(kv * kv);\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    if (sg == 0u) {\n      T pq = static_cast<T>(0), pk = static_cast<T>(0);\n      uint base = 4u * lane;\n      for (int i = 0; i < 4; ++i) {\n        pq = static_cast<T>(sq_squared[base + i] + pq);\n        pk = static_cast<T>(sk_squared[base + i] + pk);\n      }\n      pq = static_cast<T>(simd_sum(float(pq)));\n      pk = static_cast<T>(simd_sum(float(pk)));\n      if (lane == 0u) {\n        T eps = static_cast<T>(1.0e-6f);\n        T qdenom = pq + eps;\n        T kdenom = pk + eps;\n        shr[0] = float(static_cast<T>(metal::precise::rsqrt(qdenom)));\n        shr[1] = float(static_cast<T>(metal::precise::rsqrt(kdenom)));\n      }\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    T qscale = static_cast<T>(0.08838834764831845f);\n    for (uint d = tid; d < (uint)DK; d += NT) {\n      T q_normalized = static_cast<T>(static_cast<T>(sq[d]) * static_cast<T>(shr[0]));\n      T k_normalized = static_cast<T>(static_cast<T>(sk[d]) * static_cast<T>(shr[1]));\n      sq[d] = float(static_cast<T>(q_normalized * qscale));\n      sk[d] = float(k_normalized);\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    for (int j = 0; j < NDV; ++j) {\n      uint dv = ty + (uint)TY * (uint)j;\n      float kv = 0.0f;\n      for (int i = 0; i < NDK; ++i) {\n        uint s = NDK * lane + i;\n        st[j][i] = st[j][i] * shr[2];\n        kv += st[j][i] * sk[s];\n      }\n      kv = simd_sum(kv);\n      float delta = (sv[dv] - kv) * shr[3];\n      float out = 0.0f;\n      for (int i = 0; i < NDK; ++i) {\n        uint s = NDK * lane + i;\n        st[j][i] = st[j][i] + sk[s] * delta;\n        out += st[j][i] * sq[s];\n      }\n      out = simd_sum(out);\n      if (thread_index_in_simdgroup == 0u)\n        sy[dv] = float(static_cast<T>(out));\n      for (int i = 0; i < NDK; ++i)\n        so[(size_t)dv * DK + NDK * lane + i] = st[j][i];\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    if (sg == 0u) {\n      float po = 0.0f;\n      uint base = 4u * lane;\n      for (int i = 0; i < 4; ++i) po += sy[base + i] * sy[base + i];\n      po = simd_sum(po);\n      if (lane == 0u)\n        shr[0] = metal::precise::rsqrt(po / (float)DV + norm_eps);\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    for (uint d = tid; d < (uint)DV; d += NT) {\n      T normalized = static_cast<T>(sy[d] * shr[0]);\n      normalized = norm_weight[d] * normalized;\n      // Exhaustive bf16 sweep: the precise float32 sigmoid matches mx.sigmoid on\n      // every finite bf16-valued gate; the fast form differs on ~1% of them.\n      float x = float(normalized) * mlx_sigmoid_precise<float>(float(z[hv * DV + d]));\n      all_y[local_hv * DV + d] = static_cast<T>(x);\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n  }\n\n  // One exact affine_qmv_fast K-block.  Retaining every lane's value lets\n  // block 0 reproduce MLX's 12-block accumulation and final simd_sum order.\n  constexpr uint VALUES = 16u;\n  constexpr uint ROWS_PER_SIMD = 4u;\n  constexpr uint ROWS_PER_WAVE = 32u * ROWS_PER_SIMD;\n  for (uint row0 = sg * ROWS_PER_SIMD; row0 < (uint)OUT;\n       row0 += ROWS_PER_WAVE) {\n    float result[ROWS_PER_SIMD] = {0.0f};\n    float xv[VALUES];\n    float xsum = 0.0f;\n    uint xbase = lane * VALUES;\n    for (uint i = 0; i < VALUES; i += 4) {\n      T tx0 = all_y[xbase + i];\n      T tx1 = all_y[xbase + i + 1];\n      T tx2 = all_y[xbase + i + 2];\n      T tx3 = all_y[xbase + i + 3];\n      float x0 = float(tx0), x1 = float(tx1);\n      float x2 = float(tx2), x3 = float(tx3);\n      xsum += float(tx0 + tx1 + tx2 + tx3);\n      xv[i] = x0;\n      xv[i + 1] = x1 / 16.0f;\n      xv[i + 2] = x2 / 256.0f;\n      xv[i + 3] = x3 / 4096.0f;\n    }\n    for (uint r = 0; r < ROWS_PER_SIMD; ++r) {\n      uint row = row0 + r;\n      if (row >= (uint)OUT) continue;\n      const device uchar* wb =\n          reinterpret_cast<const device uchar*>(out_weight)\n          + (size_t)row * (VD / 2) + block * (QBLOCK / 2) + lane * 8;\n      const device ushort* wp = reinterpret_cast<const device ushort*>(wb);\n      float accum = 0.0f;\n      for (uint i = 0; i < 4; ++i) {\n        ushort packed = wp[i];\n        accum += xv[4 * i] * float(packed & 0x000f)\n                 + xv[4 * i + 1] * float(packed & 0x00f0)\n                 + xv[4 * i + 2] * float(packed & 0x0f00)\n                 + xv[4 * i + 3] * float(packed & 0xf000);\n      }\n      uint group = block * (QBLOCK / OGS) + lane / 4;\n      float os = float(out_scales[(size_t)row * (VD / OGS) + group]);\n      float ob = float(out_biases[(size_t)row * (VD / OGS) + group]);\n      result[r] = os * accum + xsum * ob;\n      partials[((size_t)block * OUT + row) * 32 + lane] = result[r];\n    }\n  }\n\n  threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);\n  if (tid == 0u)\n    atomic_fetch_add_explicit(\n        barrier + 1, 1u, memory_order_relaxed);\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n  if (block != 0u) return;\n  if (tid == 0u) {\n    while (atomic_load_explicit(barrier + 1, memory_order_relaxed)\n           != NBLOCKS) {}\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n\n  for (uint row0 = sg * ROWS_PER_SIMD; row0 < (uint)OUT;\n       row0 += ROWS_PER_WAVE) {\n    for (uint r = 0; r < ROWS_PER_SIMD; ++r) {\n      uint row = row0 + r;\n      if (row >= (uint)OUT) continue;\n      float value = 0.0f;\n      for (uint qb = 0; qb < NBLOCKS; ++qb)\n        value += partials[((size_t)qb * OUT + row) * 32 + lane];\n      value = simd_sum(value);\n      if (lane == 0u) output[row] = static_cast<T>(value);\n    }\n  }\n"
+_SOURCE = "\n  const uint hv = threadgroup_position_in_grid.z;\n  const uint hk = hv / RATIO;\n  const uint lane = thread_position_in_threadgroup.x;\n  const uint ty = thread_position_in_threadgroup.y;\n  const uint tid = thread_index_in_threadgroup;\n\n  constexpr int NT = 32 * TY;\n  constexpr int NDK = DK / 32;\n  constexpr int NDV = DV / TY;\n  constexpr uint KD = (uint)(HK * DK);\n  constexpr uint VD = (uint)(HV * DV);\n  constexpr uint CD = 2u * KD + VD;\n\n  threadgroup float sq[DK];\n  threadgroup float sk[DK];\n  // Float storage can represent the Qwen4 bf16 squares exactly after their\n  // explicit cast while also serving Agnes' float-accumulating fast RMSNorm.\n  threadgroup float sq_squared[DK];\n  threadgroup float sk_squared[DK];\n  threadgroup float sv[DV];\n  threadgroup float sy[DV];\n  threadgroup float shr[4];\n\n  device const float* si = recurrent_state + (size_t)hv * DV * DK;\n  device float* so = recurrent_state_out + (size_t)hv * DV * DK;\n  float st[NDV][NDK];\n  for (int j = 0; j < NDV; ++j) {\n    uint dv = ty + (uint)TY * (uint)j;\n    for (int i = 0; i < NDK; ++i)\n      st[j][i] = si[(size_t)dv * DK + NDK * lane + i];\n  }\n\n  // q/k channels are shared by three value heads.  All three compute the\n  // identical values locally, but only the first writes their cache channels.\n  for (uint idx = tid; idx < (uint)(2 * DK + DV); idx += NT) {\n    uint part = idx / (uint)DK;\n    uint d = idx - part * (uint)DK;\n    uint c = part == 0u ? hk * DK + d\n           : (part == 1u ? KD + hk * DK + d : 2u * KD + hv * DV + d);\n    device const T* wc = conv_weight + (size_t)c * K;\n    float acc = 0.0f;\n    for (uint tap = 0; tap + 1 < (uint)K; ++tap)\n      acc += float(conv_state[(size_t)tap * CD + c]) * float(wc[tap]);\n    acc += float(qkv[c]) * float(wc[K - 1]);\n    T xb = static_cast<T>(acc);\n    T sl = xb * mlx_sigmoid_fast(xb);\n    if (part == 0u) sq[d] = float(sl);\n    else if (part == 1u) sk[d] = float(sl);\n    else sv[d] = float(sl);\n\n    if (part == 2u || (hv % RATIO) == 0u) {\n      for (uint tap = 0; tap + 2 < (uint)K; ++tap)\n        conv_state_out[(size_t)tap * CD + c] =\n            conv_state[(size_t)(tap + 1) * CD + c];\n      conv_state_out[(size_t)(K - 2) * CD + c] = qkv[c];\n    }\n  }\n\n  if (tid == 0u) {\n    if constexpr (AGNES_NUMERICS) {\n      // Qwen3.5-family checkpoints retain their activation-dtype boundary.\n      T av = a[hv] + dt_bias[hv];\n      T sp = mlx_softplus_fast(av);\n      shr[2] = metal::precise::exp(\n          -metal::precise::exp(float(A_log[hv])) * float(sp));\n    } else {\n      // Qwen4-Exp declares an fp32 recurrent state. Widen before addition\n      // and softplus so a slow decay cannot round to one in bf16.\n      float av = float(a[hv]) + float(dt_bias[hv]);\n      float sp = mlx_softplus_fast<float>(av);\n      shr[2] = metal::precise::exp(\n          -metal::precise::exp(float(A_log[hv])) * sp);\n    }\n    if constexpr (AGNES_NUMERICS) {\n      // Shared Qwen3.5 widens b before the eager sigmoid.\n      shr[3] = mlx_sigmoid_precise<float>(float(b[hv]));\n    } else {\n      // Qwen4 materializes beta in the activation dtype.\n      shr[3] = float(mlx_sigmoid_precise(b[hv]));\n    }\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n\n  for (uint d = tid; d < (uint)DK; d += NT) {\n    if constexpr (AGNES_NUMERICS) {\n      float qv = sq[d];\n      float kv = sk[d];\n      sq_squared[d] = qv * qv;\n      sk_squared[d] = kv * kv;\n    } else {\n      T qv = static_cast<T>(sq[d]);\n      T kv = static_cast<T>(sk[d]);\n      sq_squared[d] = float(static_cast<T>(qv * qv));\n      sk_squared[d] = float(static_cast<T>(kv * kv));\n    }\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n\n  if (simdgroup_index_in_threadgroup == 0u) {\n    uint base = 4u * lane;\n    if constexpr (AGNES_NUMERICS) {\n      // This mirrors MLX rms_single_row for axis_size=128/N_READS=4:\n      // four float products per lane, then one simd_sum in float32.\n      float pq = 0.0f, pk = 0.0f;\n      for (int i = 0; i < 4; ++i) {\n        pq += sq_squared[base + i];\n        pk += sk_squared[base + i];\n      }\n      pq = simd_sum(pq);\n      pk = simd_sum(pk);\n      if (lane == 0u) {\n        constexpr float rms_eps = 1.0e-6f / float(DK);\n        shr[0] = metal::precise::rsqrt(pq / float(DK) + rms_eps);\n        shr[1] = metal::precise::rsqrt(pk / float(DK) + rms_eps);\n      }\n    } else {\n      T pq = static_cast<T>(0), pk = static_cast<T>(0);\n      for (int i = 0; i < 4; ++i) {\n        pq = static_cast<T>(static_cast<T>(sq_squared[base + i]) + pq);\n        pk = static_cast<T>(static_cast<T>(sk_squared[base + i]) + pk);\n      }\n      pq = static_cast<T>(simd_sum(float(pq)));\n      pk = static_cast<T>(simd_sum(float(pk)));\n      if (lane == 0u) {\n        T eps = static_cast<T>(1.0e-6f);\n        T qdenom = pq + eps;\n        T kdenom = pk + eps;\n        shr[0] = float(static_cast<T>(metal::precise::rsqrt(qdenom)));\n        shr[1] = float(static_cast<T>(metal::precise::rsqrt(kdenom)));\n      }\n    }\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n  for (uint d = tid; d < (uint)DK; d += NT) {\n    if constexpr (AGNES_NUMERICS) {\n      // normalize_gdn_qk expresses L2 normalization through fast RMSNorm,\n      // then applies 1/DK to q and 1/sqrt(DK) to k in activation dtype.\n      T q_rms = static_cast<T>(sq[d] * shr[0]);\n      T k_rms = static_cast<T>(sk[d] * shr[1]);\n      sq[d] = float(static_cast<T>(q_rms * static_cast<T>(1.0f / float(DK))));\n      sk[d] = float(static_cast<T>(\n          k_rms * static_cast<T>(0.08838834764831845f)));\n    } else {\n      T qscale = static_cast<T>(0.08838834764831845f);\n      T q_normalized = static_cast<T>(\n          static_cast<T>(sq[d]) * static_cast<T>(shr[0]));\n      T k_normalized = static_cast<T>(\n          static_cast<T>(sk[d]) * static_cast<T>(shr[1]));\n      sq[d] = float(static_cast<T>(q_normalized * qscale));\n      sk[d] = float(k_normalized);\n    }\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n\n  for (int j = 0; j < NDV; ++j) {\n    uint dv = ty + (uint)TY * (uint)j;\n    float kv = 0.0f;\n    for (int i = 0; i < NDK; ++i) {\n      uint s = NDK * lane + i;\n      st[j][i] = st[j][i] * shr[2];\n      kv += st[j][i] * sk[s];\n    }\n    kv = simd_sum(kv);\n    float delta = (sv[dv] - kv) * shr[3];\n    float out = 0.0f;\n    for (int i = 0; i < NDK; ++i) {\n      uint s = NDK * lane + i;\n      st[j][i] = st[j][i] + sk[s] * delta;\n      out += st[j][i] * sq[s];\n    }\n    out = simd_sum(out);\n    if (thread_index_in_simdgroup == 0u)\n      sy[dv] = float(static_cast<T>(out));\n    for (int i = 0; i < NDK; ++i)\n      so[(size_t)dv * DK + NDK * lane + i] = st[j][i];\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n\n  if (simdgroup_index_in_threadgroup == 0u) {\n    float po = 0.0f;\n    uint base = 4u * lane;\n    for (int i = 0; i < 4; ++i) po += sy[base + i] * sy[base + i];\n    po = simd_sum(po);\n    if (lane == 0u)\n      shr[0] = metal::precise::rsqrt(po / (float)DV + norm_eps);\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n  for (uint d = tid; d < (uint)DV; d += NT) {\n    T normalized = static_cast<T>(sy[d] * shr[0]);\n    normalized = norm_weight[d] * normalized;\n    float zv = float(z[hv * DV + d]);\n    float gate = mlx_sigmoid_precise<float>(zv);\n    if constexpr (AGNES_NUMERICS) {\n      // Agnes' compiled _precise_swiglu uses nn.silu in float32. Runtime-built\n      // compiled spans lower that sigmoid to metal::exp, hence the fast form.\n      gate = zv * mlx_sigmoid_fast<float>(zv);\n    }\n    float x = float(normalized) * gate;\n    output[hv * DV + d] = static_cast<T>(x);\n  }\n"
+_SOURCE_OUTPROJ = "\n  const uint lane = thread_position_in_threadgroup.x;\n  const uint ty = thread_position_in_threadgroup.y;\n  const uint tid = thread_index_in_threadgroup;\n  const uint sg = simdgroup_index_in_threadgroup;\n\n  constexpr int NT = 32 * TY;\n  constexpr int NDK = DK / 32;\n  constexpr int NDV = DV / TY;\n  constexpr uint KD = (uint)(HK * DK);\n  constexpr uint VD = (uint)(HV * DV);\n  constexpr uint CD = 2u * KD + VD;\n\n  threadgroup float sq[DK];\n  threadgroup float sk[DK];\n  threadgroup T sq_squared[DK];\n  threadgroup T sk_squared[DK];\n  threadgroup float sv[DV];\n  threadgroup float sy[DV];\n  threadgroup float shr[4];\n  constexpr uint HEADS_PER_BLOCK = 4u;\n  constexpr uint QBLOCK = HEADS_PER_BLOCK * DV;\n  constexpr uint NBLOCKS = HV / HEADS_PER_BLOCK;\n  const uint block = threadgroup_position_in_grid.z;\n  const uint epoch_value = epoch[0];\n  device atomic_uint* barrier =\n      reinterpret_cast<device atomic_uint*>(const_cast<device uint*>(control));\n\n  // The control array is resident per layer.  Epochs are supplied by the\n  // Python caller, so no stale value can release a later invocation.\n  if (block == 0u) {\n    if (tid == 0u) {\n      atomic_store_explicit(barrier + 1, 0u, memory_order_relaxed);\n      atomic_store_explicit(barrier, epoch_value, memory_order_relaxed);\n    }\n  } else if (tid == 0u) {\n    while (atomic_load_explicit(barrier, memory_order_relaxed)\n           != epoch_value) {}\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n\n  threadgroup T all_y[QBLOCK];\n\n  for (uint local_hv = 0; local_hv < HEADS_PER_BLOCK; ++local_hv) {\n    const uint hv = block * HEADS_PER_BLOCK + local_hv;\n    const uint hk = hv / RATIO;\n    device const float* si = recurrent_state + (size_t)hv * DV * DK;\n    device float* so = recurrent_state_out + (size_t)hv * DV * DK;\n    float st[NDV][NDK];\n    for (int j = 0; j < NDV; ++j) {\n      uint dv = ty + (uint)TY * (uint)j;\n      for (int i = 0; i < NDK; ++i)\n        st[j][i] = si[(size_t)dv * DK + NDK * lane + i];\n    }\n\n    for (uint idx = tid; idx < (uint)(2 * DK + DV); idx += NT) {\n      uint part = idx / (uint)DK;\n      uint d = idx - part * (uint)DK;\n      uint c = part == 0u ? hk * DK + d\n             : (part == 1u ? KD + hk * DK + d : 2u * KD + hv * DV + d);\n      device const T* wc = conv_weight + (size_t)c * K;\n      float acc = 0.0f;\n      for (uint tap = 0; tap + 1 < (uint)K; ++tap)\n        acc += float(conv_state[(size_t)tap * CD + c]) * float(wc[tap]);\n      acc += float(qkv[c]) * float(wc[K - 1]);\n      T xb = static_cast<T>(acc);\n      T sl = xb * mlx_sigmoid_fast(xb);\n      if (part == 0u) sq[d] = float(sl);\n      else if (part == 1u) sk[d] = float(sl);\n      else sv[d] = float(sl);\n\n      if (part == 2u || (hv % RATIO) == 0u) {\n        for (uint tap = 0; tap + 2 < (uint)K; ++tap)\n          conv_state_out[(size_t)tap * CD + c] =\n              conv_state[(size_t)(tap + 1) * CD + c];\n        conv_state_out[(size_t)(K - 2) * CD + c] = qkv[c];\n      }\n    }\n\n    if (tid == 0u) {\n      float av = float(a[hv]) + float(dt_bias[hv]);\n      float sp = mlx_softplus_fast<float>(av);\n      shr[2] = metal::precise::exp(\n          -metal::precise::exp(float(A_log[hv])) * sp);\n      // Exhaustive bf16 sweep: mlx_sigmoid_precise<T> equals mx.sigmoid on\n      // every finite bf16 input; the fast form differs on one (x ~ -6.85).\n      shr[3] = float(mlx_sigmoid_precise(b[hv]));\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    for (uint d = tid; d < (uint)DK; d += NT) {\n      T qv = static_cast<T>(sq[d]);\n      T kv = static_cast<T>(sk[d]);\n      sq_squared[d] = static_cast<T>(qv * qv);\n      sk_squared[d] = static_cast<T>(kv * kv);\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    if (sg == 0u) {\n      T pq = static_cast<T>(0), pk = static_cast<T>(0);\n      uint base = 4u * lane;\n      for (int i = 0; i < 4; ++i) {\n        pq = static_cast<T>(sq_squared[base + i] + pq);\n        pk = static_cast<T>(sk_squared[base + i] + pk);\n      }\n      pq = static_cast<T>(simd_sum(float(pq)));\n      pk = static_cast<T>(simd_sum(float(pk)));\n      if (lane == 0u) {\n        T eps = static_cast<T>(1.0e-6f);\n        T qdenom = pq + eps;\n        T kdenom = pk + eps;\n        shr[0] = float(static_cast<T>(metal::precise::rsqrt(qdenom)));\n        shr[1] = float(static_cast<T>(metal::precise::rsqrt(kdenom)));\n      }\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    T qscale = static_cast<T>(0.08838834764831845f);\n    for (uint d = tid; d < (uint)DK; d += NT) {\n      T q_normalized = static_cast<T>(static_cast<T>(sq[d]) * static_cast<T>(shr[0]));\n      T k_normalized = static_cast<T>(static_cast<T>(sk[d]) * static_cast<T>(shr[1]));\n      sq[d] = float(static_cast<T>(q_normalized * qscale));\n      sk[d] = float(k_normalized);\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    for (int j = 0; j < NDV; ++j) {\n      uint dv = ty + (uint)TY * (uint)j;\n      float kv = 0.0f;\n      for (int i = 0; i < NDK; ++i) {\n        uint s = NDK * lane + i;\n        st[j][i] = st[j][i] * shr[2];\n        kv += st[j][i] * sk[s];\n      }\n      kv = simd_sum(kv);\n      float delta = (sv[dv] - kv) * shr[3];\n      float out = 0.0f;\n      for (int i = 0; i < NDK; ++i) {\n        uint s = NDK * lane + i;\n        st[j][i] = st[j][i] + sk[s] * delta;\n        out += st[j][i] * sq[s];\n      }\n      out = simd_sum(out);\n      if (thread_index_in_simdgroup == 0u)\n        sy[dv] = float(static_cast<T>(out));\n      for (int i = 0; i < NDK; ++i)\n        so[(size_t)dv * DK + NDK * lane + i] = st[j][i];\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    if (sg == 0u) {\n      float po = 0.0f;\n      uint base = 4u * lane;\n      for (int i = 0; i < 4; ++i) po += sy[base + i] * sy[base + i];\n      po = simd_sum(po);\n      if (lane == 0u)\n        shr[0] = metal::precise::rsqrt(po / (float)DV + norm_eps);\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    for (uint d = tid; d < (uint)DV; d += NT) {\n      T normalized = static_cast<T>(sy[d] * shr[0]);\n      normalized = norm_weight[d] * normalized;\n      // Exhaustive bf16 sweep: the precise float32 sigmoid matches mx.sigmoid on\n      // every finite bf16-valued gate; the fast form differs on ~1% of them.\n      float x = float(normalized) * mlx_sigmoid_precise<float>(float(z[hv * DV + d]));\n      all_y[local_hv * DV + d] = static_cast<T>(x);\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n  }\n\n  // One exact affine_qmv_fast K-block.  Retaining every lane's value lets\n  // block 0 reproduce MLX's 12-block accumulation and final simd_sum order.\n  constexpr uint VALUES = 16u;\n  constexpr uint ROWS_PER_SIMD = 4u;\n  constexpr uint ROWS_PER_WAVE = 32u * ROWS_PER_SIMD;\n  for (uint row0 = sg * ROWS_PER_SIMD; row0 < (uint)OUT;\n       row0 += ROWS_PER_WAVE) {\n    float result[ROWS_PER_SIMD] = {0.0f};\n    float xv[VALUES];\n    float xsum = 0.0f;\n    uint xbase = lane * VALUES;\n    for (uint i = 0; i < VALUES; i += 4) {\n      T tx0 = all_y[xbase + i];\n      T tx1 = all_y[xbase + i + 1];\n      T tx2 = all_y[xbase + i + 2];\n      T tx3 = all_y[xbase + i + 3];\n      float x0 = float(tx0), x1 = float(tx1);\n      float x2 = float(tx2), x3 = float(tx3);\n      xsum += float(tx0 + tx1 + tx2 + tx3);\n      xv[i] = x0;\n      xv[i + 1] = x1 / 16.0f;\n      xv[i + 2] = x2 / 256.0f;\n      xv[i + 3] = x3 / 4096.0f;\n    }\n    for (uint r = 0; r < ROWS_PER_SIMD; ++r) {\n      uint row = row0 + r;\n      if (row >= (uint)OUT) continue;\n      const device uchar* wb =\n          reinterpret_cast<const device uchar*>(out_weight)\n          + (size_t)row * (VD / 2) + block * (QBLOCK / 2) + lane * 8;\n      const device ushort* wp = reinterpret_cast<const device ushort*>(wb);\n      float accum = 0.0f;\n      for (uint i = 0; i < 4; ++i) {\n        ushort packed = wp[i];\n        accum += xv[4 * i] * float(packed & 0x000f)\n                 + xv[4 * i + 1] * float(packed & 0x00f0)\n                 + xv[4 * i + 2] * float(packed & 0x0f00)\n                 + xv[4 * i + 3] * float(packed & 0xf000);\n      }\n      uint group = block * (QBLOCK / OGS) + lane / 4;\n      float os = float(out_scales[(size_t)row * (VD / OGS) + group]);\n      float ob = float(out_biases[(size_t)row * (VD / OGS) + group]);\n      result[r] = os * accum + xsum * ob;\n      partials[((size_t)block * OUT + row) * 32 + lane] = result[r];\n    }\n  }\n\n  threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);\n  if (tid == 0u)\n    atomic_fetch_add_explicit(\n        barrier + 1, 1u, memory_order_relaxed);\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n  if (block != 0u) return;\n  if (tid == 0u) {\n    while (atomic_load_explicit(barrier + 1, memory_order_relaxed)\n           != NBLOCKS) {}\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n\n  for (uint row0 = sg * ROWS_PER_SIMD; row0 < (uint)OUT;\n       row0 += ROWS_PER_WAVE) {\n    for (uint r = 0; r < ROWS_PER_SIMD; ++r) {\n      uint row = row0 + r;\n      if (row >= (uint)OUT) continue;\n      float value = 0.0f;\n      for (uint qb = 0; qb < NBLOCKS; ++qb)\n        value += partials[((size_t)qb * OUT + row) * 32 + lane];\n      value = simd_sum(value);\n      if (lane == 0u) output[row] = static_cast<T>(value);\n    }\n  }\n"
 
 
 # Batched one-token decode (omlx #4106 GDN half; see
@@ -527,7 +539,8 @@ def qwen4_fused_gdn_decode(
     norm_eps: float,
     *,
     threadgroup_y: int,
-    architecture: str = "qwen4",
+    contract: Optional[FusedGdnContract] = None,
+    architecture: Optional[str] = None,
     num_key_heads: int = NUM_KEY_HEADS,
     num_value_heads: int = NUM_VALUE_HEADS,
     key_head_dim: int = KEY_HEAD_DIM,
@@ -539,8 +552,21 @@ def qwen4_fused_gdn_decode(
         raise ValueError(
             f"unsupported threadgroup_y {threadgroup_y}; expected one of {_THREADGROUP_Y_CANDIDATES}"
         )
-    if architecture not in ("qwen4", "agnes", "qwen35", "qwen38"):
-        raise ValueError(f"unsupported fused GDN architecture {architecture!r}")
+    selected, refusal = resolve_qwen_gdn_contract(contract, architecture)
+    if refusal is not None or selected is None:
+        raise ValueError(refusal or "missing fused GDN contract")
+    live_geometry = (num_key_heads, num_value_heads, key_head_dim, value_head_dim, conv_kernel)
+    expected_geometry = (
+        selected.geometry.num_key_heads,
+        selected.geometry.num_value_heads,
+        selected.geometry.key_head_dim,
+        selected.geometry.value_head_dim,
+        selected.geometry.conv_kernel,
+    )
+    if live_geometry != expected_geometry:
+        raise ValueError(
+            f"fused GDN geometry {live_geometry} disagrees with contract {expected_geometry}"
+        )
     key_dim = num_key_heads * key_head_dim
     value_dim = num_value_heads * value_head_dim
     conv_dim = 2 * key_dim + value_dim
@@ -570,7 +596,7 @@ def qwen4_fused_gdn_decode(
             ("K", conv_kernel),
             ("TY", threadgroup_y),
             ("RATIO", num_value_heads // num_key_heads),
-            ("AGNES_NUMERICS", int(architecture in ("agnes", "qwen35", "qwen38"))),
+            ("AGNES_NUMERICS", int(uses_activation_dtype_arithmetic(selected))),
         ],
         grid=(32, threadgroup_y, num_value_heads),
         threadgroup=(32, threadgroup_y, 1),
@@ -598,7 +624,8 @@ def qwen4_fused_gdn_batch_decode(
     norm_eps: float,
     *,
     threadgroup_y: int,
-    architecture: str = "qwen4",
+    contract: Optional[FusedGdnContract] = None,
+    architecture: Optional[str] = None,
     num_key_heads: int = NUM_KEY_HEADS,
     num_value_heads: int = NUM_VALUE_HEADS,
     key_head_dim: int = KEY_HEAD_DIM,
@@ -613,8 +640,21 @@ def qwen4_fused_gdn_batch_decode(
         raise ValueError(
             f"unsupported threadgroup_y {threadgroup_y}; expected one of {_THREADGROUP_Y_CANDIDATES}"
         )
-    if architecture not in ("qwen4", "agnes", "qwen35", "qwen38"):
-        raise ValueError(f"unsupported fused GDN architecture {architecture!r}")
+    selected, refusal = resolve_qwen_gdn_contract(contract, architecture)
+    if refusal is not None or selected is None:
+        raise ValueError(refusal or "missing fused GDN contract")
+    live_geometry = (num_key_heads, num_value_heads, key_head_dim, value_head_dim, conv_kernel)
+    expected_geometry = (
+        selected.geometry.num_key_heads,
+        selected.geometry.num_value_heads,
+        selected.geometry.key_head_dim,
+        selected.geometry.value_head_dim,
+        selected.geometry.conv_kernel,
+    )
+    if live_geometry != expected_geometry:
+        raise ValueError(
+            f"fused GDN geometry {live_geometry} disagrees with contract {expected_geometry}"
+        )
     rows = int(qkv.shape[0])
     key_dim = num_key_heads * key_head_dim
     value_dim = num_value_heads * value_head_dim
@@ -645,7 +685,7 @@ def qwen4_fused_gdn_batch_decode(
             ("K", conv_kernel),
             ("TY", threadgroup_y),
             ("RATIO", num_value_heads // num_key_heads),
-            ("AGNES_NUMERICS", int(architecture in ("agnes", "qwen35", "qwen38"))),
+            ("AGNES_NUMERICS", int(uses_activation_dtype_arithmetic(selected))),
         ],
         grid=(32, threadgroup_y, num_value_heads * rows),
         threadgroup=(32, threadgroup_y, 1),
@@ -860,42 +900,62 @@ _PROBE_LOCK = Lock()
 
 
 _PROBED_ST16: dict = {}
+_PROBED_CONTRACT_DECODE: dict[str, Optional[int]] = {}
 
 
-def _probe_st16_decode(dtype) -> Optional[int]:
+def _probe_st16_decode(
+    dtype, contract: FusedGdnContract = QWEN4_GDN_CONTRACT
+) -> Optional[int]:
     """The fp16 storage-class decode and batch kernels at the fp32 geometry.
 
     Only the fp32 probe's ``threadgroup_y`` is tried, so both classes run the
     same thread geometry; a failure keeps fp16 states on the stock chain.
     """
-    if "decode" in _PROBED_ST16:
-        return _PROBED_ST16["decode"]
-    start = probe_qwen4_fused_gdn_decode(dtype)
+    key = "decode" if contract == QWEN4_GDN_CONTRACT else contract.identity
+    if key in _PROBED_ST16:
+        return _PROBED_ST16[key]
+    start = probe_qwen4_fused_gdn_decode(dtype, contract=contract)
     with _PROBE_LOCK:
-        if "decode" in _PROBED_ST16:
-            return _PROBED_ST16["decode"]
+        if key in _PROBED_ST16:
+            return _PROBED_ST16[key]
+        geometry = contract.geometry
+        value_dim = geometry.num_value_heads * geometry.value_head_dim
+        conv_dim = 2 * geometry.num_key_heads * geometry.key_head_dim + value_dim
         result = None
         if start is not None:
             try:
                 for rows in (1, 2):
-                    qkv = mx.zeros((rows, 1, CONV_DIM), dtype=dtype)
-                    z = mx.zeros((rows, 1, VALUE_DIM), dtype=dtype)
-                    gates = mx.zeros((rows, 1, NUM_VALUE_HEADS), dtype=dtype)
-                    conv_state = mx.zeros((rows, CONV_KERNEL - 1, CONV_DIM), dtype=dtype)
+                    qkv = mx.zeros((rows, 1, conv_dim), dtype=dtype)
+                    z = mx.zeros((rows, 1, value_dim), dtype=dtype)
+                    gates = mx.zeros((rows, 1, geometry.num_value_heads), dtype=dtype)
+                    conv_state = mx.zeros(
+                        (rows, geometry.conv_kernel - 1, conv_dim), dtype=dtype
+                    )
                     state = mx.zeros(
-                        (rows, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+                        (
+                            rows,
+                            geometry.num_value_heads,
+                            geometry.value_head_dim,
+                            geometry.key_head_dim,
+                        ),
                         dtype=mx.float16,
                     )
                     build = qwen4_fused_gdn_decode if rows == 1 else qwen4_fused_gdn_batch_decode
                     outputs = build(
                         qkv, z, gates, gates, conv_state,
-                        mx.zeros((CONV_DIM, CONV_KERNEL, 1), dtype=dtype),
-                        mx.zeros((NUM_VALUE_HEADS,), dtype=mx.float32),
-                        mx.zeros((NUM_VALUE_HEADS,), dtype=dtype),
+                        mx.zeros((conv_dim, geometry.conv_kernel, 1), dtype=dtype),
+                        mx.zeros((geometry.num_value_heads,), dtype=mx.float32),
+                        mx.zeros((geometry.num_value_heads,), dtype=dtype),
                         state,
-                        mx.ones((VALUE_HEAD_DIM,), dtype=dtype),
+                        mx.ones((geometry.value_head_dim,), dtype=dtype),
                         1e-06,
                         threadgroup_y=start,
+                        contract=contract,
+                        num_key_heads=geometry.num_key_heads,
+                        num_value_heads=geometry.num_value_heads,
+                        key_head_dim=geometry.key_head_dim,
+                        value_head_dim=geometry.value_head_dim,
+                        conv_kernel=geometry.conv_kernel,
                     )
                     mx.eval(*outputs)
                 result = start
@@ -906,37 +966,53 @@ def _probe_st16_decode(dtype) -> Optional[int]:
                     # Not a kernel refusal: let serving recover, probe again.
                     raise
                 logger.info("Qwen4 fused GDN fp16-state probe failed: %s", exc)
-        _PROBED_ST16["decode"] = result
+        _PROBED_ST16[key] = result
         return result
 
 
-def probe_qwen4_fused_gdn_decode(dtype, *, state_dtype=None) -> Optional[int]:
+def probe_qwen4_fused_gdn_decode(
+    dtype, *, state_dtype=None, contract: FusedGdnContract | None = None
+) -> Optional[int]:
     """Compile candidates once and publish the supported geometry atomically.
 
     ``state_dtype=mx.float16`` probes the fp16 storage-class kernels instead.
     """
     global _PROBE_COMPLETE, _PROBED_THREADGROUP_Y
+    selected, refusal = resolve_qwen_gdn_contract(contract)
+    if refusal is not None or selected is None:
+        return None
     if state_dtype is not None and state_dtype == mx.float16:
-        return _probe_st16_decode(dtype)
-    if _PROBE_COMPLETE:
+        return _probe_st16_decode(dtype, selected)
+    if selected == QWEN4_GDN_CONTRACT and _PROBE_COMPLETE:
         return _PROBED_THREADGROUP_Y
+    if selected.identity in _PROBED_CONTRACT_DECODE:
+        return _PROBED_CONTRACT_DECODE[selected.identity]
     with _PROBE_LOCK:
-        if _PROBE_COMPLETE:
+        if selected == QWEN4_GDN_CONTRACT and _PROBE_COMPLETE:
             return _PROBED_THREADGROUP_Y
+        if selected.identity in _PROBED_CONTRACT_DECODE:
+            return _PROBED_CONTRACT_DECODE[selected.identity]
         if not fused_gdn_runtime_supported():
-            _PROBE_COMPLETE = True
+            _PROBED_CONTRACT_DECODE[selected.identity] = None
+            if selected == QWEN4_GDN_CONTRACT:
+                _PROBE_COMPLETE = True
             return None
-        qkv = mx.zeros((1, 1, CONV_DIM), dtype=dtype)
-        z = mx.zeros((1, 1, VALUE_DIM), dtype=dtype)
-        gates = mx.zeros((1, 1, NUM_VALUE_HEADS), dtype=dtype)
-        conv_state = mx.zeros((1, CONV_KERNEL - 1, CONV_DIM), dtype=dtype)
-        conv_weight = mx.zeros((CONV_DIM, CONV_KERNEL, 1), dtype=dtype)
+        geometry = selected.geometry
+        value_dim = geometry.num_value_heads * geometry.value_head_dim
+        conv_dim = 2 * geometry.num_key_heads * geometry.key_head_dim + value_dim
+        qkv = mx.zeros((1, 1, conv_dim), dtype=dtype)
+        z = mx.zeros((1, 1, value_dim), dtype=dtype)
+        gates = mx.zeros((1, 1, geometry.num_value_heads), dtype=dtype)
+        conv_state = mx.zeros((1, geometry.conv_kernel - 1, conv_dim), dtype=dtype)
+        conv_weight = mx.zeros((conv_dim, geometry.conv_kernel, 1), dtype=dtype)
         recurrent_state = mx.zeros(
-            (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM), dtype=mx.float32
+            (1, geometry.num_value_heads, geometry.value_head_dim, geometry.key_head_dim),
+            dtype=mx.float32,
         )
-        vector = mx.zeros((NUM_VALUE_HEADS,), dtype=dtype)
-        A_log = mx.zeros((NUM_VALUE_HEADS,), dtype=mx.float32)
-        norm_weight = mx.ones((VALUE_HEAD_DIM,), dtype=dtype)
+        vector = mx.zeros((geometry.num_value_heads,), dtype=dtype)
+        A_log = mx.zeros((geometry.num_value_heads,), dtype=mx.float32)
+        norm_weight = mx.ones((geometry.value_head_dim,), dtype=dtype)
+        result = None
         for threadgroup_y in _THREADGROUP_Y_CANDIDATES:
             try:
                 outputs = qwen4_fused_gdn_decode(
@@ -952,9 +1028,15 @@ def probe_qwen4_fused_gdn_decode(dtype, *, state_dtype=None) -> Optional[int]:
                     norm_weight,
                     1e-06,
                     threadgroup_y=threadgroup_y,
+                    contract=selected,
+                    num_key_heads=geometry.num_key_heads,
+                    num_value_heads=geometry.num_value_heads,
+                    key_head_dim=geometry.key_head_dim,
+                    value_head_dim=geometry.value_head_dim,
+                    conv_kernel=geometry.conv_kernel,
                 )
                 mx.eval(*outputs)
-                _PROBED_THREADGROUP_Y = threadgroup_y
+                result = threadgroup_y
                 break
             except ValueError as exc:
                 if "threads per threadgroup" in str(exc):
@@ -974,5 +1056,8 @@ def probe_qwen4_fused_gdn_decode(dtype, *, state_dtype=None) -> Optional[int]:
                     exc,
                 )
                 continue
-        _PROBE_COMPLETE = True
-        return _PROBED_THREADGROUP_Y
+        _PROBED_CONTRACT_DECODE[selected.identity] = result
+        if selected == QWEN4_GDN_CONTRACT:
+            _PROBED_THREADGROUP_Y = result
+            _PROBE_COMPLETE = True
+        return result

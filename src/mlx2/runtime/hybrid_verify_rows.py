@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from numbers import Integral
 
-from .models.cache import ArraysCache, KVCache
+from .cache_operations import CacheOperationsUnsupported, cache_operations
 
 
 class HybridVerifyUnsupported(TypeError):
@@ -38,13 +38,21 @@ class HybridVerifyUnsupported(TypeError):
 
 
 def _supported_kv(cache):
-    # A subclass can add state that ordinary KV trim does not settle.  Require
-    # its own declaration: inheriting a parent's flag is not evidence that the
-    # subclass's extra planes support the same exact rollback operation.
-    return type(cache) is KVCache or (
-        isinstance(cache, KVCache)
-        and type(cache).__dict__.get("supports_external_verify_transaction") is True
+    contract = cache_operations(
+        cache, capability="hybrid verify KV rollback", required=False
     )
+    return (
+        contract is not None
+        and contract.rollback == "kv_trim"
+        and contract.family in {"kv", "indexed_kv"}
+    )
+
+
+def _recurrent(cache):
+    contract = cache_operations(
+        cache, capability="hybrid verify recurrent rollback", required=False
+    )
+    return contract is not None and contract.rollback == "recurrent_record_trim"
 
 
 def is_hybrid_rows(rows) -> bool:
@@ -55,11 +63,13 @@ def is_hybrid_rows(rows) -> bool:
     specialized = False
     for row in rows:
         for cache in row:
-            if isinstance(cache, ArraysCache):
+            if _recurrent(cache):
                 specialized = True
             elif not _supported_kv(cache):
                 return False
-            elif type(cache) is not KVCache:
+            elif cache_operations(
+                cache, capability="hybrid verify topology"
+            ).family == "indexed_kv":
                 specialized = True
     return specialized
 
@@ -83,11 +93,19 @@ class HybridVerifyRows:
         if len({id(cache) for row in rows for cache in row}) != sum(map(len, rows)):
             raise ValueError("hybrid lanes/layers must have independent cache owners")
         for layer in zip(*rows):
-            kinds = {
-                ArraysCache if isinstance(c, ArraysCache) else type(c) for c in layer
-            }
+            try:
+                kinds = {
+                    cache_operations(
+                        c, capability="hybrid verify layer binding"
+                    ).fingerprint
+                    for c in layer
+                }
+            except CacheOperationsUnsupported as error:
+                raise HybridVerifyUnsupported(
+                    "hybrid verify needs an explicitly declared exact rollback contract"
+                ) from error
             if len(kinds) != 1 or not all(
-                isinstance(cache, ArraysCache) or _supported_kv(cache)
+                _recurrent(cache) or _supported_kv(cache)
                 for cache in layer
             ):
                 raise HybridVerifyUnsupported(
@@ -95,7 +113,7 @@ class HybridVerifyRows:
                     "declared exact KV transaction layers"
                 )
             for cache in layer:
-                if isinstance(cache, ArraysCache):
+                if _recurrent(cache):
                     if cache.batch_size != 1 and not cache.empty():
                         raise ValueError(
                             "each authoritative recurrent cache must be a B1 row"
@@ -151,7 +169,7 @@ class HybridVerifyRows:
             # The batched recurrent view assumes a verify epoch; a plain
             # step writes state through it without records.
             for view in group:
-                if isinstance(view, ArraysCache):
+                if _recurrent(view):
                     view.speculating = False
         return group
 
@@ -186,7 +204,7 @@ class HybridVerifyTransaction:
         self.closed = False
         self._finalized = False
         self._kv_base = [
-            [None if isinstance(c, ArraysCache) else _kv_offset(c) for c in row]
+            [None if _recurrent(c) else _kv_offset(c) for c in row]
             for row in rows
         ]
         self._started = []
@@ -195,7 +213,7 @@ class HybridVerifyTransaction:
             (cache, list(cache.cache), cache.lengths, cache.left_padding)
             for row in rows
             for cache in row
-            if isinstance(cache, ArraysCache)
+            if _recurrent(cache)
         ]
         self.plain = bool(plain_single_token) and self.width == 1
         # Rows of a plain round rewound and dropped before commit.
@@ -203,7 +221,7 @@ class HybridVerifyTransaction:
         try:
             for row in rows:
                 for cache in row:
-                    if isinstance(cache, ArraysCache) and not self.plain:
+                    if _recurrent(cache) and not self.plain:
                         cache.start_speculation()
                         self._started.append(cache)
             if len(rows) == 1:
@@ -218,7 +236,7 @@ class HybridVerifyTransaction:
                 # row is one valid token, the ordinary decode geometry.
                 self._prepared = [
                     cache for cache in self.caches
-                    if not (self.plain and isinstance(cache, ArraysCache))
+                    if not (self.plain and _recurrent(cache))
                 ]
                 _prepare_self_mtp_cache_group(
                     self._prepared,

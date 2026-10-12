@@ -15,6 +15,7 @@ from . import qwen3_next as QN
 from . import qwen4_moe_window as W
 from . import qwen4_routed_decode as RD
 from .import_env import snapshot
+from .qwen_moe_contracts import QWEN36_E256_K8_ROUTING
 from .precise_ops import gate_sigmoid
 
 snapshot(__name__)
@@ -234,6 +235,8 @@ class Qwen36SparseMoeBlock(QN.Qwen3NextSparseMoeBlock):
 
     def __init__(self, args):
         super().__init__(args)
+        self.moe_routing_contract = QWEN36_E256_K8_ROUTING
+        self.switch_mlp.moe_routing_contract = self.moe_routing_contract
         self.qwen36_window_consumers = (
             frozenset(("batch_decode", "verify", "row_exact"))
             if _WINDOW
@@ -246,7 +249,7 @@ class Qwen36SparseMoeBlock(QN.Qwen3NextSparseMoeBlock):
 
     def set_moe_window_consumers(self, consumers):
         consumers = frozenset(consumers)
-        if consumers - set(W.CONSUMERS):
+        if consumers - self.moe_routing_contract.allowed_row_consumers:
             raise ValueError("unknown MoE window consumer")
         self.qwen36_window_consumers = consumers
         return consumers
@@ -278,6 +281,16 @@ class Qwen36SparseMoeBlock(QN.Qwen3NextSparseMoeBlock):
             self._decline("window width outside 1..17")
             return super().__call__(x)
         sw = self.switch_mlp
+        contract_reason = self.moe_routing_contract.routing_refusal(
+            expert_count=self.num_experts,
+            top_k=self.top_k,
+            normalize_topk=bool(self.norm_topk_prob),
+            activation_dtype=(
+                "bfloat16" if x.dtype == mx.bfloat16 else str(x.dtype)
+            ),
+            projection_layout="split_gate_up",
+            consumer=consumer if window else None,
+        )
         reason = None
         if self.shared_folded or self.sharding_group is not None:
             reason = "shared row folded or sharded"
@@ -289,10 +302,8 @@ class Qwen36SparseMoeBlock(QN.Qwen3NextSparseMoeBlock):
             self.moe_router_mode != "stock" or QN._MOE_GATE_COMPILE or QN._COMPILE_GLUE
         ):
             reason = "alternative router or compiled combine selected"
-        elif not self.norm_topk_prob:
-            reason = "only normalized top-8 routing"
-        elif self.top_k != 8 or self.num_experts != 256:
-            reason = "unsupported topology"
+        elif contract_reason is not None:
+            reason = contract_reason
         elif "gate_up_proj" in sw:
             reason = "requires split gate/up tables"
         else:
@@ -303,6 +314,7 @@ class Qwen36SparseMoeBlock(QN.Qwen3NextSparseMoeBlock):
                 sw.gate_proj,
                 sw.up_proj,
                 sw.down_proj,
+                contract=self.moe_routing_contract,
             )
             if not admit.accepted:
                 reason = admit.reason
@@ -325,14 +337,23 @@ class Qwen36SparseMoeBlock(QN.Qwen3NextSparseMoeBlock):
         if self.moe_topk_mode == "launch":
             # The same structural admission the parent's launch applies; the
             # kernel transcribes stock routing for bf16 logits only.
-            refusal = W.admit_router_topk(logits, 8, bool(self.norm_topk_prob))
+            refusal = W.admit_router_topk(
+                logits, self.top_k, bool(self.norm_topk_prob),
+                contract=self.moe_routing_contract,
+                consumer=consumer if window else None,
+            )
             if refusal is None and logits.dtype != x.dtype:
                 refusal = "router logits dtype differs from the activation"
             if refusal is not None:
                 self.moe_topk_fallbacks += 1
                 self.moe_topk_last_fallback = refusal
         if self.moe_topk_mode == "launch" and refusal is None:
-            inds, scores = W.router_topk(logits, top_k=8)
+            inds, scores = W.router_topk(
+                logits,
+                top_k=self.top_k,
+                contract=self.moe_routing_contract,
+                consumer=consumer if window else None,
+            )
             self.moe_topk_calls["launch"] += 1
             self.moe_topk_last_fallback = None
         else:

@@ -16,12 +16,14 @@ of the decode switch, and refusals are counted as ``prefill: <reason>``.
 from __future__ import annotations
 
 import mlx.core as mx
+
+from . import qwen4_fused_gdn as kernels
+from . import qwen4_fused_gdn_prefill as prefill_kernels
+from . import qwen4_fused_gdn_verify as verify_kernels
+from .qwen_gdn_contracts import QWEN36_GDN_CONTRACT, QWEN38_GDN_CONTRACT
+from .gdn_state import check_state
 from .qwen3_5 import GatedDeltaNet as ReferenceGatedDeltaNet
 from .qwen3_next import Qwen3NextRMSNormGated
-from .gdn_state import check_state
-from . import qwen4_fused_gdn as kernels
-from . import qwen4_fused_gdn_verify as verify_kernels
-from . import qwen4_fused_gdn_prefill as prefill_kernels
 from .served_exp import is_device_fault
 
 VERIFY_REFUSAL = 'verify shape outside corrected fused path'
@@ -30,6 +32,8 @@ PREFILL_MIN_ROWS = prefill_kernels.PREFILL_MIN_ROWS
 _COUNTER_NAMES = (
     'decode_calls', 'batch_decode_calls', 'batch_decode_rows',
     'verify_calls', 'verify_tokens', 'verify_rollbacks',
+    'compact_verify_calls', 'compact_rollback_calls',
+    'compact_tape_bytes', 'compact_snapshot_bytes_avoided',
     'prefill_calls', 'prefill_tokens',
     'prefill_chunk_calls', 'prefill_chunk_tokens', 'prefill_norm_eager',
     'fallbacks',
@@ -56,7 +60,10 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         super().__init__(args)
         self.fused_gdn_enabled = False
         self.fused_gdn_prefill_enabled = False
+        self.fused_gdn_compact_replay_enabled = False
+        object.__setattr__(self, 'state_plane_operations', None)
         self.fused_gdn_architecture = 'qwen38'
+        self.fused_gdn_contract = QWEN38_GDN_CONTRACT
         object.__setattr__(self, 'fused_gdn_counters', {
             **{name: 0 for name in _COUNTER_NAMES},
             'last_fallback': None, 'reasons': {},
@@ -72,10 +79,25 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             raise ValueError('fused_gdn_prefill must be boolean')
         self.fused_gdn_prefill_enabled = enabled
 
+    def set_fused_gdn_compact_replay_enabled(self, enabled: bool, operations=None):
+        if type(enabled) is not bool:
+            raise ValueError('fused_gdn_compact_replay must be boolean')
+        if enabled:
+            from ..state_plane_operations import CompactGdnReplayOperations
+
+            if not isinstance(operations, CompactGdnReplayOperations):
+                raise ValueError('compact replay requires model state-plane operations')
+        self.fused_gdn_compact_replay_enabled = enabled
+        object.__setattr__(self, 'state_plane_operations', operations)
+
     def set_fused_gdn_architecture(self, architecture: str):
         if architecture not in ('qwen35', 'qwen38'):
             raise ValueError('unsupported fused_gdn architecture')
         self.fused_gdn_architecture = architecture
+        self.fused_gdn_contract = (
+            QWEN36_GDN_CONTRACT if architecture == 'qwen35'
+            else QWEN38_GDN_CONTRACT
+        )
 
     def _fallback(self, reason):
         counts = self.fused_gdn_counters
@@ -106,7 +128,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         rows = int(qkv.shape[0])
         admit = (kernels.admit_qwen4_fused_gdn_decode if rows == 1
                  else kernels.admit_qwen4_fused_gdn_batch_decode)
-        geometry = dict(architecture=self.fused_gdn_architecture, num_key_heads=self.num_k_heads,
+        geometry = dict(contract=self.fused_gdn_contract, num_key_heads=self.num_k_heads,
             num_value_heads=self.num_v_heads, key_head_dim=self.head_k_dim,
             value_head_dim=self.head_v_dim, conv_kernel=self.conv_kernel_size)
         admission = admit(qkv=qkv, z=z, b=b, a=a, conv_state=cache[0],
@@ -124,6 +146,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             return self._fallback(refusal)
         try:
             ty = kernels.probe_qwen4_fused_gdn_decode(qkv.dtype,
+                contract=self.fused_gdn_contract,
                 **({'state_dtype': mx.float16} if cache[1].dtype == mx.float16 else {}))
             if ty is None:
                 return self._fallback('Metal kernel probe declined')
@@ -228,7 +251,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         steps = int(qkv.shape[1])
         spans = describe(steps, mask)
         geometry = dict(
-            architecture=self.fused_gdn_architecture,
+            contract=self.fused_gdn_contract,
             num_key_heads=self.num_k_heads,
             num_value_heads=self.num_v_heads,
             key_head_dim=self.head_k_dim,
@@ -253,19 +276,42 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             return self._fallback(silu_refusal)
         state_kw = ({'state_dtype': mx.float16}
                     if cache[1].dtype == mx.float16 else {})
-        probe = (verify_kernels.probe_qwen4_fused_gdn_verify if speculating
-                 else verify_kernels.probe_qwen4_fused_gdn_catchup)
-        build = (verify_kernels.qwen4_fused_gdn_verify if speculating
-                 else verify_kernels.qwen4_fused_gdn_catchup)
+        compact = bool(speculating and self.fused_gdn_compact_replay_enabled)
+        authorization = None
+        if compact:
+            try:
+                authorization = self.state_plane_operations.authorize_compact_gdn_replay(
+                    cache, self.fused_gdn_contract, steps
+                )
+            except Exception as exc:
+                return self._fallback(
+                    f'compact replay state contract refused: {type(exc).__name__}'
+                )
+        probe = (
+            verify_kernels.probe_qwen4_fused_gdn_replay_verify
+            if compact else (
+                verify_kernels.probe_qwen4_fused_gdn_verify if speculating
+                else verify_kernels.probe_qwen4_fused_gdn_catchup
+            )
+        )
+        build = (
+            verify_kernels.qwen4_fused_gdn_replay_verify
+            if compact else (
+                verify_kernels.qwen4_fused_gdn_verify if speculating
+                else verify_kernels.qwen4_fused_gdn_catchup
+            )
+        )
         try:
-            ty = probe(qkv.dtype, steps, architecture=self.fused_gdn_architecture,
-                       num_value_heads=self.num_v_heads, **state_kw)
+            probe_kw = dict(contract=self.fused_gdn_contract, **state_kw)
+            if not compact:
+                probe_kw['num_value_heads'] = self.num_v_heads
+            ty = probe(qkv.dtype, steps, **probe_kw)
             if ty is None:
                 return self._fallback('Metal kernel probe declined')
             outputs = build(
                 qkv, z, b, a, cache[0], self.conv1d.weight, self.A_log,
                 self.dt_bias, cache[1], self.norm.weight, self.norm.eps,
-                threadgroup_y=ty, architecture=self.fused_gdn_architecture,
+                threadgroup_y=ty, contract=self.fused_gdn_contract,
                 num_value_heads=self.num_v_heads,
             )
             out, conv, state = outputs[:3]
@@ -274,11 +320,35 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                 raise
             return self._fallback(f'Metal kernel dispatch failed: {type(exc).__name__}')
         if speculating:
-            state_snapshots, conv_snapshots = outputs[3:]
+            if compact:
+                replay_keys, replay_corrections, replay_decay = outputs[3:]
+                try:
+                    replay_plan = self.state_plane_operations.make_compact_gdn_replay_plan(
+                        authorization,
+                        cache=cache,
+                        raw_qkv=qkv,
+                        replay_keys=replay_keys,
+                        replay_corrections=replay_corrections,
+                        replay_decay=replay_decay,
+                        reconstruct=verify_kernels.qwen4_fused_gdn_reconstruct,
+                        threadgroup_y=ty,
+                    )
+                except Exception as exc:
+                    return self._fallback(
+                        f'compact replay plan refused: {type(exc).__name__}'
+                    )
 
-            def rollback(m, conv=conv_snapshots, state=state_snapshots):
-                self.fused_gdn_counters['verify_rollbacks'] += 1
-                return [mx.contiguous(conv[:, m - 1]), state[:, m - 1]]
+                def rollback(m, plan=replay_plan):
+                    restored = plan.accepted_prefix(m)
+                    self.fused_gdn_counters['verify_rollbacks'] += 1
+                    self.fused_gdn_counters['compact_rollback_calls'] += 1
+                    return restored
+            else:
+                state_snapshots, conv_snapshots = outputs[3:]
+
+                def rollback(m, conv=conv_snapshots, state=state_snapshots):
+                    self.fused_gdn_counters['verify_rollbacks'] += 1
+                    return [mx.contiguous(conv[:, m - 1]), state[:, m - 1]]
 
             record(steps, rollback, [cache[0], cache[1]])
         cache[0], cache[1] = conv, state
@@ -287,11 +357,20 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         kind = 'verify' if speculating else 'prefill'
         counts[f'{kind}_calls'] += 1
         counts[f'{kind}_tokens'] += steps
+        if compact:
+            counts['compact_verify_calls'] += 1
+            counts['compact_tape_bytes'] += authorization.tape_bytes
+            counts['compact_snapshot_bytes_avoided'] += (
+                authorization.snapshot_bytes_avoided
+            )
         counts['last_fallback'] = None
         return self.out_proj(out)
 
 
-def configure(model, enabled, *, architecture='qwen38', prefill=False):
+def configure(
+    model, enabled, *, architecture='qwen38', prefill=False,
+    compact_replay=False, state_plane_operations=None,
+):
     """Adapter-owned switches; explicit false is also the immediate kill switch.
 
     ``prefill`` selects the fused prefill route independently of ``enabled``
@@ -311,16 +390,23 @@ def configure(model, enabled, *, architecture='qwen38', prefill=False):
             module.set_fused_gdn_architecture(architecture)
             module.set_fused_gdn_enabled(enabled)
             module.set_fused_gdn_prefill_enabled(prefill)
+            module.set_fused_gdn_compact_replay_enabled(
+                compact_replay, state_plane_operations
+            )
 
 
 def stats(model):
-    report = {'enabled': False, 'prefill_enabled': False, 'qualified': False,
+    report = {'enabled': False, 'prefill_enabled': False,
+              'compact_replay_enabled': False, 'qualified': False,
               'layers': 0, **{name: 0 for name in _COUNTER_NAMES}, 'reasons': {}}
     for _, module in model.named_modules():
         if isinstance(module, GatedDeltaNet):
             report['layers'] += 1
             report['enabled'] |= module.fused_gdn_enabled
             report['prefill_enabled'] |= module.fused_gdn_prefill_enabled
+            report['compact_replay_enabled'] |= (
+                module.fused_gdn_compact_replay_enabled
+            )
             counts = module.fused_gdn_counters
             for name in _COUNTER_NAMES:
                 report[name] += counts[name]

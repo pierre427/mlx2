@@ -13,7 +13,10 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from .external_draft_policy import ExternalDraftAdapterMixin
+from .external_draft_policy import (
+    ExternalDraftAdapterMixin,
+    normalize_progressive_external_policy,
+)
 from .flash_next import FlashNextAdapter, gdn_state_diagnostics
 from .mtp_depth_cap import validate_self_mtp_num_draft
 from ..process_env import (
@@ -350,11 +353,17 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "tensorfold_cohort_limit",
         "minimum_draft_proposals",
         "exact_verification",
+        "progressive_verification_tile",
+        "progressive_multilane_draft_cap",
+        "progressive_verification_fidelity",
+        "cost_per_commit_handoff",
     }
 )
 # Target-wide keys the adapter consumes before an external policy is split
 # off; they are valid beside an external draft but not part of its receipt.
-TARGET_POLICY_KEYS = frozenset({"fused_gdn", "fused_gdn_prefill", "gdn_state_dtype"})
+TARGET_POLICY_KEYS = frozenset(
+    {"fused_gdn", "fused_gdn_prefill", "fused_gdn_compact_replay", "gdn_state_dtype"}
+)
 _TREE_BATCH_ROUTES = {
     "tree15_b1_chain_b2plus_v1": 1,
     "tree15_b1_b4_chain_b5plus_v1": 4,
@@ -480,7 +489,11 @@ def inspect_external_policy(
         raise ValueError("exact_verification must be 'token' or 'block'")
     if exact_verification == "block" and (
         batch_route is not None
-        or any(key in policy for key in ("adaptive_verification", "continuation_pool"))
+        or any(key in policy for key in (
+            "adaptive_verification",
+            "continuation_pool",
+            "progressive_verification_tile",
+        ))
     ):
         # Block verification decides over one linear chain; the pinned
         # pair's default tree route is left with "batch_size_route": null.
@@ -495,6 +508,7 @@ def inspect_external_policy(
         # a chain-only policy.
         if any(policy.get(key) not in (None, False) for key in (
             "adaptive_verification", "proposal_composition", "continuation_pool",
+            "progressive_verification_tile",
         )):
             raise ValueError("tree15 bounded route conflicts with chain-only proposal policy")
         if any(os.environ.get(name) is not None for name in (
@@ -688,24 +702,38 @@ def eager_dispatch_diagnostics(adapter) -> dict:
     }
 
 
-def resolve_eos_token_ids(config: dict, tokenizer) -> list[int]:
-    """Combine artifact and tokenizer EOS ids without trusting either alone."""
-    text = config.get("text_config", config)
-    configured = config.get("eos_token_id", text.get("eos_token_id"))
-    # A copy: appending to the config's own list mutated the artifact config.
-    values = list(configured) if isinstance(configured, list) else [configured]
-    values.append(getattr(tokenizer, "eos_token_id", None))
-    result = []
-    for value in values:
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-            if value not in result:
-                result.append(value)
+def resolve_eos_token_ids(config: dict, tokenizer, model_path=None) -> list[int]:
+    """Combine every EOS id the Qwen artifact or tokenizer declares.
+
+    ``model_path`` is optional for compatibility with metadata-only callers.
+    Live adapters always provide it, so ``generation_config.json`` participates
+    in the same shared artifact law as StandardDecoder.
+    """
+    if model_path is not None:
+        from .eos import artifact_eos_token_ids
+
+        result = artifact_eos_token_ids(model_path, config, tokenizer)
+    else:
+        text = config.get("text_config", config)
+        configured = config.get("eos_token_id", text.get("eos_token_id"))
+        # A copy: appending to the config's own list mutated the artifact config.
+        values = list(configured) if isinstance(configured, list) else [configured]
+        values.append(getattr(tokenizer, "eos_token_id", None))
+        result = []
+        for value in values:
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                if value not in result:
+                    result.append(value)
     if not result:
         raise ValueError("Qwen tokenizer and config declare no EOS token")
     return result
 
 
 class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
+    # Auto DLoop selection combines host-local cycle costs with an acceptance
+    # prior.  The bundled prior was measured on this family and must not leak
+    # through inheritance into another model family.
+    draft_loop_prior_resource = "draft_loop_prior_qwen38_27b.json"
     # Adapter-owned rather than inherited: this family selects an eight-token
     # copy ceiling, hence a nine-row target verify/rollback window.
     # Native self-MTP only. The external TensorFold tree independently owns a
@@ -845,6 +873,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     # Opt-in through {"fused_gdn_prefill": true} until its GPU gate and A/B
     # say otherwise.  Own __dict__ only, like default_fused_gdn.
     default_fused_gdn_prefill = False
+    # Exact compact correction-tape rollback for speculative GDN verify.
+    # Implemented CPU/source-first and intentionally unselected/unqualified.
+    default_fused_gdn_compact_replay = False
     fused_gdn_architecture = "qwen38"
     # Self-MTP draft depth on the native-MTP route when the policy names no
     # num_draft: 3 since 2026-10-02 (Pierre): in-process mtp:2 +30.7%, mtp:3
@@ -852,6 +883,34 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     # noise; B1 tokens identical (options-sweep-27b-20261002).  Own __dict__
     # only, like default_fused_gdn: subclasses keep 2.
     default_num_draft = 3
+
+    def attention_topology(self):
+        """Revision-bound full-KV/GDN layer contract for state capabilities."""
+        from ..runtime.attention_topology import (
+            FULL_KV,
+            RECURRENT,
+            AttentionTopology,
+        )
+
+        config = self._attention_topology_config
+        count = int(config["num_hidden_layers"])
+        interval = int(config["full_attention_interval"])
+        expected = tuple(
+            "full_attention" if (index + 1) % interval == 0 else "linear_attention"
+            for index in range(count)
+        )
+        declared = config.get("layer_types")
+        if declared is not None and tuple(declared) != expected:
+            raise ValueError("unknown Qwen3 hybrid attention topology")
+        layers = tuple(FULL_KV if kind == "full_attention" else RECURRENT for kind in expected)
+        auxiliary = (FULL_KV,) * int(config.get("mtp_num_hidden_layers", 0))
+        return AttentionTopology(
+            state_revision=self.identity["fingerprint"],
+            cache_layout=self.layout,
+            layers=layers,
+            auxiliary_layers=auxiliary,
+            recurrent_layout="gated-delta-state-v1",
+        )
 
     def __init__(
         self, model_path: str, *, require_mtp: bool = False, execution_policy=None,
@@ -890,6 +949,14 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             policy, vars(type(self)).get("default_fused_gdn_prefill", False)
         )
         policy.pop("fused_gdn_prefill", None)
+        self.fused_gdn_compact_replay = policy.pop(
+            "fused_gdn_compact_replay",
+            vars(type(self)).get("default_fused_gdn_compact_replay", False),
+        )
+        if type(self.fused_gdn_compact_replay) is not bool:
+            raise ValueError("fused_gdn_compact_replay must be boolean")
+        if self.fused_gdn_compact_replay and not self.fused_gdn:
+            raise ValueError("fused_gdn_compact_replay requires fused_gdn")
         if stream_request is not None:
             if "draft_model" in policy:
                 raise ValueError(
@@ -941,7 +1008,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             # Revision pins and drafter headers are checked before the
             # target's tensors load; a mismatch fails closed here.
             draft_record = inspect_external_policy(policy, model_path)
-            self.external_policy = policy
+            count = policy.get("num_draft", self.EXTERNAL_DEFAULT_NUM_DRAFT)
+            minimum = policy.get("minimum_draft_proposals", min(3, count))
+            self.external_policy = normalize_progressive_external_policy(
+                policy,
+                num_draft=count,
+                minimum_proposals=minimum,
+            )
             policy = {}
         else:
             policy.pop("varlen_dense_mlp", None)
@@ -1009,6 +1082,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             self.environment = {
                 **self.environment, "MLX2_QWEN38_FUSED_GDN_PREFILL": "1"
             }
+        if self.fused_gdn_compact_replay:
+            self.environment = {
+                **self.environment, "MLX2_QWEN38_FUSED_GDN_COMPACT_REPLAY": "1"
+            }
         from ..runtime.models.import_env import assert_profile_applied
 
         # Model modules read GDN/QSDPA selections at import: one imported
@@ -1030,6 +1107,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if not artifact["has_mtp"] or draft_record is not None:
             # The external route never runs the embedded head: do not load it.
             config["text_config"]["mtp_num_hidden_layers"] = 0
+        self._attention_topology_config = dict(config["text_config"])
         self.model = Model(ModelArgs.from_dict(config))
         names = sorted(set(artifact["weight_map"].values()))
         files = [path / name for name in names]
@@ -1154,6 +1232,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         configure_fused_gdn(
             self.model, self.fused_gdn, architecture=self.fused_gdn_architecture,
             prefill=self.fused_gdn_prefill,
+            compact_replay=self.fused_gdn_compact_replay,
+            state_plane_operations=self.model.state_plane_operations,
         )
         mx.eval(self.model.parameters())
         if eager_dispatch[0]:
@@ -1220,11 +1300,14 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
 
         self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
-        eos = resolve_eos_token_ids(config, tokenizer)
+        eos = resolve_eos_token_ids(config, tokenizer, path)
         self.tokenizer = TokenizerWrapper(
             tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
         )
         self.max_context = int(config["text_config"]["max_position_embeddings"])
+        from ..runtime.models.gated_delta import gdn_core_status
+
+        self._gdn_core_initial = gdn_core_status()
         if getattr(self, "weight_stream", None) is not None:
             self.weight_stream.begin_serving()
 
@@ -1249,9 +1332,34 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         adaptive = self.external_policy.get("adaptive_verification")
         if adaptive is not None:
             kwargs.setdefault("adaptive_verification", adaptive)
+        if self.external_policy.get("progressive_verification_tile") is not None:
+            kwargs.setdefault(
+                "progressive_verification_tile",
+                self.external_policy["progressive_verification_tile"],
+            )
+            kwargs.setdefault(
+                "multilane_draft_cap",
+                self.external_policy.get("progressive_multilane_draft_cap"),
+            )
+            kwargs.setdefault(
+                "progressive_verification_fidelity",
+                self.external_policy["progressive_verification_fidelity"],
+            )
+            kwargs.setdefault(
+                "progressive_target_protocol",
+                self._progressive_external_binding["target_protocol"],
+            )
+            kwargs.setdefault(
+                "progressive_protocol_binding", self._progressive_external_binding
+            )
         if self.external_policy.get("exact_verification", "token") != "token":
             kwargs.setdefault(
                 "exact_verification", self.external_policy["exact_verification"]
+            )
+        if self.external_policy.get("cost_per_commit_handoff") is not None:
+            kwargs.setdefault(
+                "cost_per_commit_handoff",
+                self.external_policy["cost_per_commit_handoff"],
             )
         route = self.external_policy.get("batch_size_route")
         tree_width = _TREE_BATCH_ROUTES.get(route) if type(route) is str else None
@@ -1270,6 +1378,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             raise ValueError("tree15 requires an explicit batch_size_route policy")
         kwargs.setdefault("dynamic_singleton_tree", tree_width is not None)
         if tree_width is not None:
+            from .qwen38_target_tree_executor import Qwen38TargetTreeExecutor
+
+            kwargs.setdefault(
+                "target_tree_executor_provider", Qwen38TargetTreeExecutor.create()
+            )
             kwargs.setdefault("dynamic_tree_max_width", tree_width)
             kwargs.setdefault(
                 "tensorfold_cohort_limit",
@@ -1519,8 +1632,23 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         }
 
     def diagnostics(self):
+        from ..runtime.models.gated_delta import gdn_core_status
         from ..runtime.models.varlen_dense_mlp import status as varlen_dense_mlp_status
         from ..runtime.segmented_self_mtp import segmented_self_mtp_stats
+
+        core = gdn_core_status()
+        initial_core = getattr(self, "_gdn_core_initial", None)
+        if initial_core is not None:
+            core = {**core, "calls": max(0, core["calls"] - initial_core["calls"])}
+        else:
+            # Partially constructed/test adapters own no counter baseline and
+            # therefore cannot claim process-global calls as route activity.
+            core = {**core, "calls": 0}
+        # Diagnostics belong to this adapter instance. A partially constructed
+        # adapter has no selected environment, and must not infer selection
+        # from process-global environment variables.
+        environment = getattr(self, "environment", {})
+        core_selected = environment.get("MLX_GDN_CORE") == "1"
 
         return {
             "architecture": "dense-hybrid-gdn-gqa",
@@ -1582,6 +1710,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 if getattr(self, "fused_gdn", False)
                 or getattr(self, "fused_gdn_prefill", False) else {}
             ),
+            **({"gdn_core": core} if core_selected or core["calls"] else {}),
         }
 
     def execution_numerics_contract(self):
@@ -1610,6 +1739,14 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             raise ValueError(
                 "selected fused_gdn_prefill policy disagrees with live target layers"
             )
+        compact = bool(getattr(self, "fused_gdn_compact_replay", False))
+        if (compact and not layers) or any(
+            module.fused_gdn_compact_replay_enabled is not compact
+            for module in layers
+        ):
+            raise ValueError(
+                "selected fused_gdn_compact_replay policy disagrees with live target layers"
+            )
         contract = self._external_execution_numerics()
         if enabled:
             architecture = getattr(self, "fused_gdn_architecture", "qwen38")
@@ -1618,7 +1755,21 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 "architecture": architecture,
                 "scope": "initialized-single-token-or-b1-unmasked-width-2-to-17",
                 "verify_prefill": "fused-when-admitted-reference-otherwise",
-                "speculative_rollback": "exact-snapshots",
+                "speculative_rollback": (
+                    "exact-compact-correction-tape-v1"
+                    if compact else "exact-snapshots"
+                ),
+                "compact_replay": {
+                    "implemented": True,
+                    "qualified": False,
+                    "selected": compact,
+                    "defaulted": False,
+                    "state_provider": getattr(
+                        getattr(self.model, "state_plane_operations", None),
+                        "provider_revision",
+                        None,
+                    ),
+                },
             }
         if prefill:
             contract["fused_gdn_prefill"] = {

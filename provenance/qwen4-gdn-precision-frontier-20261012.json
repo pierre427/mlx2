@@ -1,0 +1,111 @@
+{
+  "kind": "behavioral-design-input-and-model-scoped-correctness-fix",
+  "recorded_at": "2026-10-12",
+  "status": "implemented and focused CPU/host tested; unqualified, unselected; no GPU evidence",
+  "code_copied": false,
+  "sources": [
+    {
+      "repository": "https://github.com/ddalcu/mlx-serve",
+      "pull_request": 815,
+      "head": "785d1ec4161bfa65d2a9f4405884ab06ce4fb105",
+      "state_when_read": "open",
+      "license": "MIT for mlx-serve original code; repository license blob fa6c781bf4ad462d965a429bd1c1c33475d3905a",
+      "paths": [
+        "src/gdn_decode.zig",
+        "src/model.zig",
+        "src/transformer.zig",
+        "docs/gotchas/models-media.md"
+      ],
+      "use": "Design and defect witness only. Qwen4-Exp keeps recurrent state and the decay gate in fp32 under bf16 activations; other families retain their measured numerics. No source copied."
+    },
+    {
+      "repository": "https://github.com/incoai/splash",
+      "pull_request": 385,
+      "head": "f13501ccaca4b798ef13474295088e357fb35d94",
+      "state_when_read": "open",
+      "license": "Apache-2.0, license blob d645695673349e3947e8e5ae42332d0ac3164cd7",
+      "paths": [
+        "runtime/metal/gdn_prefill.metal",
+        "runtime/metal/gdn_decode.metal",
+        "runtime/ops/GDN.cpp",
+        "runtime/model/StateLayout.hpp",
+        "DEVELOPMENT.md"
+      ],
+      "use": "Comparison only. Splash's optional bf16 state widens to fp32 for compute and rounds on store at a prefill-chunk or decode-step boundary; its different rounding schedule was not ported. No source copied."
+    }
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/models/gated_delta.py",
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "src/mlx2/runtime/models/qwen4_fused_gdn.py",
+    "src/mlx2/runtime/models/qwen4_fused_gdn_verify.py",
+    "tests/test_qwen4_gdn_precision_frontier_cpu.py"
+  ],
+  "precision_matrix": [
+    {
+      "profile": "mlx2 Qwen4-Exp default",
+      "state_storage_dtype": "float32",
+      "decay_gate_dtype": "float32, widened before a + dt_bias and softplus",
+      "accumulation_dtype": "float32",
+      "rounding_frequency": "no recurrent-state narrowing",
+      "decay_truth": "Qwen4-Exp fp32 reference contract",
+      "launch_grouping": "same gate law in ordinary prefill/decode, fused decode, fused verify/catchup/replay and batched derived sources",
+      "cache_namespace": "existing default fp32 namespace",
+      "fallbacks": "ordinary path uses the same Qwen4-only fp32-input gate"
+    },
+    {
+      "profile": "mlx2 Qwen4-Exp optional fp16 state",
+      "state_storage_dtype": "float16",
+      "decay_gate_dtype": "float32",
+      "accumulation_dtype": "float32",
+      "rounding_frequency": "round-to-nearest-even after every token, including inside grouped launches",
+      "decay_truth": "fp32 Qwen4-Exp gate followed by the existing fp16 state-storage law",
+      "launch_grouping": "state trajectory is independent of prefill/verify launch grouping",
+      "cache_namespace": "gdn-state-fp16-v1",
+      "fallbacks": "unsupported fused paths fall back or refuse as recorded in provenance/gdn-state-fp16.json"
+    },
+    {
+      "profile": "mlx2 Qwen3.5-family",
+      "state_storage_dtype": "existing policy, default float32",
+      "decay_gate_dtype": "existing activation-dtype addition/softplus boundary",
+      "accumulation_dtype": "float32 recurrent update",
+      "rounding_frequency": "unchanged",
+      "decay_truth": "family-specific existing contract",
+      "launch_grouping": "unchanged",
+      "cache_namespace": "unchanged",
+      "fallbacks": "unchanged"
+    },
+    {
+      "profile": "mlx-serve PR 815 Qwen4-Exp",
+      "state_storage_dtype": "float32 by default; historical bf16 opt-out",
+      "decay_gate_dtype": "state dtype under bf16 activations",
+      "accumulation_dtype": "float32 with fp32 state",
+      "rounding_frequency": "none in the new default",
+      "decay_truth": "fp32 reference; upstream reports slow bf16 gates could become exactly one",
+      "launch_grouping": "serial, verify, tree, batched and prefill arms guarded upstream",
+      "cache_namespace": "separate fp32 state root",
+      "fallbacks": "MLX_SERVE_GDN_STATE_F32=0 restores the historical state/gate"
+    },
+    {
+      "profile": "Splash PR 385 optional bf16 state",
+      "state_storage_dtype": "bf16 option, fp32 default",
+      "decay_gate_dtype": "float32",
+      "accumulation_dtype": "float32",
+      "rounding_frequency": "once per decode step and at each prefill-chunk store",
+      "decay_truth": "fp32 compute over the widened state",
+      "launch_grouping": "prefill chunk boundaries can change last bits",
+      "cache_namespace": "state format separates persistent cache",
+      "fallbacks": "restart with fp32 state format"
+    }
+  ],
+  "modifications": [
+    "Added a Qwen4-only ordinary decay producer that casts a and dt_bias to fp32 before addition and softplus; Qwen3.5 keeps the existing compute_g producer.",
+    "Changed Qwen4 fused decode, batched decode, out-projection candidate, verify, catchup and replay-derived sources to compute the dynamic decay input and softplus in float32 before the recurrent state update.",
+    "Preserved Qwen3.5/Agnes fused decode and verify source arithmetic through explicit family branches/derivation.",
+    "Did not adopt Splash's bf16 storage type or chunk-boundary rounding law; mlx2's existing optional fp16 state remains per-token rounded and namespace-separated."
+  ],
+  "validation": [
+    "tests/test_qwen4_gdn_precision_frontier_cpu.py: CPU graph witness plus model call-site, fused-source, family-boundary, storage and namespace guards",
+    "No GPU run, qualification, full preflight, default promotion, commit or publication in this slice"
+  ]
+}

@@ -52,20 +52,37 @@
     "scripts/qualify_serving.py",
     "docs/SERVING.md",
     "docs/METRICS.md",
-    "tests/test_disk_weight_streaming.py"
+    "tests/test_disk_weight_streaming.py",
+    "src/mlx2/adapters/north_mini_code.py",
+    "tests/test_north_mini_code_port.py",
+    "src/mlx2/adapters/xing.py",
+    "src/mlx2/runtime/models/nemotron_h.py",
+    "src/mlx2/runtime/models/xing4_0.py",
+    "src/mlx2/runtime/models/hy_v3.py",
+    "src/mlx2/runtime/models/mellum.py",
+    "tests/test_xing_adapter.py",
+    "src/mlx2/adapters/mellum21.py",
+    "tests/test_mellum21_adapter_cpu.py"
   ],
   "modifications": [
     "All code is original to mlx2 and extends its own runtime/weight_stream.py (2026-09 expert streaming).",
     "Source addressing is proven by raw-array object identity through sanitize, or by an explicitly ledgered output-axis concatenation; any other transform is refused.",
     "Shard descriptors and safetensors headers are bound at construction from the adapter's indexed weight map and identity records; reads re-check an fstat tuple (a mutation detector, not a content hash).",
     "Cache entries are concrete; host staging is bounded by materializing as reads complete; a worst-case per-layer gather transient is reserved beside the steady cache.",
-    "Dense paging replaces trunk MLP QuantizedLinear modules with plain modules that run the stock quantized_matmul and evaluate the output before releasing the projection."
+    "Dense paging replaces trunk MLP QuantizedLinear modules with plain modules that run the stock quantized_matmul and evaluate the output before releasing the projection.",
+    "North Mini Code declares the existing generic moe_experts early-load contract on its concrete adapter; its already-stacked checkpoint tables are source-resolved before materialization, stock expert arithmetic is forced, external drafting is refused under an unproven combined weight budget, and route diagnostics keep eligibility, selection and observed page-ins distinct.",
+    "The source-origin protocol now records an exact axis-0 stack of individually indexed per-expert tensors. Every selected expert remains bound to its own immutable checkpoint byte range; transformed parts, other axes, mixed shapes and mixed dtypes fail closed.",
+    "North Mini Code and Xing4.0 declare the existing generic moe_experts early-load contract on their concrete adapters. Both force stock expert arithmetic, keep the policy default-off, and leave selection and observed-use authority with the server receipt. Xing can keep its embedded MTP experts resident through the existing explicit mtp_resident policy.",
+    "Predictive cross-layer prefetch was not enabled: the repository already records a negative end-to-end result and the new adapters have no revision-bound predictor. Reactive router-known parallel page-in remains exact and unchanged.",
+    "Mellum 2.1 declares the same generic early expert stream. Its ordinary eager layer-at-a-time stack remains unchanged; only the selected streamed load uses the exact stack-origin ledger, and its 64-expert top-8 route stays default-off and server-receipted."
   ],
   "validation": [
     "CPU: tests/test_disk_weight_streaming.py and tests/test_moe_expert_streaming.py (synthetic checkpoints; lazy-load seams through each adapter's weight loader; APCv2 cold/warm continuations with page-in counters).",
     "Independent focused CPU validation:631passed; final disk-streaming/overflow regression validation76passed. Host-only DSpark209passed and GDN92passed in isolated processes. Broader suite findings and baseline comparison are recorded in qualification/runs/disk-streaming-20261001.",
     "M3Pro36GiB ordinary singlelane capacity smoke at459bbfe4: cryptographically verified67.9GiB Qwen3.5-122B-A10B-oQ4-mtp checkpoint,6GiB expertcache. Cold/warm/restart token IDs and logprobs match; live and persistent APCv2 reuse4tokens; SSEmatches; serving page-ins observed.",
-    "Peak sampled RSS12.35GiB, observed Metalpeak11.65GiB, no change in preexisting swap. Source was read-only SSD backing on another host via ThunderboltNFS. Capacity evidence only; full route qualification and performance testing remain false. Dense real-hardware capacity is untested."
+    "Peak sampled RSS12.35GiB, observed Metalpeak11.65GiB, no change in preexisting swap. Source was read-only SSD backing on another host via ThunderboltNFS. Capacity evidence only; full route qualification and performance testing remain false. Dense real-hardware capacity is untested.",
+    "CPU extension (2026-10-12): North declaration/refusal and the existing synthetic early-load, cache, source-binding and serving integration suites; no GPU, formal qualification or performance claim.",
+    "CPU extension (2026-10-12): exact stack-origin reconstruction plus North and Xing declarations/refusals were exercised with the disk-streaming, expert-streaming and adapter suites; no GPU, formal qualification or performance claim."
   ],
   "validation_evidence": "qualification/runs/disk-streaming-20261001/summary.json"
 }

@@ -1,0 +1,41 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "recorded_at": "2026-10-12",
+  "source": {
+    "repository": "https://github.com/ashhart/TensorFold",
+    "pull_request": "https://github.com/ashhart/TensorFold/pull/680",
+    "revision": "fbe0b167",
+    "paths": [
+      "Metal command-buffer timing instrumentation described by pull request 680"
+    ],
+    "license": "concept review only; no source copied"
+  },
+  "local": {
+    "paths": [
+      "native/paged_kv/arena.h",
+      "native/paged_kv/arena.cpp",
+      "native/paged_kv/binding.cpp",
+      "src/mlx2/runtime/paged_kv_write.py",
+      "scripts/research/varlen_native_cow_gpu_probe.py",
+      "tests/test_native_copy_timing_cpu.py"
+    ],
+    "modifications": [
+      "Added a default-off bounded copy timing session on the existing native arena",
+      "Kept host enqueue elapsed time separate from Metal command-buffer GPU start/end time",
+      "Collected GPU timestamps only in the existing completion callback without a global wait",
+      "Refused nested sessions, capacity overflow, premature teardown, and unread result loss",
+      "Made timing reservations RAII-owned until completion-handler ownership is proven",
+      "Added one-shot native reservation, handler-registration, and dispatch fault injection",
+      "Poisoned post-handler failures and allowed teardown only after explicit terminal stream proof",
+      "Suppressed timing publication for work that never reached the dispatch boundary",
+      "Made command-buffer scope and absence of a performance claim explicit",
+      "Wired the diagnostic into the leased one-copy native COW probe so the surface has an operational receipt consumer"
+    ],
+    "validation": [
+      "Focused model-free CPU lifecycle tests",
+      "Static native-source checks for callback-only collection and bounded storage",
+      "Focused failure-atomicity tests for reservation rollback, terminal-gated abort, non-underflow, and false-publication refusal",
+      "Fresh Release native build and ABI import against the pinned MLX wheel"
+    ]
+  }
+}

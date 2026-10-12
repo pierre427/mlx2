@@ -13,6 +13,7 @@ import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
+from typing import ClassVar
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..process_env import (
@@ -185,19 +186,41 @@ def inspect_artifact(
 class Qwen359BAdapter(Qwen3827BAdapter):
     """Ordinary-decode, text-only adapter for the dense Qwen3.5 9B artifact."""
 
+    # The only bundled automatic draft-loop prior was measured on Qwen3.8.
+    # Keep this explicit even though the current artifact is ordinary-only:
+    # a future adapter-owned draft route must not silently inherit another
+    # model family's acceptance distribution through this implementation base.
+    draft_loop_prior_resource = None
     default_route = "ordinary"
     fused_gdn_architecture = "qwen35"
     # The parent 27B decode-first default has only been measured on 27B.
-    default_route_execution_policy = {}
+    default_route_execution_policy: ClassVar[dict] = {}
     descriptor = QWEN35_9B
     artifact_inspector = staticmethod(inspect_artifact)
     descriptor_builder = staticmethod(descriptor_for)
     environment_configurator = staticmethod(configure_environment)
     from .qwen import QWEN35_9B_SAMPLING as sampling_defaults
 
+    def _init_qwen38(
+        self, model_path: str, *, require_mtp: bool = False,
+        execution_policy=None, weight_streaming=None,
+    ):
+        """Refuse the inherited Qwen3.8 drafter identity before tensor load."""
+        if isinstance(execution_policy, dict) and "draft_model" in execution_policy:
+            raise ValueError(
+                f"{self.descriptor.family} external drafting is unavailable: "
+                "no artifact-bound drafter contract is declared"
+            )
+        return super()._init_qwen38(
+            model_path,
+            require_mtp=require_mtp,
+            execution_policy=execution_policy,
+            weight_streaming=weight_streaming,
+        )
+
     def prefill_step_default(self):
         """No 27B prefill preference inheritance without 9B evidence."""
-        return None
+        return
 
     def configure_neural_concept_bridge(self, artifact):
         """Bind the learned bridge to this exact dense hidden geometry."""

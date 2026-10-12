@@ -80,6 +80,88 @@ class ExecutionAdapter(Protocol):
     ) -> tuple[TokenStep, ...]: ...
 
 
+@runtime_checkable
+class RouteDiagnosticsProvider(Protocol):
+    """Route-owned diagnostic state; shared serving never inspects modules."""
+
+    def snapshot(self) -> Mapping[str, Any]: ...
+
+    def delta(
+        self, before: Mapping[str, Any], after: Mapping[str, Any]
+    ) -> Mapping[str, Any]: ...
+
+
+class _AdapterDiagnosticsProvider:
+    """Provider wrapper for production adapters with ``diagnostics()``."""
+
+    _MAX_DELTA_DEPTH = 8
+    _MAX_DELTA_FIELDS = 128
+
+    def __init__(self, adapter):
+        self.adapter = adapter
+
+    def snapshot(self) -> Mapping[str, Any]:
+        return self.adapter.diagnostics()
+
+    def delta(self, before, after) -> Mapping[str, Any]:
+        fields_seen = 0
+
+        def walk(old, new, depth):
+            nonlocal fields_seen
+            if depth > self._MAX_DELTA_DEPTH or fields_seen >= self._MAX_DELTA_FIELDS:
+                return {}
+            if isinstance(old, Mapping) and isinstance(new, Mapping):
+                delta = {}
+                for key in new:
+                    if fields_seen >= self._MAX_DELTA_FIELDS:
+                        break
+                    if key not in old:
+                        continue
+                    fields_seen += 1
+                    value = walk(old[key], new[key], depth + 1)
+                    if value not in ({}, None, 0):
+                        delta[key] = value
+                return delta
+            if (
+                isinstance(old, (int, float))
+                and not isinstance(old, bool)
+                and isinstance(new, (int, float))
+                and not isinstance(new, bool)
+                and new >= old
+            ):
+                return new - old
+            return None
+
+        return walk(before, after, 0)
+
+
+def _route_diagnostics_provider(adapter):
+    provider = getattr(adapter, "route_diagnostics_provider", None)
+    if provider is not None:
+        if not isinstance(provider, RouteDiagnosticsProvider):
+            raise TypeError("route diagnostics provider does not implement its protocol")
+        return provider
+    if not callable(getattr(adapter, "diagnostics", None)):
+        raise TypeError("adapter does not expose route diagnostics")
+    return _AdapterDiagnosticsProvider(adapter)
+
+
+def route_diagnostics_snapshot(adapter) -> dict:
+    provider = _route_diagnostics_provider(adapter)
+    snapshot = provider.snapshot()
+    if not isinstance(snapshot, Mapping):
+        raise TypeError("route diagnostics snapshot must be a mapping")
+    return dict(snapshot)
+
+
+def route_diagnostics_delta(adapter, before, after) -> dict:
+    provider = _route_diagnostics_provider(adapter)
+    delta = provider.delta(before, after)
+    if not isinstance(delta, Mapping):
+        raise TypeError("route diagnostics delta must be a mapping")
+    return dict(delta)
+
+
 def decoder_input_representations(
     adapter,
     texts: Sequence[str],

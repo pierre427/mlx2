@@ -159,6 +159,24 @@ class EagleWindowKVCache(_BaseCache):
     cache class, so APCv2 disk persistence resolves it by ``module:Class``.
     """
 
+    from ..cache_operations import CacheOperationsContract, CachePlaneDeclaration
+
+    cache_operations_contract = CacheOperationsContract(
+        family="cohere_eagle_window_kv",
+        topology="rotating_kv",
+        state_revision="mlx2.cohere-eagle-window-kv.v1",
+        cache_layout="committed-window-bhsd",
+        numerics="stored_dtype",
+        planes=(
+            CachePlaneDeclaration(
+                "attention_ring", ("keys", "values"), ("window",)
+            ),
+        ),
+        exact_prefix=True,
+        restores_at_checkpoints=False,
+        rollback=None,
+    )
+
     def __init__(self, window: int, n_kv_heads: int = 1, head_dim: int = 1):
         self.window = int(window)
         self.offset = 0
