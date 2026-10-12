@@ -9,6 +9,11 @@ import pytest
 
 SOURCE = (Path(__file__).resolve().parents[1] / "qualification" / "runs" /
           "tree15-b1-discriminator-20261003" / "same_cache_chain.py")
+if not SOURCE.exists():
+    pytest.skip(
+        "curated source-only projection excludes private qualification diagnostic",
+        allow_module_level=True,
+    )
 SPEC = importlib.util.spec_from_file_location("same_cache_chain", SOURCE)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)

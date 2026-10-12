@@ -84,14 +84,74 @@ def require_process_numerics(owner: str, environ=None) -> None:
 # profile's lab-namespace wipe used to delete them silently (sweep
 # 2026-10-06 LEAD-02), so an operator's setting never reached the run.
 PRESERVED_OPERATOR_KNOBS = frozenset(
-    {"MLX_LM_STATE_CHECKPOINT_STRIDE", "MLX_LM_STATE_CHECKPOINT_MAX"}
+    {
+        "MLX_LM_STATE_CHECKPOINT_STRIDE",
+        "MLX_LM_STATE_CHECKPOINT_MAX",
+        # Request-local observability; these do not select model math.
+        "MLX_LM_SYNC_TRACE",
+        "MLX_LM_SEGMENTED_SELF_MTP_TIMING",
+        # Documented process-owner choices.  NAX_GATHER and RHS_PAD_POLICY
+        # are rebound and conflict-checked by adapters.process_globals; the
+        # other values tune those modes and are exposed in their status.
+        "MLX2_MOE_NAX_GATHER",
+        "MLX2_MOE_NAX_GATHER_PLAN",
+        "MLX2_MOE_NAX_GATHER_BITS",
+        "MLX2_MOE_RHS_PAD_POLICY",
+        "MLX2_MOE_RHS_PAD_MIN_ROWS",
+        # Source ownership for the explicitly selected TensorFold route.
+        "MLX2_TENSORFOLD_SOURCE",
+    }
+)
+
+# Model profiles are process-global.  Every adapter profile transition clears
+# these selector namespaces before pinning its declared environment, so a
+# previous model's kernel or external-route choice cannot survive outside the
+# new adapter receipt.  Exact operator-owned values are preserved above.
+# MLX_ENABLE_TF32 is deliberately absent: require_process_numerics must reject
+# an explicit enabling value instead of erasing evidence that MLX may have
+# latched it.
+INHERITED_MODEL_PROFILE_PREFIXES = (
+    "MLX_QWEN",
+    "MLX_LM_",
+    "MLXUAG_",
+    "MLX_GDN_",
+    "MLX2_DFLASH_",
+    "MLX2_FUSED_SDPA_",
+    "MLX2_MOE_",
+    "MLX2_QSDPA_",
+    "MLX2_QWEN38_",
+    "MLX2_QWEN_",
+    "MLX2_TENSORFOLD_",
+    "MLX2_TREE_",
+    "MLX2_XING_",
+    "MLX2_EAGER_DISPATCH_",
+    "MLX_SDPA_",
+    "MLX_LAGUNA_",
+)
+
+# These process-global selections are applied through live setters and held
+# by adapters.process_globals.  Import snapshots may legitimately contain an
+# earlier value; the adapter claim, rather than environment text, is the
+# authoritative transition.
+LIVE_MOE_PROFILE_SELECTIONS = frozenset(
+    {"MLX2_MOE_NAX_GATHER", "MLX2_MOE_RHS_PAD_POLICY"}
 )
 
 
 def clear_inherited_profile(prefixes, environ=None) -> None:
-    """Delete inherited lab experiment variables under ``prefixes`` before a
-    profile is pinned, keeping ``PRESERVED_OPERATOR_KNOBS``."""
+    """Delete inherited model selectors before a profile is pinned."""
     target = os.environ if environ is None else environ
+    prefixes = tuple(dict.fromkeys((*INHERITED_MODEL_PROFILE_PREFIXES, *prefixes)))
     for name in tuple(target):
         if name.startswith(tuple(prefixes)) and name not in PRESERVED_OPERATOR_KNOBS:
             del target[name]
+
+
+def assert_process_profile_applied(owner: str, *, live=()) -> None:
+    """Fail when an imported tensor module latched another model profile."""
+    from .runtime.models.import_env import assert_profile_applied
+
+    assert_profile_applied(
+        owner,
+        live=frozenset(live) | LIVE_MOE_PROFILE_SELECTIONS,
+    )

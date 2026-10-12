@@ -113,8 +113,8 @@ class FLyVerificationPolicy:
         }
 
 
-def apply_fly_relaxation(tokens, targets, ordinary_accepts, policy):
-    """Return ``(accepted_prefix, relaxed_count)`` under the FLy rule.
+def apply_fly_relaxation_positions(tokens, targets, ordinary_accepts, policy):
+    """Return ``(accepted_prefix, relaxed_positions)`` under the FLy rule.
 
     A failed position is relaxed only when its target entropy/probability gates
     pass and all W following proposal decisions pass the ordinary verifier.
@@ -131,9 +131,9 @@ def apply_fly_relaxation(tokens, targets, ordinary_accepts, policy):
         accepted = 0
         while accepted < len(tokens) and ordinary_accepts[accepted]:
             accepted += 1
-        return accepted, 0
+        return accepted, ()
     index = 0
-    relaxed = 0
+    relaxed_positions = []
     while index < len(tokens):
         if ordinary_accepts[index]:
             index += 1
@@ -149,9 +149,55 @@ def apply_fly_relaxation(tokens, targets, ordinary_accepts, policy):
             or not all(ordinary_accepts[index + 1 : stop])
         ):
             break
-        relaxed += 1
+        relaxed_positions.append(index)
         index = stop
-    return index, relaxed
+    return index, tuple(relaxed_positions)
+
+
+def apply_fly_relaxation(tokens, targets, ordinary_accepts, policy):
+    """Return ``(accepted_prefix, relaxed_count)`` under the FLy rule."""
+    accepted, relaxed_positions = apply_fly_relaxation_positions(
+        tokens, targets, ordinary_accepts, policy
+    )
+    return accepted, len(relaxed_positions)
+
+
+def count_delivered_relaxed_accepts(
+    relaxed_positions,
+    relaxed_accepts,
+    *,
+    delivered,
+    accepted,
+):
+    """Count relaxed proposal tokens inside the delivered accepted prefix.
+
+    Position metadata is authoritative when present.  Older/synthetic results
+    carry only an aggregate count; that count is publishable only after the
+    complete accepted proposal prefix was delivered.  Invalid positions and
+    inconsistent legacy counts fail closed instead of becoming engagement
+    evidence.
+    """
+    delivered = max(0, int(delivered))
+    accepted = max(0, int(accepted))
+    if relaxed_positions:
+        try:
+            positions = tuple(int(position) for position in relaxed_positions)
+            relaxed_accepts = int(relaxed_accepts or 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        if (
+            relaxed_accepts <= 0
+            or len(positions) != relaxed_accepts
+            or len(set(positions)) != len(positions)
+            or any(position < 0 or position >= accepted for position in positions)
+        ):
+            return 0
+        boundary = min(delivered, accepted)
+        return sum(position < boundary for position in positions)
+    relaxed_accepts = int(relaxed_accepts or 0)
+    if relaxed_accepts <= 0 or relaxed_accepts > accepted:
+        return 0
+    return relaxed_accepts if delivered >= accepted else 0
 
 
 def _residual(target, proposal):
@@ -174,6 +220,7 @@ class VerifiedBlock:
     target_probabilities: tuple[np.ndarray, ...]
     rejected: bool
     relaxed_accepts: int = 0
+    relaxed_positions: tuple[int, ...] = ()
 
 
 def verify_proposals(tokens, proposals, targets, rng, *, fly_verification=None):
@@ -200,20 +247,23 @@ def verify_proposals(tokens, proposals, targets, rng, *, fly_verification=None):
             ordinary_accepts.append(
                 rng.uniform() < min(1.0, p[i][token] / q[i][token])
             )
-        accepted, relaxed = apply_fly_relaxation(
+        accepted, relaxed_positions = apply_fly_relaxation_positions(
             tokens, p[: len(tokens)], ordinary_accepts, fly
         )
+        relaxed = len(relaxed_positions)
         emitted = list(tokens[:accepted])
         laws = list(p[:accepted])
         if accepted < len(tokens):
             emitted.append(rng.sample(_residual(p[accepted], q[accepted])))
             laws.append(p[accepted])
             return VerifiedBlock(
-                accepted, tuple(emitted), tuple(laws), True, relaxed
+                accepted, tuple(emitted), tuple(laws), True, relaxed,
+                relaxed_positions,
             )
         emitted.append(rng.sample(p[-1])); laws.append(p[-1])
         return VerifiedBlock(
-            len(tokens), tuple(emitted), tuple(laws), False, relaxed
+            len(tokens), tuple(emitted), tuple(laws), False, relaxed,
+            relaxed_positions,
         )
     emitted, laws = [], []
     for i, token in enumerate(tokens):
@@ -338,17 +388,24 @@ def verify_compact_proposals(
             rng.uniform() < min(1.0, p[i][token] / selected_q[i])
             for i, token in enumerate(tokens)
         ]
-        accepted, relaxed = apply_fly_relaxation(
+        accepted, relaxed_positions = apply_fly_relaxation_positions(
             tokens, p[: len(tokens)], ordinary_accepts, fly
         )
+        relaxed = len(relaxed_positions)
         emitted = list(tokens[:accepted])
         laws = list(p[:accepted])
         if accepted < len(tokens):
             emitted.append(rng.sample(residual_at(accepted)))
             laws.append(p[accepted])
-            return VerifiedBlock(accepted, tuple(emitted), tuple(laws), True, relaxed)
+            return VerifiedBlock(
+                accepted, tuple(emitted), tuple(laws), True, relaxed,
+                relaxed_positions,
+            )
         emitted.append(rng.sample(p[-1])); laws.append(p[-1])
-        return VerifiedBlock(len(tokens), tuple(emitted), tuple(laws), False, relaxed)
+        return VerifiedBlock(
+            len(tokens), tuple(emitted), tuple(laws), False, relaxed,
+            relaxed_positions,
+        )
     emitted, laws = [], []
     for i, token in enumerate(tokens):
         if rng.uniform() < min(1.0, p[i][token] / selected_q[i]):

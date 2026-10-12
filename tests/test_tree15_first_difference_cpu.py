@@ -5,10 +5,16 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 SOURCE = (Path(__file__).resolve().parents[1] / "qualification" / "runs"
           / "tree15-b1-discriminator-20261003" / "first_difference.py")
+if not SOURCE.exists():
+    pytest.skip(
+        "curated source-only projection excludes private qualification diagnostic",
+        allow_module_level=True,
+    )
 SPEC = importlib.util.spec_from_file_location("tree15_first_difference", SOURCE)
 probe = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(probe)
