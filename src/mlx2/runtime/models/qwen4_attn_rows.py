@@ -57,6 +57,10 @@ from typing import Optional
 
 import mlx.core as mx
 
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
+
 ENV_NAME = "MLX_QWEN4_ATTN_FUSED_ROWS"
 # M < 8: MLX's quantized_matmul stays on qmv/qmv_wide (NAX small-M qmv starts
 # at M = 8 for large N, qmm below every vector limit >= 12 on M5).

@@ -92,7 +92,10 @@ from operator import is_
 import mlx.core as mx
 from mlx import nn
 
+from .import_env import snapshot as _import_env_snapshot
 from .served_exp import ServedExpGate, is_device_fault, metal_helper
+
+_import_env_snapshot(__name__)
 
 HC_DECODE_ENV = "MLX_QWEN4_HC_DECODE"
 HC_COUNT = 4

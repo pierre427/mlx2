@@ -86,7 +86,10 @@ def test_delayed_host_accounting_yields_without_apc_eviction_or_migration():
 
 
 def test_optional_reclaim_grace_expires_to_real_memory_policy():
-    batch, bank = setup_batch(21.0, delayed=True)
+    # Keep the post-promotion plan below even its plain-decode floor.  At
+    # 21 GiB the current policy can make progress at lower optional depth and
+    # deliberately preserves APC state instead of evicting it.
+    batch, bank = setup_batch(19.0, delayed=True)
     try:
         assert batch._apply_admission() is False
         batch._optional_reclaim_deadline = 1.0

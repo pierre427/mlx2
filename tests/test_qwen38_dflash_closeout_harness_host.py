@@ -13,6 +13,12 @@ from mlx_blocker import block_mlx_imports, mlx_module_names
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def require_private_closeout(*paths):
+    missing = [path for path in paths if not path.is_file()]
+    if missing:
+        pytest.skip(f"private closeout fixture is not exported: {missing[0].name}")
+
+
 def load_script(name: str):
     path = ROOT / "scripts" / name
     spec = importlib.util.spec_from_file_location(path.stem, path)
@@ -227,6 +233,9 @@ def test_pld_dflash_policy_pair_is_chain_only_and_one_field_different():
 
 
 def test_varlen_qualify_preflight_requires_corrected_matched_policy_pair():
+    require_private_closeout(
+        ROOT / "qualification/policies/qwen38-27b-dflash2-varlen-tensorfold.json"
+    )
     module = load_script("qualify_qwen38_dflash_fixed_cohort_abba.py")
     candidate = json.loads(
         (
@@ -817,6 +826,9 @@ def test_closeout_policy_derives_pld_control_by_removing_only_composition():
 
 
 def test_closeout_policy_derives_matched_p25_varlen_control():
+    require_private_closeout(
+        ROOT / "qualification/policies/qwen38-27b-dflash2-varlen-tensorfold.json"
+    )
     module = load_script("prepare_qwen38_dflash_closeout_policies.py")
     candidate_path = (
         ROOT / "qualification/policies/qwen38-27b-dflash2-varlen-tensorfold.json"
@@ -871,6 +883,7 @@ def test_closeout_real_p25_fixture_retains_required_legacy_identity_pins():
         / "qualification/runs/dflash-varlen-tensorfold-20x20-r2-20261005"
         / "policy-candidate.json"
     )
+    require_private_closeout(canonical_path, identity_template_path)
     canonical = json.loads(canonical_path.read_bytes())
     identity_template = json.loads(identity_template_path.read_bytes())
     transplanted = json.loads(
@@ -909,6 +922,7 @@ def test_closeout_source_policy_hashes_and_harnesses_require_derived_policy():
         "abba-candidate": ROOT
         / "qualification/policies/qwen38-27b-dflash2-varlen-tensorfold.json",
     }
+    require_private_closeout(*expected.values(), module.DEFAULT_ABBA_IDENTITY_TEMPLATE)
     for label, path in expected.items():
         assert module.sha256(path) == module.EXPECTED_SOURCE_POLICY_SHA256[label]
     assert module.sha256(module.DEFAULT_ABBA_IDENTITY_TEMPLATE) == (

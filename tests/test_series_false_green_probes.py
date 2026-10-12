@@ -11,6 +11,9 @@ from types import SimpleNamespace
 import pytest
 
 RUN = Path(__file__).parents[1] / "qualification/runs/series-20260924"
+pytestmark = pytest.mark.skipif(
+    not RUN.is_dir(), reason="private series qualification harnesses are not exported"
+)
 
 
 def load(name):

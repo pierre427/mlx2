@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 import numpy as np
+import pytest
 
 from test_qwen38_dflash2_cpu import tiny_target
 
@@ -19,6 +20,9 @@ SCRIPT = (
     ROOT
     / "qualification/runs/speculative-composition-qualification-20261012"
     / "diagnose_qwen_wide_row_law.py"
+)
+pytestmark = pytest.mark.skipif(
+    not SCRIPT.is_file(), reason="private wide-row diagnostic harness is not exported"
 )
 
 

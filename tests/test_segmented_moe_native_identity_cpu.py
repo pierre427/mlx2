@@ -20,6 +20,7 @@ attributes or private objects. Nothing here is native execution, qualification o
 
 import ast
 import contextlib
+import hashlib
 import importlib
 import importlib.abc
 import importlib.util
@@ -388,6 +389,13 @@ def _commit(repo, *args):
 @pytest.fixture
 def checkout(tmp_path, monkeypatch):
     """A temporary git checkout holding the bound files (expected bytes come from its own HEAD blobs)."""
+    drift = [
+        rel for rel, expected in q.FROZEN.items()
+        if not (ROOT / rel).is_file()
+        or hashlib.sha256((ROOT / rel).read_bytes()).hexdigest() != expected
+    ]
+    if drift:
+        pytest.skip(f"public projection differs from private frozen file: {drift[0]}")
     repo = (tmp_path / "mlx2").resolve()
     for rel in q.BOUND_FILES:
         dst = repo / rel

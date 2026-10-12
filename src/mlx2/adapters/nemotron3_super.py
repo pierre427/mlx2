@@ -14,6 +14,7 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..process_env import (
     PROCESS_NUMERICS,
+    assert_process_profile_applied,
     clear_inherited_profile,
     require_process_numerics,
 )
@@ -159,6 +160,7 @@ def configure_environment() -> dict[str, str]:
         **PROCESS_NUMERICS}
     clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
+    assert_process_profile_applied("the Nemotron-3 Super profile")
     return profile
 
 class Nemotron3SuperAdapter(FlashNextAdapter):

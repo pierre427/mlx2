@@ -34,11 +34,44 @@ def test_trace_is_opt_in_and_preserves_producing_width_after_join_and_shrink():
 
 def test_speculative_width_is_not_reported_as_ordinary():
     job = Job({"return_token_trace": True})
-    for receipt, width in (({"route": "mtp"}, 4), (None, 2)):
-        record_generation_output(job, NS(token=7, execution_width=width, mtp_receipt=receipt),
+    for receipt, width, ordinary in (
+        ({"route": "mtp"}, 4, False),
+        # Native MTP emits nonterminal outputs before its terminal receipt.
+        (None, 3, False),
+        (None, 2, True),
+    ):
+        record_generation_output(job, NS(token=7, execution_width=width,
+                                 mtp_receipt=receipt, ordinary_execution=ordinary),
                                  mtp=True, external_draft=False, prompt_lookup=False)
     assert job.ordinary_compute_widths == {2}
-    assert job.token_trace.ordinary_execution_widths == [None, 2]
+    assert job.token_trace.ordinary_execution_widths == [None, None, 2]
+
+
+@pytest.mark.parametrize(
+    "route", ["ordinary_after_mtp_handoff", "ordinary_after_mtp_fallback"]
+)
+def test_mtp_to_ordinary_transition_uses_per_output_producing_path(route):
+    job = Job({"return_token_trace": True})
+    receipt = {"route": route, "ordinary_compute_widths": [4]}
+
+    # The first token was prepared by MTP before the transition.  The shared
+    # request receipt already knows a later ordinary width, but must not
+    # retroactively reclassify this token.
+    record_generation_output(
+        job,
+        NS(token=7, execution_width=1, mtp_receipt=receipt,
+           ordinary_execution=False),
+        mtp=True, external_draft=False, prompt_lookup=False,
+    )
+    record_generation_output(
+        job,
+        NS(token=8, execution_width=4, mtp_receipt=receipt,
+           ordinary_execution=True),
+        mtp=True, external_draft=False, prompt_lookup=False,
+    )
+
+    assert job.ordinary_compute_widths == {4}
+    assert job.token_trace.ordinary_execution_widths == [None, 4]
 
 
 def test_trace_bound_is_explicit_and_incomplete_evidence_fails_closed():

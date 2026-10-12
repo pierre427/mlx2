@@ -35,6 +35,12 @@ B27 = ROOT / "qualification/runs/options-sweep-27b-20261002/smoke"
 FN = ROOT / "qualification/runs/options-sweep-flashnext-20261002/smoke"
 
 
+def _private_json(path):
+    if not path.is_file():
+        pytest.skip(f"private qualification receipt is not exported: {path.name}")
+    return json.loads(path.read_text())
+
+
 @pytest.fixture(scope="module")
 def qualify():
     sys.path.insert(0, str(SCRIPTS))
@@ -45,14 +51,14 @@ def qualify():
 
 
 def _q36(stage):
-    initial = json.loads((Q36 / stage / "status-initial.json").read_text())
-    final = json.loads((Q36 / stage / "status-final.json").read_text())
+    initial = _private_json(Q36 / stage / "status-initial.json")
+    final = _private_json(Q36 / stage / "status-final.json")
     return initial, final
 
 
 def _b27(arm):
     """The 27B smoke's final status (the receipt keeps no initial one)."""
-    return json.loads((B27 / arm / "qualification.json").read_text())["final_status"]
+    return _private_json(B27 / arm / "qualification.json")["final_status"]
 
 
 def _features(names):
@@ -958,9 +964,7 @@ def test_row_exact_observation_fails_closed_on_any_fallback(qualify):
 def test_historical_sparse_qsa_smoke_no_longer_passes_without_engagement(
     qualify, route
 ):
-    final = json.loads(
-        (FN / f"qsa_sparse_indexed--{route}" / "status-final.json").read_text()
-    )
+    final = _private_json(FN / f"qsa_sparse_indexed--{route}" / "status-final.json")
     assert "feature_qsa_batch_decode_sparse" in required_feature_checks(
         final["settings"]
     )
@@ -968,9 +972,7 @@ def test_historical_sparse_qsa_smoke_no_longer_passes_without_engagement(
 
 
 def test_historical_row_exact_smoke_no_longer_hides_fallbacks(qualify):
-    final = json.loads(
-        (FN / "row_exact_verify--mtp2" / "status-final.json").read_text()
-    )
+    final = _private_json(FN / "row_exact_verify--mtp2" / "status-final.json")
     required = required_feature_checks(final["settings"])
     assert {
         "feature_row_exact_verify",

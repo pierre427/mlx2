@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import io
 import json
 import re
+import socket
 import struct
 import threading
 import time
@@ -87,7 +89,7 @@ CORE_CHECK_NAMES = (
     "messages_text", "messages_stream", "messages_system", "messages_tools_any",
     "messages_tools_named", "messages_tool_result_roundtrip",
     "messages_thinking_signature_roundtrip", "messages_count_tokens",
-    "messages_max_tokens_32000", "messages_stop_sequences",
+    "messages_max_tokens_within_context", "messages_stop_sequences",
     "apc_repeated_prompt_hit", "apc_skip_writing_prefix_cache",
     "apc_sessions_park_resume_delete", "apc_admin_quiesce_suspend_resume",
     "multimodal_image", "multimodal_audio", "multimodal_plain_text",
@@ -118,11 +120,65 @@ def _wav_b64() -> str:
     return base64.b64encode(out.getvalue()).decode()
 
 
+class _TrackedConnection(http.client.HTTPConnection):
+    """An HTTP connection whose socket the owning client can close from outside."""
+
+    def __init__(self, owner, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._owner = owner
+
+    def connect(self):
+        super().connect()
+        with self._owner._lock:
+            self._owner._sockets.add(self.sock)
+
+
+class _TrackedHandler(urllib.request.HTTPHandler):
+    def __init__(self, owner):
+        super().__init__()
+        self._owner = owner
+
+    def http_open(self, req):
+        return self.do_open(lambda *args, **kwargs: _TrackedConnection(self._owner, *args, **kwargs), req)
+
+
 class HTTP:
     def __init__(self, base: str, timeout: float, admin_token: str | None = None):
         self.base, self.timeout, self.admin_token = base.rstrip("/"), timeout, admin_token
+        self._lock = threading.Lock()
+        self._sockets = set()
+        self._opener = urllib.request.build_opener(_TrackedHandler(self))
+
+    def abort_inflight(self) -> int:
+        """Close every open request socket so the server cancels abandoned work.
+
+        A check that times out leaves its worker thread blocked on the socket.
+        Without this the server keeps generating for a client nobody reads,
+        which holds a lane and blocks later checks (an admin drain waits on it).
+        """
+        with self._lock:
+            sockets, self._sockets = self._sockets, set()
+        for sock in sockets:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+        return len(sockets)
 
     def request(self, method: str, path: str, body=None, *, stream=False):
+        try:
+            return self._request(method, path, body, stream=stream)
+        finally:
+            # The response owns the socket until it is read; forget the ones
+            # that are fully closed so only in-flight requests stay tracked.
+            with self._lock:
+                self._sockets = {sock for sock in self._sockets if sock.fileno() != -1}
+
+    def _request(self, method: str, path: str, body=None, *, stream=False):
         request_evidence = {"method": method, "path": path, "body": body}
         headers = {"Content-Type": "application/json"}
         if self.admin_token and path.startswith("/v1/admin"):
@@ -130,7 +186,7 @@ class HTTP:
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(self.base + path, method=method, data=data, headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self._opener.open(request, timeout=self.timeout) as response:
                 if stream:
                     events = []
                     for raw in response:
@@ -244,7 +300,11 @@ class Matrix:
                 "seconds": elapsed,
             }
         elif thread.is_alive():
-            row = {"name": name, "status": "FAIL", "reason": f"timeout after {self.args.check_timeout}s", "seconds": elapsed}
+            # Drop the abandoned request so it cannot keep generating into
+            # the next check (a server drain would wait on it).
+            abort = getattr(self.http, "abort_inflight", None)
+            aborted = abort() if callable(abort) else 0
+            row = {"name": name, "status": "FAIL", "reason": f"timeout after {self.args.check_timeout}s", "seconds": elapsed, "aborted_connections": aborted}
         elif failure:
             row = {"name": name, "status": "FAIL", "reason": failure[0], "seconds": elapsed}
         else:
@@ -353,42 +413,68 @@ def _single_tool_enforced(reply):
     )
 
 
+ADMIN_DRAIN_SECONDS = 30.0
+
+
 def _admin_suspend_resume(http, *, timeout):
     prompt = "admin warm filler " * 96 + " Reply ADMIN_OK."
     sid = "quality-campaign-admin-suspend-190919"
     cold = _chat(http, prompt, session_id=sid)
-    quiesce = http.post("/v1/admin/quiesce", {"suspend": True})
+    # The server's drain deadline must end inside this check's wait. Left at
+    # the server default (600 s), a drain blocked by an in-flight request was
+    # still pending when a 30 s wait gave up, and the service went on to
+    # suspend after the check had moved on.
+    drain = max(0.1, min(ADMIN_DRAIN_SECONDS, timeout / 4))
+    quiesce = http.post("/v1/admin/quiesce", {"suspend": True, "drain_timeout_seconds": drain})
     states = []
-    deadline = time.monotonic() + min(30, timeout / 2)
-    while time.monotonic() < deadline:
-        state = http.get("/v1/admin/state")
-        states.append(state)
-        if (state.get("body") or {}).get("state") == "suspended":
-            break
-        time.sleep(0.05)
-    else:
-        return Outcome(False, "admin service did not reach suspended", {"cold": cold, "quiesce": quiesce, "states": states})
-    resume = http.post("/v1/admin/resume", {"prefetch_sessions": [{"tenant": "default", "session_id": sid}]})
-    session_states = []
-    while time.monotonic() < deadline:
-        session = http.get(f"/v1/apc/sessions/{sid}")
-        session_states.append(session)
-        if (session.get("body") or {}).get("state") == "resident":
-            break
-        time.sleep(0.05)
-    else:
-        return Outcome(False, "suspended session did not prefetch", {"cold": cold, "quiesce": quiesce, "states": states, "resume": resume, "session_states": session_states})
-    warm_a = _chat(http, prompt, session_id=sid)
-    warm_b = _chat(http, prompt, session_id=sid)
-    passed = (
-        cold["status"] == warm_a["status"] == warm_b["status"] == 200
-        and quiesce["status"] in {200, 202}
-        and resume["status"] in {200, 202}
-        and _cached_tokens(warm_a) > 0
-        and _cached_tokens(warm_b) > 0
-        and _text(warm_a) == _text(warm_b)
-    )
-    return Outcome(passed, "suspended state restored; warm outputs agree", {"cold": cold, "quiesce": quiesce, "states": states, "resume": resume, "session_states": session_states, "warm_a": warm_a, "warm_b": warm_b})
+    evidence = {"cold": cold, "quiesce": quiesce, "states": states}
+    resumed = False
+    try:
+        deadline = time.monotonic() + min(drain + 15, timeout / 2)
+        while time.monotonic() < deadline:
+            state = http.get("/v1/admin/state")
+            states.append(state)
+            if (state.get("body") or {}).get("state") == "suspended":
+                break
+            time.sleep(0.05)
+        else:
+            return Outcome(False, "admin service did not reach suspended", evidence)
+        resume = http.post("/v1/admin/resume", {"prefetch_sessions": [{"tenant": "default", "session_id": sid}]})
+        evidence["resume"] = resume
+        resumed = resume["status"] in {200, 202}
+        session_states = []
+        evidence["session_states"] = session_states
+        while time.monotonic() < deadline:
+            session = http.get(f"/v1/apc/sessions/{sid}")
+            session_states.append(session)
+            if (session.get("body") or {}).get("state") == "resident":
+                break
+            time.sleep(0.05)
+        else:
+            return Outcome(False, "suspended session did not prefetch", evidence)
+        warm_a = _chat(http, prompt, session_id=sid)
+        warm_b = _chat(http, prompt, session_id=sid)
+        evidence.update(warm_a=warm_a, warm_b=warm_b)
+        passed = (
+            cold["status"] == warm_a["status"] == warm_b["status"] == 200
+            and quiesce["status"] in {200, 202}
+            and resumed
+            and _cached_tokens(warm_a) > 0
+            and _cached_tokens(warm_b) > 0
+            and _text(warm_a) == _text(warm_b)
+        )
+        return Outcome(passed, "suspended state restored; warm outputs agree", evidence)
+    finally:
+        if not resumed:
+            # Every exit after a quiesce reopens the service: a drain that has
+            # not finished is cancelled, a suspend that finished late is
+            # resumed. Otherwise every later check (and the SDK round) is
+            # rejected with 503 by a server nobody will resume.
+            try:
+                evidence["recovery_resume"] = http.post("/v1/admin/resume", {})
+                evidence["recovery_state"] = http.get("/v1/admin/state")
+            except OSError as error:
+                evidence["recovery_resume"] = {"status": -1, "error": f"{type(error).__name__}: {error}"}
 
 
 def _fly_verification(http):
@@ -474,7 +560,7 @@ def responses_checks(matrix: Matrix, *, applies: bool):
     def response_text(body):
         return "".join(part.get("text", "") for item in body.get("output", []) if item.get("type") == "message" for part in item.get("content", []) if part.get("type") == "output_text")
     matrix.check("responses_text", lambda: (lambda r: Outcome(r["status"] == 200 and bool(response_text(r["body"]).strip()), "output_text present", r))(h.post("/v1/responses", {"model": MODEL_ID, "temperature": 0, "input": "Reply with RESPONSES_OK.", "max_output_tokens": 64, "reasoning": {"effort": "none"}})), applies=applies)
-    matrix.check("responses_stream", lambda: (lambda r: Outcome(r["status"] == 200 and any(isinstance(e, dict) and e.get("type") == "response.completed" for e in r["events"]), "typed response.completed", r))(h.post("/v1/responses", {"model": MODEL_ID, "temperature": 0, "input": "Reply with STREAM_OK.", "stream": True, "reasoning": {"effort": "none"}}, stream=True)), applies=applies)
+    matrix.check("responses_stream", lambda: (lambda r: Outcome(r["status"] == 200 and any(isinstance(e, dict) and e.get("type") == "response.completed" for e in r["events"]), "typed response.completed", r))(h.post("/v1/responses", {"model": MODEL_ID, "temperature": 0, "input": "Reply with STREAM_OK.", "stream": True, "max_output_tokens": 64, "reasoning": {"effort": "none"}}, stream=True)), applies=applies)
 
     def tool_roundtrip():
         first = h.post("/v1/responses", {"model": MODEL_ID, "temperature": 0, "input": "Use weather for Toronto.", "tools": [{"type": "function", "name": "weather", "description": "Weather", "parameters": TOOLS[0]["function"]["parameters"], "strict": True}], "tool_choice": {"type": "function", "name": "weather"}, "max_output_tokens": 256})
@@ -502,7 +588,13 @@ def responses_checks(matrix: Matrix, *, applies: bool):
         return Outcome(second["status"] == 200 and (second.get("body") or {}).get("previous_response_id") == rid, "previous response linked", {"first": first, "second": second})
     matrix.check("responses_previous_response_id", previous, applies=applies)
     def include():
-        r = h.post("/v1/responses", {"model": MODEL_ID, "temperature": 0, "input": "Say yes.", "include": ["reasoning.encrypted_content", "message.output_text.logprobs"], "top_logprobs": 1, "reasoning": {"effort": "low"}, "max_output_tokens": 256})
+        # Output logprobs cover answer tokens only, so the answer needs room:
+        # bound reasoning where the adapter supports it (Xing reasoned
+        # through all 256 tokens at effort low and left no answer).
+        body = {"model": MODEL_ID, "temperature": 0, "input": "Say yes.", "include": ["reasoning.encrypted_content", "message.output_text.logprobs"], "top_logprobs": 1, "reasoning": {"effort": "low"}, "max_output_tokens": 512}
+        if supports_budgeted_thinking(set(matrix.args.capabilities)):
+            body["thinking_budget"] = 128
+        r = h.post("/v1/responses", body)
         output = (r.get("body") or {}).get("output", [])
         encrypted = any(item.get("type") == "reasoning" and item.get("encrypted_content") for item in output)
         logs = any(part.get("logprobs") for item in output for part in item.get("content", []))
@@ -537,7 +629,19 @@ def messages_checks(matrix: Matrix, *, applies: bool):
         return Outcome(second["status"] == 200, "signature roundtrip accepted", {"first": first, "second": second})
     matrix.check("messages_thinking_signature_roundtrip", thinking_signature, applies=applies and "thinking-deferral" in matrix.args.capabilities, reason="adapter does not declare budgeted thinking")
     matrix.check("messages_count_tokens", lambda: (lambda r: Outcome(r["status"] == 200 and (r.get("body") or {}).get("input_tokens", 0) > 0, "positive token count", r))(h.post("/v1/messages/count_tokens", {"model": MODEL_ID, "messages": [{"role": "user", "content": "Count this."}]})), applies=applies)
-    matrix.check("messages_max_tokens_32000", lambda: (lambda r: Outcome(r["status"] == 200, "32K accepted by 2M ceiling", r))(post({"messages": [{"role": "user", "content": "Reply briefly."}], "max_tokens": 32000})), applies=applies)
+    def large_output_budget():
+        status = h.get("/v1/status")
+        context = (status.get("body") or {}).get("max_context")
+        if status["status"] != 200 or type(context) is not int or context <= 256:
+            return Outcome(False, "served context unavailable for large output probe", status)
+        # The API's 2M-token ceiling is not a promise that a 16K deployment
+        # can reserve 32K output tokens. Leave room for the short rendered
+        # prompt and exercise the largest budget that fits this served cap.
+        budget = min(32_000, context - 256)
+        reply = post({"messages": [{"role": "user", "content": "Reply briefly."}], "max_tokens": budget})
+        return Outcome(reply["status"] == 200, f"requested max_tokens={budget} context={context}",
+                       {"status": status, "reply": reply})
+    matrix.check("messages_max_tokens_within_context", large_output_budget, applies=applies)
     matrix.check("messages_stop_sequences", lambda: (lambda r: Outcome(r["status"] == 200 and (r.get("body") or {}).get("stop_reason") == "stop_sequence", "stop_sequence reported", r))(post({"messages": [{"role": "user", "content": "Repeat this line exactly and output nothing else: A END B"}], "stop_sequences": ["END"], "thinking": {"type": "disabled"}})), applies=applies)
 
 

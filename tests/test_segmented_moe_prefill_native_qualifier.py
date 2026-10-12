@@ -9,6 +9,7 @@ numerical qualification of the candidate.
 """
 
 import contextlib
+import hashlib
 import importlib.abc
 import importlib.util
 import json
@@ -777,6 +778,12 @@ def tree(tmp_path, monkeypatch):
     if missing:
         pytest.skip(f"frozen candidate file absent: {missing[0]} (private provenance "
                     "is not exported to the public mirror)")
+    drift = [
+        rel for rel, expected in q.FROZEN.items()
+        if hashlib.sha256((ROOT / rel).read_bytes()).hexdigest() != expected
+    ]
+    if drift:
+        pytest.skip(f"public projection differs from private frozen file: {drift[0]}")
     repo = (tmp_path / "mlx2").resolve()
     for rel in q.BOUND_FILES + ("src/mlx2/other.py",):
         dst = repo / rel

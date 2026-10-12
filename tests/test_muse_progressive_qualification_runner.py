@@ -4,13 +4,21 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
+
+SCRIPT = (
+    Path(__file__).parents[1]
+    / "qualification/runs/muse-progressive-qualification-m3-20261008"
+    / "run_muse_progressive_m3.py"
+)
+pytestmark = pytest.mark.skipif(
+    not SCRIPT.is_file(), reason="private Muse qualification harness is not exported"
+)
+
 
 def _runner():
-    path = (
-        Path(__file__).parents[1]
-        / "qualification/runs/muse-progressive-qualification-m3-20261008"
-        / "run_muse_progressive_m3.py"
-    )
+    path = SCRIPT
     spec = importlib.util.spec_from_file_location("muse_progressive_m3_runner", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

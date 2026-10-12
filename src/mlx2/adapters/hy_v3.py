@@ -11,6 +11,7 @@ from .ordinary_text import OrdinaryTextAdapter
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from ..process_env import (
     PROCESS_NUMERICS,
+    assert_process_profile_applied,
     clear_inherited_profile,
     require_process_numerics,
 )
@@ -135,6 +136,7 @@ def configure_environment() -> dict[str, str]:
                **PROCESS_NUMERICS, "MLX_LM_COMPILED_DECODE": "0"}
     clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
+    assert_process_profile_applied("the Hy-V3 profile")
     return profile
 
 

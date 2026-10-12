@@ -21,6 +21,15 @@ from mlx2.runtime.tensorfold_owned_router import (
 from mlx2.server import handler_for
 
 
+PRIVATE_RUN = (
+    Path(__file__).resolve().parents[1]
+    / "qualification/runs/tree15-b1-discriminator-20261003"
+)
+requires_private_run = pytest.mark.skipif(
+    not PRIVATE_RUN.is_dir(), reason="private TensorFold gate harnesses are not exported"
+)
+
+
 class FakeProfile:
     identity = "fixture"
     cache_layout = "qwen38-tensorfold-owned:fixture"
@@ -585,6 +594,7 @@ def test_standard_completion_header_uses_native_eos_and_rejects_unsupported_opti
         router.close()
 
 
+@requires_private_run
 def test_service_gate_cpu_drives_shared_http_stage_before_paired_screen(monkeypatch):
     script = (Path(__file__).resolve().parents[1] / "qualification/runs"
               / "tree15-b1-discriminator-20261003/tensorfold_owned_service.py")
@@ -644,6 +654,7 @@ def test_service_gate_cpu_drives_shared_http_stage_before_paired_screen(monkeypa
         i for i, call in enumerate(calls) if call[1] == 48)
 
 
+@requires_private_run
 def test_spomin_report_requires_frozen_cell_order_and_source_identity(tmp_path):
     root = Path(__file__).resolve().parents[1]
     script = root / "qualification/runs/tree15-b1-discriminator-20261003/tensorfold_owned_spomin_report.py"
@@ -691,6 +702,7 @@ def test_spomin_report_requires_frozen_cell_order_and_source_identity(tmp_path):
         module.collect(tmp_path, source_commit, source_file, source_sha, "unused")
 
 
+@requires_private_run
 def test_spomin_long_lease_does_not_expand_other_gate_caps():
     root = Path(__file__).resolve().parents[1]
     script = (root / "qualification/runs/tree15-b1-discriminator-20261003"
@@ -705,6 +717,7 @@ def test_spomin_long_lease_does_not_expand_other_gate_caps():
     assert "resident" in module.cap_error("spomin-cell", 900, 49)
 
 
+@requires_private_run
 def test_spomin_b1_normal_endpoint_pairing_and_exact_token_oracle(monkeypatch):
     root = Path(__file__).resolve().parents[1]
     script = root / "qualification/runs/tree15-b1-discriminator-20261003/tensorfold_owned_spomin_b1.py"
@@ -771,6 +784,7 @@ def test_spomin_b1_normal_endpoint_pairing_and_exact_token_oracle(monkeypatch):
                for arm in result["arms"].values())
 
 
+@requires_private_run
 def test_owned_feature_gate_cpu_dry_run_and_call_order(monkeypatch):
     root = Path(__file__).resolve().parents[1]
     script = root / "qualification/runs/tree15-b1-discriminator-20261003/tensorfold_owned_feature_gate.py"
@@ -868,6 +882,7 @@ def test_owned_feature_gate_cpu_dry_run_and_call_order(monkeypatch):
         assert not module.check_receipt(changed, "native", route, None)
 
 
+@requires_private_run
 def test_owned_feature_gate_cap_is_separate_from_other_gates():
     script = (Path(__file__).resolve().parents[1] / "qualification/runs"
               / "tree15-b1-discriminator-20261003/tensorfold-owned-b1/run_gate.py")
@@ -879,6 +894,7 @@ def test_owned_feature_gate_cap_is_separate_from_other_gates():
     assert "180" in module.cap_error("service", 181, 48)
 
 
+@requires_private_run
 def test_owned_disconnect_gate_cpu_packet(monkeypatch):
     root = Path(__file__).resolve().parents[1]
     script = root / "qualification/runs/tree15-b1-discriminator-20261003/tensorfold_owned_disconnect.py"

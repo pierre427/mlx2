@@ -17,6 +17,9 @@ SCRIPT = (
     / "speculative-composition-qualification-20261012"
     / "diagnose_qwen36_exact_external_thermal_ladder.py"
 )
+pytestmark = pytest.mark.skipif(
+    not SCRIPT.is_file(), reason="private Qwen3.6 thermal harness is not exported"
+)
 
 
 def _module():

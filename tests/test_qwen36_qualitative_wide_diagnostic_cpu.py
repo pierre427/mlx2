@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import mlx.core as mx
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,9 @@ SCRIPT = (
     / "runs"
     / "speculative-composition-qualification-20261012"
     / "diagnose_qwen36_qualitative_wide.py"
+)
+pytestmark = pytest.mark.skipif(
+    not SCRIPT.is_file(), reason="private Qwen3.6 diagnostic harness is not exported"
 )
 
 

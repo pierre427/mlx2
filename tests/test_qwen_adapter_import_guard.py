@@ -12,6 +12,7 @@ with "0" by every adapter profile; the profiles now refuse it.
 """
 
 import os
+import subprocess
 import sys
 from types import ModuleType
 
@@ -379,7 +380,188 @@ def test_every_profile_that_spreads_process_numerics_is_covered():
         p.stem for p in adapters.glob("*.py") if "require_process_numerics(" in p.read_text()
     }
     assert spreading <= refusing, sorted(spreading - refusing)
-    assert spreading == set(PROFILE_MODULES) | {"olmo_hils", "granite_swa"}
+    assert spreading == set(PROFILE_MODULES) | {
+        "olmo_hils", "granite_swa", "standard_decoder",
+    }
+
+    # Qwen3.5 9B and dense Qwen3.6 inherit Qwen3.8's guarded constructor;
+    # every other profile owner must enforce the import latch in its module.
+    deferred_to_qwen38 = {"qwen35_9b", "qwen36_27b"}
+    guarded = {
+        p.stem
+        for p in adapters.glob("*.py")
+        if "assert_process_profile_applied(" in p.read_text()
+        or "assert_profile_applied(" in p.read_text()
+    }
+    assert spreading - deferred_to_qwen38 <= guarded, sorted(
+        spreading - deferred_to_qwen38 - guarded
+    )
+
+
+def test_shared_profile_clear_owns_routes_and_preserves_operator_state():
+    env = {
+        "MLX2_DFLASH_TOPOLOGY": "tree15",
+        "MLX2_QWEN_TARGET_EXECUTION": "tensorfold",
+        "MLX2_TENSORFOLD_CACHE_EXECUTOR": "1",
+        "MLX2_TREE_SINGLE_FENCE": "1",
+        "MLX2_MOE_UNDECLARED_SELECTOR": "1",
+        "MLX2_MOE_NAX_GATHER": "fused",
+        "MLX2_MOE_NAX_GATHER_PLAN": "db,64,64,0,0",
+        "MLX2_MOE_NAX_GATHER_BITS": "4,6,8",
+        "MLX2_MOE_RHS_PAD_POLICY": "adaptive",
+        "MLX2_MOE_RHS_PAD_MIN_ROWS": "3",
+        "MLX2_TENSORFOLD_SOURCE": "/operator/source",
+        "MLX_LM_STATE_CHECKPOINT_STRIDE": "17",
+        "MLX_LM_SYNC_TRACE": "1",
+        "MLX_LM_SEGMENTED_SELF_MTP_TIMING": "1",
+        "MLX_ENABLE_TF32": "1",
+    }
+
+    process_env.clear_inherited_profile((), environ=env)
+
+    for name in (
+        "MLX2_DFLASH_TOPOLOGY",
+        "MLX2_QWEN_TARGET_EXECUTION",
+        "MLX2_TENSORFOLD_CACHE_EXECUTOR",
+        "MLX2_TREE_SINGLE_FENCE",
+        "MLX2_MOE_UNDECLARED_SELECTOR",
+    ):
+        assert name not in env
+    assert env == {
+        "MLX2_MOE_NAX_GATHER": "fused",
+        "MLX2_MOE_NAX_GATHER_PLAN": "db,64,64,0,0",
+        "MLX2_MOE_NAX_GATHER_BITS": "4,6,8",
+        "MLX2_MOE_RHS_PAD_POLICY": "adaptive",
+        "MLX2_MOE_RHS_PAD_MIN_ROWS": "3",
+        "MLX2_TENSORFOLD_SOURCE": "/operator/source",
+        "MLX_LM_STATE_CHECKPOINT_STRIDE": "17",
+        "MLX_LM_SYNC_TRACE": "1",
+        "MLX_LM_SEGMENTED_SELF_MTP_TIMING": "1",
+        "MLX_ENABLE_TF32": "1",
+    }
+
+
+def test_generic_profile_refuses_a_stale_import_latch(monkeypatch):
+    from mlx2.adapters.gpt_oss import configure_environment
+
+    monkeypatch.setenv("MLX2_FUSED_SDPA_MIN_L", "0")
+    _latched(monkeypatch, {"MLX2_FUSED_SDPA_MIN_L": "0"})
+    with pytest.raises(import_env.ImportOrderError, match="MLX2_FUSED_SDPA_MIN_L"):
+        configure_environment()
+
+
+def test_standard_decoder_profile_refuses_latch_and_rolls_back(monkeypatch, tmp_path):
+    from mlx2.adapters import standard_decoder
+
+    monkeypatch.setattr(standard_decoder, "inspect_artifact", lambda _path: {
+        "config": {"model_type": "llama"},
+        "identity": {"path": str(tmp_path), "fingerprint": "f", "files": []},
+        "sampling_defaults": None,
+    })
+    monkeypatch.setenv("MLX2_FUSED_SDPA_MIN_L", "0")
+    _latched(monkeypatch, {"MLX2_FUSED_SDPA_MIN_L": "0"})
+
+    with pytest.raises(import_env.ImportOrderError, match="MLX2_FUSED_SDPA_MIN_L"):
+        standard_decoder.StandardDecoderAdapter(str(tmp_path))
+
+    # guarded_construction restores the caller's environment after refusal.
+    assert os.environ["MLX2_FUSED_SDPA_MIN_L"] == "0"
+
+
+def test_direct_leaf_import_registers_and_refuses_a_stale_latch():
+    """A leaf imported before its parent model must be guarded too.
+
+    Flash-Next status and diagnostic code imports these leaf modules directly.
+    A parent-only snapshot therefore cannot protect a leaf that was cached
+    under another profile before the adapter transition.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(import_env.PREFIXES)
+    }
+    env["PYTHONPATH"] = str(root / "src")
+    env["MLX_QWEN4_ATTN_FUSED_ROWS"] = "1"
+    code = """
+import os
+from mlx2.runtime.models import import_env
+from mlx2.runtime.models import qwen4_attn_rows
+
+name = qwen4_attn_rows.__name__
+assert import_env._SNAPSHOTS[name]["MLX_QWEN4_ATTN_FUSED_ROWS"] == "1"
+del os.environ["MLX_QWEN4_ATTN_FUSED_ROWS"]
+try:
+    import_env.assert_profile_applied("leaf latch regression")
+except import_env.ImportOrderError:
+    pass
+else:
+    raise AssertionError("stale direct leaf import was accepted")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_qwen_leaf_modules_that_latch_profile_state_take_snapshots():
+    from pathlib import Path
+
+    models = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "mlx2"
+        / "runtime"
+        / "models"
+    )
+    readers = {
+        "qwen4_attn_rows.py",
+        "qwen4_attn_window.py",
+        "qwen4_hc_decode.py",
+        "qwen4_moe_window.py",
+        "qwen4_routed_decode.py",
+    }
+    missing = [
+        name
+        for name in sorted(readers)
+        if "_import_env_snapshot(__name__)" not in (models / name).read_text()
+    ]
+    assert not missing, missing
+
+
+@pytest.mark.parametrize("module", PROFILE_MODULES)
+def test_adapter_profiles_clear_shared_model_selectors(monkeypatch, tmp_path, module):
+    monkeypatch.setattr(import_env, "_SNAPSHOTS", {})
+    monkeypatch.setenv("MLX2_FUSED_SDPA_MIN_L", "0")
+    monkeypatch.setenv("MLX2_QSDPA_VERIFY_KERNEL", "0")
+    monkeypatch.setenv("MLX_SDPA_BLOCKS", "128")
+    monkeypatch.setenv("MLX2_EAGER_DISPATCH_STRIDE", "3")
+    monkeypatch.setenv("MLX2_DFLASH_TOPOLOGY", "tree15")
+    monkeypatch.setenv("MLX2_TREE_BATCHED_TARGET_LAWS", "1")
+    monkeypatch.setenv("MLX_LM_STATE_CHECKPOINT_STRIDE", "17")
+    monkeypatch.setenv("MLX_LM_SYNC_TRACE", "1")
+
+    profile = _configure(module, tmp_path)
+
+    for name in (
+        "MLX2_FUSED_SDPA_MIN_L",
+        "MLX2_QSDPA_VERIFY_KERNEL",
+        "MLX_SDPA_BLOCKS",
+        "MLX2_EAGER_DISPATCH_STRIDE",
+        "MLX2_DFLASH_TOPOLOGY",
+        "MLX2_TREE_BATCHED_TARGET_LAWS",
+    ):
+        assert name not in os.environ, (module, name)
+        assert name not in profile, (module, name)
+    assert os.environ["MLX_LM_STATE_CHECKPOINT_STRIDE"] == "17"
+    assert os.environ["MLX_LM_SYNC_TRACE"] == "1"
 
 
 def test_qwen36_routed_decode_default_steps_aside_for_the_candidate(monkeypatch, tmp_path):

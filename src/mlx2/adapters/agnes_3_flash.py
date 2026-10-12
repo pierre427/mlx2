@@ -9,6 +9,7 @@ from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from ..process_env import (
     PROCESS_NUMERICS,
+    assert_process_profile_applied,
     clear_inherited_profile,
     require_process_numerics,
 )
@@ -107,6 +108,7 @@ def configure_environment() -> dict[str, str]:
                "MLX_GDN_CORE": "0", "MLX_LM_COMPILED_DECODE": "0"}
     clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_", "MLX_AGNES_"))
     os.environ.update(profile)
+    assert_process_profile_applied("the Agnes-3-Flash profile")
     return profile
 
 

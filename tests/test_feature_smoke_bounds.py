@@ -28,6 +28,8 @@ OUTPUT_BOUNDS = {"max_tokens", "max_completion_tokens", "max_output_tokens"}
 
 
 def load(path):
+    if not path.is_file():
+        pytest.skip(f"private feature-smoke harness is not exported: {path.name}")
     name = f"feature_smoke_{path.parent.name.replace('-', '_')}"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)

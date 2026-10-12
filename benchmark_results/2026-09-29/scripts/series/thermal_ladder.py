@@ -142,11 +142,15 @@ def foreign_activity(before: dict[int, dict], after: dict[int, dict], threshold:
     return active
 
 
-def lock_owner() -> str | None:
-    try:
-        return (Path("/Users/Shared/mlxuag/gpu.lock") / "owner.txt").read_text().strip()
-    except OSError:
-        return None
+def lock_owner() -> dict | None:
+    """Return the paired-lock receipt, or fail closed on missing/drifted locks."""
+    receipts = []
+    for lock in (Path("/Users/Shared/mlxuag/gpu.lock"), Path("/tmp/gpu.lock")):
+        try:
+            receipts.append(json.loads((lock / "owner.json").read_text()))
+        except (OSError, json.JSONDecodeError):
+            return None
+    return receipts[0] if receipts[0] == receipts[1] else None
 
 
 def throttled(sample: dict) -> bool:
@@ -216,6 +220,15 @@ class Stream(Client):
             "temperature": 0, "enable_thinking": False, "max_tokens": max_tokens,
             "stream": True, "stream_options": {"include_usage": True},
         }
+        if getattr(self, "top_logprobs", 0):
+            body.update(logprobs=True, top_logprobs=self.top_logprobs)
+            if getattr(self, "logprobs_token", 0):
+                body.update(
+                    logprobs_start=self.logprobs_token,
+                    logprobs_end=self.logprobs_token,
+                )
+        if getattr(self, "verify_bitexact", False):
+            body["verify_bitexact"] = True
         if self.min_tokens_supported:
             body["min_tokens"] = max_tokens
         import urllib.request
@@ -224,7 +237,7 @@ class Stream(Client):
             headers={"Content-Type": "application/json"},
         )
         started, first = time.monotonic(), None
-        content, usage, receipt, done = [], {}, {}, False
+        content, usage, receipt, probabilities, done = [], {}, {}, [], False
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             for raw in response:
                 line = raw.decode(errors="replace").strip()
@@ -238,6 +251,9 @@ class Stream(Client):
                 usage = event.get("usage") or usage
                 receipt = event.get("mlx2") or receipt
                 for choice in event.get("choices", []):
+                    probabilities.extend(
+                        (choice.get("logprobs") or {}).get("content") or []
+                    )
                     delta = choice.get("delta") or {}
                     piece = (delta.get("reasoning_content") or "") + (delta.get("content") or "")
                     if piece and first is None:
@@ -259,8 +275,10 @@ class Stream(Client):
             "server_elapsed_seconds": elapsed, "wall_seconds": wall,
             "prefill_tokens_per_second": ((prompt_tokens - cached) / ttft) if ttft and ttft > 0 else None,
             "decode_tokens_per_second": ((completion - 1) / decode_window) if completion > 1 and decode_window > 0 else None,
+            **({"logprobs": probabilities} if self.top_logprobs else {}),
             "receipt": {key: receipt.get(key) for key in ("cache", "profile", "route", "cached_tokens",
-                                                          "ordinary_compute_width", "speculation")}
+                                                          "ordinary_compute_width", "speculation",
+                                                          "qualification")}
             | {"mtp": {key: (receipt.get("mtp") or {}).get(key) for key in ("route", "num_draft", "acceptance_rate", "observed_compute_widths")}
                if receipt.get("mtp") else None},
         }
@@ -280,6 +298,24 @@ def median(values):
     return statistics.median(values) if values else None
 
 
+_IDENTIFIER_DASHES = str.maketrans({
+    "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "―": "-", "−": "-",
+})
+
+
+def contains_identifier(content: str, identifier: str) -> bool:
+    """Match an exact identifier while tolerating typographic dash substitution."""
+    return identifier in content.translate(_IDENTIFIER_DASHES)
+
+
+WARM_HIT_MIN_FRACTION = 0.9
+
+
+def warm_hit(row) -> bool:
+    """Exclude reuse of only a fixed chat-template preamble."""
+    return row["cached_tokens"] >= WARM_HIT_MIN_FRACTION * max(row["prompt_tokens"], 1)
+
+
 def summarize_run(cold: dict, warm: dict, needles: list[str]) -> dict:
     lanes = len(needles)
     cold_rows, warm_rows = cold["rows"], warm["rows"]
@@ -294,13 +330,23 @@ def summarize_run(cold: dict, warm: dict, needles: list[str]) -> dict:
         "decode_tokens_per_second": median([row["decode_tokens_per_second"] for row in cold_rows]),
         "warm_decode_tokens_per_second": median([row["decode_tokens_per_second"] for row in warm_rows]),
         "aggregate_decode_tokens_per_second": cold["aggregate_completion_tokens_per_second"],
-        "needle_correct": sum(needle in row["content"] for row, needle in zip(cold_rows, needles))
-        + sum(needle in row["content"] for row, needle in zip(warm_rows, needles)),
+        "needle_correct": sum(
+            contains_identifier(row["content"], needle)
+            for row, needle in zip(cold_rows, needles)
+        ) + sum(
+            contains_identifier(row["content"], needle)
+            for row, needle in zip(warm_rows, needles)
+        ),
         "needle_total": 2 * lanes,
         "streams_done": all(row["done"] for row in cold_rows + warm_rows),
         "cold_cached_max_tokens": max(row["cached_tokens"] for row in cold_rows),
         "cold_cached_max_fraction": max(row["cached_tokens"] / max(row["prompt_tokens"], 1) for row in cold_rows),
-        "warm_apc_hits": sum(row["cached_tokens"] > 0 for row in warm_rows),
+        "warm_apc_hits": sum(warm_hit(row) for row in warm_rows),
+        "warm_hit_min_fraction": WARM_HIT_MIN_FRACTION,
+        "warm_cached_min_fraction": min(
+            (row["cached_tokens"] / max(row["prompt_tokens"], 1) for row in warm_rows),
+            default=None,
+        ),
         "warm_equals_cold": sum(a["content"] == b["content"] for a, b in zip(cold_rows, warm_rows)),
         "prompt_tokens": [row["prompt_tokens"] for row in cold_rows],
         "completion_tokens": [row["completion_tokens"] for row in cold_rows],
@@ -335,8 +381,20 @@ def main(argv=None):
     parser.add_argument("--max-retries", type=int, default=2)
     parser.add_argument("--foreign-cpu-threshold", type=float, default=2.0)
     parser.add_argument("--swapout-tolerance-pages", type=int, default=0)
+    parser.add_argument("--top-logprobs", type=int, default=0)
+    parser.add_argument("--logprobs-token", type=int, default=0)
+    parser.add_argument("--verify-bitexact", action="store_true")
     args = parser.parse_args(argv)
+    if not 0 <= args.top_logprobs <= 20:
+        parser.error("--top-logprobs must be 0..20")
+    if args.logprobs_token < 0:
+        parser.error("--logprobs-token must be nonnegative")
+    if args.logprobs_token and not args.top_logprobs:
+        parser.error("--logprobs-token requires --top-logprobs")
     client = Stream(args.url, args.timeout, args.model_id)
+    client.top_logprobs = args.top_logprobs
+    client.logprobs_token = args.logprobs_token
+    client.verify_bitexact = args.verify_bitexact
     if not args.server_pid:
         from urllib.parse import urlparse
         port = urlparse(args.url).port
@@ -349,6 +407,9 @@ def main(argv=None):
         "schema": "mlx2.thermal-context-ladder.v1", "model": args.model, "route": args.route,
         "max_context": args.max_context, "server_pid": args.server_pid, "runs_per_cell": args.runs, "max_tokens": args.max_tokens,
         "thermal_policy": THERMAL_POLICY, "root": str(ROOT),
+        "top_logprobs": args.top_logprobs,
+        "logprobs_token": args.logprobs_token,
+        "verify_bitexact": args.verify_bitexact,
         "design": __doc__, "started_at": time.time(), "initial": client.status(), "cells": [],
     }
 
@@ -504,6 +565,7 @@ def main(argv=None):
                 and all(row["summary"]["streams_done"] for row in runs)
                 and all(row["summary"]["needle_correct"] == row["summary"]["needle_total"] for row in runs)
                 and all(row["summary"]["warm_apc_hits"] == width for row in runs)
+                and all(row["summary"]["warm_equals_cold"] == width for row in runs)
                 and not any(row["contaminated"] for row in runs)
             )
             cell["quality"] = (f"{sum(row['summary']['needle_correct'] for row in runs)}/"

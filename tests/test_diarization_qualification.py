@@ -20,6 +20,16 @@ from mlx2.diarization_qualification import (
     load_qualified_diarization_cli,
 )
 
+ROOT = Path(__file__).resolve().parents[1]
+PRIVATE_PLANS = (
+    ROOT / "qualification/plans/nemotron3-diarization-v3-calibrated.json",
+    ROOT / "qualification/plans/nemotron3-diarization-v4-m3.json",
+)
+pytestmark = pytest.mark.skipif(
+    not all(path.is_file() for path in PRIVATE_PLANS),
+    reason="private diarization qualification plans are not exported",
+)
+
 
 def _receipt():
     return {"schema": "mlx2.diarization-cli-qualification.v2",

@@ -100,7 +100,7 @@ def _clock(monkeypatch, per_token=0.002):
     return rounds
 
 
-def _fn_generator(model, admission, **kwargs):
+def _fn_generator(model, admission, *, handoff_max_width=3, **kwargs):
     # Flash-Next serving shape, scaled: one-chunk prompts, stall target 100 ms.
     return G.BatchGenerator(
         model,
@@ -112,7 +112,7 @@ def _fn_generator(model, admission, **kwargs):
         self_mtp=dict(SELF_MTP, prefill_step_size=1024),
         mtp_admission=admission,
         mtp_ordinary_handoff=MTPOrdinaryHandoffPolicy.from_value(
-            {"enabled": True, "max_mtp_width": 3}
+            {"enabled": True, "max_mtp_width": handoff_max_width}
         ),
         decode_time_fairness={"enabled": True, "stall_target_ms": 100.0},
         prefill_scheduling={"order": "srpt", "one_slice_contention": True},
@@ -133,7 +133,10 @@ def _drain(gen, rounds, limit=60):
 def test_coarrivals_split_by_the_first_boundary_prepare_together(model, monkeypatch):
     rounds = _clock(monkeypatch)
     admission = _FirstBoundaryQueues(keep=2)
-    gen = _fn_generator(model, admission)
+    # Keep this route inside the speculative width policy. Wider bursts are
+    # now intentionally priced and prepared as ordinary cohorts before native
+    # admission, so they cannot exercise the split-boundary seam below.
+    gen = _fn_generator(model, admission, handoff_max_width=8)
     try:
         prompts = [[(5 * k + i) % 50 + 1 for i in range(60)] for k in range(8)]
         gen.insert(prompts, max_tokens=[40] * 8)

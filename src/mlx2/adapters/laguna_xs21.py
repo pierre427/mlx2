@@ -14,6 +14,7 @@ from .external_draft_policy import ExternalDraftAdapterMixin
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from ..process_env import (
     PROCESS_NUMERICS,
+    assert_process_profile_applied,
     clear_inherited_profile,
     require_process_numerics,
 )
@@ -234,6 +235,7 @@ def configure_environment() -> dict[str, str]:
     }
     clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
+    assert_process_profile_applied("the Laguna XS.2.1 profile")
     return profile
 
 

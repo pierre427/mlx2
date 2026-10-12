@@ -3,6 +3,8 @@ import copy,importlib.abc,json,sys,tempfile,unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 ROOT=Path(__file__).resolve().parents[1]
+PRIVATE_LONG_RECEIPT=ROOT/'qualification/runs/stock27b-wall-7df61ae6-20261004/receipt.json'
+PRIVATE_MODEL_CONFIG=Path.home()/'mlx-models/Qwen3.8-27B-MLX-4bit/config.json'
 class Guard(importlib.abc.MetaPathFinder):
     def find_spec(self,name,path=None,target=None):
         if name=='mlx' or name.startswith('mlx.') or name=='_paged_kv_native':raise RuntimeError('runtime forbidden')
@@ -61,8 +63,9 @@ class Tests(unittest.TestCase):
             setattr(raw,name,value)
         cap['scratch_bytes']=1
         with self.assertRaises(ValueError):L.require_long_capabilities(raw,backend,L.COUNTS)
+    @unittest.skipUnless(PRIVATE_MODEL_CONFIG.is_file(), 'private Qwen3.8 model config is not installed')
     def test_whole_projection_charge_is_not_hidden_in_short_budget(self):
-        config=json.loads(Path('~/mlx-models/Qwen3.8-27B-MLX-4bit/config.json').read_text())['text_config']
+        config=json.loads(PRIVATE_MODEL_CONFIG.read_text())['text_config']
         candidate=NS(args=NS(**config),native_layer_count=16,bootstrap_staging_bytes=lambda n:0)
         charge=S.scratch_bound(candidate,L.COUNTS,long_fused=True)
         self.assertGreater(charge,24<<30);self.assertLess(charge,40<<30)
@@ -97,6 +100,7 @@ class Tests(unittest.TestCase):
             bad={**args,key:value}
             with self.assertRaises(ValueError):PagedAttentionPlan(**bad,profile='prefill_long_nax_v1',max_work_items=2*8192*24,max_scratch_bytes=0)
 
+    @unittest.skipUnless(PRIVATE_LONG_RECEIPT.is_file(), 'private long-profile receipt is not exported')
     def test_pinned_whole_prompts_and_zero_score_scratch_proof(self):
         self.assertEqual(tuple(map(len,prompt_ids())),L.COUNTS)
         self.assertEqual(physical_prefill()['grouped_multirow_row_count'],222064)

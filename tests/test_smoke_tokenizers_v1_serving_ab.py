@@ -57,6 +57,10 @@ def _arm(*, candidate, response=None):
 
 
 def test_live_retained_manifest_and_artifact_identity_are_exact():
+    if not smoke.MANIFEST.is_file():
+        import pytest
+
+        pytest.skip("private retained-worker manifest is not exported")
     result = smoke.preflight()
     missing_failures = {
         f"manifest {field} identity mismatch"

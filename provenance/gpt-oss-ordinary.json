@@ -13,7 +13,9 @@
     "placed GPU-free exact topology and index closure inspection in mlx2.adapters.gpt_oss",
     "kept GPT-OSS Puzzle per-layer expert counts and full/rotating KV cache windows",
     "selected ordinary decode only with APCv2 layered cache layout and pending qualification",
-    "excluded MTP, tools, and reasoning routes pending implementation and qualification"
+    "excluded MTP and tools routes pending implementation and qualification; harmony reasoning (Capability.REASONING) was added later, see provenance/gpt-oss-harmony-guard.json",
+    "removed the source's unused speculative-rollback kv_sink hooks and the stock model's supports_speculative_rollback flag (no speculative route is declared)",
+    "replaced the Apple copyright header on gpt_oss_puzzle.py, which the lab wrote in the fork, with an SPDX/attribution line; the MIT notice is in the root NOTICE"
   ],
   "validation": [
     "CPU-only inspection of the local GPT-OSS 20B and Puzzle 88B artifacts",

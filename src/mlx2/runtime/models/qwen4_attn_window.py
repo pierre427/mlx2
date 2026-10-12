@@ -50,7 +50,10 @@ from typing import List, Optional, Sequence
 
 import mlx.core as mx
 
+from .import_env import snapshot as _import_env_snapshot
 from . import qwen4_attn_rows as AR
+
+_import_env_snapshot(__name__)
 
 ENV_NAME = "MLX_QWEN4_ROW_EXACT_ATTN_WINDOW"
 # Rows per window (copy-draft windows reach 17; omlx serves 16).

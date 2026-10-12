@@ -8,6 +8,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN = ROOT / "qualification/runs/varlen-closeout-current-main-20261005"
+pytestmark = pytest.mark.skipif(
+    not RUN.is_dir(), reason="private varlen closeout harnesses are not exported"
+)
 
 
 def load(name: str, path: Path):

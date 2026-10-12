@@ -3,10 +3,18 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
+
+SCRIPT = (Path(__file__).resolve().parents[1] / "qualification" / "runs"
+          / "gemma4-defaults-20260925" / "smoke_http.py")
+pytestmark = pytest.mark.skipif(
+    not SCRIPT.is_file(), reason="private Gemma 4 diagnostic harness is not exported"
+)
+
 
 def _runner():
-    path = (Path(__file__).resolve().parents[1] / "qualification" / "runs"
-            / "gemma4-defaults-20260925" / "smoke_http.py")
+    path = SCRIPT
     spec = importlib.util.spec_from_file_location("gemma4_smoke_http", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

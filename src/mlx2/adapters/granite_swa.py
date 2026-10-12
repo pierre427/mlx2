@@ -12,7 +12,12 @@ from .artifact_paths import shard_within_artifact
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from .ordinary_text import OrdinaryTextAdapter
-from ..process_env import PROCESS_NUMERICS, require_process_numerics
+from ..process_env import (
+    PROCESS_NUMERICS,
+    assert_process_profile_applied,
+    clear_inherited_profile,
+    require_process_numerics,
+)
 
 
 DESCRIPTOR = ModelDescriptor(
@@ -198,8 +203,10 @@ class GraniteSWAAdapter(OrdinaryTextAdapter):
         self.layout = DESCRIPTOR.cache_layout
         # Refuse an explicit TF32 value before the profile overwrites it.
         require_process_numerics("the Granite SWA profile")
+        clear_inherited_profile(())
         self.environment = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", **PROCESS_NUMERICS}
         os.environ.update(self.environment)
+        assert_process_profile_applied("the Granite SWA profile")
         claim_stock_moe(self, "the Granite SWA adapter")
         path = Path(self.identity["path"])
         import mlx.core as mx
