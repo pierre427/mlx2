@@ -42,7 +42,12 @@ def _engine(**overrides):
 def _adapter():
     tokenizer = SimpleNamespace(encode=lambda text: [1, 2, 3])
     model = SimpleNamespace(args=SimpleNamespace(text_config={"vocab_size": 64}))
-    return SimpleNamespace(model=model, tokenizer=tokenizer, identity={"fingerprint": "f"})
+    return SimpleNamespace(
+        model=model,
+        tokenizer=tokenizer,
+        identity={"fingerprint": "f"},
+        draft_loop_prior_resource=vt.PRIOR_RESOURCE,
+    )
 
 
 @pytest.mark.parametrize(
@@ -82,6 +87,8 @@ def test_selection_adds_the_probed_topology(monkeypatch):
                    "draft_loop": {"by_width": {"1": [3, 7]}, "threshold": -0.4, "cohort": "any"}}
     assert config == {"num_draft": 3}  # the adapter's mapping is not mutated
     assert seen["identity"]["lane_law"] == "lane-simd-v1" and seen["base"] == 3
+    assert seen["identity"]["draft_loop_prior_resource"] == vt.PRIOR_RESOURCE
+    assert seen["prior"] == vt.load_prior_grid(vt.PRIOR_RESOURCE)
     assert seen["max_end"] == vt.MAX_END and seen["vocab_size"] == 64
     assert seen["threshold"] == -0.4
     assert seen["widths"] == [1]  # max_lanes 1 caps the probed widths
@@ -216,6 +223,7 @@ class _WindowedAdapter:
 
     max_exact_self_mtp_verification_rows = 9
     max_exact_self_mtp_rollback_rows = 9
+    draft_loop_prior_resource = vt.PRIOR_RESOURCE
 
     def __init__(self):
         self.tokenizer = SimpleNamespace(encode=lambda text: [1, 2, 3])
@@ -254,6 +262,38 @@ def test_an_undeclared_adapter_keeps_the_prior_ceiling(monkeypatch):
     ServingEngine._select_draft_loop(_engine(), _adapter(), {"num_draft": 3})
     assert seen["max_end"] == vt.MAX_END
     assert seen["identity"]["exact_self_mtp_rows"] is None
+
+
+def test_auto_loop_refuses_an_adapter_without_its_own_acceptance_prior(monkeypatch):
+    from mlx2.serving import ServingEngine
+
+    adapter = _adapter()
+    adapter.draft_loop_prior_resource = None
+    monkeypatch.setattr(vt, "resolve_topology", lambda *a, **k: pytest.fail("probed"))
+    engine = _engine()
+    config = {"num_draft": 3}
+    assert ServingEngine._select_draft_loop(engine, adapter, config) is config
+    receipt = engine.verify_topology_receipt
+    assert receipt["selected"] is None
+    assert receipt["source"] == "adapter"
+    assert "no source-bound" in receipt["reason"]
+
+
+def test_qwen38_prior_does_not_leak_to_code_sharing_model_families():
+    from mlx2.adapters.qwen35_4b import Qwen354BAdapter
+    from mlx2.adapters.qwen35_9b import Qwen359BAdapter
+    from mlx2.adapters.qwen36_27b import Qwen3627BAdapter
+    from mlx2.adapters.qwen36_35b import Qwen3635BA3BAdapter
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
+
+    assert Qwen3827BAdapter.draft_loop_prior_resource == vt.PRIOR_RESOURCE
+    for adapter_type in (
+        Qwen354BAdapter,
+        Qwen359BAdapter,
+        Qwen3627BAdapter,
+        Qwen3635BA3BAdapter,
+    ):
+        assert adapter_type.draft_loop_prior_resource is None
 
 
 def test_a_selection_past_the_exact_window_is_refused(monkeypatch):
@@ -322,11 +362,10 @@ def test_a_window_with_no_end_above_the_base_depth_skips_the_probe(monkeypatch):
 
 
 def test_production_adapters_cap_the_probe_at_their_declared_window(monkeypatch):
-    from mlx2.adapters.flash_next import FlashNextAdapter
     from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
     from mlx2.serving import ServingEngine
 
-    expected = {Qwen3827BAdapter: 8, FlashNextAdapter: vt.MAX_END}
+    expected = {Qwen3827BAdapter: 8}
     for adapter_type, max_end in expected.items():
         adapter = object.__new__(adapter_type)
         adapter.tokenizer = SimpleNamespace(encode=lambda text: [1, 2, 3])

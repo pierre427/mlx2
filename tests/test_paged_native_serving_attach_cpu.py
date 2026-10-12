@@ -10,6 +10,35 @@ import pytest
 from mlx2 import serving
 
 
+class _Provider:
+    revision = "r1"
+    protocol = "native-test"
+    candidate_type = object
+
+    def validate_candidate(self, candidate):
+        assert candidate._native_continuation_provider is self
+
+    def probe(self, *args, candidate, **kwargs):
+        from mlx2.runtime.paged_native_batch_lifecycle import probe_queued_native_qwen3
+        return probe_queued_native_qwen3(*args, candidate, **kwargs)
+
+    def prepare(self, *args, **kwargs):
+        from mlx2.runtime.paged_native_batch_lifecycle import prepare_queued_native_first_response
+        return prepare_queued_native_first_response(*args, **kwargs)
+
+    def create_continuation(self, **kwargs):
+        return kwargs
+
+    def run_research(self, *args, candidate, **kwargs):
+        raise AssertionError("unused")
+
+    def run_research_pair(self, *args, candidate, **kwargs):
+        raise AssertionError("unused")
+
+    def receipt(self):
+        return {"route": self.protocol}
+
+
 def _job(**request):
     return SimpleNamespace(
         uid=3, preempted=False, cached_tokens=0,
@@ -67,6 +96,7 @@ def test_native_attach_uses_live_identity_price_then_installs_or_retires(monkeyp
                              poisoned=False, pending_epochs=(),
                              ledger=SimpleNamespace(pending_count=0))
     candidate = SimpleNamespace(backend=SimpleNamespace(writer=writer))
+    candidate._native_continuation_provider = _Provider()
     created = []
     adapter = SimpleNamespace(
         identity={"path": "/tmp/model", "fingerprint": "r1"},
@@ -163,9 +193,10 @@ def test_native_attach_retains_owner_if_retirement_raises(monkeypatch, tmp_path)
     owner = PendingOwner()
     adapter = SimpleNamespace(
         identity={"path": "/tmp/model", "fingerprint": "r1"},
-        create_native_paged_qwen3_request=lambda **_: (
-            owner, SimpleNamespace(backend=SimpleNamespace(
-                writer=SimpleNamespace(pool=SimpleNamespace(free_count=8))))))
+        create_native_paged_qwen3_request=lambda **_: (owner, candidate))
+    candidate = SimpleNamespace(backend=SimpleNamespace(
+        writer=SimpleNamespace(pool=SimpleNamespace(free_count=8))))
+    candidate._native_continuation_provider = _Provider()
     with pytest.raises(RuntimeError, match="terminal pending"):
         serving.install_explicit_native_qwen3_request(
             object(), adapter, _job(), prompt_tokens=[1, 2], maximum=2,

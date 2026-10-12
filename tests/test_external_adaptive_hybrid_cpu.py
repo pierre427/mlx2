@@ -20,7 +20,7 @@ from mlx2.runtime.models.cache import ArraysCache
 from mlx2.runtime.sample_utils import LaneRNG
 
 
-def pair(monkeypatch):
+def pair(monkeypatch, *, target_tree_executor_provider=None):
     target = tiny_target()
     draft = XPressDraftModel(
         XPressConfig(
@@ -66,6 +66,7 @@ def pair(monkeypatch):
         num_draft=2,
         prefill_step_size=4,
         adaptive_verification=policy,
+        target_tree_executor_provider=target_tree_executor_provider,
     )
     engine.acceptance_estimator.observe([0, 0], 0, rejected=True)
     engine.acceptance_estimator.rounds = 1
@@ -472,7 +473,6 @@ def test_actual_mamba2_continuous_batch_stop_and_final_budget_boundary(monkeypat
 
 def test_tensorfold_dispatch_seam_groups_depths_with_cpu_hybrid_substitute(monkeypatch):
     """Exercise real executor dispatch signatures, not native TensorFold kernels."""
-    from mlx2.runtime import qwen38_tensorfold
     from mlx2.runtime.hybrid_verify_rows import HybridVerifyRows
 
     monkeypatch.setenv("MLX2_QWEN_TARGET_EXECUTION", "tensorfold")
@@ -502,22 +502,59 @@ def test_tensorfold_dispatch_seam_groups_depths_with_cpu_hybrid_substitute(monke
         )
         return logits, hidden, tx
 
-    def single(
-        model, tokens, parents, cache, capture_layers, source_root, *, cached=False
-    ):
-        return substitute(
-            model,
-            [tokens],
-            [parents],
-            [cache],
-            capture_layers,
-            source_root,
-            cached=cached,
-        )
+    from mlx2.runtime.target_tree_executor import TargetTreeDispatchMetrics
 
-    monkeypatch.setattr(qwen38_tensorfold, "forward_many", substitute)
-    monkeypatch.setattr(qwen38_tensorfold, "forward", single)
-    target, _, engine = pair(monkeypatch)
+    class CpuTargetTreeProvider:
+        source_identity = (("kind", "cpu-hybrid-substitute"),)
+        source_revision_token = "cpu-hybrid-substitute-v1"
+        protocol = "cpu_hybrid_target_tree_v1"
+        maximum_cohort_width = 4
+
+        def validate_cohort(self, width, configured_limit):
+            if not 1 <= width <= min(configured_limit, self.maximum_cohort_width):
+                raise ValueError("CPU target-tree cohort exceeds bound")
+
+        def validate_revision(self):
+            return None
+
+        def _bind(self, result):
+            transaction = result[2]
+            transaction.provider_protocol = self.protocol
+            transaction.provider_revision_token = self.source_revision_token
+            return result
+
+        def forward(self, model, inputs, parents, cache, layers, *, cached):
+            return self._bind(substitute(
+                model, [inputs], [parents], [cache], layers, cached=cached
+            ))
+
+        def forward_many(
+            self, model, inputs, parents, caches, layers, *, cached,
+            configured_limit,
+        ):
+            self.validate_cohort(len(caches), configured_limit)
+            return self._bind(substitute(
+                model, inputs, parents, caches, layers, cached=cached
+            ))
+
+        def dispatch_metrics(self, width, transaction, *, cached):
+            return TargetTreeDispatchMetrics(
+                width=width,
+                physical_packed=False,
+                executor_cached=False,
+                cached=cached,
+                provider_protocol=self.protocol,
+            )
+
+        def receipt(self):
+            return {
+                "provider": self.protocol,
+                "source_revision_token": self.source_revision_token,
+            }
+
+    target, _, engine = pair(
+        monkeypatch, target_tree_executor_provider=CpuTargetTreeProvider()
+    )
     engine.insert(
         [[1, 2, 3], [1, 2], [2, 3, 4], [2, 3]],
         max_tokens=[8] * 4,
@@ -526,7 +563,7 @@ def test_tensorfold_dispatch_seam_groups_depths_with_cpu_hybrid_substitute(monke
     prefill_all(engine)
     engine._round(list(engine.lanes.values()))
     assert dispatched == [(2, 3), (2, 2)]
-    assert engine.scheduler_stats["external_tensorfold_cohort_rounds"] == 2
+    assert engine.scheduler_stats["external_target_tree_cohort_rounds"] == 2
     for lane in engine.lanes.values():
         fresh = target.make_cache()
         mx.eval(target(mx.array([lane.history]), cache=fresh))

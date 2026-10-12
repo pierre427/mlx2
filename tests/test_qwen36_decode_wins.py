@@ -9,12 +9,19 @@ from mlx2.runtime.models import qwen4_fused_gdn_verify as V
 from mlx2.runtime.models import qwen4_moe_window as W
 from mlx2.runtime.models import qwen4_routed_decode as RD
 from mlx2.runtime.models import qwen36_35b as Q
+from mlx2.runtime.models.moe_routing_contract import (
+    QWEN4_E512_K10_ROUTING,
+    QWEN36_E256_K8_ROUTING,
+)
 
 
 @pytest.mark.parametrize("ne,k", [(256, 8), (512, 10)])
 def test_router_launch_geometry(monkeypatch, ne, k):
     monkeypatch.setattr(RD, "runtime_supported", lambda: True)
-    assert W.admit_router_topk(mx.zeros((1, ne), mx.bfloat16), k, True) is None
+    assert W.admit_router_topk(
+        mx.zeros((1, ne), mx.bfloat16), k, True,
+        contract=(QWEN36_E256_K8_ROUTING if k == 8 else QWEN4_E512_K10_ROUTING),
+    ) is None
     calls = []
 
     def kernel(name):
@@ -27,7 +34,13 @@ def test_router_launch_geometry(monkeypatch, ne, k):
         return run
 
     monkeypatch.setattr(W, "_kernel", kernel)
-    out = W.router_topk(mx.zeros((1, ne), mx.bfloat16), top_k=k)
+    out = W.router_topk(
+        mx.zeros((1, ne), mx.bfloat16),
+        top_k=k,
+        contract=(
+            QWEN36_E256_K8_ROUTING if k == 8 else QWEN4_E512_K10_ROUTING
+        ),
+    )
     assert out[0].shape == (1, k)
     assert dict(calls[0]["template"])["TOPK"] == k
 
@@ -35,7 +48,10 @@ def test_router_launch_geometry(monkeypatch, ne, k):
 @pytest.mark.parametrize("ne,k", [(512, 8), (256, 10), (256, 6)])
 def test_router_launch_refuses_mixed_geometry(monkeypatch, ne, k):
     monkeypatch.setattr(RD, "runtime_supported", lambda: True)
-    reason = W.admit_router_topk(mx.zeros((1, ne), mx.bfloat16), k, True)
+    reason = W.admit_router_topk(
+        mx.zeros((1, ne), mx.bfloat16), k, True,
+        contract=(QWEN36_E256_K8_ROUTING if k == 8 else QWEN4_E512_K10_ROUTING),
+    )
     assert reason is not None and f"E{ne}/top-{k}" in reason
 
 
@@ -88,6 +104,8 @@ def test_adapter_new_selections_explicit_default_off(monkeypatch):
         "fused_gdn_verify": "MLX_QWEN36_FUSED_GDN_VERIFY",
         "fused_gdn_batch_verify": "MLX_QWEN36_FUSED_GDN_BATCH_VERIFY",
         "moe_window": "MLX_QWEN36_MOE_WINDOW",
+        "moe_window_batch_decode": "MLX_QWEN36_MOE_WINDOW_BATCH_DECODE",
+        "moe_window_verify": "MLX_QWEN36_MOE_WINDOW_VERIFY",
     }
     for name in names.values():
         monkeypatch.setenv(name, "1")
@@ -106,6 +124,94 @@ def test_adapter_new_selections_explicit_default_off(monkeypatch):
     assert profile[names["moe_routed_decode"]] == "gate_up"
     assert profile[names["moe_topk_fold"]] == "launch"
     assert profile[names["moe_window"]] == "1"
+
+
+def test_adapter_moe_window_consumers_are_independent():
+    assert A.moe_window_consumers({"moe_window_batch_decode": True}) == (
+        "batch_decode",
+    )
+    assert A.moe_window_consumers({"moe_window_verify": True}) == ("verify",)
+    assert A.moe_window_consumers(
+        {"moe_window_batch_decode": True, "moe_window_verify": True}
+    ) == ("batch_decode", "verify")
+    # The compatibility umbrella retains its historical all-consumer meaning.
+    assert A.moe_window_consumers({"moe_window": True}) == (
+        "batch_decode",
+        "verify",
+        "row_exact",
+    )
+    with pytest.raises(ValueError, match="cannot be mixed"):
+        A.configure_environment(
+            {"moe_window": True, "moe_window_batch_decode": True}
+        )
+
+
+def test_adapter_independent_moe_window_environment_is_explicit_only(monkeypatch):
+    names = {
+        "moe_window_batch_decode": "MLX_QWEN36_MOE_WINDOW_BATCH_DECODE",
+        "moe_window_verify": "MLX_QWEN36_MOE_WINDOW_VERIFY",
+    }
+    for name in names.values():
+        monkeypatch.setenv(name, "1")
+    assert all(name not in A.configure_environment() for name in names.values())
+    profile = A.configure_environment(
+        {"moe_window_batch_decode": True, "moe_window_verify": True}
+    )
+    assert all(profile[name] == "1" for name in names.values())
+    assert profile["MLX_QWEN36_DECODE_WINS"] == "1"
+
+
+def test_qwen36_live_import_exemptions_cover_both_process_global_setters():
+    assert {
+        "MLX2_MOE_NAX_GATHER",
+        "MLX2_MOE_RHS_PAD_POLICY",
+    } <= A.LIVE_APPLIED_ENV
+
+
+def test_numerical_contract_binds_ambient_fused_gdn_from_live_layers(monkeypatch):
+    from types import SimpleNamespace
+
+    class FakeGDN:
+        def __init__(self, mode):
+            self.fused_gdn_decode_mode = mode
+
+    monkeypatch.setattr(Q, "GatedDeltaNet", FakeGDN)
+    adapter = object.__new__(A.Qwen3635BA3BAdapter)
+    adapter._kernels = {"moe_topk_fold": "launch"}
+    adapter.moe_nax_gather = "fused"
+    adapter.model = SimpleNamespace(
+        named_modules=lambda: (
+            ("gdn0", FakeGDN("stock")),
+            ("gdn1", FakeGDN("stock")),
+        )
+    )
+    contract = adapter.execution_numerics_contract()["qwen36_target"]
+    assert contract["decode_kernels"] == {
+        "fused_gdn_decode": False,
+        "moe_topk_fold": "launch",
+    }
+
+    adapter.model = SimpleNamespace(
+        named_modules=lambda: (("gdn0", FakeGDN("fused")),)
+    )
+    assert adapter.execution_numerics_contract()["qwen36_target"][
+        "decode_kernels"
+    ]["fused_gdn_decode"] is True
+
+
+def test_numerical_contract_refuses_declared_live_fused_gdn_disagreement(monkeypatch):
+    from types import SimpleNamespace
+
+    class FakeGDN:
+        fused_gdn_decode_mode = "stock"
+
+    monkeypatch.setattr(Q, "GatedDeltaNet", FakeGDN)
+    adapter = object.__new__(A.Qwen3635BA3BAdapter)
+    adapter._kernels = {"fused_gdn_decode": True}
+    adapter.moe_nax_gather = "off"
+    adapter.model = SimpleNamespace(named_modules=lambda: (("gdn", FakeGDN()),))
+    with pytest.raises(ValueError, match="disagrees with live layers"):
+        adapter.execution_numerics_contract()
 
 
 def test_gdn_batch_switch_exists():
@@ -306,18 +412,23 @@ def test_split_gate_up_admission_serves_exact_top8_geometry():
     x = _ShapeOnly((1, 1, 2048), mx.bfloat16)
     inds = _ShapeOnly((1, 8), mx.uint32)
     scores = _ShapeOnly((1, 8), mx.bfloat16)
-    ok = RD.admit_split_routed_decode(x, inds, scores, *tables(256))
+    ok = RD.admit_split_routed_decode(
+        x, inds, scores, *tables(256), contract=QWEN36_E256_K8_ROUTING
+    )
     assert ok.accepted, ok.reason
     # A consistent E128 top-8 model is not the Qwen3.6 geometry: the width-512
     # intermediate exception must not silently widen to it.
-    other = RD.admit_split_routed_decode(x, inds, scores, *tables(128))
-    assert not other.accepted and "intermediate" in other.reason
+    other = RD.admit_split_routed_decode(
+        x, inds, scores, *tables(128), contract=QWEN36_E256_K8_ROUTING
+    )
+    assert not other.accepted and "E128/top-8" in other.reason
     # Nor does the exception reach a top-10 (Flash-Next-shaped) launch.
     ten = _ShapeOnly((1, 10), mx.uint32)
     wide = RD.admit_split_routed_decode(
-        x, ten, _ShapeOnly((1, 10), mx.bfloat16), *tables(256)
+        x, ten, _ShapeOnly((1, 10), mx.bfloat16), *tables(256),
+        contract=QWEN36_E256_K8_ROUTING,
     )
-    assert not wide.accepted and "intermediate" in wide.reason
+    assert not wide.accepted and "E256/top-10" in wide.reason
 
 
 def _qwen36_block(monkeypatch):
@@ -326,9 +437,8 @@ def _qwen36_block(monkeypatch):
 
     from mlx import nn
 
-    from mlx2.runtime.models import qwen36_moe_decode as M
-
     from mlx2.runtime.models import qwen3_next as QN
+    from mlx2.runtime.models import qwen36_moe_decode as M
 
     # Split gate/up tables, as the Qwen3.6 artifacts hold them.
     monkeypatch.setattr(QN, "_MOE_FUSED_GATE_UP", False)
@@ -347,7 +457,7 @@ def _qwen36_block(monkeypatch):
     monkeypatch.setattr(
         RD,
         "admit_split_routed_decode",
-        lambda *a: RD.RoutedDecodeAdmission(True, "eligible"),
+        lambda *a, **k: RD.RoutedDecodeAdmission(True, "eligible"),
     )
     monkeypatch.setattr(RD, "runtime_supported", lambda: True)
     monkeypatch.setattr(RD, "served_swiglu_refusal", lambda: None)
@@ -358,7 +468,7 @@ def _qwen36_block(monkeypatch):
     )
     launches = []
 
-    def router_topk(logits, *, top_k):
+    def router_topk(logits, *, top_k, **_contract):
         launches.append(logits.dtype)
         rows = logits.size // logits.shape[-1]
         return (
@@ -372,6 +482,27 @@ def _qwen36_block(monkeypatch):
     block.set_moe_routed_decode_mode("gate_up_down")
     block.set_moe_topk_mode("launch")
     return block, launches, nn
+
+
+def test_decode_wins_reports_window_consumers_and_keeps_aggregate(monkeypatch):
+    from types import SimpleNamespace
+
+    block, _, _ = _qwen36_block(monkeypatch)
+    block.moe_window_calls = {"batch_decode": 3, "verify": 5, "row_exact": 7}
+    model = SimpleNamespace(named_modules=lambda: (("moe", block),))
+    report = Q.qwen36_decode_wins_stats(model)
+    assert report["moe"]["window_calls"] == 15
+    assert report["moe"]["window_calls_by_consumer"] == {
+        "batch_decode": 3,
+        "verify": 5,
+        "row_exact": 7,
+    }
+    Q.qwen36_decode_wins_stats(model, reset=True)
+    assert block.moe_window_calls == {
+        "batch_decode": 0,
+        "verify": 0,
+        "row_exact": 0,
+    }
 
 
 def test_qwen36_topk_launch_runs_only_admitted_router_logits(monkeypatch):

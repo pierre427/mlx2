@@ -420,9 +420,9 @@ def test_ready_drain_modes_are_exact_and_all_keeps_lanes_in_lockstep(monkeypatch
     widths = []
     real_round = batch._round
 
-    def record(cohort):
+    def record(cohort, *, forced_depth=None):
         widths.append(len(cohort))
-        return real_round(cohort)
+        return real_round(cohort, forced_depth=forced_depth)
 
     monkeypatch.setattr(batch, "_round", record)
     uids = batch.insert(prompts, max_tokens=[24, 24], sampling_configs=[{"sampling_temp": 0}] * 2)

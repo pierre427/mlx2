@@ -36,6 +36,7 @@ from mlx2.runtime.streamed_load import (  # noqa: E402
 )
 from mlx2.runtime.weight_stream import (  # noqa: E402
     BoundShards,
+    ExpertSliceReader,
     StreamingUnavailable,
     TensorOrigins,
     WeightSourceChanged,
@@ -44,6 +45,7 @@ from mlx2.runtime.weight_stream import (  # noqa: E402
     concat_ledger,
     install_expert_streaming,
     record_concat,
+    record_stack,
 )
 
 GROUP = 64
@@ -289,6 +291,113 @@ def _descriptors_open_on(paths):
             continue
         found += (info.st_dev, info.st_ino) in wanted
     return found
+
+
+def test_axis_zero_expert_stack_keeps_exact_byte_origins(tmp_path):
+    """Per-expert checkpoints may sanitize into one SwitchGLU table.
+
+    The ledger proves each selected expert from its own checkpoint range;
+    unselected experts are never materialized by the reader.
+    """
+    root = tmp_path / "stacked-experts"
+    root.mkdir()
+    source = {
+        "experts.0.weight": mx.arange(12, dtype=mx.float16).reshape(3, 4),
+        "experts.1.weight": (mx.arange(12, dtype=mx.float16) + 20).reshape(3, 4),
+    }
+    shard = root / "model.safetensors"
+    mx.save_safetensors(str(shard), source)
+    stat = shard.stat()
+    weight_map = {name: shard.name for name in source}
+    bound = BoundShards(
+        root,
+        [shard.name],
+        records=[(shard.name, stat.st_size, stat.st_mtime_ns)],
+        weight_map=weight_map,
+    )
+    arrays = mx.load(str(shard))
+    origins = TensorOrigins(
+        bound.index, weight_map=weight_map, name_of=bound.name_of
+    )
+    origins.record_shard(shard, arrays)
+    parts = [arrays["experts.0.weight"], arrays["experts.1.weight"]]
+    with concat_ledger(origins.concats, origins.stacks):
+        stacked = mx.stack(parts)
+        record_stack(stacked, parts)
+    spec = origins.resolve_expert("switch", "weight", stacked)
+    assert spec.num_experts == 2
+    assert spec.expert_shape_concat() == (3, 4)
+    reader = ExpertSliceReader([spec], handles=bound)
+    (row,) = reader.materialize(reader.read_bytes(1))
+    assert np.array_equal(np.array(row), np.array(source["experts.1.weight"]))
+    bound.close()
+
+
+def test_axis_zero_stack_runs_through_early_streamed_switch(tmp_path):
+    from mlx2.runtime.models.switch_layers import SwitchGLU
+
+    class StackedExperts(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.switch = SwitchGLU(64, 64, 2)
+
+        def sanitize(self, weights):
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                for kind in ("weight", "scales", "biases"):
+                    parts = [
+                        weights.pop(f"experts.{expert}.{projection}.{kind}")
+                        for expert in range(2)
+                    ]
+                    stacked = mx.stack(parts)
+                    record_stack(stacked, parts)
+                    weights[f"switch.{projection}.{kind}"] = stacked
+            return weights
+
+        def __call__(self, x, indices):
+            return self.switch(x, indices)
+
+    mx.random.seed(23)
+    reference = StackedExperts()
+    nn.quantize(reference, group_size=64, bits=4)
+    mx.eval(reference.parameters())
+    split = {}
+    for name, value in tree_flatten(reference.parameters()):
+        _, projection, kind = name.split(".")
+        for expert in range(2):
+            split[f"experts.{expert}.{projection}.{kind}"] = value[expert]
+    root = tmp_path / "stacked-switch"
+    weight_map, records = _write_checkpoint(root, split, lambda _name: True)
+    model = StackedExperts()
+
+    def quantize(weights):
+        nn.quantize(
+            model,
+            group_size=64,
+            bits=4,
+            class_predicate=lambda name, module: hasattr(module, "to_quantized")
+            and f"{name}.scales" in weights,
+        )
+
+    loaded = load_streamed(
+        model,
+        root,
+        _shards(weight_map),
+        request=_moe_request(1 << 20),
+        sanitize=model.sanitize,
+        quantize=quantize,
+        records=records,
+        weight_map=weight_map,
+        top_k=1,
+    )
+    loaded.manager.begin_serving()
+    x = mx.random.normal((1, 3, 64))
+    indices = mx.array([[[0], [1], [0]]])
+    expected = reference(x, indices)
+    actual = model(x, indices)
+    mx.eval(expected, actual)
+    assert np.array_equal(np.array(actual), np.array(expected))
+    assert loaded.manager.counters()["stream_page_ins_total"] == 6
+    loaded.manager.close()
 
 
 class _EvalSpy:

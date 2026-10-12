@@ -4,6 +4,10 @@ import mlx.nn as nn
 import pytest
 from mlx2.runtime.models import qwen38_27b
 from mlx2.runtime.models.cache import ArraysCache
+from mlx2.runtime.models.qwen_gdn_contracts import (
+    QWEN36_GDN_CONTRACT,
+    QWEN38_GDN_CONTRACT,
+)
 from mlx2.runtime.models.qwen3_5 import TextModelArgs, GatedDeltaNet as Reference
 
 
@@ -54,6 +58,7 @@ def test_qwen35_adapter_binds_supported_fused_geometry(monkeypatch):
     route.configure(Model(), True, architecture=Qwen354BAdapter.fused_gdn_architecture)
     assert obj.fused_gdn_enabled is True
     assert obj.fused_gdn_architecture == 'qwen35'
+    assert obj.fused_gdn_contract is QWEN36_GDN_CONTRACT
     assert obj._try_fused_decode(*operands(obj), None, c) is None
     assert obj.fused_gdn_counters['last_fallback'] == 'Metal runtime unavailable'
 
@@ -154,7 +159,8 @@ def test_successful_bounded_prefill_uses_corrected_catchup(monkeypatch):
                         lambda *a, **kw: 32)
 
     def build(*args, **kwargs):
-        assert kwargs['architecture'] == 'qwen38'
+        assert kwargs['contract'] is QWEN38_GDN_CONTRACT
+        assert 'architecture' not in kwargs
         assert kwargs['num_value_heads'] == 48
         return z, conv, state
 
@@ -186,7 +192,8 @@ def test_successful_routing_uses_qwen35_numerics_and_commits_once(monkeypatch, r
     calls = []
 
     def build(*args, **kwargs):
-        assert kwargs['architecture'] == 'qwen38'
+        assert kwargs['contract'] is QWEN38_GDN_CONTRACT
+        assert 'architecture' not in kwargs
         assert kwargs['num_key_heads'] == 16
         assert kwargs['num_value_heads'] == 48
         calls.append(kwargs)

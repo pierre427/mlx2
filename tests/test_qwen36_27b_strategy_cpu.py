@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 
 ARTIFACTS = (
-    Path("~/mlx-models/Qwen3.6-27B-Abliterated-Heretic-Uncensored-MLX-4bit"),
-    Path("~/mlx-models/Qwen3.6-27B-MLX-8bit"),
+    Path("/Users/pierrelamy/mlx-models/Qwen3.6-27B-Abliterated-Heretic-Uncensored-MLX-4bit"),
+    Path("/Users/pierrelamy/mlx-models/Qwen3.6-27B-MLX-8bit"),
 )
 
 
@@ -63,6 +63,8 @@ def test_dense_qwen36_adapter_owns_prefill_and_strategy_without_loading_model():
     adapter = object.__new__(Qwen3627BAdapter)
     strategy = adapter.continuation_verification_strategy()
     assert adapter.default_route == "ordinary"
+    assert adapter.EXTERNAL_ROUTE_TAG == "external-dflash2-qwen36-27b-v1"
+    assert adapter.EXTERNAL_PROFILE == "qwen36-27b-apcv2-dflash2"
     assert adapter.prefill_step_default() == 2048
     assert strategy.algorithm == "longest_first_exact_prefix_v1"
     assert strategy.prune_incompatible_siblings

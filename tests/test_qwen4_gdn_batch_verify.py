@@ -17,6 +17,7 @@ from mlx2.adapters.flash_next_policy import FlashNextPolicy
 from mlx2.runtime.models import qwen4_exp
 from mlx2.runtime.models import qwen4_fused_gdn_verify as V
 from mlx2.runtime.models.cache import ArraysCache
+from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 from mlx2.runtime.models.qwen4_fused_gdn import CONV_DIM, NUM_VALUE_HEADS, VALUE_DIM
 from mlx2.runtime.segmented_batch_cache import SegmentedBatchArraysCache
 from test_gdn_mask_geometry import production_gdn_qwen4  # noqa: F401 - fixture
@@ -45,6 +46,7 @@ def _admit(rows, steps, **overrides):
         _operands(rows, steps), mask=None, spans=(), speculating=True, training=False,
         sharded=False, num_key_heads=16, num_value_heads=48, key_head_dim=128,
         value_head_dim=128, conv_kernel=4, gate_activation="sigmoid",
+        contract=QWEN4_GDN_CONTRACT,
     )
     kwargs.update(overrides)
     return V.admit_qwen4_fused_gdn_batch_verify(**kwargs)
@@ -131,7 +133,12 @@ def test_launch_wrapper_rejects_row_steps_that_do_not_fit():
             ops["A_log"], ops["dt_bias"], ops["recurrent_state"], ops["norm_weight"], 1e-6)
     for bad in ((3,), (3, 0), (3, 4)):
         with pytest.raises(ValueError, match="row steps"):
-            V.qwen4_fused_gdn_batch_verify(*args, bad, threadgroup_y=32)
+            V.qwen4_fused_gdn_batch_verify(
+                *args,
+                bad,
+                threadgroup_y=32,
+                contract=QWEN4_GDN_CONTRACT,
+            )
     with pytest.raises(ValueError, match="threadgroup_y"):
         V.qwen4_fused_gdn_batch_replay_verify(*args, (3, 2), threadgroup_y=3)
 
@@ -376,7 +383,7 @@ def test_snapshot_mode_restores_each_lane_from_its_snapshot(
     layer = _gdn_layers(production_gdn_qwen4)[0]
 
     def fake(qkv, z, b, a, conv_state, conv_weight, A_log, dt_bias, state,
-             norm_weight, eps, row_steps, *, threadgroup_y):
+             norm_weight, eps, row_steps, *, threadgroup_y, **_kwargs):
         rows, steps = int(qkv.shape[0]), int(qkv.shape[1])
         snaps = mx.stack([state + 10 * (p + 1) for p in range(steps - 1)], axis=1)
         conv_snaps = mx.stack(

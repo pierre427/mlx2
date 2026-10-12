@@ -231,7 +231,7 @@ def test_nemotron_mtp_prefill_matches_ordinary_chunk_boundaries_cpu(prompt):
         prompt_cache=None, mtp_state=None, lane_rng=None, num_draft=2,
         sampling_temp=0, sampling_top_p=1, sampling_top_k=0,
         sampling_min_p=0, accept_rule="exact", logits_processors=[],
-        prefill_step_size=2, share_qsa_indices=False,
+        prefill_step_size=2, share_index_state=False,
     )
     assert first.token == int(mx.argmax(logits[0, -1]).item())
     for expected, actual in zip(reference, lane.caches.target):
@@ -269,7 +269,7 @@ def test_nemotron_single_lane_mtp_matches_ordinary_state_cpu():
         prompt_cache=None, mtp_state=None, lane_rng=None, num_draft=2,
         sampling_temp=0, sampling_top_p=1, sampling_top_k=0,
         sampling_min_p=0, accept_rule="exact", logits_processors=[],
-        prefill_step_size=2, share_qsa_indices=False,
+        prefill_step_size=2, share_index_state=False,
     )
     assert first.token == current
     batch = attach_self_mtp_lanes(model, None, [detached])
@@ -318,7 +318,7 @@ def test_self_mtp_batched_cycles_cpu(force_accept, segmented):
             prompt_cache=None, mtp_state=None, lane_rng=None, num_draft=2,
             sampling_temp=0, sampling_top_p=1, sampling_top_k=0,
             sampling_min_p=0, accept_rule="exact", logits_processors=[],
-            prefill_step_size=2, share_qsa_indices=False,
+            prefill_step_size=2, share_index_state=False,
         )
         detached.append(lane)
     assert len(model.make_mtp_cache()) == 1
@@ -457,7 +457,7 @@ def test_segmented_mtp_uses_exact_b1_verifier_cpu(lanes):
             prompt_cache=None, mtp_state=None, lane_rng=None, num_draft=3,
             sampling_temp=0, sampling_top_p=1, sampling_top_k=0,
             sampling_min_p=0, accept_rule="exact", logits_processors=[],
-            prefill_step_size=2, share_qsa_indices=False,
+            prefill_step_size=2, share_index_state=False,
         )
         assert first.token == currents[-1]
         detached.append(lane)

@@ -54,12 +54,19 @@ class Continuation:
     def __init__(self,**kwargs):
         if len(self.made)==self.fail_at: raise RuntimeError('second constructor refused')
         self.__dict__.update(kwargs);self.made.append(self)
+class Provider:
+    def __init__(self,candidate):self.candidate=candidate
+    def validate_candidate(self,candidate):
+        if candidate is not self.candidate:raise TypeError('candidate binding drifted')
+    def create_continuation(self,**kwargs):
+        self.validate_candidate(kwargs.get('candidate'));return Continuation(**kwargs)
 
 fake_module('mlx2.adapters.qwen35_paged_candidate',Qwen35PagedCandidate=Candidate)
 contract=load_file('native_contract_source','src/mlx2/runtime/paged_native_contract.py')
 fake_module('mlx2.runtime.paged_native_contract',supports_native_checkpoint_candidate=contract.supports_native_checkpoint_candidate)
 fake_module('mlx2.runtime.paged_native_atomic_owner',NativeAtomicRequestOwner=Owner)
 fake_module('mlx2.runtime.paged_native_continuation',NativeQwen3Continuation=Continuation)
+fake_module('mlx2.runtime.native_continuation_provider',NativeContinuationProvider=Provider)
 fake_module('mlx2.runtime.paged_native_retirement',reap_native_request_owner=lambda *args:None)
 source=ast.parse((ROOT/'src/mlx2/runtime/generate.py').read_text())
 method=next(node for cls in source.body if isinstance(cls,ast.ClassDef) and cls.name=='BatchGenerator'
@@ -89,6 +96,7 @@ class AtomicAttachment(unittest.TestCase):
         self.candidate.state_planes=('kv','gdn');self.candidate.bootstrap_generation=0
         self.candidate.supports_singleton=True;self.candidate.owns_physical_dispatch_proof=True
         self.candidate.packed_lane=lambda *args:None;self.candidate.forward_staged=lambda *args:None
+        self.candidate._native_continuation_provider=Provider(self.candidate)
         self.candidate._serving_prompt_ids_by_uid={7:tuple(range(32)),8:tuple(range(96))}
         self.candidate.logical_layer_count=32;self.candidate._serving_resources=NS(charge=12345)
         self.candidate.backend=NS(writer=NS(poisoned=False,pending_epochs={},ledger=NS(pending_count=0)))

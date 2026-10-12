@@ -272,9 +272,17 @@ def test_actual_pld_head_arbitration_adaptive_groups_have_request_private_source
     ]
     e._round(lanes)
     assert shapes == [(1, 3), (1, 2)]
+    assert lanes[0].proposal_score_counts is not lanes[1].proposal_score_counts
+    assert any(k.startswith("prompt_lookup:") for k in lanes[0].proposal_score_counts)
+    assert not any(k.startswith("prompt_lookup:") for k in lanes[1].proposal_score_counts)
+    assert "external" not in lanes[0].proposal_score_counts
+    assert "external" in lanes[1].proposal_score_counts
     for index, lane in enumerate(lanes):
         receipt = lane.ready[0].speculative_receipt["proposal_composition"]
         source = "prompt_lookup" if index == 0 else "external"
+        other = "external" if index == 0 else "prompt_lookup"
+        assert "proposal_attempt_rows" not in receipt
+        assert other not in receipt["committed_verification"]
         assert receipt["current_source"] == source and receipt["observed_used"] is (
             index == 0
         )
@@ -315,7 +323,7 @@ def test_composed_late_group_failure_rolls_back_request_source_counts_and_q_cali
     lanes = list(e.lanes.values())
     before = copy.deepcopy([l.__dict__ for l in lanes])
     fit = copy.deepcopy(e.acceptance_estimator)
-    score_counts = copy.deepcopy(wrapper._score_counts)
+    score_counts = copy.deepcopy([lane.proposal_score_counts for lane in lanes])
     original = target.forward_with_taps
     calls = [0]
 
@@ -334,9 +342,10 @@ def test_composed_late_group_failure_rolls_back_request_source_counts_and_q_cali
     )
     for lane, saved in zip(lanes, before):
         assert not hasattr(lane, "proposal_composition_counts")
-        assert not e._proposal_composition_receipt(lane)["proposal_composition"][
-            "observed_used"
-        ]
+        receipt = e._proposal_composition_receipt(lane)["proposal_composition"]
+        assert not receipt["observed_used"]
+        assert "proposal_attempt_rows" not in receipt
+        assert receipt["committed_verification"] == {}
         assert (
             lane.history == saved["history"]
             and lane.rng.snapshot() == saved["rng"].snapshot()
@@ -346,10 +355,10 @@ def test_composed_late_group_failure_rolls_back_request_source_counts_and_q_cali
     np.testing.assert_array_equal(
         e.acceptance_estimator.observed_counts, fit.observed_counts
     )
-    assert wrapper._score_counts == score_counts
+    assert [lane.proposal_score_counts for lane in lanes] == score_counts
     monkeypatch.setattr(target, "forward_with_taps", original)
     e._round(lanes)
-    assert wrapper._score_counts != score_counts
+    assert [lane.proposal_score_counts for lane in lanes] != score_counts
     assert lanes[0].proposal_composition_counts["prompt_lookup"]["verified_rounds"] == 1
 
 

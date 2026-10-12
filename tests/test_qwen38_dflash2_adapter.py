@@ -514,6 +514,8 @@ def test_explicit_b1_route_receipt_names_policy_and_remains_unqualified():
                             dynamic_tree_max_width=1, _auto_active_width=1,
                             _auto_cohort_width=1, draft_topology="tree15",
                             target_execution="tensorfold", tensorfold_cohort_limit=1,
+                            target_tree_executor_provider=SimpleNamespace(
+                                receipt=lambda: {"provider": "bound-test"}),
                             scheduler_stats={"external_tensorfold_cohort_max_width": 1,
                                              "external_tensorfold_cohort_rounds": 0})
     receipt = ExternalDraftBatchGenerator._target_execution_receipt(route)["batch_size_route"]
@@ -521,7 +523,7 @@ def test_explicit_b1_route_receipt_names_policy_and_remains_unqualified():
                        "tree_node_budget_by_lanes": {"1": 15},
                        "current_tree_node_budget": 15,
                        "active_lanes": 1, "cohort_width": 1,
-                       "current": "tree15_tensorfold", "qualified": False}
+                       "current": "tree15_provider", "qualified": False}
 
 
 def test_tree_topology_override_requires_explicit_route_before_artifact_load(tmp_path, monkeypatch):

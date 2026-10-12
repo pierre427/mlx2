@@ -198,7 +198,14 @@ NOT_RUN_LOCAL = {
     "fp32_head_logits",
 }
 # Evidence from offline reports passed beside the snapshots, never /v1/status.
-EXTERNAL_EVIDENCE = {"adaptive_mtp_depth", "mtp_ordinary_handoff", "approximate_kv_fidelity"}
+EXTERNAL_EVIDENCE = {
+    "adaptive_mtp_depth", "mtp_ordinary_handoff", "approximate_kv_fidelity",
+    "proposal_composition", "proposal_composition_pld",
+    "proposal_composition_native_mtp", "proposal_composition_external_source",
+    "proposal_composition_lane_ranking", "trusted_pld_calibration",
+    "trusted_pld_blind", "trusted_pld_periodic_audit",
+    "trusted_pld_revocation", "trusted_pld_recovery",
+}
 # Latched booleans with no run counter: (initial False -> final True) is the
 # only attributable engagement.
 LATCHES = {
@@ -224,12 +231,18 @@ ENGAGED = _merged(HISTORY, {
     "settings": {
         "sp_qmm": "measured",
         "qsdpa_verify_kernel": {"enabled": True, "min_context": 1024},
+        "cache_capsules": {"enabled": True},
+        "persistent_block_bytes": 4 << 20,
         "execution_policy": {
             "progressive_verification_tile": 4,
             "progressive_multilane_draft_cap": 2,
         },
     },
-    "counts": {"ingress_cohort_target_reached": 2},
+    "counts": {
+        "ingress_cohort_target_reached": 2,
+        "cache_capsule_prepared": 3,
+    },
+    "cache_capsules": {"requests": 4, "primary_successes": 3},
     "scheduler": {
         "external_rounds": 9, "draft_fallbacks": 0, "proposed_tokens": 30,
         "paired_cache_resumes": 4, "segmented_transactions": 9,
@@ -258,7 +271,8 @@ ENGAGED = _merged(HISTORY, {
     "apcv2": {
         "idle_disk": {
             "parks": 3, "resumes": 2, "prefetch_restores_ok": 1, "prefetch_hits": 1,
-            "persisted_writes": 2, "restores": 1,
+            "persisted_writes": 2, "restores": 1, "bytes_written": 4 << 20,
+            "block_bytes": 4 << 20,
         },
         "persistence": {"rescan": {"registered": 1}},
     },
@@ -277,7 +291,16 @@ ENGAGED = _merged(HISTORY, {
             "ple_tail_prefetch_tables": 6, "qsa_pooled_key_cache_hits": 8,
             "qsa_scatter_chosen_calls": 9, "eager_async_evals": 5,
         },
-        "ple_tables": [{"lookups": 7}, {"lookups": 2}],
+        "ple_tables": [
+            {
+                "lookups": 7,
+                "read_policy": {
+                    "configured": "serial",
+                    "counts": {"foreground_serial_calls": 5},
+                },
+            },
+            {"lookups": 2},
+        ],
         "ple_compile": {
             "enabled": True,
             "counts": {"builds": 1, "hits": 9, "fallbacks": 0, "skips": 0},
@@ -295,9 +318,13 @@ ENGAGED = _merged(HISTORY, {
         "moe": {
             "fused_gate_up_layers": 2, "dispatches": {"scalar": 12, "tile4": 3},
             "weighted_sum": {"calls": 4},
-            "moe_window": {"topk_calls": {"launch": 3, "fold": 2}},
+            "moe_window": {
+                "topk_calls": {"launch": 3, "fold": 2},
+                "calls": {"row_exact": 3, "batch_decode": 2, "verify": 2},
+            },
             "routed_decode": {"calls": 5},
         },
+        "tensorfold_qmv": {"counters": {"kernel_calls": 4}},
         "tensorfold_prefill": {"counters": {"projection_calls": 4}},
         "gdn_prefill_scan": {"counters": {"calls": 3}},
         "varlen_dense_mlp": {
@@ -309,7 +336,22 @@ ENGAGED = _merged(HISTORY, {
             "projection_grouped": 3, "prep_rows": 3, "sdpa_1pass_rows": 2,
             "sdpa_2pass_rows": 1, "mask_rows": 2, "index_q_rows": 2}},
         "tensorfold_longctx": {
-            "qsa_fused_scores": {"enabled": True, "counts": {"engaged": 4}}},
+            "qsa_fused_scores": {"enabled": True, "counts": {"engaged": 4}},
+            "ple_early_dispatch": {"dispatches": 3, "device_ids": 3},
+        },
+        "qsa_stage1": {
+            "candidates": {
+                "direct_selector_configured": "direct8",
+                "runtime_counts": {"direct8_topk_dispatches": 4},
+            }
+        },
+        "row_exact_verify": {
+            "windows_row_exact": 5,
+            "windows_not_exact": 0,
+            "failures": {},
+            "stages": {"attention": {"window_dense": 5}},
+        },
+        "qsa_batch_decode_sparse": {"engagements": 3},
         "moe_nax_gather": {"mode": "gather", "calls": {"gather": 3}},
         "fused_gdn_decode": {"fused_calls": 5},
         "decode_wins": {
@@ -324,7 +366,11 @@ ENGAGED = _merged(HISTORY, {
                       "counters": {"kernel_launches": 3, "ops_calls": 1}},
         "gdn_core": {"enabled": True, "calls": 6},
         "fp32_head_logits": {"enabled": True, "extra_resident_bytes": 4096},
-        "qsa_nax_prefill": {"engagements": 3},
+        "qsa_nax_prefill": {
+            "engagements": 3,
+            "counts": {"engaged_auto_batched": 2},
+        },
+        "mtp_draft_vocab": {"runtime_enabled": True, "reduced_head_calls": 3},
     },
 })
 
@@ -373,7 +419,23 @@ GROWTH = {
         "scatter_qsa": _X + ("round_levers", "qsa_scatter_chosen_calls"),
         "eager_dispatch": _X + ("round_levers", "eager_async_evals"),
         "file_backed_ple": _X + ("ple_tables", 0, "lookups"),
+        "ple_read_policy": _X + (
+            "ple_tables", 0, "read_policy", "counts", "foreground_serial_calls"),
         "compiled_ple": _X + ("ple_compile", "counts", "hits"),
+        "qsa_stage1_direct_selector": _X + (
+            "qsa_stage1", "candidates", "runtime_counts", "direct8_topk_dispatches"),
+        "tensorfold_qmv_rows": _X + ("tensorfold_qmv", "counters", "kernel_calls"),
+        "row_exact_verify": _X + ("row_exact_verify", "windows_row_exact"),
+        "row_exact_attn_window": _X + (
+            "row_exact_verify", "stages", "attention", "window_dense"),
+        "moe_window_row_exact": _X + ("moe", "moe_window", "calls", "row_exact"),
+        "moe_window_batch_decode": _X + (
+            "moe", "moe_window", "calls", "batch_decode"),
+        "moe_window_verify": _X + ("moe", "moe_window", "calls", "verify"),
+        "qsa_batch_decode_sparse": _X + ("qsa_batch_decode_sparse", "engagements"),
+        "qsa_nax_batched": _X + (
+            "qsa_nax_prefill", "counts", "engaged_auto_batched"),
+        "mtp_draft_vocab": _X + ("mtp_draft_vocab", "reduced_head_calls"),
         "fused_gdn_decode": _X + ("fused_gdn", "fused_calls"),
         "fused_gdn_verify": _X + ("fused_gdn", "verify_calls"),
         "fused_gdn_replay_rollback": _X + ("fused_gdn", "replay_rollback_calls"),
@@ -418,12 +480,27 @@ GROWTH = {
     "apc_sessions": {
         ("apcv2", "idle_disk", key): 1
         for key in ("parks", "resumes", "prefetch_restores_ok", "prefetch_hits")},
+    "cache_capsules": {
+        ("cache_capsules", "requests"): 1,
+        ("cache_capsules", "primary_successes"): 1,
+        ("counts", "cache_capsule_prepared"): 1,
+    },
+    "persistent_blocks": {
+        ("apcv2", "idle_disk", "parks"): 1,
+        ("apcv2", "idle_disk", "restores"): 1,
+        ("apcv2", "idle_disk", "resumes"): 1,
+        ("apcv2", "idle_disk", "bytes_written"): 4 << 20,
+    },
     "external_tree": {
         _S + ("external_tree_rounds",): 1,
         _S + ("external_tensorfold_target_rounds",): 1},
     "external_varlen_prefill": {
         _S + ("external_batched_prefill_rounds",): 1,
         _S + ("external_batched_prefill_lanes",): 1},
+    "ple_early_dispatch": {
+        _X + ("tensorfold_longctx", "ple_early_dispatch", "dispatches"): 1,
+        _X + ("tensorfold_longctx", "ple_early_dispatch", "device_ids"): 1,
+    },
     "progressive_verification": {
         _S + ("external_progressive_verify_rounds",): 1,
         _S + ("external_progressive_verify_full_tiles",): 1,

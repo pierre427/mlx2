@@ -70,7 +70,7 @@ def mtp(model, prompt, count, depth, mx):
         mtp_state=None, lane_rng=None, num_draft=depth, sampling_temp=0,
         sampling_top_p=1, sampling_top_k=0, sampling_min_p=0,
         accept_rule='exact', logits_processors=[], prefill_step_size=256,
-        share_qsa_indices=False,
+        share_index_state=False,
     )
     prefill_s = time.monotonic() - start
     batch = attach_self_mtp_lanes(model, None, [detached])

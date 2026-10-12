@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+from mlx2.runtime.models.gdn_kernel_contract import FusedGdnContract
+from mlx2.runtime.models.qwen_gdn_contracts import resolve_qwen_gdn_contract
+
 ROOT = Path(os.environ.get("MLX2_SOURCE_ROOT", Path(__file__).resolve().parents[1]))
 MODELS = ROOT / "src/mlx2/runtime/models"
 
@@ -74,6 +77,8 @@ def verify_admit(rows, hv=32, architecture="qwen35", **overrides):
         _shape=lambda a: a.shape,
         _dtype=lambda a: a.dtype,
         _slab_width=lambda a: a.shape[1],
+        FusedGdnContract=FusedGdnContract,
+        resolve_qwen_gdn_contract=resolve_qwen_gdn_contract,
     )
     function("qwen4_fused_gdn.py", "admit_rollback_span", env)
     function("qwen4_fused_gdn_verify.py", "batch_verify_row_steps", env)
@@ -227,7 +232,11 @@ class Sources(unittest.TestCase):
             n for n in helpers.body
             if isinstance(n, ast.FunctionDef) and n.name == "clear_inherited_profile"
             or isinstance(n, ast.Assign)
-            and any(getattr(x, "id", None) == "PRESERVED_OPERATOR_KNOBS" for x in n.targets)
+            and any(
+                getattr(x, "id", None)
+                in {"PRESERVED_OPERATOR_KNOBS", "INHERITED_MODEL_PROFILE_PREFIXES"}
+                for x in n.targets
+            )
         ], type_ignores=[]), "process_env", "exec"), env)
         names = {
             "KERNEL_POLICY_ENV",
@@ -242,7 +251,12 @@ class Sources(unittest.TestCase):
             and any(isinstance(x, ast.Name) and x.id in names for x in n.targets)
             or isinstance(n, ast.FunctionDef)
             and n.name
-            in ("configure_environment", "validate_kernel_choice", "choice_selected")
+            in (
+                "configure_environment",
+                "validate_kernel_choice",
+                "choice_selected",
+                "validate_moe_window_policy",
+            )
         ]
         exec(compile(ast.Module(body=body, type_ignores=[]), "adapter", "exec"), env)
         saved = dict(os.environ)
@@ -302,12 +316,12 @@ PINS = [
     (
         "qwen4_fused_gdn.py",
         "_SOURCE",
-        "f6d1166e26c2c6506e380d7253a43f218b5c099e048ff7aa95ef7648bb4d0e60",
+        "b323df961a5d0958136ca02d973ae064e125ac55b759c9fcc608cd9b9e63405e",
     ),
     (
         "qwen4_fused_gdn_verify.py",
         "_SOURCE",
-        "2d5d84dc1869b7d74115605f2391e6a8e0767916db4f2214df19321641c90842",
+        "3ce2e470cea234a1043200ec964f85379561ee17240c95b7def0a980076f2293",
     ),
     (
         "qwen4_routed_decode.py",

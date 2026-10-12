@@ -8,6 +8,7 @@ sources. The numerics are checked on the GPU by
 ``scripts/check_fn_moe_window.py`` (real Flash-Next weights).
 """
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -19,11 +20,13 @@ from mlx2.runtime import verify_scope
 from mlx2.runtime.models import qwen3_next as QN
 from mlx2.runtime.models import qwen4_moe_window as W
 from mlx2.runtime.models import qwen4_routed_decode as RD
+from mlx2.runtime.models.moe_routing_contract import QWEN4_E512_K10_ROUTING
 from mlx2.runtime.models.precise_ops import gate_sigmoid
 
 # I = 192: the shared down input must not be a qmv_quad width (64, 128) or
 # a whole qmv_fast block, or MLX would not run the plain qmv the fold transcribes.
 E, H, I = 16, 512, 192
+TEST_ROUTING = replace(QWEN4_E512_K10_ROUTING, expert_count=E)
 
 
 def _block(monkeypatch, seed=0):
@@ -34,6 +37,8 @@ def _block(monkeypatch, seed=0):
         norm_topk_prob=True, num_experts=E, num_experts_per_tok=10,
     )
     block = QN.Qwen3NextSparseMoeBlock(args)
+    block.moe_routing_contract = TEST_ROUTING
+    block.switch_mlp.moe_routing_contract = TEST_ROUTING
     for proj, shape in (("gate_proj", (E, I, H)), ("up_proj", (E, I, H)), ("down_proj", (E, H, I))):
         getattr(block.switch_mlp, proj).weight = mx.random.normal(shape) * 0.05
     nn.quantize(block, group_size=64, bits=4)
@@ -85,7 +90,7 @@ def ref_kernels(monkeypatch, served_exp_forms_match):
         y = y + gate_sigmoid(gate_logit.reshape(-1, 1)) * sh
         return (y, inds, scores) if logits is not None else y
 
-    def router_topk(logits):
+    def router_topk(logits, **_contract):
         calls["router"] += 1
         return _stock_routing(logits)
 

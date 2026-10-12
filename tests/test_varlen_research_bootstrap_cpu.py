@@ -106,8 +106,15 @@ def test_explicit_serving_bootstrap_receipt_and_cold_policy(monkeypatch, tmp_pat
                         "prepare_queued_native_first_response", lambda *_, **__: object())
     owner = SimpleNamespace(close=lambda: None, reap_retired=lambda: None,
                             reap_quarantine=lambda: None)
-    candidate = SimpleNamespace(backend=SimpleNamespace(
+    model = object()
+    candidate = SimpleNamespace(model=model, backend=SimpleNamespace(
         writer=SimpleNamespace(pool=SimpleNamespace(free_count=64))))
+    from mlx2.adapters.native_continuation import (
+        bind_qwen_native_continuation_provider,
+    )
+    bind_qwen_native_continuation_provider(
+        candidate, "r1", model, "cpu-varlen-bootstrap"
+    )
     adapter = SimpleNamespace(
         identity={"path": str(tmp_path), "fingerprint": "r1"},
         create_native_paged_qwen3_request=lambda **_: (owner, candidate))

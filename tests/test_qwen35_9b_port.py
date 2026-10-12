@@ -106,6 +106,18 @@ class Qwen359BPortTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not implemented"):
             adapter.profile_name(True)
 
+    def test_external_draft_is_refused_before_artifact_or_tensor_load(self):
+        with self.assertRaisesRegex(ValueError, "no artifact-bound drafter contract"):
+            Qwen359BAdapter(
+                "/missing-qwen35-target",
+                execution_policy={"draft_model": "/missing-draft"},
+            )
+        with self.assertRaisesRegex(ValueError, "no artifact-bound drafter contract"):
+            Qwen359BAdapter(
+                "/missing-qwen35-target",
+                execution_policy={"draft_model": None},
+            )
+
     def test_27b_decode_first_default_does_not_transfer_to_9b(self):
         resolution = AdapterResolution(Qwen359BAdapter, descriptor_for(), {})
         self.assertEqual(resolution.default_execution_policy("ordinary"), {})
@@ -217,11 +229,14 @@ class Qwen359BPortTests(unittest.TestCase):
             "capsule-scheduled-isolated-b1",
         )
         self.assertEqual(result["receipt"]["decode_steps"], 2)
-        self.assertEqual(adapter.diagnostics()["neural_concept_bridge"]["counts"], {
+        with patch.dict(os.environ, {"MLX_GDN_CORE": "1"}):
+            diagnostics = adapter.diagnostics()
+        self.assertEqual(diagnostics["neural_concept_bridge"]["counts"], {
             "prefills": 1,
             "concepts": 1,
             "tokens": 2,
         })
+        self.assertNotIn("gdn_core", diagnostics)
 
     def test_tokenizer_chat_eos_augments_config_endoftext(self):
         tokenizer = type("Tokenizer", (), {"eos_token_id": 248046})()

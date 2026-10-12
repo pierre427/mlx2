@@ -307,7 +307,7 @@ def test_greedy_self_mtp_runtime_matches_plain_greedy(model):
             accept_rule="exact",
             logits_processors=[],
             prefill_step_size=3,
-            share_qsa_indices=False,
+            share_index_state=False,
         )
         lanes.append(detached)
         emitted.append([int(first.token)])

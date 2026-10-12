@@ -292,7 +292,8 @@ def resolve_self_mtp(config):
         "segment_aware_cohort_size": G._segment_aware_cohort_size(config),
         "async_qsa_promotion": G._segmented_async_qsa_promotion_enabled(config),
         "async_qsa_min_remaining_tokens": G._segmented_async_qsa_min_remaining_tokens(config),
-        "share_qsa_indices": G._share_qsa_indices_for_config(config),
+        # Keep the receipt field for one cycle while using the current helper.
+        "share_qsa_indices": G._share_index_state_for_config(config),
         # No config key exists for this one: environment only.
         "true_batched_segmented": true_batched_segmented_self_mtp_enabled() if segmented else None,
         "environment": {name: os.environ.get(name) for name in LAYOUT_ENVIRONMENT},
@@ -312,8 +313,13 @@ def allowed_routes(args, async_promotion):
 
 # Fields of runtime.segmented_physical_promotion.SegmentedPhysicalPromotionReceipt,
 # which MTPGenerationBatch stores per promoted lane as ``asdict(receipt)``.
-PROMOTION_FIELDS = ("queued_ns", "finish_ns", "stream_wait_ns", "reserved_bytes", "patched_bytes",
-                    "recurrent_arrays_reused", "cleanup_error_count", "rows", "layers", "advance")
+PROMOTION_INT_FIELDS = (
+    "queued_ns", "finish_ns", "stream_wait_ns", "reserved_bytes", "patched_bytes",
+    "recurrent_arrays_reused", "cleanup_error_count", "rows", "layers", "advance",
+)
+PROMOTION_FIELDS = PROMOTION_INT_FIELDS + (
+    "state_provider_revision", "state_layouts", "state_fidelity",
+)
 
 
 def is_declined_promotion(receipt):
@@ -322,7 +328,15 @@ def is_declined_promotion(receipt):
             and receipt["selected"] is False and isinstance(receipt["reason"], str) and bool(receipt["reason"]))
 
 
-def promotion_receipt_problems(receipt, *, num_draft, batch, cache_layers):
+def promotion_receipt_problems(
+    receipt,
+    *,
+    num_draft,
+    batch,
+    cache_layers,
+    expected_provider_revision,
+    expected_state_layouts,
+):
     """Why ``receipt`` is not a completed physical promotion ([] when it is).
 
     Requirements come from ``SegmentedPhysicalPromotionTicket.finish`` and
@@ -344,12 +358,44 @@ def promotion_receipt_problems(receipt, *, num_draft, batch, cache_layers):
         problems.append(f"missing fields {missing}")
     if extra:
         problems.append(f"unexpected fields {extra}")
-    problems += [f"{f} is {type(receipt[f]).__name__}, not int" for f in PROMOTION_FIELDS
+    problems += [f"{f} is {type(receipt[f]).__name__}, not int" for f in PROMOTION_INT_FIELDS
                  if f in receipt and type(receipt[f]) is not int]
     if problems:
         return problems
     r = receipt
-    if min(r[f] for f in PROMOTION_FIELDS) < 0:
+    if not isinstance(r["state_provider_revision"], str) or not r["state_provider_revision"]:
+        problems.append("state_provider_revision must be a nonempty string")
+    if (
+        not isinstance(expected_provider_revision, str)
+        or not expected_provider_revision
+    ):
+        problems.append("expected state-plane provider revision is unavailable")
+    elif r["state_provider_revision"] != expected_provider_revision:
+        problems.append(
+            "state_provider_revision does not match the model provider"
+        )
+    if (
+        type(r["state_layouts"]) is not tuple
+        or not r["state_layouts"]
+        or any(not isinstance(layout, str) or not layout for layout in r["state_layouts"])
+    ):
+        problems.append("state_layouts must be a nonempty tuple of nonempty strings")
+    else:
+        if r["layers"] != len(r["state_layouts"]):
+            problems.append(
+                f"state_layouts count {len(r['state_layouts'])} != layers {r['layers']}"
+            )
+        if (
+            type(expected_state_layouts) is not tuple
+            or not expected_state_layouts
+            or any(not isinstance(layout, str) or not layout for layout in expected_state_layouts)
+        ):
+            problems.append("expected state-plane contracts are unavailable")
+        elif r["state_layouts"] != expected_state_layouts:
+            problems.append("state_layouts do not match the model cache contracts")
+    if r["state_fidelity"] != "exact":
+        problems.append("state_fidelity must be exact")
+    if min(r[f] for f in PROMOTION_INT_FIELDS) < 0:
         problems.append("negative field")
     if r["stream_wait_ns"] > r["finish_ns"]:
         problems.append("stream_wait_ns exceeds finish_ns")
@@ -577,6 +623,22 @@ class RetirementDriver:
             cache = getattr(final, "prompt_cache", None)
             mtp_state = getattr(final, "mtp_state", None)
             draft = mtp_state[0] if isinstance(mtp_state, tuple) and mtp_state else None
+            operations = getattr(self.model, "state_plane_operations", None)
+            provider_revision = getattr(operations, "provider_revision", None)
+            expected_layouts = None
+            contract_for = getattr(operations, "contract", None)
+            if callable(contract_for) and cache is not None and draft is not None:
+                contracts = tuple(
+                    contract_for(entry) for entry in (*tuple(cache), *tuple(draft))
+                )
+                if contracts and all(
+                    contract is not None
+                    and contract.revision == provider_revision
+                    and contract.fidelity == "exact"
+                    and "promotion" in contract.operations
+                    for contract in contracts
+                ):
+                    expected_layouts = tuple(contract.layout for contract in contracts)
             out[i] = {
                 "tokens": lane["tokens"], "token_sha256": _sha(json.dumps(lane["tokens"]).encode()),
                 "finish_reason": lane["finish_reason"], "logprob_rows": lane["logprob_rows"],
@@ -589,6 +651,8 @@ class RetirementDriver:
                         "num_draft": receipt.get("num_draft"),
                         # Published target + draft cache layers (cross-checks a promotion receipt).
                         "cache_layers": None if cache is None or draft is None else len(cache) + len(draft),
+                        "expected_state_provider_revision": provider_revision,
+                        "expected_state_layouts": expected_layouts,
                         "draft_cycles": stats.get("draft_cycles", 0), "draft_proposed": stats.get("draft_proposed", 0),
                         "draft_accepted": stats.get("draft_accepted", 0),
                         "verify_span_hist": stats.get("verify_span_hist"),
@@ -689,7 +753,9 @@ def model_mode(args):
             route, receipt = l["mtp"]["route"], l["mtp"]["async_qsa_promotion"]
             if receipt is not None and not is_declined_promotion(receipt):
                 problems = promotion_receipt_problems(receipt, num_draft=l["mtp"]["num_draft"], batch=args.batch,
-                                                      cache_layers=l["mtp"]["cache_layers"])
+                                                      cache_layers=l["mtp"]["cache_layers"],
+                                                      expected_provider_revision=l["mtp"]["expected_state_provider_revision"],
+                                                      expected_state_layouts=l["mtp"]["expected_state_layouts"])
                 if problems:
                     refusals.append(f"{arm} lane {i}: invalid promotion receipt: " + "; ".join(problems))
                 else:

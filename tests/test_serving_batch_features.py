@@ -1,10 +1,9 @@
 """Exercise new serving controls through the actual tiny-model batch lifecycle."""
-from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 from mlx2.runtime.apc_v2 import APCv2, MTPAPCSidecar
-from mlx2.runtime.generate import BatchGenerator, _share_qsa_indices_for_config
-from mlx2.runtime.sample_utils import LaneRNG, make_logits_processors
+from mlx2.runtime.generate import BatchGenerator, _share_index_state_for_config
+from mlx2.runtime.sample_utils import LaneRNG
 from mlx2.runtime.segmented_self_mtp import segmented_self_mtp_stats
 from mlx2.serving import shared_prefix_attestation
 from test_batched_mtp import _tiny_qwen4_model
@@ -16,12 +15,30 @@ from test_batched_mtp import _tiny_qwen4_model
         ({}, True),
         ({"share_qsa_indices": True}, True),
         ({"share_qsa_indices": False}, False),
+        ({"share_index_state": True}, True),
+        ({"share_index_state": False}, False),
     ],
 )
 def test_parent_mtp_route_defaults_shared_qsa_on_and_preserves_opt_out(
     config, expected
 ):
-    assert _share_qsa_indices_for_config(config) is expected
+    assert _share_index_state_for_config(
+        config, lambda value: bool(value.get("share_index_state", True))
+    ) is expected
+
+
+def test_shared_index_state_refuses_legacy_key_without_provider():
+    with pytest.raises(ValueError, match="declared index-state provider"):
+        _share_index_state_for_config({"share_qsa_indices": True})
+    assert _share_index_state_for_config({}) is False
+
+
+def test_shared_index_state_alias_conflict_fails_closed():
+    with pytest.raises(ValueError, match="conflicts with share_index_state"):
+        _share_index_state_for_config(
+            {"share_qsa_indices": True, "share_index_state": False},
+            lambda value: value["share_index_state"],
+        )
 
 
 @pytest.mark.parametrize("async_promotion,shared_suffix", [(False, True), (True, True), (True, False)])
@@ -233,6 +250,49 @@ def test_atomic_b4_receipt_reports_uniform_lower_k(monkeypatch):
         )
         assert not any(decision.stage == "fewer_lanes" for decision in decisions)
         assert decisions[-1].stage == "lower_k"
+    finally:
+        batch.close()
+
+
+def test_standard_admission_receipt_reports_per_lane_requested_and_selected_depth(monkeypatch):
+    monkeypatch.setenv("MLX_LM_SEGMENTED_SELF_MTP", "1")
+    monkeypatch.setenv("MLX_LM_TRUE_BATCHED_SEGMENTED_MTP", "1")
+    mx.random.seed(312)
+    model = _tiny_qwen4_model()
+    config = {
+        "persistent": True,
+        "num_draft": 2,
+        "segment_aware_live_tip": True,
+        "segment_aware_cohort_size": 4,
+        "segment_aware_async_qsa_promotion": False,
+    }
+    callback = lambda rows: {int(row[0]): 1 for row in rows}
+    batch = BatchGenerator(
+        model,
+        completion_batch_size=2,
+        self_mtp=config,
+        mtp_admission=callback,
+    )
+    batch.insert(
+        [[1, 2, 3], [4, 5, 6]],
+        max_tokens=[4, 4],
+    )
+    receipts = {}
+    try:
+        for _ in range(40):
+            _, generated = batch.next()
+            for item in generated:
+                if item.finish_reason:
+                    receipts[item.uid] = item.mtp_receipt
+            if len(receipts) == 2:
+                break
+        assert len(receipts) == 2
+        assert all(
+            receipt["num_draft"] == 1
+            and receipt["requested_num_draft"] == 2
+            and receipt["admission_stage"] == "lower_k"
+            for receipt in receipts.values()
+        )
     finally:
         batch.close()
 

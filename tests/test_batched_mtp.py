@@ -1,4 +1,5 @@
 # Adapted from unified tests/test_batched_self_mtp_qwen4.py at 1e2bc604, MIT.
+import json
 import unittest
 from itertools import product
 from types import SimpleNamespace
@@ -94,7 +95,7 @@ def _cache_offsets(caches):
     return offsets
 
 
-def _prepare_lane(model, uid, prompt, *, share_qsa_indices=False, max_tokens=8):
+def _prepare_lane(model, uid, prompt, *, share_index_state=False, max_tokens=8):
     return prepare_self_mtp_lane(
         mx.array(prompt, mx.uint32),
         model,
@@ -111,7 +112,7 @@ def _prepare_lane(model, uid, prompt, *, share_qsa_indices=False, max_tokens=8):
         accept_rule="residual",
         logits_processors=[],
         prefill_step_size=4,
-        share_qsa_indices=share_qsa_indices,
+        share_index_state=share_index_state,
     )[0]
 
 
@@ -169,7 +170,7 @@ class TestBatchedSelfMTPQSA(unittest.TestCase):
                 "accept_rule": "residual",
                 "logits_processors": [],
                 "prefill_step_size": 4,
-                "share_qsa_indices": False,
+                "share_index_state": False,
             }
             monolithic_boundary = {}
             monolithic, monolithic_first = prepare_self_mtp_lane(
@@ -251,7 +252,7 @@ class TestBatchedSelfMTPQSA(unittest.TestCase):
         mx.random.seed(43)
         model = _tiny_qwen4_model()
         lanes = [
-            _prepare_lane(model, uid, prompt, share_qsa_indices=True)
+            _prepare_lane(model, uid, prompt, share_index_state=True)
             for uid, prompt in enumerate(([1, 2, 3, 4, 5], [7, 8, 9, 10, 11, 12]))
         ]
         batch = attach_self_mtp_lanes(model, None, lanes)
@@ -719,6 +720,89 @@ def test_wide_mtp_cohort_handoff_matches_ordinary_greedy_continuation():
             ordinary.close()
         if handoff is not None:
             handoff.close()
+        mx.set_default_device(previous_device)
+
+
+def test_handoff_receipt_snapshots_adaptive_state_before_migration(monkeypatch):
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import BatchGenerator
+
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    generator = None
+    try:
+        mx.random.seed(9241)
+        generator = BatchGenerator(
+            _tiny_qwen4_model(), completion_batch_size=2, prefill_batch_size=2,
+            prefill_step_size=32,
+            self_mtp={
+                "num_draft": 2,
+                "persistent": True,
+                "segment_aware_live_tip": True,
+                "segment_aware_cohort_size": 2,
+            },
+            adaptive_mtp_depth={},
+            mtp_ordinary_handoff=MTPOrdinaryHandoffPolicy.from_value(
+                {"enabled": True, "max_mtp_width": 1}
+            ),
+        )
+        uids = generator.insert(
+            [[1, 7, 3, 9, 2], [4, 5, 6, 2, 8]],
+            max_tokens=[8, 8],
+            lane_rngs=[LaneRNG(311), LaneRNG(312)],
+            self_mtp_configs=[{"sampling_temp": 0.0}] * 2,
+        )
+        migrate = generator._migrate_plain_fallbacks
+        monkeypatch.setattr(generator, "_migrate_plain_fallbacks", lambda: [])
+        for _ in range(12):
+            generator.next()
+            if generator._generation_batch._plain_ready:
+                break
+        packages = list(generator._generation_batch._plain_ready)
+        assert [package.detached.lane.uid for package in packages] == uids
+        snapshots = {
+            package.detached.lane.uid:
+            package.handoff_receipt["adaptive_depth_before_handoff"]
+            for package in packages
+        }
+        assert all(snapshot["current"] == 2 for snapshot in snapshots.values())
+
+        # Migration can be delayed while the shared controller continues to
+        # exist. A terminal receipt must describe the handoff boundary rather
+        # than whatever state that mutable controller has at delivery time.
+        adaptive = generator._generation_batch.adaptive_depth_policy
+        adaptive.current_depth = 0
+        adaptive.counters["depth_changes"] += 7
+        adaptive.trace.append({"boundary": 999, "selected_depth": 0})
+
+        monkeypatch.setattr(generator, "_migrate_plain_fallbacks", migrate)
+        responses = list(generator._migrate_plain_fallbacks())
+        terminal = {
+            response.uid: response
+            for response in responses
+            if response.finish_reason is not None
+        }
+        for _ in range(20):
+            _, current = generator.next()
+            responses.extend(current)
+            terminal.update(
+                (response.uid, response)
+                for response in current
+                if response.finish_reason is not None
+            )
+            if len(terminal) == len(uids):
+                break
+        assert set(terminal) == set(uids)
+        for response in terminal.values():
+            receipt = response.mtp_receipt
+            assert receipt["adaptive_depth"] == snapshots[response.uid]
+            assert receipt["adaptive_depth"]["current"] == 2
+            assert receipt["adaptive_depth"]["counters"]["depth_changes"] != (
+                adaptive.counters["depth_changes"]
+            )
+    finally:
+        if generator is not None:
+            generator.close()
         mx.set_default_device(previous_device)
 
 
@@ -1229,11 +1313,36 @@ def test_width_lock_and_starved_fallbacks_migrate_in_one_plain_batch(
 
     previous_device = mx.default_device()
     mx.set_default_device(mx.cpu)
-    generator = None
+    generator = reference = None
     try:
         mx.random.seed(929)
+        model = _tiny_qwen4_model()
+        prompts = [[1, 8, 12, 14, 2], [4, 5, 6, 2, 8]]
+
+        # Keep an ordinary decode as the reference for both emitted tokens
+        # and the live target KV state at the terminal boundary.
+        reference = BatchGenerator(
+            model,
+            completion_batch_size=2,
+            prefill_batch_size=2,
+            prefill_step_size=32,
+        )
+        reference_uids = reference.insert(prompts, max_tokens=[8, 8])
+        expected_tokens = {uid: [] for uid in reference_uids}
+        expected_terminal = {}
+        for _ in range(20):
+            _, responses = reference.next()
+            for response in responses:
+                expected_tokens[response.uid].append(response.token)
+                if response.finish_reason:
+                    expected_terminal[response.uid] = response
+            if len(expected_terminal) == 2:
+                break
+        assert len(expected_terminal) == 2
+
+        mx.random.seed(929)
         generator = BatchGenerator(
-            _tiny_qwen4_model(), completion_batch_size=2,
+            model, completion_batch_size=2,
             prefill_batch_size=2, prefill_step_size=32,
             self_mtp={
                 "num_draft": 2, "persistent": True,
@@ -1241,14 +1350,19 @@ def test_width_lock_and_starved_fallbacks_migrate_in_one_plain_batch(
                 "segment_aware_cohort_size": 2,
             },
         )
-        generator.insert(
-            [[1, 8, 12, 14, 2], [4, 5, 6, 2, 8]],
+        mtp_uids = generator.insert(
+            prompts,
             max_tokens=[8, 8],
             lane_rngs=[LaneRNG(81), LaneRNG(82)],
             self_mtp_configs=[{"sampling_temp": 0.0}] * 2,
         )
-        generator.next()
-        generator.next()
+        actual_tokens = {uid: [] for uid in mtp_uids}
+        assert generator.next()[1] == []
+        _, mtp_responses = generator.next()
+        assert {response.uid for response in mtp_responses} == {0, 1}
+        assert all(response.finish_reason is None for response in mtp_responses)
+        for response in mtp_responses:
+            actual_tokens[response.uid].append(response.token)
         batch = generator._generation_batch
 
         late = batch._detach_packages([1])[0]
@@ -1263,7 +1377,9 @@ def test_width_lock_and_starved_fallbacks_migrate_in_one_plain_batch(
 
         starved = batch._detach_packages([0])[0]
         batch._paused[0] = starved
+        batch._memory_queued.add(0)
         assert batch.demote_oldest_paused_to_plain() == 0
+        assert 0 not in batch._memory_queued
         assert [package.detached.lane.uid
                 for package in batch._plain_ready] == [1, 0]
 
@@ -1283,6 +1399,7 @@ def test_width_lock_and_starved_fallbacks_migrate_in_one_plain_batch(
         for _ in range(20):
             _, responses = generator.next()
             for response in responses:
+                actual_tokens[response.uid].append(response.token)
                 if response.finish_reason:
                     terminal[response.uid] = response
             if len(terminal) == 2:
@@ -1290,9 +1407,84 @@ def test_width_lock_and_starved_fallbacks_migrate_in_one_plain_batch(
         assert len(terminal) == 2
         assert all(response.lane_rng is not None
                    for response in terminal.values())
+        assert [actual_tokens[uid] for uid in mtp_uids] == [
+            expected_tokens[uid] for uid in reference_uids
+        ]
+
+        def target_state(cache):
+            # ArraysCache.state may include retained rollback snapshots. Those
+            # snapshots are route bookkeeping rather than live target state.
+            if hasattr(cache, "cache") and isinstance(cache.cache, list):
+                return list(_tree_arrays(cache.cache))
+            if all(hasattr(cache, name) for name in ("keys", "values")):
+                return list(
+                    _tree_arrays(
+                        (
+                            cache.keys,
+                            cache.values,
+                            getattr(cache, "index_keys", None),
+                        )
+                    )
+                )
+            return list(_tree_arrays(cache.state))
+
+        for mtp_uid, reference_uid in zip(mtp_uids, reference_uids):
+            actual_state = [
+                array
+                for cache in terminal[mtp_uid].prompt_cache
+                for array in target_state(cache)
+            ]
+            expected_state = [
+                array
+                for cache in expected_terminal[reference_uid].prompt_cache
+                for array in target_state(cache)
+            ]
+            assert len(actual_state) == len(expected_state)
+            assert all(
+                bool(mx.allclose(actual, expected, rtol=1e-5, atol=1e-6).item())
+                for actual, expected in zip(actual_state, expected_state)
+            )
+        assert generator.scheduler_stats.get("mtp_ordinary_handoff_events", 0) == 0
+        assert generator.scheduler_stats.get("mtp_ordinary_handoff_lanes", 0) == 0
+        assert generator.scheduler_stats["mtp_plain_fallback_events"] == 2
+        assert generator.scheduler_stats["mtp_plain_fallback_lanes"] == 2
+        assert (
+            generator.scheduler_stats[
+                "mtp_plain_fallback_width_lock_deferral_limit"
+            ]
+            == 1
+        )
+        assert (
+            generator.scheduler_stats[
+                "mtp_plain_fallback_starvation_boundary_limit"
+            ]
+            == 1
+        )
+        reasons = {
+            uid: response.mtp_receipt["mtp_plain_fallback"]["reason"]
+            for uid, response in terminal.items()
+        }
+        assert reasons == {
+            1: "width_lock_deferral_limit",
+            0: "starvation_boundary_limit",
+        }
+        for response in terminal.values():
+            receipt = json.loads(json.dumps(response.mtp_receipt))
+            fallback = receipt["mtp_plain_fallback"]
+            assert receipt["route"] == "ordinary_after_mtp_fallback"
+            assert "mtp_ordinary_handoff" not in receipt
+            assert fallback["selected"] is False
+            assert fallback["engaged"] is True
+            assert fallback["one_way"] is True
+            assert fallback["committed_tokens_before_fallback"] == 1
+            assert fallback["prepared_initial_token_pending"] is False
+            assert receipt["observed_compute_widths"] == [2]
+            assert receipt["ordinary_compute_widths"] == [2]
     finally:
         if generator is not None:
             generator.close()
+        if reference is not None:
+            reference.close()
         mx.set_default_device(previous_device)
 
 
@@ -1432,7 +1624,13 @@ def test_handoff_preserves_logits_processor_and_partial_stop_state():
         mx.set_default_device(previous_device)
 
 
-def test_greedy_self_mtp_applies_fly_and_records_relaxed_accept():
+@pytest.mark.parametrize(
+    "emitted_count,expected_relaxed", [(1, 0), (2, 1)],
+    ids=["cut-before-relaxed-position", "deliver-relaxed-position"],
+)
+def test_greedy_self_mtp_counts_only_delivered_fly_relaxed_accepts(
+    emitted_count, expected_relaxed
+):
     previous_device = mx.default_device()
     mx.set_default_device(mx.cpu)
     try:
@@ -1454,7 +1652,7 @@ def test_greedy_self_mtp_applies_fly_and_records_relaxed_accept():
             accept_rule="residual",
             logits_processors=[],
             prefill_step_size=8,
-            share_qsa_indices=False,
+            share_index_state=False,
             fly_verification={
                 "enabled": True,
                 "entropy_threshold": 0.5,
@@ -1464,8 +1662,8 @@ def test_greedy_self_mtp_applies_fly_and_records_relaxed_accept():
         )
         batch = attach_self_mtp_lanes(model, None, [detached])
         with patch(
-            "mlx2.runtime.speculative_sampling.apply_fly_relaxation",
-            return_value=(2, 1),
+            "mlx2.runtime.speculative_sampling.apply_fly_relaxation_positions",
+            return_value=(2, (1,)),
         ) as relaxed:
             proposal = propose_batched_self_mtp(model, batch)
         assert relaxed.call_count == 1
@@ -1475,10 +1673,10 @@ def test_greedy_self_mtp_applies_fly_and_records_relaxed_accept():
         commit_batched_self_mtp(
             batch,
             proposal,
-            emitted_counts=[len(proposal.outputs[0])],
-            terminal=[False],
+            emitted_counts=[emitted_count],
+            terminal=[True],
         )
-        assert batch.lanes[0].relaxed_accepts == 1
+        assert batch.lanes[0].relaxed_accepts == expected_relaxed
     finally:
         mx.set_default_device(previous_device)
 
@@ -1679,7 +1877,7 @@ def test_greedy_host_accept_skips_rejected_grammar_rows(
                 lane_rng=LaneRNG(700), num_draft=2, sampling_temp=0.0,
                 sampling_top_p=1.0, sampling_top_k=0, sampling_min_p=0.0,
                 accept_rule="residual", logits_processors=[],
-                prefill_step_size=4, share_qsa_indices=False,
+                prefill_step_size=4, share_index_state=False,
             )
             constraint = (
                 compile_constraint(None, "B+")
@@ -1810,7 +2008,7 @@ def test_host_acceptance_delegates_preceding_processors_to_eager_path():
             lane_rng=LaneRNG(700), num_draft=2, sampling_temp=0.0,
             sampling_top_p=1.0, sampling_top_k=0, sampling_min_p=0.0,
             accept_rule="residual", logits_processors=[],
-            prefill_step_size=4, share_qsa_indices=False,
+            prefill_step_size=4, share_index_state=False,
         )
         detached.lane.cur = 1
         detached.lane.logits_processors = [
@@ -1872,7 +2070,7 @@ def test_host_acceptance_falls_back_before_processing_nonfinite_target():
             lane_rng=LaneRNG(700), num_draft=2, sampling_temp=0.0,
             sampling_top_p=1.0, sampling_top_k=0, sampling_min_p=0.0,
             accept_rule="residual", logits_processors=[],
-            prefill_step_size=4, share_qsa_indices=False,
+            prefill_step_size=4, share_index_state=False,
         )
         processor = StructuredOutputProcessor(
             _LetterTokenizer(), 4, _only_b_overrunning_at(None), greedy=True

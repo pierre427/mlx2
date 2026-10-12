@@ -196,6 +196,53 @@ def test_int8_prefill_scopes_are_declared():
     assert set(xing.XingAdapter.int8_prefill_supported()) == {"mlp", "all"}
 
 
+def test_xing_declares_exact_early_expert_streaming_only():
+    from mlx2.runtime.streamed_load import WeightStreamRequest, declared_stream_modes
+
+    assert declared_stream_modes(xing.XingAdapter) == frozenset({"moe_experts"})
+    dense = WeightStreamRequest(mode="dense_mlp", budget_bytes=1 << 20)
+    with pytest.raises(ValueError, match="does not declare dense_mlp"):
+        xing.XingAdapter("/missing", weight_streaming=dense)
+
+
+def test_route_contract_binds_mtp_handoff_and_preserves_ordinary_reference():
+    adapter = object.__new__(xing.XingAdapter)
+    adapter.descriptor = xing.descriptor_for(has_mtp=True)
+    contract = adapter.route_capability_contract()
+    assert contract["ordinary_reference_preserved"] is True
+    assert contract["default_route"] == "native_mtp"
+    assert contract["prompt_lookup"]["implemented"] is True
+    assert contract["prompt_lookup"]["target_verified"] is True
+    assert contract["prompt_lookup"]["rollback"] == "exact-mla-latent-rows"
+    assert contract["prompt_lookup"]["qualified"] is False
+    assert contract["prompt_lookup"]["selected"] is None
+    assert contract["moe_expert_streaming"] == {
+        "implemented": True,
+        "qualified": False,
+        "eligible": True,
+        "selected": None,
+        "observed_used": False,
+        "default": False,
+        "selection_authority": "server_weight_stream_receipt",
+        "observation_authority": "server_weight_stream_receipt",
+        "mtp_resident_available": True,
+    }
+    assert contract["native_mtp"]["ordinary_handoff"] == {
+        "enabled": True,
+        "max_mtp_width": xing.DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH,
+    }
+    assert contract["native_mtp"]["qualified"] is False
+    assert contract["native_mtp"]["selected"] is None
+    assert contract["native_mtp"]["selection_authority"] == "serving_route_receipt"
+    assert contract["external_draft"]["implemented"] is False
+
+    adapter.descriptor = xing.descriptor_for(has_mtp=False)
+    contract = adapter.route_capability_contract()
+    assert contract["default_route"] == "ordinary"
+    assert contract["native_mtp"]["implemented"] is False
+    assert contract["native_mtp"]["ordinary_handoff"] is None
+
+
 def _conversion(**changes):
     return {**CONFIG, "mlx2_conversion": {**CONFIG["mlx2_conversion"], **changes}}
 

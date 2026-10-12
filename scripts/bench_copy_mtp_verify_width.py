@@ -101,7 +101,7 @@ def main():
         mtp_state=None, lane_rng=LaneRNG(1), num_draft=2, sampling_temp=0.0,
         sampling_top_p=1.0, sampling_top_k=0, sampling_min_p=0.0,
         accept_rule="residual", logits_processors=[], prefill_step_size=2048,
-        share_qsa_indices=False,
+        share_index_state=False,
     )
     batch = attach_self_mtp_lanes(model, None, [detached])
     target = batch.caches.target

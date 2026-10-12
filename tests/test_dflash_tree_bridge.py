@@ -100,7 +100,7 @@ def test_default_off_publishes_no_bridge_counters(monkeypatch):
     _, _, _, stats = _run(m, d)
     assert stats["external_tree_rounds"] > 0
     for counters in (
-        "external_tensorfold_executor_cache_hits",
+        "external_target_tree_executor_cache_hits",
         "external_tree_codebook_cache_hits",
         "external_tree_batched_law_rounds",
         "external_tree_logprob_rows_skipped",
@@ -120,7 +120,7 @@ def test_default_off_publishes_no_bridge_counters(monkeypatch):
         ),
         (
             {"MLX2_DFLASH_TOPOLOGY": "tree15", "MLX2_TENSORFOLD_CACHE_EXECUTOR": "1"},
-            "requires MLX2_QWEN_TARGET_EXECUTION=tensorfold",
+            "requires target-tree provider execution",
         ),
         (
             {"MLX2_DFLASH_TOPOLOGY": "tree15", "MLX2_TREE_PIPELINE_DRAFT": "yes"},
@@ -137,7 +137,7 @@ def test_gates_fail_closed(monkeypatch, env, message):
 
 
 @pytest.mark.parametrize("value", ["0", "5", "yes", "01"])
-def test_tensorfold_cohort_limit_is_bounded_and_strict(monkeypatch, value):
+def test_target_tree_cohort_limit_is_bounded_and_strict(monkeypatch, value):
     monkeypatch.setenv("MLX2_QWEN_TARGET_EXECUTION", "tensorfold")
     monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused")
     monkeypatch.setenv("MLX2_TENSORFOLD_COHORT_LIMIT", value)
@@ -146,21 +146,21 @@ def test_tensorfold_cohort_limit_is_bounded_and_strict(monkeypatch, value):
         generator(model, draft)
 
 
-def test_tensorfold_cohort_limit_defaults_singleton_and_is_target_only(monkeypatch):
+def test_target_tree_cohort_limit_defaults_singleton_and_is_target_only(monkeypatch):
     model, draft = tiny()
     monkeypatch.setenv("MLX2_QWEN_TARGET_EXECUTION", "tensorfold")
     monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused")
     singleton = generator(model, draft, completion_batch_size=8)
-    assert singleton.tensorfold_cohort_limit == 1
-    assert singleton.scheduler_stats["external_tensorfold_cohort_limit"] == 1
+    assert singleton.target_tree_cohort_limit == 1
+    assert singleton.scheduler_stats["external_target_tree_cohort_limit"] == 1
 
     monkeypatch.setenv("MLX2_TENSORFOLD_COHORT_LIMIT", "4")
     cohort = generator(model, draft, completion_batch_size=8)
-    assert cohort.tensorfold_cohort_limit == 4
-    assert cohort.scheduler_stats["external_tensorfold_cohort_limit"] == 4
+    assert cohort.target_tree_cohort_limit == 4
+    assert cohort.scheduler_stats["external_target_tree_cohort_limit"] == 4
 
     monkeypatch.setenv("MLX2_QWEN_TARGET_EXECUTION", "reference")
-    with pytest.raises(ValueError, match="requires MLX2_QWEN_TARGET_EXECUTION=tensorfold"):
+    with pytest.raises(ValueError, match="requires target-tree provider execution"):
         generator(model, draft)
 
 
@@ -402,16 +402,18 @@ def _install_reference_cohort(batch, monkeypatch, seen):
             batch._reference_tree_forward(lane, row, parent_row)
             for lane, row, parent_row in zip(cohort, inputs, parents)
         ]
-        batch._record_tensorfold_dispatch(cohort)
-        batch.scheduler_stats["external_tensorfold_target_rounds"] += 1
-        batch.scheduler_stats["external_tensorfold_physical_target_forwards"] += 1
-        if len(cohort) > 1:
-            batch.scheduler_stats["external_tensorfold_cohort_rounds"] += 1
-            batch.scheduler_stats["external_tensorfold_cohort_lanes"] += len(cohort)
-            batch.scheduler_stats["external_tensorfold_cohort_max_width"] = max(
-                batch.scheduler_stats["external_tensorfold_cohort_max_width"],
-                len(cohort),
-            )
+        from mlx2.runtime.target_tree_executor import TargetTreeDispatchMetrics
+
+        batch._apply_target_tree_dispatch_metrics(
+            cohort,
+            TargetTreeDispatchMetrics(
+                width=len(cohort),
+                physical_packed=False,
+                executor_cached=False,
+                cached=False,
+                provider_protocol="cpu-reference-oracle",
+            ),
+        )
         return (
             mx.concatenate([result[0] for result in results]),
             mx.concatenate([result[1] for result in results]),
@@ -460,17 +462,21 @@ def test_tensorfold_tree_cohort_matches_single_lane_reference(monkeypatch):
     assert any(len(uids) == 2 for uids, _ in seen)
     assert all(1 <= len(uids) <= 4 for uids, _ in seen)
     stats = candidate.scheduler_stats
-    assert stats["external_tensorfold_cohort_rounds"] > 0
-    assert stats["external_tensorfold_cohort_lanes"] >= 2
-    assert stats["external_tensorfold_cohort_max_width"] == 2
-    assert stats["external_tensorfold_cohort_limit"] == 4
+    assert stats["external_target_tree_cohort_rounds"] > 0
+    assert stats["external_target_tree_cohort_lanes"] >= 2
+    assert stats["external_target_tree_cohort_max_width"] == 2
+    assert stats["external_target_tree_cohort_limit"] == 4
     assert sum(
-        stats[f"external_tensorfold_target_width_{width}_rounds"]
+        stats[f"external_target_tree_target_width_{width}_rounds"]
         for width in range(1, 5)
-    ) == stats["external_tensorfold_target_rounds"]
+    ) == stats["external_target_tree_target_rounds"]
     assert all(receipt["target_width"] >= 2 for receipt in receipts.values())
     assert all(
-        receipt["tensorfold_target"]["cohort_max_width"] == 2
+        receipt["target_tree"]["cohort_max_width"] == 2
+        for receipt in receipts.values()
+    )
+    assert all(
+        receipt["tensorfold_target"] == receipt["target_tree"]
         for receipt in receipts.values()
     )
 
@@ -503,7 +509,7 @@ def test_dynamic_singleton_tree_switches_to_concurrent_chain_and_back(monkeypatc
         if batch.scheduler_stats["external_auto_tree_rounds"]:
             break
     assert batch.scheduler_stats["external_auto_tree_rounds"] > 0
-    assert any(r.get("batch_size_route", {}).get("current") == "tree15_tensorfold" for r in receipts)
+    assert any(r.get("batch_size_route", {}).get("current") == "tree15_provider" for r in receipts)
 
     second = batch.insert(
         [[4, 5, 6]], max_tokens=[3],
@@ -525,7 +531,7 @@ def test_dynamic_singleton_tree_switches_to_concurrent_chain_and_back(monkeypatc
             break
     assert batch.scheduler_stats["external_auto_tree_rounds"] > 1
     assert batch.scheduler_stats["external_auto_mode_switches"] >= 2
-    assert batch.scheduler_stats["external_tensorfold_cohort_max_width"] == 0
+    assert batch.scheduler_stats["external_target_tree_cohort_max_width"] == 0
     for _ in range(50):
         if first not in batch.lanes:
             break
@@ -575,13 +581,13 @@ def test_bounded_tree_candidate_moves_b1_b2_b4_b1_at_round_boundaries(monkeypatc
     assert first in batch.lanes
     assert batch.scheduler_stats["external_auto_tree_rounds"] > prior
     assert batch.scheduler_stats["external_auto_chain_rounds"] == 0
-    assert batch.scheduler_stats["external_tensorfold_cohort_limit"] == 4
-    assert batch.scheduler_stats["external_tensorfold_cohort_max_width"] == 4
+    assert batch.scheduler_stats["external_target_tree_cohort_limit"] == 4
+    assert batch.scheduler_stats["external_target_tree_cohort_max_width"] == 4
     route = [r["batch_size_route"] for r in receipts if "batch_size_route" in r]
     assert {1, 2, 4} <= {r["active_lanes"] for r in route}
     assert all(r["policy"] == "tree15_b1_b4_chain_b5plus_v1" and not r["qualified"]
                for r in route)
-    assert all(r["current"] == "tree15_tensorfold" for r in route)
+    assert all(r["current"] == "tree15_provider" for r in route)
     assert {"15", "7", "3"} <= set(
         batch.scheduler_stats["external_tree_node_budget_histogram"]
     )
@@ -660,7 +666,7 @@ def test_dynamic_route_records_only_committed_rounds(monkeypatch):
     model, draft = tiny(vocab=64, top_k=16, block_size=8)
     batch = generator(model, draft, dynamic_singleton_tree=True)
 
-    def fail(_cohort):
+    def fail(_cohort, **_):
         raise RuntimeError("round failed before commit")
 
     monkeypatch.setattr(batch, "_round", fail)
@@ -670,7 +676,7 @@ def test_dynamic_route_records_only_committed_rounds(monkeypatch):
     assert batch.scheduler_stats["external_auto_chain_rounds"] == 0
     assert batch.scheduler_stats["external_auto_mode_switches"] == 0
     assert batch.draft_topology == "tree15"
-    assert batch.target_execution == "tensorfold"
+    assert batch.target_execution == "provider"
 
 
 def test_tensorfold_cohort_partial_commit_restores_every_lane(monkeypatch):
@@ -710,9 +716,9 @@ def test_tensorfold_cohort_partial_commit_restores_every_lane(monkeypatch):
         batch._tree_round(lanes)
     assert [_lane_state(lane) for lane in lanes] == before
     assert all(not lane.ready for lane in lanes)
-    assert all(not lane.tensorfold_target_width_hist for lane in lanes)
-    assert all(not lane.tensorfold_target_width_trace for lane in lanes)
-    assert batch.scheduler_stats["external_tensorfold_target_width_2_rounds"] == 0
+    assert all(not lane.target_tree_width_hist for lane in lanes)
+    assert all(not lane.target_tree_width_trace for lane in lanes)
+    assert batch.scheduler_stats["external_target_tree_target_width_2_rounds"] == 0
     assert (
         batch.scheduler_stats["external_tree_node_budget_histogram"]
         == before_histogram

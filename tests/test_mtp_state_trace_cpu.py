@@ -75,7 +75,7 @@ def _prepare(model, prompt, *, cache=None, sidecar=None, boundary=None):
         accept_rule="residual",
         logits_processors=[],
         prefill_step_size=3,
-        share_qsa_indices=False,
+        share_index_state=False,
         prompt_boundary_out=boundary,
     )
 

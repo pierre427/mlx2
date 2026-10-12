@@ -603,7 +603,14 @@ def test_b2_second_handoff_failure_retires_uninstalled_owner(monkeypatch, tmp_pa
                                    close=lambda index=index: closed.append(index))
                    for index in range(2))
     backend = SimpleNamespace(writer=SimpleNamespace())
-    candidate = SimpleNamespace(backend=backend)
+    model = object()
+    candidate = SimpleNamespace(backend=backend, model=model)
+    from mlx2.adapters.native_continuation import (
+        bind_qwen_native_continuation_provider,
+    )
+    bind_qwen_native_continuation_provider(
+        candidate, "rev", model, "cpu-varlen-b2"
+    )
     monkeypatch.setattr(qwen3_paged_graph_factory, "create_shared_qwen3_graph_pack",
                         lambda *_, **__: (owners, candidate))
     monkeypatch.setattr(paged_native_batch_lifecycle,

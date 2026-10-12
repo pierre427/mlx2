@@ -540,12 +540,43 @@ def selected_capability_scope(status):
 
 def read_adapter_qualification(path, status):
     """Embed a source-bound media companion only for the same live route."""
-    from mlx2.qualification import validate_adapter_qualification
+    from mlx2.qualification import (
+        APPROVED_MEDIA_PRODUCERS,
+        validate_adapter_qualification,
+    )
 
     report = json.loads(Path(path).read_text())
+    model_type = report.get("model_type") if isinstance(report, dict) else None
+    settings = status.get("settings") if isinstance(status, dict) else None
+    descriptor = (
+        settings.get("adapter_qualification_descriptor")
+        if isinstance(settings, dict)
+        else None
+    )
+    if model_type in APPROVED_MEDIA_PRODUCERS:
+        # The report supplies observations, not authority to choose its own
+        # required checks; resolve those only from the live route descriptor.
+        runtime_descriptor = descriptor
+        family = (
+            (settings.get("mlx_vlm") or {}).get("family")
+            if isinstance(settings, dict)
+            else None
+        )
+        if (
+            not isinstance(runtime_descriptor, dict)
+            or runtime_descriptor.get("schema")
+            != "mlx2.adapter-qualification-descriptor.v1"
+            or runtime_descriptor.get("model_type") != model_type
+            or family != model_type
+        ):
+            raise ValueError(
+                "live adapter qualification descriptor is missing or mismatched"
+            )
+    else:
+        runtime_descriptor = None
     validate_adapter_qualification(
         report, runtime=status.get("runtime"), artifact=status.get("artifact"),
-        settings=status.get("settings"),
+        settings=settings, descriptor=runtime_descriptor,
     )
     return report
 
@@ -1585,6 +1616,32 @@ def normalize_chat_content(value):
     return (value or "").strip()
 
 
+def cache_capsule_probe_passes(reference, fanout):
+    """Require the one-lane seed and all physical fanout samples to be exact."""
+    if not isinstance(reference, dict) or not isinstance(fanout, dict):
+        return False
+    choices = fanout.get("choices")
+    if not isinstance(choices, list) or len(choices) != 3:
+        return False
+
+    def answer(response_choice):
+        if not isinstance(response_choice, dict):
+            return None
+        message = response_choice.get("message")
+        return (
+            normalize_chat_content(message.get("content"))
+            if isinstance(message, dict)
+            else None
+        )
+
+    reference_choices = reference.get("choices")
+    if not isinstance(reference_choices, list) or len(reference_choices) != 1:
+        return False
+    return answer(reference_choices[0]) == "CAPSULE_READY" and all(
+        answer(choice) == "CAPSULE_READY" for choice in choices
+    )
+
+
 def stop_witness_response_matches(response, witness):
     """Compare the observed stop prefix with symmetric whitespace normalization."""
     if (
@@ -2157,7 +2214,299 @@ def qsdpa_verify_observation(initial, final):
     return min(end - start, multirow_delta)
 
 
-def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initial=None):
+def _response_speculation_receipts(value):
+    """Yield response-local speculation receipts in insertion order.
+
+    Qualification stores API responses in a heterogeneous tree (single
+    responses, cold/warm pairs and batches).  Only a response's ``mlx2``
+    receipt is request-local evidence; process status and adapter diagnostics
+    are deliberately insufficient for proposal-composition qualification.
+    """
+    if isinstance(value, dict):
+        mlx2 = value.get("mlx2")
+        speculation = mlx2.get("speculation") if isinstance(mlx2, dict) else None
+        if isinstance(speculation, dict):
+            yield speculation
+        for child in value.values():
+            yield from _response_speculation_receipts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _response_speculation_receipts(child)
+
+
+def _proposal_composition_settings_bound(selected, receipt):
+    """Whether a response receipt binds the selected effective policy."""
+    if not isinstance(selected, dict) or not isinstance(receipt, dict):
+        return False
+    try:
+        from mlx2.runtime.proposal_composition import ProposalCompositionPolicy
+
+        expected = ProposalCompositionPolicy.from_value(selected).as_dict()
+    except (TypeError, ValueError):
+        return False
+    trusted = receipt.get("trusted_pld")
+    for name, value in expected.items():
+        if name == "trusted_pld":
+            observed = trusted.get("enabled") if isinstance(trusted, dict) else trusted
+        elif name.startswith("trusted_pld_"):
+            if not isinstance(trusted, dict):
+                return False
+            observed = trusted.get(
+                {
+                    "trusted_pld_min_score": "min_score",
+                    "trusted_pld_min_verified_tokens": "min_verified_tokens",
+                    "trusted_pld_min_match": "min_match",
+                    "trusted_pld_max_span": "max_span",
+                    "trusted_pld_audit_interval": "audit_interval",
+                }[name]
+            )
+        else:
+            observed = receipt.get(name)
+        if observed != value:
+            return False
+    return True
+
+
+def proposal_composition_evidence(responses, settings):
+    """Summarize run-local, source-bound composition response evidence.
+
+    The summary intentionally ignores resident adapter totals.  Source use,
+    ranking, and trusted-PLD state all have request-lane ownership and must be
+    present in a response whose frozen draft settings match this route.
+    """
+    selected = ((settings or {}).get("execution_policy") or {}).get(
+        "proposal_composition"
+    )
+    evidence = {
+        "selected_receipts": 0,
+        "source_bound_receipts": 0,
+        "sources": {
+            "prompt_lookup": 0,
+            "native_mtp": 0,
+            "external": 0,
+        },
+        "lane_ranking_receipts": 0,
+        "trusted_pld": {
+            "calibration": 0,
+            "blind": 0,
+            "periodic_audit": 0,
+            "revocation": 0,
+            "recovery": 0,
+        },
+    }
+    if not isinstance(selected, dict):
+        return evidence
+    try:
+        from mlx2.runtime.proposal_composition import ProposalCompositionPolicy
+
+        policy = ProposalCompositionPolicy.from_value(selected)
+    except (TypeError, ValueError):
+        return evidence
+
+    def trust_record(record):
+        if not isinstance(record, dict):
+            return None
+        names = (
+            "exact_accepted_tokens",
+            "exact_proposed_tokens",
+            "audit_rounds",
+            "periodic_audit_rounds",
+            "blind_rounds",
+            "blind_since_audit",
+            "audit_failures",
+        )
+        values = {name: record.get(name, 0) for name in names}
+        if any(type(value) is not int or value < 0 for value in values.values()):
+            return None
+        if values["exact_accepted_tokens"] > values["exact_proposed_tokens"]:
+            return None
+        if type(record.get("revoked", False)) is not bool:
+            return None
+        return values | {"revoked": record.get("revoked", False)}
+
+    def trust_ready(record):
+        return bool(
+            record
+            and record["exact_proposed_tokens"]
+            >= max(1, policy.trusted_pld_min_verified_tokens)
+            and record["exact_proposed_tokens"] > 0
+            and record["exact_accepted_tokens"]
+            / record["exact_proposed_tokens"]
+            >= policy.trusted_pld_min_score
+        )
+
+    def trust_key_bound(trust_key, score_key):
+        if not isinstance(trust_key, str) or not isinstance(score_key, str):
+            return False
+        prefix, separator, span_text = trust_key.rpartition(":span_")
+        if not separator or prefix != score_key:
+            return False
+        match_prefix = "prompt_lookup:match_"
+        if not score_key.startswith(match_prefix):
+            return False
+        try:
+            match = int(score_key[len(match_prefix) :])
+            span = int(span_text)
+        except ValueError:
+            return False
+        return (
+            match >= policy.trusted_pld_min_match
+            and 1 <= span <= policy.trusted_pld_max_span
+        )
+
+    for speculation in _response_speculation_receipts(responses):
+        composition = speculation.get("proposal_composition")
+        if not isinstance(composition, dict) or composition.get("selected") is not True:
+            continue
+        evidence["selected_receipts"] += 1
+        frozen = (speculation.get("draft_settings") or {}).get(
+            "proposal_composition"
+        )
+        if not _proposal_composition_settings_bound(selected, frozen):
+            continue
+        evidence["source_bound_receipts"] += 1
+        committed = composition.get("committed_verification") or {}
+        for source in evidence["sources"]:
+            counters = committed.get(source) or {}
+            rounds = counters.get("verified_rounds", 0)
+            proposed = counters.get("proposed_tokens", 0)
+            accepted = counters.get("accepted_tokens", 0)
+            if (
+                type(rounds) is int
+                and type(proposed) is int
+                and type(accepted) is int
+                and rounds > 0
+                and proposed > 0
+                and 0 <= accepted <= proposed
+            ):
+                evidence["sources"][source] = max(
+                    evidence["sources"][source], rounds
+                )
+        ranking = composition.get("ranking") or {}
+        score_counts = ranking.get("score_counts") or {}
+        valid_scores = 0
+        for counts in score_counts.values():
+            if not isinstance(counts, dict):
+                continue
+            accepted = counts.get("weighted_accepted_tokens")
+            proposed = counts.get("weighted_proposed_tokens")
+            if (
+                isinstance(accepted, (int, float))
+                and not isinstance(accepted, bool)
+                and isinstance(proposed, (int, float))
+                and not isinstance(proposed, bool)
+                and math.isfinite(float(accepted))
+                and math.isfinite(float(proposed))
+                and 0 <= accepted <= proposed
+                and proposed > 0
+            ):
+                valid_scores += 1
+        trust = composition.get("trusted_pld") or {}
+        if (
+            ranking.get("authority") == "lagged_committed_verification_only"
+            and ranking.get("order") == "score_then_span_then_source"
+            and valid_scores >= 2
+            and trust.get("scope") == "request_lane"
+            and (composition.get("adapter_diagnostics") or {}).get("scope")
+            == "process_global"
+        ):
+            evidence["lane_ranking_receipts"] += 1
+        if not policy.trusted_pld or trust.get("scope") != "request_lane":
+            continue
+        # Trust is learned after the emitted response is committed.  The
+        # preselection snapshot is deliberately stale for that round, so
+        # lifecycle claims must read the response's postcommit snapshot.
+        postcommit = composition.get("postcommit_learning") or {}
+        post_trust = postcommit.get("trusted_pld") or {}
+        if (
+            postcommit.get("scope") != "request_lane"
+            or post_trust.get("scope") != "request_lane"
+            or type(postcommit.get("audited")) is not bool
+            or type(postcommit.get("periodic_audit")) is not bool
+            or type(postcommit.get("trusted")) is not bool
+            or postcommit.get("audited") and postcommit.get("trusted")
+            or postcommit.get("periodic_audit") and not postcommit.get("audited")
+        ):
+            continue
+        trust_key = postcommit.get("trust_key")
+        score_key = postcommit.get("score_key")
+        proposed = postcommit.get("observed_proposed_tokens")
+        accepted = postcommit.get("observed_accepted_tokens")
+        if (
+            not trust_key_bound(trust_key, score_key)
+            or type(proposed) is not int
+            or proposed < 1
+            or type(accepted) is not int
+            or not 0 <= accepted <= proposed
+        ):
+            continue
+        current_source = composition.get("current_source")
+        # Depth-zero terminal responses intentionally carry the previous
+        # committed learning snapshot while reporting current_source=ordinary.
+        # For a live composition round, however, the pre/post round identity
+        # must agree exactly.
+        if current_source != "ordinary" and (
+            current_source != "prompt_lookup"
+            or composition.get("current_trust_key") != trust_key
+            or composition.get("current_score_key") != score_key
+            or composition.get("current_audit") is not postcommit["audited"]
+            or composition.get("current_trusted") is not postcommit["trusted"]
+            or composition.get("current_periodic_audit")
+            is not postcommit["periodic_audit"]
+        ):
+            continue
+        before = trust_record((trust.get("sources") or {}).get(trust_key, {}))
+        after = trust_record((post_trust.get("sources") or {}).get(trust_key))
+        if after is None:
+            continue
+        ready = trust_ready(after)
+        if after["audit_rounds"] > 0 and ready and not after["revoked"]:
+            evidence["trusted_pld"]["calibration"] += 1
+        if after["blind_rounds"] > 0:
+            evidence["trusted_pld"]["blind"] += 1
+        if after["audit_failures"] > 0:
+            evidence["trusted_pld"]["revocation"] += 1
+        if after["audit_failures"] > 0 and not after["revoked"] and ready:
+            evidence["trusted_pld"]["recovery"] += 1
+
+        # Total audit counts cannot prove periodic auditing: the calibration
+        # phase may already contain several exact audits before the first
+        # blind copy.  Require this response to show the actual cadence
+        # transition from an eligible, non-revoked, post-blind bucket to one
+        # additional exact audit with its cadence reset.
+        periodic_transition = (
+            postcommit["audited"]
+            and postcommit["periodic_audit"]
+            and not postcommit["trusted"]
+            and after["periodic_audit_rounds"] > 0
+            and after["blind_rounds"] > 0
+            and after["blind_since_audit"] == 0
+        )
+        if current_source != "ordinary":
+            periodic_transition = periodic_transition and (
+                before is not None
+                and trust_ready(before)
+                and not before["revoked"]
+                and before["blind_rounds"] > 0
+                and before["blind_since_audit"]
+                >= policy.trusted_pld_audit_interval - 1
+                and after["audit_rounds"] == before["audit_rounds"] + 1
+                and after["periodic_audit_rounds"]
+                == before["periodic_audit_rounds"] + 1
+                and after["blind_rounds"] == before["blind_rounds"]
+            )
+        if periodic_transition:
+            evidence["trusted_pld"]["periodic_audit"] += 1
+    return evidence
+
+
+def feature_observations(
+    final,
+    kv_fidelity=None,
+    adaptive_benchmark=None,
+    initial=None,
+    proposal_evidence=None,
+):
     execution = final.get("execution", {})
     initial_execution = (initial or {}).get("execution", {})
 
@@ -2311,6 +2660,83 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
         for key in LATCHED_FEATURE_GATES[feature]:
             value = value.get(key) if isinstance(value, dict) else None
         return int(bool(value))
+
+    def ple_policy_delta() -> int:
+        total = 0
+        for index, table in enumerate(ple_tables):
+            before = initial_ple_tables[index] if index < len(initial_ple_tables) else {}
+            after_policy = table.get("read_policy") or {}
+            before_policy = before.get("read_policy") or {}
+            configured = after_policy.get("configured")
+            counts = after_policy.get("counts") or {}
+            old_counts = before_policy.get("counts") or {}
+            if configured == "serial":
+                names = ("foreground_serial_calls",)
+            elif configured == "adaptive":
+                names = (
+                    "foreground_serial_calls",
+                    "foreground_pooled_calls",
+                    "foreground_calibrations",
+                    "warm_refreshes",
+                )
+            else:
+                names = ()
+            total += sum(
+                max(0, counts.get(name, 0) - old_counts.get(name, 0))
+                for name in names
+                if type(counts.get(name, 0)) is int
+                and type(old_counts.get(name, 0)) is int
+            )
+        return total
+
+    def row_exact_observation() -> int:
+        exact = run_delta(
+            execution, initial_execution, "row_exact_verify", "windows_row_exact"
+        )
+        not_exact = run_delta(
+            execution, initial_execution, "row_exact_verify", "windows_not_exact"
+        )
+        failures = (execution.get("row_exact_verify") or {}).get("failures") or {}
+        initial_failures = (
+            (initial_execution.get("row_exact_verify") or {}).get("failures") or {}
+        )
+        grew_failure = any(
+            type(value) is int
+            and value > (initial_failures.get(name, 0) or 0)
+            for name, value in failures.items()
+        )
+        return exact if exact > 0 and not not_exact and not grew_failure else 0
+
+    def row_exact_attn_window_observation() -> int:
+        after = ((execution.get("row_exact_verify") or {}).get("stages") or {})
+        before = (
+            (initial_execution.get("row_exact_verify") or {}).get("stages") or {}
+        )
+        total = 0
+        for stage in ("attention", "attention_sdpa"):
+            routes = after.get(stage) or {}
+            if not isinstance(routes, dict):
+                continue
+            old = before.get(stage) or {}
+            total += sum(
+                max(0, value - (old.get(name, 0) or 0))
+                for name, value in routes.items()
+                if name.startswith("window_")
+                and type(value) is int
+                and type(old.get(name, 0)) is int
+            )
+        return total
+
+    direct_mode = (
+        ((execution.get("qsa_stage1") or {}).get("candidates") or {}).get(
+            "direct_selector_configured"
+        )
+    )
+    direct_key = (
+        f"{direct_mode}_topk_dispatches"
+        if direct_mode in {"direct8", "direct4", "gvr"}
+        else None
+    )
     # External-draft transactions publish their counters through the scheduler.
     # Native self-MTP publishes the same logical evidence through its segmented
     # execution counters instead.  A zero/partial accepted draft is a real
@@ -2361,9 +2787,114 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
             and not benchmark_handoff.get("unsafe_divergences")
         )
     )
+    proposal_evidence = proposal_evidence or proposal_composition_evidence(
+        {}, (initial or final).get("settings") or {}
+    )
+    proposal_sources = proposal_evidence.get("sources") or {}
+    trusted_evidence = proposal_evidence.get("trusted_pld") or {}
     return {
+        "proposal_composition": min(
+            proposal_evidence.get("source_bound_receipts", 0),
+            sum(int(value > 0) for value in proposal_sources.values()),
+        ),
+        "proposal_composition_pld": proposal_sources.get("prompt_lookup", 0),
+        "proposal_composition_native_mtp": proposal_sources.get("native_mtp", 0),
+        "proposal_composition_external_source": proposal_sources.get("external", 0),
+        "proposal_composition_lane_ranking": proposal_evidence.get(
+            "lane_ranking_receipts", 0
+        ),
+        "trusted_pld_calibration": trusted_evidence.get("calibration", 0),
+        "trusted_pld_blind": trusted_evidence.get("blind", 0),
+        "trusted_pld_periodic_audit": trusted_evidence.get("periodic_audit", 0),
+        "trusted_pld_revocation": trusted_evidence.get("revocation", 0),
+        "trusted_pld_recovery": trusted_evidence.get("recovery", 0),
         "indexed_fused_merge": latch_observation("indexed_fused_merge"),
         "indexed_output_gate": latch_observation("indexed_output_gate"),
+        "ple_early_dispatch": min(
+            run_delta(
+                execution,
+                initial_execution,
+                "tensorfold_longctx",
+                "ple_early_dispatch",
+                "dispatches",
+            ),
+            run_delta(
+                execution,
+                initial_execution,
+                "tensorfold_longctx",
+                "ple_early_dispatch",
+                "device_ids",
+            ),
+        ),
+        "qsa_stage1_direct_selector": (
+            run_delta(
+                execution,
+                initial_execution,
+                "qsa_stage1",
+                "candidates",
+                "runtime_counts",
+                direct_key,
+            )
+            if direct_key is not None
+            else 0
+        ),
+        "ple_read_policy": ple_policy_delta(),
+        "tensorfold_qmv_rows": run_delta(
+            execution, initial_execution, "tensorfold_qmv", "counters", "kernel_calls"
+        ),
+        "row_exact_verify": row_exact_observation(),
+        "row_exact_attn_window": row_exact_attn_window_observation(),
+        "moe_window_row_exact": run_delta(
+            execution, initial_execution, "moe", "moe_window", "calls", "row_exact"
+        ),
+        "moe_window_batch_decode": max(
+            run_delta(
+                execution,
+                initial_execution,
+                "moe",
+                "moe_window",
+                "calls",
+                "batch_decode",
+            ),
+            run_delta(
+                execution,
+                initial_execution,
+                "decode_wins",
+                "moe",
+                "window_calls_by_consumer",
+                "batch_decode",
+            ),
+        ),
+        "moe_window_verify": max(
+            run_delta(
+                execution, initial_execution, "moe", "moe_window", "calls", "verify"
+            ),
+            run_delta(
+                execution,
+                initial_execution,
+                "decode_wins",
+                "moe",
+                "window_calls_by_consumer",
+                "verify",
+            ),
+        ),
+        "qsa_batch_decode_sparse": run_delta(
+            execution, initial_execution, "qsa_batch_decode_sparse", "engagements"
+        ),
+        "qsa_nax_batched": run_delta(
+            execution,
+            initial_execution,
+            "qsa_nax_prefill",
+            "counts",
+            "engaged_auto_batched",
+        ),
+        "mtp_draft_vocab": (
+            run_delta(
+                execution, initial_execution, "mtp_draft_vocab", "reduced_head_calls"
+            )
+            if (execution.get("mtp_draft_vocab") or {}).get("runtime_enabled") is True
+            else 0
+        ),
         "shared_qsa": run_delta(
             execution, initial_execution, "segmented_mtp", "shared_qsa_batched_selections"
         ),
@@ -2504,6 +3035,27 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
         "apc_sessions": min(
             count_delta("apcv2", "idle_disk", key)
             for key in ("parks", "resumes", "prefetch_restores_ok", "prefetch_hits")
+        ),
+        # A selected capsule must prepare at least one physical fanout from a
+        # real cache plane. Policy selection and an ordinary batch merge are
+        # not engagement.
+        "cache_capsules": min(
+            count_delta("cache_capsules", "requests"),
+            count_delta("cache_capsules", "primary_successes"),
+            count_delta("counts", "cache_capsule_prepared"),
+        ),
+        # Block persistence is a disk-session format. Require the selected
+        # block width plus a completed write/park/restore/resume lifecycle.
+        "persistent_blocks": (
+            min(
+                count_delta("apcv2", "idle_disk", "parks"),
+                count_delta("apcv2", "idle_disk", "restores"),
+                count_delta("apcv2", "idle_disk", "resumes"),
+                count_delta("apcv2", "idle_disk", "bytes_written"),
+            )
+            if (final.get("apcv2") or {}).get("idle_disk", {}).get("block_bytes")
+            == (final.get("settings") or {}).get("persistent_block_bytes")
+            else 0
         ),
         # Each observation below counts the mechanism engaging, never the
         # policy being selected.  A hybrid rolling checkpoint must have been
@@ -3008,7 +3560,7 @@ def main():
         help=("Measured KV-quantization fidelity report "
               "(scripts/measure_kv_quant_fidelity.py) for an approximate-KV route"),
     )
-    parser.add_argument("--require-feature", action="append", default=[], choices=["shared_qsa", "async_promotion", "indexed_qsa", "private_delta", "known_tail_prefetch", "indexed_fused_merge", "indexed_output_gate", "file_backed_ple", "compiled_ple", "pooled_qsa", "scatter_qsa", "fused_gdn_decode", "fused_gdn_verify", "fused_gdn_replay_rollback", "eager_dispatch", "fused_moe", "external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction", "segmented_rollback", "prompt_lookup", "prompt_lookup_proposals", "prompt_lookup_rollback", "prompt_lookup_rotating_replay", "prompt_lookup_batched_verify", "adaptive_mtp_depth", "mtp_ordinary_handoff", "fly_verification", "self_mtp_copy_draft", "spomin_surgery", "approximate_kv", "approximate_kv_mtp", "approximate_kv_fidelity", "apc_interior_checkpoints", "apc_persistence", "apc_sessions"], help="Fail this candidate unless its mechanism actually executed")
+    parser.add_argument("--require-feature", action="append", default=[], choices=["shared_qsa", "async_promotion", "indexed_qsa", "private_delta", "known_tail_prefetch", "indexed_fused_merge", "indexed_output_gate", "ple_early_dispatch", "qsa_stage1_direct_selector", "ple_read_policy", "tensorfold_qmv_rows", "row_exact_verify", "row_exact_attn_window", "moe_window_row_exact", "moe_window_batch_decode", "moe_window_verify", "qsa_batch_decode_sparse", "qsa_nax_batched", "mtp_draft_vocab", "file_backed_ple", "compiled_ple", "pooled_qsa", "scatter_qsa", "fused_gdn_decode", "fused_gdn_verify", "fused_gdn_replay_rollback", "eager_dispatch", "fused_moe", "external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction", "segmented_rollback", "prompt_lookup", "prompt_lookup_proposals", "prompt_lookup_rollback", "prompt_lookup_rotating_replay", "prompt_lookup_batched_verify", "adaptive_mtp_depth", "mtp_ordinary_handoff", "fly_verification", "self_mtp_copy_draft", "spomin_surgery", "approximate_kv", "approximate_kv_mtp", "approximate_kv_fidelity", "apc_interior_checkpoints", "apc_persistence", "apc_sessions", "cache_capsules", "persistent_blocks"], help="Fail this candidate unless its mechanism actually executed")
     args = parser.parse_args()
 
     if args.preflight_only:
@@ -3332,6 +3884,24 @@ def main():
             )),
             warm["mlx2"],
         )
+        if (initial["settings"].get("cache_capsules") or {}).get("enabled") is True:
+            capsule_request = prompt(
+                "Cache capsule qualification probe. Reply with exactly CAPSULE_READY",
+                max_tokens=16,
+                reasoning_effort="none",
+                think=False,
+            )
+            capsule_reference = post(capsule_request)
+            capsule_fanout = post({**capsule_request, "n": 3})
+            report["responses"]["cache_capsules"] = {
+                "reference": capsule_reference,
+                "fanout": capsule_fanout,
+            }
+            check(
+                "cache_capsule_outputs",
+                cache_capsule_probe_passes(capsule_reference, capsule_fanout),
+                report["responses"]["cache_capsules"],
+            )
         if initial["settings"].get("disk_cache") is True:
             session_id = f"qualification-{int(time.time())}"
             session_request = prompt(
@@ -3867,6 +4437,10 @@ def main():
             ),
             initial["runtime"],
         )
+        proposal_evidence = proposal_composition_evidence(
+            report.get("responses") or {}, initial.get("settings") or {}
+        )
+        report["proposal_composition_evidence"] = proposal_evidence
         observed = feature_observations(
             final,
             kv_fidelity=kv_fidelity,
@@ -3874,6 +4448,7 @@ def main():
                 None if adaptive_benchmark is None else adaptive_benchmark[0]
             ),
             initial=initial,
+            proposal_evidence=proposal_evidence,
         )
         report["feature_observations"] = observed
         latched = latched_before_run(initial)
@@ -3914,6 +4489,8 @@ def main():
         for feature in sorted(required_features - set(host_gated) - set(contention_gated)):
             if feature in {"adaptive_mtp_depth", "mtp_ordinary_handoff"}:
                 evidence = report.get("adaptive_benchmark")
+            elif feature.startswith(("proposal_composition", "trusted_pld_")):
+                evidence = proposal_evidence
             elif feature == "sp_qmm":
                 evidence = {
                     "before": initial.get("sp_qmm"),

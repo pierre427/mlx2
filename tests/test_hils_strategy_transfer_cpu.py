@@ -167,3 +167,48 @@ def test_hils_contract_never_promotes_the_planner_to_a_serving_route():
     diagnostics = _adapter().diagnostics()
     assert diagnostics["route"] == "ordinary"
     assert diagnostics["prefix_candidate_verification"] == contract
+
+
+def test_hils_apcv2_descriptor_names_every_nonstandard_exact_plane():
+    adapter = _adapter()
+    descriptor = adapter.apcv2_state_operation_descriptor()
+    assert descriptor["fidelity"] == "exact"
+    assert descriptor["source_cache_layout"] == LIVE_CACHE_LAYOUT
+    assert descriptor["target_cache_layout"] is None
+    assert descriptor["required_state_planes"] == (
+        "attention_kv",
+        "landmark_inserted_coordinates",
+        "landmark_pooled_keys",
+        "landmark_prior_bias",
+        "rng",
+        "transcript",
+    )
+    assert descriptor["required_layer_state"]["hils_8"] == (
+        "num_pooled_chunks", "landmark_keys", "prior_bias"
+    )
+    assert descriptor["serialization_implemented"] is False
+    assert descriptor["restore_implemented"] is False
+    assert descriptor["publication_allowed"] is False
+    assert descriptor["implemented"] is True
+    assert descriptor["implementation_scope"] == "descriptor_and_source_geometry_gate"
+    assert descriptor["qualified"] is descriptor["selected"] is False
+    assert descriptor["observed_used"] is False
+    assert "apcv2" not in {capability.value for capability in adapter.descriptor.capabilities}
+
+
+def test_hils_apcv2_publication_validates_source_then_fails_closed():
+    adapter = _adapter()
+    binding = _binding()
+    with pytest.raises(RuntimeError, match="publication is unavailable"):
+        adapter.prepare_apcv2_publication(binding)
+
+    with pytest.raises(ValueError, match="source revision differs"):
+        adapter.prepare_apcv2_publication(
+            {**binding, "state_revision": "b" * 64}
+        )
+    with pytest.raises(ValueError, match="source cache layout differs"):
+        adapter.prepare_apcv2_publication({**binding, "cache_layout": "other"})
+    bad_caches = _caches()
+    bad_caches[3].num_pooled_chunks = 0
+    with pytest.raises(ValueError, match="landmark_pool_geometry_mismatch"):
+        adapter.prepare_apcv2_publication({**binding, "caches": bad_caches})

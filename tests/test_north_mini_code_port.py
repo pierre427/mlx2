@@ -2,27 +2,27 @@
 
 import copy
 import json
-import subprocess
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from mlx2.adapters.north_memory import NorthCacheBudget
 from mlx2.adapters.north_mini_code import (
     CACHE_LAYOUT,
     NORTH_MINI_CODE,
     NorthMiniCodeAdapter,
+    _expected_weight_headers,
     inspect_artifact,
     normalize_messages,
     reasoning_policy,
-    _expected_weight_headers,
 )
 from mlx2.adapters.north_output import NorthOutputParser, parse_actions
-from mlx2.adapters.north_memory import NorthCacheBudget
-from mlx2.runtime.memory_policy import SelfMTPLaneAdmissionController as C
 from mlx2.adapters.registry import inspect_model, resolve_adapter
 from mlx2.contracts import Capability, StatePlane
+from mlx2.runtime.memory_policy import SelfMTPLaneAdmissionController as C
 
 
 def north_config():
@@ -57,6 +57,15 @@ def north_config():
             for i in range(49)
         ],
     }
+
+
+def test_north_declares_only_early_moe_expert_streaming():
+    from mlx2.runtime.streamed_load import WeightStreamRequest, declared_stream_modes
+
+    assert declared_stream_modes(NorthMiniCodeAdapter) == frozenset({"moe_experts"})
+    dense = WeightStreamRequest(mode="dense_mlp", budget_bytes=1 << 20)
+    with pytest.raises(ValueError, match="does not declare dense_mlp"):
+        NorthMiniCodeAdapter("/missing", weight_streaming=dense)
 
 
 def artifact(path: Path):
@@ -252,6 +261,85 @@ def test_descriptor_declares_current_cache_and_no_unimplemented_speculation():
     assert Capability.EXTERNAL_DRAFT not in NORTH_MINI_CODE.capabilities
     assert StatePlane.DRAFT not in NORTH_MINI_CODE.state_planes
     assert NORTH_MINI_CODE.metadata["qualification"] == "pending"
+
+
+def test_capability_receipts_distinguish_available_selected_and_observed():
+    adapter = object.__new__(NorthMiniCodeAdapter)
+    adapter.layout = CACHE_LAYOUT
+    adapter.model = None
+    adapter.draft_model = None
+    adapter.expert_gather_sort = "auto"
+    adapter.batch_row_exact_q4 = False
+    adapter._north_expert_gathers = []
+    receipt = adapter.diagnostics()
+    assert receipt["route"] == "ordinary"
+    assert receipt["qualification"] == "unqualified"
+    features = receipt["capability_receipts"]
+    assert features["ordinary_reference"]["selected"] is None
+    assert features["ordinary_reference"]["default"] is True
+    assert features["prompt_lookup"] == {
+        "implemented": True,
+        "qualified": False,
+        "selected": None,
+        "observed_used": False,
+        "selection": "request_scoped",
+        "selection_authority": "serving_route_receipt",
+        "observation_authority": "speculative_route_receipt",
+    }
+    assert features["moe_expert_streaming"]["eligible"] is True
+    assert features["moe_expert_streaming"]["selected"] is None
+    assert features["moe_expert_streaming"]["observed_used"] is False
+    assert features["external_draft"]["implemented"] is True
+    assert features["external_draft"]["selected"] is False
+    assert features["proposal_composition"]["implemented"] is False
+
+    adapter.draft_model = object()
+    adapter._external_execution_started = True
+    features = adapter.capability_receipts()
+    assert features["ordinary_reference"]["selected"] is None
+    assert features["ordinary_reference"]["default"] is False
+    assert features["external_draft"]["selected"] is True
+    assert features["external_draft"]["observed_used"] is False
+    assert features["external_draft"]["observation_authority"] == "speculative_route_receipt"
+
+
+@pytest.mark.parametrize(
+    "policy, feature",
+    [
+        ({"draft_model": "/draft", "proposal_composition": {}}, "proposal_composition"),
+        ({"draft_model": "/draft", "continuation_pool": {}}, "continuation_pool"),
+        (
+            {"draft_model": "/draft", "continuation_strategy": "longest_first_exact_prefix"},
+            "continuation_strategy",
+        ),
+        ({"draft_model": "/draft", "lilicorr_feedback": {}}, "lilicorr_feedback"),
+    ],
+)
+def test_external_route_semantic_conflicts_fail_before_artifact_load(policy, feature):
+    with pytest.raises(ValueError, match=feature):
+        NorthMiniCodeAdapter("/missing-target", execution_policy=policy)
+
+
+def test_external_route_publishes_skipped_composition_default(monkeypatch):
+    adapter = object.__new__(NorthMiniCodeAdapter)
+    monkeypatch.setattr(
+        adapter,
+        "_parse_external_policy",
+        lambda policy, family: setattr(adapter, "external_policy", dict(policy)) or True,
+    )
+    monkeypatch.setattr(
+        "mlx2.adapters.north_mini_code.inspect_artifact",
+        lambda path: (_ for _ in ()).throw(RuntimeError("stop after policy")),
+    )
+    monkeypatch.setattr(
+        "mlx2.adapters.cohere_eagle.inspect_drafter",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop after policy")),
+    )
+    with pytest.raises(RuntimeError, match="stop after policy"):
+        adapter._init_north(
+            "/missing-target", execution_policy={"draft_model": "/draft"}
+        )
+    assert "proposal_composition" in adapter.skipped_route_defaults
 
 
 def test_null_tie_metadata_resolves_to_required_tied_head():

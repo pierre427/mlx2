@@ -5,6 +5,11 @@ from unittest.mock import patch
 import mlx.core as mx
 import pytest
 
+from mlx2.runtime.cache_operations import (
+    KV_OPERATIONS,
+    QSA_KV_OPERATIONS,
+    RECURRENT_OPERATIONS,
+)
 from mlx2.runtime.hybrid_speculative import (
     DetachedSelfMTPLane,
     HybridStats,
@@ -30,6 +35,8 @@ from mlx2.runtime.segmented_self_mtp import (
 from mlx2.runtime.models.qwen4_exp import QSAKVCache
 from mlx2.runtime.ragged_verify_layout import RaggedVerifyLayout
 from mlx2.runtime.qsa_shared_suffix import SharedSuffixQSAKVCache
+from mlx2.runtime.models.qwen4_state_plane import Qwen4StatePlaneOperations
+from mlx2.runtime.state_plane_operations import StatePlaneBinding
 from mlx2.structured_output import StructuredOutputProcessor, compile_constraint
 
 
@@ -198,21 +205,37 @@ class _FakeCache:
 
 
 class _FakeKVCache(_FakeCache):
+    cache_operations_contract = KV_OPERATIONS
     keys = object()
+    values = object()
 
 
 class _FakeQSAKVCache(_FakeKVCache):
+    cache_operations_contract = QSA_KV_OPERATIONS
     index_keys = object()
+    _qsa_pooled_keys = None
+    _qsa_pooled_ratio = None
+    _qsa_summary_identity = None
+    _qsa_summary_restored = False
+    _qsa_pending_pooled = None
+    _mtp_share_topk = False
+    _mtp_shared_topk = None
+    _mtp_shared_topk_n_blocks = None
 
 
 class _FakeArraysCache(_FakeCache):
+    cache_operations_contract = RECURRENT_OPERATIONS
+
     def __init__(self, offset):
         super().__init__(offset)
         self.cache = ["fake-recurrent-state"]
+        self.left_padding = None
+        self.lengths = None
+        self._rollbacks = []
 
 
 class _FakeMTPKVCache(_FakeKVCache):
-    pass
+    cache_operations_contract = KV_OPERATIONS
 
 
 class _FakeModel:
@@ -221,6 +244,35 @@ class _FakeModel:
         for cache in caches:
             cache.offset += width
         return hidden
+
+
+class _FakeQwen4AttachOperations(Qwen4StatePlaneOperations):
+    def bind_loaded_state(self, model, row_caches):
+        rows = tuple(row_caches)
+        cache_key = tuple(
+            "QSAKVCache"
+            if isinstance(cache, SharedSuffixQSAKVCache)
+            else type(cache).__name__
+            for cache in [*rows[0].target, *rows[0].draft]
+        )
+        return StatePlaneBinding(
+            self.provider_revision,
+            ("test-artifact", id(model)),
+            cache_key,
+            ("test-numerics",),
+        )
+
+
+def _fake_qwen4_attach_model(rows):
+    model = _FakeModel()
+    model.state_plane_operations = _FakeQwen4AttachOperations()
+    binding = model.state_plane_operations.bind_loaded_state(
+        model, [item.caches for item in rows]
+    )
+    for item in rows:
+        item.state_plane_operations = model.state_plane_operations
+        item.state_plane_binding = binding
+    return model
 
 
 class _FakeMatcher:
@@ -254,7 +306,7 @@ def _detached(uid, position=6):
         logprob_transform=None,
         logits_processors=[],
         stats=HybridStats(),
-        share_qsa_indices=False,
+        share_index_state=False,
     )
     return DetachedSelfMTPLane(
         lane,
@@ -297,15 +349,15 @@ def _real_qsa_detached(uid, position=8):
 def test_shared_qsa_prefix_attestation_is_host_only_and_initial_cohort_scoped():
     first = _detached(0, position=8)
     second = _detached(1, position=8)
-    first.shared_qsa_prefix_id = "same-host-token-digest"
-    second.shared_qsa_prefix_id = "same-host-token-digest"
+    first.shared_state_identity = "same-host-token-digest"
+    second.shared_state_identity = "same-host-token-digest"
 
     state = attach_segmented_self_mtp_lanes(_FakeModel(), None, [first, second])
-    assert state.shared_qsa_prefix_id == "same-host-token-digest"
+    assert state.shared_state_identity == "same-host-token-digest"
 
     state, detached = detach_self_mtp_lanes(_FakeModel(), state, [1])
-    assert state.shared_qsa_prefix_id is None
-    assert detached[0].shared_qsa_prefix_id is None
+    assert state.shared_state_identity is None
+    assert detached[0].shared_state_identity is None
     close_segmented_self_mtp_state(state)
     detached[0].segment_transaction.close()
 
@@ -343,11 +395,12 @@ def test_shared_qsa_auto_policy_is_storage_reachable_at_16k(monkeypatch):
     monkeypatch.delenv("MLX_LM_QSA_PRIVATE_DELTA_MIN_CONTEXT_MN", raising=False)
     rows = [_real_qsa_detached(uid, position=16 * 1024 - 4) for uid in range(2)]
     for item in rows:
-        item.shared_qsa_prefix_id = "auto-admitted-16k-live-tip"
+        item.shared_state_identity = "auto-admitted-16k-live-tip"
 
-    state = attach_segmented_self_mtp_lanes(_FakeModel(), None, rows)
+    model = _fake_qwen4_attach_model(rows)
+    state = attach_segmented_self_mtp_lanes(model, None, rows)
 
-    assert state.shared_qsa_prefix_id == "auto-admitted-16k-live-tip"
+    assert state.shared_state_identity == "auto-admitted-16k-live-tip"
     assert all(
         isinstance(pair.target[1], SharedSuffixQSAKVCache) for pair in state.row_caches
     )
@@ -361,25 +414,160 @@ def test_shared_qsa_suffix_materializes_on_detach_and_later_join(monkeypatch):
     first = _real_qsa_detached(0)
     second = _real_qsa_detached(1)
     for item in (first, second):
-        item.shared_qsa_prefix_id = "same-live-tip"
+        item.shared_state_identity = "same-live-tip"
 
-    state = attach_segmented_self_mtp_lanes(_FakeModel(), None, [first, second])
+    model = _fake_qwen4_attach_model([first, second])
+    state = attach_segmented_self_mtp_lanes(model, None, [first, second])
     left = state.row_caches[0].target[1]
     right = state.row_caches[1].target[1]
     assert isinstance(left, SharedSuffixQSAKVCache)
     assert isinstance(right, SharedSuffixQSAKVCache)
     assert left.base is right.base
 
-    state, detached = detach_self_mtp_lanes(_FakeModel(), state, [1])
+    state, detached = detach_self_mtp_lanes(model, state, [1])
     assert type(detached[0].caches.target[1]) is QSAKVCache
     assert isinstance(state.row_caches[0].target[1], SharedSuffixQSAKVCache)
 
     third = _real_qsa_detached(2)
-    state = attach_segmented_self_mtp_lanes(_FakeModel(), state, [third])
+    third.state_plane_operations = model.state_plane_operations
+    third.state_plane_binding = model.state_plane_operations.bind_loaded_state(
+        model, [third.caches]
+    )
+    state = attach_segmented_self_mtp_lanes(model, state, [third])
     assert all(type(pair.target[1]) is QSAKVCache for pair in state.row_caches)
-    assert state.shared_qsa_prefix_id is None
+    assert state.shared_state_identity is None
     close_segmented_self_mtp_state(state)
     detached[0].segment_transaction.close()
+
+
+def _attach_refusal_snapshot(rows):
+    return (
+        tuple(id(item.caches) for item in rows),
+        tuple(
+            tuple(id(cache) for cache in [*item.caches.target, *item.caches.draft])
+            for item in rows
+        ),
+        tuple(item.segment_transaction for item in rows),
+        tuple(
+            bool(getattr(cache, "speculating", False))
+            for item in rows
+            for cache in item.caches.target
+        ),
+    )
+
+
+@pytest.mark.parametrize("defect", ["duplicate_uid", "mixed_depth", "alias"])
+def test_attach_pure_refusals_leave_every_lane_unchanged(defect):
+    first, second = _detached(0), _detached(1)
+    if defect == "duplicate_uid":
+        second.lane.uid = first.lane.uid
+    elif defect == "mixed_depth":
+        second.lane.num_draft += 1
+    else:
+        second.caches.target[1] = first.caches.target[1]
+    before = _attach_refusal_snapshot([first, second])
+    with pytest.raises(ValueError):
+        attach_segmented_self_mtp_lanes(object(), None, [first, second])
+    assert _attach_refusal_snapshot([first, second]) == before
+
+
+def test_attach_rejects_cross_artifact_binding_before_state_change():
+    rows = [_real_qsa_detached(0), _real_qsa_detached(1)]
+    original_model = _fake_qwen4_attach_model(rows)
+    other_model = _FakeModel()
+    other_model.state_plane_operations = original_model.state_plane_operations
+    before = _attach_refusal_snapshot(rows)
+    with pytest.raises(RuntimeError, match="loaded-state binding"):
+        attach_segmented_self_mtp_lanes(other_model, None, rows)
+    assert _attach_refusal_snapshot(rows) == before
+
+
+def test_attach_provider_failure_keeps_cache_and_transaction_ownership(monkeypatch):
+    monkeypatch.setenv("MLX_LM_SHARED_QSA_SUFFIX", "1")
+    rows = [_real_qsa_detached(0), _real_qsa_detached(1)]
+    for item in rows:
+        item.shared_state_identity = "provider-failure"
+    model = _fake_qwen4_attach_model(rows)
+    before = _attach_refusal_snapshot(rows)
+    monkeypatch.setattr(
+        model.state_plane_operations,
+        "materialize_shared_prefix",
+        lambda _plan: (_ for _ in ()).throw(RuntimeError("provider failure")),
+    )
+    with pytest.raises(RuntimeError, match="provider failure"):
+        attach_segmented_self_mtp_lanes(model, None, rows)
+    assert _attach_refusal_snapshot(rows) == before
+
+
+def test_attach_rejects_invalid_shared_prefix_telemetry_before_publication(monkeypatch):
+    monkeypatch.setenv("MLX_LM_SHARED_QSA_SUFFIX", "1")
+    rows = [_real_qsa_detached(0), _real_qsa_detached(1)]
+    for item in rows:
+        item.shared_state_identity = "invalid-telemetry"
+    model = _fake_qwen4_attach_model(rows)
+    before = _attach_refusal_snapshot(rows)
+    original = model.state_plane_operations.materialize_shared_prefix
+
+    def invalid(plan):
+        materialized = original(plan)
+        return type(materialized)(
+            target_rows=materialized.target_rows,
+            telemetry=(("shared_qsa_rows", -1),),
+        )
+
+    monkeypatch.setattr(model.state_plane_operations, "materialize_shared_prefix", invalid)
+    with pytest.raises(Exception, match="invalid telemetry"):
+        attach_segmented_self_mtp_lanes(model, None, rows)
+    assert _attach_refusal_snapshot(rows) == before
+
+
+def test_shared_prefix_telemetry_failure_poisons_published_state(monkeypatch):
+    import mlx2.runtime.hybrid_speculative as hybrid
+    import mlx2.runtime.segmented_self_mtp as segmented
+
+    monkeypatch.setenv("MLX_LM_SHARED_QSA_SUFFIX", "1")
+    monkeypatch.setenv("MLX_LM_QSA_PRIVATE_DELTA", "1")
+    monkeypatch.setenv("MLX_LM_QSA_PRIVATE_DELTA_MIN_CONTEXT", "0")
+    rows = [_real_qsa_detached(0), _real_qsa_detached(1)]
+    for item in rows:
+        item.shared_state_identity = "telemetry-failure"
+    model = _fake_qwen4_attach_model(rows)
+    poisoned = []
+    original_poison = hybrid._poison_self_mtp_batch
+
+    def capture_poison(state, reason):
+        original_poison(state, reason)
+        poisoned.append(state)
+
+    def fail_shared(key, amount=1):
+        if key == "shared_qsa_rows":
+            raise RuntimeError("telemetry sink failed")
+
+    monkeypatch.setattr(hybrid, "_poison_self_mtp_batch", capture_poison)
+    monkeypatch.setattr(segmented, "note_segmented_self_mtp", fail_shared)
+    with pytest.raises(RuntimeError, match="telemetry sink failed"):
+        attach_segmented_self_mtp_lanes(model, None, rows)
+    assert len(poisoned) == 1
+    assert poisoned[0].poisoned
+    assert "published attach failed" in poisoned[0].poison_reason
+
+
+def test_attach_successor_construction_failure_rolls_back_staged_caches(monkeypatch):
+    monkeypatch.setenv("MLX_LM_SHARED_QSA_SUFFIX", "1")
+    rows = [_real_qsa_detached(0), _real_qsa_detached(1)]
+    for item in rows:
+        item.shared_state_identity = "successor-failure"
+    model = _fake_qwen4_attach_model(rows)
+    before = _attach_refusal_snapshot(rows)
+    monkeypatch.setattr(
+        "mlx2.runtime.segmented_self_mtp.SegmentedLaneTransaction",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("successor failure")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="successor failure"):
+        attach_segmented_self_mtp_lanes(model, None, rows)
+    assert _attach_refusal_snapshot(rows) == before
 
 
 def test_shared_qsa_b2_to_b1_survivor_next_forward_matches_physical(monkeypatch):
@@ -411,7 +599,7 @@ def test_shared_qsa_b2_to_b1_survivor_next_forward_matches_physical(monkeypatch)
             mx.eval(cache._qsa_pooled_keys)
         if shared:
             for item in rows:
-                item.shared_qsa_prefix_id = "same-four-token-live-tip"
+                item.shared_state_identity = "same-four-token-live-tip"
         state = attach_segmented_self_mtp_lanes(model, None, rows)
         state, leaving = detach_self_mtp_lanes(model, state, [1])
         survivor = state.row_caches[0].target[1]
@@ -479,7 +667,7 @@ def test_aborted_shared_qsa_proposal_restores_one_base_and_stays_batched(monkeyp
         cache._qsa_summary_identity = dict(indexer.summary_identity)
         cache._qsa_summary_identity["complete_blocks"] = blocks
         mx.eval(cache._qsa_pooled_keys)
-        item.shared_qsa_prefix_id = "same-four-token-live-tip"
+        item.shared_state_identity = "same-four-token-live-tip"
     state = attach_segmented_self_mtp_lanes(model, None, rows)
 
     def reject_all(logprobs, *_args, **_kwargs):
@@ -510,21 +698,21 @@ def test_aborted_shared_qsa_proposal_restores_one_base_and_stays_batched(monkeyp
 def test_shared_qsa_prefix_attestation_rejects_mixed_host_identities():
     first = _detached(0, position=8)
     second = _detached(1, position=8)
-    first.shared_qsa_prefix_id = "prefix-a"
-    second.shared_qsa_prefix_id = "prefix-b"
+    first.shared_state_identity = "prefix-a"
+    second.shared_state_identity = "prefix-b"
 
     state = attach_segmented_self_mtp_lanes(_FakeModel(), None, [first, second])
-    assert state.shared_qsa_prefix_id is None
+    assert state.shared_state_identity is None
     close_segmented_self_mtp_state(state)
 
 
 def test_serial_cycle_permanently_invalidates_shared_qsa_prefix(monkeypatch):
     first = _detached(0, position=8)
     second = _detached(1, position=8)
-    first.shared_qsa_prefix_id = "same-host-token-digest"
-    second.shared_qsa_prefix_id = "same-host-token-digest"
+    first.shared_state_identity = "same-host-token-digest"
+    second.shared_state_identity = "same-host-token-digest"
     state = attach_segmented_self_mtp_lanes(_FakeModel(), None, [first, second])
-    assert state.shared_qsa_prefix_id is not None
+    assert state.shared_state_identity is not None
 
     monkeypatch.setenv("MLX_LM_TRUE_BATCHED_SEGMENTED_MTP", "0")
     with patch(
@@ -534,7 +722,7 @@ def test_serial_cycle_permanently_invalidates_shared_qsa_prefix(monkeypatch):
         ),
     ):
         proposal = propose_batched_self_mtp(_FakeModel(), state)
-    assert state.shared_qsa_prefix_id is None
+    assert state.shared_state_identity is None
     commit_batched_self_mtp(
         state,
         proposal,
@@ -545,7 +733,7 @@ def test_serial_cycle_permanently_invalidates_shared_qsa_prefix(monkeypatch):
     monkeypatch.setenv("MLX_LM_TRUE_BATCHED_SEGMENTED_MTP", "1")
     # Re-enabling batching must not recreate a shared-prefix proof from equal
     # host offsets after the serial rows were allowed to diverge.
-    assert state.shared_qsa_prefix_id is None
+    assert state.shared_state_identity is None
     close_segmented_self_mtp_state(state)
 
 
@@ -1572,7 +1760,7 @@ def test_qsa_transaction_planes_name_nonoverlapping_components():
         for entry in bases["qsa_summary"].payload.fingerprint
         for field in entry[2]
     }
-    assert attention_fields == {"keys", "values", "key_scale", "value_scale"}
+    assert attention_fields == {"keys", "values"}
     assert summary_fields == {
         "index_keys",
         "_qsa_pooled_keys",
@@ -1582,6 +1770,7 @@ def test_qsa_transaction_planes_name_nonoverlapping_components():
         "_qsa_pending_pooled",
         "_mtp_share_topk",
         "_mtp_shared_topk",
+            "_mtp_shared_topk_n_blocks",
     }
     assert attention_fields.isdisjoint(summary_fields)
     transaction.close()
@@ -2400,7 +2589,7 @@ def test_private_qsa_repeated_cycles_have_bounded_state_oracle(monkeypatch):
         for item in rows:
             item.lane.max_tokens = 64
             item.lane.sampling_temp = 0.0
-            item.shared_qsa_prefix_id = "identical-four-token-prefix"
+            item.shared_state_identity = "identical-four-token-prefix"
         base = _qsa_prefix_snapshot(rows)
         counts = _instrument_qsa_updates(rows) if private_delta else None
         state = attach_segmented_self_mtp_lanes(model, None, rows)
@@ -2430,7 +2619,7 @@ def test_private_qsa_repeated_cycles_have_bounded_state_oracle(monkeypatch):
             for cycle, accepts in enumerate(accept_cycles):
                 if cycle == 3:
                     state, detached = detach_self_mtp_lanes(model, state, [0, 1])
-                    assert state.shared_qsa_prefix_id is None
+                    assert state.shared_state_identity is None
                     state = attach_segmented_self_mtp_lanes(model, state, detached)
                     monkeypatch.setenv("MLX_LM_TRUE_BATCHED_SEGMENTED_MTP", "0")
                 elif cycle == 4:
@@ -2509,7 +2698,7 @@ def test_private_qsa_abort_preserves_base_and_restores_committed_boundary(monkey
     model = _tiny_qwen4_model()
     rows = [_prepare_lane(model, uid, [1, 2, 3, 4]) for uid in range(2)]
     for item in rows:
-        item.shared_qsa_prefix_id = "abort-base"
+        item.shared_state_identity = "abort-base"
     base = _qsa_prefix_snapshot(rows)
     counts = _instrument_qsa_updates(rows)
     state = attach_segmented_self_mtp_lanes(model, None, rows)
@@ -2572,7 +2761,7 @@ def test_true_batched_segmented_shared_qsa_cycle_is_disarmed():
             model,
             uid,
             prompt,
-            share_qsa_indices=True,
+            share_index_state=True,
         )
         for uid, prompt in enumerate(([1, 2, 3, 4], [5, 6, 7, 8, 9]))
     ]
@@ -2879,6 +3068,7 @@ def test_width_lock_handoff_moves_active_and_late_lanes_atomically():
     assert active._plain_ready[-1].handoff_receipt["reason"] == (
         "cohort_already_handed_off"
     )
+    assert scheduler["mtp_ordinary_handoff_lanes"] == 5
     active.close()
 
 
@@ -3021,6 +3211,7 @@ def test_handoff_keeps_memory_queued_lane_under_admission():
             for package in batch.take_plain_fallbacks()] == [0]
     assert list(batch._paused) == [1]
     assert batch._paused[1].handoff_receipt is not None
+    original_receipt = dict(batch._paused[1].handoff_receipt)
 
     # The queued lane is reconsidered with ordinary, not MTP, memory costs on
     # every closed boundary even while the migrated cohort is still running.
@@ -3031,8 +3222,10 @@ def test_handoff_keeps_memory_queued_lane_under_admission():
     admission.release = True
     assert batch._apply_admission()
     assert not batch._paused
-    assert [package.detached.lane.uid
-            for package in batch.take_plain_fallbacks()] == [1]
+    released = batch.take_plain_fallbacks()
+    assert [package.detached.lane.uid for package in released] == [1]
+    assert released[0].handoff_receipt == original_receipt
+    assert original_receipt["reason"] != "cohort_already_handed_off"
     batch.close()
 
 
@@ -3112,6 +3305,192 @@ def test_width_lock_handoff_admits_late_lane_before_plain_migration():
     assert not active._memory_queued
     arriving.close()
     active.close()
+
+
+def test_cancelled_lane_is_removed_from_latched_handoff_queue():
+    from mlx2.runtime import generate
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import MTPGenerationBatch, StopSequenceMatcher
+
+    batch = MTPGenerationBatch(
+        object(), [_detached(0), _detached(1)], [None, None],
+        [StopSequenceMatcher(), StopSequenceMatcher()],
+        segmented_live_tip=True,
+        ordinary_handoff_policy=MTPOrdinaryHandoffPolicy.from_value(
+            {"enabled": True, "max_mtp_width": 1}
+        ),
+    )
+    assert batch._maybe_handoff_active_cohort()
+    engine = generate.BatchGenerator.__new__(generate.BatchGenerator)
+    engine.self_mtp = {}
+    engine._generation_batch = batch
+    engine._plain_fallback_batch = type("EmptyPlain", (), {"uids": []})()
+    engine._prompt_batch = type("EmptyPrompt", (), {"uids": []})()
+    engine._unprocessed_sequences = ()
+    engine._native_continuations = {}
+    assert engine._find_uids([0, 1]) == {0: (2, -1), 1: (2, -1)}
+    assert engine.extract_cache([1])[1][1] == [1, 2, 3]
+    # Decode-first publication can suspend after prefill admission has staged
+    # these packages and before the next scheduler turn migrates them.
+    batch.remove_uids([0])
+    with pytest.raises(KeyError):
+        batch.extract_uid(0)
+    assert batch.extract_uid(1)[1] == [1, 2, 3]
+    assert [package.detached.lane.uid for package in batch.take_plain_fallbacks()] == [1]
+    batch.remove_uids([1])
+    assert not batch._plain_ready
+    batch.close()
+
+
+def test_latched_handoff_marks_late_plain_admission_with_handoff_receipt():
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import MTPGenerationBatch, StopSequenceMatcher
+
+    class Admission:
+        atomic_cohort = False
+
+        def __call__(self, rows):
+            return {uid: "plain" for uid, *_rest in rows}
+
+    policy = MTPOrdinaryHandoffPolicy.from_value(
+        {"enabled": True, "max_mtp_width": 1}
+    )
+    batch = MTPGenerationBatch(
+        object(), [_detached(0), _detached(1)], [None, None],
+        [StopSequenceMatcher(), StopSequenceMatcher()],
+        segmented_live_tip=True, ordinary_handoff_policy=policy,
+        mtp_admission=Admission(),
+    )
+    # The initial decision keeps both lanes in MTP; then force the trigger at
+    # a closed boundary and let a new lane pass the plain admission branch.
+    batch.mtp_admission = None
+    assert batch._maybe_handoff_active_cohort()
+    batch.mtp_admission = Admission()
+    incoming = MTPGenerationBatch(
+        object(), [_detached(2)], [None], [StopSequenceMatcher()],
+        segmented_live_tip=True, ordinary_handoff_policy=policy,
+    )
+    batch.extend(incoming)
+    late = next(p for p in batch._plain_ready if p.detached.lane.uid == 2)
+    assert late.handoff_receipt is not None
+    assert late.handoff_receipt["reason"] == "cohort_already_handed_off"
+    incoming.close()
+    batch.close()
+
+
+@pytest.mark.parametrize("start_paused", [False, True])
+def test_plain_admission_records_fallback_receipt_without_handoff_counters(
+    start_paused,
+):
+    from mlx2.runtime.generate import MTPGenerationBatch, StopSequenceMatcher
+
+    class Admission:
+        atomic_cohort = False
+
+        def __call__(self, rows):
+            return {uid: "plain" for uid, *_rest in rows}
+
+    batch = MTPGenerationBatch(
+        object(),
+        [_detached(0)],
+        [None],
+        [StopSequenceMatcher()],
+        segmented_live_tip=True,
+        mtp_admission=None,
+    )
+    if start_paused:
+        package = batch._detach_packages([0])[0]
+        batch._paused[0] = package
+        batch._memory_queued.add(0)
+    batch.mtp_admission = Admission()
+
+    assert batch._apply_admission()
+
+    assert not batch.uids and not batch._paused
+    assert len(batch._plain_ready) == 1
+    receipt = batch._plain_ready[0].handoff_receipt
+    assert receipt["transition"] == "fallback"
+    assert receipt["reason"] == "admission_plain"
+    assert receipt["selected"] is False
+    assert receipt["engaged"] is True
+    assert batch.scheduler_stats.get("mtp_ordinary_handoff_events", 0) == 0
+    assert batch.scheduler_stats.get("mtp_ordinary_handoff_lanes", 0) == 0
+    batch.close()
+
+
+@pytest.mark.parametrize("failure_stage", ("construction", "extend"))
+def test_failed_ordinary_migration_releases_detached_mtp_resources(
+    monkeypatch, failure_stage
+):
+    from mlx2.runtime import generate
+
+    class Cache:
+        def merge(self, rows):
+            return MergedCache()
+
+    class MergedCache:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class IncomingPlain:
+        def __init__(self, *args, **kwargs):
+            self.uids = list(args[1])
+            self.prompt_cache = args[3]
+
+    class ExistingPlain:
+        def __init__(self):
+            self.uids = [90]
+            self.filtered = None
+
+        def __len__(self):
+            return len(self.uids)
+
+        def extend(self, batch):
+            self.uids.extend(batch.uids)
+            if failure_stage == "extend":
+                raise RuntimeError("ordinary cache join failed")
+
+        def filter(self, keep):
+            self.filtered = list(keep)
+            self.uids = [self.uids[index] for index in keep]
+
+    detached = _detached(12)
+    source = _CloseableCacheList([Cache()])
+    detached.caches.target = source
+    mtp = generate.MTPGenerationBatch.empty(object(), segmented_live_tip=True)
+    mtp._plain_ready.append(
+        generate._PausedMTPGenerationLane(
+            detached, None, generate.StopSequenceMatcher(), {}, 0
+        )
+    )
+    engine = generate.BatchGenerator.__new__(generate.BatchGenerator)
+    engine.self_mtp = {}
+    engine._generation_batch = mtp
+    engine.model = object()
+    engine.sampler = None
+    engine._plain_fallback_batch = ExistingPlain()
+    merged = []
+
+    def make_incoming(*args, **kwargs):
+        result = IncomingPlain(*args, **kwargs)
+        merged.extend(result.prompt_cache)
+        if failure_stage == "construction":
+            raise RuntimeError("ordinary cache join failed")
+        return result
+
+    monkeypatch.setattr(generate, "GenerationBatch", make_incoming)
+    with pytest.raises(RuntimeError, match="ordinary cache join failed"):
+        engine._migrate_plain_fallbacks()
+
+    assert engine._plain_fallback_batch.uids == [90]
+    assert engine._plain_fallback_batch.filtered == (
+        [0] if failure_stage == "extend" else None
+    )
+    assert source.closed
+    assert merged[0].closed
 
 
 def test_lane_queued_at_its_merge_boundary_is_a_memory_wait():
@@ -3298,7 +3677,7 @@ def _greedy_segmented_lane(model, uid, prompt, max_tokens=4096):
         prompt_cache=None, mtp_state=None, lane_rng=LaneRNG(40 + uid),
         num_draft=2, sampling_temp=0.0, sampling_top_p=1.0, sampling_top_k=0,
         sampling_min_p=0.0, accept_rule="residual", logits_processors=[],
-        prefill_step_size=256, share_qsa_indices=False,
+        prefill_step_size=256, share_index_state=False,
     )
 
 
@@ -3611,7 +3990,7 @@ def test_segmented_cycles_never_rewind_a_borrowed_plane_below_its_level(
             num_draft=3, sampling_temp=1.0, sampling_top_p=1.0,
             sampling_top_k=0, sampling_min_p=0.0, accept_rule="residual",
             logits_processors=[], prefill_step_size=64,
-            share_qsa_indices=False,
+            share_index_state=False,
         )[0]
         for uid, prompt in enumerate(([3, 9, 27, 81, 5], [7, 1, 4, 1, 5, 9, 2]))
     ]

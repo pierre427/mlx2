@@ -181,6 +181,8 @@ def test_unpadded_scope_declines_and_exception_resets_context():
 
 def test_prefill_processing_publishes_exact_chunk_lengths():
     class Model:
+        _test_only_allow_unvalidated_prefill_checkpoint = True
+
         def __init__(self):
             self.scopes = []
             self.calls = []

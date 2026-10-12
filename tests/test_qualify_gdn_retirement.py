@@ -512,7 +512,9 @@ def test_prompt_layout_is_validated_and_labelled():
 PROMOTE = ("--mtp-layout", "segmented", "--async-promotion", "on", "--prompt-layout", "aligned")
 VALID = {"queued_ns": 3695292, "finish_ns": 1033833, "stream_wait_ns": 404375, "reserved_bytes": 141184,
          "patched_bytes": 320, "recurrent_arrays_reused": 4, "cleanup_error_count": 0, "rows": 2, "layers": 3,
-         "advance": 1}  # a real tiny receipt
+         "advance": 1, "state_provider_revision": "qwen4-state-plane-operations-v1",
+         "state_layouts": ("qwen4-recurrent-arrays-v1", "qwen4-qsa-raw-key-ledger-v1",
+                           "qwen4-recurrent-arrays-v1"), "state_fidelity": "exact"}
 
 
 @pytest.fixture(scope="module")
@@ -531,7 +533,9 @@ def test_true_tiny_promotion_cell_passes_with_valid_receipts(tiny_promoted):
             assert lane["mtp"]["route"] == R.PHYSICAL_ROUTE and set(receipt) == set(R.PROMOTION_FIELDS)
             assert "selected" not in receipt
             assert R.promotion_receipt_problems(receipt, num_draft=lane["mtp"]["num_draft"], batch=2,
-                                                cache_layers=lane["mtp"]["cache_layers"]) == []
+                                                cache_layers=lane["mtp"]["cache_layers"],
+                                                expected_provider_revision=lane["mtp"]["expected_state_provider_revision"],
+                                                expected_state_layouts=lane["mtp"]["expected_state_layouts"]) == []
 
 
 def _set_receipts(monkeypatch, value, arms=("retire", "control"), route=None):
@@ -541,7 +545,21 @@ def _set_receipts(monkeypatch, value, arms=("retire", "control"), route=None):
         data = run(self, name)
         if name in arms:
             for lane in data["lanes"].values():
-                lane["mtp"]["async_qsa_promotion"] = value() if callable(value) else value
+                replacement = value() if callable(value) else value
+                actual = lane["mtp"].get("async_qsa_promotion")
+                if (
+                    isinstance(replacement, dict)
+                    and "queued_ns" in replacement
+                    and isinstance(actual, dict)
+                ):
+                    # Malformation tests perturb the numeric receipt while
+                    # retaining the producer-bound model identity.
+                    replacement = dict(replacement)
+                    for key in (
+                        "state_provider_revision", "state_layouts", "state_fidelity"
+                    ):
+                        replacement[key] = actual[key]
+                lane["mtp"]["async_qsa_promotion"] = replacement
                 if route is not None:
                     lane["mtp"]["route"] = route
         return data
@@ -583,15 +601,36 @@ def test_root_falsifier_declined_receipt_on_a_physical_route_is_refused(monkeypa
     ({**VALID, "layers": 2}, "layers 2 != published target+draft cache layers 3"),
     ({**VALID, "advance": 0}, "advance 0 outside 1..num_draft+1"),
     ({**VALID, "advance": 4}, "advance 4 outside 1..num_draft+1"),
+    ({**VALID, "state_layouts": ("qwen4-recurrent-arrays-v1",)},
+     "state_layouts count 1 != layers 3"),
+    ({**VALID, "state_provider_revision": "foreign-provider-v1"},
+     "state_provider_revision does not match the model provider"),
+    ({**VALID, "state_layouts": ("foreign-layout-v1",) * 3},
+     "state_layouts do not match the model cache contracts"),
 ])
 def test_promotion_receipt_schema_refusals(receipt, problem):
-    problems = R.promotion_receipt_problems(receipt, num_draft=2, batch=2, cache_layers=3)
+    problems = R.promotion_receipt_problems(
+        receipt,
+        num_draft=2,
+        batch=2,
+        cache_layers=3,
+        expected_provider_revision=VALID["state_provider_revision"],
+        expected_state_layouts=VALID["state_layouts"],
+    )
     assert any(p.startswith(problem) for p in problems), problems
 
 
 def test_the_valid_receipt_and_decline_shapes_are_recognised():
-    assert R.promotion_receipt_problems(dict(VALID), num_draft=2, batch=2, cache_layers=3) == []
-    assert R.promotion_receipt_problems(dict(VALID), num_draft=2, batch=2, cache_layers=None)  # unknown layers
+    expected = {
+        "expected_provider_revision": VALID["state_provider_revision"],
+        "expected_state_layouts": VALID["state_layouts"],
+    }
+    assert R.promotion_receipt_problems(
+        dict(VALID), num_draft=2, batch=2, cache_layers=3, **expected
+    ) == []
+    assert R.promotion_receipt_problems(
+        dict(VALID), num_draft=2, batch=2, cache_layers=None, **expected
+    )  # unknown layers
     assert R.is_declined_promotion({"selected": False, "reason": "memory_pressure_retains_segmented_owner"})
     for shape in ({"selected": 0, "reason": "x"}, {"selected": False}, {"selected": False, "reason": "x", "y": 1},
                   {"selected": False, "reason": 3}, None, VALID):

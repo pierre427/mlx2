@@ -11,6 +11,7 @@ from mlx2.adapters.gpt_oss import (
     GPT_OSS_PUZZLE,
     GptOssAdapter,
     GptOssPuzzleAdapter,
+    _validate_execution_policy,
     inspect_artifact,
 )
 from mlx2.contracts import Capability
@@ -92,6 +93,7 @@ def test_ordinary_descriptors_and_cache_geometry(tmp_path, puzzle):
     adapter = GptOssPuzzleAdapter if puzzle else GptOssAdapter
     assert adapter.default_route == "ordinary"
     assert Capability.APC_V2 in descriptor.capabilities
+    assert Capability.PROMPT_LOOKUP in descriptor.capabilities
     assert Capability.MTP not in descriptor.capabilities
     assert Capability.TOOLS not in descriptor.capabilities
     assert descriptor.metadata["qualification"] == "pending"
@@ -101,6 +103,40 @@ def test_ordinary_descriptors_and_cache_geometry(tmp_path, puzzle):
         assert record["windows"][1] is None
     with pytest.raises(ValueError, match="MTP"):
         adapter.profile_name(adapter, True)
+
+
+def test_execution_policy_refuses_unimplemented_routes_before_artifact_load():
+    _validate_execution_policy(None)
+    _validate_execution_policy({})
+    with pytest.raises(ValueError, match="external drafting is not implemented"):
+        GptOssAdapter("/missing", execution_policy={"draft_model": "/draft"})
+    with pytest.raises(ValueError, match="proposal composition requires"):
+        GptOssAdapter(
+            "/missing", execution_policy={"proposal_composition": {"prompt_lookup": True}}
+        )
+    with pytest.raises(ValueError, match="request-scoped prompt lookup"):
+        GptOssAdapter("/missing", execution_policy={"num_draft": 2})
+    with pytest.raises(TypeError, match="must be an object"):
+        _validate_execution_policy(["ordinary"])
+
+
+@pytest.mark.parametrize("adapter_type", [GptOssAdapter, GptOssPuzzleAdapter])
+def test_capability_receipts_keep_ordinary_and_request_scoped_paths_distinct(adapter_type):
+    adapter = object.__new__(adapter_type)
+    adapter.layout = adapter_type.descriptor.cache_layout
+    receipt = adapter.diagnostics()
+    assert receipt["adapter_default_route"] == "ordinary"
+    assert "route" not in receipt
+    assert receipt["qualification"] == "unqualified"
+    features = receipt["capability_receipts"]
+    assert features["ordinary_reference"]["selected"] is None
+    assert features["ordinary_reference"]["default"] is True
+    assert features["apcv2"]["selected"] is None
+    assert features["prompt_lookup"]["implemented"] is True
+    assert features["prompt_lookup"]["selected"] is None
+    assert features["prompt_lookup"]["selection"] == "request_scoped"
+    assert features["external_draft"]["implemented"] is False
+    assert features["proposal_composition"]["implemented"] is False
 
 
 def test_puzzle_rejects_block_and_layer_disagreement(tmp_path):

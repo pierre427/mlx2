@@ -200,3 +200,37 @@ def test_lightning_budget_charges_recurrent_and_draft_state():
     assert draft.project(2048) > ordinary.project(2048)
     assert draft.project_pool(2048, resident_lanes=2, running_lanes=1) > draft.project(2048)
     assert draft.as_dict()["schema"] == "nemotron35-lightning-cache-geometry-v1"
+
+
+def test_route_contract_preserves_ordinary_and_fails_closed_without_sidecar():
+    from mlx2.adapters.nemotron35_lightning import (
+        CACHE_LAYOUT,
+        Nemotron35LightningAdapter,
+        descriptor_for,
+    )
+
+    adapter = object.__new__(Nemotron35LightningAdapter)
+    adapter._has_mtp = False
+    adapter._num_draft = 2
+    adapter.layout = CACHE_LAYOUT
+    adapter.descriptor = descriptor_for(has_mtp=False)
+
+    with pytest.raises(ValueError, match="MTP head is absent"):
+        adapter.profile_name(True)
+    assert adapter.execution_config(max_lanes=4, prefill_step=2048)["num_draft"] == 0
+    contract = adapter.route_capability_contract()
+    assert contract["ordinary_reference_preserved"] is True
+    assert contract["default_route"] == "ordinary"
+    assert contract["native_mtp"]["implemented"] is False
+    assert contract["native_mtp"]["ordinary_handoff"] is None
+    assert contract["prompt_lookup"]["implemented"] is False
+    assert contract["external_draft"]["implemented"] is False
+
+    adapter._has_mtp = True
+    adapter.descriptor = descriptor_for(has_mtp=True)
+    assert adapter.execution_config(max_lanes=4, prefill_step=2048)["num_draft"] == 2
+    contract = adapter.route_capability_contract()
+    assert contract["native_mtp"]["implemented"] is True
+    assert contract["native_mtp"]["ordinary_handoff"] is None
+    assert contract["native_mtp"]["qualified"] is False
+    assert contract["native_mtp"]["selected"] is None

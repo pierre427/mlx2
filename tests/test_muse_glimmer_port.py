@@ -3,6 +3,7 @@
 import ast
 import copy
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ from mlx2.adapters.muse_glimmer import (
     inspect_artifact,
     normalize_external_policy,
     normalize_messages,
+    progressive_external_identity,
 )
 from mlx2.adapters.muse_glimmer_config import ModelArgs
 from mlx2.adapters.muse_glimmer_output import MuseOutputParser, parse_atem
@@ -65,6 +67,28 @@ def test_import_has_no_tensor_side_effects():
     assert result.returncode == 0, result.stderr
 
 
+def test_muse_profile_clears_qwen_external_route_state(monkeypatch):
+    from mlx2.adapters.muse_glimmer import configure_environment
+
+    stale = {
+        "MLX2_DFLASH_TOPOLOGY": "tree15",
+        "MLX2_QWEN_TARGET_EXECUTION": "tensorfold",
+        "MLX2_TENSORFOLD_SOURCE": "/stale/qwen38/source",
+        "MLX2_TENSORFOLD_COHORT_LIMIT": "4",
+        "MLX2_TREE_BATCHED_TARGET_LAWS": "1",
+        "MLX2_TREE_SINGLE_FENCE": "1",
+    }
+    for name, value in stale.items():
+        monkeypatch.setenv(name, value)
+
+    profile = configure_environment()
+
+    assert profile["MLX2_QWEN_TARGET_EXECUTION"] == "reference"
+    assert os.environ["MLX2_QWEN_TARGET_EXECUTION"] == "reference"
+    for name in stale.keys() - {"MLX2_QWEN_TARGET_EXECUTION"}:
+        assert name not in os.environ
+
+
 def test_default_topology_and_layout():
     args = ModelArgs()
     assert args.layer_types.count("sliding_attention") == 39
@@ -97,6 +121,7 @@ def test_progressive_external_policy_requires_row_exact_host_chain():
     assert selected["progressive_verification_tile"] == 3
     assert selected["progressive_multilane_draft_cap"] == 3
     assert selected["proposal_composition"] is False
+    assert '"verification_tile":3' in progressive_external_identity(selected)
     with pytest.raises(ValueError, match="positive integer"):
         normalize_external_policy(
             {**base, "progressive_verification_tile": True}

@@ -12,11 +12,13 @@ from mlx2.runtime.hybrid_speculative import (
 )
 from mlx2.runtime.models.cache import ArraysCache
 from mlx2.runtime.models.qwen4_exp import QSAKVCache, Qwen4ArraysCache
+from mlx2.runtime.models.qwen4_state_plane import Qwen4StatePlaneOperations
 from mlx2.runtime.segmented_physical_promotion import (
     SegmentedPhysicalPromotionDeclined,
     begin_segmented_physical_promotion,
     begin_shared_prefix_physical_promotion,
 )
+from mlx2.runtime.state_plane_operations import StatePlaneContract
 
 
 class _Lineage:
@@ -85,6 +87,7 @@ def _state():
         row_caches=rows,
         transactions=[_Transaction(3), _Transaction(3)],
         membership_epoch=7,
+        state_plane_operations=Qwen4StatePlaneOperations(),
     )
 
 
@@ -96,9 +99,7 @@ def _commit(state, advances):
             mx.full((1, 1, count, 2), 50 + index, dtype=mx.float32),
             mx.full((1, 1, count, 3), 60 + index, dtype=mx.float32),
         )
-        qsa.update_index_keys(
-            mx.full((1, count, 2), 70 + index, dtype=mx.float32)
-        )
+        qsa.update_index_keys(mx.full((1, count, 2), 70 + index, dtype=mx.float32))
         state.transactions[index].advance(count)
     # The true segmented consumer owns the authoritative batched recurrent
     # arrays. Simulate its post-commit state and row split.
@@ -113,8 +114,11 @@ def test_shared_prefix_prequeue_binds_and_finishes_exactly():
     canonical = DetachedSelfMTPLane(
         lane=SimpleNamespace(uid=101),
         caches=pair,
-        shared_qsa_prefix_id="same-prefix",
+        shared_state_identity="same-prefix",
+        state_plane_operations=Qwen4StatePlaneOperations(),
     )
+    assert canonical.shared_qsa_prefix_id == "same-prefix"
+    canonical.shared_qsa_prefix_id = "same-prefix"
     staged = begin_shared_prefix_physical_promotion(
         canonical,
         rows=2,
@@ -127,8 +131,12 @@ def test_shared_prefix_prequeue_binds_and_finishes_exactly():
         row_caches=[pair, sibling_pair],
         transactions=[_Transaction(3), _Transaction(3)],
         membership_epoch=7,
-        shared_qsa_prefix_id="same-prefix",
+        shared_state_identity="same-prefix",
+        state_plane_operations=canonical.state_plane_operations,
     )
+    assert state.shared_qsa_prefix_id == "same-prefix"
+    state.shared_qsa_prefix_id = "same-prefix"
+    assert state.shared_state_identity == "same-prefix"
     ticket = staged.bind(state)
     _commit(state, [1, 1])
     physical, receipt = ticket.finish()
@@ -151,7 +159,8 @@ def test_shared_prefix_prequeue_rejects_changed_attestation_and_drains():
     canonical = DetachedSelfMTPLane(
         lane=SimpleNamespace(uid=101),
         caches=pair,
-        shared_qsa_prefix_id="prefix-a",
+        shared_state_identity="prefix-a",
+        state_plane_operations=Qwen4StatePlaneOperations(),
     )
     staged = begin_shared_prefix_physical_promotion(
         canonical,
@@ -164,7 +173,8 @@ def test_shared_prefix_prequeue_rejects_changed_attestation_and_drains():
         row_caches=[pair, copy.deepcopy(pair)],
         transactions=[_Transaction(3), _Transaction(3)],
         membership_epoch=7,
-        shared_qsa_prefix_id="prefix-b",
+        shared_state_identity="prefix-b",
+        state_plane_operations=canonical.state_plane_operations,
     )
     with pytest.raises(SegmentedPhysicalPromotionDeclined, match="attestation"):
         staged.bind(state)
@@ -185,9 +195,7 @@ def _cpu_default():
 def test_uniform_first_commit_promotes_and_reuses_recurrent_arrays():
     state = _state()
     stream = mx.new_stream(mx.cpu)
-    ticket = begin_segmented_physical_promotion(
-        state, reserve_tail=4, stream=stream
-    )
+    ticket = begin_segmented_physical_promotion(state, reserve_tail=4, stream=stream)
     assert ticket.pending_bytes == ticket.reserved_bytes > 0
     ticket.settle_for_admission()
     ticket.settle_for_admission()
@@ -220,6 +228,14 @@ def test_uniform_first_commit_promotes_and_reuses_recurrent_arrays():
     assert receipt.reserved_bytes > 0  # Total allocation remains in the receipt.
     assert receipt.recurrent_arrays_reused == 4
     assert receipt.patched_bytes > 0
+    assert receipt.state_provider_revision == "qwen4-state-plane-operations-v1"
+    assert receipt.state_fidelity == "exact"
+    assert receipt.state_layouts == (
+        "qwen4-qsa-raw-key-ledger-v1",
+        "qwen4-recurrent-arrays-v1",
+        "qwen4-qsa-raw-key-ledger-v1",
+        "qwen4-recurrent-arrays-v1",
+    )
 
     # The first physical follow-up must consume the normal growth slab instead
     # of copying the entire promoted prefix into a new allocation.
@@ -229,6 +245,103 @@ def test_uniform_first_commit_promotes_and_reuses_recurrent_arrays():
         mx.full((2, 1, 1, 3), 82, dtype=mx.float32),
     )
     assert qsa.keys is keys_before
+
+
+def test_promotion_rejects_provider_revision_drift_before_publication():
+    class DriftingQwen4Provider(Qwen4StatePlaneOperations):
+        provider_revision = "test-qwen4-state-v1"
+
+        def __init__(self):
+            self.revision = self.provider_revision
+
+        def contract(self, cache):
+            contract = super().contract(cache)
+            if contract is None:
+                return None
+            return StatePlaneContract(
+                revision=self.revision,
+                layout=contract.layout,
+                fidelity=contract.fidelity,
+                operations=contract.operations,
+            )
+
+    state = _state()
+    provider = DriftingQwen4Provider()
+    ticket = begin_segmented_physical_promotion(
+        state,
+        reserve_tail=2,
+        stream=mx.new_stream(mx.cpu),
+        operations=provider,
+    )
+    _commit(state, [1, 1])
+    provider.revision = "test-qwen4-state-v2"
+
+    with pytest.raises(SegmentedPhysicalPromotionDeclined, match="drifted"):
+        ticket.finish()
+    assert state.row_caches and not state.poisoned
+
+
+def test_promotion_rejects_provider_without_declared_cache_contract():
+    class EmptyProvider:
+        provider_revision = "empty-v1"
+
+        def contract(self, _cache):
+            return None
+
+    state = _state()
+    with pytest.raises(SegmentedPhysicalPromotionDeclined, match="operations provider"):
+        begin_segmented_physical_promotion(
+            state,
+            reserve_tail=2,
+            stream=mx.new_stream(mx.cpu),
+            operations=EmptyProvider(),
+        )
+    assert state.row_caches and not state.poisoned
+
+
+def test_promotion_rejects_absent_provider_without_touching_live_state():
+    state = _state()
+    state.state_plane_operations = None
+    rows = list(state.row_caches)
+    transactions = list(state.transactions)
+
+    with pytest.raises(SegmentedPhysicalPromotionDeclined, match="operations provider"):
+        begin_segmented_physical_promotion(
+            state, reserve_tail=2, stream=mx.new_stream(mx.cpu)
+        )
+
+    assert state.row_caches == rows
+    assert state.transactions == transactions
+    assert state._segmented_caches is None
+    assert not state.poisoned
+
+
+def test_provider_materialization_refusal_preserves_committed_live_state():
+    class RefusingProvider(Qwen4StatePlaneOperations):
+        def materialize_promoted_layer(self, *args, **kwargs):
+            from mlx2.runtime.state_plane_operations import StatePlaneOperationRefused
+
+            raise StatePlaneOperationRefused("synthetic provider refusal")
+
+    state = _state()
+    rows = list(state.row_caches)
+    transactions = list(state.transactions)
+    ticket = begin_segmented_physical_promotion(
+        state,
+        reserve_tail=2,
+        stream=mx.new_stream(mx.cpu),
+        operations=RefusingProvider(),
+    )
+    _commit(state, [1, 1])
+
+    with pytest.raises(SegmentedPhysicalPromotionDeclined, match="provider refusal"):
+        ticket.finish()
+
+    assert state.row_caches == rows
+    assert state.transactions == transactions
+    assert state._segmented_caches is ticket.view
+    assert not state.poisoned
+    assert all(not transaction.closed for transaction in transactions)
 
 
 def test_ragged_commit_declines_without_retiring_segmented_state():
@@ -377,9 +490,7 @@ def test_cleanup_failure_cannot_republish_partially_retired_rows(monkeypatch):
     def fail_cleanup():
         raise RuntimeError("synthetic old-row cleanup failure")
 
-    monkeypatch.setattr(
-        state.row_caches[0].target[0], "stop_speculation", fail_cleanup
-    )
+    monkeypatch.setattr(state.row_caches[0].target[0], "stop_speculation", fail_cleanup)
     batch, receipt = ticket.finish()
 
     assert len(batch.lanes) == 2
@@ -420,9 +531,7 @@ def test_plain_physical_merge_carries_runtime_pooled_keys_without_apc(monkeypatc
     monkeypatch.setattr(qwen4_exp, "_QSA_APC_SUMMARIES", False)
     rows = [_qsa(4, 1), _qsa(4, 2)]
     for index, cache in enumerate(rows):
-        cache._qsa_pooled_keys = mx.full(
-            (1, 2, 2), 120 + index, dtype=mx.float32
-        )
+        cache._qsa_pooled_keys = mx.full((1, 2, 2), 120 + index, dtype=mx.float32)
         cache._qsa_pooled_ratio = 2
         cache._qsa_summary_identity = None
 

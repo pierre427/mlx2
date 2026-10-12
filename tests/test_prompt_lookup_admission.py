@@ -430,7 +430,7 @@ def _cache_state(caches):
         ({"ngram_min": 0}, 40, None, ValueError, "ngram_min"),
         ({"recent_committed_segments": True}, 40, None, ValueError, "source scope"),
         ({}, 0, None, ValueError, "output budget"),
-        ({}, 40, [object()], NotImplementedError, "rollback-capable"),
+        ({}, 40, [object()], NotImplementedError, "declared exact rollback contract"),
     ],
     ids=["num_draft", "widening", "invalid_key", "source_scope", "budget", "cache"],
 )

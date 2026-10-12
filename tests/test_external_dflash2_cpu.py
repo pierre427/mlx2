@@ -363,7 +363,83 @@ def test_composed_feedback_counts_an_accepted_stop_draft(stop_index):
         assert lane.proposal_composition_current_source == "external"
         expected = 3 if stop_index is None else len(lane.ready)
         # The lagged source scorer learns every delivered accepted proposal.
-        assert wrapper._score_counts["external"] == (expected, 3)
+        assert lane.proposal_score_counts["external"] == (expected, expected)
+        receipt = lane.ready[-1].speculative_receipt["proposal_composition"]
+        assert "external" not in receipt["preselection_ranking"]["score_counts"]
+        postcommit = receipt["postcommit_learning"]
+        assert postcommit["observed_proposed_tokens"] == expected
+        assert postcommit["observed_accepted_tokens"] == expected
+        assert postcommit["ranking"]["score_counts"]["external"] == {
+            "weighted_accepted_tokens": expected,
+            "weighted_proposed_tokens": expected,
+        }
+    finally:
+        batch.close()
+
+
+def test_composed_score_state_is_discarded_on_cancel_before_next_request():
+    from mlx2.runtime.proposal_composition import ComposedDraftModel
+
+    model, draft = tiny()
+    wrapper = ComposedDraftModel(draft, {"prompt_lookup": True})
+    batch = generator(model, wrapper)
+    try:
+        first = batch.insert([[1, 2, 3, 4]], max_tokens=[8])[0]
+        lane = batch.lanes[first]
+        while lane.anchor is None:
+            batch._prefill(lane)
+        batch._round([lane])
+        assert lane.proposal_score_counts
+        assert "external" not in lane.ready[0].speculative_receipt[
+            "proposal_composition"
+        ]["ranking"]["score_counts"]
+        assert "external" in lane.proposal_score_counts
+        lane.proposal_trust_states["prompt_lookup:match_4:span_2"] = {
+            "blind_since_audit": 3,
+            "exact_accepted_tokens": 8,
+            "exact_proposed_tokens": 8,
+            "revoked": True,
+        }
+        batch.remove([first], cancelled=True)
+
+        second = batch.insert([[1, 2, 3, 4]], max_tokens=[8])[0]
+        assert batch.lanes[second].proposal_score_counts == {}
+        assert batch.lanes[second].proposal_score_counts is not lane.proposal_score_counts
+        assert batch.lanes[second].proposal_trust_states == {}
+        assert batch.lanes[second].proposal_trust_states is not lane.proposal_trust_states
+    finally:
+        batch.close()
+
+
+def test_composed_trust_state_is_restored_on_round_failure(monkeypatch):
+    from mlx2.runtime.proposal_composition import ComposedDraftModel
+
+    model, draft = tiny()
+    wrapper = ComposedDraftModel(draft, {"prompt_lookup": True})
+    batch = generator(model, wrapper)
+    try:
+        uid = batch.insert([[1, 2, 3, 4]], max_tokens=[8])[0]
+        lane = batch.lanes[uid]
+        while lane.anchor is None:
+            batch._prefill(lane)
+        lane.proposal_trust_states = {
+            "prompt_lookup:match_4:span_2": {
+                "blind_since_audit": 7,
+                "exact_accepted_tokens": 8,
+                "exact_proposed_tokens": 8,
+                "revoked": False,
+            }
+        }
+        before = copy.deepcopy(lane.proposal_trust_states)
+
+        def fail_forward(*args, **kwargs):
+            lane.proposal_trust_states["prompt_lookup:match_4:span_2"]["revoked"] = True
+            raise RuntimeError("injected trust rollback failure")
+
+        monkeypatch.setattr(model, "forward_with_taps", fail_forward)
+        with pytest.raises(RuntimeError, match="trust rollback"):
+            batch._round([lane])
+        assert lane.proposal_trust_states == before
     finally:
         batch.close()
 
@@ -901,9 +977,19 @@ def test_external_atomic_cohort_holds_short_prefill_until_all_rows_reach_decode(
     _prompts, responses = batch.next()
     assert {response.uid for response in responses} == set(uids)
     assert batch.scheduler_stats["target_max_width"] == 2
+    assert batch.scheduler_stats["external_atomic_cohort_releases"] == 1
+    for response in responses:
+        assert response.speculative_receipt["declared_cohort_frontier"] == {
+            "implemented": True,
+            "selected": True,
+            "qualified": False,
+            "observed_used": True,
+            "declared_width": 2,
+            "ownership": "atomic_until_complete_decode_frontier",
+        }
 
 
-def test_external_atomic_cohort_missing_member_does_not_deadlock_survivor():
+def test_external_atomic_cohort_missing_member_fails_closed_without_deadlock():
     model, draft = tiny()
     batch = generator(model, draft)
     cohort = {"tenant_id": "default", "id": "cancelled", "size": 2}
@@ -913,10 +999,68 @@ def test_external_atomic_cohort_missing_member_does_not_deadlock_survivor():
         sampling_configs=[{"sampling_temp": 0.0, "batch_cohort": cohort}],
     )[0]
 
-    output, _final = drain(batch)
-    assert len(output[uid]) == 2
-    assert batch.scheduler_stats["external_atomic_cohort_prefill_holds"] == 0
+    assert batch.next() == ([], [])
+    assert not batch.lanes
+    failures = batch.take_atomic_cohort_failures()
+    assert failures == [{
+        "uids": (uid,),
+        "cohort": cohort,
+        "reason": "declared external cohort cannot form its complete decode frontier",
+    }]
+    assert batch.scheduler_stats["external_atomic_cohort_failures"] == 1
     assert batch.scheduler_stats["external_idle_allocator_reclaims"] == 1
+
+
+def test_external_atomic_cohort_cancellation_retires_survivors_but_not_unrelated():
+    model, draft = tiny()
+    batch = generator(model, draft, completion_batch_size=3)
+    cohort = {"tenant_id": "default", "id": "cancelled", "size": 2}
+    uids = batch.insert(
+        [[1, 2, 3], [4, 5, 6], [7, 8]],
+        max_tokens=[3, 3, 2],
+        sampling_configs=[
+            {"sampling_temp": 0.0, "batch_cohort": dict(cohort)},
+            {"sampling_temp": 0.0, "batch_cohort": dict(cohort)},
+            {"sampling_temp": 0.0},
+        ],
+    )
+
+    cancelled_cache = batch.remove([uids[0]], return_prompt_caches=True)
+    assert set(cancelled_cache) == {uids[0]}
+    assert set(batch.lanes) == {uids[2]}
+    assert batch.take_atomic_cohort_failures() == [{
+        "uids": (uids[1],),
+        "cohort": cohort,
+        "reason": "declared external cohort lost a member before its decode frontier",
+    }]
+    output, final = drain(batch)
+    assert set(output) == set(final) == {uids[2]}
+    assert len(output[uids[2]]) == 2
+
+
+def test_external_atomic_cohort_can_shrink_after_complete_frontier_release():
+    model, draft = tiny()
+    batch = generator(model, draft, completion_batch_size=2)
+    cohort = {"tenant_id": "default", "id": "released", "size": 2}
+    uids = batch.insert(
+        [[1, 2], [3, 4]],
+        max_tokens=[3, 3],
+        sampling_configs=[
+            {"sampling_temp": 0.0, "batch_cohort": dict(cohort)},
+            {"sampling_temp": 0.0, "batch_cohort": dict(cohort)},
+        ],
+    )
+    for _ in range(10):
+        batch.next()
+        if batch._batch_cohort_key(batch.lanes[uids[0]]) in batch._released_atomic_cohorts:
+            break
+    else:
+        pytest.fail("cohort did not release its complete decode frontier")
+
+    batch.remove([uids[0]])
+    assert set(batch.lanes) == {uids[1]}
+    assert not batch.take_atomic_cohort_failures()
+    batch.close()
 
 
 def test_external_memory_blocked_prefill_is_not_reported_as_scheduler_waiting():
@@ -1429,6 +1573,7 @@ def test_external_fly_receipt_counter_and_structured_disable(monkeypatch):
                 tuple(targets),
                 False,
                 1,
+                (1,),
             )
         return original(tokens,proposals,targets,rng,**kwargs)
 
@@ -1440,6 +1585,21 @@ def test_external_fly_receipt_counter_and_structured_disable(monkeypatch):
     assert receipt['parameters']==policy
     assert receipt['relaxed_accepts']==1
     assert enabled.scheduler_stats['fly_relaxed_accepts']==1
+
+    # A stop at output position zero discards the relaxed draft at position
+    # one. Proposal-time FLy engagement must not survive that truncation.
+    def relaxed_then_stopped(tokens,proposals,targets,rng,**kwargs):
+        assert kwargs['fly_verification'].enabled
+        emitted=(0,)+tuple(tokens)
+        return VerifiedBlock(
+            len(tokens), emitted, tuple(targets), False, 1, (1,)
+        )
+    monkeypatch.setattr(module,'verify_proposals',relaxed_then_stopped)
+    stopped=generator(m,d,fly_verification=policy,stop_tokens=[[0]])
+    stopped.insert([[1,2,3]],max_tokens=[3])
+    _,stopped_final=drain(stopped)
+    assert stopped_final[0].speculative_receipt['relaxed_accepts']==0
+    assert stopped.scheduler_stats['fly_relaxed_accepts']==0
 
     seen=[]
     def exact_for_structured(tokens,proposals,targets,rng,**kwargs):

@@ -18,6 +18,7 @@ from mlx2.runtime.models import qwen4_fused_gdn_prefill as fused_prefill
 from mlx2.runtime.models import qwen4_fused_gdn_verify as fused_verify
 from mlx2.runtime.models.cache import ArraysCache
 from mlx2.runtime.models.gated_delta import gated_delta_ops, gated_delta_update
+from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 
 
 def _bits(x):
@@ -228,10 +229,16 @@ def test_probe_keys_accept_the_default_none_state_dtype(monkeypatch):
     assert fused_verify._probe_key(3, mx.float16) == (3, "float16")
     monkeypatch.setattr(fused, "_PROBE_COMPLETE", True)
     monkeypatch.setattr(fused, "_PROBED_THREADGROUP_Y", 16)
-    monkeypatch.setattr(fused, "_probe_st16_decode", lambda dtype: 8)
-    assert fused.probe_qwen4_fused_gdn_decode(mx.bfloat16) == 16
-    assert fused.probe_qwen4_fused_gdn_decode(mx.bfloat16, state_dtype=None) == 16
-    assert fused.probe_qwen4_fused_gdn_decode(mx.bfloat16, state_dtype=mx.float16) == 8
+    monkeypatch.setattr(fused, "_probe_st16_decode", lambda dtype, contract: 8)
+    assert fused.probe_qwen4_fused_gdn_decode(
+        mx.bfloat16, contract=QWEN4_GDN_CONTRACT
+    ) == 16
+    assert fused.probe_qwen4_fused_gdn_decode(
+        mx.bfloat16, state_dtype=None, contract=QWEN4_GDN_CONTRACT
+    ) == 16
+    assert fused.probe_qwen4_fused_gdn_decode(
+        mx.bfloat16, state_dtype=mx.float16, contract=QWEN4_GDN_CONTRACT
+    ) == 8
 
 
 def test_fp16_sources_are_derived_and_fp32_sources_untouched():
@@ -350,7 +357,9 @@ def test_fp16_probe_device_fault_is_raised_not_cached(monkeypatch):
     # A Metal OOM or GPU timeout during the probe is not a kernel refusal:
     # serving must see it, and the next call probes again.
     monkeypatch.setattr(fused, "_PROBED_ST16", {})
-    monkeypatch.setattr(fused, "probe_qwen4_fused_gdn_decode", lambda dtype: 8)
+    monkeypatch.setattr(
+        fused, "probe_qwen4_fused_gdn_decode", lambda dtype, **_kwargs: 8
+    )
 
     def fault(*_a, **_k):
         raise RuntimeError(

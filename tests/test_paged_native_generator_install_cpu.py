@@ -17,6 +17,15 @@ from mlx2.runtime.paged_native_batch_lifecycle import (
 from mlx2.runtime.paged_request_transaction import CandidateRequest
 
 
+def _candidate(model, backend):
+    from mlx2.adapters.native_continuation import bind_qwen_native_continuation_provider
+
+    candidate = Qwen3PackedCandidate(model, backend)
+    bind_qwen_native_continuation_provider(
+        candidate, "r1", model, "native_qwen3_paged_test")
+    return candidate
+
+
 def _owner(offset=3, generation=1):
     owner = object.__new__(NativeAtomicRequestOwner)
     owner.supported_planes = ("kv",)
@@ -71,7 +80,7 @@ def test_native_install_is_default_off_and_refusals_keep_ordinary_queue(monkeypa
     try:
         uid = generator.insert([[7, 8, 9]], caches=[[]])[0]
         owner = _owner()
-        candidate = Qwen3PackedCandidate(None, SimpleNamespace(
+        candidate = _candidate(None, SimpleNamespace(
             read_submissions=1, terminal_successes=1))
         args = (_prepared(uid), owner, candidate, RLock())
         assert generator.install_native_queued(*args)["reason"] == "native_serving_disabled"
@@ -282,7 +291,7 @@ def test_native_install_cancel_and_remove_close_lane_without_emitting(monkeypatc
     try:
         uid = generator.insert([[7, 8, 9]], caches=[[]])[0]
         result = generator.install_native_queued(
-            _prepared(uid), _owner(), Qwen3PackedCandidate(None, SimpleNamespace(
+            _prepared(uid), _owner(), _candidate(None, SimpleNamespace(
                 read_submissions=1, terminal_successes=1)), RLock(),
             permit_native=True)
         assert result["selected"] and not result["observed_used"]
@@ -310,7 +319,7 @@ def test_warm_apcv2_prefix_handoff_preserves_complete_prompt(monkeypatch):
     try:
         uid = generator.insert([[3]], caches=[[]], all_tokens=[[1, 2]])[0]
         owner = _owner(offset=3)
-        candidate = Qwen3PackedCandidate(None, SimpleNamespace(
+        candidate = _candidate(None, SimpleNamespace(
             read_submissions=1, terminal_successes=1))
         prepared = NativeQueuedHandoffPreparation(
             uid, "r1", 1, (1, 2, 3), object(),
@@ -350,7 +359,7 @@ def test_cancel_after_first_native_response_retains_owner_until_retired(monkeypa
     try:
         uid = generator.insert([[7, 8, 9]], caches=[[]])[0]
         result = generator.install_native_queued(
-            _prepared(uid), _owner(), Qwen3PackedCandidate(None, SimpleNamespace(
+            _prepared(uid), _owner(), _candidate(None, SimpleNamespace(
                 read_submissions=1, terminal_successes=1)), RLock(),
             permit_native=True)
         assert result["selected"]
@@ -495,7 +504,7 @@ def test_native_continuation_samples_and_forwards_accepted_token_without_device(
     owner.reap_quarantine = lambda: 0
     backend = SimpleNamespace(read_submissions=2, terminal_successes=2,
                               writer=_healthy_writer())
-    candidate = Qwen3PackedCandidate(SimpleNamespace(layers=(object(), object())), backend)
+    candidate = _candidate(SimpleNamespace(layers=(object(), object())), backend)
 
     def forward(lanes, **_):
         assert reader["open"], "native forward lost its public reader lease"
@@ -548,7 +557,7 @@ def test_native_live_reader_drift_fails_before_sampling(monkeypatch):
     from mlx2.runtime.paged_native_continuation import NativeQwen3Continuation
 
     owner = _owner(offset=2)
-    candidate = Qwen3PackedCandidate(
+    candidate = _candidate(
         SimpleNamespace(layers=(object(), object())),
         SimpleNamespace(read_submissions=2, terminal_successes=2))
     sampled = []
@@ -604,7 +613,7 @@ def test_research_permit_executes_private_prompt_without_serving_selection(monke
     backend = SimpleNamespace(read_submissions=0, terminal_successes=0,
                               writer=_healthy_writer())
     model = SimpleNamespace(layers=(object(), object()))
-    candidate = Qwen3PackedCandidate(model, backend)
+    candidate = _candidate(model, backend)
 
     def forward(lanes, **_):
         backend.read_submissions += 2

@@ -63,7 +63,7 @@ def _prepare(model, uid, prompt):
         accept_rule="residual",
         logits_processors=[],
         prefill_step_size=4,
-        share_qsa_indices=False,
+        share_index_state=False,
     )
 
 

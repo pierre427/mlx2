@@ -75,6 +75,8 @@ class _CheckpointRecorder:
 
 
 class _NoopModel:
+    _test_only_allow_unvalidated_prefill_checkpoint = True
+
     def __call__(self, _tokens, *, cache):
         return None
 

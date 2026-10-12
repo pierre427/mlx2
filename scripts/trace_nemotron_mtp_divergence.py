@@ -88,7 +88,7 @@ def main():
         mtp_state=None, lane_rng=None, num_draft=3, sampling_temp=0,
         sampling_top_p=1, sampling_top_k=0, sampling_min_p=0,
         accept_rule='exact', logits_processors=[], prefill_step_size=256,
-        share_qsa_indices=False,
+        share_index_state=False,
     )
     batch = attach_self_mtp_lanes(model, None, [detached])
     result = {

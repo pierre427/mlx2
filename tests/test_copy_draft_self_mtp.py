@@ -488,7 +488,7 @@ def test_accepted_copy_rows_settle_structured_steps_at_delivery(cpu, delivered):
         sampling_temp=0.0, sampling_top_p=1.0, sampling_top_k=0,
         sampling_min_p=0.0, accept_rule="residual",
         logits_processors=[processor], prefill_step_size=32,
-        share_qsa_indices=False,
+        share_index_state=False,
     )
     before = processor.constrained_steps
     detached.lane.copy_draft = CopyDraftState(
@@ -689,7 +689,7 @@ def test_segmented_abort_restores_copy_state(cpu):
         prompt_cache=None, mtp_state=None, lane_rng=LaneRNG(3), num_draft=2,
         sampling_temp=0.0, sampling_top_p=1.0, sampling_top_k=0,
         sampling_min_p=0.0, accept_rule="residual", logits_processors=[],
-        prefill_step_size=32, share_qsa_indices=False,
+        prefill_step_size=32, share_index_state=False,
     )
     policy = CopyDraftPolicy(enabled=True)
     detached.lane.copy_draft = CopyDraftState(policy, PROMPT + [first.token])

@@ -12,6 +12,7 @@ import pytest
 from mlx2.runtime.models import qwen4_fused_gdn_verify as V
 from mlx2.runtime.models import qwen36_35b as Q
 from mlx2.runtime.models.served_exp import is_device_fault
+from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 
 OOM = (
     "[METAL] Command buffer execution failed: Insufficient Memory "
@@ -125,6 +126,7 @@ def fp32_probe(monkeypatch):
     monkeypatch.setattr(F, "_PROBE_COMPLETE", False)
     monkeypatch.setattr(F, "_PROBED_THREADGROUP_Y", None)
     monkeypatch.setattr(F, "_PROBED_ST16", {})
+    monkeypatch.setattr(F, "_PROBED_CONTRACT_DECODE", {})
     monkeypatch.setattr(F, "fused_gdn_runtime_supported", lambda: True)
 
 
@@ -132,9 +134,11 @@ def test_fp32_decode_probe_reraises_and_probes_again(monkeypatch, fp32_probe):
     calls = []
     monkeypatch.setattr(F, "qwen4_fused_gdn_decode", _faulting_once(3, calls))
     with pytest.raises(RuntimeError, match="Insufficient Memory"):
-        F.probe_qwen4_fused_gdn_decode(mx.bfloat16)
+        F.probe_qwen4_fused_gdn_decode(mx.bfloat16, contract=QWEN4_GDN_CONTRACT)
     assert F._PROBE_COMPLETE is False
-    assert F.probe_qwen4_fused_gdn_decode(mx.bfloat16) == 32
+    assert F.probe_qwen4_fused_gdn_decode(
+        mx.bfloat16, contract=QWEN4_GDN_CONTRACT
+    ) == 32
     assert calls == [32, 32]
 
 
@@ -145,7 +149,9 @@ def test_fp32_decode_probe_still_steps_past_kernel_refusals(monkeypatch, fp32_pr
         return (mx.zeros((1,)),) * 3
 
     monkeypatch.setattr(F, "qwen4_fused_gdn_decode", kernel)
-    assert F.probe_qwen4_fused_gdn_decode(mx.bfloat16) == 16
+    assert F.probe_qwen4_fused_gdn_decode(
+        mx.bfloat16, contract=QWEN4_GDN_CONTRACT
+    ) == 16
     assert F._PROBE_COMPLETE is True
 
 
@@ -183,10 +189,15 @@ def test_b1_multitoken_probes_reraise_and_probe_again(
     monkeypatch.setattr(V, kernel_name, _faulting_once(n_outputs, calls))
     monkeypatch.setattr(V, "qwen4_fused_gdn_reconstruct", lambda *a, **k: mx.zeros((1,)))
     probe = getattr(V, probe_name)
+    probe_kwargs = (
+        {"contract": QWEN4_GDN_CONTRACT}
+        if probe_name in {"probe_qwen4_fused_gdn_verify", "probe_qwen4_fused_gdn_catchup"}
+        else {}
+    )
     with pytest.raises(RuntimeError, match="Insufficient Memory"):
-        probe(mx.bfloat16, 3)
+        probe(mx.bfloat16, 3, **probe_kwargs)
     assert getattr(V, cache_name) == {}
-    assert probe(mx.bfloat16, 3) == 32
+    assert probe(mx.bfloat16, 3, **probe_kwargs) == 32
     assert calls == [32, 32]
 
 

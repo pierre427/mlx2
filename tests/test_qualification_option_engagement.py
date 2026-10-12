@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 Q36 = ROOT / "qualification/runs/options-sweep-qwen36-20261002/smoke"
 B27 = ROOT / "qualification/runs/options-sweep-27b-20261002/smoke"
+FN = ROOT / "qualification/runs/options-sweep-flashnext-20261002/smoke"
 
 
 @pytest.fixture(scope="module")
@@ -56,6 +57,383 @@ def _b27(arm):
 
 def _features(names):
     return {"feature_" + name for name in names}
+
+
+# -- Proposal composition --------------------------------------------------
+
+
+def _composition_response(
+    policy,
+    *,
+    trust_record=None,
+    post_trust_record=None,
+    audited=False,
+    periodic_audit=False,
+    trusted=False,
+    frozen_override=None,
+):
+    from mlx2.runtime.proposal_composition import ProposalCompositionPolicy
+
+    normalized = ProposalCompositionPolicy.from_value(policy).as_dict()
+    frozen = dict(normalized)
+    frozen["trusted_pld"] = {
+        "enabled": normalized["trusted_pld"],
+        "min_score": normalized["trusted_pld_min_score"],
+        "min_verified_tokens": normalized["trusted_pld_min_verified_tokens"],
+        "min_match": normalized["trusted_pld_min_match"],
+        "max_span": normalized["trusted_pld_max_span"],
+        "audit_interval": normalized["trusted_pld_audit_interval"],
+    }
+    frozen.update(frozen_override or {})
+    trust_key = "prompt_lookup:match_4:span_4"
+    return {
+        "mlx2": {
+            "speculation": {
+                "draft_settings": {"proposal_composition": frozen},
+                "proposal_composition": {
+                    "selected": True,
+                    # External source use was historically omitted from this
+                    # convenience bit. Qualification reads committed source
+                    # evidence instead of trusting it.
+                    "observed_used": False,
+                    "ranking": {
+                        "order": "score_then_span_then_source",
+                        "authority": "lagged_committed_verification_only",
+                        "score_counts": {
+                            "prompt_lookup:match_4": {
+                                "weighted_accepted_tokens": 4.0,
+                                "weighted_proposed_tokens": 4.0,
+                            },
+                            "native_mtp": {
+                                "weighted_accepted_tokens": 2.0,
+                                "weighted_proposed_tokens": 3.0,
+                            },
+                            "external": {
+                                "weighted_accepted_tokens": 1.0,
+                                "weighted_proposed_tokens": 2.0,
+                            },
+                        },
+                    },
+                    "trusted_pld": {
+                        "scope": "request_lane",
+                        "sources": (
+                            {} if trust_record is None else {trust_key: trust_record}
+                        ),
+                    },
+                    "current_trust_key": trust_key,
+                    "current_score_key": "prompt_lookup:match_4",
+                    "current_source": "prompt_lookup",
+                    "current_audit": audited,
+                    "current_periodic_audit": periodic_audit,
+                    "current_trusted": trusted,
+                    "postcommit_learning": {
+                        "scope": "request_lane",
+                        "observed_proposed_tokens": 4,
+                        "observed_accepted_tokens": 4,
+                        "trust_key": trust_key,
+                        "score_key": "prompt_lookup:match_4",
+                        "audited": audited,
+                        "periodic_audit": periodic_audit,
+                        "trusted": trusted,
+                        "trusted_pld": {
+                            "scope": "request_lane",
+                            "sources": (
+                                {}
+                                if post_trust_record is None
+                                else {trust_key: post_trust_record}
+                            ),
+                        },
+                    },
+                    "adapter_diagnostics": {"scope": "process_global"},
+                    "committed_verification": {
+                        source: {
+                            "verified_rounds": 1,
+                            "proposed_tokens": 4,
+                            "accepted_tokens": 3,
+                        }
+                        for source in ("prompt_lookup", "native_mtp", "external")
+                    },
+                },
+            }
+        }
+    }
+
+
+def test_proposal_composition_checks_follow_selected_sources_only():
+    settings = {
+        "speculation": "external_draft",
+        "execution_policy": {"proposal_composition": {"prompt_lookup": True}},
+    }
+    required = required_feature_checks(settings)
+    assert {
+        "feature_proposal_composition",
+        "feature_proposal_composition_pld",
+        "feature_proposal_composition_external_source",
+        "feature_proposal_composition_lane_ranking",
+    } <= required
+    assert "feature_proposal_composition_native_mtp" not in required
+    assert not {name for name in required if name.startswith("feature_trusted_pld_")}
+
+    settings["execution_policy"]["proposal_composition"] = {
+        "prompt_lookup": True,
+        "native_mtp": True,
+        "trusted_pld": True,
+    }
+    required = required_feature_checks(settings)
+    assert "feature_proposal_composition_native_mtp" in required
+    assert {
+        "feature_trusted_pld_calibration",
+        "feature_trusted_pld_blind",
+        "feature_trusted_pld_periodic_audit",
+        "feature_trusted_pld_revocation",
+        "feature_trusted_pld_recovery",
+    } <= required
+
+    settings["execution_policy"]["proposal_composition"] = False
+    required = required_feature_checks(settings)
+    assert not {
+        name
+        for name in required
+        if "proposal_composition" in name or "trusted_pld" in name
+    }
+
+
+def test_composition_observation_requires_bound_lane_local_receipts(qualify):
+    policy = {
+        "prompt_lookup": True,
+        "native_mtp": True,
+        "trusted_pld": True,
+        "trusted_pld_min_verified_tokens": 4,
+        "trusted_pld_audit_interval": 2,
+    }
+    settings = {
+        "speculation": "external_draft",
+        "execution_policy": {"proposal_composition": policy},
+    }
+    cold = {
+        "blind_rounds": 0,
+        "blind_tokens": 0,
+        "blind_since_audit": 0,
+        "audit_rounds": 0,
+        "audit_proposed_tokens": 0,
+        "audit_accepted_tokens": 0,
+        "audit_failures": 0,
+        "periodic_audit_rounds": 0,
+        "revoked": False,
+        "exact_accepted_tokens": 0,
+        "exact_proposed_tokens": 0,
+    }
+    calibrated = {
+        **cold,
+        "audit_rounds": 1,
+        "audit_proposed_tokens": 4,
+        "audit_accepted_tokens": 4,
+        "exact_accepted_tokens": 4,
+        "exact_proposed_tokens": 4,
+    }
+    blind = {
+        **calibrated,
+        "blind_rounds": 1,
+        "blind_tokens": 4,
+        "blind_since_audit": 1,
+    }
+    periodic = {
+        **blind,
+        "blind_since_audit": 0,
+        "audit_rounds": 2,
+        "audit_proposed_tokens": 8,
+        "audit_accepted_tokens": 8,
+        "periodic_audit_rounds": 1,
+        "exact_accepted_tokens": 8,
+        "exact_proposed_tokens": 8,
+    }
+    revoked = {
+        **periodic,
+        "blind_since_audit": 0,
+        "audit_rounds": 3,
+        "audit_proposed_tokens": 12,
+        "audit_accepted_tokens": 11,
+        "audit_failures": 1,
+        "revoked": True,
+        "exact_accepted_tokens": 0,
+        "exact_proposed_tokens": 0,
+    }
+    recovered = {
+        **revoked,
+        "audit_rounds": 4,
+        "audit_proposed_tokens": 16,
+        "audit_accepted_tokens": 15,
+        "revoked": False,
+        "exact_accepted_tokens": 4,
+        "exact_proposed_tokens": 4,
+    }
+    responses = [
+        _composition_response(
+            policy,
+            trust_record=cold,
+            post_trust_record=calibrated,
+            audited=True,
+        ),
+        _composition_response(
+            policy,
+            trust_record=calibrated,
+            post_trust_record=blind,
+            trusted=True,
+        ),
+        _composition_response(
+            policy,
+            trust_record=blind,
+            post_trust_record=periodic,
+            audited=True,
+            periodic_audit=True,
+        ),
+        _composition_response(
+            policy,
+            trust_record=revoked,
+            post_trust_record=recovered,
+            audited=True,
+        ),
+    ]
+    evidence = qualify.proposal_composition_evidence(responses, settings)
+    observed = qualify.feature_observations(
+        {"settings": settings},
+        proposal_evidence=evidence,
+    )
+    assert evidence["source_bound_receipts"] == 4
+    assert observed["proposal_composition"] > 0
+    assert observed["proposal_composition_pld"] > 0
+    assert observed["proposal_composition_native_mtp"] > 0
+    assert observed["proposal_composition_external_source"] > 0
+    assert observed["proposal_composition_lane_ranking"] > 0
+    assert all(
+        observed[name] > 0
+        for name in (
+            "trusted_pld_calibration",
+            "trusted_pld_blind",
+            "trusted_pld_periodic_audit",
+            "trusted_pld_revocation",
+            "trusted_pld_recovery",
+        )
+    )
+
+    mismatched = [_composition_response(
+        policy,
+        trust_record=recovered,
+        post_trust_record=recovered,
+        frozen_override={"lookback": 999},
+    )]
+    evidence = qualify.proposal_composition_evidence(mismatched, settings)
+    observed = qualify.feature_observations(
+        {"settings": settings}, proposal_evidence=evidence
+    )
+    assert evidence["selected_receipts"] == 1
+    assert evidence["source_bound_receipts"] == 0
+    assert observed["proposal_composition"] == 0
+    assert observed["proposal_composition_external_source"] == 0
+
+
+def test_trusted_pld_periodic_gate_requires_a_post_blind_audit_transition(qualify):
+    policy = {
+        "prompt_lookup": True,
+        "trusted_pld": True,
+        "trusted_pld_min_verified_tokens": 4,
+        "trusted_pld_audit_interval": 2,
+    }
+    settings = {
+        "speculation": "external_draft",
+        "execution_policy": {"proposal_composition": policy},
+    }
+    # Multiple calibration audits plus a blind copy are not evidence that the
+    # configured post-blind cadence ever forced an exact audit.
+    before = {
+        "blind_rounds": 0,
+        "blind_tokens": 0,
+        "blind_since_audit": 0,
+        "audit_rounds": 4,
+        "audit_proposed_tokens": 16,
+        "audit_accepted_tokens": 16,
+        "audit_failures": 0,
+        "periodic_audit_rounds": 0,
+        "revoked": False,
+        "exact_accepted_tokens": 16,
+        "exact_proposed_tokens": 16,
+    }
+    after = {
+        **before,
+        "blind_rounds": 1,
+        "blind_tokens": 4,
+        "blind_since_audit": 1,
+    }
+    evidence = qualify.proposal_composition_evidence(
+        [
+            _composition_response(
+                policy,
+                trust_record=before,
+                post_trust_record=after,
+                trusted=True,
+            )
+        ],
+        settings,
+    )
+    assert evidence["trusted_pld"]["calibration"] > 0
+    assert evidence["trusted_pld"]["blind"] > 0
+    assert evidence["trusted_pld"]["periodic_audit"] == 0
+
+
+def test_trusted_pld_gate_accepts_terminal_carry_of_fresh_postcommit_state(qualify):
+    policy = {
+        "prompt_lookup": True,
+        "trusted_pld": True,
+        "trusted_pld_min_verified_tokens": 4,
+        "trusted_pld_audit_interval": 2,
+    }
+    settings = {
+        "speculation": "external_draft",
+        "execution_policy": {"proposal_composition": policy},
+    }
+    before = {
+        "blind_rounds": 1,
+        "blind_tokens": 4,
+        "blind_since_audit": 1,
+        "audit_rounds": 1,
+        "periodic_audit_rounds": 0,
+        "audit_proposed_tokens": 4,
+        "audit_accepted_tokens": 4,
+        "audit_failures": 0,
+        "revoked": False,
+        "exact_accepted_tokens": 4,
+        "exact_proposed_tokens": 4,
+    }
+    after = {
+        **before,
+        "blind_since_audit": 0,
+        "audit_rounds": 2,
+        "periodic_audit_rounds": 1,
+        "audit_proposed_tokens": 8,
+        "audit_accepted_tokens": 8,
+        "exact_accepted_tokens": 8,
+        "exact_proposed_tokens": 8,
+    }
+    terminal = _composition_response(
+        policy,
+        trust_record=before,
+        post_trust_record=after,
+        audited=True,
+        periodic_audit=True,
+    )
+    composition = terminal["mlx2"]["speculation"]["proposal_composition"]
+    composition.update(
+        current_source="ordinary",
+        current_trust_key=None,
+        current_score_key=None,
+        current_audit=False,
+        current_periodic_audit=False,
+    )
+    composition["trusted_pld"]["sources"] = {
+        "prompt_lookup:match_4:span_4": after
+    }
+    evidence = qualify.proposal_composition_evidence([terminal], settings)
+    assert evidence["trusted_pld"]["periodic_audit"] > 0
 
 
 # -- Qwen3.6 decode wins ---------------------------------------------------
@@ -131,6 +509,52 @@ def test_qwen36_moe_window_is_required_when_selected(qualify):
     assert "feature_qwen36_moe_window" in required_feature_checks(final["settings"])
 
 
+def test_qwen36_independent_moe_window_reachability():
+    base = {
+        "environment": {
+            "MLX_QWEN36_MOE_WINDOW_BATCH_DECODE": "1",
+            "MLX_QWEN36_MOE_WINDOW_VERIFY": "1",
+        },
+        "max_lanes": 4,
+        "mtp": True,
+        "speculation": "self_mtp",
+        "mtp_ordinary_handoff": {"enabled": True, "max_mtp_width": 1},
+    }
+    assert {
+        "feature_moe_window_batch_decode",
+        "feature_moe_window_verify",
+    } <= required_feature_checks(base)
+    ordinary_b1 = {**base, "max_lanes": 1, "mtp": False, "speculation": None}
+    skipped = selected_not_observed_features(ordinary_b1)
+    assert "no batched decode" in skipped["feature_moe_window_batch_decode"]
+    assert "no native MTP verify" in skipped["feature_moe_window_verify"]
+
+
+def test_qwen36_independent_moe_window_observations_are_run_deltas(qualify):
+    initial = {
+        "execution": {
+            "decode_wins": {
+                "moe": {
+                    "window_calls_by_consumer": {
+                        "batch_decode": 11,
+                        "verify": 13,
+                        "row_exact": 17,
+                    }
+                }
+            }
+        }
+    }
+    final = json.loads(json.dumps(initial))
+    calls = final["execution"]["decode_wins"]["moe"][
+        "window_calls_by_consumer"
+    ]
+    calls["batch_decode"] = 18
+    calls["verify"] = 24
+    observed = qualify.feature_observations(final, initial=initial)
+    assert observed["moe_window_batch_decode"] == 7
+    assert observed["moe_window_verify"] == 11
+
+
 # -- NAX gather on any model ----------------------------------------------
 
 
@@ -145,19 +569,15 @@ def test_nax_gather_is_required_from_a_settings_selection():
         {**settings, "moe_nax_gather": "off"})
 
 
-def test_serving_records_an_inherited_nax_selection(monkeypatch):
+def test_serving_does_not_inherit_nax_selection_from_process_state(monkeypatch):
     from mlx2 import serving
 
-    fake = SimpleNamespace(MODE="fused")
-    monkeypatch.setitem(sys.modules, serving._MOE_NAX_GATHER_MODULE, fake)
-    assert serving._moe_nax_gather_setting({}) == {"moe_nax_gather": "fused"}
-    # A profile that pins it (Flash-Next) already carries it.
-    assert serving._moe_nax_gather_setting({"MLX2_MOE_NAX_GATHER": "fused"}) == {}
-    fake.MODE = "off"
-    assert serving._moe_nax_gather_setting({}) == {}
+    monkeypatch.setenv("MLX2_MOE_NAX_GATHER", "fused")
+    assert not hasattr(serving, "_moe_nax_gather_mode")
+    assert not hasattr(serving, "_moe_nax_gather_setting")
 
 
-def test_serving_status_adds_counters_the_adapter_does_not_report(monkeypatch):
+def test_serving_status_uses_only_route_owned_diagnostics(monkeypatch):
     from mlx2 import serving
 
     nax = SimpleNamespace(MODE="gather", calls={"gather": 0},
@@ -165,21 +585,17 @@ def test_serving_status_adds_counters_the_adapter_does_not_report(monkeypatch):
     switch = SimpleNamespace(moe_pad_status=lambda: {"policy": "adaptive",
                                                      "choices": {"cost_qmv": 2}})
     gdn = SimpleNamespace(gdn_core_status=lambda: {"enabled": True, "calls": 5})
-    monkeypatch.setitem(sys.modules, serving._MOE_NAX_GATHER_MODULE, nax)
-    monkeypatch.setitem(sys.modules, serving._SWITCH_LAYERS_MODULE, switch)
-    monkeypatch.setitem(sys.modules, serving._GATED_DELTA_MODULE, gdn)
     adapter = SimpleNamespace(diagnostics=lambda: {"decode_wins": {}})
-    execution = serving._execution_diagnostics(adapter)
+    assert serving._execution_diagnostics(adapter) == {"decode_wins": {}}
+    # The adapter's own report wins; defaults add nothing.
+    own = SimpleNamespace(diagnostics=lambda: {
+        "moe_nax_gather": nax.status(), "moe_pad": switch.moe_pad_status(),
+        "gdn_core": gdn.gdn_core_status(),
+    })
+    execution = serving._execution_diagnostics(own)
     assert execution["moe_nax_gather"]["calls"] == {"gather": 3}
     assert execution["moe_pad"]["policy"] == "adaptive"
     assert execution["gdn_core"] == {"enabled": True, "calls": 5}
-    # The adapter's own report wins; defaults add nothing.
-    own = SimpleNamespace(diagnostics=lambda: {"moe_nax_gather": {"own": True}})
-    assert serving._execution_diagnostics(own)["moe_nax_gather"] == {"own": True}
-    nax.MODE = "off"
-    switch.moe_pad_status = lambda: {"policy": "floor", "choices": {}}
-    gdn.gdn_core_status = lambda: {"enabled": False, "calls": 0}
-    assert serving._execution_diagnostics(adapter) == {"decode_wins": {}}
 
 
 # -- Adaptive sorted-MoE pad ----------------------------------------------
@@ -292,6 +708,279 @@ def test_gdn_core_counter_counts_core_dispatches(monkeypatch):
     status = gd.gdn_core_status()
     assert calls and status["calls"] == before + 1
     assert status["enabled"] is True
+
+
+def test_cache_capsules_and_persistent_blocks_require_real_engagement(qualify):
+    settings = {
+        "cache_capsules": {"enabled": True},
+        "persistent_block_bytes": 4 << 20,
+    }
+    assert {
+        "feature_cache_capsules",
+        "feature_persistent_blocks",
+    } <= required_feature_checks(settings)
+
+    initial = {
+        "cache_capsules": {"requests": 2, "primary_successes": 2},
+        "counts": {"cache_capsule_prepared": 1},
+        "apcv2": {
+            "idle_disk": {
+                "block_bytes": 4 << 20,
+                "parks": 4,
+                "restores": 3,
+                "resumes": 3,
+                "bytes_written": 100,
+            }
+        },
+    }
+    final = {
+        "settings": settings,
+        "cache_capsules": {"requests": 5, "primary_successes": 5},
+        "counts": {"cache_capsule_prepared": 4},
+        "apcv2": {
+            "idle_disk": {
+                "block_bytes": 4 << 20,
+                "parks": 5,
+                "restores": 4,
+                "resumes": 4,
+                "bytes_written": 200,
+            }
+        },
+    }
+    observed = qualify.feature_observations(final, initial=initial)
+    assert observed["cache_capsules"] == 3
+    assert observed["persistent_blocks"] == 1
+    fallback_only = {
+        **final,
+        "counts": {"cache_capsule_prepared": initial["counts"]["cache_capsule_prepared"]},
+    }
+    assert qualify.feature_observations(fallback_only, initial=initial)[
+        "cache_capsules"
+    ] == 0
+    wrong_block_width = {
+        **final,
+        "apcv2": {
+            "idle_disk": {
+                **final["apcv2"]["idle_disk"],
+                "block_bytes": 8 << 20,
+            }
+        },
+    }
+    assert qualify.feature_observations(wrong_block_width, initial=initial)[
+        "persistent_blocks"
+    ] == 0
+    assert qualify.feature_observations(initial, initial=initial)["cache_capsules"] == 0
+    assert qualify.feature_observations(initial, initial=initial)["persistent_blocks"] == 0
+
+
+def test_cache_capsule_output_probe_is_exact(qualify):
+    reference = {
+        "choices": [{"message": {"content": "\nCAPSULE_READY\n"}}]
+    }
+    fanout = {
+        "choices": [
+            {"message": {"content": "CAPSULE_READY"}},
+            {"message": {"content": " CAPSULE_READY"}},
+            {"message": {"content": "CAPSULE_READY\n"}},
+        ]
+    }
+    assert qualify.cache_capsule_probe_passes(reference, fanout)
+    fanout["choices"][2]["message"]["content"] = "CAPSULE_READY extra"
+    assert not qualify.cache_capsule_probe_passes(reference, fanout)
+
+
+@pytest.mark.parametrize(
+    "policy,feature",
+    [
+        ({"ple_early_dispatch": True}, "feature_ple_early_dispatch"),
+        (
+            {"qsa_stage1_direct_selector": "direct8"},
+            "feature_qsa_stage1_direct_selector",
+        ),
+        ({"ple_read_policy": "serial"}, "feature_ple_read_policy"),
+        ({"tensorfold_qmv_rows": True}, "feature_tensorfold_qmv_rows"),
+        (
+            {"qsa_batch_decode_sparse": "indexed"},
+            "feature_qsa_batch_decode_sparse",
+        ),
+        ({"qsa_nax_batched": True}, "feature_qsa_nax_batched"),
+    ],
+)
+def test_flash_next_default_off_options_require_engagement(policy, feature):
+    settings = {
+        "adapter_policy": policy,
+        "max_context": 65536,
+        "max_lanes": 4,
+        "mtp": False,
+    }
+    assert feature in required_feature_checks(settings)
+
+
+def test_flash_next_mtp_only_options_require_their_exact_paths():
+    settings = {
+        "adapter_policy": {
+            "row_exact_verify": True,
+            "row_exact_window_kernels": True,
+            "moe_window_row_exact": True,
+            "moe_window_verify": True,
+            "mtp_draft_vocab": True,
+        },
+        "max_context": 65536,
+        "max_lanes": 4,
+        "mtp": True,
+        "speculation": "self_mtp",
+    }
+    assert {
+        "feature_row_exact_verify",
+        "feature_row_exact_attn_window",
+        "feature_moe_window_row_exact",
+        "feature_moe_window_verify",
+        "feature_mtp_draft_vocab",
+    } <= required_feature_checks(settings)
+
+
+def test_flash_next_default_off_option_observations_are_run_deltas(qualify):
+    initial = {
+        "execution": {
+            "tensorfold_longctx": {
+                "ple_early_dispatch": {"dispatches": 2, "device_ids": 2}
+            },
+            "qsa_stage1": {
+                "candidates": {
+                    "direct_selector_configured": "direct8",
+                    "runtime_counts": {"direct8_topk_dispatches": 3},
+                }
+            },
+            "ple_tables": [
+                {
+                    "read_policy": {
+                        "configured": "serial",
+                        "counts": {"foreground_serial_calls": 4},
+                    }
+                }
+            ],
+            "tensorfold_qmv": {"counters": {"kernel_calls": 5}},
+            "row_exact_verify": {
+                "windows_row_exact": 6,
+                "windows_not_exact": 0,
+                "failures": {},
+                "stages": {"attention": {"window_dense": 7}},
+            },
+            "moe": {
+                "moe_window": {
+                    "calls": {"row_exact": 8, "batch_decode": 9, "verify": 10}
+                }
+            },
+            "qsa_batch_decode_sparse": {"engagements": 11},
+            "qsa_nax_prefill": {"counts": {"engaged_auto_batched": 12}},
+            "mtp_draft_vocab": {"runtime_enabled": True, "reduced_head_calls": 13},
+        }
+    }
+    final = json.loads(json.dumps(initial))
+    execution = final["execution"]
+    execution["tensorfold_longctx"]["ple_early_dispatch"] = {
+        "dispatches": 4,
+        "device_ids": 5,
+    }
+    execution["qsa_stage1"]["candidates"]["runtime_counts"][
+        "direct8_topk_dispatches"
+    ] = 7
+    execution["ple_tables"][0]["read_policy"]["counts"][
+        "foreground_serial_calls"
+    ] = 9
+    execution["tensorfold_qmv"]["counters"]["kernel_calls"] = 11
+    execution["row_exact_verify"]["windows_row_exact"] = 14
+    execution["row_exact_verify"]["stages"]["attention"]["window_dense"] = 15
+    execution["moe"]["moe_window"]["calls"] = {
+        "row_exact": 18,
+        "batch_decode": 20,
+        "verify": 22,
+    }
+    execution["qsa_batch_decode_sparse"]["engagements"] = 24
+    execution["qsa_nax_prefill"]["counts"]["engaged_auto_batched"] = 26
+    execution["mtp_draft_vocab"]["reduced_head_calls"] = 28
+    observed = qualify.feature_observations(final, initial=initial)
+    assert {
+        name: observed[name]
+        for name in (
+            "ple_early_dispatch",
+            "qsa_stage1_direct_selector",
+            "ple_read_policy",
+            "tensorfold_qmv_rows",
+            "row_exact_verify",
+            "row_exact_attn_window",
+            "moe_window_row_exact",
+            "moe_window_batch_decode",
+            "moe_window_verify",
+            "qsa_batch_decode_sparse",
+            "qsa_nax_batched",
+            "mtp_draft_vocab",
+        )
+    } == {
+        "ple_early_dispatch": 2,
+        "qsa_stage1_direct_selector": 4,
+        "ple_read_policy": 5,
+        "tensorfold_qmv_rows": 6,
+        "row_exact_verify": 8,
+        "row_exact_attn_window": 8,
+        "moe_window_row_exact": 10,
+        "moe_window_batch_decode": 11,
+        "moe_window_verify": 12,
+        "qsa_batch_decode_sparse": 13,
+        "qsa_nax_batched": 14,
+        "mtp_draft_vocab": 15,
+    }
+
+
+def test_row_exact_observation_fails_closed_on_any_fallback(qualify):
+    initial = {
+        "execution": {
+            "row_exact_verify": {
+                "windows_row_exact": 2,
+                "windows_not_exact": 0,
+                "failures": {},
+            }
+        }
+    }
+    final = {
+        "execution": {
+            "row_exact_verify": {
+                "windows_row_exact": 5,
+                "windows_not_exact": 1,
+                "failures": {"attention_preselected": 1},
+            }
+        }
+    }
+    assert qualify.feature_observations(final, initial=initial)["row_exact_verify"] == 0
+
+
+@pytest.mark.parametrize("route", ["ordinary", "mtp2"])
+def test_historical_sparse_qsa_smoke_no_longer_passes_without_engagement(
+    qualify, route
+):
+    final = json.loads(
+        (FN / f"qsa_sparse_indexed--{route}" / "status-final.json").read_text()
+    )
+    assert "feature_qsa_batch_decode_sparse" in required_feature_checks(
+        final["settings"]
+    )
+    assert qualify.feature_observations(final)["qsa_batch_decode_sparse"] == 0
+
+
+def test_historical_row_exact_smoke_no_longer_hides_fallbacks(qualify):
+    final = json.loads(
+        (FN / "row_exact_verify--mtp2" / "status-final.json").read_text()
+    )
+    required = required_feature_checks(final["settings"])
+    assert {
+        "feature_row_exact_verify",
+        "feature_row_exact_attn_window",
+        "feature_moe_window_row_exact",
+    } <= required
+    observed = qualify.feature_observations(final)
+    assert observed["row_exact_verify"] == 0
+    assert observed["row_exact_attn_window"] > 0
+    assert observed["moe_window_row_exact"] > 0
 
 
 def test_slice_floor_is_contention_gated(qualify):

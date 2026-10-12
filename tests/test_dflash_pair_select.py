@@ -1,5 +1,6 @@
 """Batched DFlash2 pairwise selection (item 2 / P3 DraftBlock); CPU only."""
 import copy
+import os
 
 import mlx.core as mx
 import numpy as np
@@ -137,6 +138,15 @@ def drain(b):
 
 
 def generator(m, d, **kwargs):
+    if (
+        os.environ.get("MLX2_QWEN_TARGET_EXECUTION") == "tensorfold"
+        or kwargs.get("dynamic_singleton_tree") is True
+    ):
+        from mlx2.adapters.qwen38_target_tree_executor import Qwen38TargetTreeExecutor
+
+        kwargs.setdefault(
+            "target_tree_executor_provider", Qwen38TargetTreeExecutor.create()
+        )
     return ExternalDraftBatchGenerator(m, draft_model=d, binding="test", num_draft=3, prefill_step_size=3, **kwargs)
 
 

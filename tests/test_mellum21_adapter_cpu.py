@@ -193,6 +193,41 @@ def test_descriptor_reports_implemented_unqualified_ordinary_slice():
     assert (defaults.temperature, defaults.top_p, defaults.top_k) == (0.6, 0.95, 20)
 
 
+def test_route_contract_is_exact_ordinary_only_and_fails_closed_for_drafts():
+    adapter = object.__new__(Mellum21ThinkingAdapter)
+    contract = adapter.route_capability_contract()
+    assert contract["ordinary_reference_preserved"] is True
+    assert contract["default_route"] == "ordinary"
+    assert contract["apcv2"]["exact_only"] is True
+    assert contract["prompt_lookup"]["target_verified"] is True
+    assert contract["moe_expert_streaming"]["implemented"] is True
+    assert contract["moe_expert_streaming"]["eligible"] is True
+    assert contract["moe_expert_streaming"]["selected"] is None
+    assert contract["moe_expert_streaming"]["observed_used"] is False
+    assert contract["native_mtp"] == {
+        "implemented": False,
+        "reason": "released artifact contains no MTP tensors",
+    }
+    assert contract["external_draft"]["implemented"] is False
+
+
+def test_mellum_declares_exact_early_expert_streaming_only(tmp_path):
+    from mlx2.runtime.streamed_load import WeightStreamRequest, declared_stream_modes
+
+    assert declared_stream_modes(Mellum21ThinkingAdapter) == frozenset({"moe_experts"})
+    dense = WeightStreamRequest(mode="dense_mlp", budget_bytes=1 << 20)
+    with pytest.raises(ValueError, match="does not declare dense_mlp"):
+        Mellum21ThinkingAdapter(str(tmp_path / "missing"), weight_streaming=dense)
+
+
+@pytest.mark.parametrize("policy", [[], "", 0, {"num_draft": 1}])
+def test_execution_policy_rejects_even_falsey_non_objects_before_artifact_read(
+    tmp_path, policy
+):
+    with pytest.raises(ValueError, match="no adapter execution-policy overrides"):
+        Mellum21ThinkingAdapter(str(tmp_path / "missing"), execution_policy=policy)
+
+
 def test_json_tool_output_and_thinking_channel():
     tools = [
         {

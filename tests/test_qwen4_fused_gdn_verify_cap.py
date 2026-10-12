@@ -5,6 +5,7 @@ import pytest
 from mlx2.adapters.flash_next_policy import FlashNextPolicy
 from mlx2.runtime.models import qwen4_fused_gdn as fg
 from mlx2.runtime.models import qwen4_fused_gdn_verify as fv
+from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 
 
 def _admission(steps):
@@ -24,6 +25,7 @@ def _admission(steps):
         num_key_heads=fg.NUM_KEY_HEADS, num_value_heads=fg.NUM_VALUE_HEADS,
         key_head_dim=fg.KEY_HEAD_DIM, value_head_dim=fg.VALUE_HEAD_DIM,
         conv_kernel=fg.CONV_KERNEL, gate_activation="sigmoid",
+        contract=QWEN4_GDN_CONTRACT,
     )
 
 

@@ -6,13 +6,16 @@ math. --baseline executes the pre-change source and must fail 27B admission.
 The tiny native model tests remain in test_qwen38_fused_gdn.py.
 """
 import ast
-from dataclasses import dataclass
-from pathlib import Path
 import subprocess
 import sys
+import unittest
+from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
-import unittest
+
+from mlx2.runtime.models.gdn_kernel_contract import FusedGdnContract
+from mlx2.runtime.models.qwen_gdn_contracts import resolve_qwen_gdn_contract
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PATH = 'src/mlx2/runtime/models/qwen4_fused_gdn.py'
@@ -53,6 +56,8 @@ def pure_admission(text):
                 continue
             nodes.append(node)
     scope = dict(__name__=__name__, dataclass=dataclass, Any=Any, Optional=Optional,
+                 FusedGdnContract=FusedGdnContract,
+                 resolve_qwen_gdn_contract=resolve_qwen_gdn_contract,
                  mx=SimpleNamespace(bfloat16='bf16', float32='fp32', float16='fp16'))
     exec(compile(ast.Module(body=nodes, type_ignores=[]), SOURCE_PATH, 'exec'), scope)
     return scope
@@ -103,7 +108,7 @@ class AdmissionTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assertFalse(self.admit(1, **change).accepted)
 
-    def test_flash_next_admission_and_metal_sources_are_unchanged(self):
+    def test_flash_next_admission_is_unchanged_and_decay_fix_is_scoped(self):
         if not baseline_available():
             self.skipTest(f'private baseline commit {BASELINE_COMMIT} absent '
                           '(public mirror history does not carry it)')
@@ -120,7 +125,14 @@ class AdmissionTests(unittest.TestCase):
             return {n.targets[0].id: ast.literal_eval(n.value) for n in ast.parse(text).body
                     if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
                     and n.targets[0].id in ('_HEADER', '_SOURCE')}
-        self.assertEqual(literals(source()), literals(source(True)))
+        current, baseline = literals(source()), literals(source(True))
+        self.assertEqual(current['_HEADER'], baseline['_HEADER'])
+        self.assertIn('T av = a[hv] + dt_bias[hv];', baseline['_SOURCE'])
+        self.assertIn('if constexpr (AGNES_NUMERICS)', current['_SOURCE'])
+        self.assertIn('float av = float(a[hv]) + float(dt_bias[hv]);',
+                      current['_SOURCE'])
+        self.assertIn('float sp = mlx_softplus_fast<float>(av);',
+                      current['_SOURCE'])
 
 
 if __name__ == '__main__':

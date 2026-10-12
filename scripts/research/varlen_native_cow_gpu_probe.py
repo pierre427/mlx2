@@ -43,6 +43,7 @@ def run_probe() -> dict:
     mx.synchronize(stream)
     _terminal(owner, write)
 
+    backend.begin_copy_timing(capacity=1)
     copy = owner.submit_copy(source, destination, byte_count=copied_bytes)
     read_lease = owner.ledger.prepare((source, destination))
     owner.ledger.submit(read_lease)
@@ -62,6 +63,10 @@ def run_probe() -> dict:
     if pool.free_count:
         raise AssertionError("destination recycled before terminal proof")
     _terminal(owner, copy)
+    timing = backend.poll_copy_timings()
+    if len(timing) != 1 or timing[0].epoch != copy.epoch or not timing[0].succeeded:
+        raise AssertionError("native copy timing did not match the terminal copy")
+    backend.end_copy_timing()
     if pool.free_count:
         raise AssertionError("destination recycled while reader pin is live")
     owner.ledger.complete(read_lease)  # Synchronized read is the proof.
@@ -70,7 +75,7 @@ def run_probe() -> dict:
     recycled = pool.reserve()[0]
     if recycled.page_id != destination.page_id or recycled.generation != destination.generation + 1:
         raise AssertionError("destination generation did not advance on reuse")
-    return {
+    result = {
         "schema": "mlx2.varlen-native-cow-probe.v1",
         "host": platform.node(), "mlx_version": mx.__version__,
         "page_bytes": page_bytes, "copied_bytes": copied_bytes,
@@ -79,9 +84,19 @@ def run_probe() -> dict:
         "source_unchanged": True, "destination_exact": True,
         "destination_generation_reused": recycled.generation,
         "terminal_copy_succeeded": True,
+        "copy_timing": {
+            "schema": backend.copy_timing_capability()["schema"],
+            "enqueue_elapsed_ns": timing[0].enqueue_elapsed_ns,
+            "completed_host_ns": timing[0].completed_host_ns,
+            "command_buffer_gpu_ns": timing[0].command_buffer_gpu_ns,
+            "measurement_scope": "one native page-copy command buffer",
+            "kernel_timing_claim": False,
+        },
         "gpu_command_failure_tested": False,
         "model_serving_tested": False,
     }
+    backend.close_after_terminal()
+    return result
 
 
 def main() -> None:

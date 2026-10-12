@@ -16,6 +16,7 @@ from mlx2.adapters.flash_next_policy import FlashNextPolicy
 from mlx2.runtime.generate import BatchGenerator
 from mlx2.runtime.models import qwen4_exp
 from mlx2.runtime.models.cache import ArraysCache
+from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 from mlx2.runtime.models.qwen4_fused_gdn import (
     BATCH_DECODE_MAX_ROWS,
     CONV_DIM,
@@ -51,6 +52,7 @@ def _admit(rows, **overrides):
         _operands(rows), mask=None, spans=(), speculating=False, training=False,
         sharded=False, num_key_heads=16, num_value_heads=48, key_head_dim=128,
         value_head_dim=128, conv_kernel=4, gate_activation="sigmoid",
+        contract=QWEN4_GDN_CONTRACT,
     )
     kwargs.update(overrides)
     return admit_qwen4_fused_gdn_batch_decode(**kwargs)
@@ -96,6 +98,7 @@ def test_one_row_admission_is_unchanged_by_the_shared_operand_checks():
         _operands(1), mask=None, spans=(), speculating=False, training=False,
         sharded=False, num_key_heads=16, num_value_heads=48, key_head_dim=128,
         value_head_dim=128, conv_kernel=4, gate_activation="sigmoid",
+        contract=QWEN4_GDN_CONTRACT,
     )
     assert admit_qwen4_fused_gdn_decode(**kwargs).accepted
     kwargs.update(_operands(2))
@@ -202,7 +205,9 @@ def test_row_exact_launch_updates_cache_and_counters(production_gdn_qwen4, monke
 
     monkeypatch.setattr(qwen4_exp, "fused_gdn_runtime_supported", lambda: True)
     monkeypatch.setattr(qwen4_exp, "served_silu_refusal", lambda: None)
-    monkeypatch.setattr(qwen4_exp, "probe_qwen4_fused_gdn_decode", lambda dtype: 32)
+    monkeypatch.setattr(
+        qwen4_exp, "probe_qwen4_fused_gdn_decode", lambda dtype, **_kwargs: 32
+    )
     monkeypatch.setattr(qwen4_exp, "qwen4_fused_gdn_batch_decode", fake)
     layer.set_fused_gdn_batch_decode_mode("row_exact")
     try:

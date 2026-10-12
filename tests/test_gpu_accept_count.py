@@ -399,7 +399,7 @@ def test_greedy_round_has_one_hybrid_sync_with_array_accept(monkeypatch):
             accept_rule="residual",
             logits_processors=[],
             prefill_step_size=8,
-            share_qsa_indices=False,
+            share_index_state=False,
         )[0]
         for uid, prompt in enumerate(([1, 7, 3, 9], [4, 4, 2, 8, 6]))
     ]

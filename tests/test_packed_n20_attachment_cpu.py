@@ -23,6 +23,12 @@ class Continuation:
         index=self.calls;Continuation.calls+=1
         if index==self.fail_at:raise RuntimeError('constructor refusal')
         self.__dict__.update(kw)
+class Provider:
+    def __init__(self,candidate):self.candidate=candidate
+    def validate_candidate(self,candidate):
+        if candidate is not self.candidate:raise TypeError('candidate binding drifted')
+    def create_continuation(self,**kwargs):
+        self.validate_candidate(kwargs.get('candidate'));return Continuation(**kwargs)
 def module(name,**values):m=ModuleType(name);m.__dict__.update(values);return m
 def ordinary_presence(penalty,origin):
     tree=ast.parse((ROOT/'src/mlx2/runtime/sample_utils.py').read_text())
@@ -38,11 +44,13 @@ class Tests(unittest.TestCase):
         self.batch=NS(model=model,self_mtp=None,_unprocessed_sequences=queue,_native_continuations={},_native_lane_rngs={i:object() for i in range(20)},_native_prompt_responses=[],sampler=lambda x:x)
         self.batch._find_uids=lambda uids:{uid:(0,index) for index,row in enumerate(self.batch._unprocessed_sequences) for uid in uids if row[0]==uid}
         self.c=NS(model=model,native_layer_count=16,logical_layer_count=64,state_planes=('kv','gdn'),bootstrap_generation=0,supports_singleton=True,owns_physical_dispatch_proof=True,packed_lane=lambda *a:None,forward_staged=lambda *a:None,_serving_prompt_ids_by_uid={i:(1,)*1025 for i in range(20)},_serving_resources=NS(charge=1),backend=NS(writer=NS(poisoned=False,pending_epochs=(),ledger=NS(pending_count=0))))
+        self.c._native_continuation_provider=Provider(self.c)
         tree=ast.parse((ROOT/'src/mlx2/runtime/generate.py').read_text());node=next(f for cls in tree.body if isinstance(cls,ast.ClassDef) and cls.name=='BatchGenerator' for f in cls.body if isinstance(f,ast.FunctionDef) and f.name=='install_native_hybrid_n_cohort')
         env={'__package__':'mlx2.runtime','deque':deque,'PromptProcessingBatch':NS(Response=lambda *a:a)};exec(compile(ast.Module(body=[node],type_ignores=[]),'real N attachment','exec'),env);self.attach=env[node.name]
         modules={
             'mlx2.runtime.paged_native_contract':module('contract',supports_native_checkpoint_candidate=supports_native_checkpoint_candidate),
             'mlx2.runtime.paged_native_continuation':module('continuation',NativeQwen3Continuation=Continuation),
+            'mlx2.runtime.native_continuation_provider':module('provider',NativeContinuationProvider=Provider),
             'mlx2.runtime.paged_native_atomic_owner':module('owner',NativeAtomicRequestOwner=Owner),
             'mlx2.runtime.packed_prefill_receipt':module('receipt',bootstrap_prefill_attribution=lambda c:dict(prefill_mode='native_packed_prefill',native_prefill_attention_calls=16))}
         p=patch.dict(sys.modules,modules);p.start();self.addCleanup(p.stop)

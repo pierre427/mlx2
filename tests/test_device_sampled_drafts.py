@@ -34,7 +34,7 @@ def _generate(model, processors, *, cycles=4, temps=(0.8, 0.8)):
             mx.array(prompt, mx.uint32), model, uid=uid, max_tokens=64, prompt_cache=None,
             mtp_state=None, lane_rng=LaneRNG(900 + uid), num_draft=2, sampling_temp=temp,
             sampling_top_p=0.95, sampling_top_k=8, sampling_min_p=0.0, accept_rule="residual",
-            logits_processors=list(processors), prefill_step_size=4, share_qsa_indices=False,
+            logits_processors=list(processors), prefill_step_size=4, share_index_state=False,
         )[0]
         for uid, (prompt, temp) in enumerate(zip(prompts, temps))
     ]

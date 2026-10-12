@@ -1,5 +1,4 @@
 """External-round snapshots without deepcopy (descriptor COW), CPU only."""
-import copy
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -286,13 +285,13 @@ def test_unfreezable_graph_falls_back_to_deepcopy_and_still_restores(monkeypatch
 
 
 def test_live_speculation_transaction_is_never_frozen_by_descriptor():
-    from mlx2.runtime.models.cache import KVCache
+    from mlx2.runtime.models.cache import RotatingKVCache
 
-    cache = KVCache()
+    cache = RotatingKVCache(max_size=8)
     cache.update_and_fetch(mx.ones((1, 1, 3, 4)), mx.ones((1, 1, 3, 4)))
     frozen, _sidecar, mode = snapshot_committed_cache([cache], enabled=True)
     assert mode == "descriptor_cow"
-    cache.speculating = True
+    cache.start_speculation(4)
     frozen, _sidecar, mode = snapshot_committed_cache([cache], enabled=True)
     assert mode == "deepcopy_fallback"
     np.testing.assert_array_equal(np.asarray(frozen[0].keys), np.asarray(cache.keys))

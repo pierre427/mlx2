@@ -8,6 +8,7 @@ test at the bottom (``MLX2_METAL_TESTS=1``).
 """
 
 import os
+from dataclasses import replace
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -15,10 +16,12 @@ import pytest
 
 from mlx2.runtime.models import qwen3_next as QN
 from mlx2.runtime.models import qwen4_routed_decode as RD
+from mlx2.runtime.models.moe_routing_contract import QWEN4_E512_K10_ROUTING
 
 # hidden % 512 == 0, intermediate % 512 != 0, % 64 == 0; not 64/128 (MLX
 # runs qmv_quad there, so the shared fold's plain-qmv down would not apply).
 E, H, I = 16, 512, 192
+TEST_ROUTING = replace(QWEN4_E512_K10_ROUTING, expert_count=E)
 
 
 def _switch(seed=0, dtype=mx.bfloat16, bits=4, group_size=64):
@@ -29,6 +32,7 @@ def _switch(seed=0, dtype=mx.bfloat16, bits=4, group_size=64):
     nn.quantize(sw, group_size=group_size, bits=bits)
     sw.set_dtype(dtype)
     QN._enable_routed_decode(sw, "off")
+    sw.moe_routing_contract = TEST_ROUTING
     sw.eval()
     return sw
 
@@ -82,19 +86,19 @@ def test_admission_accepts_flash_next_geometry_and_refuses_the_rest():
     sw = _switch()
     inds, scores = _route(0)
     x = mx.expand_dims(_x(0), (-2, -3))
-    ok = RD.admit_routed_decode(x, inds, scores, sw.gate_up_proj, sw.down_proj)
+    ok = RD.admit_routed_decode(x, inds, scores, sw.gate_up_proj, sw.down_proj, contract=TEST_ROUTING)
     assert ok.accepted, ok.reason
     two_rows = mx.expand_dims(_x(0, rows=2), (-2, -3))
     inds2, scores2 = _route(0, rows=2)
-    assert RD.admit_routed_decode(two_rows, inds2, scores2, sw.gate_up_proj, sw.down_proj).reason == "not one token"
+    assert RD.admit_routed_decode(two_rows, inds2, scores2, sw.gate_up_proj, sw.down_proj, contract=TEST_ROUTING).reason == "not one token"
     half = x.astype(mx.float16)
-    assert not RD.admit_routed_decode(half, inds, scores, sw.gate_up_proj, sw.down_proj).accepted
-    assert not RD.admit_routed_decode(x, inds, scores.astype(mx.float32), sw.gate_up_proj, sw.down_proj).accepted
-    assert not RD.admit_routed_decode(x, inds[..., :8], scores[..., :8], sw.gate_up_proj, sw.down_proj).accepted
+    assert not RD.admit_routed_decode(half, inds, scores, sw.gate_up_proj, sw.down_proj, contract=TEST_ROUTING).accepted
+    assert not RD.admit_routed_decode(x, inds, scores.astype(mx.float32), sw.gate_up_proj, sw.down_proj, contract=TEST_ROUTING).accepted
+    assert not RD.admit_routed_decode(x, inds[..., :8], scores[..., :8], sw.gate_up_proj, sw.down_proj, contract=TEST_ROUTING).accepted
     q8 = _switch(bits=8)
-    assert "bits" in RD.admit_routed_decode(x, inds, scores, q8.gate_up_proj, q8.down_proj).reason
+    assert "bits" in RD.admit_routed_decode(x, inds, scores, q8.gate_up_proj, q8.down_proj, contract=TEST_ROUTING).reason
     g32 = _switch(group_size=32)
-    assert "group size" in RD.admit_routed_decode(x, inds, scores, g32.gate_up_proj, g32.down_proj).reason
+    assert "group size" in RD.admit_routed_decode(x, inds, scores, g32.gate_up_proj, g32.down_proj, contract=TEST_ROUTING).reason
 
 
 @pytest.mark.parametrize("variant", ["stock", "scalar"])
@@ -200,6 +204,8 @@ def _block(monkeypatch, bits=4):
     )
     mx.random.seed(21)
     block = QN.Qwen3NextSparseMoeBlock(args)
+    block.moe_routing_contract = TEST_ROUTING
+    block.switch_mlp.moe_routing_contract = TEST_ROUTING
     switch = block.switch_mlp
     switch.gate_up_proj.weight = mx.random.normal((E, 2 * I, H)) * 0.05
     switch.down_proj.weight = mx.random.normal((E, H, I)) * 0.05
@@ -297,6 +303,7 @@ def _split_switch(seed=0, bits=4, group_size=64):
     nn.quantize(sw, group_size=group_size, bits=bits)
     sw.set_dtype(mx.bfloat16)
     QN._enable_routed_decode(sw, "off")
+    sw.moe_routing_contract = TEST_ROUTING
     sw.eval()
     return sw
 
@@ -333,17 +340,18 @@ def test_split_admission_accepts_served_layout_and_refuses_the_rest():
     sw = _split_switch()
     inds, scores = _route(0)
     x = mx.expand_dims(_x(0), (-2, -3))
-    ok = RD.admit_split_routed_decode(x, inds, scores, sw.gate_proj, sw.up_proj, sw.down_proj)
+    ok = RD.admit_split_routed_decode(x, inds, scores, sw.gate_proj, sw.up_proj, sw.down_proj, contract=TEST_ROUTING)
     assert ok.accepted, ok.reason
     q8 = _split_switch(bits=8)
-    assert "bits" in RD.admit_split_routed_decode(x, inds, scores, q8.gate_proj, q8.up_proj, q8.down_proj).reason
+    assert "bits" in RD.admit_split_routed_decode(x, inds, scores, q8.gate_proj, q8.up_proj, q8.down_proj, contract=TEST_ROUTING).reason
     # gate and up tables must match each other and the down table
     other = _split_switch(seed=1)
     other.up_proj.weight = other.up_proj.weight[:, : I // 2]
     other.up_proj.scales = other.up_proj.scales[:, : I // 2]
     other.up_proj.biases = other.up_proj.biases[:, : I // 2]
     assert "do not match" in RD.admit_split_routed_decode(
-        x, inds, scores, other.gate_proj, other.up_proj, other.down_proj).reason
+        x, inds, scores, other.gate_proj, other.up_proj, other.down_proj,
+        contract=TEST_ROUTING).reason
 
     class Streamed(type(sw.gate_proj)):
         pass
@@ -352,7 +360,7 @@ def test_split_admission_accepts_served_layout_and_refuses_the_rest():
     nn.Module.__init__(sub)
     sub.weight, sub.scales, sub.biases = (sw.gate_proj[k] for k in ("weight", "scales", "biases"))
     sub.bits, sub.group_size, sub.mode = 4, 64, "affine"
-    assert "resident" in RD.admit_split_routed_decode(x, inds, scores, sub, sw.up_proj, sw.down_proj).reason
+    assert "resident" in RD.admit_split_routed_decode(x, inds, scores, sub, sw.up_proj, sw.down_proj, contract=TEST_ROUTING).reason
 
 
 @pytest.mark.parametrize("mode", ["gate_up", "two_launch"])
@@ -514,6 +522,8 @@ def _served_block(monkeypatch, mode="gate_up_down_shared", seed=0):
         norm_topk_prob=True, num_experts=E, num_experts_per_tok=10,
     )
     block = QN.Qwen3NextSparseMoeBlock(args)
+    block.moe_routing_contract = TEST_ROUTING
+    block.switch_mlp.moe_routing_contract = TEST_ROUTING
     for proj, shape in (("gate_proj", (E, I, H)), ("up_proj", (E, I, H)), ("down_proj", (E, H, I))):
         getattr(block.switch_mlp, proj).weight = (mx.random.normal(shape) * 0.05)
     nn.quantize(block, group_size=64, bits=4)

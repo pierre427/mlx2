@@ -85,7 +85,7 @@ def test_qsa_reuse_appends_group_closed_mid_draft_without_acceptance_drift(
             model,
             0,
             list(range(1, 8)),
-            share_qsa_indices=share,
+            share_index_state=share,
         )
         state = attach_self_mtp_lanes(model, None, [lane])
         proposal = propose_batched_self_mtp(model, state)
@@ -180,6 +180,8 @@ def test_qsa_mtp_amendment_failures_remain_visible_and_coherent():
 
 class _CacheEchoModel:
     """Small deterministic cache consumer for cancellation parity."""
+
+    _test_only_allow_unvalidated_prefill_checkpoint = True
 
     def __call__(self, tokens, *, cache):
         values = tokens.astype(mx.float32)[:, None, :, None]

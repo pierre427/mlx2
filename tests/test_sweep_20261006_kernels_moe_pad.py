@@ -9,7 +9,8 @@ from mlx2.runtime.models import switch_layers as sl
 
 class _Adapter:
     def diagnostics(self):
-        return {}
+        status = sl.moe_pad_status()
+        return {"moe_pad": status} if sl.moe_pad_reportable(status) else {}
 
 
 @pytest.fixture

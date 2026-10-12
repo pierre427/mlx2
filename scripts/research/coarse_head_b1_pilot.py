@@ -167,7 +167,7 @@ def prepare(model, prefix, seed: int):
         lane_rng=LaneRNG(seed), num_draft=3, sampling_temp=0.8,
         sampling_top_p=0.95, sampling_top_k=20, sampling_min_p=0.0,
         accept_rule="residual", logits_processors=[], prefill_step_size=512,
-        share_qsa_indices=False)
+        share_index_state=False)
     checkpoint = capture_self_mtp_checkpoint(
         detached.caches.target, (detached.caches.draft, detached.lane.seed_h))
     if checkpoint is None:

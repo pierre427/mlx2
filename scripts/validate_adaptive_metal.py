@@ -519,7 +519,7 @@ def run(args, receipt):
                 current[0]["shapes"].append([int(v) for v in tokens.shape])
             return original_forward(tokens, *a, **k)
 
-        def one_round(cohort):
+        def one_round(cohort, *, forced_depth=None):
             before = dict(e.scheduler_stats)
             ready_before = {l.uid: len(l.ready) for l in cohort}
             maxima = [
@@ -535,7 +535,7 @@ def run(args, receipt):
             }
             current[0] = frame
             try:
-                return original_round(cohort)
+                return original_round(cohort, forced_depth=forced_depth)
             finally:
                 current[0] = None
                 frame["saved"] = max(

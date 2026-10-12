@@ -57,6 +57,8 @@ def test_exact_topologies_resolve_without_loading_weights(tmp_path, sparse, expe
     assert result.artifact["max_context"] == 262144
     assert result.artifact["full_attention_layers"] == (5 if sparse else 10)
     assert result.default_route == "ordinary"
+    identity = result.adapter_type._inspect_adapter_artifact(tmp_path)
+    assert identity["variant"] == expected.variant
     assert Capability.VISION in expected.capabilities
     assert Capability.VIDEO in expected.capabilities
     assert Capability.AUDIO not in expected.capabilities
@@ -70,6 +72,7 @@ def test_mismatched_model_or_quantization_fails_before_load(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps(config))
     with pytest.raises(ValueError, match="topology"):
         inspect_gemma4_artifact(tmp_path)
+
     config["text_config"]["num_experts"] = 128
     config["audio_config"] = {"hidden_size": 1024}
     (tmp_path / "config.json").write_text(json.dumps(config))
@@ -80,6 +83,15 @@ def test_mismatched_model_or_quantization_fails_before_load(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps(config))
     with pytest.raises(ValueError, match="affine 8-bit"):
         inspect_gemma4_artifact(tmp_path)
+
+
+@pytest.mark.parametrize("adapter_type", [Gemma4A4BAdapter, Gemma431BAdapter])
+def test_execution_policy_is_refused_before_artifact_inspection(adapter_type):
+    with pytest.raises(ValueError, match="do not accept speculative policy"):
+        adapter_type(
+            "/missing-gemma4-artifact",
+            execution_policy={"draft_model": "/missing-draft"},
+        )
 
 
 def test_conversion_provenance_must_match_resolved_variant(tmp_path):
@@ -144,6 +156,71 @@ def test_both_variants_use_the_pinned_vendor_sampling_defaults():
         assert defaults.source == "generation_config.json"
 
 
+def test_route_contract_separates_dense_and_sparse_optimization_surfaces():
+    sparse = object.__new__(Gemma4A4BAdapter)
+    dense = object.__new__(Gemma431BAdapter)
+    sparse_contract = sparse.route_capability_contract()
+    dense_contract = dense.route_capability_contract()
+
+    for adapter, contract in ((sparse, sparse_contract), (dense, dense_contract)):
+        assert contract["route"] == "ordinary"
+        assert contract["ordinary_reference_preserved"] is True
+        assert contract["apcv2"]["exact_only"] is True
+        assert contract["apcv2"]["cache_layout"] == adapter.descriptor.cache_layout
+        assert contract["apcv2"]["candidate_verify_publication"] is False
+        assert contract["unsupported_capabilities"] == (
+            "audio", "mtp", "external_draft"
+        )
+        assert contract["qualified"] is False
+
+    sparse_opt = sparse_contract["optimization"]
+    dense_opt = dense_contract["optimization"]
+    assert sparse_opt["topology_kind"] == "sparse_moe"
+    assert sparse_opt["dense_int8_prefill"]["eligible"] is False
+    assert sparse_opt["sparse_moe_prefill"]["eligible"] is False
+    assert dense_opt["topology_kind"] == "dense"
+    assert dense_opt["dense_int8_prefill"]["eligible"] is True
+    assert dense_opt["dense_int8_prefill"]["scopes"] == ("mlp", "all")
+    assert dense_opt["sparse_moe_prefill"]["eligible"] is False
+    assert sparse_opt["speculative_decode"]["eligible"] is False
+    assert dense_opt["speculative_decode"]["eligible"] is False
+
+
+def test_prepared_media_route_requires_complete_apcv2_identity():
+    adapter = object.__new__(Gemma4A4BAdapter)
+    prepared = {
+        "_mlx2_prompt_tokens": [2, 258884, 7],
+        "_mlx2_prefill_inputs": {"pixel_values": object()},
+        "_mlx2_media_token_end": 2,
+        "_mlx2_media_fingerprint": "ordered-media-proof",
+    }
+    assert adapter.validate_prepared_media_route(prepared) == {
+        "route": "ordinary",
+        "cache_layout": adapter.descriptor.cache_layout,
+        "media_token_end": 2,
+        "media_fingerprint": "ordered-media-proof",
+        "apcv2_exact": True,
+    }
+    for field in tuple(prepared):
+        broken = dict(prepared)
+        broken.pop(field)
+        with pytest.raises(ValueError, match="incomplete"):
+            adapter.validate_prepared_media_route(broken)
+    with pytest.raises(ValueError, match="outside the prompt"):
+        adapter.validate_prepared_media_route(
+            {**prepared, "_mlx2_media_token_end": 4}
+        )
+    with pytest.raises(ValueError, match="payload is missing"):
+        adapter.validate_prepared_media_route(
+            {**prepared, "_mlx2_prefill_inputs": {"input_ids": [1, 2]}}
+        )
+    video = {
+        **prepared,
+        "_mlx2_prefill_inputs": {"pixel_values_videos": object()},
+    }
+    assert adapter.validate_prepared_media_route(video)["apcv2_exact"] is True
+
+
 def _served_adapter(cls, encoded):
     """An adapter shell with a fake tokenizer: no weights, no mlx-vlm."""
     adapter = object.__new__(cls)
@@ -168,7 +245,13 @@ def test_text_prompts_start_with_bos_exactly_once(cls):
     already = _served_adapter(cls, [2, 818])
     assert already.prompt_tokens({"prompt": "<bos>The"}) == [2, 818]
     # Processor-built media prompts already carry their own ids untouched.
-    prepared = {"messages": [], "_mlx2_prompt_tokens": [2, 255999, 7]}
+    prepared = {
+        "messages": [],
+        "_mlx2_prompt_tokens": [2, 255999, 7],
+        "_mlx2_prefill_inputs": {"pixel_values": object()},
+        "_mlx2_media_token_end": 2,
+        "_mlx2_media_fingerprint": "ordered-media-proof",
+    }
     assert adapter.prompt_tokens(prepared) == [2, 255999, 7]
 
 

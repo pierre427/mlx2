@@ -112,6 +112,13 @@ def test_flash_next_expert_arithmetic_contract_splits_auto_from_stock():
         def set_moe_routed_candidate_mode(self, value):
             self.switch_mlp.routed_candidate_mode = value
 
+        def force_stock_for_expert_streaming(self):
+            self.set_fused_expert_kernel_mode("stock")
+            self.set_moe_routed_decode_mode("off")
+            self.set_moe_window_consumers(())
+            self.set_moe_routed_candidate_mode("off")
+            return {"blocks": 1}
+
     streamed = Block()
     force_stock_expert_arithmetic(
         SimpleNamespace(named_modules=lambda: (("layer", streamed),))

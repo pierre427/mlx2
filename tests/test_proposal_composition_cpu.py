@@ -18,12 +18,87 @@ from test_parallel_draft_apcv2_batching_cpu import (
 )
 from test_standard_xpress_serving_cpu import drain, generator, reference, tiny
 
-from mlx2.adapters.external_draft_policy import ExternalDraftAdapterMixin
+from mlx2.adapters.external_draft_policy import (
+    ExternalDraftAdapterMixin,
+    normalize_progressive_external_policy,
+    progressive_external_identity,
+)
 from mlx2.adapters.proposal_sources import native_mtp_source
 from mlx2.runtime.proposal_composition import (
     ComposedDraftModel,
     ProposalCompositionPolicy,
 )
+
+
+def test_progressive_external_policy_is_shared_and_identity_bound():
+    policy = normalize_progressive_external_policy(
+        {"progressive_verification_tile": 3, "progressive_multilane_draft_cap": 5},
+        num_draft=15,
+        minimum_proposals=3,
+    )
+    assert policy["proposal_composition"] is False
+    assert policy["progressive_verification_tile"] == 3
+    assert policy["progressive_multilane_draft_cap"] == 5
+    assert progressive_external_identity(policy) != progressive_external_identity(
+        {**policy, "progressive_multilane_draft_cap": 4}
+    )
+
+
+def test_external_adapter_mix_in_selects_and_reports_progressive_policy():
+    adapter = ExternalDraftAdapterMixin()
+    adapter._parse_external_policy(
+        {
+            "draft_model": "/unused/drafter",
+            "num_draft": 8,
+            "progressive_verification_tile": 2,
+            "progressive_multilane_draft_cap": 3,
+        },
+        family="test",
+    )
+    adapter._check_num_draft(
+        {"args": SimpleNamespace(block_size=16, minimum_proposal_length=3)}
+    )
+    settings = adapter._external_execution_config(max_lanes=4, prefill_step=512)
+    assert adapter.external_policy["proposal_composition"] is False
+    assert settings["progressive_verification_tile"] == 2
+    assert settings["progressive_multilane_draft_cap"] == 3
+
+
+@pytest.mark.parametrize(
+    "policy, kwargs, message",
+    [
+        ({"progressive_verification_tile": True}, {"num_draft": 8}, "integer"),
+        ({"progressive_verification_tile": 8}, {"num_draft": 8}, "below num_draft"),
+        ({"progressive_multilane_draft_cap": 3}, {"num_draft": 8}, "requires progressive"),
+        (
+            {
+                "progressive_verification_tile": 2,
+                "progressive_multilane_draft_cap": 1,
+            },
+            {"num_draft": 8, "minimum_proposals": 2},
+            "between minimum proposals",
+        ),
+        (
+            {
+                "progressive_verification_tile": 2,
+                "proposal_composition": {"prompt_lookup": True},
+            },
+            {"num_draft": 8},
+            "cannot combine",
+        ),
+        (
+            {
+                "progressive_verification_tile": 2,
+                "lilicorr_feedback": {"enabled": True},
+            },
+            {"num_draft": 8},
+            "LiLiCorr feedback",
+        ),
+    ],
+)
+def test_progressive_external_policy_refuses_incompatible_values(policy, kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        normalize_progressive_external_policy(policy, **kwargs)
 
 
 def test_composition_ranks_committed_score_first_and_span_second():
@@ -33,16 +108,29 @@ def test_composition_ranks_committed_score_first_and_span_second():
     )
     short_pld = ("prompt_lookup", [7, 8], "prompt_lookup:match_4")
     full_external = ("external", None, "external")
+    scores = {}
 
     # Cold scores tie, so the longer usable chain wins.
     assert wrapper._select_candidate([short_pld, full_external], 4)[0] == "external"
 
     # Only committed labels move scores. A stronger PLD score beats length.
-    wrapper.observe_proposal_feedback("prompt_lookup:match_4", 8, 8)
-    wrapper.observe_proposal_feedback("external", 8, 0)
-    selected = wrapper._select_candidate([short_pld, full_external], 4)
+    wrapper.observe_proposal_feedback(scores, "prompt_lookup:match_4", 8, 8)
+    wrapper.observe_proposal_feedback(scores, "external", 8, 0)
+    selected = wrapper._select_candidate([short_pld, full_external], 4, scores)
     assert selected[0] == "prompt_lookup"
-    assert wrapper._proposal_score(selected[2]) > wrapper._proposal_score("external")
+    assert wrapper._proposal_score(selected[2], scores) > wrapper._proposal_score("external", scores)
+
+
+def test_composition_scores_are_lane_local_and_decay_by_proposed_token_mass():
+    _model, draft = tiny()
+    wrapper = ComposedDraftModel(draft, {"ngram_min": 1, "ngram_max": 1})
+    lane_a, lane_b = {}, {}
+    wrapper.observe_proposal_feedback(lane_a, "external", 8, 8, 0.5)
+    assert lane_b == {}
+    assert lane_a["external"] == (8, 8)
+    wrapper.observe_proposal_feedback(lane_a, "external", 2, 0, 0.5)
+    assert lane_a["external"] == (2.0, 4.0)
+    assert lane_b == {}
 
 
 def test_composition_equal_score_and_span_has_stable_source_order():
@@ -67,9 +155,10 @@ def test_stochastic_safe_source_choice_is_frozen_before_backend_call(monkeypatch
         draft, {"ngram_min": 1, "ngram_max": 1, "min_context_match": 0}
     )
     original = draft.draft_distributions
+    scores = {}
 
     def mutate_lagged_score_after_selection(*args, **kwargs):
-        wrapper.observe_proposal_feedback("external", 100, 100)
+        wrapper.observe_proposal_feedback(scores, "external", 100, 100)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(draft, "draft_distributions", mutate_lagged_score_after_selection)
@@ -85,6 +174,7 @@ def test_stochastic_safe_source_choice_is_frozen_before_backend_call(monkeypatch
         [None],
         [0],
         processor_histories=[history],
+        proposal_score_states=[scores],
     )
     assert wrapper.last_proposal_sources == ("prompt_lookup",)
     assert wrapper.last_proposal_score_keys == ("prompt_lookup:match_1",)
@@ -100,9 +190,12 @@ def test_trusted_pld_calibrates_cold_bucket_then_returns_to_score_order():
             "min_context_match": 0,
             "trusted_pld": True,
             "trusted_pld_min_verified_tokens": 32,
+            "trusted_pld_min_match": 1,
         },
     )
-    wrapper.observe_proposal_feedback("external", 100, 100)
+    scores = {}
+    trust = {}
+    wrapper.observe_proposal_feedback(scores, "external", 100, 100)
     history, anchor = [1, 2, 1], 2
     hidden = model.prefill_body(
         mx.array([[1, 2]]), model.make_cache(), [0, 2]
@@ -117,15 +210,173 @@ def test_trusted_pld_calibrates_cold_bucket_then_returns_to_score_order():
             [None],
             [0],
             processor_histories=[history],
+            proposal_score_states=[scores],
+            proposal_trust_states=[trust],
         )
 
     propose()
     assert wrapper.last_proposal_sources == ("prompt_lookup",)
     assert wrapper.last_proposal_audits == (True,)
-    wrapper.observe_proposal_feedback("prompt_lookup:match_1", 32, 32)
+    assert wrapper.last_proposal_periodic_audits == (False,)
+    trust_key = wrapper.last_proposal_trust_keys[0]
+    assert trust_key == "prompt_lookup:match_1:span_2"
+    wrapper.observe_proposal_feedback(scores, "prompt_lookup:match_1", 32, 32)
+    wrapper.observe_trusted_pld(
+        trust, trust_key, proposed=32, audited=True, accepted=32
+    )
     propose()
     assert wrapper.last_proposal_sources == ("external",)
     assert wrapper.last_proposal_audits == (False,)
+
+
+def test_trusted_pld_requires_a_positive_periodic_audit_when_enabled():
+    _model, draft = tiny()
+    with pytest.raises(ValueError, match="positive audit interval"):
+        ComposedDraftModel(
+            draft,
+            {
+                "prompt_lookup": True,
+                "trusted_pld": True,
+                "trusted_pld_audit_interval": 0,
+            },
+        )
+
+
+def test_trusted_pld_cadence_and_revocation_are_lane_local():
+    _model, draft = tiny()
+    wrapper = ComposedDraftModel(
+        draft,
+        {
+            "prompt_lookup": True,
+            "trusted_pld": True,
+            "trusted_pld_min_verified_tokens": 4,
+            "trusted_pld_audit_interval": 8,
+        },
+    )
+    lane_a = {
+        "prompt_lookup:match_4:span_2": {
+            "blind_since_audit": 7,
+            "blind_rounds": 7,
+            "blind_tokens": 14,
+            "audit_rounds": 0,
+            "audit_proposed_tokens": 0,
+            "audit_accepted_tokens": 0,
+            "audit_failures": 0,
+            "revoked": False,
+            "exact_accepted_tokens": 4,
+            "exact_proposed_tokens": 4,
+        }
+    }
+    lane_b = {}
+
+    wrapper.observe_trusted_pld(
+        lane_a,
+        "prompt_lookup:match_4:span_2",
+        proposed=2,
+        audited=True,
+        accepted=1,
+    )
+    assert lane_a["prompt_lookup:match_4:span_2"]["revoked"]
+    assert lane_a["prompt_lookup:match_4:span_2"]["audit_failures"] == 1
+    assert lane_a["prompt_lookup:match_4:span_2"]["exact_proposed_tokens"] == 0
+    assert lane_b == {}
+
+    wrapper.observe_trusted_pld(
+        lane_a,
+        "prompt_lookup:match_4:span_2",
+        proposed=2,
+        audited=True,
+        accepted=2,
+    )
+    assert lane_a["prompt_lookup:match_4:span_2"]["revoked"]
+    assert lane_a["prompt_lookup:match_4:span_2"]["exact_proposed_tokens"] == 2
+    wrapper.observe_trusted_pld(
+        lane_a,
+        "prompt_lookup:match_4:span_2",
+        proposed=2,
+        audited=True,
+        accepted=2,
+    )
+    assert not lane_a["prompt_lookup:match_4:span_2"]["revoked"]
+    assert lane_a["prompt_lookup:match_4:span_2"]["exact_proposed_tokens"] == 4
+
+
+def test_trusted_pld_periodic_audit_schedule_is_per_lane_and_source_bucket():
+    model, draft = tiny()
+    wrapper = ComposedDraftModel(
+        draft,
+        {
+            "ngram_min": 1,
+            "ngram_max": 1,
+            "min_context_match": 0,
+            "trusted_pld": True,
+            "trusted_pld_min_score": 0.5,
+            "trusted_pld_min_verified_tokens": 0,
+            "trusted_pld_min_match": 1,
+            "trusted_pld_max_span": 2,
+            "trusted_pld_audit_interval": 8,
+        },
+    )
+    history, anchor = [1, 2, 1], 2
+    hidden = model.prefill_body(
+        mx.array([[1, 2]]), model.make_cache(), [0, 2]
+    )
+    scores = {
+        "prompt_lookup:match_1": (64.0, 64.0),
+        "external": (0.0, 64.0),
+    }
+
+    def propose(trust_state):
+        wrapper.draft_distributions(
+            [anchor],
+            hidden,
+            wrapper.make_cache(),
+            2,
+            [None],
+            [0],
+            processor_histories=[history],
+            proposal_score_states=[dict(scores)],
+            proposal_trust_states=[trust_state],
+        )
+        return (
+            wrapper.last_proposal_trusted,
+            wrapper.last_proposal_audits,
+            wrapper.last_proposal_periodic_audits,
+        )
+
+    key = "prompt_lookup:match_1:span_2"
+    lane_a, lane_b = {}, {}
+    wrapper.observe_trusted_pld(
+        lane_a, key, proposed=2, audited=True, accepted=2
+    )
+    wrapper.observe_trusted_pld(
+        lane_b, key, proposed=2, audited=True, accepted=2
+    )
+    assert lane_a[key]["periodic_audit_rounds"] == 0
+    for _ in range(7):
+        assert propose(lane_a) == ((True,), (False,), (False,))
+        wrapper.observe_trusted_pld(
+            lane_a, key, proposed=2, audited=False
+        )
+    # Exactly N-1 blind rounds are permitted; the Nth is exact-audited.
+    assert propose(lane_a) == ((False,), (True,), (True,))
+    wrapper.observe_trusted_pld(
+        lane_a,
+        key,
+        proposed=2,
+        audited=True,
+        periodic_audit=True,
+        accepted=2,
+    )
+    assert lane_a[key]["periodic_audit_rounds"] == 1
+    assert lane_a[key]["audit_rounds"] == 2
+    # Another lane's schedule and another span bucket are independent.
+    assert propose(lane_b) == ((True,), (False,), (False,))
+    assert lane_b[key]["periodic_audit_rounds"] == 0
+    assert "prompt_lookup:match_1:span_1" not in lane_b
+    assert not wrapper._trusted_evidence_ready(
+        lane_b.get("prompt_lookup:match_1:span_1", {})
+    )
 
 
 @pytest.mark.parametrize("kind", ["xpress", "lilicorr"])
@@ -277,7 +528,7 @@ def test_native_source_matches_existing_teacher_forced_protocol_and_real_anchor(
         accept_rule="exact",
         logits_processors=[],
         prefill_step_size=16,
-        share_qsa_indices=False,
+        share_index_state=False,
     )
     h, out = detached.lane.seed_h, []
     for _ in range(count):
@@ -618,12 +869,13 @@ def test_shared_adapter_binding_defaults_local_pld_and_allows_explicit_opt_out()
         "max_sources": 8,
         "native_mtp": False,
         "mtp_max_history": 4096,
+        "score_decay_per_token": 0.9,
         "trusted_pld": False,
         "trusted_pld_min_score": 0.9,
         "trusted_pld_min_verified_tokens": 32,
         "trusted_pld_min_match": 4,
         "trusted_pld_max_span": 8,
-        "trusted_pld_audit_interval": 0,
+        "trusted_pld_audit_interval": 8,
     }
 
     disabled = ExternalDraftAdapterMixin()
@@ -639,6 +891,32 @@ def test_shared_adapter_binding_defaults_local_pld_and_allows_explicit_opt_out()
         {"fingerprint": "head-revision"}, lambda record, target: draft, descriptor
     )
     assert disabled.draft_model is draft
+
+
+def test_progressive_target_protocol_refuses_before_external_drafter_load():
+    from mlx2.contracts import Capability, ModelDescriptor
+
+    model, draft = tiny()
+    descriptor = ModelDescriptor(
+        model_type="qwen3",
+        family="qwen3",
+        variant="tiny",
+        cache_layout="tiny",
+        capabilities=frozenset({Capability.TEXT}),
+        state_planes=frozenset(),
+    )
+    adapter = ExternalDraftAdapterMixin()
+    adapter.model = model
+    adapter.external_policy = {"progressive_verification_tile": 1}
+    loads = []
+
+    def loader(*args):
+        loads.append(args)
+        return draft
+
+    with pytest.raises(ValueError, match="row-exact B1 state-promotion"):
+        adapter._bind_external_drafter({"fingerprint": "head"}, loader, descriptor)
+    assert loads == []
 
 
 def _enable_tiny_trusted_pld(monkeypatch, model):
@@ -678,9 +956,17 @@ def test_trusted_pld_blindly_commits_copy_and_projects_only_bonus_row(monkeypatc
     assert engine.scheduler_stats["external_composed_trusted_pld_rounds"] > 0
     assert wrapper._trusted_stats["blind_rounds"] > 0
     assert wrapper._trusted_stats["blind_tokens"] >= 2
-    assert not any(key.startswith("prompt_lookup") for key in wrapper._score_counts)
     receipt = finishes[uid].speculative_receipt["proposal_composition"]
-    assert receipt["trusted_pld"]["blind_rounds"] > 0
+    assert receipt["ranking"] == receipt["preselection_ranking"]
+    assert receipt["postcommit_learning"] is not None
+    trust = receipt["trusted_pld"]
+    assert trust["scope"] == "request_lane"
+    post_trust = receipt["postcommit_learning"]["trusted_pld"]
+    assert any(
+        record["blind_rounds"] > 0
+        for record in post_trust["sources"].values()
+    )
+    assert receipt["adapter_diagnostics"]["scope"] == "process_global"
 
 
 def test_trusted_pld_audit_uses_exact_verifier_and_updates_score():
@@ -702,11 +988,21 @@ def test_trusted_pld_audit_uses_exact_verifier_and_updates_score():
     engine = generator(model, wrapper)
     prompt = [1, 2, 3, 1, 2, 3, 1, 2]
     uid = engine.insert([prompt], max_tokens=[8])[0]
-    outputs, _ = drain(engine)
+    outputs, finishes = drain(engine)
     assert outputs[uid] == reference(model, prompt, 8)
     assert wrapper._trusted_stats["blind_rounds"] == 0
     assert wrapper._trusted_stats["audit_rounds"] > 0
-    assert any(key.startswith("prompt_lookup") for key in wrapper._score_counts)
+    composition = finishes[uid].speculative_receipt["proposal_composition"]
+    assert any(
+        key.startswith("prompt_lookup")
+        for key in composition["ranking"]["score_counts"]
+    )
+    postcommit = composition["postcommit_learning"]
+    assert "periodic_audit" in postcommit
+    assert any(
+        record["periodic_audit_rounds"] > 0
+        for record in postcommit["trusted_pld"]["sources"].values()
+    )
 
 
 def test_trusted_pld_span_with_stop_token_is_forced_through_exact_audit(monkeypatch):
@@ -729,11 +1025,32 @@ def test_trusted_pld_span_with_stop_token_is_forced_through_exact_audit(monkeypa
     uid = engine.insert([[1, 2, 3, 1, 2, 3, 1, 2]], max_tokens=[6])[0]
     outputs, finishes = drain(engine)
     assert outputs[uid] and uid in finishes
-    assert engine.scheduler_stats[
-        "external_composed_trusted_pld_stop_guard_rounds"
-    ] > 0
     assert wrapper._trusted_stats["audit_rounds"] > 0
-    assert any(key.startswith("prompt_lookup") for key in wrapper._score_counts)
+    assert any(key.startswith("prompt_lookup") for key in finishes[uid].speculative_receipt["proposal_composition"]["ranking"]["score_counts"])
+    postcommit = finishes[uid].speculative_receipt["proposal_composition"][
+        "postcommit_learning"
+    ]
+    assert postcommit["audited"]
+    assert postcommit["observed_proposed_tokens"] == postcommit[
+        "observed_accepted_tokens"
+    ]
+    record = postcommit["trusted_pld"]["sources"][postcommit["trust_key"]]
+    assert not record["revoked"]
+    assert record["exact_proposed_tokens"] == record["exact_accepted_tokens"]
+
+
+def test_round_does_not_mask_run_round_type_error():
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    engine = object.__new__(ExternalDraftBatchGenerator)
+    engine.continuation_policy = None
+
+    def fail(_cohort, *, forced_depth=None):
+        raise TypeError("failure from inside wrapped round")
+
+    engine._run_round = fail
+    with pytest.raises(TypeError, match="failure from inside wrapped round"):
+        engine._round([])
 
 
 def test_trusted_pld_in_split_b2_cohort_completes_both_lanes():
@@ -776,12 +1093,12 @@ def test_trusted_pld_in_split_b2_cohort_completes_both_lanes():
     blind_in_b2 = []
     run_round = engine._run_round
 
-    def observe(cohort):
+    def observe(cohort, *, forced_depth=None):
         tails = {int(lane.tail.shape[1]) for lane in cohort}
         before = engine.scheduler_stats.get(
             "external_composed_trusted_pld_rounds", 0
         )
-        result = run_round(cohort)
+        result = run_round(cohort, forced_depth=forced_depth)
         if len(cohort) == 2:
             if len(tails) == 2:
                 split_b2.append(sorted(tails))

@@ -28,3 +28,13 @@ def test_resolving_eos_ids_does_not_mutate_the_artifact_config():
     config = {"eos_token_id": [151645]}
     assert resolve_eos_token_ids(config, SimpleNamespace(eos_token_id=151643)) == [151645, 151643]
     assert config["eos_token_id"] == [151645]
+
+
+def test_qwen_resolver_includes_generation_config_when_path_is_bound(tmp_path):
+    config = {"text_config": {"eos_token_id": 248044}}
+    (tmp_path / "generation_config.json").write_text(
+        json.dumps({"eos_token_id": [248044, 248046]})
+    )
+    tokenizer = SimpleNamespace(eos_token_id=248046)
+    assert resolve_eos_token_ids(config, tokenizer, tmp_path) == [248044, 248046]
+    assert config == {"text_config": {"eos_token_id": 248044}}
