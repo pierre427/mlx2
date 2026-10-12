@@ -257,7 +257,9 @@ APPROVED_QUALIFICATION_HARNESS = {
     # Re-pinned 2026-10-11: proposal-composition claims now require frozen
     # source settings and run-local lane receipts for each selected source,
     # ranking, and the complete trusted-PLD lifecycle.
-    "sha256": "ac82fa9e08e790592810ad1e2da602a302708b5b05f4c5b9800bd1fdbcb15f6b",
+    # Re-pinned 2026-10-12: PLE host-read dispatch evidence no longer
+    # requires the mutually exclusive device-ID bypass counter.
+    "sha256": "d1b0ae501f8fc968106318cb2397ab792e4c2dd4bfc04cd68e1049c54e767a51",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -283,6 +285,9 @@ APPROVED_MEDIA_HARNESS = {
     "name": "scripts/qualify_media_serving.py",
     "sha256": "15f1bad9a3fe8646c25cf0f0e18ef0c8c810c426f65790371192b5fd3fbfb067",
 }
+# Re-pinned 2026-10-12 after review of Gemma3n shared-KV/lane projection
+# and video batch-default repairs. Old companion identities remain historical;
+# this enables validation only and does not qualify any model or media route.
 APPROVED_MEDIA_PRODUCERS = {
     "smolvlm": (APPROVED_MEDIA_HARNESS, evaluate_smol_media_report, SMOL_MEDIA_CHECKS),
     "qwen2_5_vl": (
@@ -311,8 +316,8 @@ APPROVED_MEDIA_PRODUCERS = {
             "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
             "evaluator_sha256": "498ddd0dfbfeb9422f3e5b1b028857df66e7c813e8048b279a087be1ccc0fe7a",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
-            "adapter_batching_sha256": "2b37a4bbaaae8ca4658104bea7d26ebe7909d7084dc2fa2c8f2c3b7b99d8706a",
-            "adapter_contract_sha256": "4896eaff85860c2913ad3fffbbbdeaf1e81e8201abe5345027688e7b6a7c1349",
+            "adapter_batching_sha256": "9d6c2346dbe9d8c21dd028f41df01e0e0047058448d822b98155d878e4315a1a",
+            "adapter_contract_sha256": "f8db4ba39c30105f8ecbdfcd0e1047b51768bfcd1a94acedf9e121fde626359f",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["gemma3n"],
@@ -324,7 +329,7 @@ APPROVED_MEDIA_PRODUCERS = {
             "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
             "evaluator_sha256": "498ddd0dfbfeb9422f3e5b1b028857df66e7c813e8048b279a087be1ccc0fe7a",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
-            "adapter_batching_sha256": "2b37a4bbaaae8ca4658104bea7d26ebe7909d7084dc2fa2c8f2c3b7b99d8706a",
+            "adapter_batching_sha256": "9d6c2346dbe9d8c21dd028f41df01e0e0047058448d822b98155d878e4315a1a",
             "adapter_contract_sha256": "5605b41a95a68adcb8f5632601a0b4dbd8d04a83a0871b6649afdc44ebe22df2",
         },
         evaluate_native_vlm_report,
@@ -337,8 +342,8 @@ APPROVED_MEDIA_PRODUCERS = {
             "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
             "evaluator_sha256": "498ddd0dfbfeb9422f3e5b1b028857df66e7c813e8048b279a087be1ccc0fe7a",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
-            "adapter_batching_sha256": "2b37a4bbaaae8ca4658104bea7d26ebe7909d7084dc2fa2c8f2c3b7b99d8706a",
-            "adapter_contract_sha256": "4896eaff85860c2913ad3fffbbbdeaf1e81e8201abe5345027688e7b6a7c1349",
+            "adapter_batching_sha256": "9d6c2346dbe9d8c21dd028f41df01e0e0047058448d822b98155d878e4315a1a",
+            "adapter_contract_sha256": "f8db4ba39c30105f8ecbdfcd0e1047b51768bfcd1a94acedf9e121fde626359f",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["minicpmo"],

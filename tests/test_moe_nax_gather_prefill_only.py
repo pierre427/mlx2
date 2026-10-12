@@ -54,6 +54,8 @@ def test_padded_decode_never_consults_nax(monkeypatch, policy):
     monkeypatch.setattr(sl, "_RHS_PAD_MIN_ROWS_PER_EXPERT", 3)
     lin = _flash_shaped_linear()
     if policy == "adaptive":
+        monkeypatch.setattr(sl, "_pad_cost_host", lambda: True)
+        monkeypatch.setattr(sl, "_pad_cost_runtime", lambda: True)
         key = (lin.mode, lin.bits, lin.group_size, EXPERTS, lin.output_dims, lin.input_dims)
         # A cost model under which the rhs pad wins at this width.
         monkeypatch.setitem(sl._PAD_COST_MODELS, key, (0.0, 1e9, 0.0, 0.0))

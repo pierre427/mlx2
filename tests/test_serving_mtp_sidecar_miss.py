@@ -58,6 +58,9 @@ def _serve_warm_target_hit(monkeypatch, behind):
         def __init__(self, *_a, **_kw):
             self.lanes = {}
 
+        def _has_active_decode(self):
+            return bool(self.lanes)
+
         def insert(self, prompts, *, caches, all_tokens, **kw):
             inserted.append(
                 (

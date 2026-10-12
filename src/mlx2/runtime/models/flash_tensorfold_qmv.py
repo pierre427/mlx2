@@ -166,8 +166,17 @@ class TensorFoldQMVLinear(nn.QuantizedLinear):
 def install(model) -> dict:
     """Install on affine q4/q8-g64 dense projections without copying weights."""
     installed = []
+    # HC's fused decode kernels own these projections. Class-swapping them
+    # silently makes every HC call decline, despite the selected HC profile.
+    hc_owned = {
+        id(projection)
+        for _, owner in model.named_modules()
+        if getattr(owner, "hc_count", None) is not None
+        for field in ("input_mix_weight_down", "input_mix_weight_up", "block_inject_weight")
+        if (projection := getattr(owner, field, None)) is not None
+    }
     for name, module in model.named_modules():
-        if type(module) is not nn.QuantizedLinear:
+        if type(module) is not nn.QuantizedLinear or id(module) in hc_owned:
             continue
         if any(part in name.split(".") for part in (
             "switch_mlp", "shared_expert", "ple", "lm_head", "mtp_draft_head"

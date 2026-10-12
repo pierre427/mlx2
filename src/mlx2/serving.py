@@ -2205,19 +2205,28 @@ def validate_prefill_depth_budget(value):
 
 
 def prefill_transient_gib(
-    cache_budget, *, context_tokens, uncached_tokens, prefill_step, single_chunk=False
+    cache_budget, *, context_tokens, uncached_tokens, prefill_step,
+    prefill_step_autoscale=False, single_chunk=False,
 ):
     """The adapter's chunked-prefill transient for one arriving lane, in GiB.
 
     Zero when the adapter declares none or when there is no prefill chunk to
     run (a warm hit leaves at most the anchor token).  The chunk is the
-    smaller of the uncached tail and the prefill step, or the whole uncached
+    smaller of the uncached tail and the selected prefill step, or the whole uncached
     tail when ``single_chunk`` (a cold multimodal request: its first prefill
     runs the whole prompt in one isolated forward).
     """
     estimate = getattr(cache_budget, "prefill_transient_bytes", None)
     if estimate is None or uncached_tokens <= 1:
         return 0.0
+    if prefill_step_autoscale and not single_chunk:
+        from .runtime.prefill_plan import prompt_length_prefill_step
+
+        # Match ordinary and self-MTP execution: schedule from the complete
+        # prompt, including cached history, rather than only the warm tail.
+        prefill_step = prompt_length_prefill_step(
+            int(context_tokens), maximum=int(prefill_step)
+        )
     rows = (
         int(uncached_tokens)
         if single_chunk
@@ -2276,6 +2285,26 @@ def unmaterialized_lane_bytes(jobs, *, materialized_bytes=None):
             raise ValueError("materialized admission bytes must be a nonnegative integer")
         remaining += max(0, grant - allocated)
     return remaining
+
+
+def native_mtp_arrival_depth(
+    requested_depth, *, handoff_policy, projected_width,
+    decode_active=False, adaptive_park_active=False,
+):
+    """Price the selected idle width route before optional verify workspace.
+
+    Preparation still has its own generator-side peak admission. A dynamic
+    park or an active decoder must keep its normal speculative arrival price;
+    an idle static-width cohort will never execute speculative verification.
+    """
+    if (
+        not decode_active
+        and not adaptive_park_active
+        and handoff_policy.enabled
+        and projected_width > handoff_policy.max_mtp_width
+    ):
+        return 0
+    return requested_depth
 
 
 def admit_lane_headroom(
@@ -2356,7 +2385,7 @@ def admit_lane_headroom(
         if headroom() >= full * (1 << 30):
             return (True, False, full)
         return (True, draft_depth > 0, floor)
-    return (False, False, required)
+    return (False, False, floor)
 
 
 def admit_prompt_lookup_lane(
@@ -3745,8 +3774,9 @@ class ServingEngine:
                 raise ValueError(
                     "MTP acceptance logging requires the native self-MTP route"
                 )
-        # Adaptive depth and ordinary handoff are exact: they change how fast
-        # tokens come, not which tokens.  Like the route itself they may run
+        # Adaptive depth and ordinary handoff preserve the target sampling
+        # algorithm. Finite-precision geometry can still flip greedy near ties;
+        # exact-token parity requires route evidence. Like the route they may run
         # unqualified; the status and every receipt then say "unqualified".
         if self.adaptive_mtp_policy.enabled:
             if not mtp or prompt_lookup:
@@ -10220,6 +10250,7 @@ class ServingEngine:
                             context_tokens=len(tokens),
                             uncached_tokens=len(hit.remaining_tokens),
                             prefill_step=self.prefill_step,
+                            prefill_step_autoscale=self.prefill_step_autoscale,
                             # Same rule the insert below uses to pass a
                             # prefill payload: a cold media request prefills
                             # its uncached tail in one isolated chunk.
@@ -10282,10 +10313,28 @@ class ServingEngine:
                                 job.prompt_lookup_span = span
                                 self.counts["prompt_lookup_admission_span_capped"] += 1
                         else:
+                            arrival_depth = (
+                                config["num_draft"]
+                                if self.mtp and not target_only_plain else 0
+                            )
+                            if arrival_depth and not external_draft:
+                                arrival_depth = native_mtp_arrival_depth(
+                                    arrival_depth,
+                                    handoff_policy=self.mtp_ordinary_handoff_policy,
+                                    projected_width=(
+                                        len(attaching_cohort.jobs)
+                                        if attaching_cohort is not None
+                                        else len(active) + 1
+                                    ),
+                                    decode_active=batch._has_active_decode(),
+                                    adaptive_park_active=(
+                                        getattr(batch, "mtp_park_memory", None) is not None
+                                    ),
+                                )
                             (admitted, depth_floor, required) = admit_lane_headroom(
                                 controller,
                                 context_tokens=len(tokens) + maximum,
-                                draft_depth=config["num_draft"] if self.mtp and not target_only_plain else 0,
+                                draft_depth=arrival_depth,
                                 cache_gib=cache_copy,
                                 prefill_gib=prefill_gib,
                                 headroom=admission_headroom,

@@ -251,7 +251,7 @@ def test_flash_next_receipt_round_trips_every_non_default_choice():
         "moe_window_batch_decode": True,
         "row_exact_verify": True,
         "qsa_fused_scores": False,
-        "fused_gdn_batch_verify": "off",
+        "fused_gdn_batch_verify": "row_exact",
         "moe_nax_gather": "off",
         "moe_rhs_pad_policy": "floor",
         "qsa_nax_min_physical_kv": 16384,

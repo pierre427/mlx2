@@ -32,6 +32,15 @@ from .prefill_metal import (
 _PREFILL_SCOPE = ContextVar("mlx2_tensorfold_prefill_scope", default=False)
 
 
+def prefill_mlp_active(layer):
+    """An installed prefill hook owns its MLP only during a prefill forward."""
+    return bool(
+        hasattr(layer, "_prefill_counts")
+        and getattr(layer, "_prefill_enabled", True)
+        and _PREFILL_SCOPE.get()
+    )
+
+
 @lru_cache(maxsize=8)
 def _scoped_decoder_type(original):
     """Scope installed layers so verification never selects prefill arithmetic."""

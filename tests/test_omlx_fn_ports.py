@@ -586,7 +586,14 @@ def test_shared_fold_admission():
     quad.set_dtype(mx.bfloat16)
     assert "plain qmv" in RD.admit_shared_fold(quad, H, 128).reason
     object.__setattr__(shared, "_prefill_counts", {})
-    assert "tensorfold" in RD.admit_shared_fold(shared, H, I).reason
+    assert RD.admit_shared_fold(shared, H, I).accepted
+    from mlx2.runtime.models.tensorfold_prefill import _PREFILL_SCOPE
+
+    token = _PREFILL_SCOPE.set(True)
+    try:
+        assert "tensorfold" in RD.admit_shared_fold(shared, H, I).reason
+    finally:
+        _PREFILL_SCOPE.reset(token)
 
 
 def test_shared_fold_replaces_the_block_tail(monkeypatch, fold_reference):
@@ -602,6 +609,15 @@ def test_shared_fold_replaces_the_block_tail(monkeypatch, fold_reference):
     assert block.shared_fold_calls == 3 and block.shared_fold_fallbacks == 0
     assert block.switch_mlp.routed_decode_calls == 3 and block.switch_mlp.routed_down_calls == 3
     assert fold_reference["fold"] == 3
+
+
+def test_prefill_installation_keeps_decode_shared_fold(monkeypatch, fold_reference):
+    block = _served_block(monkeypatch)
+    object.__setattr__(block.shared_expert, "_prefill_counts", {})
+    block(_x(5))
+    assert block.shared_fold_calls == 1
+    assert block.shared_fold_fallbacks == 0
+    assert fold_reference["fold"] == 1
 
 
 def test_shared_fold_declines_with_reasons(monkeypatch, fold_reference):

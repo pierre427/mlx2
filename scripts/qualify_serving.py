@@ -2810,21 +2810,15 @@ def feature_observations(
         "trusted_pld_recovery": trusted_evidence.get("recovery", 0),
         "indexed_fused_merge": latch_observation("indexed_fused_merge"),
         "indexed_output_gate": latch_observation("indexed_output_gate"),
-        "ple_early_dispatch": min(
-            run_delta(
-                execution,
-                initial_execution,
-                "tensorfold_longctx",
-                "ple_early_dispatch",
-                "dispatches",
-            ),
-            run_delta(
-                execution,
-                initial_execution,
-                "tensorfold_longctx",
-                "ple_early_dispatch",
-                "device_ids",
-            ),
+        # Host-ID PLE dispatches pending hidden work before the host read.
+        # Device IDs skip that read and increment a mutually exclusive counter;
+        # requiring both paths falsely rejects every file-backed PLE profile.
+        "ple_early_dispatch": run_delta(
+            execution,
+            initial_execution,
+            "tensorfold_longctx",
+            "ple_early_dispatch",
+            "dispatches",
         ),
         "qsa_stage1_direct_selector": (
             run_delta(

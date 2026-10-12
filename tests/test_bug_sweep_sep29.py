@@ -89,6 +89,22 @@ def test_switch_quantization_does_not_allocate_discarded_random_experts(monkeypa
     assert not quantized.trainable_parameters()
 
 
+def test_gemma_default_preserves_one_video_encoder_geometry():
+    calls = []
+
+    def forward(pixels, *args):
+        calls.append(int(pixels.shape[0]))
+        return pixels
+
+    policy = Gemma3nVideoPolicy()
+    assert policy.frame_batch_size == policy.max_frames
+    model = SimpleNamespace(get_image_features=forward)
+    install_gemma3n_vision_batching(model, policy)
+    pixels = mx.zeros((17, 1))
+    assert model.get_image_features(pixels, None, None, None) is pixels
+    assert calls == [17]
+
+
 def test_gemma_frame_batches_are_evaluated_before_constructing_next(monkeypatch):
     events = []
     real_eval = mx.eval

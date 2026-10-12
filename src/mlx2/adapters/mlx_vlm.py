@@ -232,6 +232,39 @@ class _LogitsModel:
         return getattr(output, "logits", output)
 
 
+class _Gemma3nCacheView:
+    """Expose written KV to shared layers without changing saved cache state.
+
+    Gemma 3n's shared layers read ``cache.state`` instead of the preceding
+    layer's ``update_and_fetch`` result. BatchKVCache intentionally retains
+    allocation capacity in state; its written-prefix cursor is ``_idx``.
+    """
+
+    def __init__(self, cache):
+        self._cache = cache
+
+    def __getattr__(self, name):
+        return getattr(self._cache, name)
+
+    @property
+    def state(self):
+        from ..runtime.models.cache import BatchKVCache
+
+        state = self._cache.state
+        if isinstance(self._cache, BatchKVCache) and state[0] is not None:
+            extent = self._cache._idx
+            return (state[0][..., :extent, :], state[1][..., :extent, :], *state[2:])
+        return state
+
+
+def _gemma3n_cache_views(cache):
+    return (
+        None
+        if cache is None
+        else [None if value is None else _Gemma3nCacheView(value) for value in cache]
+    )
+
+
 class _Gemma3nLogitsModel(_LogitsModel):
     """Keep Gemma 3n's prompt embeddings and token decode paths distinct.
 
@@ -252,13 +285,15 @@ class _Gemma3nLogitsModel(_LogitsModel):
             input_ids,
             inputs_embeds=inputs_embeds,
             per_layer_inputs=per_layer_inputs,
-            cache=cache,
+            cache=_gemma3n_cache_views(cache),
             **kwargs,
         )
         return getattr(output, "logits", output)
 
     def __call__(self, input_ids, *, cache=None, **kwargs):
-        output = self._model.language_model(input_ids, cache=cache, **kwargs)
+        output = self._model.language_model(
+            input_ids, cache=_gemma3n_cache_views(cache), **kwargs
+        )
         return getattr(output, "logits", output)
 
 
@@ -562,6 +597,13 @@ GEMMA3N = ModelDescriptor(
 class Gemma3nAdapter(_MLXVLMAdapter):
     descriptor = GEMMA3N
     sampling_defaults = GEMMA3N_SAMPLING
+
+    def lane_policy_defaults(self):
+        # At the stock 16-row crossover, B1/B2 decode and small prefill can
+        # select different arithmetic. Native 2026-10-12 diagnostics reproduce
+        # token changes and remove them when both use the lane projection.
+        # Preserve the SIMD backend's default-off mode and operator overrides.
+        return {"min_rows": {"bf16": 1, "fp16": 1}}
 
     @staticmethod
     def _wrap_model(model):

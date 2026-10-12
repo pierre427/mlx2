@@ -882,7 +882,9 @@ def _moe_rows_refusal(block, x, rows):
     if refusal is not None:
         return refusal
     shared = block.get("shared_expert")
-    if shared is None or hasattr(shared, "_prefill_counts"):
+    from .tensorfold_prefill import prefill_mlp_active
+
+    if shared is None or prefill_mlp_active(shared):
         return "shared expert missing or tensorfold prefill MLP installed"
     return None
 

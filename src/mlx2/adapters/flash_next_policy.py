@@ -179,12 +179,13 @@ class FlashNextPolicy:
     # verify (and so to one-token decode), rollback included; otherwise
     # such blocks take the stock multi-row chain.  TensorFold 0.6.1
     # multi-stream GDN + mlx2 L1 lane rebinding
-    # (provenance/tensorfold-batched-gdn-verify.json).  Default "row_exact"
-    # since 2026-10-01 (Pierre): no speed gain for plain batched MTP (-0.3 to
-    # -2.1% at 2-16 lanes, tokens identical) but it lets batched row-exact
-    # verify windows engage GDN (B4 63/63, B8 62/62).  Recorded in receipts
-    # only when it differs from the default; "off" restores the stock chain.
-    fused_gdn_batch_verify: str = "row_exact"
+    # (provenance/tensorfold-batched-gdn-verify.json). The measured plain
+    # batched MTP profile lost 0.3..2.1% at 2-16 lanes with identical tokens.
+    # "auto" therefore resolves to "off" normally and "row_exact" when
+    # row_exact_verify is requested (B4 63/63, B8 62/62 GDN windows engaged).
+    # Explicit "off" / "row_exact" remain overrides; receipts store the
+    # resolved value. See the 2026-10-12 regression audit.
+    fused_gdn_batch_verify: str = "auto"
     # Opt-in: the quantized lm_head stores fp32 logits instead of rounding
     # them to bf16 (runtime/fp32_head.py).  Not an environment switch; it
     # enters receipts only when enabled, like the kernels above.
@@ -414,8 +415,13 @@ class FlashNextPolicy:
             )
         if self.fused_gdn_batch_decode not in {"off", "row_exact"}:
             raise ValueError("fused_gdn_batch_decode must be off or row_exact")
+        if self.fused_gdn_batch_verify == "auto":
+            object.__setattr__(
+                self, "fused_gdn_batch_verify",
+                "row_exact" if self.row_exact_verify else "off",
+            )
         if self.fused_gdn_batch_verify not in {"off", "row_exact"}:
-            raise ValueError("fused_gdn_batch_verify must be off or row_exact")
+            raise ValueError("fused_gdn_batch_verify must be auto, off or row_exact")
         for name in (
             "async_qsa_promotion",
             "known_tail_ple_prefetch",
@@ -613,7 +619,8 @@ class FlashNextPolicy:
             del values["hc_decode_multi_row"]
         if self.fused_gdn_batch_decode == _DEFAULTS["fused_gdn_batch_decode"]:
             del values["fused_gdn_batch_decode"]
-        if self.fused_gdn_batch_verify == _DEFAULTS["fused_gdn_batch_verify"]:
+        if (self.fused_gdn_batch_verify == _DEFAULTS["fused_gdn_batch_verify"]
+                and not self.row_exact_verify):
             del values["fused_gdn_batch_verify"]
         if self.attn_fused_rows == _DEFAULTS["attn_fused_rows"]:
             del values["attn_fused_rows"]
@@ -748,3 +755,4 @@ class FlashNextPolicy:
 
 # Field defaults, for as_dict's omit-at-default rule.
 _DEFAULTS = {f.name: f.default for f in fields(FlashNextPolicy)}
+_DEFAULTS["fused_gdn_batch_verify"] = "off"

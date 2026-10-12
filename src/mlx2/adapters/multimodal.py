@@ -153,7 +153,10 @@ def install_gemma3n_vision_batching(model, policy: Gemma3nVideoPolicy):
 class Gemma3nVideoPolicy:
     fps: float = 2.0
     max_frames: int = 64
-    frame_batch_size: int = 16
+    # Keep the source encoder geometry for one video at the default frame
+    # limit. Splitting 17 frames as 16+1 changed features and amplified the
+    # difference in language logits. Smaller encoder batches are explicit.
+    frame_batch_size: int = 64
 
     def __post_init__(self):
         if not math.isfinite(float(self.fps)) or self.fps <= 0:

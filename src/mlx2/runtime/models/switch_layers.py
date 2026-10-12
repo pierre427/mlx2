@@ -3,6 +3,10 @@
 import math
 import os
 import threading
+from functools import lru_cache
+from importlib.metadata import version
+
+from ...process_env import tf32_enabled
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -111,7 +115,8 @@ def set_pad_policy(policy: str) -> str:
 # (mode, bits, group_size, experts, output_dims, input_dims) -> (q0, q1, r0, r1),
 # ms per call.  Fitted in-model on M5 Max (mlx 39400a0d4) from real weights
 # and real routing, every sorted gather of one forward replayed both ways at
-# 16..204 rows (scripts/calibrate_moe_pad_inmodel.py, Flash-Next 4-bit
+# 16..204 token rows / 160..2040 sorted assignments
+# (scripts/calibrate_moe_pad_inmodel.py, Flash-Next 4-bit
 # experts; qualification/runs/moe-adaptive-pad-20261001).  The touched term
 # assumes uniform routing; real routing touches fewer experts, which the
 # fitted r0/r1 absorb for this table.
@@ -123,6 +128,35 @@ _PAD_COST_MODELS = {
     # rows (~31 tokens).
     ("affine", 4, 64, 512, 2560, 640): (-0.26367, 0.002081, -0.009772, 0.001673),
 }
+_PAD_COST_ASSIGNMENTS = (160, 2040)
+_PAD_COST_MLX = "0.32.2.dev20260919+39400a0d4"
+
+
+@lru_cache(maxsize=1)
+def _pad_cost_host() -> bool:
+    """The installed fits were measured on M5 Max, not every Metal host."""
+    try:
+        return bool(mx.metal.is_available()) and str(
+            mx.device_info().get("device_name", "")
+        ) == "Apple M5 Max"
+    except Exception:
+        return False
+
+
+@lru_cache(maxsize=1)
+def _pad_cost_build() -> bool:
+    """Resolve immutable package metadata once, outside the gather hot path."""
+    try:
+        return version("mlx") == _PAD_COST_MLX
+    except Exception:
+        return False
+
+
+def _pad_cost_runtime() -> bool:
+    """A different native kernel build or TF32 setting needs a fresh fit."""
+    return _pad_cost_build() and not tf32_enabled()
+
+
 pad_choice_counts = {}
 
 
@@ -155,6 +189,11 @@ def moe_pad_status(*, reset: bool = False) -> dict:
             "pad_rows": rhs_pad_rows,
             "engaged": rhs_pad_calls > 0,
             "qualified": _RHS_PAD_QUALIFIED,
+            "cost_model_host": "Apple M5 Max",
+            "cost_model_host_matches": _pad_cost_host(),
+            "cost_model_assignment_range": list(_PAD_COST_ASSIGNMENTS),
+            "cost_model_mlx": _PAD_COST_MLX,
+            "cost_model_runtime_matches": _pad_cost_runtime(),
             "choices": dict(pad_choice_counts),
         }
         if reset:
@@ -189,6 +228,10 @@ def _adaptive_pad(n: int, layer) -> tuple:
     if model is None:
         pad = _rhs_stream_pad(n, num_experts)
         return pad, "uncalibrated_rhs" if pad else "uncalibrated_qmv"
+    if not _pad_cost_host() or not _pad_cost_runtime() or not _PAD_COST_ASSIGNMENTS[0] <= n <= _PAD_COST_ASSIGNMENTS[1]:
+        pad = _rhs_stream_pad(n, num_experts)
+        scope = "host" if not _pad_cost_host() else "runtime" if not _pad_cost_runtime() else "range"
+        return pad, f"uncalibrated_{scope}_{'rhs' if pad else 'qmv'}"
     q0, q1, r0, r1 = model
     touched = num_experts * (1.0 - math.exp(-n / num_experts))
     if r0 + r1 * touched < q0 + q1 * n:

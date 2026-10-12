@@ -145,16 +145,18 @@ def test_launch_wrapper_rejects_row_steps_that_do_not_fit():
 
 # ---------------------------------------------------------------- policy ----
 
-def test_policy_field_defaults_row_exact_and_off_is_recorded():
-    # Default "row_exact" since 2026-10-01; receipts record it only when it
-    # differs from the default.
+def test_policy_field_defaults_off_and_row_exact_is_recorded():
+    # Plain MTP defaults off; an explicit row-exact profile is receipted.
     default = FlashNextPolicy()
-    assert default.fused_gdn_batch_verify == "row_exact"
+    assert default.fused_gdn_batch_verify == "off"
     assert "fused_gdn_batch_verify" not in default.as_dict()
-    assert default.environment()["MLX_QWEN4_FUSED_GDN_BATCH_VERIFY"] == "row_exact"
+    assert "MLX_QWEN4_FUSED_GDN_BATCH_VERIFY" not in default.environment()
     off = FlashNextPolicy.from_mapping({"fused_gdn_batch_verify": "off"})
-    assert off.as_dict()["fused_gdn_batch_verify"] == "off"
+    assert "fused_gdn_batch_verify" not in off.as_dict()
     assert "MLX_QWEN4_FUSED_GDN_BATCH_VERIFY" not in off.environment()
+    exact = FlashNextPolicy.from_mapping({"fused_gdn_batch_verify": "row_exact"})
+    assert exact.as_dict()["fused_gdn_batch_verify"] == "row_exact"
+    assert exact.environment()["MLX_QWEN4_FUSED_GDN_BATCH_VERIFY"] == "row_exact"
     with pytest.raises(ValueError, match="fused_gdn_batch_verify"):
         FlashNextPolicy.from_mapping({"fused_gdn_batch_verify": "on"})
 
@@ -163,7 +165,7 @@ def test_policy_field_defaults_row_exact_and_off_is_recorded():
 def test_policy_field_round_trips_through_receipts(value):
     policy = FlashNextPolicy.from_mapping({"fused_gdn_batch_verify": value})
     assert FlashNextPolicy.from_mapping(policy.as_dict()) == policy
-    default = FlashNextPolicy.__dataclass_fields__["fused_gdn_batch_verify"].default
+    default = FlashNextPolicy().fused_gdn_batch_verify
     assert ("fused_gdn_batch_verify" in policy.as_dict()) == (value != default)
 
 

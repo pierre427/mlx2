@@ -1298,7 +1298,9 @@ def admit_shared_fold(shared, hidden: int, inter: int) -> RoutedDecodeAdmission:
     a ``qmv_quad`` width)."""
     if shared is None:
         return RoutedDecodeAdmission(False, "no shared expert")
-    if hasattr(shared, "_prefill_counts"):
+    from .tensorfold_prefill import prefill_mlp_active
+
+    if prefill_mlp_active(shared):
         return RoutedDecodeAdmission(False, "tensorfold prefill MLP installed")
     gate, up, down = shared.get("gate_proj"), shared.get("up_proj"), shared.get("down_proj")
     widths = {}

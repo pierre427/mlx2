@@ -162,6 +162,10 @@ def adaptive(monkeypatch, pad_floor):
     pad_floor(3)
     monkeypatch.setattr(SL, "_RHS_PAD_POLICY", "adaptive")
     monkeypatch.setattr(SL, "_PAD_COST_MODELS", {})
+    monkeypatch.setattr(SL, "_pad_cost_runtime", lambda: True)
+    # These tests install synthetic fits over their own small row range.
+    monkeypatch.setattr(SL, "_pad_cost_host", lambda: True)
+    monkeypatch.setattr(SL, "_PAD_COST_ASSIGNMENTS", (1, 2040))
     SL.moe_pad_status(reset=True)
     yield SL._PAD_COST_MODELS
     SL.moe_pad_status(reset=True)
@@ -191,6 +195,45 @@ def test_adaptive_chooses_by_cost_per_table(adaptive):
     other = _quantized_projection(D, N, E, bits=8)
     assert SL._adaptive_pad(95, other) == (0, "uncalibrated_qmv")
     assert SL._adaptive_pad(96, other) == (4 * E - 96, "uncalibrated_rhs")
+
+
+def test_installed_fit_never_transfers_to_another_host(monkeypatch):
+    from types import SimpleNamespace
+
+    layer = SimpleNamespace(mode="affine", bits=4, group_size=64,
+                            num_experts=512, output_dims=2560, input_dims=640)
+    monkeypatch.setattr(SL, "_RHS_PAD_POLICY", "adaptive")
+    monkeypatch.setattr(SL, "_RHS_PAD_MIN_ROWS_PER_EXPERT", 3)
+    monkeypatch.setattr(SL, "_pad_cost_host", lambda: False)
+    # The installed M5 fit picks streaming at 320 assignments; the fixed
+    # floor on an uncalibrated host does not. At 1600 both choose streaming.
+    assert SL._adaptive_pad(320, layer) == (0, "uncalibrated_host_qmv")
+    assert SL._adaptive_pad(1600, layer) == (448, "uncalibrated_host_rhs")
+    monkeypatch.setattr(SL, "_pad_cost_host", lambda: True)
+    assert SL._adaptive_pad(320, layer) == (1728, "cost_rhs")
+
+
+def test_installed_fit_does_not_extrapolate_beyond_measured_assignments(monkeypatch):
+    from types import SimpleNamespace
+
+    layer = SimpleNamespace(mode="affine", bits=4, group_size=64,
+                            num_experts=512, output_dims=2560, input_dims=640)
+    monkeypatch.setattr(SL, "_RHS_PAD_POLICY", "adaptive")
+    monkeypatch.setattr(SL, "_RHS_PAD_MIN_ROWS_PER_EXPERT", 3)
+    monkeypatch.setattr(SL, "_pad_cost_host", lambda: True)
+    assert SL._adaptive_pad(159, layer) == (0, "uncalibrated_range_qmv")
+    assert SL._adaptive_pad(2041, layer) == (7, "uncalibrated_range_rhs")
+
+
+def test_calibration_runtime_requires_measured_build_and_tf32(monkeypatch):
+    monkeypatch.setattr(SL, "_pad_cost_build", lambda: True)
+    monkeypatch.setenv("MLX_ENABLE_TF32", "0")
+    assert SL._pad_cost_runtime()
+    monkeypatch.setenv("MLX_ENABLE_TF32", "1")
+    assert not SL._pad_cost_runtime()
+    monkeypatch.setenv("MLX_ENABLE_TF32", "0")
+    monkeypatch.setattr(SL, "_pad_cost_build", lambda: False)
+    assert not SL._pad_cost_runtime()
 
 
 def test_adaptive_counts_choices_and_keeps_rows(adaptive):

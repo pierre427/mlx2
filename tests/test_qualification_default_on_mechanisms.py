@@ -49,15 +49,16 @@ def test_ordinary_route_requires_every_default_on_mechanism():
     required = required_feature_checks(_settings())
     assert DEFAULT_ON | LONG | {"feature_fused_gdn_batch_decode"} <= required
     assert "feature_fused_gdn_batch_verify" not in required
-    assert "feature_fused_gdn_batch_verify" in selected_not_observed_features(_settings())
+    assert "feature_fused_gdn_batch_verify" not in selected_not_observed_features(_settings())
 
 
-def test_mtp_route_with_handoff_requires_batch_decode_and_verify():
+def test_mtp_route_with_handoff_requires_selected_batch_decode():
     settings = _settings(mtp=True, speculation="self_mtp",
                          mtp_ordinary_handoff={"enabled": True, "max_mtp_width": 3})
     required = required_feature_checks(settings)
     assert DEFAULT_ON | LONG <= required
-    assert {"feature_fused_gdn_batch_decode", "feature_fused_gdn_batch_verify"} <= required
+    assert "feature_fused_gdn_batch_decode" in required
+    assert "feature_fused_gdn_batch_verify" not in required
 
 
 @pytest.mark.parametrize("handoff", [None, {"enabled": True, "max_mtp_width": 4}])
@@ -67,7 +68,7 @@ def test_mtp_route_that_cannot_batch_decode_says_so(handoff):
         settings["mtp_ordinary_handoff"] = handoff
     required = required_feature_checks(settings)
     assert "feature_fused_gdn_batch_decode" not in required
-    assert "feature_fused_gdn_batch_verify" in required
+    assert "feature_fused_gdn_batch_verify" not in required
     reason = selected_not_observed_features(settings)["feature_fused_gdn_batch_decode"]
     assert "native MTP" in reason
 
@@ -189,7 +190,7 @@ def test_observations_count_engagement_not_selection(qualify):
 def test_e8861bb5_mtp_receipt_shape_records_batch_decode_as_not_observed():
     """The served e8861bb5 MTP settings: handoff off, so batch decode is
     labelled, while every other default-on kernel is required."""
-    env = FlashNextPolicy().environment()
+    env = FlashNextPolicy(fused_gdn_batch_verify="row_exact").environment()
     settings = {"environment": env, "max_context": 32768, "max_lanes": 4, "mtp": True}
     required = required_feature_checks(settings)
     assert {"feature_hc_decode", "feature_attn_fused_rows", "feature_moe_topk_fold",
@@ -382,6 +383,32 @@ def test_nax_gather_observation_counts_both_fused_halves(qualify):
     assert moe_nax_gather_engagement(
         _nax(mode="gather", calls={"gather": 12}), _nax(mode="gather")) == 12
     assert moe_nax_gather_engagement({}, {}) == 0
+
+
+@pytest.mark.parametrize(
+    "before,after,expected",
+    [
+        ({"dispatches": 10, "device_ids": 0},
+         {"dispatches": 17, "device_ids": 0}, 7),
+        ({"dispatches": 10, "device_ids": 0},
+         {"dispatches": 10, "device_ids": 7}, 0),
+        ({"dispatches": 10, "device_ids": 0},
+         {"dispatches": 10, "device_ids": 0}, 0),
+        ({"dispatches": 10, "device_ids": 0},
+         {"dispatches": 3, "device_ids": 0}, 0),
+    ],
+)
+def test_ple_early_dispatch_requires_run_local_host_read_dispatch(
+    qualify, before, after, expected
+):
+    def status(counters):
+        return {"execution": {"tensorfold_longctx": {
+            "ple_early_dispatch": counters,
+        }}}
+
+    assert qualify.feature_observations(
+        status(after), initial=status(before)
+    )["ple_early_dispatch"] == expected
 
 
 def test_nax_gather_host_gate_and_canary_are_selected_not_observed():

@@ -59,3 +59,18 @@ def test_installer_accepts_affine_q4_and_q8(bits):
     assert receipt["installed"] == 1
     assert receipt["kernel"] == "qmv_rows_q4q8g64"
     assert type(model.dense) is TensorFoldQMVLinear
+
+
+def test_installer_preserves_fused_hc_projection_ownership():
+    model = nn.Module()
+    model.dense = _quantized()
+    model.hc = nn.Module()
+    model.hc.hc_count = 4
+    model.hc.input_mix_weight_down = _quantized()
+    model.hc.input_mix_weight_up = _quantized()
+    model.hc.block_inject_weight = _quantized()
+    receipt = install(model)
+    assert receipt["installed"] == 1
+    assert type(model.dense) is TensorFoldQMVLinear
+    for field in ("input_mix_weight_down", "input_mix_weight_up", "block_inject_weight"):
+        assert type(getattr(model.hc, field)) is nn.QuantizedLinear

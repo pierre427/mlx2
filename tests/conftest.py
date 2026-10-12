@@ -11,6 +11,20 @@ import os
 import subprocess
 import sys
 
+if os.environ.get("MLX2_PREFLIGHT_CPU_ONLY") == "1":
+    # A CPU-only publication gate must not let availability-only Metal tests
+    # opt themselves in on an Apple host. Explicit GPU selection fails before
+    # a tensor can be dispatched; unit tests may still mock hardware probes.
+    mx.metal.is_available = lambda: False
+    _set_default_device = mx.set_default_device
+
+    def _cpu_only_default_device(device):
+        if device == mx.gpu:
+            raise RuntimeError("GPU execution forbidden by CPU-only preflight")
+        return _set_default_device(device)
+
+    mx.set_default_device = _cpu_only_default_device
+
 os.environ.setdefault("MLX2_STRUCTURED_WORKERS", "0")
 
 import pytest

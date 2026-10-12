@@ -263,7 +263,11 @@ def test_gate_still_fails_closed_when_even_the_plain_rung_does_not_fit():
     plain = lane_admission_required_gib(
         controller, context_tokens=SMOKE_CONTEXT, draft_depth=0, cache_gib=0.0
     )
-    assert _gate(controller, plain - 0.01, NUM_DRAFT)[:2] == (False, False)
+    refused = _gate(controller, plain - 0.01, NUM_DRAFT)
+    assert refused[:2] == (False, False)
+    # Refusal telemetry describes the final ordinary rung, not the optional
+    # speculative workspace that was tried first.
+    assert refused[2] == pytest.approx(plain, abs=0)
     assert _gate(controller, 0.0, NUM_DRAFT)[:2] == (False, False)
 
 
