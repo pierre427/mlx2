@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 
 ARTIFACTS = (
-    Path("/Users/pierrelamy/mlx-models/Qwen3.6-27B-Abliterated-Heretic-Uncensored-MLX-4bit"),
-    Path("/Users/pierrelamy/mlx-models/Qwen3.6-27B-MLX-8bit"),
+    Path.home() / "mlx-models/Qwen3.6-27B-Abliterated-Heretic-Uncensored-MLX-4bit",
+    Path.home() / "mlx-models/Qwen3.6-27B-MLX-8bit",
 )
 
 
