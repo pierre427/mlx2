@@ -104,6 +104,7 @@ def gpu_kernel_ab(widths, repeats: int, rows: int) -> list[dict]:
     import mlx.core as mx
 
     from mlx2.runtime.models import qwen4_fused_gdn_verify as fused
+    from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 
     hk, hv, dk, dv = (
         fused.NUM_KEY_HEADS,
@@ -111,7 +112,7 @@ def gpu_kernel_ab(widths, repeats: int, rows: int) -> list[dict]:
         fused.KEY_HEAD_DIM,
         fused.VALUE_HEAD_DIM,
     )
-    ty = fused.probe_qwen4_fused_gdn_decode(mx.bfloat16)
+    ty = fused.probe_qwen4_fused_gdn_decode(mx.bfloat16, contract=QWEN4_GDN_CONTRACT)
     if ty is None:
         raise SystemExit("fused GDN decode probe declined on this device")
     report = []

@@ -9,6 +9,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.nn.layers.distributed import shard_inplace, shard_linear, sum_gradients
 
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache, RotatingKVCache
 from .rope_utils import initialize_rope
@@ -238,7 +239,7 @@ class Model(nn.Module):
         self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
     def __call__(self, inputs: mx.array, cache=None):
-        return self.lm_head(self.model(inputs, cache))
+        return self.lm_head(select_checkpoint_rows(self.model(inputs, cache)))
 
     def sanitize(self, weights):
         if any("gate_proj.weight" in k for k in weights.keys()):

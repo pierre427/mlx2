@@ -26,6 +26,7 @@ from .qwen3_next import Qwen3NextMLP as MLP
 from .precise_ops import gate_sigmoid
 from .rope_utils import initialize_rope
 from ..ragged_verify_observation import current_observer, observed_stage
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 
 
 class Qwen3NextAttention(nn.Module):
@@ -536,6 +537,7 @@ class TextModel(nn.Module):
             input_embeddings=input_embeddings,
             deep_concept_memory=deep_concept_memory,
         )
+        out = select_checkpoint_rows(out)
         if self.args.tie_word_embeddings:
             out = self.model.embed_tokens.as_linear(out)
         else:

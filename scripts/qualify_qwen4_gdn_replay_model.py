@@ -220,6 +220,7 @@ def main() -> int:
             probe_qwen4_fused_gdn_replay_verify,
             probe_qwen4_fused_gdn_verify,
         )
+        from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 
         prompt = adapter.tokenizer.encode(args.prompt, add_special_tokens=False)
         if len(prompt) < 4:
@@ -240,7 +241,7 @@ def main() -> int:
         )
         probes = {
             str(width): {
-                "snapshot": probe_qwen4_fused_gdn_verify(mx.bfloat16, width),
+                "snapshot": probe_qwen4_fused_gdn_verify(mx.bfloat16, width, contract=QWEN4_GDN_CONTRACT),
                 "compact": probe_qwen4_fused_gdn_replay_verify(mx.bfloat16, width),
             }
             for width in widths

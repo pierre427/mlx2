@@ -12,6 +12,7 @@ import mlx.core as mx
 from mlx import nn
 from mlx.utils import tree_flatten
 
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .rope_utils import initialize_rope
@@ -278,7 +279,7 @@ class Model(nn.Module):
 
     def __call__(self, inputs, cache=None):
         out = self.model(inputs, cache)
-        return self.logits(out)
+        return self.logits(select_checkpoint_rows(out))
 
     def paged_embed(self, token_ids):
         """Flattened packed rows; ordinary ``__call__`` remains the reference."""

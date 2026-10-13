@@ -391,7 +391,7 @@ def grouped_input(layer, x):
 
 def install(model, *, backend="native"):
     """Install a prefill-only candidate; retain any selected decode matvec."""
-    from .flash_tensorfold_qmv import TensorFoldQMVLinear
+    from .flash_tensorfold_qmv import TensorFoldQMVLinear, hc_owned_projection_ids
     from .qwen3_5 import GatedDeltaNet
     from .qwen3_next import Qwen3NextMLP
     from .qwen4_exp import DecoderLayer as FlashDecoder
@@ -412,6 +412,7 @@ def install(model, *, backend="native"):
     counts = Counter()
     installed, groups, mlps = [], 0, 0
     skip = {"switch_mlp", "ple", "lm_head", "mtp_draft_head", "mtp"}
+    hc_owned = hc_owned_projection_ids(model)
     modules = list(model.named_modules())
     for name, module in modules:
         if skip.intersection(name.split(".")):
@@ -419,6 +420,7 @@ def install(model, *, backend="native"):
         if (
             backend == "metal"
             and type(module) in (nn.QuantizedLinear, TensorFoldQMVLinear)
+            and id(module) not in hc_owned
             and eligible(module)
         ):
             module.__class__ = (

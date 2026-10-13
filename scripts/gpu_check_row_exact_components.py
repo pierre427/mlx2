@@ -136,9 +136,10 @@ def check_gdn(rows_list, seed):
     import mlx.core as mx
     from mlx2.runtime.models import qwen4_fused_gdn as FG
     from mlx2.runtime.models import qwen4_fused_gdn_verify as FV
+    from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 
     FV.set_verify_max_steps(17)
-    ty = FG.probe_qwen4_fused_gdn_decode(mx.bfloat16)
+    ty = FG.probe_qwen4_fused_gdn_decode(mx.bfloat16, contract=QWEN4_GDN_CONTRACT)
     out = []
     mx.random.seed(seed)
     conv_weight = (mx.random.normal((FG.CONV_DIM, FG.CONV_KERNEL, 1)) * 0.3).astype(mx.bfloat16)
@@ -158,18 +159,18 @@ def check_gdn(rows_list, seed):
         for r in range(rows):
             o, conv, state = FG.qwen4_fused_gdn_decode(
                 qkv[:, r : r + 1], z[:, r : r + 1], b[:, r : r + 1], a[:, r : r + 1],
-                conv, conv_weight, A_log, dt_bias, state, norm_weight, 1e-6, threadgroup_y=ty)
+                conv, conv_weight, A_log, dt_bias, state, norm_weight, 1e-6, threadgroup_y=ty, contract=QWEN4_GDN_CONTRACT)
             mx.eval(o, conv, state)
             outs.append(o)
             states.append(state)
             convs.append(conv)
         serial_out = mx.concatenate(outs, axis=1)
         entry = {"rows": rows}
-        vty = FV.probe_qwen4_fused_gdn_verify(mx.bfloat16, rows)
+        vty = FV.probe_qwen4_fused_gdn_verify(mx.bfloat16, rows, contract=QWEN4_GDN_CONTRACT)
         if vty is not None:
             vo, vconv, vstate, snaps, csnaps = FV.qwen4_fused_gdn_verify(
                 qkv, z, b, a, conv0, conv_weight, A_log, dt_bias, state0, norm_weight,
-                1e-6, threadgroup_y=vty)
+                1e-6, threadgroup_y=vty, contract=QWEN4_GDN_CONTRACT)
             mx.eval(vo, vconv, vstate, snaps, csnaps)
             entry["verify_out_equal"] = bits_equal(vo, serial_out)[0]
             entry["verify_final_state_equal"] = bits_equal(vstate, states[-1])[0]

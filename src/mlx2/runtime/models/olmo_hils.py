@@ -44,6 +44,7 @@ from typing import Optional
 import mlx.core as mx
 import mlx.nn as nn
 
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 from .base import BaseModelArgs
 from .cache import _BaseCache
 from .olmo3 import Olmo3MLP
@@ -785,7 +786,7 @@ class Model(nn.Module):
                 "olmo_hils does not support input_embeddings: landmark "
                 "insertion requires token ids"
             )
-        out = self.model(inputs, cache)
+        out = select_checkpoint_rows(self.model(inputs, cache))
         # mlx 0.31.x quantized_matmul is wrong for unaligned N (the vocab,
         # 100278, is not a multiple of 32) when 10 <= rows and rows % 32
         # != 0 (fixed in mlx 0.32). Pad the row count to a multiple of 32

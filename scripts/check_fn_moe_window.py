@@ -80,6 +80,7 @@ def main():
     from mlx2.runtime.models import qwen3_next as QN
     from mlx2.runtime.models import qwen4_moe_window as W
     from mlx2.runtime.models import qwen4_routed_decode as RD
+    from mlx2.runtime.models.qwen_moe_contracts import QWEN4_E512_K10_ROUTING
 
     index = json.load(open(base.MODEL / "model.safetensors.index.json"))["weight_map"]
     cache = {}
@@ -166,7 +167,7 @@ def main():
                 rows_i, rows_s = zip(*[stock_routing(block, gates[r:r + 1]) for r in range(R)])
                 tally(f"routing/R{R}/stock_rows==stock_one_row",
                       same(bi, mx.concatenate(rows_i)) and same(bs, mx.concatenate(rows_s)))
-                li, ls = W.router_topk(gates)
+                li, ls = W.router_topk(gates, contract=QWEN4_E512_K10_ROUTING)
                 tally(f"routing/R{R}/launch==stock", same(li, bi) and same(ls, bs))
                 _, fi, fs = W.routed_rows(x, None, None, sw.gate_proj, sw.up_proj, sw.down_proj, logits=gates)
                 tally(f"routing/R{R}/fold_stored==stock", same(fi, bi) and same(fs, bs))
@@ -235,7 +236,7 @@ def main():
             si, ss = si.reshape(n, TOPK), ss.reshape(n, TOPK)
             for start in range(0, n, 17):
                 chunk = logits[start:start + 17]
-                li, ls = W.router_topk(chunk)
+                li, ls = W.router_topk(chunk, contract=QWEN4_E512_K10_ROUTING)
                 tally(f"routing_synth/{name}/launch==stock", same(li, si[start:start + 17]) and same(ls, ss[start:start + 17]))
             for start in range(0, min(n, 17 * 24), 17):
                 chunk = logits[start:start + 17]

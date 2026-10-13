@@ -73,6 +73,7 @@ def main():
         probe_qwen4_fused_gdn_decode,
         qwen4_fused_gdn_decode,
     )
+    from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
     from mlx2.runtime.segmented_batch_cache import SegmentedBatchArraysCache
 
     mx.set_cache_limit(4 << 30)
@@ -158,7 +159,7 @@ def main():
             mx.bfloat16, steps, compact=False, **({"state_dtype": mx.float16} if st16 else {}))
         assert tg_compact is not None and tg_snap is not None, "batched verify probe declined"
         tg_dec = probe_qwen4_fused_gdn_decode(
-            mx.bfloat16, **({"state_dtype": mx.float16} if st16 else {}))
+            mx.bfloat16, **({"state_dtype": mx.float16} if st16 else {}), contract=QWEN4_GDN_CONTRACT)
         spans = spans_for(rows, steps, pattern)
         conv = mx.concatenate([lanes[r][0] for r in range(rows)])
         state = mx.concatenate([lanes[r][1] for r in range(rows)])
@@ -168,7 +169,7 @@ def main():
         common = (layer.conv1d.weight, layer.A_log, layer.dt_bias)
         snap = V.qwen4_fused_gdn_batch_verify(
             qkv, z, b, a, conv, *common, state, layer.norm.weight, layer.norm.eps,
-            spans, threadgroup_y=tg_snap)
+            spans, threadgroup_y=tg_snap, contract=QWEN4_GDN_CONTRACT)
         tape = V.qwen4_fused_gdn_batch_replay_verify(
             qkv, z, b, a, conv, *common, state, layer.norm.weight, layer.norm.eps,
             spans, threadgroup_y=tg_compact)
@@ -181,7 +182,7 @@ def main():
             if span == 1:
                 one = qwen4_fused_gdn_decode(
                     qkv[sl], z[sl], b[sl], a[sl], conv[r:r + 1], *common, state[r:r + 1],
-                    layer.norm.weight, layer.norm.eps, threadgroup_y=tg_dec)
+                    layer.norm.weight, layer.norm.eps, threadgroup_y=tg_dec, contract=QWEN4_GDN_CONTRACT)
                 mx.eval(*one)
                 for name, batched in (("snapshot", snap), ("compact", tape)):
                     lane[f"{name}_vs_decode_kernel"] = all(
@@ -191,7 +192,7 @@ def main():
             else:
                 ref = V.qwen4_fused_gdn_verify(
                     qkv[sl], z[sl], b[sl], a[sl], conv[r:r + 1], *common, state[r:r + 1],
-                    layer.norm.weight, layer.norm.eps, threadgroup_y=tg_snap)
+                    layer.norm.weight, layer.norm.eps, threadgroup_y=tg_snap, contract=QWEN4_GDN_CONTRACT)
                 ref_tape = V.qwen4_fused_gdn_replay_verify(
                     qkv[sl], z[sl], b[sl], a[sl], conv[r:r + 1], *common, state[r:r + 1],
                     layer.norm.weight, layer.norm.eps, threadgroup_y=tg_compact)
@@ -231,7 +232,7 @@ def main():
         nudged = mx.concatenate([(state[:1] * (1 + eps)).astype(state.dtype), state[1:]])
         probe = V.qwen4_fused_gdn_batch_verify(
             qkv, z, b, a, conv, *common, nudged, layer.norm.weight, layer.norm.eps,
-            spans, threadgroup_y=tg_snap)
+            spans, threadgroup_y=tg_snap, contract=QWEN4_GDN_CONTRACT)
         mx.eval(*probe)
         result["falsifier_nudged_state_detected"] = not same(probe[2][:1], snap[2][:1])
         result["falsifier_other_lanes_unchanged"] = all(
@@ -272,7 +273,7 @@ def main():
                 sl = (slice(r, r + 1), slice(t, t + 1))
                 o, c, s = qwen4_fused_gdn_decode(
                     qkv[sl], z[sl], b[sl], a[sl], c, *common, s,
-                    layer.norm.weight, layer.norm.eps, threadgroup_y=tg_dec)
+                    layer.norm.weight, layer.norm.eps, threadgroup_y=tg_dec, contract=QWEN4_GDN_CONTRACT)
                 mx.eval(o, c, s)
                 ok &= same(o, snap[0][sl])
                 if t < span - 1:

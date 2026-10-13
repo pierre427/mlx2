@@ -59,6 +59,7 @@ def main():
         qwen4_fused_gdn_batch_decode,
         qwen4_fused_gdn_decode,
     )
+    from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 
     mx.set_cache_limit(4 << 30)
     model_path = Path(args.model).expanduser()
@@ -68,7 +69,7 @@ def main():
         "weight_map"
     ]
     hidden = int(config["text_config"]["hidden_size"])
-    tg_y = probe_qwen4_fused_gdn_decode(mx.bfloat16)
+    tg_y = probe_qwen4_fused_gdn_decode(mx.bfloat16, contract=QWEN4_GDN_CONTRACT)
     assert tg_y is not None, "B=1 fused GDN probe declined on this device"
 
     def load_layer(index):
@@ -130,7 +131,7 @@ def main():
             qkv, z, b, a = layer._input_projections(xs[0])
             batch_out = qwen4_fused_gdn_batch_decode(
                 qkv, z, b, a, conv, layer.conv1d.weight, layer.A_log, layer.dt_bias,
-                state, layer.norm.weight, layer.norm.eps, threadgroup_y=tg_y)
+                state, layer.norm.weight, layer.norm.eps, threadgroup_y=tg_y, contract=QWEN4_GDN_CONTRACT)
             mx.eval(*batch_out)
             kernel_equal = True
             projections_equal = True
@@ -138,7 +139,7 @@ def main():
                 one = qwen4_fused_gdn_decode(
                     qkv[r:r + 1], z[r:r + 1], b[r:r + 1], a[r:r + 1], conv[r:r + 1],
                     layer.conv1d.weight, layer.A_log, layer.dt_bias, state[r:r + 1],
-                    layer.norm.weight, layer.norm.eps, threadgroup_y=tg_y)
+                    layer.norm.weight, layer.norm.eps, threadgroup_y=tg_y, contract=QWEN4_GDN_CONTRACT)
                 mx.eval(*one)
                 kernel_equal &= all(same(x[r:r + 1], y) for x, y in zip(batch_out, one))
                 solo = layer._input_projections(xs[0][r:r + 1])

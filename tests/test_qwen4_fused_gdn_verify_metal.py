@@ -24,6 +24,7 @@ from mlx import nn
 from mlx2.runtime.models import qwen4_fused_gdn as fused_gdn
 from mlx2.runtime.models import qwen4_fused_gdn_verify as fused_verify
 from mlx2.runtime.models.gated_delta import gated_delta_update
+from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("MLX2_RUN_METAL_TESTS") != "1" or not mx.metal.is_available(),
@@ -202,7 +203,7 @@ def test_short_verify_after_wide_uses_only_its_own_replay_tape(gpu):
 
 @pytest.mark.parametrize("steps", WIDTHS)
 def test_snapshot_verify_matches_stock(gpu, steps):
-    ty = fused_verify.probe_qwen4_fused_gdn_verify(mx.bfloat16, steps)
+    ty = fused_verify.probe_qwen4_fused_gdn_verify(mx.bfloat16, steps, contract=QWEN4_GDN_CONTRACT)
     assert ty is not None
     w = _weights()
     (sc, ss), (fc, fs) = _zeros(), _zeros()
@@ -210,7 +211,7 @@ def test_snapshot_verify_matches_stock(gpu, steps):
         qkv, z, b, a = _inputs(steps, block, 2)
         stock = _stock_block(qkv, z, b, a, sc, w[0], w[1], w[2], w[3], ss)
         out = fused_verify.qwen4_fused_gdn_verify(
-            qkv, z, b, a, fc, w[0], w[1], w[2], fs, w[3], 1.0e-6, threadgroup_y=ty)
+            qkv, z, b, a, fc, w[0], w[1], w[2], fs, w[3], 1.0e-6, threadgroup_y=ty, contract=QWEN4_GDN_CONTRACT)
         mx.eval(*stock[:3], *stock[3], *stock[4], *out)
         for i, name in enumerate(("output", "conv", "state")):
             assert _eq(stock[i], out[i]), (name, steps, block)
@@ -227,7 +228,7 @@ def test_snapshot_verify_matches_stock(gpu, steps):
 
 @pytest.mark.parametrize("steps", WIDTHS)
 def test_catchup_matches_stock(gpu, steps):
-    ty = fused_verify.probe_qwen4_fused_gdn_catchup(mx.bfloat16, steps)
+    ty = fused_verify.probe_qwen4_fused_gdn_catchup(mx.bfloat16, steps, contract=QWEN4_GDN_CONTRACT)
     assert ty is not None
     w = _weights()
     (sc, ss), (fc, fs) = _zeros(), _zeros()
@@ -235,7 +236,7 @@ def test_catchup_matches_stock(gpu, steps):
         qkv, z, b, a = _inputs(steps, block, 3)
         stock = _stock_block(qkv, z, b, a, sc, w[0], w[1], w[2], w[3], ss)
         out = fused_verify.qwen4_fused_gdn_catchup(
-            qkv, z, b, a, fc, w[0], w[1], w[2], fs, w[3], 1.0e-6, threadgroup_y=ty)
+            qkv, z, b, a, fc, w[0], w[1], w[2], fs, w[3], 1.0e-6, threadgroup_y=ty, contract=QWEN4_GDN_CONTRACT)
         mx.eval(*stock[:3], *out)
         for i, name in enumerate(("output", "conv", "state")):
             assert _eq(stock[i], out[i]), (name, steps, block)

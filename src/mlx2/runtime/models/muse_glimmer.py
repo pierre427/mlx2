@@ -6,6 +6,7 @@ import mlx.core as mx
 from mlx import nn
 
 from ...adapters.muse_glimmer_config import ModelArgs
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 from .base import create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache, RotatingKVCache
 
@@ -348,7 +349,7 @@ class Model(nn.Module):
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
     def __call__(self, inputs: mx.array, cache=None):
-        out = self.model(inputs, cache=cache)
+        out = select_checkpoint_rows(self.model(inputs, cache=cache))
         if self.tie_word_embeddings:
             out = self.model.embed_tokens.as_linear(out)
         else:

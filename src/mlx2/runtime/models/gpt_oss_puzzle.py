@@ -19,6 +19,7 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 from .base import BaseModelArgs, create_attention_mask
 from .cache import KVCache, RotatingKVCache
 from .gpt_oss import Model as GptOssModel
@@ -123,7 +124,9 @@ class Model(nn.Module):
         input_embeddings: Optional[mx.array] = None,
     ):
         return self.lm_head(
-            self.model(inputs, cache, input_embeddings=input_embeddings)
+            select_checkpoint_rows(
+                self.model(inputs, cache, input_embeddings=input_embeddings)
+            )
         )
 
     def sanitize(self, weights):

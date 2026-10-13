@@ -13,6 +13,7 @@ from typing import Any
 import mlx.core as mx
 from mlx import nn
 
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache, RotatingKVCache
@@ -393,7 +394,7 @@ class Model(nn.Module):
                 else "laguna-xs21-layer-segments-v1")
 
     def __call__(self, inputs, cache=None, input_embeddings=None):
-        hidden = self.model(inputs, cache, input_embeddings)
+        hidden = select_checkpoint_rows(self.model(inputs, cache, input_embeddings))
         return self.model.embed_tokens.as_linear(hidden) if self.args.tie_word_embeddings else self.lm_head(hidden)
 
     def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):

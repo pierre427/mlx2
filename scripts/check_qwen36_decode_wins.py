@@ -43,6 +43,7 @@ def main():
     from mlx2.runtime.models import qwen36_moe_decode as M
     from mlx2.runtime.models.cache import ArraysCache
     from mlx2.runtime.models.precise_ops import gate_sigmoid
+    from mlx2.runtime.models.qwen_moe_contracts import QWEN36_E256_K8_ROUTING
 
     mx.set_default_device(mx.gpu)
     record = {
@@ -111,7 +112,7 @@ def main():
                         [block.gate(x[r : r + 1]).reshape(1, -1) for r in range(rows)]
                     )
                     inds, scores = N._stock_routing(block, logits)
-                    launch = W.router_topk(logits, top_k=8)
+                    launch = W.router_topk(logits, top_k=8, contract=QWEN36_E256_K8_ROUTING)
                     equal(
                         f"router/{li}/{rows}/{seed}/indices",
                         inds.astype(mx.uint32),
@@ -127,7 +128,7 @@ def main():
                         (rows, 256),
                     )
                     skew_ref = N._stock_routing(block, skew_logits)
-                    skew_launch = W.router_topk(skew_logits, top_k=8)
+                    skew_launch = W.router_topk(skew_logits, top_k=8, contract=QWEN36_E256_K8_ROUTING)
                     equal(
                         f"router-skew/{li}/{rows}/{seed}/indices",
                         skew_ref[0].astype(mx.uint32),

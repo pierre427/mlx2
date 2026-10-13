@@ -1622,6 +1622,34 @@ def _prefill_bf16_projection(module, x):
     )
 
 
+def prefill_bf16_projection_refusal(module):
+    """Why ``_prefill_bf16_projection`` would refuse ``module``, or None.
+
+    For mode selection: a BF16 materialized-MLP experiment is refused when it
+    is selected rather than mid-prefill.  Admits exactly what the projection
+    admits (an ordinary ``nn.QuantizedLinear`` in affine q4/g64 storage);
+    nothing is evaluated.
+    """
+    from ..quantized_dense_execution import QuantizedDenseExecutionRefusal, geometry
+
+    if type(module) is not nn.QuantizedLinear:
+        # geometry() refuses the same way; checked first because a swapped
+        # class may not carry the storage attributes the probe below reads.
+        return "dense execution requires an ordinary nn.QuantizedLinear"
+    bits = getattr(module, "bits", None)
+    if type(bits) is not int or bits <= 0:
+        return "dense execution requires declared affine or MXFP4 storage geometry"
+    input_dims = int(module.weight.shape[-1]) * 32 // bits
+    try:
+        receipt = geometry(module, mx.zeros((1, input_dims), dtype=mx.bfloat16))
+    except QuantizedDenseExecutionRefusal as exc:
+        return str(exc)
+    signature = (receipt["mode"], receipt["bits"], receipt["group_size"])
+    if signature != ("affine", 4, 64):
+        return f"quantized storage format {signature!r} was not admitted"
+    return None
+
+
 
 class Qwen3NextSparseMoeBlock(nn.Module):
     def __init__(self, args: ModelArgs):

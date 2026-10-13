@@ -35,6 +35,7 @@ from mlx2.runtime.models.qwen4_fused_gdn_verify import (  # noqa: E402
     qwen4_fused_gdn_replay_verify,
     qwen4_fused_gdn_verify,
 )
+from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 
 
 def _require_lock() -> list[dict]:
@@ -146,7 +147,7 @@ def _peak_delta(function) -> int:
 
 def _case(width: int, seed: int, warmups: int, rounds: int) -> dict:
     values = _random_inputs(width, seed)
-    snapshot_ty = probe_qwen4_fused_gdn_verify(mx.bfloat16, width)
+    snapshot_ty = probe_qwen4_fused_gdn_verify(mx.bfloat16, width, contract=QWEN4_GDN_CONTRACT)
     replay_ty = probe_qwen4_fused_gdn_replay_verify(mx.bfloat16, width)
     if snapshot_ty is None or replay_ty is None:
         raise RuntimeError(

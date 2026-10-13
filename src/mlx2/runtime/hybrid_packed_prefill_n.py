@@ -27,6 +27,20 @@ def mlp_selection(value):
     return value
 
 
+def require_bf16_projection_owners(candidate):
+    """Refuse a BF16 materialized-MLP mode at selection, not mid-prefill.
+
+    The BF16 projection admits only ordinary affine q4/g64 QuantizedLinear
+    storage; lane matmul and row-exact installs class-swap projections.
+    """
+    from .models.qwen3_next import prefill_bf16_projection_refusal
+    for index,layer in enumerate(candidate.trunk.layers):
+        for name in ('gate_proj','up_proj','down_proj'):
+            refusal=prefill_bf16_projection_refusal(getattr(layer.mlp,name,None))
+            if refusal is not None:
+                raise ValueError(f'BF16 MLP experiment refused at selection: layer {index} {name}: {refusal}')
+
+
 def environment(gdn_eval_wave_max_segments=1):
     from .hybrid_packed_prefill_long import long_environment
     wave=wave_selection(gdn_eval_wave_max_segments)
@@ -163,6 +177,8 @@ def model_memory_bound(candidate,counts,caps,profile,mx):
     candidate._prefill_gdn_eval_wave_max_segments=wave_selection(profile.get('gdn_eval_wave_max_segments',1))
     candidate._prefill_gdn_eval_wave_expanded_charge=profile.get('gdn_eval_wave_expanded_charge',False)
     candidate._prefill_mlp_materialization_mode=mlp_selection(profile.get('mlp_materialization_mode','staged_qmm'))
+    if candidate._prefill_mlp_materialization_mode.endswith('_bf16'):
+        require_bf16_projection_owners(candidate)
     if candidate._prefill_mlp_materialization_mode in ('tiled_q4_swiglu','packed_gate_up_qmm'):
         from .dense_mlp_geometry import infer_uniform_dense_glu_geometry
         candidate._prefill_mlp_geometry=infer_uniform_dense_glu_geometry(

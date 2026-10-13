@@ -9,6 +9,7 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache, RotatingKVCache
@@ -198,7 +199,7 @@ class Model(nn.Module):
         self.logits_scaling = args.logits_scaling
 
     def __call__(self, inputs: mx.array, cache=None) -> mx.array:
-        out = self.model(inputs, cache)
+        out = select_checkpoint_rows(self.model(inputs, cache))
         if self.args.tie_word_embeddings:
             out = self.model.embed_tokens.as_linear(out)
         else:

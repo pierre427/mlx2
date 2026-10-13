@@ -8,6 +8,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.nn.layers.distributed import shard_inplace, shard_linear, sum_gradients
 
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache
@@ -287,7 +288,7 @@ class Model(nn.Module):
         inputs: mx.array,
         cache: Optional[Any] = None,
     ):
-        return self.logits(self.model(inputs, cache))
+        return self.logits(select_checkpoint_rows(self.model(inputs, cache)))
 
     def make_cache(self):
         return [KVCache() for _ in self.layers]

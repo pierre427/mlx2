@@ -36,6 +36,7 @@ from .mixed_step import (
     model_supports_mixed_forward,
 )
 from .multi_lora import bind_lora_rows, clear_lora_rows
+from .prefill_checkpoint_rows import prefill_checkpoint_rows
 from .prefill_plan import (
     checkpoint_bounded_prefill_rows,
     depth_bounded_prefill_rows,
@@ -140,6 +141,23 @@ class PromptChunkCorruption(RuntimeError):
     def __init__(self, uids, reason):
         self.uids = tuple(int(uid) for uid in uids)
         super().__init__(str(reason))
+
+
+def _narrowed_checkpoint_output(output, request):
+    """Mark a forward whose head ran on the checkpoint rows only.
+
+    ``request`` is the ``prefill_checkpoint_rows`` request that scoped the
+    forward.  The output is last-row-only when the model narrowed exactly one
+    head input and returned a single sequence row; anything else keeps the
+    full-sequence validation.
+    """
+    if request.applied != 1:
+        return output
+    logits = output[0] if isinstance(output, (tuple, list)) and output else output
+    shape = getattr(logits, "shape", None)
+    if shape is None or len(shape) != 3 or int(shape[1]) != 1:
+        return output
+    return _PrefillCheckpointOutput(logits, last_row_only=True)
 
 
 def _validate_prefill_checkpoint_output(
@@ -975,7 +993,9 @@ class PromptProcessingBatch:
                         if callable(row_context)
                         else contextlib.nullcontext()
                     )
-                    with context:
+                    with context, prefill_checkpoint_rows(
+                        chunk_lengths, width=n_to_process
+                    ) as checkpoint_rows:
                         checkpoint_output = forward(
                             tokens[:, :n_to_process],
                             cache=self.prompt_cache,
@@ -983,6 +1003,9 @@ class PromptProcessingBatch:
                         )
                 finally:
                     clear_lora_rows(lora_rows)
+                checkpoint_output = _narrowed_checkpoint_output(
+                    checkpoint_output, checkpoint_rows
+                )
             if kwargs:
                 self.prefill_inputs[0] = None
             if prefill_prefetch is not None and tokens.shape[1] > n_to_process:

@@ -32,6 +32,7 @@ from mlx2.runtime.models import qwen4_fused_gdn as fused_gdn
 from mlx2.runtime.models import qwen4_fused_gdn_verify as fused_verify
 from mlx2.runtime.models.cache import ArraysCache
 from mlx2.runtime.models.gated_delta import gated_delta_update
+from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("MLX2_RUN_METAL_TESTS") != "1" or not mx.metal.is_available(),
@@ -193,7 +194,7 @@ def _probe_kw(state_dtype):
 
 @pytest.mark.parametrize("state_dtype", STATES)
 def test_fused_decode_and_batch_decode_match_stock(gpu, state_dtype):
-    ty = fused_gdn.probe_qwen4_fused_gdn_decode(mx.bfloat16, **_probe_kw(state_dtype))
+    ty = fused_gdn.probe_qwen4_fused_gdn_decode(mx.bfloat16, **_probe_kw(state_dtype), contract=QWEN4_GDN_CONTRACT)
     assert ty is not None
     w = _weights()
     (sc, ss), (fc, fs) = _start(state_dtype), _start(state_dtype)
@@ -201,7 +202,7 @@ def test_fused_decode_and_batch_decode_match_stock(gpu, state_dtype):
         qkv, z, b, a = _inputs(1, step, 5)
         stock = _stock_block(qkv, z, b, a, sc, w[0], w[1], w[2], w[3], ss)
         out = fused_gdn.qwen4_fused_gdn_decode(
-            qkv, z, b, a, fc, w[0], w[1], w[2], fs, w[3], 1.0e-6, threadgroup_y=ty)
+            qkv, z, b, a, fc, w[0], w[1], w[2], fs, w[3], 1.0e-6, threadgroup_y=ty, contract=QWEN4_GDN_CONTRACT)
         mx.eval(*stock[:3], *out)
         assert out[2].dtype == state_dtype
         for i, name in enumerate(("output", "conv", "state")):
@@ -213,7 +214,7 @@ def test_fused_decode_and_batch_decode_match_stock(gpu, state_dtype):
         qkv, z, b, a = _inputs(1, step, 6, rows=rows)
         stock = _stock_block(qkv, z, b, a, sc, w[0], w[1], w[2], w[3], ss)
         out = fused_gdn.qwen4_fused_gdn_batch_decode(
-            qkv, z, b, a, fc, w[0], w[1], w[2], fs, w[3], 1.0e-6, threadgroup_y=ty)
+            qkv, z, b, a, fc, w[0], w[1], w[2], fs, w[3], 1.0e-6, threadgroup_y=ty, contract=QWEN4_GDN_CONTRACT)
         mx.eval(*stock[:3], *out)
         for i, name in enumerate(("output", "conv", "state")):
             assert _eq(stock[i], out[i]), ("batch", name, step)
@@ -265,8 +266,8 @@ def test_compact_replay_verify_and_every_rollback_match_stock(gpu, steps, state_
 @pytest.mark.parametrize("steps", WIDTHS)
 def test_snapshot_verify_and_catchup_match_stock(gpu, steps, state_dtype):
     kw = _probe_kw(state_dtype)
-    ty = fused_verify.probe_qwen4_fused_gdn_verify(mx.bfloat16, steps, **kw)
-    cty = fused_verify.probe_qwen4_fused_gdn_catchup(mx.bfloat16, steps, **kw)
+    ty = fused_verify.probe_qwen4_fused_gdn_verify(mx.bfloat16, steps, **kw, contract=QWEN4_GDN_CONTRACT)
+    cty = fused_verify.probe_qwen4_fused_gdn_catchup(mx.bfloat16, steps, **kw, contract=QWEN4_GDN_CONTRACT)
     assert ty is not None and cty is not None
     w = _weights()
     (sc, ss), (fc, fs) = _start(state_dtype), _start(state_dtype)
@@ -274,9 +275,9 @@ def test_snapshot_verify_and_catchup_match_stock(gpu, steps, state_dtype):
         qkv, z, b, a = _inputs(steps, block, 2)
         stock = _stock_block(qkv, z, b, a, sc, w[0], w[1], w[2], w[3], ss)
         out = fused_verify.qwen4_fused_gdn_verify(
-            qkv, z, b, a, fc, w[0], w[1], w[2], fs, w[3], 1.0e-6, threadgroup_y=ty)
+            qkv, z, b, a, fc, w[0], w[1], w[2], fs, w[3], 1.0e-6, threadgroup_y=ty, contract=QWEN4_GDN_CONTRACT)
         catch = fused_verify.qwen4_fused_gdn_catchup(
-            qkv, z, b, a, fc, w[0], w[1], w[2], fs, w[3], 1.0e-6, threadgroup_y=cty)
+            qkv, z, b, a, fc, w[0], w[1], w[2], fs, w[3], 1.0e-6, threadgroup_y=cty, contract=QWEN4_GDN_CONTRACT)
         mx.eval(*stock[:3], *stock[3], *stock[4], *out, *catch)
         assert out[3].dtype == state_dtype  # rollback snapshots in the state's class
         for i, name in enumerate(("output", "conv", "state")):

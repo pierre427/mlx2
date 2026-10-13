@@ -216,6 +216,7 @@ def main():
     import mlx.core as mx
     from mlx2.runtime.models import qwen4_fused_gdn as decode
     from mlx2.runtime.models import qwen4_fused_gdn_verify as verify
+    from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT
 
     result = {
         "experiment": "actual_fused_gdn_rsqrt_only",
@@ -247,7 +248,7 @@ def main():
         result["variants"][route] = sources
         configurations = [(1, "qwen4"), (1, "agnes")] if route == "decode" else [(s, "qwen4") for s in (2, 4, 8)]
         for steps, architecture in configurations:
-            probe = decode.probe_qwen4_fused_gdn_decode(mx.bfloat16) if route == "decode" else verify.probe_qwen4_fused_gdn_verify(mx.bfloat16, steps)
+            probe = decode.probe_qwen4_fused_gdn_decode(mx.bfloat16, contract=QWEN4_GDN_CONTRACT) if route == "decode" else verify.probe_qwen4_fused_gdn_verify(mx.bfloat16, steps, contract=QWEN4_GDN_CONTRACT)
             if probe is None:
                 raise RuntimeError(f"Original {route} width {steps} is unavailable")
             kwargs = {"threadgroup_y": probe}

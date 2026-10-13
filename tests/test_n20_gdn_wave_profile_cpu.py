@@ -1,5 +1,5 @@
 """Source-bound grouped-GDN policy reaches allocation and actual receipt gates."""
-import runpy,sys,unittest,copy
+import runpy,sys,unittest
 from pathlib import Path
 from types import SimpleNamespace as NS,ModuleType
 from unittest.mock import patch
@@ -78,8 +78,18 @@ class WaveProfileTests(unittest.TestCase):
    with self.assertRaises(ValueError):N.make_profile(A['identity'](),inputs,mlp_materialization_mode=bad)
   c=self.measured_candidate();module=ModuleType('mlx.utils');module.tree_flatten=lambda values:list(enumerate(values))
   p={**A['profile'](),'mlp_materialization_mode':'single_eval_bf16'}
-  with patch.dict(sys.modules,{'mlx.utils':module}):
+  # This host-only planner suite deliberately forbids MLX imports. Keep
+  # projection admission as an explicit seam; its real affine/class law is
+  # covered by test_prefill_bf16_projection_selection_cpu.py.
+  owners=ModuleType('mlx2.runtime.models.qwen3_next');checked=[]
+  def admit(projection):checked.append(projection);return None
+  owners.prefill_bf16_projection_refusal=admit
+  with patch.dict(sys.modules,{'mlx.utils':module,'mlx2.runtime.models.qwen3_next':owners}):
    components,_,_,_=N.model_memory_bound(c,(7000,)*3,(4,)*3,p,NS(device_info=lambda:{'memory_size':64<<30}))
+  self.assertEqual(len(checked),3*len(c.trunk.layers))
+  owners.prefill_bf16_projection_refusal=lambda projection:'class-swapped projection'
+  with patch.dict(sys.modules,{'mlx.utils':module,'mlx2.runtime.models.qwen3_next':owners}),self.assertRaisesRegex(ValueError,'refused at selection'):
+   N.model_memory_bound(self.measured_candidate(),(7000,)*3,(4,)*3,p,NS(device_info=lambda:{'memory_size':64<<30}))
   self.assertEqual(c._prefill_mlp_materialization_mode,'single_eval_bf16')
   self.assertTrue(all(layer.mlp._prefill_materialization_mode=='single_eval_bf16' for layer in c.trunk.layers))
   self.assertIn('mlp_dequantized_projection_bytes',components)

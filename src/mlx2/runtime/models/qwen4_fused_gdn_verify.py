@@ -1715,22 +1715,36 @@ _PROBED_BATCH: dict = {}
 
 
 def probe_qwen4_fused_gdn_batch_verify(
-    dtype, steps: int, *, compact: bool, state_dtype=None
+    dtype,
+    steps: int,
+    *,
+    compact: bool,
+    state_dtype=None,
+    contract: Optional[FusedGdnContract] = None,
 ) -> Optional[int]:
     """The B=1 verify probe's ``threadgroup_y`` once the batched kernel at
     that geometry compiled and ran (with the dynamic reconstruct for the
-    compact tape), else ``None``.  Cached per (width, form, state class)."""
+    compact tape), else ``None``.  Cached per (width, form, state class).
+
+    The batched kernels have the Qwen4 geometry; ``contract`` defaults to
+    the Qwen4 contract, like the compact (replay) probe, and is threaded to
+    the snapshot form's B=1 probe and batch build, which refuse without one.
+    """
+    if contract is None:
+        contract = QWEN4_GDN_CONTRACT
     steps = int(steps)
-    key = (_probe_key(steps, state_dtype), bool(compact))
+    key = (_probe_key(steps, state_dtype), bool(compact), contract.identity)
     if key in _PROBED_BATCH:
         return _PROBED_BATCH[key]
     state_kw = {} if state_dtype is None else {"state_dtype": state_dtype}
     if compact:
         threadgroup_y = probe_qwen4_fused_gdn_replay_verify(
-            dtype, steps, dynamic_accept=True, **state_kw
+            dtype, steps, dynamic_accept=True, contract=contract, **state_kw
         )
     else:
-        threadgroup_y = probe_qwen4_fused_gdn_verify(dtype, steps, **state_kw)
+        threadgroup_y = probe_qwen4_fused_gdn_verify(
+            dtype, steps, contract=contract, **state_kw
+        )
     with _PROBE_LOCK:
         if key in _PROBED_BATCH:
             return _PROBED_BATCH[key]
@@ -1754,11 +1768,12 @@ def probe_qwen4_fused_gdn_batch_verify(
                 if compact
                 else qwen4_fused_gdn_batch_verify
             )
+            build_kw = {} if compact else {"contract": contract}
             try:
                 outputs = build(
                     qkv, z, gates, gates, conv_state, conv_weight, A_log, vector,
                     recurrent_state, norm_weight, 1e-06, (steps, 1),
-                    threadgroup_y=threadgroup_y,
+                    threadgroup_y=threadgroup_y, **build_kw,
                 )
                 extra = []
                 if compact:

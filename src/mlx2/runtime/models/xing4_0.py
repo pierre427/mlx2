@@ -47,6 +47,7 @@ from .base import BaseModelArgs, create_attention_mask
 from .cache import KVCache
 from .rope_utils import initialize_rope
 from .switch_layers import SwitchGLU
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 
 
 # --------------------------------------------------------------------------
@@ -936,7 +937,11 @@ class Model(nn.Module):
         self.mtp = MTPModule(args) if args.num_nextn_predict_layers > 0 else None
 
     def __call__(self, inputs: mx.array, cache=None, input_embeddings: Optional[mx.array] = None):
-        return self.lm_head(self.model(inputs, cache, input_embeddings=input_embeddings))
+        return self.lm_head(
+            select_checkpoint_rows(
+                self.model(inputs, cache, input_embeddings=input_embeddings)
+            )
+        )
 
     @property
     def layers(self):

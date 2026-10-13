@@ -13,6 +13,7 @@ from .qwen3_5 import GatedDeltaNet
 from .qwen3_next import Qwen3NextMLP
 from .precise_ops import gate_sigmoid
 from .rope_utils import initialize_rope
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 
 LAYER_GLOBAL = "agnes_global_attention"
 LAYER_DELTA = "agnes_delta_attention"
@@ -335,6 +336,7 @@ class TextModel(nn.Module):
         input_embeddings: Optional[mx.array] = None,
     ) -> mx.array:
         hidden = self.model(inputs, cache=cache, input_embeddings=input_embeddings)
+        hidden = select_checkpoint_rows(hidden)
         if self.args.tie_word_embeddings:
             return self.model.embed_tokens.as_linear(hidden)
         return self.lm_head(hidden)

@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 import mlx.core as mx
 from mlx import nn
 
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 from .activations import swiglu
 from .base import (
     BaseModelArgs,
@@ -701,7 +702,7 @@ class Model(nn.Module):
         cache: Any | None = None,
     ):
         out = self.backbone(inputs, cache=cache)
-        return self.lm_head(out)
+        return self.lm_head(select_checkpoint_rows(out))
 
     @property
     def embed_tokens(self):

@@ -148,6 +148,7 @@ from .qwen3_next import (
 from .rope_utils import Llama3RoPE, YarnRoPE, initialize_rope
 from ..verify_sync import record_verify_sync
 from ..row_exact_verify import active as _row_exact_window_active
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 
 _QSA_SEGMENT_CAPTURE_LOCK = threading.Lock()
 _QSA_SEGMENT_CAPTURE_COUNT = 0
@@ -1596,7 +1597,11 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         compact = self.fused_gdn_replay_rollback_mode == "compact"
         try:
             threadgroup_y = probe_qwen4_fused_gdn_batch_verify(
-                qkv.dtype, steps, compact=compact, **_state_probe(cache[1])
+                qkv.dtype,
+                steps,
+                compact=compact,
+                contract=QWEN4_GDN_CONTRACT,
+                **_state_probe(cache[1]),
             )
             if threadgroup_y is None:
                 return fallback("Metal kernel probe declined")
@@ -7292,7 +7297,7 @@ class TextModel(nn.Module):
         return self.model.pipeline_layers
 
     def __call__(self, inputs, cache=None, input_embeddings=None):
-        hidden = self.model(inputs, cache, input_embeddings)
+        hidden = select_checkpoint_rows(self.model(inputs, cache, input_embeddings))
         return (
             self.model.embed_tokens.as_linear(hidden)
             if self.args.tie_word_embeddings
