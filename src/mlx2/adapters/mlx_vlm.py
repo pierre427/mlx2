@@ -586,9 +586,23 @@ GEMMA3N = ModelDescriptor(
             "multimodal_image",
             "multimodal_video",
             "multimodal_audio_input",
-            "multimodal_encoder_batching",
             "multimodal_continuous_batch",
             "multimodal_apcv2_reuse",
+        ),
+        # The default video policy keeps one video at the frame limit in one
+        # encoder batch (086421f7b); no single-video probe can split it, so
+        # encoder batching is required only for a policy that can split one.
+        "conditional_qualification_checks": (
+            {
+                "setting": ("adapter_policy", "video_frame_batch_splits"),
+                "equals": True,
+                "check": "multimodal_encoder_batching",
+            },
+            {
+                "setting": ("adapter_policy", "video_frame_batch_splits"),
+                "equals": False,
+                "check": "multimodal_encoder_unsplit",
+            },
         ),
     },
 )
@@ -628,6 +642,9 @@ class Gemma3nAdapter(_MLXVLMAdapter):
     def __init__(self, model_path, *, execution_policy=None):
         super().__init__(model_path, execution_policy=execution_policy)
         self.video_policy = Gemma3nVideoPolicy()
+        # serving.py records adapter.policy.as_dict() in route settings; the
+        # descriptor's conditional encoder check resolves against it.
+        self.policy = self.video_policy
         install_gemma3n_vision_batching(self.model, self.video_policy)
         install_media_feature_cache(
             self.model, self.media_feature_cache, family="gemma3n"

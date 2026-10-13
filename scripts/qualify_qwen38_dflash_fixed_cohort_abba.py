@@ -627,6 +627,21 @@ def wait_ready(base: str, process: subprocess.Popen, timeout: float) -> dict:
     raise TimeoutError(f"server did not become ready; last_error={last_error}")
 
 
+def tree_scheduler_counters(status: dict) -> dict:
+    """``status["scheduler"]`` with each target-tree counter also under its
+    historical ``external_tensorfold_*`` name.
+
+    e3c19168e renamed them ``external_target_tree_*`` in /v1/status.  The
+    runtime name wins; a historical receipt keeps the name it recorded.
+    """
+    scheduler = dict(status.get("scheduler") or {})
+    for key, value in list(scheduler.items()):
+        if key.startswith("external_target_tree_"):
+            suffix = key.removeprefix("external_target_tree_")
+            scheduler["external_tensorfold_" + suffix] = value
+    return scheduler
+
+
 def status_counts(status: dict) -> dict:
     return {key: int(value) for key, value in (status.get("counts") or {}).items()
             if isinstance(value, (int, float)) and not isinstance(value, bool)}
@@ -1119,10 +1134,11 @@ def run_arm(
             if failures:
                 raise RuntimeError(f"{arm}: cohort failure counters changed: {failures}")
             scheduler = after.get("scheduler") or {}
+            tree = tree_scheduler_counters(after)
             if args.qualification_kind == "varlen":
-                if int(scheduler.get("external_tensorfold_cohort_rounds", 0)) <= 0:
+                if int(tree.get("external_tensorfold_cohort_rounds", 0)) <= 0:
                     raise RuntimeError(f"{arm}: TensorFold cohort route did not engage")
-                if int(scheduler.get("external_tensorfold_cohort_max_width", 0)) != COHORT_SIZE:
+                if int(tree.get("external_tensorfold_cohort_max_width", 0)) != COHORT_SIZE:
                     raise RuntimeError(f"{arm}: TensorFold did not reach physical B4")
             else:
                 counts = status_counts(after)

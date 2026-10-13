@@ -41,6 +41,21 @@ def status(base: str) -> dict:
         return json.load(response)
 
 
+def tree_scheduler_counters(status: dict) -> dict:
+    """``status["scheduler"]`` with each target-tree counter also under its
+    historical ``external_tensorfold_*`` name.
+
+    e3c19168e renamed them ``external_target_tree_*`` in /v1/status.  The
+    runtime name wins; a historical receipt keeps the name it recorded.
+    """
+    scheduler = dict(status.get("scheduler") or {})
+    for key, value in list(scheduler.items()):
+        if key.startswith("external_target_tree_"):
+            suffix = key.removeprefix("external_target_tree_")
+            scheduler["external_tensorfold_" + suffix] = value
+    return scheduler
+
+
 def stop(process: subprocess.Popen | None) -> None:
     if process is not None and process.poll() is None:
         os.killpg(process.pid, signal.SIGTERM)
@@ -197,7 +212,7 @@ def main() -> int:
                     subprocess.run(arm["bench"], cwd=ROOT, env=environment, check=True,
                                    timeout=remaining, stdout=log, stderr=subprocess.STDOUT)
                     final = status(arm["bench"][arm["bench"].index("--base") + 1])
-                counters = final.get("scheduler") or {}
+                counters = tree_scheduler_counters(final)
                 width = int(counters.get("external_tensorfold_cohort_max_width", 0))
                 if (int(counters.get("external_tensorfold_cohort_limit", 0)) != cohort_limit
                         or int(counters.get("target_max_width", 0)) != args.concurrency

@@ -22,6 +22,7 @@ from urllib.request import Request, urlopen
 
 from probe_qwen38_tree15_live_transition import (
     BASE_POLICY, DRAFT, GATES, MODEL, PYTHON, ROOT, ROUTE, SOURCE, SOURCE_PIN, stop,
+    tree_scheduler_counters,
 )
 
 PROMPT = ("Write a detailed, numbered tutorial on implementing a Python HTTP "
@@ -54,7 +55,7 @@ def snapshot(base: str, deadline: float) -> dict:
 
 
 def counters(status: dict) -> dict:
-    scheduler = status.get("scheduler") or {}
+    scheduler = tree_scheduler_counters(status)
     return {key: int(scheduler.get(key, 0)) for key in COUNTER_KEYS}
 
 

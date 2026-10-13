@@ -30,7 +30,7 @@ HISTORY = {
         "segmented_transactions": 5, "segmented_rollbacks": 2,
         "external_pairwise_selection_groups": 3, "draft_fallbacks": 0,
         "fly_relaxed_accepts": 6, "external_tree_rounds": 7,
-        "external_tensorfold_target_rounds": 7,
+        "external_target_tree_target_rounds": 7,
         "external_batched_prefill_rounds": 2, "external_batched_prefill_lanes": 4,
     },
     "counts": {"ingress_cohort_target_reached": 2},

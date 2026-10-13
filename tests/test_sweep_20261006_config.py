@@ -394,7 +394,12 @@ def test_lane_auto_without_a_backend_does_not_inspect_the_model(monkeypatch):
 
 
 # CQ-11 ------------------------------------------------------------------
-def test_default_qwen38_tree_route_can_qualify_with_observed_tree_rounds():
+# /v1/status carries external_target_tree_* since e3c19168e; historical
+# receipts carry external_tensorfold_*.
+@pytest.mark.parametrize("target_rounds", (
+    "external_target_tree_target_rounds", "external_tensorfold_target_rounds",
+))
+def test_default_qwen38_tree_route_can_qualify_with_observed_tree_rounds(target_rounds):
     from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
     from mlx2.qualification import required_feature_checks, unqualifiable_candidate
 
@@ -407,9 +412,9 @@ def test_default_qwen38_tree_route_can_qualify_with_observed_tree_rounds():
     assert "feature_external_tree" in required_feature_checks(settings)
 
     observe = _load_qualifier().feature_observations
-    initial = {"scheduler": {"external_tree_rounds": 3, "external_tensorfold_target_rounds": 3}}
+    initial = {"scheduler": {"external_tree_rounds": 3, target_rounds: 3}}
     assert observe(initial, initial=initial)["external_tree"] == 0
-    final = {"scheduler": {"external_tree_rounds": 9, "external_tensorfold_target_rounds": 7}}
+    final = {"scheduler": {"external_tree_rounds": 9, target_rounds: 7}}
     assert observe(final, initial=initial)["external_tree"] == 4
     # A chain-only external route does not require it.
     chain = {**settings, "execution_policy": {"pairwise_selection": "host"}}

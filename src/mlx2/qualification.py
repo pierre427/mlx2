@@ -259,7 +259,21 @@ APPROVED_QUALIFICATION_HARNESS = {
     # ranking, and the complete trusted-PLD lifecycle.
     # Re-pinned 2026-10-12: PLE host-read dispatch evidence no longer
     # requires the mutually exclusive device-ID bypass counter.
-    "sha256": "d1b0ae501f8fc968106318cb2397ab792e4c2dd4bfc04cd68e1049c54e767a51",
+    # Re-pinned 2026-10-12 (sweep 10-12 L8-2/L5-02): feature_external_tree
+    # reads the runtime's external_target_tree_target_rounds (e3c19168e
+    # rename), falling back to external_tensorfold_target_rounds for
+    # historical receipts; d1b0ae50... never observed a tree round.
+    # Re-pinned 2026-10-12 (sweep 10-12 L1-F5): a selected per-lane
+    # cost-per-commit handoff requires run-local
+    # mtp_ordinary_handoff_cost_per_committed_token growth
+    # (feature_mtp_ordinary_handoff_cost_per_commit).  Receipts from
+    # 67604272... must be regenerated.
+    # Re-pinned 2026-10-12 (sweep 10-12 L6-2): feature_moe_rhs_pad counts
+    # only the pad law's own decisions (cost_* for adaptive, always_rhs for
+    # always); uncalibrated_* floor fallbacks are recorded as selected, not
+    # observed with the reason, and the required check fails closed.
+    # Receipts from 12047d25... must be regenerated.
+    "sha256": "17e5e86351c05ac968530696cb03eb8e82b864b0ef100af2c6403cffa235b24c",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -288,6 +302,11 @@ APPROVED_MEDIA_HARNESS = {
 # Re-pinned 2026-10-12 after review of Gemma3n shared-KV/lane projection
 # and video batch-default repairs. Old companion identities remain historical;
 # this enables validation only and does not qualify any model or media route.
+# Re-pinned 2026-10-12 (sweep 10-12 L6-1): Gemma3n's encoder check follows
+# its video policy (route settings adapter_policy.video_frame_batch_splits):
+# multimodal_encoder_batching when one default video can split, else the new
+# multimodal_encoder_unsplit. evaluator 498ddd0d... -> 0e9abb7a..., adapter_batching
+# 9d6c2346... -> 19e7822c..., Gemma3n/MiniCPM-o adapter_contract f8db4ba3... -> ba3ebfdb....
 APPROVED_MEDIA_PRODUCERS = {
     "smolvlm": (APPROVED_MEDIA_HARNESS, evaluate_smol_media_report, SMOL_MEDIA_CHECKS),
     "qwen2_5_vl": (
@@ -314,10 +333,10 @@ APPROVED_MEDIA_PRODUCERS = {
         {
             "name": "scripts/qualify_native_vlm_media.py",
             "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
-            "evaluator_sha256": "498ddd0dfbfeb9422f3e5b1b028857df66e7c813e8048b279a087be1ccc0fe7a",
+            "evaluator_sha256": "0e9abb7acb5464a91c0005de07c8466f0559e6026c77d69c242ba17e9d9ae974",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
-            "adapter_batching_sha256": "9d6c2346dbe9d8c21dd028f41df01e0e0047058448d822b98155d878e4315a1a",
-            "adapter_contract_sha256": "f8db4ba39c30105f8ecbdfcd0e1047b51768bfcd1a94acedf9e121fde626359f",
+            "adapter_batching_sha256": "19e7822ca5f4751e05b17d7ae9dbacc221fdb98234aef6243e306d38bb6cab04",
+            "adapter_contract_sha256": "ba3ebfdb13db6a2df8e7f12950f58c5c3cc830fc26f5220227a835b7c25ba180",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["gemma3n"],
@@ -327,10 +346,13 @@ APPROVED_MEDIA_PRODUCERS = {
         {
             "name": "scripts/qualify_native_vlm_media.py",
             "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
-            "evaluator_sha256": "498ddd0dfbfeb9422f3e5b1b028857df66e7c813e8048b279a087be1ccc0fe7a",
+            "evaluator_sha256": "0e9abb7acb5464a91c0005de07c8466f0559e6026c77d69c242ba17e9d9ae974",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
-            "adapter_batching_sha256": "9d6c2346dbe9d8c21dd028f41df01e0e0047058448d822b98155d878e4315a1a",
-            "adapter_contract_sha256": "5605b41a95a68adcb8f5632601a0b4dbd8d04a83a0871b6649afdc44ebe22df2",
+            "adapter_batching_sha256": "19e7822ca5f4751e05b17d7ae9dbacc221fdb98234aef6243e306d38bb6cab04",
+            # Re-pinned 2026-10-12 (sweep 10-12 L5-03): e3c19168e changed
+            # adapters/gemma4.py (descriptor execution-contract metadata and
+            # the media policy); 5605b41a... refused every new companion.
+            "adapter_contract_sha256": "f143292422b28f200dc39dbbaaffe3004cbda57f51356f18b2203f488b6277ac",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["gemma4"],
@@ -340,10 +362,10 @@ APPROVED_MEDIA_PRODUCERS = {
         {
             "name": "scripts/qualify_native_vlm_media.py",
             "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
-            "evaluator_sha256": "498ddd0dfbfeb9422f3e5b1b028857df66e7c813e8048b279a087be1ccc0fe7a",
+            "evaluator_sha256": "0e9abb7acb5464a91c0005de07c8466f0559e6026c77d69c242ba17e9d9ae974",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
-            "adapter_batching_sha256": "9d6c2346dbe9d8c21dd028f41df01e0e0047058448d822b98155d878e4315a1a",
-            "adapter_contract_sha256": "f8db4ba39c30105f8ecbdfcd0e1047b51768bfcd1a94acedf9e121fde626359f",
+            "adapter_batching_sha256": "19e7822ca5f4751e05b17d7ae9dbacc221fdb98234aef6243e306d38bb6cab04",
+            "adapter_contract_sha256": "ba3ebfdb13db6a2df8e7f12950f58c5c3cc830fc26f5220227a835b7c25ba180",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["minicpmo"],
@@ -785,6 +807,18 @@ def _qsa_indexer_probe(settings, env):
     }
 
 
+def _cost_per_commit_selected(handoff):
+    """Whether route settings select the per-lane cost-per-commit handoff.
+
+    Serving records ``cost_per_commit`` only when selected; this mirrors
+    ``CostPerCommitHandoffSettings.from_value`` for hand-written settings.
+    """
+    cost = (handoff or {}).get("cost_per_commit")
+    if cost is True:
+        return True
+    return isinstance(cost, dict) and cost.get("enabled", True) is True
+
+
 def _default_on_mechanisms(settings):
     """Selected kernels and policies a route must show engaged (sweep H1).
 
@@ -817,6 +851,8 @@ def _default_on_mechanisms(settings):
         native_mtp
         and handoff_width is not None
         and handoff.get("adaptive_park") is None
+        # The per-lane cost handoff (e3c19168e) fires at any width.
+        and not _cost_per_commit_selected(handoff)
         and int(settings.get("max_lanes") or 1) <= handoff_width
     ):
         # The static handoff fires only when the cohort grows past its width.
@@ -1224,6 +1260,43 @@ def _qsa_nax_prefill_host_gated(execution, initial_execution):
             "QSA prefill keeps the masked attention"
         )
     return None
+
+
+def moe_rhs_pad_uncalibrated(execution, initial_execution=None):
+    """Why the selected adaptive MoE pad law never decided this run, or None.
+
+    Off the fitted host, MLX build or row range (or for a geometry with no
+    fitted model) switch_layers._adaptive_pad falls back to the fixed floor
+    rule and records ``uncalibrated_*``.  Those are the floor's decisions,
+    not the adaptive law's, so they are not observed use of ``moe_rhs_pad``.
+    Returns a reason when the run's pad decisions grew only through such
+    fallbacks; None when the cost model decided at least once, nothing
+    grew, or the policy is not adaptive.
+    """
+    status = (execution or {}).get("moe_pad")
+    if not isinstance(status, dict) or status.get("policy") != "adaptive":
+        return None
+    before = ((initial_execution or {}).get("moe_pad") or {}).get("choices") or {}
+    grown = {}
+    for reason, value in (status.get("choices") or {}).items():
+        base = before.get(reason, 0)
+        if type(value) is int and type(base) is int and value > base:
+            grown[reason] = value - base
+    fallbacks = {
+        reason: count
+        for reason, count in grown.items()
+        if reason.startswith("uncalibrated_")
+    }
+    if not fallbacks or any(reason.startswith("cost_") for reason in grown):
+        return None
+    return (
+        "adaptive pad cost model did not run: every pad decision this run fell "
+        "back to the floor rule ("
+        + ", ".join(f"{reason}={count}" for reason, count in sorted(fallbacks.items()))
+        + f"; cost_model_host={status.get('cost_model_host')!r}, "
+        f"cost_model_host_matches={status.get('cost_model_host_matches')!r}, "
+        f"cost_model_runtime_matches={status.get('cost_model_runtime_matches')!r})"
+    )
 
 
 def host_gated_not_observed(execution, initial_execution=None):
@@ -1635,6 +1708,11 @@ def _route_feature_checks(settings):
         and "mtp_ordinary_handoff" not in _default_on_mechanisms(settings)[1]
     ):
         features.add("mtp_ordinary_handoff")
+    handoff = settings.get("mtp_ordinary_handoff") or {}
+    if handoff.get("enabled") is True and _cost_per_commit_selected(handoff):
+        # A selected per-lane cost handoff must show lanes it handed off
+        # during this run, not only the policy benchmark's static handoff.
+        features.add("mtp_ordinary_handoff_cost_per_commit")
     if settings.get("fly_verification", {}).get("enabled") is True:
         features.add("fly_verification")
     if (settings.get("self_mtp_copy_draft") or {}).get("enabled") is True:

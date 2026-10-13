@@ -47,8 +47,23 @@ def status(base: str) -> dict:
         return json.load(response)
 
 
+def tree_scheduler_counters(status: dict) -> dict:
+    """``status["scheduler"]`` with each target-tree counter also under its
+    historical ``external_tensorfold_*`` name.
+
+    e3c19168e renamed them ``external_target_tree_*`` in /v1/status.  The
+    runtime name wins; a historical receipt keeps the name it recorded.
+    """
+    scheduler = dict(status.get("scheduler") or {})
+    for key, value in list(scheduler.items()):
+        if key.startswith("external_target_tree_"):
+            suffix = key.removeprefix("external_target_tree_")
+            scheduler["external_tensorfold_" + suffix] = value
+    return scheduler
+
+
 def counters(snapshot: dict) -> dict:
-    return snapshot.get("scheduler") or {}
+    return tree_scheduler_counters(snapshot)
 
 
 def verify_stage(previous: dict, current: dict, width: int) -> None:

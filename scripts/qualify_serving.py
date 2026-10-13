@@ -2969,6 +2969,13 @@ def feature_observations(
         # event/correctness/throughput gate.
         "adaptive_mtp_depth": adaptive_observed,
         "mtp_ordinary_handoff": handoff_observed,
+        # Lanes the per-lane cost-per-commit handoff moved to ordinary
+        # decode during this run (runtime/generate.py).
+        "mtp_ordinary_handoff_cost_per_commit": run_delta(
+            scheduler,
+            initial_scheduler,
+            "mtp_ordinary_handoff_cost_per_committed_token",
+        ),
         "self_mtp_copy_draft": run_delta(scheduler, initial_scheduler, "self_mtp_copy_rounds"),
         "fly_verification": max(
             run_delta(scheduler, initial_scheduler, "fly_relaxed_accepts"),
@@ -3100,9 +3107,17 @@ def feature_observations(
         ),
         # The default Qwen3.8 tree route: lanes served by tree rounds and
         # rounds the TensorFold target executed, both during this run.
+        # e3c19168e renamed external_tensorfold_* to external_target_tree_*
+        # in /v1/status; historical receipts carry the old name.
         "external_tree": min(
             run_delta(scheduler, initial_scheduler, "external_tree_rounds"),
-            run_delta(scheduler, initial_scheduler, "external_tensorfold_target_rounds"),
+            run_delta(
+                scheduler,
+                initial_scheduler,
+                "external_target_tree_target_rounds"
+                if "external_target_tree_target_rounds" in (scheduler or {})
+                else "external_tensorfold_target_rounds",
+            ),
         ),
         "progressive_verification": progressive_observed,
         "progressive_multilane_draft_cap": multilane_cap_observed,
@@ -3267,9 +3282,17 @@ def default_on_observations(final, initial=None):
         "qwen36_moe_window": q36_window,
         # Sorted-MoE pad policy: one recorded choice per sorted expert gather
         # the adaptive (or always) rule decided (switch_layers.moe_pad_status).
+        # Only the law's own decisions count: cost_* for adaptive, always_rhs
+        # for always.  uncalibrated_* are floor-rule fallbacks where the cost
+        # model never ran, and mlx_streams needed no pad decision.
         "moe_rhs_pad": sum(
             delta("moe_pad", "choices", reason)
             for reason in ((execution.get("moe_pad") or {}).get("choices") or {})
+            if reason.startswith("cost_")
+            or (
+                reason == "always_rhs"
+                and (execution.get("moe_pad") or {}).get("policy") == "always"
+            )
         ),
         # Prefill forwards through the slice-invariant lane.
         "invariant_prefill": delta("invariant_prefill", "counts", "forwards"),
@@ -3703,6 +3726,7 @@ def main():
         contention_gated_not_observed,
         host_gate_record,
         host_gated_not_observed,
+        moe_rhs_pad_uncalibrated,
         selected_not_observed_features,
     )
 
@@ -4480,11 +4504,39 @@ def main():
             }
             print(f"feature_{feature}: SELECTED, NOT OBSERVED "
                   f"({contention_gated[feature]})", flush=True)
+        # An adaptive MoE pad whose cost model never ran (off its fitted
+        # host, MLX build or row range) made only floor-rule decisions:
+        # selected, not observed.  The required check still fails closed.
+        pad_uncalibrated = moe_rhs_pad_uncalibrated(
+            final.get("execution") or {}, initial.get("execution") or {}
+        )
+        if "moe_rhs_pad" in required_features and pad_uncalibrated is not None:
+            report["selected_not_observed"]["feature_moe_rhs_pad"] = {
+                "status": "selected, not observed",
+                "reason": pad_uncalibrated,
+                "uncalibrated": True,
+            }
+            print(f"feature_moe_rhs_pad: SELECTED, NOT OBSERVED "
+                  f"({pad_uncalibrated})", flush=True)
         for feature in sorted(required_features - set(host_gated) - set(contention_gated)):
             if feature in {"adaptive_mtp_depth", "mtp_ordinary_handoff"}:
                 evidence = report.get("adaptive_benchmark")
             elif feature.startswith(("proposal_composition", "trusted_pld_")):
                 evidence = proposal_evidence
+            elif feature == "moe_rhs_pad":
+                evidence = {
+                    "before": (initial.get("execution") or {}).get("moe_pad"),
+                    "after": (final.get("execution") or {}).get("moe_pad"),
+                    "observation": observed.get(feature, 0),
+                    "uncalibrated": pad_uncalibrated,
+                }
+            elif feature == "mtp_ordinary_handoff_cost_per_commit":
+                key = "mtp_ordinary_handoff_cost_per_committed_token"
+                evidence = {
+                    "before": (initial.get("scheduler") or {}).get(key),
+                    "after": (final.get("scheduler") or {}).get(key),
+                    "delta": observed.get(feature, 0),
+                }
             elif feature == "sp_qmm":
                 evidence = {
                     "before": initial.get("sp_qmm"),

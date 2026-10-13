@@ -80,6 +80,21 @@ def artifact_sha256(path):
     return h.hexdigest()
 
 
+def _encoder_features(family, settings):
+    """Encoder evidence the family's selected media policy requires.
+
+    Gemma 3n's default video policy keeps one video in one encoder batch, so
+    it needs single-batch evidence; a policy that can split one video, or a
+    policy these settings do not declare, needs batching evidence.
+    """
+    if family == "gemma3n":
+        policy = settings.get("adapter_policy") or {}
+        if policy.get("video_frame_batch_splits") is False:
+            return ["encoder_unsplit"]
+        return ["encoder_batching"]
+    return ["encoder_batching"] if family == "minicpmo" else []
+
+
 def campaign_spec(
     family,
     *,
@@ -122,7 +137,7 @@ def campaign_spec(
         "required_features": [
             "ordinary_reference",
             "continuous_batch",
-            *(["encoder_batching"] if family in {"gemma3n", "minicpmo"} else []),
+            *_encoder_features(family, settings),
             *FAMILIES[family]["modalities"],
             "prefix_reuse",
             "replay",

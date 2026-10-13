@@ -690,6 +690,7 @@ NATIVE_VLM_MEDIA_CHECKS = {
             "multimodal_video",
             "multimodal_audio_input",
             "multimodal_encoder_batching",
+            "multimodal_encoder_unsplit",
             "multimodal_continuous_batch",
             "multimodal_apcv2_reuse",
         }
@@ -858,6 +859,37 @@ def evaluate_encoder_batching_observation(value):
     return observed_overflow
 
 
+def evaluate_encoder_unsplit_observation(value, policy):
+    """Accept only observed encoder calls that each ran as one batch under a
+    selected non-splitting Gemma 3n video policy."""
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != "mlx2.encoder-batching-observation.v1"
+        or not isinstance(policy, dict)
+        or policy.get("video_frame_batch_splits") is not False
+    ):
+        return False
+    limit = value.get("policy_limit")
+    calls = value.get("calls")
+    if (
+        value.get("enabled") is not True
+        or type(limit) is not int
+        or limit < 1
+        or type(policy.get("video_frame_batch_size")) is not int
+        or limit != policy["video_frame_batch_size"]
+        or not isinstance(calls, list)
+        or not calls
+    ):
+        return False
+    for call in calls:
+        if not isinstance(call, dict):
+            return False
+        count, chunks = call.get("input_count"), call.get("chunk_sizes")
+        if type(count) is not int or not 1 <= count <= limit or chunks != [count]:
+            return False
+    return True
+
+
 def evaluate_encoder_sequential_observation(observation, policy, feature_parity):
     """Require the selected single-image path to execute and match source."""
     if (
@@ -948,6 +980,24 @@ def _evaluate_native_vlm_report_unchecked(
             evaluate_encoder_batching_observation(probe.get("encoder_batching"))
             and evaluate_encoder_batching_observation(
                 report.get("serving_encoder_batching")
+            )
+            and feature_parity.get("passed") is True
+            and feature_parity.get("shapes_match") is True
+            and type(feature_parity.get("tensor_count")) is int
+            and feature_parity["tensor_count"] > 0
+            and type(feature_parity.get("max_abs")) in (int, float)
+            and math.isfinite(feature_parity["max_abs"])
+            and 0 <= feature_parity["max_abs"] <= 1e-4
+        )
+    if "multimodal_encoder_unsplit" in checks:
+        probe = (report.get("direct") or {}).get("video") or {}
+        parity = probe.get("parity") or {}
+        feature_parity = parity.get("feature_parity") or {}
+        policy = (report.get("settings") or {}).get("adapter_policy") or {}
+        checks["multimodal_encoder_unsplit"] = (
+            evaluate_encoder_unsplit_observation(probe.get("encoder_batching"), policy)
+            and evaluate_encoder_unsplit_observation(
+                report.get("serving_encoder_batching"), policy
             )
             and feature_parity.get("passed") is True
             and feature_parity.get("shapes_match") is True

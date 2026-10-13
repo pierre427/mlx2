@@ -30,7 +30,9 @@ def test_text_batching_does_not_require_multimodal_batch_evidence():
     for descriptor in descriptors:
         settings = {
             "adapter_policy": {"batch_vision_input": False}
-        } if descriptor is MINICPMO else None
+        } if descriptor is MINICPMO else {
+            "adapter_policy": {"video_frame_batch_splits": False}
+        } if descriptor is GEMMA3N else None
         requires_media_batch = (
             Capability.CONTINUOUS_BATCH in descriptor.capabilities
         )
@@ -141,17 +143,18 @@ def test_fp32_head_receipt_cannot_select_opposite_head_mode(tmp_path, qualified_
 def test_multimodal_descriptor_requires_adapter_owned_live_checks(tmp_path):
     from mlx2.adapters.mlx_vlm import GEMMA3N
 
-    required = required_descriptor_checks(GEMMA3N)
+    policy = {"video_frame_batch_splits": False}
+    required = required_descriptor_checks(GEMMA3N, {"adapter_policy": policy})
     assert required == {
         "multimodal_image",
         "multimodal_video",
         "multimodal_audio_input",
-        "multimodal_encoder_batching",
+        "multimodal_encoder_unsplit",
         "multimodal_continuous_batch",
         "multimodal_apcv2_reuse",
     }
     path = tmp_path / "qualification.json"
-    settings = {"mtp": False, "max_context": 32768}
+    settings = {"mtp": False, "max_context": 32768, "adapter_policy": policy}
     checks = {name: {"passed": True} for name in REQUIRED_CHECKS}
     record = {
         "passed": True,

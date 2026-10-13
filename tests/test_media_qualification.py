@@ -42,6 +42,33 @@ def test_approved_media_producer_hashes_match_reviewed_scripts():
                 )
 
 
+def test_native_media_producer_pins_match_the_identity_it_records():
+    """Every native pin, adapter_contract_sha256 included, is recomputed by
+    the producer's own _harness_identity from the current files; a stale
+    pin refuses every new companion of that family (sweep 10-12 L5-03)."""
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "_pin_native_vlm_media", root / "scripts/qualify_native_vlm_media.py"
+    )
+    producer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(producer)
+    native = {
+        family: entry[0]
+        for family, entry in qualification.APPROVED_MEDIA_PRODUCERS.items()
+        if entry[0]["name"] == "scripts/qualify_native_vlm_media.py"
+    }
+    assert set(native) == {"gemma3n", "gemma4", "minicpmo"}
+    stale = {
+        family: {
+            key: (value, pin.get(key))
+            for key, value in producer._harness_identity(family).items()
+            if value != pin.get(key)
+        }
+        for family, pin in native.items()
+    }
+    assert not any(stale.values()), stale
+
+
 REV = "a" * 40
 IDENTITY = {
     "schema": "mlx2.vlm-dependencies.v1",

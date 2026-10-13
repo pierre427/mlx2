@@ -139,8 +139,23 @@ def measured_summary(rows: list[dict]) -> dict:
     return result
 
 
+def tree_scheduler_counters(status: dict) -> dict:
+    """``status["scheduler"]`` with each target-tree counter also under its
+    historical ``external_tensorfold_*`` name.
+
+    e3c19168e renamed them ``external_target_tree_*`` in /v1/status.  The
+    runtime name wins; a historical receipt keeps the name it recorded.
+    """
+    scheduler = dict(status.get("scheduler") or {})
+    for key, value in list(scheduler.items()):
+        if key.startswith("external_target_tree_"):
+            suffix = key.removeprefix("external_target_tree_")
+            scheduler["external_tensorfold_" + suffix] = value
+    return scheduler
+
+
 def validate_arm(limit: int, rows: list[dict], status: dict) -> dict:
-    scheduler = status.get("scheduler") or {}
+    scheduler = tree_scheduler_counters(status)
     if int(scheduler.get("external_tensorfold_cohort_limit", -1)) != limit:
         raise RuntimeError("server receipt does not match requested cohort limit")
     if int(scheduler.get("external_tensorfold_target_rounds", 0)) <= 0:

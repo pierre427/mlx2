@@ -164,6 +164,20 @@ class Gemma3nVideoPolicy:
         if self.max_frames < 1 or self.frame_batch_size < 1:
             raise ValueError("Gemma 3n video frame bounds must be positive")
 
+    def as_dict(self) -> dict:
+        """Return the effective adapter policy for route identity receipts.
+
+        ``video_frame_batch_splits`` says whether one video at the frame
+        limit can span more than one encoder batch; qualification requires
+        the encoder-batching check only then.
+        """
+        return {
+            "video_fps": self.fps,
+            "video_max_frames": self.max_frames,
+            "video_frame_batch_size": self.frame_batch_size,
+            "video_frame_batch_splits": self.frame_batch_size < self.max_frames,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class NativeVideoInput:
