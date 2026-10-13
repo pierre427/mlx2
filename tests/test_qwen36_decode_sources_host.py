@@ -230,7 +230,10 @@ class Sources(unittest.TestCase):
         helpers = ast.parse((ROOT / "src/mlx2/process_env.py").read_text())
         exec(compile(ast.Module(body=[
             n for n in helpers.body
-            if isinstance(n, ast.FunctionDef) and n.name == "clear_inherited_profile"
+            if isinstance(n, ast.FunctionDef)
+            and n.name in {"clear_inherited_profile", "_operator_selectors"}
+            or isinstance(n, ast.AnnAssign)
+            and getattr(n.target, "id", None) == "_OPERATOR_SELECTORS"
             or isinstance(n, ast.Assign)
             and any(
                 getattr(x, "id", None)

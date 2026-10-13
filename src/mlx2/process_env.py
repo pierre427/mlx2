@@ -106,7 +106,9 @@ PRESERVED_OPERATOR_KNOBS = frozenset(
 # Model profiles are process-global.  Every adapter profile transition clears
 # these selector namespaces before pinning its declared environment, so a
 # previous model's kernel or external-route choice cannot survive outside the
-# new adapter receipt.  Exact operator-owned values are preserved above.
+# new adapter receipt.  Exact operator-owned values are preserved above, and
+# so is whatever the operator set under these namespaces before the first
+# profile applied (``_OPERATOR_SELECTORS``; sweep 2026-10-12 L1-F2).
 # MLX_ENABLE_TF32 is deliberately absent: require_process_numerics must reject
 # an explicit enabling value instead of erasing evidence that MLX may have
 # latched it.
@@ -138,13 +140,51 @@ LIVE_MOE_PROFILE_SELECTIONS = frozenset(
 )
 
 
-def clear_inherited_profile(prefixes, environ=None) -> None:
-    """Delete inherited model selectors before a profile is pinned."""
+# The process environment under INHERITED_MODEL_PROFILE_PREFIXES when the
+# first profile transition ran: the operator's selections (tree gate kill
+# switches, env_switches.SERVING_ENV_SWITCHES, the cohort qualifier's gates).
+# Anything that appears or changes there later was written by a profile or an
+# in-process arm, so the next profile clears it.  Latched once per process.
+_OPERATOR_SELECTORS: dict | None = None
+
+
+def _operator_selectors(target) -> dict:
+    global _OPERATOR_SELECTORS
+    if _OPERATOR_SELECTORS is None:
+        _OPERATOR_SELECTORS = {
+            name: value
+            for name, value in target.items()
+            if name.startswith(INHERITED_MODEL_PROFILE_PREFIXES)
+        }
+    return _OPERATOR_SELECTORS
+
+
+def clear_inherited_profile(prefixes, environ=None, *, operator=None) -> None:
+    """Delete inherited model selectors before a profile is pinned.
+
+    ``prefixes`` are the adapter's own namespaces: everything under them is
+    cleared except ``PRESERVED_OPERATOR_KNOBS``.  Under the shared
+    ``INHERITED_MODEL_PROFILE_PREFIXES`` the operator's values (``operator``;
+    by default, for the process environment, the values present when the
+    first profile applied) are kept, and put back if an earlier profile
+    cleared or overwrote them; every other value there is cleared.  An
+    explicit ``environ`` without ``operator`` has no operator values.
+    """
     target = os.environ if environ is None else environ
-    prefixes = tuple(dict.fromkeys((*INHERITED_MODEL_PROFILE_PREFIXES, *prefixes)))
+    if operator is None:
+        operator = _operator_selectors(target) if environ is None else {}
+    own = tuple(prefixes)
+    shared = INHERITED_MODEL_PROFILE_PREFIXES
     for name in tuple(target):
-        if name.startswith(tuple(prefixes)) and name not in PRESERVED_OPERATOR_KNOBS:
+        if name in PRESERVED_OPERATOR_KNOBS:
+            continue
+        if name.startswith(own) or (
+            name.startswith(shared) and operator.get(name) != target[name]
+        ):
             del target[name]
+    for name, value in operator.items():
+        if name not in target and not name.startswith(own) and name.startswith(shared):
+            target[name] = value
 
 
 def assert_process_profile_applied(owner: str, *, live=()) -> None:

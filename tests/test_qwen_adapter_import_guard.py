@@ -444,6 +444,9 @@ def test_shared_profile_clear_owns_routes_and_preserves_operator_state():
 def test_generic_profile_refuses_a_stale_import_latch(monkeypatch):
     from mlx2.adapters.gpt_oss import configure_environment
 
+    # Left by an earlier profile or arm (not operator-set before the first
+    # profile), so the gpt-oss transition clears it beneath the latch.
+    monkeypatch.setattr(process_env, "_OPERATOR_SELECTORS", {})
     monkeypatch.setenv("MLX2_FUSED_SDPA_MIN_L", "0")
     _latched(monkeypatch, {"MLX2_FUSED_SDPA_MIN_L": "0"})
     with pytest.raises(import_env.ImportOrderError, match="MLX2_FUSED_SDPA_MIN_L"):
@@ -458,6 +461,7 @@ def test_standard_decoder_profile_refuses_latch_and_rolls_back(monkeypatch, tmp_
         "identity": {"path": str(tmp_path), "fingerprint": "f", "files": []},
         "sampling_defaults": None,
     })
+    monkeypatch.setattr(process_env, "_OPERATOR_SELECTORS", {})
     monkeypatch.setenv("MLX2_FUSED_SDPA_MIN_L", "0")
     _latched(monkeypatch, {"MLX2_FUSED_SDPA_MIN_L": "0"})
 
@@ -539,6 +543,10 @@ def test_qwen_leaf_modules_that_latch_profile_state_take_snapshots():
 @pytest.mark.parametrize("module", PROFILE_MODULES)
 def test_adapter_profiles_clear_shared_model_selectors(monkeypatch, tmp_path, module):
     monkeypatch.setattr(import_env, "_SNAPSHOTS", {})
+    # The operator set none of these before the first profile applied: they
+    # were left by an earlier profile or in-process arm.  Operator-set values
+    # survive (tests/test_profile_clear_operator_switches.py, L1-F2).
+    monkeypatch.setattr(process_env, "_OPERATOR_SELECTORS", {})
     monkeypatch.setenv("MLX2_FUSED_SDPA_MIN_L", "0")
     monkeypatch.setenv("MLX2_QSDPA_VERIFY_KERNEL", "0")
     monkeypatch.setenv("MLX_SDPA_BLOCKS", "128")

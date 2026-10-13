@@ -36,8 +36,16 @@ def _restore_process_environment():
     it after every test so one test's serving profile (e.g. Flash-Next's
     segmented self-MTP layout) cannot change a later module's behaviour
     (test_qualify_gdn_retirement after test_execution_policy, 2026-10-01)."""
+    from mlx2 import process_env
+
+    # Each test starts as a process whose first adapter profile has not run:
+    # the operator selections latched by one test must not become another
+    # test's "operator" environment (sweep 2026-10-12 L1-F2).
+    saved_operator = process_env._OPERATOR_SELECTORS
+    process_env._OPERATOR_SELECTORS = None
     saved = dict(os.environ)
     yield
+    process_env._OPERATOR_SELECTORS = saved_operator
     if os.environ != saved:
         os.environ.clear()
         os.environ.update(saved)
