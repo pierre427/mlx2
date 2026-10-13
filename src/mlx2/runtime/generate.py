@@ -2006,6 +2006,22 @@ def _cohort_plain_width(batch) -> int:
     return len(getattr(batch, "_plain_ready", ())) + external
 
 
+def _release_cost_handoff_state(owner: Any, uid: int) -> Optional[dict]:
+    """Pop and cancel one lane's cost-per-commit evidence.
+
+    Returns the receipt taken before cancellation, or None when the lane had
+    no state.  Every exit from native MTP calls this so a long-lived batch
+    never retains per-request timing evidence.
+    """
+    states = getattr(owner, "_cost_handoff_states", None)
+    state = states.pop(uid, None) if states else None
+    if state is None:
+        return None
+    receipt = state.receipt()
+    state.cancel()
+    return receipt
+
+
 class MTPGenerationBatch:
     """Scheduler wrapper for Agent A's batched self-MTP transaction."""
 
@@ -2640,6 +2656,9 @@ class MTPGenerationBatch:
                     getattr(self, "adaptive_depth_policy", None)
                 )
             )
+            cost_receipt = _release_cost_handoff_state(self, lane.uid)
+            if cost_receipt is not None:
+                lane_receipt["cost_per_commit_handoff"] = cost_receipt
             from . import mtp_state_trace
             mtp_state_trace.state(
                 "ordinary_handoff", target=package.detached.caches.target,
@@ -2671,7 +2690,9 @@ class MTPGenerationBatch:
         for package in packages:
             uid = package.detached.lane.uid
             decision = decisions[uid]
-            state = self._cost_handoff_states.get(uid)
+            # The decided state is terminal; take it out before the generic
+            # release in _mark_plain_handoff so its receipt keeps the evidence.
+            state = self._cost_handoff_states.pop(uid, None)
             self._mark_plain_handoff(
                 [package], decision=decision, projected_width=projected_width
             )
@@ -2679,7 +2700,6 @@ class MTPGenerationBatch:
                 package.handoff_receipt["cost_per_commit_handoff"] = (
                     state.receipt()
                 )
-            self._cost_handoff_states.pop(uid, None)
         _bump_bounded_counter(
             self.scheduler_stats, "mtp_ordinary_handoff_events"
         )
@@ -2715,6 +2735,7 @@ class MTPGenerationBatch:
             stats["draft_acceptance"] = float(lane.stats.draft_accepted) / max(
                 int(lane.stats.draft_proposed), 1
             )
+            cost_receipt = _release_cost_handoff_state(self, lane.uid)
             package.handoff_receipt = {
                 "transition": "fallback",
                 "selected": False,
@@ -2740,6 +2761,8 @@ class MTPGenerationBatch:
                     getattr(self, "adaptive_depth_policy", None)
                 ),
             }
+            if cost_receipt is not None:
+                package.handoff_receipt["cost_per_commit_handoff"] = cost_receipt
             from . import mtp_state_trace
 
             mtp_state_trace.state(
@@ -3250,9 +3273,12 @@ class MTPGenerationBatch:
         package = self._paused.pop(uid)
         self._memory_queued.discard(uid)
         self._plain_ready.append(package)
-        self._mark_plain_fallback(
-            [package], reason="starvation_boundary_limit"
-        )
+        # A lane the handoff policy already selected (memory-queued when its
+        # cohort handed off) keeps that receipt; it is not also a fallback.
+        if package.handoff_receipt is None:
+            self._mark_plain_fallback(
+                [package], reason="starvation_boundary_limit"
+            )
         return uid
 
     def take_plain_fallbacks(self):
@@ -3315,6 +3341,8 @@ class MTPGenerationBatch:
                     first_error = error
         self._paused.clear()
         self._plain_ready.clear()
+        for uid in list(getattr(self, "_cost_handoff_states", ())):
+            _release_cost_handoff_state(self, uid)
         if first_error is not None:
             raise first_error
 
@@ -3532,6 +3560,7 @@ class MTPGenerationBatch:
                 packages.append(package)
             self._async_qsa_receipts_by_uid.pop(uid, None)
             self._observed_widths_by_uid.pop(uid, None)
+            _release_cost_handoff_state(self, uid)
         # Ownership has left every queue. A failed close must not strand the
         # remaining rows outside batch.close()'s reach, or leave cancelled
         # memory waits and receipts attached to a reusable batch.
@@ -3662,16 +3691,10 @@ class MTPGenerationBatch:
                 "adaptive_depth": (
                     _adaptive_depth_receipt(self.adaptive_depth_policy)
                 ),
-                **(
-                    {
-                        "cost_per_commit_handoff": self._cost_handoff_states[
-                            lane.uid
-                        ].receipt()
-                    }
-                    if lane.uid in self._cost_handoff_states
-                    else {}
-                ),
             }
+            cost_receipt = _release_cost_handoff_state(self, lane.uid)
+            if cost_receipt is not None:
+                response.mtp_receipt["cost_per_commit_handoff"] = cost_receipt
             _close_segmented_detached(package.detached, release_cache=False)
         self._normalize_empty_segmented_admission()
 

@@ -780,3 +780,23 @@ def test_apc_parked_session_loss_counters_are_exported():
     assert "mlx2_apc_invalidation_pinned_parks_lost_total 0" in quiet
     assert "mlx2_apc_shutdown_pinned_parks_lost_total 0" in quiet
     assert "mlx2_apc_suspend_pinned_parks_lost_total 0" in quiet
+
+
+def test_native_cost_per_commit_handoff_reason_is_exported():
+    """L1-F4: the native per-lane cost handoff bumps its reason counter
+    beside the shared handoff events; /metrics must carry it too."""
+    from mlx2.prometheus import PrometheusBuilder, _add_scheduler
+
+    builder = PrometheusBuilder()
+    _add_scheduler(
+        builder,
+        {
+            "mtp_ordinary_handoff_events": 1,
+            "mtp_ordinary_handoff_lanes": 2,
+            "mtp_ordinary_handoff_cost_per_committed_token": 2,
+        },
+    )
+    assert (
+        'event="mtp_ordinary_handoff_cost_per_committed_token",'
+        'mechanism="mtp_ordinary_handoff"} 2'
+    ) in builder.render()

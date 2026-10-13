@@ -676,6 +676,7 @@ _SCHEDULER_EVENTS = frozenset(
         "mtp_ordinary_handoff_segmented_width_lock",
         "mtp_ordinary_handoff_measured_loss",
         "mtp_ordinary_handoff_park_memory",
+        "mtp_ordinary_handoff_cost_per_committed_token",
         "mtp_adaptive_park_engaged",
         "mtp_adaptive_park_kill_switch",
         "mtp_adaptive_park_mtp_samples",

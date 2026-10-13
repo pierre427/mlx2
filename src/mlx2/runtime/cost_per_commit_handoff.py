@@ -10,6 +10,13 @@ The feature is default-off at every caller.  A selected controller first
 collects ordinary target samples, then speculative samples in the same timing
 domain and physical width.  A sustained speculative loss produces one terminal
 decision.  It can never re-enter speculation for that request.
+
+Target cost grows with context for both routes, so a terminal decision may
+only use the speculative samples that directly follow an ordinary baseline
+(``speculative_samples + loss_decisions - 1``, the fewest that can decide).
+A sustained loss against an older baseline does not decide: it discards both
+windows and asks for a fresh ordinary probe at the current context.  A
+speculator that keeps winning pays no extra probes.
 """
 
 from __future__ import annotations
@@ -134,6 +141,10 @@ class CostPerCommitLaneState:
         self._ordinary: dict[int, deque[tuple[int, int]]] = {}
         self._speculative: dict[int, deque[tuple[int, int]]] = {}
         self._loss_streak: dict[int, int] = {}
+        # Speculative samples taken since this width's ordinary baseline was
+        # last sampled; bounds how stale a baseline a decision may use.
+        self._speculative_since_ordinary: dict[int, int] = {}
+        self._ordinary_refreshes = 0
         self._decision: dict[str, Any] | None = None
         self._cancelled = False
         self._invalid_samples = 0
@@ -164,6 +175,7 @@ class CostPerCommitLaneState:
         self._ordinary.clear()
         self._speculative.clear()
         self._loss_streak.clear()
+        self._speculative_since_ordinary.clear()
 
     def observe(
         self,
@@ -207,13 +219,14 @@ class CostPerCommitLaneState:
         )
         samples.append((elapsed_ns, committed_tokens))
         if kind == "ordinary":
+            self._speculative_since_ordinary[execution_width] = 0
             return None
         ordinary = self._ordinary.get(execution_width)
-        if (
-            ordinary is None
-            or len(ordinary) < self.settings.ordinary_samples
-            or len(samples) < self.settings.speculative_samples
-        ):
+        if ordinary is None or len(ordinary) < self.settings.ordinary_samples:
+            return None
+        since = self._speculative_since_ordinary.get(execution_width, 0) + 1
+        self._speculative_since_ordinary[execution_width] = since
+        if len(samples) < self.settings.speculative_samples:
             return None
         ordinary_cost = self._cost(ordinary)
         speculative_cost = self._cost(samples)
@@ -225,6 +238,17 @@ class CostPerCommitLaneState:
         self._loss_streak[execution_width] = streak
         if streak < self.settings.loss_decisions:
             return None
+        if since > (
+            self.settings.speculative_samples + self.settings.loss_decisions - 1
+        ):
+            # The baseline predates the speculative window.  Re-measure both
+            # routes at the current context before any one-way decision.
+            del self._ordinary[execution_width]
+            samples.clear()
+            self._loss_streak[execution_width] = 0
+            self._speculative_since_ordinary[execution_width] = 0
+            self._ordinary_refreshes += 1
+            return None
         self._decision = {
             "reason": "cost_per_committed_token",
             "one_way": True,
@@ -234,6 +258,7 @@ class CostPerCommitLaneState:
             "speculative_to_ordinary_cost_ratio": speculative_cost / ordinary_cost,
             "loss_ratio_threshold": self.settings.loss_ratio,
             "loss_decisions": streak,
+            "speculative_samples_since_ordinary": since,
         }
         return dict(self._decision)
 
@@ -264,6 +289,7 @@ class CostPerCommitLaneState:
             "decision": None if self._decision is None else dict(self._decision),
             "cancelled": self._cancelled,
             "invalid_samples": self._invalid_samples,
+            "ordinary_refreshes": self._ordinary_refreshes,
             "observations": self._observations,
             "valid_samples": self._valid_samples,
         }
