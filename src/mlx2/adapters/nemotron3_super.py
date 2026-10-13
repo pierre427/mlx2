@@ -178,6 +178,10 @@ class Nemotron3SuperAdapter(FlashNextAdapter):
     # (content trimmed), and the model writes ``</think>\n\n`` before its
     # answer.  Those newlines are template structure, not the answer.
     think_close_separator = "\r\n"
+    # Flash-Next's QSA/GDN topology reads loader state this family never sets
+    # and has no Nemotron-H mamba layer kind.  Without a provider, APCv2 keeps
+    # this adapter's legacy layout namespace (sweep 2026-10-12 L5-01).
+    attention_topology = None
 
     @staticmethod
     def spomin_backend(model, prompt_cache):

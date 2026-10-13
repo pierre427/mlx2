@@ -253,6 +253,8 @@ class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
         path = Path(self.identity["path"])
         config = json.loads(json.dumps(artifact["config"]))
         config["text_config"]["mtp_num_hidden_layers"] = 0
+        # The inherited Qwen3.6 topology hook reads this (sweep 2026-10-12 L5-01).
+        self._attention_topology_config = dict(config["text_config"])
         import mlx.core as mx
         import mlx.nn as nn
         from transformers import AutoTokenizer
@@ -302,11 +304,23 @@ class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
                 tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
             )
             self.max_context = int(config["text_config"]["max_position_embeddings"])
+            from ..runtime.models.gated_delta import gdn_core_status
+
+            # Inherited Qwen3.8 diagnostics report core calls since this.
+            self._gdn_core_initial = gdn_core_status()
             if self.weight_stream is not None:
                 self.weight_stream.begin_serving()
         except BaseException:
             self.close()
             raise
+
+    def attention_topology(self):
+        """The Qwen3.6 hybrid layer order with this trunk's own GDN state
+        (64 value / 16 key heads, not the 35B's 32v16k)."""
+        return replace(
+            super().attention_topology(),
+            recurrent_layout="qwen35-122b-gdn-64v16k-state-v1",
+        )
 
     def prefill_step_default(self):
         """Decline the 35B's measured routed-MoE chunk; nothing was measured

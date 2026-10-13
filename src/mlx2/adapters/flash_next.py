@@ -653,6 +653,10 @@ class FlashNextAdapter:
             self.max_context = int(
                 config["text_config"].get("max_position_embeddings", 262144)
             )
+            from ..runtime.models.gated_delta import gdn_core_status
+
+            # diagnostics() reports GDN core calls since this.
+            self._gdn_core_initial = gdn_core_status()
             from ..runtime.models.gdn_state import (
                 install_state_dtype,
                 layout_with_state_dtype,
@@ -747,6 +751,20 @@ class FlashNextAdapter:
             request["tool_choice"],
             parallel_tool_calls=request.get("parallel_tool_calls", True),
         )
+
+    def _gdn_core_diagnostics(self) -> dict:
+        """MLX's GDN core (policy ``gdn_core`` -> ``MLX_GDN_CORE=1``): calls
+        since load, present while selected or used.  Serving no longer adds
+        the process counter (sweep 2026-10-12 L5-04), so this route owns it.
+        A partially constructed adapter has no baseline and claims no calls."""
+        from ..runtime.models.gated_delta import gdn_core_status
+
+        core = gdn_core_status()
+        initial = getattr(self, "_gdn_core_initial", None)
+        calls = 0 if initial is None else max(0, core["calls"] - initial["calls"])
+        core = {**core, "calls": calls}
+        selected = getattr(self, "environment", {}).get("MLX_GDN_CORE") == "1"
+        return {"gdn_core": core} if selected or calls else {}
 
     def diagnostics(self) -> dict:
         from ..runtime.models.flash_tensorfold_qmv import counters as tensorfold_qmv_counters
@@ -918,6 +936,7 @@ class FlashNextAdapter:
                 if _moe_nax.MODE != "off" or any(_moe_nax.calls.values())
                 else {}
             ),
+            **self._gdn_core_diagnostics(),
             "eager_dispatch": qwen4_eager_dispatch_status(),
             "ple_tables": [ple_table_diagnostics(table) for table in self._tables],
             "fused_gdn": qwen4_fused_gdn_stats(self.model, modules=diagnostic_modules),

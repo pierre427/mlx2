@@ -734,9 +734,12 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
             )
             self.max_context = int(config["text_config"]["max_position_embeddings"])
+            from ..runtime.models.gated_delta import gdn_core_status
             from ..runtime.models.switch_layers import moe_pad_status
 
             self._moe_pad_initial = moe_pad_status()
+            # Inherited Qwen3.8 diagnostics report core calls since this.
+            self._gdn_core_initial = gdn_core_status()
             if self.weight_stream is not None:
                 # The dtype probe above paged experts in as load evidence only.
                 self.weight_stream.begin_serving()
