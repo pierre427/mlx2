@@ -2020,7 +2020,10 @@ class ExternalDraftBatchGenerator:
         """Draft phase: one proposal block per cohort row, ``None`` for no draft.
 
         A zero-count round only appends pending draft context so the draft
-        plane stays paired with the target boundary.
+        plane stays paired with the target boundary.  A forced zero-count
+        round (the cost-per-commit ordinary probe) defers that append: the
+        pending context stays in ``lane.tail`` and ``_commit`` extends it, so
+        the probe times only the target step the ordinary route performs.
         """
         tree_budget = (
             self._tree_node_budget() if self.draft_topology == "tree15" else None
@@ -2069,6 +2072,8 @@ class ExternalDraftBatchGenerator:
         if any(l.ordinary for l in cohort): requested_count = 0
         blocks = [None]*len(cohort)
         if not requested_count:
+            if force_zero:
+                return blocks
             for lane in cohort:
                 if lane.tail.shape[1]: self._append_context(lane, lane.anchor)
             return blocks
@@ -3098,8 +3103,15 @@ class ExternalDraftBatchGenerator:
         transaction,
         committed_rows=None,
         committed_rngs=None,
+        deferred_context=False,
     ):
-        """Commit accepted prefixes, then publish responses for every row."""
+        """Commit accepted prefixes, then publish responses for every row.
+
+        ``deferred_context`` means this round's proposal phase did not append
+        the pending ``lane.tail`` to the draft plane; the committed features
+        then extend that tail instead of replacing it, keeping
+        ``draft offset + tail length == committed boundary``.
+        """
         proposal_counts = [
             0 if block is None else int(block.lengths[0]) for block in blocks
         ]
@@ -3184,13 +3196,16 @@ class ExternalDraftBatchGenerator:
             if committed_rngs is not None:
                 lane.rng = committed_rngs[row]
             if decision.commit_rows is None:
-                lane.tail = features[row:row+1,:consumed[row]]
+                tail = features[row:row+1,:consumed[row]]
             else:
-                lane.tail = self.mx.take(
+                tail = self.mx.take(
                     features[row:row+1],
                     self.mx.array(paths[row], dtype=self.mx.int32),
                     axis=1,
                 )
+            if deferred_context and lane.tail.shape[1]:
+                tail = self.mx.concatenate([lane.tail, tail], axis=1)
+            lane.tail = tail
             lane.history.extend(committed_inputs)
             lane.anchor = emitted[-1]
             round_accepted = _delivered_accepts(decision)
@@ -3732,6 +3747,17 @@ class ExternalDraftBatchGenerator:
                     for depth, maximum in zip(depths, maxima)
                 ]
                 blocks = [self._trim_adaptive_block(block, depth) for block, depth in zip(blocks, depths)]
+            # This round verifies every row exactly; it has no trusted-PLD
+            # path.  A "trusted" copy that reaches it is an exact audit, so
+            # book and receipt it as one and let its labels feed revocation.
+            demoted = False
+            for block in blocks:
+                if block is not None and bool(getattr(block, "proposal_trusted", False)):
+                    block.proposal_trusted = False
+                    block.proposal_audit = True
+                    demoted = True
+            if demoted:
+                _bump(self.scheduler_stats, "external_composed_trusted_pld_adaptive_guard_rounds")
             decisions = [None] * len(cohort)
             physical = self._adaptive_physical_groups(blocks)
             _bump(self.scheduler_stats, "external_adaptive_rounds")
@@ -4571,7 +4597,12 @@ class ExternalDraftBatchGenerator:
             if clock is not None:
                 self._mark("verify_laws", clock)
             self._commit(
-                cohort, decisions, features, blocks=blocks, transaction=transaction
+                cohort,
+                decisions,
+                features,
+                blocks=blocks,
+                transaction=transaction,
+                deferred_context=forced_depth is not None,
             )
             for commit, decision in zip(steer_commits, decisions):
                 commit(min(decision.accepted + 1, len(decision.emitted)))

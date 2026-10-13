@@ -1164,6 +1164,78 @@ def test_trusted_pld_on_unsupported_target_is_verified_exactly():
     assert wrapper._trusted_stats["audit_rounds"] > 0
 
 
+def test_trusted_pld_per_request_adaptive_round_is_booked_as_exact(monkeypatch):
+    """L3-5 (sweep 2026-10-12): the per-request adaptive round verifies every
+    row exactly, so a "trusted" copy that reaches it is an audit: it must not
+    be booked or receipted as a blind trusted round, and its exact labels
+    must feed the lane trust state (where a rejection revokes trust)."""
+    from mlx2.runtime import external_speculative as es
+
+    model, draft = tiny()
+    original = model.forward_with_taps
+
+    def forward(*args, last_logits_only=False, **kwargs):
+        logits, features = original(*args, **kwargs)
+        return (logits[:, -1:] if last_logits_only else logits), features
+
+    monkeypatch.setattr(model, "supports_trusted_pld", True, raising=False)
+    monkeypatch.setattr(model, "forward_with_taps", forward)
+    wrapper = ComposedDraftModel(
+        draft,
+        {
+            "ngram_min": 1,
+            "ngram_max": 1,
+            "min_context_match": 0,
+            "trusted_pld": True,
+            "trusted_pld_min_score": 0.5,
+            "trusted_pld_min_verified_tokens": 0,
+            "trusted_pld_min_match": 1,
+            "trusted_pld_max_span": 2,
+        },
+    )
+    trusted_calls = []
+    original_trusted = es.ExternalDraftBatchGenerator._verify_trusted_pld
+
+    def trusted(self, *args):
+        trusted_calls.append(1)
+        return original_trusted(self, *args)
+
+    monkeypatch.setattr(
+        es.ExternalDraftBatchGenerator, "_verify_trusted_pld", trusted
+    )
+    engine = generator(
+        model,
+        wrapper,
+        adaptive_verification={
+            "verification_costs": [0.5, 1, 1.4],
+            "mode": "per_request",
+            "min_observations": 1,
+        },
+    )
+    prompt = [1, 2, 3, 1, 2, 3, 1, 2]
+    uid = engine.insert([prompt], max_tokens=[8])[0]
+    outputs, finishes = drain(engine)
+    receipt = finishes[uid].speculative_receipt
+    sources = receipt["proposal_composition"]["trusted_pld"]["sources"]
+    # Every row went through the exact verifier ...
+    assert outputs[uid] == reference(model, prompt, 8)
+    assert trusted_calls == []
+    assert engine.scheduler_stats["external_adaptive_per_request_rounds"] > 0
+    # ... so nothing is booked or receipted as blind trusted execution.
+    assert engine.scheduler_stats.get("external_composed_trusted_pld_rounds", 0) == 0
+    assert receipt["verification"] == "exact"
+    assert receipt.get("approximate") is not True
+    assert wrapper._trusted_stats["blind_rounds"] == 0
+    assert all(record["blind_rounds"] == 0 for record in sources.values())
+    # The exact labels reached the lane trust state as audits; a rejected
+    # audit revokes trust for that request and source bucket.
+    assert wrapper._trusted_stats["audit_rounds"] > 0
+    assert engine.scheduler_stats["external_composed_trusted_pld_audit_rounds"] > 0
+    failed = [record for record in sources.values() if record["audit_failures"]]
+    assert failed
+    assert all(record["revoked"] for record in failed)
+
+
 def test_default_composition_skips_tree_batch_routes():
     """The pinned Qwen3.8 DFlash2 pair defaults to a tree batch-size route;
     composition verifies chains only, so the default must not attach (the

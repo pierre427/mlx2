@@ -33,6 +33,11 @@ PROGRESSIVE_FIDELITIES = frozenset(
 PROGRESSIVE_APPROXIMATE_QUALIFICATION_GATE_SCHEMA = (
     "mlx2.qwen38-approx-progressive-qualification-gate.v1"
 )
+# Identity keys keep their repository spelling, but the bytes are read from
+# the imported package so a wheel/site-packages install (no ``src/`` tree)
+# hashes the same files as an editable checkout.
+_PACKAGE = Path(__file__).resolve().parents[1]
+_PACKAGE_PREFIX = "src/mlx2/"
 _ROOT = Path(__file__).resolve().parents[3]
 _ALGORITHM_SOURCE_PATHS = (
     "src/mlx2/runtime/progressive_external_verify.py",
@@ -41,10 +46,16 @@ _ALGORITHM_SOURCE_PATHS = (
 )
 
 
+def _source_path(name):
+    if name.startswith(_PACKAGE_PREFIX):
+        return _PACKAGE / name[len(_PACKAGE_PREFIX):]
+    return _ROOT / name
+
+
 def _source_hashes(paths):
     result = {}
     for name in paths:
-        path = _ROOT / name
+        path = _source_path(name)
         result[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
 

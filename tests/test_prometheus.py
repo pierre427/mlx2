@@ -800,3 +800,18 @@ def test_native_cost_per_commit_handoff_reason_is_exported():
         'event="mtp_ordinary_handoff_cost_per_committed_token",'
         'mechanism="mtp_ordinary_handoff"} 2'
     ) in builder.render()
+
+
+def test_external_cost_per_commit_handoff_counters_are_exported():
+    """sweep1012: the external route's per-lane cost handoff bumps
+    external_cost_handoff_{events,lanes}; /metrics must carry both."""
+    from mlx2.prometheus import PrometheusBuilder, _add_scheduler
+
+    builder = PrometheusBuilder()
+    _add_scheduler(
+        builder,
+        {"external_cost_handoff_events": 1, "external_cost_handoff_lanes": 3},
+    )
+    text = builder.render()
+    assert 'event="external_cost_handoff_events"' in text
+    assert 'event="external_cost_handoff_lanes"' in text
