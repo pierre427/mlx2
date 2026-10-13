@@ -2720,6 +2720,7 @@ class MTPGenerationBatch:
                 [package], decision=decision, projected_width=projected_width
             )
             if state is not None:
+                state.mark_handoff_performed()
                 package.handoff_receipt["cost_per_commit_handoff"] = (
                     state.receipt()
                 )
@@ -4037,6 +4038,10 @@ class MTPGenerationBatch:
                     self.state.lanes, emitted_counts, strict=True
                 ):
                     if probe_ordinary and lane.uid not in cost_probe_uids:
+                        continue
+                    if not probe_ordinary and lane.uid in cost_probe_uids:
+                        # A bounded speculative round granted to established
+                        # peers is not evidence for a lane without a baseline.
                         continue
                     decision = cost_states[lane.uid].observe(
                         kind=kind,

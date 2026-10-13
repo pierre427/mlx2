@@ -387,6 +387,16 @@ def _normalized_adaptive_verification(value, depth):
     return json.loads(json.dumps(settings, sort_keys=True, allow_nan=False))
 
 
+def _normalized_cost_per_commit_handoff(value):
+    """Return effective cost-per-commit settings, or None when not selected."""
+    if value is None:
+        return None
+    from ..runtime.cost_per_commit_handoff import CostPerCommitHandoffSettings
+
+    settings = CostPerCommitHandoffSettings.from_value(value)
+    return None if settings is None else settings.as_dict()
+
+
 def _tree_node_budgets(value, width):
     if value is None:
         return {lane_width: 15 for lane_width in range(1, width + 1)}
@@ -484,6 +494,17 @@ def inspect_external_policy(
     batch_route = policy.get("batch_size_route")
     if batch_route is None and os.environ.get("MLX2_DFLASH_TOPOLOGY") == "tree15":
         raise ValueError("tree15 requires an explicit batch_size_route policy")
+    if (
+        _normalized_cost_per_commit_handoff(policy.get("cost_per_commit_handoff"))
+        is not None
+        and batch_route is not None
+    ):
+        # The batch generator refuses this too, but only after the target
+        # weights load; the policy alone decides it.
+        raise ValueError(
+            "cost-per-commit handoff requires a fixed external route; "
+            "batch_size_route must be null"
+        )
     exact_verification = policy.get("exact_verification", "token")
     if exact_verification not in ("token", "block"):
         raise ValueError("exact_verification must be 'token' or 'block'")
@@ -1036,6 +1057,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 num_draft=count,
                 minimum_proposals=minimum,
             )
+            if "cost_per_commit_handoff" in self.external_policy:
+                # Receipt the effective settings, not a caller's shorthand.
+                cost_handoff = _normalized_cost_per_commit_handoff(
+                    self.external_policy.pop("cost_per_commit_handoff")
+                )
+                if cost_handoff is not None:
+                    self.external_policy["cost_per_commit_handoff"] = cost_handoff
             policy = {}
         else:
             policy.pop("varlen_dense_mlp", None)

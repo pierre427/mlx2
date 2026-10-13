@@ -4047,6 +4047,10 @@ class ExternalDraftBatchGenerator:
                 continue
             if ordinary_probe and lane.uid not in ordinary_probe_uids:
                 continue
+            if not ordinary_probe and lane.uid in ordinary_probe_uids:
+                # A bounded speculative round granted to established peers
+                # is not evidence for a lane without a baseline.
+                continue
             decision = state.observe(
                 kind="ordinary" if ordinary_probe else "speculative",
                 elapsed_ns=elapsed_ns,
@@ -4057,12 +4061,19 @@ class ExternalDraftBatchGenerator:
             )
             if decision is None:
                 continue
-            # The target and draft transaction already committed.  Marking
-            # this lane ordinary only affects the next closed boundary.
-            lane.ordinary = True
+            if not any(
+                getattr(response, "finish_reason", None) is not None
+                for response in lane.ready
+            ):
+                # The target and draft transaction already committed.
+                # Marking this lane ordinary only affects the next closed
+                # boundary.  A lane that finished this round never leaves
+                # speculation: its receipt keeps the decision only.
+                lane.ordinary = True
+                state.mark_handoff_performed()
+                _bump(self.scheduler_stats, "external_cost_handoff_events")
+                _bump(self.scheduler_stats, "external_cost_handoff_lanes")
             lane.cost_handoff_receipt = state.receipt()
-            _bump(self.scheduler_stats, "external_cost_handoff_events")
-            _bump(self.scheduler_stats, "external_cost_handoff_lanes")
             for response in lane.ready:
                 response.speculative_receipt["cost_per_commit_handoff"] = (
                     copy.deepcopy(lane.cost_handoff_receipt)

@@ -54,6 +54,10 @@ def test_width_one_greedy_lane_hands_off_once_after_sustained_loss():
     assert state.handed_off
     assert _observe(state, "speculative", 1000) is None
     assert state.receipt()["observed_used"] is True
+    # A decision alone is not a handoff; the executor records that.
+    assert state.receipt()["decision_reached"] is True
+    assert state.receipt()["handoff_triggered"] is False
+    state.mark_handoff_performed()
     assert state.receipt()["handoff_triggered"] is True
 
 
@@ -189,7 +193,10 @@ def test_native_handoff_detaches_only_losing_lane():
         state=SimpleNamespace(proposal_open=False, lanes=[first, second]),
         _plain_ready=deque(),
         _cost_handoff_states={
-            1: SimpleNamespace(receipt=lambda: {"handoff_triggered": True}),
+            1: SimpleNamespace(
+                receipt=lambda: {"handoff_triggered": True},
+                mark_handoff_performed=lambda: None,
+            ),
             2: object(),
         },
         scheduler_stats={},
@@ -566,7 +573,9 @@ class _RoundClock:
         return getattr(self._real, name)
 
 
-def _drive_native_cost_handoff(monkeypatch, speculative_round_seconds):
+def _drive_native_cost_handoff(
+    monkeypatch, speculative_round_seconds, max_tokens=(16, 16)
+):
     """Run real MTPGenerationBatch rounds with cost_per_commit selected.
 
     Ordinary probe rounds cost one fake second; speculative rounds cost
@@ -644,10 +653,10 @@ def _drive_native_cost_handoff(monkeypatch, speculative_round_seconds):
                 }
             ),
         )
-        reference_uids = reference.insert(prompts, max_tokens=[16, 16])
+        reference_uids = reference.insert(prompts, max_tokens=list(max_tokens))
         uids = generator.insert(
             prompts,
-            max_tokens=[16, 16],
+            max_tokens=list(max_tokens),
             lane_rngs=[LaneRNG(31), LaneRNG(32)],
             self_mtp_configs=[{"sampling_temp": 0.0}] * 2,
         )
@@ -717,4 +726,269 @@ def test_native_self_mtp_keeps_a_faster_speculator(monkeypatch):
         assert evidence["ordinary"]["2"]["samples"] == 2
         assert evidence["speculative"]["2"]["samples"] >= 2
     assert sum(kind == "speculative" for kind, _ in run.rounds) >= 2
+    assert run.leftover_states == {}
+
+
+# R1-2 (codex review of sweep 2026-10-12): one lane missing its baseline
+# forced the whole cohort to depth zero, so continuous arrivals starved the
+# established lanes of speculative rounds and they never decided.
+
+
+def _drive_continuous_arrival(rounds=40, width=4, arrive_every=2):
+    """Two established losing lanes plus a new lane every ``arrive_every``.
+
+    Width stays constant: two late-lane slots are replaced alternately, so
+    each late lane stays ``2 * arrive_every`` rounds and a new one arrives as
+    fast as a baseline fills.  The driver records evidence the way both
+    executors do: a probe round only for lanes missing a baseline, a
+    speculative round only for lanes that have one.
+    """
+    settings = CostPerCommitHandoffSettings(
+        enabled=True,
+        ordinary_samples=2,
+        speculative_samples=2,
+        loss_decisions=2,
+        window=4,
+    )
+    scope = ("tenant-a", "model-a")
+    uids = iter(range(100, 1000))
+    joined = {}
+
+    def new_lane(round_index):
+        uid = next(uids)
+        joined[uid] = round_index
+        return CostPerCommitLaneState(settings, lane_uid=uid, owner_scope=scope)
+
+    established = [
+        CostPerCommitLaneState(settings, lane_uid=uid, owner_scope=scope)
+        for uid in (1, 2)
+    ]
+    for state in established:
+        for _ in range(2):
+            state.observe(
+                kind="ordinary", elapsed_ns=100, committed_tokens=1,
+                execution_width=width, lane_uid=state.lane_uid, owner_scope=scope,
+            )
+    slots = [new_lane(0), new_lane(0)]
+    late = list(slots)
+    baseline_round = {}
+    decisions = {}
+    trace = []
+    for round_index in range(rounds):
+        if round_index and round_index % arrive_every == 0:
+            slot = (round_index // arrive_every) % 2
+            slots[slot] = new_lane(round_index)
+            late.append(slots[slot])
+        states = [*established, *slots]
+        probe = cohort_needs_ordinary_probe(states, width)
+        probe_uids = {
+            state.lane_uid for state in states if state.needs_ordinary_probe(width)
+        }
+        trace.append("ordinary" if probe else "speculative")
+        for state in states:
+            if probe and state.lane_uid not in probe_uids:
+                continue
+            if not probe and state.lane_uid in probe_uids:
+                continue
+            decision = state.observe(
+                kind="ordinary" if probe else "speculative",
+                elapsed_ns=100 if probe else 300,
+                committed_tokens=1 if probe else 2,
+                execution_width=width,
+                lane_uid=state.lane_uid,
+                owner_scope=scope,
+            )
+            if decision is not None:
+                decisions[state.lane_uid] = (round_index, decision)
+            if (
+                state.lane_uid in joined
+                and state.lane_uid not in baseline_round
+                and not state.needs_ordinary_probe(width)
+            ):
+                baseline_round[state.lane_uid] = round_index
+    return SimpleNamespace(
+        settings=settings,
+        established=established,
+        late=late,
+        joined=joined,
+        baseline_round=baseline_round,
+        decisions=decisions,
+        trace=trace,
+    )
+
+
+def test_continuous_arrivals_do_not_starve_established_lanes():
+    run = _drive_continuous_arrival()
+    # Without a bound every round was a cohort probe for the late lanes.
+    assert "speculative" in run.trace, run.trace
+    # Both established (losing) lanes still reach their one-way decision.
+    assert set(run.decisions) >= {1, 2}, (run.decisions, run.trace)
+    cap = run.settings.ordinary_samples
+    for uid in (1, 2):
+        round_index, decision = run.decisions[uid]
+        assert round_index < 20
+        assert decision["one_way"] is True
+        assert decision["speculative_to_ordinary_cost_ratio"] > 1
+    for state in run.established:
+        receipt = state.receipt()
+        assert receipt["decision_reached"] is True
+        assert receipt["probe_blocked_rounds"] > 0
+    # Until they decide, established lanes never wait more than ``cap``
+    # consecutive forced probes for a speculative round.
+    decided = min(round_index for round_index, _ in run.decisions.values())
+    streak = 0
+    for kind in run.trace[: decided + 1]:
+        streak = streak + 1 if kind == "ordinary" else 0
+        assert streak <= cap, run.trace
+
+
+def test_continuous_arrivals_still_finish_each_late_baseline_in_bounded_rounds():
+    run = _drive_continuous_arrival()
+    bound = run.settings.ordinary_samples + 1
+    finished = 0
+    for state in run.late:
+        uid = state.lane_uid
+        if run.joined[uid] + bound > len(run.trace):
+            continue
+        assert uid in run.baseline_round, (uid, run.trace)
+        assert run.baseline_round[uid] - run.joined[uid] < bound
+        finished += 1
+        receipt = state.receipt()
+        assert receipt["ordinary"]["4"]["samples"] >= 2
+    assert finished >= 15
+    # Some late lane had to wait out a granted speculative round.
+    assert any(state.receipt()["probe_deferred_rounds"] for state in run.late)
+
+
+def test_continuous_arrival_trace_is_deterministic():
+    first = _drive_continuous_arrival()
+    second = _drive_continuous_arrival()
+    assert first.trace == second.trace
+    assert {uid: d for uid, (_r, d) in first.decisions.items()} == {
+        uid: d for uid, (_r, d) in second.decisions.items()
+    }
+
+
+def test_external_route_continuous_arrivals_reach_handoff(monkeypatch):
+    settings = CostPerCommitHandoffSettings(
+        enabled=True,
+        ordinary_samples=2,
+        speculative_samples=2,
+        loss_decisions=2,
+        window=4,
+    )
+    width = 3
+
+    def lane_state(uid):
+        return CostPerCommitLaneState(
+            settings, lane_uid=uid, owner_scope=("test", f"scope-{uid}")
+        )
+
+    established = _external_lane(1, lane_state(1))
+    for _ in range(2):
+        established.cost_handoff_state.observe(
+            kind="ordinary", elapsed_ns=100, committed_tokens=1,
+            execution_width=width, lane_uid=1, owner_scope=("test", "scope-1"),
+        )
+    clock = {"now": 0}
+    batch = object.__new__(ExternalDraftBatchGenerator)
+    batch.dynamic_singleton_tree = False
+    batch.binding = "test"
+    batch.scheduler_stats = {}
+    forced = []
+
+    def round_stub(cohort, *, forced_depth=None):
+        forced.append(forced_depth)
+        # Speculation costs 150 ns per committed token, ordinary 100.
+        clock["now"] += 100 if forced_depth == 0 else 300
+        for lane in cohort:
+            lane.generated += 1 if forced_depth == 0 else 2
+
+    batch._round = round_stub
+    monkeypatch.setattr(
+        "mlx2.runtime.external_speculative.time.perf_counter_ns",
+        lambda: clock["now"],
+    )
+    slots = [_external_lane(10, lane_state(10)), _external_lane(11, lane_state(11))]
+    late = list(slots)
+    for round_index in range(30):
+        if round_index and round_index % 2 == 0:
+            uid = 10 + len(late)
+            slots[(round_index // 2) % 2] = _external_lane(uid, lane_state(uid))
+            late.append(slots[(round_index // 2) % 2])
+        batch._round_at_batch_route([established, *slots], concurrent=False)
+        if established.ordinary:
+            break
+    assert established.ordinary is True, forced
+    assert None in forced
+    receipt = established.cost_handoff_receipt
+    assert receipt["decision_reached"] is True
+    assert receipt["handoff_triggered"] is True
+    assert receipt["probe_blocked_rounds"] > 0
+    assert batch.scheduler_stats["external_cost_handoff_lanes"] == 1
+    for lane in late:
+        state = lane.cost_handoff_state
+        if state.needs_ordinary_probe(width):
+            # Still missing a baseline: no speculative evidence was recorded.
+            assert state.receipt()["speculative"].get(str(width), {"samples": 0})[
+                "samples"
+            ] == 0
+
+
+# R1-4: a decision on a lane's final token must not read as a handoff.
+
+
+def test_external_decision_on_final_round_is_not_a_handoff(monkeypatch):
+    settings = CostPerCommitHandoffSettings(
+        enabled=True,
+        ordinary_samples=1,
+        speculative_samples=1,
+        loss_decisions=1,
+    )
+    state = CostPerCommitLaneState(
+        settings, lane_uid=1, owner_scope=("test", "scope-1")
+    )
+    state.observe(
+        kind="ordinary",
+        elapsed_ns=100,
+        committed_tokens=1,
+        execution_width=1,
+        lane_uid=1,
+        owner_scope=("test", "scope-1"),
+    )
+    response = SimpleNamespace(speculative_receipt={}, finish_reason="length")
+    lane = _external_lane(1, state)
+    lane.generated = 1
+    lane.ready.append(response)
+    batch = object.__new__(ExternalDraftBatchGenerator)
+    batch.binding = "test"
+    batch.scheduler_stats = {}
+    monkeypatch.setattr(
+        "mlx2.runtime.external_speculative.time.perf_counter_ns", lambda: 300
+    )
+    batch._observe_cost_handoff_round([lane], [0], 100, ordinary_probe=False)
+    assert lane.ordinary is False
+    assert batch.scheduler_stats == {}
+    evidence = response.speculative_receipt["cost_per_commit_handoff"]
+    assert evidence["decision_reached"] is True
+    assert evidence["handoff_triggered"] is False
+    assert lane.cost_handoff_receipt == evidence
+
+
+def test_native_decision_on_final_token_is_not_a_handoff(monkeypatch):
+    # R1-4: two probes, then the third losing speculative round both decides
+    # and emits the sixth (final) token.  The lane never leaves MTP.
+    run = _drive_native_cost_handoff(
+        monkeypatch, speculative_round_seconds=10.0, max_tokens=(6, 6)
+    )
+    assert [kind for kind, _ in run.rounds] == ["ordinary"] * 2 + ["speculative"] * 3
+    assert "mtp_ordinary_handoff_lanes" not in run.stats
+    assert "mtp_ordinary_handoff_cost_per_committed_token" not in run.stats
+    for response in run.terminal:
+        receipt = response.mtp_receipt
+        assert receipt["route"] == "segmented_self_mtp"
+        evidence = receipt["cost_per_commit_handoff"]
+        assert evidence["decision_reached"] is True
+        assert evidence["decision"]["reason"] == "cost_per_committed_token"
+        assert evidence["handoff_triggered"] is False
     assert run.leftover_states == {}

@@ -231,6 +231,7 @@ class CostAwarePLDLatch:
             )
             if decision is not None:
                 self.state = "handed_off"
+                self.handoff_state.mark_handoff_performed()
                 self.reprobe_at = (1 << 62) - 1
                 self.shadow = ()
                 self.shadow_hits.clear()

@@ -17,6 +17,11 @@ only use the speculative samples that directly follow an ordinary baseline
 A sustained loss against an older baseline does not decide: it discards both
 windows and asks for a fresh ordinary probe at the current context.  A
 speculator that keeps winning pays no extra probes.
+
+A decision is not a handoff.  ``decision_reached`` records the terminal
+policy decision; ``handoff_triggered`` is set only by the executor that
+actually moves the lane to ordinary decode (``mark_handoff_performed``).  A
+lane whose decision lands on its final token finishes without a handoff.
 """
 
 from __future__ import annotations
@@ -145,7 +150,15 @@ class CostPerCommitLaneState:
         # last sampled; bounds how stale a baseline a decision may use.
         self._speculative_since_ordinary: dict[int, int] = {}
         self._ordinary_refreshes = 0
+        # Cohort probe accounting (see cohort_needs_ordinary_probe): forced
+        # depth-zero rounds while this lane's own baseline was complete, the
+        # current consecutive run of them, and speculative rounds granted to
+        # blocked peers while this lane still lacked its baseline.
+        self._probe_blocked_rounds = 0
+        self._probe_blocked_streak = 0
+        self._probe_deferred_rounds = 0
         self._decision: dict[str, Any] | None = None
+        self._handoff_performed = False
         self._cancelled = False
         self._invalid_samples = 0
         self._observations = 0
@@ -169,6 +182,12 @@ class CostPerCommitLaneState:
     @property
     def handed_off(self) -> bool:
         return self._decision is not None
+
+    def mark_handoff_performed(self) -> None:
+        """Record that the executor moved this lane to ordinary decode."""
+        if self._decision is None:
+            raise RuntimeError("cost-per-commit handoff requires a decision")
+        self._handoff_performed = True
 
     def cancel(self) -> None:
         self._cancelled = True
@@ -280,7 +299,8 @@ class CostPerCommitLaneState:
             "defaulted": False,
             "observed_used": self._observations > 0,
             "observed_sampling": self._valid_samples > 0,
-            "handoff_triggered": self._decision is not None,
+            "decision_reached": self._decision is not None,
+            "handoff_triggered": self._handoff_performed,
             "one_way": True,
             "scope": "request_lane",
             "settings": self.settings.as_dict(),
@@ -290,23 +310,60 @@ class CostPerCommitLaneState:
             "cancelled": self._cancelled,
             "invalid_samples": self._invalid_samples,
             "ordinary_refreshes": self._ordinary_refreshes,
+            "probe_blocked_rounds": self._probe_blocked_rounds,
+            "probe_deferred_rounds": self._probe_deferred_rounds,
             "observations": self._observations,
             "valid_samples": self._valid_samples,
         }
 
 
 def cohort_needs_ordinary_probe(states, execution_width: int) -> bool:
-    """One late lane makes the whole physical cohort run an ordinary probe.
+    """Decide whether this physical round is a cohort-wide ordinary probe.
 
     Native and external batching cannot mix verify depths inside one physical
-    cohort.  Existing lanes may collect another ordinary sample; their
-    speculative windows remain intact, while the late lane is guaranteed to
-    finish its own baseline.
+    cohort, so a lane that lacks its ordinary baseline (a late join, or a
+    stale-baseline refresh) forces the whole cohort to depth zero.  Executors
+    record that probe only for the lanes that need it; established lanes keep
+    their windows but collect nothing.
+
+    The forced run is bounded so continuous arrivals cannot starve
+    established lanes: once an established lane has been held at depth zero
+    for ``ordinary_samples`` consecutive rounds, the next round is
+    speculative for the whole cohort.  Executors do not record that round for
+    lanes still missing a baseline.  Hence an established lane runs
+    speculative at least once every ``ordinary_samples + 1`` rounds, and a
+    late lane (same settings) completes its baseline within
+    ``ordinary_samples + 1`` rounds of joining.
+
+    Call this exactly once per physical round: it records the round's probe
+    accounting on each lane state.  The result depends only on that call
+    sequence, so decisions stay deterministic.
     """
-    return any(
-        state is not None and state.needs_ordinary_probe(execution_width)
+    width = int(execution_width)
+    live = [
+        state
         for state in states
-    )
+        if state is not None
+        and state._decision is None
+        and not state._cancelled
+    ]
+    needing = [state for state in live if state.needs_ordinary_probe(width)]
+    blocked = [state for state in live if not state.needs_ordinary_probe(width)]
+    for state in needing:
+        state._probe_blocked_streak = 0
+    if needing and not any(
+        state._probe_blocked_streak >= state.settings.ordinary_samples
+        for state in blocked
+    ):
+        for state in blocked:
+            state._probe_blocked_streak += 1
+            state._probe_blocked_rounds += 1
+        return True
+    for state in blocked:
+        state._probe_blocked_streak = 0
+    for state in needing:
+        state._probe_deferred_rounds += 1
+    return False
 
 
 __all__ = [

@@ -879,3 +879,85 @@ def test_block_verification_is_bound_into_the_numerics_contract(tmp_path):
         {"execution_policy": {"exact_verification": "block"}}
     )
     assert unqualifiable_candidate({"execution_policy": {"exact_verification": "token"}}) is None
+
+
+# R1-3 (codex review of sweep 2026-10-12): cost-per-commit handoff needs a
+# fixed external route, but the tree batch_size_route conflict surfaced only
+# when ExternalDraftBatchGenerator was built, after the 27B weights loaded.
+
+
+@pytest.mark.parametrize("value", [True, {"enabled": True}, {"window": 32}])
+def test_cost_handoff_with_tree_route_is_refused_at_inspection(
+    tmp_path, monkeypatch, value
+):
+    from mlx2.adapters import qwen38_27b, qwen38_tensorfold_source
+
+    target, draft = _write_artifacts(tmp_path)
+    policy = {
+        **_pins(target, draft),
+        "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
+        "cost_per_commit_handoff": value,
+    }
+    monkeypatch.setattr(qwen38_tensorfold_source, "validate_source", lambda: None)
+
+    def no_artifact_reads(*_args, **_kwargs):
+        raise AssertionError("artifact payload inspected before the policy conflict")
+
+    monkeypatch.setattr(qwen38_27b, "_inspect_target_content", no_artifact_reads)
+    monkeypatch.setattr("mlx2.adapters.dflash2.inspect_drafter", no_artifact_reads)
+    with pytest.raises(ValueError, match="cost-per-commit handoff requires a fixed"):
+        qwen38_27b.inspect_external_policy(policy, target)
+
+
+def test_cost_handoff_settings_are_validated_at_inspection(tmp_path, monkeypatch):
+    from mlx2.adapters import qwen38_27b
+
+    target, draft = _write_artifacts(tmp_path)
+    pins = _pins(target, draft)
+
+    def no_artifact_reads(*_args, **_kwargs):
+        raise AssertionError("artifact payload inspected before policy validation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(qwen38_27b, "_inspect_target_content", no_artifact_reads)
+        with pytest.raises(ValueError, match="unknown cost-per-commit"):
+            qwen38_27b.inspect_external_policy(
+                {**pins, "cost_per_commit_handoff": {"mystery": 1}}, target
+            )
+        with pytest.raises(ValueError, match="window must cover"):
+            qwen38_27b.inspect_external_policy(
+                {**pins, "cost_per_commit_handoff": {"window": 1}}, target
+            )
+    # The fixed chain route accepts it; a disabled setting never conflicts.
+    assert qwen38_27b.inspect_external_policy(
+        {**pins, "cost_per_commit_handoff": {"enabled": True}}, target
+    )["args"].block_size == 8
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", str(tmp_path / "unused"))
+    monkeypatch.setattr(
+        "mlx2.adapters.qwen38_tensorfold_source.validate_source", lambda: None
+    )
+    assert qwen38_27b.inspect_external_policy(
+        {
+            **pins,
+            "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
+            "cost_per_commit_handoff": False,
+        },
+        target,
+    )["args"].block_size == 8
+
+
+def test_cost_handoff_settings_normalize_to_effective_receipt_form():
+    from mlx2.adapters.qwen38_27b import _normalized_cost_per_commit_handoff
+
+    assert _normalized_cost_per_commit_handoff(None) is None
+    assert _normalized_cost_per_commit_handoff(False) is None
+    assert _normalized_cost_per_commit_handoff({"enabled": False}) is None
+    assert _normalized_cost_per_commit_handoff(True) == {
+        "enabled": True,
+        "ordinary_samples": 4,
+        "speculative_samples": 4,
+        "loss_ratio": 0.97,
+        "loss_decisions": 3,
+        "window": 16,
+    }
+    assert _normalized_cost_per_commit_handoff({"loss_ratio": 1})["loss_ratio"] == 1.0
