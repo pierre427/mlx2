@@ -100,9 +100,13 @@ def test_pld_rollback_preflights_every_provider_before_mutating_any_cache():
         pass
 
     first = KVCache()
-    _append(first, 5)
-    unknown = UnknownKV()
+    _append(first, 2)
+    # Snapshot below the live offset, so a restore that ran before the
+    # refusal would be visible as offset 2.
     first_snapshot = _snapshot([first])[0]
+    _append(first, 3)
+    assert first.offset == 5
+    unknown = UnknownKV()
     with pytest.raises(CacheOperationsUnsupported, match="explicit"):
         _rewind([first, unknown], [first_snapshot, ("invalid",)])
     assert first.offset == 5

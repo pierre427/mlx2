@@ -1,5 +1,6 @@
 """Host-only admission checks for explicit native serving attachment."""
 
+import inspect
 import sys
 from pathlib import Path
 from threading import RLock
@@ -10,33 +11,26 @@ import pytest
 from mlx2 import serving
 
 
-class _Provider:
-    revision = "r1"
-    protocol = "native-test"
-    candidate_type = object
+def _bind_real_provider(candidate):
+    """Bind the adapter's real provider so serving's call shape is exercised."""
+    from mlx2.adapters.native_continuation import bind_qwen_native_continuation_provider
 
-    def validate_candidate(self, candidate):
-        assert candidate._native_continuation_provider is self
+    candidate.model = SimpleNamespace(name="model")
+    return bind_qwen_native_continuation_provider(
+        candidate, "r1", candidate.model, "native-test")
 
-    def probe(self, *args, candidate, **kwargs):
-        from mlx2.runtime.paged_native_batch_lifecycle import probe_queued_native_qwen3
-        return probe_queued_native_qwen3(*args, candidate, **kwargs)
 
-    def prepare(self, *args, **kwargs):
-        from mlx2.runtime.paged_native_batch_lifecycle import prepare_queued_native_first_response
-        return prepare_queued_native_first_response(*args, **kwargs)
+def _signature_bound(real, record, result):
+    """Stub that binds arguments exactly as the real lifecycle function would."""
 
-    def create_continuation(self, **kwargs):
-        return kwargs
+    def stub(*args, **kwargs):
+        bound = inspect.signature(real).bind(*args, **kwargs)
+        record.append((args, kwargs, bound.arguments))
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
-    def run_research(self, *args, candidate, **kwargs):
-        raise AssertionError("unused")
-
-    def run_research_pair(self, *args, candidate, **kwargs):
-        raise AssertionError("unused")
-
-    def receipt(self):
-        return {"route": self.protocol}
+    return stub
 
 
 def _job(**request):
@@ -82,7 +76,9 @@ def test_native_attach_uses_live_identity_price_then_installs_or_retires(monkeyp
     probe = SimpleNamespace(native_probe=SimpleNamespace(published=True), reason="accepted")
     probes = []
     monkeypatch.setattr(paged_native_batch_lifecycle, "probe_queued_native_qwen3",
-                        lambda *args, **kwargs: (probes.append((args, kwargs)) or probe))
+                        _signature_bound(
+                            paged_native_batch_lifecycle.probe_queued_native_qwen3,
+                            probes, probe))
     monkeypatch.setattr(paged_native_batch_lifecycle,
                         "prepare_queued_native_first_response",
                         lambda *_, **__: "prepared")
@@ -96,7 +92,7 @@ def test_native_attach_uses_live_identity_price_then_installs_or_retires(monkeyp
                              poisoned=False, pending_epochs=(),
                              ledger=SimpleNamespace(pending_count=0))
     candidate = SimpleNamespace(backend=SimpleNamespace(writer=writer))
-    candidate._native_continuation_provider = _Provider()
+    _bind_real_provider(candidate)
     created = []
     adapter = SimpleNamespace(
         identity={"path": "/tmp/model", "fingerprint": "r1"},
@@ -110,6 +106,8 @@ def test_native_attach_uses_live_identity_price_then_installs_or_retires(monkeyp
         mlx_wheel_path="wheel")
     assert result["selected"]
     assert not retired
+    assert probes[0][2]["candidate"] is candidate
+    assert probes[0][2]["offers"][0].lane_id == 3
     assert calls[0][1]["adapter_artifact_root"] == Path("/tmp/model").resolve()
     warm = _job()
     warm.cached_tokens = 2
@@ -176,7 +174,9 @@ def test_native_attach_retains_owner_if_retirement_raises(monkeypatch, tmp_path)
     price_path = tmp_path / "price.json"
     price_path.write_text('{"measurement_scope":"complete_request"}')
     monkeypatch.setattr(paged_native_batch_lifecycle, "probe_queued_native_qwen3",
-                        lambda *_, **__: (_ for _ in ()).throw(RuntimeError("probe failed")))
+                        _signature_bound(
+                            paged_native_batch_lifecycle.probe_queued_native_qwen3,
+                            [], RuntimeError("probe failed")))
 
     class PendingOwner:
         fully_retired = False
@@ -196,7 +196,7 @@ def test_native_attach_retains_owner_if_retirement_raises(monkeypatch, tmp_path)
         create_native_paged_qwen3_request=lambda **_: (owner, candidate))
     candidate = SimpleNamespace(backend=SimpleNamespace(
         writer=SimpleNamespace(pool=SimpleNamespace(free_count=8))))
-    candidate._native_continuation_provider = _Provider()
+    _bind_real_provider(candidate)
     with pytest.raises(RuntimeError, match="terminal pending"):
         serving.install_explicit_native_qwen3_request(
             object(), adapter, _job(), prompt_tokens=[1, 2], maximum=2,

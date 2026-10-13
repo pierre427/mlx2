@@ -14,7 +14,7 @@ from ..adapters.qwen3_paged_candidate import PackedLane, Qwen3PackedCandidate
 from .generate import GenerationBatch, StopSequenceMatcher, _invalid_output_reason
 from .paged_native_atomic_owner import NativeAtomicRequestOwner
 from .paged_request_transaction import CandidateRequest
-from .paged_native_contract import native_layer_count
+from .paged_native_contract import native_layer_count, supports_native_checkpoint_candidate
 
 
 _NO_GRAPH_LOGITS = object()
@@ -35,7 +35,8 @@ class NativeQwen3Continuation:
         if (type(uid) is not int or uid < 0 or not revision or not prompt_tokens or
                 type(maximum) is not int or maximum < 1 or
                 type(owner) is not NativeAtomicRequestOwner or
-                type(candidate) is not Qwen3PackedCandidate or
+                (type(candidate) is not Qwen3PackedCandidate and
+                 not supports_native_checkpoint_candidate(candidate)) or
                 not callable(sampler) or type(matcher) is not StopSequenceMatcher):
             raise ValueError("incomplete native continuation state")
         if owner.supported_planes != getattr(candidate, "state_planes", ("kv",)) or owner.atomic_publish is not True:

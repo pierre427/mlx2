@@ -1682,7 +1682,15 @@ def attach_segmented_self_mtp_lanes(
                 row_caches=staged_joining,
                 transactions=staged_joining_transactions,
                 membership_epoch=1,
-                shared_state_identity=shared_prefix_id,
+                # A declared provider sees the shared prefix only when it
+                # planned one; a provider without shared-prefix planning
+                # would refuse the view. Without a provider the generic
+                # view keeps its own attested-prefix handling.
+                shared_state_identity=(
+                    shared_prefix_id
+                    if operations is None or plan is not None
+                    else None
+                ),
                 state_plane_operations=operations,
                 state_plane_binding=binding,
             )
@@ -1932,6 +1940,54 @@ def _restore_segmented_recovery(batch: SegmentedSelfMTPState) -> None:
     note_segmented_self_mtp("recovery_checkpoint_restores", len(restored_pairs))
 
 
+class _SegmentedViewDeclined(RuntimeError):
+    """The segmented rows cannot form one exact batched compute view."""
+
+
+def _build_segmented_compute_view(batch: SegmentedSelfMTPState):
+    """Build the batched compute view over a segmented cohort's B1 rows.
+
+    A declared state-plane provider owns the view. A model that declares no
+    provider uses the generic segmented view, which refuses any cache it
+    cannot represent exactly. A declared provider without view operations,
+    or one that refuses, declines; the reason is counted for the receipt.
+    """
+    from .segmented_self_mtp import note_segmented_self_mtp
+
+    operations = batch.state_plane_operations
+    shared_prefix = batch.shared_state_identity is not None
+    if operations is None:
+        from .segmented_batch_cache import build_segmented_batch_cache_pair
+
+        try:
+            view = build_segmented_batch_cache_pair(
+                batch.row_caches,
+                note=note_segmented_self_mtp,
+                shared_qsa_prefix=shared_prefix,
+            )
+        except (ValueError, TypeError) as error:
+            note_segmented_self_mtp("true_batched_declined_view_refused")
+            raise _SegmentedViewDeclined(str(error)) from error
+        note_segmented_self_mtp("true_batched_generic_view")
+        return view
+    if not isinstance(operations, SegmentedViewOperations):
+        note_segmented_self_mtp("true_batched_declined_no_view_operations")
+        raise _SegmentedViewDeclined(
+            "the declared state-plane provider has no segmented view operations"
+        )
+    try:
+        view = operations.build_segmented_view(
+            batch.row_caches,
+            note=note_segmented_self_mtp,
+            shared_prefix=shared_prefix,
+        )
+        operations.validate_segmented_view(view, batch.row_caches)
+    except (StatePlaneOperationRefused, ValueError, TypeError) as error:
+        note_segmented_self_mtp("true_batched_declined_view_refused")
+        raise _SegmentedViewDeclined(str(error)) from error
+    return view
+
+
 def _model_allows_segmented_true_batch(model: nn.Module) -> bool:
     """Whether a model's MTP verifier can consume a prepared segmented step.
 
@@ -1984,22 +2040,11 @@ def _propose_segmented_self_mtp(
             note_segmented_self_mtp("true_batched_requests")
             compute_caches = batch._segmented_caches
             if compute_caches is None:
-                operations = batch.state_plane_operations
-                if not isinstance(operations, SegmentedViewOperations):
+                try:
+                    compute_caches = _build_segmented_compute_view(batch)
+                except _SegmentedViewDeclined:
                     note_segmented_self_mtp("true_batched_declined")
-                else:
-                    try:
-                        compute_caches = operations.build_segmented_view(
-                        batch.row_caches,
-                        note=note_segmented_self_mtp,
-                            shared_prefix=batch.shared_state_identity is not None,
-                        )
-                        operations.validate_segmented_view(
-                            compute_caches, batch.row_caches
-                        )
-                    except (StatePlaneOperationRefused, ValueError, TypeError):
-                        note_segmented_self_mtp("true_batched_declined")
-                        compute_caches = None
+                    compute_caches = None
             if compute_caches is not None:
                 batch._segmented_caches = compute_caches
                 batched_state = BatchedSelfMTPState(
@@ -2273,23 +2318,11 @@ def advance_batched_self_mtp_zero(
             transaction.validate(pair, lane, transaction.position)
         compute_caches = batch._segmented_caches
         if compute_caches is None:
-            operations = batch.state_plane_operations
-            if not isinstance(operations, SegmentedViewOperations):
-                raise ZeroDepthFastUnavailable(
-                    "segmented K=0 fast path has no state-plane provider"
-                )
             try:
-                compute_caches = operations.build_segmented_view(
-                    batch.row_caches,
-                    note=note_segmented_self_mtp,
-                    shared_prefix=batch.shared_state_identity is not None,
-                )
-                operations.validate_segmented_view(
-                    compute_caches, batch.row_caches
-                )
-            except (StatePlaneOperationRefused, ValueError, TypeError) as error:
+                compute_caches = _build_segmented_compute_view(batch)
+            except _SegmentedViewDeclined as error:
                 raise ZeroDepthFastUnavailable(
-                    "segmented K=0 fast path requires a batched cache view"
+                    f"segmented K=0 fast path requires a batched cache view: {error}"
                 ) from error
         batch._segmented_caches = compute_caches
         target_caches = compute_caches.target

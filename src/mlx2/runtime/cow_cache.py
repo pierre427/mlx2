@@ -810,8 +810,14 @@ def _clone_graph(
             f"cannot copy {type(value).__module__}.{type(value).__name__}"
         ) from error
     memo[ident] = clone
-    nested_contract = cache_operations(
-        value, capability="APCv2 COW nested plane classification", required=False
+    # Everything below an MTP-draft sidecar stays on the inherited draft
+    # plane; its nested target-family contract must not reclassify it.
+    nested_contract = (
+        None
+        if plane == "draft_mtp"
+        else cache_operations(
+            value, capability="APCv2 COW nested plane classification", required=False
+        )
     )
     if nested_contract is None:
         clone_plane = plane

@@ -34,6 +34,11 @@ class QwenNativeContinuationProvider:
         self.validate_candidate(candidate)
         from ..runtime.paged_native_batch_lifecycle import probe_queued_native_qwen3
 
+        # ``candidate`` is the lifecycle's fifth positional parameter, and
+        # serving passes capability, reserved rows and offers positionally
+        # after the owner. Restore that position instead of binding it twice.
+        if len(args) >= 4:
+            return probe_queued_native_qwen3(*args[:4], candidate, *args[4:], **kwargs)
         return probe_queued_native_qwen3(*args, candidate=candidate, **kwargs)
 
     def prepare(self, *args, **kwargs):

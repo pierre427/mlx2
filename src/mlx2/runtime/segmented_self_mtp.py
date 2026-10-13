@@ -35,6 +35,12 @@ _ZERO = {
     "true_batched_requests": 0,
     "true_batched_engaged": 0,
     "true_batched_declined": 0,
+    # Why a segmented cohort did or did not get a batched compute view: the
+    # generic view (no state-plane provider declared), a declared provider
+    # without view operations, or a provider/view refusal.
+    "true_batched_generic_view": 0,
+    "true_batched_declined_no_view_operations": 0,
+    "true_batched_declined_view_refused": 0,
     "live_width_change_deferrals": 0,
     "layer_local_materializations": 0,
     "recurrent_state_materializations": 0,
