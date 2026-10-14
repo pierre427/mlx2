@@ -7299,10 +7299,11 @@ class ServingEngine:
         """Default draft-loop topology when the lane matmul covers the model.
 
         Runs the load-time verify-topology probe (cached per device, MLX
-        build, model and lane law) and adds the selected ``draft_loop`` to
-        the self-MTP execution policy.  An operator-supplied ``draft_loop``,
-        ``--draft-loop off``, a route other than self-MTP, or a model the
-        lane matmul does not cover leaves the policy unchanged.
+        build, model, adapter execution levers and lane law) and adds the
+        selected ``draft_loop`` to the self-MTP execution policy.  An
+        operator-supplied ``draft_loop``, ``--draft-loop off``, a route other
+        than self-MTP, or a model the lane matmul does not cover leaves the
+        policy unchanged.
 
         An adapter that declares an exact self-MTP row window caps the end
         depths the probe may consider (window - 1 drafts); an operator or
@@ -7387,6 +7388,8 @@ class ServingEngine:
         )
         tokenizer = adapter.tokenizer
         prompt = list(tokenizer.encode(vt.PROBE_TEXT))
+        as_dict = getattr(getattr(adapter, "policy", None), "as_dict", None)
+        adapter_policy = as_dict() if callable(as_dict) else None
         receipt = vt.resolve_topology(
             adapter.model,
             identity={
@@ -7394,6 +7397,12 @@ class ServingEngine:
                 "mlx": mx.__version__,
                 "adapter": type(adapter).__name__,
                 "artifact": adapter.identity["fingerprint"],
+                # The same artifact runs other kernels under other adapter
+                # levers; route identity carries both (see the status
+                # settings), and so must the cached cycle costs.
+                "execution": vt.execution_digest(
+                    getattr(adapter, "environment", None), adapter_policy
+                ),
                 "lane_law": self.lane_matmul_receipt.get("law_id"),
                 "draft_loop_prior_resource": prior_resource,
                 "exact_self_mtp_rows": (

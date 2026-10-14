@@ -483,3 +483,54 @@ def test_cli_widths_reach_the_engine():
         args, None, native_mtp=True, approximate_kv=None, max_request_bytes=1 << 20
     )
     assert kwargs["draft_loop_widths"] == "1"
+
+
+def test_probe_cache_is_keyed_by_the_adapter_execution_levers(tmp_path, monkeypatch):
+    """TensorFold #756's failure shape: a cost cache keyed by checkpoint shape
+    let one configuration's draft-window costs steer another's depth.  Here
+    the artifact fingerprint is pinned, but the adapter's execution levers
+    (environment switches such as fused GDN or eager dispatch, and its
+    route policy such as a reduced draft vocabulary) change what a verify
+    cycle costs.  A load under other levers must time its own cycles, not
+    read the cached selection of the first load; the same levers still hit
+    the cache."""
+    from mlx2.serving import ServingEngine
+
+    monkeypatch.setenv("MLX2_VERIFY_TOPOLOGY_CACHE", str(tmp_path))
+    probes = []
+
+    def rows(model, vocab, max_rows, reps=3):
+        probes.append("rows")
+        return {r: 0.04 if r <= 8 else 0.06 for r in range(1, max_rows + 1)}
+
+    def cycles(model, prompt, depths, **kwargs):
+        return {int(d): 0.15 for d in depths}
+
+    monkeypatch.setattr(vt, "probe_row_costs", rows)
+    monkeypatch.setattr(vt, "probe_cycle_costs", cycles)
+
+    def adapter(environment, policy=None):
+        made = _adapter()
+        made.environment = environment
+        if policy is not None:
+            made.policy = SimpleNamespace(as_dict=lambda: dict(policy))
+        return made
+
+    def load(made):
+        engine = _engine()
+        ServingEngine._select_draft_loop(engine, made, {"num_draft": 3})
+        return engine.verify_topology_receipt
+
+    first = load(adapter({"MLX_GDN_CORE": "0"}))
+    assert first["source"] == "probe"
+    # Falsifier: the identical configuration reads its own cache entry.
+    assert load(adapter({"MLX_GDN_CORE": "0"}))["source"] == "cache"
+    assert len(probes) == 1
+    # Same checkpoint, another environment lever: its own probe.
+    fused = load(adapter({"MLX_GDN_CORE": "0", "MLX2_QWEN38_FUSED_GDN": "1"}))
+    assert fused["source"] == "probe" and len(probes) == 2
+    # Same checkpoint and environment, another adapter route policy.
+    vocab = load(adapter({"MLX_GDN_CORE": "0"}, {"mtp_draft_vocab": "top32k"}))
+    assert vocab["source"] == "probe" and len(probes) == 3
+    assert first["key"]["identity"]["artifact"] == fused["key"]["identity"]["artifact"]
+    assert first["key"]["identity"]["execution"] != fused["key"]["identity"]["execution"]

@@ -18,8 +18,8 @@ module measures that at load and picks the topology:
    predicted ms per token, or no loop when no end beats fixed depth by
    ``MIN_PREDICTED_GAIN``.
 
-The result is cached per device, MLX build, model identity, lane law and
-base depth, so only the first load of a configuration pays for the probe.
+The result is cached per device, MLX build, model identity, adapter
+execution levers, lane law and base depth, so only the first load of a configuration pays for the probe.
 Original mlx2 code; see ``provenance/dloop-untrained-gate.json``.
 """
 
@@ -295,6 +295,26 @@ def self_mtp_digest(self_mtp: Optional[Mapping[str, Any]]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def execution_digest(
+    environment: Optional[Mapping[str, Any]] = None,
+    adapter_policy: Optional[Mapping[str, Any]] = None,
+) -> str:
+    """Stable digest of the adapter execution levers a cycle ran under.
+
+    The artifact fingerprint pins the checkpoint, but the same checkpoint
+    runs other kernels under other adapter environment switches (fused GDN,
+    eager dispatch, compiled decode) or route policy (a reduced draft
+    vocabulary, row-exact verify), so its cycles cost differently.  Keying
+    the cached selection without them let one configuration's costs steer
+    another's draft depth (TensorFold #756's draft-window cost cache keyed
+    by model shape).  Non-JSON values are digested by their repr."""
+    encoded = json.dumps(
+        {"environment": dict(environment or {}), "adapter_policy": dict(adapter_policy or {})},
+        sort_keys=True, default=repr,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def cache_key(parts: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:32]
 
@@ -321,7 +341,8 @@ def resolve_topology(
     """Probe (or load) this host's verify topology and select a draft loop.
 
     ``identity`` must pin everything that changes costs: device, MLX build,
-    model fingerprint and lane law.  Returns a receipt; ``selected`` is a
+    model fingerprint, lane law and the adapter's execution levers
+    (``execution_digest``).  Returns a receipt; ``selected`` is a
     ``draft_loop`` policy mapping or None.
     """
     grid = dict(prior or load_prior_grid())
@@ -388,6 +409,6 @@ def resolve_topology(
 
 __all__ = [
     "DEFAULT_THRESHOLD", "PRIOR_RESOURCE", "load_prior_grid", "prior_at", "threshold_range", "MIN_PREDICTED_GAIN", "SCHEMA",
-    "candidate_ends", "predict", "probe_cycle_costs", "probe_row_costs",
+    "candidate_ends", "execution_digest", "predict", "probe_cycle_costs", "probe_row_costs",
     "resolve_topology", "select_topology", "self_mtp_digest", "tile_edges",
 ]

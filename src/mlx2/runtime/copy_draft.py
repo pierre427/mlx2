@@ -87,6 +87,16 @@ class CopyDraftPolicy:
     strong_match: int = 0
     strong_max_span: int = 0
     initial_span: Optional[int] = None
+    # Measured round cost per verify-row count (any unit), for example the
+    # verify-topology probe's ``row_cost_ms``.  When set, a round's verify
+    # cost is that table at its rows (linear between listed counts, extended
+    # past the widest by its last slope, flat if that slope falls) over the
+    # one-row cost, in place of ``1 + verify_row_cost * rows``;
+    # ``draft_step_cost`` still prices head drafting.  Lane kernels cost about the same up to a tile edge, so the
+    # linear model overprices wide copies there.  Design input: TensorFold
+    # #788 CostDepth (measured window cost per width).  None (the default)
+    # keeps the linear model and leaves receipts unchanged.
+    verify_row_costs: Optional[tuple] = None
 
     def __post_init__(self):
         if not isinstance(self.enabled, bool):
@@ -125,6 +135,24 @@ class CopyDraftPolicy:
                 raise ValueError(
                     "copy-draft initial_span must be <= max(max_span, strong_max_span)"
                 )
+        if self.verify_row_costs is not None:
+            object.__setattr__(
+                self, "verify_row_costs", _row_cost_table(self.verify_row_costs)
+            )
+            # Every verify width a copy round can reach must price positive
+            # and finite (the gate's ratio of sums assumes it). The cost is
+            # piecewise linear in rows, so its extremes over [1, ceiling + 1]
+            # lie at the endpoints or at measured rows: check only those, so
+            # an unclamped max_span cannot make construction loop for ever.
+            last = self.span_ceiling + 1
+            checked = {1, last}
+            checked.update(rows for rows, _ in self.verify_row_costs if 1 <= rows <= last)
+            for rows in sorted(checked):
+                cost = _row_cost(self.verify_row_costs, rows)
+                if not (math.isfinite(cost) and cost > 0):
+                    raise ValueError(
+                        f"copy-draft verify_row_costs prices {rows} verify rows at {cost}"
+                    )
 
     @classmethod
     def from_value(cls, value: Any) -> "CopyDraftPolicy":
@@ -149,6 +177,12 @@ class CopyDraftPolicy:
         for name in _MATCH_FIELDS:
             if values[name] == _MATCH_DEFAULTS[name]:
                 del values[name]
+        if self.verify_row_costs is None:
+            del values["verify_row_costs"]
+        else:
+            values["verify_row_costs"] = {
+                str(rows): cost for rows, cost in self.verify_row_costs
+            }
         return values
 
     @property
@@ -187,11 +221,70 @@ class CopyDraftPolicy:
             ),
         )
 
+    def _verify_cost(self, proposals: int) -> float:
+        """Cost of verifying ``proposals`` rows past the pending token, in
+        units of a one-row round."""
+        proposals = max(int(proposals), 0)
+        if self.verify_row_costs is None:
+            return 1.0 + self.verify_row_cost * proposals
+        return _row_cost(self.verify_row_costs, proposals + 1) / self.verify_row_costs[0][1]
+
     def head_cost(self, depth: int) -> float:
-        return 1.0 + (self.draft_step_cost + self.verify_row_cost) * max(int(depth), 0)
+        return self._verify_cost(depth) + self.draft_step_cost * max(int(depth), 0)
 
     def copy_cost(self, span: int) -> float:
-        return 1.0 + self.verify_row_cost * max(int(span), 0)
+        return self._verify_cost(span)
+
+
+def _row_cost_table(value: Any) -> tuple:
+    """``verify_row_costs`` as sorted ``((rows, cost), ...)`` starting at one row."""
+    # A mapping (policy JSON) or the normalized pairs (``dataclasses.replace``).
+    if isinstance(value, Mapping):
+        items = list(value.items())
+    elif isinstance(value, tuple) and all(
+        isinstance(item, tuple) and len(item) == 2 for item in value
+    ):
+        items = list(value)
+    else:
+        raise ValueError("copy-draft verify_row_costs must map verify rows to costs")
+    table = {}
+    for rows, cost in items:
+        if isinstance(rows, str) and rows.isdigit():
+            rows = int(rows)
+        if isinstance(rows, bool) or not isinstance(rows, int) or rows < 1:
+            raise ValueError("copy-draft verify_row_costs rows must be integers >= 1")
+        if (
+            isinstance(cost, bool)
+            or not isinstance(cost, (int, float))
+            or not math.isfinite(float(cost))
+            or cost <= 0
+        ):
+            raise ValueError("copy-draft verify_row_costs costs must be finite and positive")
+        table[rows] = float(cost)
+    if 1 not in table:
+        raise ValueError("copy-draft verify_row_costs must include the one-row cost")
+    return tuple(sorted(table.items()))
+
+
+def _row_cost(table: tuple, rows: int) -> float:
+    """Cost at ``rows``: linear between listed counts, past the widest by the
+    last segment's slope when it rises and flat otherwise.
+
+    Listed points are measurements and are kept as given, noise included;
+    between positive points the interpolation stays positive.  Past the
+    widest count there is no evidence that cost keeps falling, so a falling
+    last segment (noise) extends flat at the last measurement instead of
+    running toward zero and below."""
+    for (low, low_cost), (high, high_cost) in zip(table, table[1:]):
+        if low <= rows <= high:
+            return low_cost + (high_cost - low_cost) * (rows - low) / (high - low)
+    if rows <= table[0][0]:
+        return table[0][1]
+    if len(table) == 1:
+        return table[-1][1]
+    (low, low_cost), (high, high_cost) = table[-2], table[-1]
+    slope = max(0.0, (high_cost - low_cost) / (high - low))
+    return high_cost + slope * (rows - high)
 
 
 _MATCH_DEFAULTS = {
