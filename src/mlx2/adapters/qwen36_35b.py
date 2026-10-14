@@ -131,6 +131,8 @@ def inspect_artifact(model_path: str | Path) -> dict:
         key for key in weight_map if key.startswith(("language_model.mtp.", "mtp."))
     ]
     has_mtp = bool(mtp_keys)
+    if has_mtp and config.get("mlx2_exl3") is not None:
+        raise ValueError("EXL3 adapter slice supports ordinary artifacts without embedded MTP")
     if has_mtp and text.get("mtp_num_hidden_layers") != 1:
         raise ValueError("MTP tensors and configured head count disagree")
     if has_mtp:
@@ -608,6 +610,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             gdn_state_dtype=policy.pop("gdn_state_dtype", "float32")
         ).gdn_state_dtype
         self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", 2))
+        moe_nax_explicit = "moe_nax_gather" in policy
         self.moe_nax_gather = policy.pop(
             "moe_nax_gather", vars(type(self)).get("default_moe_nax_gather", "off")
         )
@@ -651,6 +654,15 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             )
         self.weight_stream = None
         artifact = inspect_artifact(model_path)
+        if artifact["config"].get("mlx2_exl3") is not None:
+            # Trellis packs use their own ordinary projection contract. Only
+            # implicit affine defaults step aside; explicit choices fail closed.
+            if not moe_nax_explicit:
+                self.moe_nax_gather = "off"
+            for key in {"moe_routed_decode", "moe_topk_fold", "moe_routed_candidate",
+                        *MOE_WINDOW_POLICY_KEYS}:
+                if key not in policy:
+                    self._kernels.pop(key, None)
         if require_mtp and not artifact["has_mtp"]:
             raise ValueError("requested MTP requires embedded head weights")
         self.identity = artifact["identity"]
@@ -830,6 +842,19 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         from .norm_repair import norm_means
 
         self.model = Model(ModelArgs.from_dict(config))
+        exl3 = config.get("mlx2_exl3")
+        if exl3 is not None and artifact["has_mtp"]:
+            raise ValueError("EXL3 adapter slice supports ordinary artifacts without embedded MTP")
+        if exl3 is not None and stream_request is not None:
+            raise ValueError("EXL3 disk streaming is not implemented; select resident EXL3")
+        if exl3 is not None and (
+            self.environment.get("MLX_QWEN36_MOE_ROUTED_CANDIDATE") == "1"
+            or self.moe_nax_gather != "off"
+            or any(choice_selected(k,v) for k,v in getattr(self,"_kernels",{}).items()
+                   if k in {"moe_routed_decode", "moe_topk_fold", "moe_routed_candidate",
+                            *MOE_WINDOW_POLICY_KEYS})
+        ):
+            raise ValueError("EXL3 cannot select affine MoE kernels")
         names = sorted(set(artifact["weight_map"].values()))
         files = [path / name for name in names]
         quant = config.get("quantization", config.get("quantization_config"))
@@ -869,6 +894,21 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         self.mtp_norm_repairs = [] if report is None else report.repaired_head_keys
         self.mtp_norm_means = norm_means(weights, "mtp.")
         if stream_request is None:
+            packed = any(key.endswith(".trellis") for key in weights)
+            if packed and exl3 is None:
+                raise ValueError("EXL3 tensors require explicit mlx2_exl3 format metadata")
+            if exl3 is not None:
+                from ..runtime.models.exl3 import install_exl3_experts
+                self.exl3 = install_exl3_experts(self.model, weights, exl3)
+                # Launch topology is a numerics law: ordinary and fused packs
+                # cannot share APCv2 namespaces or qualification identities.
+                self.identity = {**self.identity, "exl3": self.exl3,
+                    "fingerprint": hashlib.sha256((self.identity["fingerprint"] +
+                        json.dumps(self.exl3,sort_keys=True)).encode()).hexdigest()}
+                from dataclasses import replace
+                self.descriptor = replace(self.descriptor,metadata={
+                    **self.descriptor.metadata,"expert_format":"exl3-mcg-2.5",
+                    "expert_format_qualification":"unqualified"})
             quantize(weights)
             self.model.load_weights(list(weights.items()), strict=True)
         self.model.eval()
@@ -1031,6 +1071,12 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             )
         if moe_pad_reportable(pad_status):
             result["moe_pad"] = pad_status
+
+        if getattr(self,"exl3",None) is not None:
+            from ..runtime.models.exl3 import Exl3SwitchGLU
+            result["exl3"] = {**self.exl3,"observed_blocks":[
+                {"path":path,**module.receipt()} for path,module in self.model.named_modules()
+                if isinstance(module,Exl3SwitchGLU)]}
         result["architecture"] = "sparse-moe-hybrid-gdn-gqa"
         result["layout"] = self.layout
         result["optimized_moe_selected"] = any(
