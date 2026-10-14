@@ -60,6 +60,7 @@ class WeightStreamRequest:
     collector: object = None
     admission_limit_bytes: Optional[int] = None
     headroom_bytes: int = MIN_LANE_HEADROOM_BYTES
+    expert_overlap: bool = False
 
     def __post_init__(self):
         if self.mode not in STREAM_MODES:
@@ -73,6 +74,8 @@ class WeightStreamRequest:
                 raise ValueError(f"weight streaming {name} must be an integer >= {low}")
         if type(self.mtp_resident) is not bool:
             raise ValueError("weight streaming mtp_resident must be boolean")
+        if type(self.expert_overlap) is not bool or (self.expert_overlap and self.mode != "moe_experts"):
+            raise ValueError("expert_overlap is a boolean MoE-only option")
         limit = self.admission_limit_bytes
         if limit is not None and (
             isinstance(limit, bool) or not isinstance(limit, int) or limit < 0
@@ -174,6 +177,7 @@ def load_streamed(
                 read_workers=request.read_workers,
                 collector=request.collector,
                 mtp_resident=request.mtp_resident,
+                overlap=request.expert_overlap,
                 shards=shards,
                 resolver=origins.resolve_expert,
             )

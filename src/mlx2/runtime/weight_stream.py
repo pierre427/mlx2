@@ -1197,7 +1197,7 @@ def _streamed_class():
 
     class StreamedQuantizedSwitchLinear(QuantizedSwitchLinear):
         def __init__(self, *, group_size, bits, mode, bias, input_dims,
-                     output_dims, reader, cache, layer_index, collector):
+                     output_dims, reader, cache, layer_index, collector, overlap=False):
             # Bypass the base class' random-init constructor entirely.
             object.__setattr__(self, "_no_grad", set())
             object.__setattr__(self, "_training", False)
@@ -1215,6 +1215,10 @@ def _streamed_class():
             self._stream_input_dims = int(input_dims)
             self._stream_output_dims = int(output_dims)
             self.freeze(recurse=False)
+            object.__setattr__(self, "_overlap", None)
+            if overlap:
+                from .expert_overlap import GatedOverlap
+                object.__setattr__(self, "_overlap", GatedOverlap(self))
 
         @property
         def input_dims(self):
@@ -1229,11 +1233,18 @@ def _streamed_class():
             return self._stream_num_experts
 
         def __call__(self, x, indices, sorted_indices=False):
+            if self._overlap is not None:
+                return self._overlap(x, indices, sorted_indices)
+            return self._synchronous(x, indices, sorted_indices)
+
+        def _synchronous(self, x, indices, sorted_indices=False, host=None, unique=None):
             # The host read of ``indices`` evaluates the graph up to this
             # layer's router, which releases the previous layer's gather
             # copies: retention is bounded to about one layer.
-            host = np.asarray(indices, dtype=np.int64)
-            unique = np.unique(host)  # ascending: the remap stays monotonic,
+            if host is None:
+                host = np.asarray(indices, dtype=np.int64)
+            if unique is None:
+                unique = np.unique(host)  # ascending: the remap stays monotonic,
             # so a sorted gather is still sorted afterwards.
             try:
                 entries = self._stream_cache.acquire([int(e) for e in unique])
@@ -1293,7 +1304,7 @@ def _streamed_class():
     return _STREAMED_CLASS
 
 
-def _streamed_switch_linear(base, reader, cache, *, layer_index, unit_offset, collector):
+def _streamed_switch_linear(base, reader, cache, *, layer_index, unit_offset, collector, overlap=False):
     """Return a drop-in replacement for one ``QuantizedSwitchLinear``.
 
     Everything the replacement needs is copied out of ``base`` here; no
@@ -1311,6 +1322,7 @@ def _streamed_switch_linear(base, reader, cache, *, layer_index, unit_offset, co
         cache=cache,
         layer_index=layer_index,
         collector=collector,
+        overlap=overlap,
     )
 
 
@@ -1506,7 +1518,9 @@ class ExpertStreamManager(_ManagerBase):
         collector=None,
         handles=None,
         streamed_keys: Sequence[str] = (),
+        overlaps=(),
     ):
+        self.overlaps = tuple(overlaps)
         self.plan = plan
         self.stats = stats
         self.caches = caches
@@ -1530,7 +1544,21 @@ class ExpertStreamManager(_ManagerBase):
         counters = self.stats.as_dict()
         if self.collector is not None:
             counters.update(self.collector.counters())
+        if self.overlaps:
+            for key in ("attempts", "accepted", "rebuilds", "declined"):
+                counters[f"stream_overlap_{key}_total"] = sum(o.counts[key] for o in self.overlaps)
         return counters
+
+    def receipt(self):
+        receipt = super().receipt()
+        if self.overlaps:
+            receipt["overlap"] = {"revision": "gated-immutable-bank-v1", "enabled": True,
+                                  "qualification": "unqualified", "default": False,
+                                  "admission": "affine-q4-f16-bf16-group64-unsorted-small-hot-bank"}
+        return receipt
+
+    def apc_revision(self):
+        return super().apc_revision() + (":gated-immutable-bank-v1" if self.overlaps else "")
 
     def close(self) -> None:
         if self._pool is not None:
@@ -1653,6 +1681,7 @@ def install_expert_streaming(
     read_workers: int = DEFAULT_READ_WORKERS,
     collector=None,
     mtp_resident: bool = False,
+    overlap: bool = False,
     shards: Optional[BoundShards] = None,
     resolver: Optional[Callable] = None,
 ) -> ExpertStreamManager:
@@ -1683,6 +1712,8 @@ def install_expert_streaming(
 
     from .models.switch_layers import QuantizedSwitchLinear
 
+    if type(overlap) is not bool:
+        raise ValueError("expert overlap must be boolean")
     early = shards is not None
     if early and resolver is None:
         raise ValueError("early-load expert streaming needs a source resolver")
@@ -1769,6 +1800,11 @@ def install_expert_streaming(
         transient = expert_transient_bound(
             groups, capacity=capacity, staging_bytes=window * expert_bytes
         )
+        # The first speculative bank of the next layer may materialize before
+        # its router sync releases the previous layer's gather copies. Reserve
+        # that one immutable bank explicitly; subsequent calls have synced.
+        if overlap:
+            transient += capacity * expert_bytes
         manifest = _manifest(
             [
                 [
@@ -1788,6 +1824,7 @@ def install_expert_streaming(
         stats = StreamStats(phase="load" if early else "serve")
         caches: Dict[str, ExpertLRU] = {}
         replacements = []
+        overlaps = []
         streamed_keys = []
         for (layer_index, (path, module, specs)) in enumerate(targets):
             reader = ExpertSliceReader(specs, handles=handles, pool=pool, window=window)
@@ -1803,7 +1840,10 @@ def install_expert_streaming(
                 layer_index=layer_index,
                 unit_offset=0,
                 collector=collector,
+                overlap=overlap,
             )))
+            if replacements[-1][1]._overlap is not None:
+                overlaps.append(replacements[-1][1]._overlap)
             streamed_keys.extend(f"{path}.{spec.key}" for spec in specs)
         for (path, replacement) in replacements:
             _swap_module(model, path, replacement)
@@ -1847,6 +1887,7 @@ def install_expert_streaming(
             collector=collector,
             handles=handles,
             streamed_keys=streamed_keys,
+            overlaps=overlaps,
         )
     except BaseException:
         if pool is not None:

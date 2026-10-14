@@ -612,3 +612,8 @@ Sushi resident 2.5-bit EXL3: source https://github.com/beamivalice/sushi at
 ad562c4078a62d9d0a562add7e109cbc330de96b (MIT).
 mlx2 supplies adapter binding, bounds, refusals and operation receipts.
 These opt-in mechanisms do not establish trained-model quality or performance.
+
+Sushi gated expert overlap: source https://github.com/beamivalice/sushi at
+ad562c4078a62d9d0a562add7e109cbc330de96b (MIT).
+mlx2 supplies adapter binding, bounds, refusals and operation receipts.
+These opt-in mechanisms do not establish trained-model quality or performance.
