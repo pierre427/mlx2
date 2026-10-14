@@ -9,7 +9,8 @@ storage-bit identity:
   rounded to fp16 between tokens -- "fp32 math, fp16 store" -- so the class's
   law holds inside a launch and grouping never changes the stored bits;
 * the fused Flash-Next decode (B=1) and batched decode equal the composed
-  stock chain (conv1d + SiLU, direct L2 q/k, gated_delta_update, gated norm);
+  stock chain (conv1d + SiLU, direct L2 q/k, gated_delta_update with the
+  Qwen4-Exp fp32-input decay, gated norm);
 * the snapshot verify, compact-replay verify with template and dynamic
   reconstruction, and catch-up equal the stock block at widths 2..8 over a
   chain of blocks that alternately commit and roll back;
@@ -120,6 +121,33 @@ def test_fp16_state_overflow_stores_inf_not_a_clamp(gpu):
     assert bool(mx.any(mx.isinf(s)).item())
 
 
+def test_last_token_overflow_keeps_a_finite_readout_and_is_refused_by_the_store(gpu):
+    """The readout is fp32, only the store rounds: the logits guard cannot see it."""
+    from mlx2.runtime.recurrent_state_codec import (
+        NonfiniteRecurrentState,
+        validate_prompt_cache,
+    )
+
+    B, T, Hk, Hv, Dk, Dv = 1, 3, 1, 1, 128, 8
+    q = mx.full((B, T, Hk, Dk), 0.01)
+    k = mx.zeros((B, T, Hk, Dk)).at[:, -1, :, 0].add(1.0)  # only the last token writes
+    v = mx.zeros((B, T, Hv, Dv)).at[:, -1].add(70000.0)
+    g = mx.ones((B, T, Hv))
+    beta = mx.ones((B, T, Hv))
+    state0 = mx.full((B, Hv, Dv, Dk), 50000.0).astype(mx.float16)
+    y, s = gd.gated_delta_kernel(q, k, v, g, beta, state0)
+    mx.eval(y, s)
+    assert s.dtype == mx.float16
+    assert bool(mx.all(mx.isfinite(y)).item())
+    assert bool(mx.any(mx.isinf(s)).item())
+    cache = ArraysCache(2)
+    cache[1] = s
+    with pytest.raises(NonfiniteRecurrentState):
+        validate_prompt_cache([cache], None)
+    cache[1] = state0
+    validate_prompt_cache([cache], None)
+
+
 # --------------------------------------------------------------------------
 # fused Flash-Next kernels vs the composed stock chain
 # --------------------------------------------------------------------------
@@ -148,6 +176,9 @@ def _stock_block(qkv, z, b, a, conv_state, conv_weight, A_log, dt_bias, norm_wei
             q[:, :m], k[:, :m], v[:, :m], a[:, :m], b[:, :m], A_log, dt_bias,
             state, None, use_kernel=True, beta_input_dtype=True,
             state_dtype=_sd(state.dtype),
+            # QWEN4_GDN_CONTRACT.decay_input_float32: the Qwen4-Exp decay
+            # widens a and dt_bias before the addition and softplus.
+            decay_input_float32=QWEN4_GDN_CONTRACT.decay_input_float32,
         )
 
     out, next_state = update(steps)

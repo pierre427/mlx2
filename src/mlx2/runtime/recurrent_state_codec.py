@@ -190,6 +190,27 @@ def is_recurrent_leaf(value) -> bool:
     )
 
 
+def is_fp16_state_leaf(value) -> bool:
+    """A recurrent state held in the fp16 storage class (never codec-encoded)."""
+    return (
+        isinstance(value, mx.array)
+        and value.dtype == mx.float16
+        and value.ndim == 4
+        and value.shape[-1] > 0
+    )
+
+
+class NonfiniteRecurrentState(ValueError):
+    """An fp16 recurrent state leaf holds inf/NaN; ``entries`` are cache indices."""
+
+    def __init__(self, entries):
+        self.entries = tuple(entries)
+        super().__init__(
+            "non-finite float16 recurrent state in cache entries "
+            f"{list(self.entries)}"
+        )
+
+
 def is_encoded(value) -> bool:
     return isinstance(value, Mapping) and CODEC_KEY in value
 
@@ -390,27 +411,49 @@ def validate_prompt_cache(prompt_cache, policy) -> int:
 
     Enabled: every recurrent leaf must be a well-formed record of the
     policy's codec with finite positive scales and payload in [-127, 127].
-    Disabled: no encoded record may appear.  One batched device read.
-    Returns the number of records checked; raises ValueError otherwise.
+    Disabled: no encoded record may appear.  Either way every fp16-class
+    recurrent leaf must be finite (``NonfiniteRecurrentState`` otherwise):
+    that class computes a token's readout from the fp32 register state and
+    rounds only the stored copy, so an overflow on a chunk's last token
+    leaves finite logits -- the prefill checkpoint guard passes -- and an
+    ``inf`` state that would fail every request restoring it.  An fp32 state
+    feeds its own readout, so that guard already covers it and the default
+    route gets no extra read.  Prior art (read, nothing copied): omlx #4516,
+    which closes the same raw-storage gap in omlx's checkpoint save.
+
+    One batched device read, only when there is something to check.
+    Returns the number of codec records checked; raises ValueError otherwise.
     """
     enabled = policy is not None and policy.enabled
     checks = []
+    fp16_entries = []
+    fp16_checks = []
     records = 0
-    for cache in _arrays_caches(prompt_cache):
-        for value in _leaves(cache):
-            if is_encoded(value):
-                if not enabled:
-                    raise ValueError("codec-encoded recurrent state in an exact APCv2 namespace")
-                if record_codec(value) != policy.codec:
-                    raise ValueError("recurrent state codec does not match this server's policy")
-                checks.append(mx.all(mx.isfinite(value["scale"]) & (value["scale"] > 0)))
-                checks.append(mx.min(value["q"]) >= -127)
-                records += 1
-            elif enabled and is_recurrent_leaf(value):
-                raise ValueError("exact recurrent state in a codec APCv2 namespace")
-    if checks:
-        flags = mx.stack(checks)
+    for entry, item in enumerate(prompt_cache):
+        for cache in _arrays_caches([item]):
+            for value in _leaves(cache):
+                if is_encoded(value):
+                    if not enabled:
+                        raise ValueError("codec-encoded recurrent state in an exact APCv2 namespace")
+                    if record_codec(value) != policy.codec:
+                        raise ValueError("recurrent state codec does not match this server's policy")
+                    checks.append(mx.all(mx.isfinite(value["scale"]) & (value["scale"] > 0)))
+                    checks.append(mx.min(value["q"]) >= -127)
+                    records += 1
+                elif enabled and is_recurrent_leaf(value):
+                    raise ValueError("exact recurrent state in a codec APCv2 namespace")
+                elif is_fp16_state_leaf(value):
+                    fp16_entries.append(entry)
+                    fp16_checks.append(mx.all(mx.isfinite(value)))
+    if checks or fp16_checks:
+        flags = mx.stack(checks + fp16_checks)
         mx.eval(flags)
-        if not bool(mx.all(flags)):
+        flags = flags.tolist()
+        if not all(flags[: len(checks)]):
             raise ValueError("corrupt recurrent state codec payload")
+        bad = sorted(
+            {entry for entry, ok in zip(fp16_entries, flags[len(checks) :]) if not ok}
+        )
+        if bad:
+            raise NonfiniteRecurrentState(bad)
     return records

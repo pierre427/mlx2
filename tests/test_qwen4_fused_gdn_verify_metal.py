@@ -2,7 +2,8 @@
 
 Run under the GPU lock with ``MLX2_RUN_METAL_TESTS=1``.  Each width is checked
 bit-exact against the stock Qwen4 verify block (conv1d + SiLU, direct L2 q/k,
-``gated_delta_update`` with the Metal kernel, gated RMSNorm), over a chain of
+``gated_delta_update`` with the Metal kernel and the Qwen4-Exp fp32-input
+decay, gated RMSNorm), over a chain of
 blocks that alternately commit and roll back so later blocks start from a
 restored state, for:
 
@@ -57,6 +58,9 @@ def _stock_block(qkv, z, b, a, conv_state, conv_weight, A_log, dt_bias, norm_wei
         return gated_delta_update(
             q[:, :m], k[:, :m], v[:, :m], a[:, :m], b[:, :m], A_log, dt_bias,
             state, None, use_kernel=True, beta_input_dtype=True,
+            # QWEN4_GDN_CONTRACT.decay_input_float32: the Qwen4-Exp decay
+            # widens a and dt_bias before the addition and softplus.
+            decay_input_float32=QWEN4_GDN_CONTRACT.decay_input_float32,
         )
 
     out, next_state = update(steps)

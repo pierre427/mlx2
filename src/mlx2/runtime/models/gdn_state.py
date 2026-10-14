@@ -104,23 +104,61 @@ def check_state(state, expected) -> None:
         )
 
 
-def nonfinite_state_layers(caches) -> list:
-    """Indices of cache entries whose recurrent state holds inf/NaN.
-
-    A diagnostic for an already-failed step (it syncs): the per-step
-    non-finite log-probability check drops the lane, and this names the GDN
-    layers that overflowed, so the failure receipt says why.
-    """
-    bad = []
+def _recurrent_states(caches):
+    """``(index, state)`` for every cache entry holding a rank-4 recurrent state."""
+    found = []
     for index, cache in enumerate(caches or ()):
         try:
             state = cache[1]
         except Exception:  # noqa: BLE001 - not an ArraysCache
             continue
         if isinstance(state, mx.array) and state.ndim == 4:
-            if not bool(mx.all(mx.isfinite(state)).item()):
-                bad.append(index)
-    return bad
+            found.append((index, state))
+    return found
+
+
+def nonfinite_state_layers(caches) -> list:
+    """Indices of cache entries whose recurrent state holds inf/NaN.
+
+    A diagnostic for an already-failed step (one device read).  APCv2 refuses
+    to store a non-finite fp16 state itself (``recurrent_state_codec``).
+    """
+    found = _recurrent_states(caches)
+    if not found:
+        return []
+    flags = mx.stack([mx.all(mx.isfinite(state)) for _, state in found]).tolist()
+    return [index for (index, _), ok in zip(found, flags) if not ok]
+
+
+def nonfinite_state_rows(caches, rows) -> dict:
+    """``{row: [cache entry indices]}`` for batch rows whose state holds inf/NaN.
+
+    The per-lane form of ``nonfinite_state_layers`` (one device read): the
+    per-step non-finite log-probability check drops a lane, and this names
+    the GDN layers that overflowed, so the failure receipt says why.  Rows
+    with no non-finite state are left out.
+    """
+    rows = sorted({int(row) for row in rows})
+    found = [
+        (index, state)
+        for index, state in _recurrent_states(caches)
+        if rows and rows[-1] < int(state.shape[0])
+    ]
+    if not found or not rows:
+        return {}
+    take = mx.array(rows, dtype=mx.int32)
+    flags = mx.stack(
+        [
+            mx.all(mx.isfinite(state[take]).reshape(len(rows), -1), axis=-1)
+            for _, state in found
+        ]
+    ).tolist()
+    result = {}
+    for column, row in enumerate(rows):
+        bad = [index for (index, _), ok in zip(found, flags) if not ok[column]]
+        if bad:
+            result[row] = bad
+    return result
 
 
 def derive_source(source: str, replacements, *, what: str) -> str:

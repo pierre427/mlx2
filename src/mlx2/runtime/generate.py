@@ -320,6 +320,37 @@ def _resolve_corrupt_rows(vocab, tokens, selected_finite, uids):
     return keep, failures
 
 
+def _name_nonfinite_states(prompt_cache, uids, failures):
+    """Append the overflowed recurrent-state layers to non-finite failures.
+
+    Runs only on the failure path (one device read), before the failed lanes
+    are filtered out, so ``uids`` still maps each failure to its batch row.
+    A diagnostic: any error leaves the original reasons untouched.
+    """
+    pending = [
+        failure for failure in failures
+        if "non-finite log probability" in failure["reason"]
+    ]
+    if not pending:
+        return
+    try:
+        from .models.gdn_state import nonfinite_state_rows
+
+        row_of = {uid: row for row, uid in enumerate(uids)}
+        named = nonfinite_state_rows(
+            prompt_cache, [row_of[failure["uid"]] for failure in pending]
+        )
+    except Exception:  # noqa: BLE001 - never mask the lane failure itself
+        logging.debug("non-finite state diagnostic failed", exc_info=True)
+        return
+    for failure in pending:
+        layers = named.get(row_of[failure["uid"]])
+        if layers:
+            failure["reason"] += (
+                f"; non-finite recurrent state in cache layers {layers}"
+            )
+
+
 def _bump_bounded_counter(counters, key, amount=1):
     counters[key] = min(
         _COUNTER_MAX, int(counters.get(key, 0)) + int(amount)
@@ -1365,6 +1396,7 @@ class GenerationBatch:
             keep, failures = _resolve_corrupt_rows(
                 vocab, self._next_tokens, selected_finite, self.uids
             )
+            _name_nonfinite_states(self.prompt_cache, self.uids, failures)
             self._lane_failures.extend(failures)
             if len(keep) != len(self.uids):
                 self.filter(keep)
@@ -1507,6 +1539,7 @@ class GenerationBatch:
                 vocab, inputs, selected_finite, self.uids
             )
             if failures:
+                _name_nonfinite_states(self.prompt_cache, self.uids, failures)
                 self._lane_failures.extend(failures)
                 logprobs_out = [self._current_logprobs[i] for i in keep]
                 inputs = inputs[keep] if keep else inputs[:0]
@@ -1614,6 +1647,7 @@ class GenerationBatch:
             selected_finite,
             [self.uids[index] for index in terminal],
         )
+        _name_nonfinite_states(self.prompt_cache, self.uids, failures)
         self._lane_failures.extend(failures)
         valid = {terminal[index] for index in keep_local}
         host_tokens = pending_tokens.tolist()

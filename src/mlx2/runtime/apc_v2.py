@@ -54,6 +54,7 @@ from .models.cache import (
 from .recurrent_state_codec import (
     STATS as RECURRENT_STATE_CODEC_STATS,
     TAG as RECURRENT_STATE_CODEC_TAG,
+    NonfiniteRecurrentState,
     RecurrentStateCodecPolicy,
     encode_prompt_cache,
     key_codec_layer,
@@ -820,6 +821,7 @@ class APCv2(PrefixIndex):
         "quarantined",
         "quarantine_evictions",
         "restore_digest_failures",
+        "restore_nonfinite_state",
     )
     _PERSIST_SCHEMA = "mlx2.apcv2.persisted-entry.v1"
     _SESSION_TAG_LIMIT = 16
@@ -980,6 +982,8 @@ class APCv2(PrefixIndex):
         self._apc_clears = 0
         self._interior_reused_entries = 0
         self.boundary_rejections = 0
+        # Stores refused for a non-finite fp16 recurrent state.
+        self.nonfinite_state_rejections = 0
         age_buckets = (1, 5, 30, 120, 600, 3600)
         self._reuse_histograms = {
             "hit_age_seconds": _FixedHistogram(age_buckets),
@@ -2912,10 +2916,11 @@ class APCv2(PrefixIndex):
             self._disk_stats["restore_digest_failures"] += 1
             self._disk_stats["restore_failures"] += 1
             return False
-        except (ValueError, KeyError, TypeError, FileNotFoundError):
-            # Identity, token-count or layout mismatch, unreadable content or
-            # a payload that is gone: the snapshot cannot serve this path.
-            # Drop it.
+        except (ValueError, KeyError, TypeError, FileNotFoundError) as error:
+            # Identity, token-count or layout mismatch, unreadable content,
+            # a non-finite fp16 state (persisted before the store refused
+            # one) or a payload that is gone: the snapshot cannot serve this
+            # path.  Drop it.
             log.exception(
                 "APCv2 disk restore failed for %d-token checkpoint",
                 len(tokens),
@@ -2923,6 +2928,8 @@ class APCv2(PrefixIndex):
             if isinstance(cache, COWFrozenPromptCache):
                 cache.close()
             self._disk_stats["restore_failures"] += 1
+            if isinstance(error, NonfiniteRecurrentState):
+                self._disk_stats["restore_nonfinite_state"] += 1
             return False
         except Exception:
             # Anything else (MemoryError under a momentarily full heap, EMFILE
@@ -4711,6 +4718,12 @@ class APCv2(PrefixIndex):
         # nor may malformed state be published into a valid namespace.
         try:
             validate_prompt_cache(prompt_cache, self._state_codec)
+        except NonfiniteRecurrentState as error:
+            # An overflowed state would fail every request that restores it,
+            # and the entry would outlive the request (and a restart, on disk).
+            self.nonfinite_state_rejections += 1
+            log.warning("APCv2 refused a %d-token checkpoint: %s", len(tokens), error)
+            return replace(capabilities, stored=False)
         except ValueError:
             self._state_codec_stats["payload_refusals"] += 1
             return replace(capabilities, stored=False)
@@ -5219,6 +5232,7 @@ class APCv2(PrefixIndex):
             stats["max_entry_tokens"] = self.max_entry_tokens
             stats["overlength_rejections"] = self.overlength_rejections
             stats["boundary_rejections"] = self.boundary_rejections
+            stats["nonfinite_state_rejections"] = self.nonfinite_state_rejections
             stats["idle_disk"] = {
                 "enabled": self._idle_disk_dir is not None,
                 "persistent": self._persist_dir is not None,
