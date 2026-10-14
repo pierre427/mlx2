@@ -80,7 +80,7 @@ def _model_and_weights(
 def test_converter_fixture_inner_and_projection():
     root = Path(__file__).resolve().parents[1]
     f = mx.load(
-        str(root / "scripts/sushi_probe/fixtures/exl3_k2p5_mcg_linear.safetensors")
+        str(root / "tests/fixtures/exl3_k2p5_mcg_linear.safetensors")
     )
     np.testing.assert_array_equal(
         decode_inner(np.asarray(f["trellis"])), np.asarray(f["inner"])

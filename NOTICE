@@ -617,3 +617,8 @@ Sushi gated expert overlap: source https://github.com/beamivalice/sushi at
 ad562c4078a62d9d0a562add7e109cbc330de96b (MIT).
 mlx2 supplies adapter binding, bounds, refusals and operation receipts.
 These opt-in mechanisms do not establish trained-model quality or performance.
+
+The EXL3 synthetic converter oracle in tests/fixtures is retained from the
+same Sushi revision under MIT; it is test data, not a trained model pack.
+Fixture SHA256: 5a651adc9cb67f065d2786b548b3a0a010ae482b80c4e269a6701f745840be08.
+The Metal header has trailing whitespace normalized; kernel arithmetic is unchanged.

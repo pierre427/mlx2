@@ -63,4 +63,3 @@ static inline exl3_win exl3_pair_window(uint t0, uint N) {
   w.fresh = e1 - e0;
   return w;
 }
-
