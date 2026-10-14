@@ -329,6 +329,45 @@ def _values_per_thread(bits: int, fast: bool) -> int:
     return (8 if bits == 5 else (4 if bits == 6 else 32 // bits)) * (2 if fast else 1)
 
 
+def layout_decline_reason(linear) -> str | None:
+    """Why the kernel cannot cover ``linear``'s weight layout on any device
+    or input (None when the layout is covered): ``decline_reason`` minus its
+    device and input checks, in the same order.  A declined layout verifies
+    through ``per_row`` (one stock one-row call per verify row): still the
+    serial arithmetic, but the weights are read once per row."""
+    if not isinstance(linear, (nn.QuantizedLinear, nn.QuantizedEmbedding)):
+        return "not_quantized_linear"
+    bits, group_size = linear.bits, linear.group_size
+    if getattr(linear, "mode", "affine") != "affine":
+        return "mode"
+    if bits not in BITS:
+        return "bits"
+    if group_size not in GROUP_SIZES:
+        return "group_size"
+    if linear.get("biases") is None:
+        return "no_affine_biases"
+    if linear.weight.dtype != mx.uint32 or linear.weight.ndim != 2:
+        return "weight_layout"
+    n = int(linear.weight.shape[0])
+    k = int(linear.scales.shape[-1]) * group_size
+    if int(linear.weight.shape[1]) * 32 != k * bits:
+        return "weight_layout"
+    if k % 8:
+        return "k_shape"
+    if group_size % _values_per_thread(bits, qmv_fast_layout(k, n, bits)):
+        return "group_tile"
+    return None
+
+
+def layout_label(linear) -> str:
+    """Receipt name of a projection's weight format."""
+    if isinstance(linear, (nn.QuantizedLinear, nn.QuantizedEmbedding)):
+        mode = getattr(linear, "mode", "affine")
+        return f"{mode}-q{int(linear.bits)}-g{int(linear.group_size)}"
+    weight = linear.get("weight") if hasattr(linear, "get") else None
+    return f"dense-{getattr(weight, 'dtype', 'unknown')}".replace("mlx.core.", "")
+
+
 def decline_reason(linear, x: mx.array) -> str | None:
     """Why the kernel does not cover ``linear`` at ``x`` (None when it does)."""
     if not isinstance(linear, (nn.QuantizedLinear, nn.QuantizedEmbedding)):
@@ -419,18 +458,58 @@ def per_row(call, x: mx.array) -> mx.array:
     return y.reshape(*lead, -1)
 
 
+# A layout this kernel declines may instead carry a lane-matmul preparation
+# (``qwen4_row_exact`` with ``low_bit_lane``).  The lane law is row-invariant
+# for 1..128 rows a call (and per chunk past that: its split-K is fixed by the
+# weight shape), so a verify row equals the module's one-token call as long
+# as that call also runs the lane law; the installing route owns that.
+LANE_ATTR = "_mlx2_row_exact_lane"
+
+
+def lane_preparation(linear):
+    """The module's lane preparation (``lane.LaneWeights``), or None."""
+    return getattr(linear, "__dict__", {}).get(LANE_ATTR)
+
+
+def lane_rows(lw, x: mx.array) -> mx.array:
+    """``x @ W.T`` (+ bias) on the lane law, in 128-row chunks past the
+    lane's per-call limit (chunking keeps every row's bits)."""
+    from ..lane import MAX_ROWS as LANE_ROWS, lane_matmul
+
+    lead = x.shape[:-1]
+    rows = 1
+    for size in lead:
+        rows *= size
+    if rows <= LANE_ROWS:
+        return lane_matmul(x, lw)
+    flat = x.reshape(rows, x.shape[-1])
+    chunks = [lane_matmul(flat[s : s + LANE_ROWS], lw) for s in range(0, rows, LANE_ROWS)]
+    return mx.concatenate(chunks, axis=0).reshape(*lead, -1)
+
+
 def quantized_linear(linear, x: mx.array, call=None):
     """``linear(x)`` for ``x`` of shape [..., K], each row with one-row arithmetic.
 
     Returns ``(y, route)`` where route is ``"kernel"`` or ``"per_row"`` (a
     layout the kernel does not cover runs one stock one-row call per row,
-    which is the serial decode call itself).  ``call`` is the stock one-row
-    call (default ``linear``).
+    which is the serial decode call itself), or ``"lane_exact"`` for a
+    module carrying a lane preparation (``LANE_ATTR``).  ``call`` is the
+    stock one-row call (default ``linear``).
     """
     lead = x.shape[:-1]
     rows = 1
     for size in lead:
         rows *= size
+    lane = lane_preparation(linear)
+    if lane is not None:
+        from ..lane import LaneUnsupported
+
+        try:
+            return lane_rows(lane, x), "lane_exact"
+        except LaneUnsupported:
+            # An input the lane refuses (activation dtype) is refused at
+            # every width, decode included, so both take the stock law.
+            pass
     stock = linear if call is None else call
     if rows <= 1:
         return stock(x), "one_row"
@@ -530,7 +609,12 @@ __all__ = [
     "GROUP_SIZES",
     "MAX_ROWS",
     "decline_reason",
+    "LANE_ATTR",
     "header",
+    "lane_preparation",
+    "lane_rows",
+    "layout_decline_reason",
+    "layout_label",
     "per_row",
     "qmv_fast_layout",
     "quantized_linear",

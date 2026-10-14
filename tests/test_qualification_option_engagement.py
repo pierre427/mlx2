@@ -1061,3 +1061,29 @@ def test_copy_draft_strong_span_does_not_change_qualifier_requirements():
     assert selected_not_observed_features(settings(14)) == selected_not_observed_features(
         settings(16))
     assert "feature_self_mtp_copy_draft" in required_feature_checks(settings(14))
+
+
+def test_low_bit_lane_requires_its_own_engagement(qualify):
+    """Codex 2026-10-14 MEDIUM 4: the generic row_exact_verify windows could
+    qualify row_exact_low_bit_lane with zero lane_exact engagement."""
+    settings = {
+        "adapter_policy": {"row_exact_verify": True, "row_exact_low_bit_lane": True},
+        "max_context": 65536, "max_lanes": 4, "mtp": True,
+    }
+    assert "feature_row_exact_low_bit_lane" in required_feature_checks(settings)
+
+    def snapshot(lane_exact, per_row=0, refused=None, count=3, intended=3):
+        return {"execution": {"row_exact_verify": {
+            "stages": {"projections": {"lane_exact": lane_exact, "per_row": per_row}},
+            "low_bit_lane": {"count": count, "intended": intended, "refused": refused or {}},
+        }}}
+
+    initial = snapshot(2)
+    assert qualify.feature_observations(snapshot(9), initial=initial)["row_exact_low_bit_lane"] == 7
+    for final in (
+        snapshot(2),                          # nothing engaged this run
+        snapshot(9, per_row=1),               # some verify rows still per row
+        snapshot(9, refused={"x": 1}),        # a layer was refused
+        snapshot(9, count=2),                 # not every declined layer prepared
+    ):
+        assert qualify.feature_observations(final, initial=initial)["row_exact_low_bit_lane"] == 0

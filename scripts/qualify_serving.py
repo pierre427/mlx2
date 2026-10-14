@@ -2707,6 +2707,26 @@ def feature_observations(
         )
         return exact if exact > 0 and not not_exact and not grew_failure else 0
 
+    def row_exact_low_bit_lane_observation() -> int:
+        """lane_exact projection growth, only when every declined layer was
+        prepared (none refused) and no projection fell back per row."""
+        lane = (execution.get("row_exact_verify") or {}).get("low_bit_lane") or {}
+        if (
+            not isinstance(lane, dict)
+            or lane.get("refused")
+            or type(lane.get("count")) is not int
+            or lane.get("count") != lane.get("intended")
+            or lane.get("count", 0) <= 0
+        ):
+            return 0
+        per_row = run_delta(
+            execution, initial_execution, "row_exact_verify", "stages", "projections", "per_row"
+        )
+        engaged = run_delta(
+            execution, initial_execution, "row_exact_verify", "stages", "projections", "lane_exact"
+        )
+        return engaged if not per_row else 0
+
     def row_exact_attn_window_observation() -> int:
         after = ((execution.get("row_exact_verify") or {}).get("stages") or {})
         before = (
@@ -2838,6 +2858,7 @@ def feature_observations(
         ),
         "row_exact_verify": row_exact_observation(),
         "row_exact_attn_window": row_exact_attn_window_observation(),
+        "row_exact_low_bit_lane": row_exact_low_bit_lane_observation(),
         "moe_window_row_exact": run_delta(
             execution, initial_execution, "moe", "moe_window", "calls", "row_exact"
         ),
@@ -3577,7 +3598,7 @@ def main():
         help=("Measured KV-quantization fidelity report "
               "(scripts/measure_kv_quant_fidelity.py) for an approximate-KV route"),
     )
-    parser.add_argument("--require-feature", action="append", default=[], choices=["shared_qsa", "async_promotion", "indexed_qsa", "private_delta", "known_tail_prefetch", "indexed_fused_merge", "indexed_output_gate", "ple_early_dispatch", "qsa_stage1_direct_selector", "ple_read_policy", "tensorfold_qmv_rows", "row_exact_verify", "row_exact_attn_window", "moe_window_row_exact", "moe_window_batch_decode", "moe_window_verify", "qsa_batch_decode_sparse", "qsa_nax_batched", "mtp_draft_vocab", "file_backed_ple", "compiled_ple", "pooled_qsa", "scatter_qsa", "fused_gdn_decode", "fused_gdn_verify", "fused_gdn_replay_rollback", "eager_dispatch", "fused_moe", "external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction", "segmented_rollback", "prompt_lookup", "prompt_lookup_proposals", "prompt_lookup_rollback", "prompt_lookup_rotating_replay", "prompt_lookup_batched_verify", "adaptive_mtp_depth", "mtp_ordinary_handoff", "fly_verification", "self_mtp_copy_draft", "spomin_surgery", "approximate_kv", "approximate_kv_mtp", "approximate_kv_fidelity", "apc_interior_checkpoints", "apc_persistence", "apc_sessions", "cache_capsules", "persistent_blocks"], help="Fail this candidate unless its mechanism actually executed")
+    parser.add_argument("--require-feature", action="append", default=[], choices=["shared_qsa", "async_promotion", "indexed_qsa", "private_delta", "known_tail_prefetch", "indexed_fused_merge", "indexed_output_gate", "ple_early_dispatch", "qsa_stage1_direct_selector", "ple_read_policy", "tensorfold_qmv_rows", "row_exact_verify", "row_exact_attn_window", "row_exact_low_bit_lane", "moe_window_row_exact", "moe_window_batch_decode", "moe_window_verify", "qsa_batch_decode_sparse", "qsa_nax_batched", "mtp_draft_vocab", "file_backed_ple", "compiled_ple", "pooled_qsa", "scatter_qsa", "fused_gdn_decode", "fused_gdn_verify", "fused_gdn_replay_rollback", "eager_dispatch", "fused_moe", "external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction", "segmented_rollback", "prompt_lookup", "prompt_lookup_proposals", "prompt_lookup_rollback", "prompt_lookup_rotating_replay", "prompt_lookup_batched_verify", "adaptive_mtp_depth", "mtp_ordinary_handoff", "fly_verification", "self_mtp_copy_draft", "spomin_surgery", "approximate_kv", "approximate_kv_mtp", "approximate_kv_fidelity", "apc_interior_checkpoints", "apc_persistence", "apc_sessions", "cache_capsules", "persistent_blocks"], help="Fail this candidate unless its mechanism actually executed")
     args = parser.parse_args()
 
     if args.preflight_only:

@@ -530,3 +530,82 @@ def test_compiled_router_window_wider_than_its_trace_fails(monkeypatch):
         handle.remove()
     finally:
         mx.set_default_device(previous)
+
+
+def _low_bit_tiny_model(seed=3):
+    """The tiny model with oQ2/oQ3-style low-bit trunk projections: every
+    MLP projection at 3 bits, the rest at 4 (the row-exact kernel covers
+    4/5/6/8 bits only)."""
+    mx.random.seed(seed)
+    model = _tiny_qwen4_model()
+
+    def predicate(path, module):
+        if not (isinstance(module, nn.Linear) and module.weight.shape[-1] % 32 == 0):
+            return False
+        if ".mlp.shared_expert." in path:
+            return {"group_size": 32, "bits": 3}
+        return True
+
+    nn.quantize(model, group_size=32, bits=4, class_predicate=predicate)
+    mx.eval(model.parameters())
+    return model
+
+
+def test_status_and_receipt_label_low_bit_layers_on_the_per_row_path():
+    """Pierre 2026-10-14 (D1): a 2/3-bit layer verifies through one stock
+    one-row call per verify row (row_exact_qmv covers 4/5/6/8 bits).  That is
+    still exact but reads the weights once per row; the route keeps serving
+    it and its status and receipts must say so, naming the formats."""
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        model = _low_bit_tiny_model()
+        low = sorted(
+            name for name, m in model.language_model.named_modules()
+            if isinstance(m, nn.QuantizedLinear) and m.bits == 3
+        )
+        assert low
+        handle = install(model)
+        label = handle.status()["per_row_layers"]
+        assert label["exact"] is True and label["slow_path"] is True
+        assert label["quantized"]["count"] == len(low)
+        assert label["quantized"]["by_format"] == {"affine-q3-g32": len(low)}
+        assert label["quantized"]["by_reason"] == {"bits": len(low)}
+        assert label["quantized"]["layers"] == low[: len(label["quantized"]["layers"])]
+        handle.enable(True)
+        _fake_gdn_engaged(handle)
+        cache = model.make_cache()
+        mx.eval(model(mx.array([[1, 7, 3, 9, 2, 8]]), cache=cache))
+        start = handle.snapshot()
+        (hidden, _) = handle.verify_backbone(mx.array([[4, 6, 5]]), cache)
+        mx.eval(handle.verify_logits(hidden))
+        receipt = handle.receipt(start)
+        assert receipt["row_exact"] is True          # still exact
+        assert receipt["per_row_layers"] == label    # and labelled slow
+        handle.remove()
+
+        # Falsifier: an all-4-bit model has no kernel-declined layers, and
+        # its receipt carries no label (receipts of covered models unchanged).
+        covered = install(_quantized_tiny_model())
+        assert covered.status()["per_row_layers"]["quantized"]["count"] == 0
+        covered.enable(True)
+        _fake_gdn_engaged(covered)
+        start = covered.snapshot()
+        assert "per_row_layers" not in covered.receipt(start)
+    finally:
+        mx.set_default_device(previous)
+
+
+def test_layout_decline_agrees_with_the_dispatch_decline(monkeypatch):
+    """The static label must name exactly the layouts dispatch sends per row."""
+    monkeypatch.setattr(REQ.mx, "default_device", lambda: REQ.mx.gpu)
+    monkeypatch.setattr(REQ.mx.metal, "is_available", lambda: True)
+    for bits in (2, 3, 4, 5, 6, 8):
+        for group_size in (32, 64, 128):
+            linear = nn.QuantizedLinear(256, 16, bias=False, group_size=group_size, bits=bits)
+            linear.set_dtype(mx.bfloat16)
+            x = mx.zeros((1, 3, 256), mx.bfloat16)
+            assert REQ.layout_decline_reason(linear) == REQ.decline_reason(linear, x), (bits, group_size)
+            expected = None if bits in REQ.BITS else "bits"
+            assert REQ.layout_decline_reason(linear) == expected
+    assert REQ.layout_decline_reason(nn.Linear(64, 8)) == "not_quantized_linear"

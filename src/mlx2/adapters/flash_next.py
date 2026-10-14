@@ -605,7 +605,9 @@ class FlashNextAdapter:
             if self.policy.row_exact_verify:
                 from ..runtime.models.qwen4_row_exact import install as install_row_exact
 
-                self.row_exact_verify = install_row_exact(self.model)
+                self.row_exact_verify = install_row_exact(
+                    self.model, low_bit_lane=self.policy.row_exact_low_bit_lane
+                )
                 self.row_exact_verify.enable(True)
             self.fp32_head = None
             if self.policy.fp32_head_logits:
@@ -1019,7 +1021,20 @@ class FlashNextAdapter:
         if not blocks:
             raise ValueError("Flash-Next expert arithmetic contract found no MoE blocks")
         switches = [getattr(block, "switch_mlp", None) for block in blocks]
+        lane = getattr(getattr(self, "row_exact_verify", None), "lane_layers", None) or {}
         return {
+            # Present only when low_bit_lane moved layers onto the lane law:
+            # their decode and prefill state differ from the stock product's.
+            **(
+                {
+                    "row_exact_low_bit_lane_v1": {
+                        "law_id": lane["law_id"],
+                        "by_format": dict(sorted(lane["by_format"].items())),
+                    }
+                }
+                if lane.get("count")
+                else {}
+            ),
             "flash_next_expert_arithmetic_v1": {
                 "fused_expert_kernel": sorted(
                     {str(block.fused_expert_kernel_mode) for block in blocks}

@@ -73,6 +73,8 @@ ENV = "MLX_QWEN4_ROW_EXACT_VERIFY"
 # qualification/runs/batched-gdn-verify-20261001/README.md. Do not raise this
 # until the complete target path (including one-token rounds) is evidenced.
 MAX_EVIDENCED_LANES = 8
+# Layer names a per-row label lists (the counts cover all of them).
+_LABEL_LAYERS = 16
 
 
 def _rows(x) -> int:
@@ -80,10 +82,30 @@ def _rows(x) -> int:
 
 
 class _RowExactQuantizedLinear:
-    """Mixin: route multi-row calls inside a window through the kernel."""
+    """Mixin: route multi-row calls inside a window through the kernel.
+
+    A layer carrying a lane preparation (``low_bit_lane``) runs the lane law
+    for every call at every width, prefill included (chunked past the lane's
+    per-call limit, which keeps each row's bits): each verify row equals the
+    layer's one-token call, and a prompt's state does not depend on how a
+    prefix hit or a checkpoint split its prefill (Codex 2026-10-14)."""
 
     def __call__(self, x):
         window = REV.current()
+        lane = REQ.lane_preparation(self)
+        if lane is not None:
+            from ..lane import LaneUnsupported
+
+            try:
+                y = REQ.lane_rows(lane, x)
+            except LaneUnsupported:
+                # Refused at every width (activation dtype): the stock law
+                # below, one-token decode and per-row verify alike.
+                pass
+            else:
+                if window is not None:
+                    window.note("projections", "lane_exact")
+                return y
         if window is None or _rows(x) <= 1:
             return super().__call__(x)
         stock = super().__call__
@@ -396,7 +418,12 @@ class _RequestStart:
 class RowExactVerify:
     """Installed route: class swaps on the trunk plus the verify hooks."""
 
-    def __init__(self, model):
+    # Set at install (``_per_row_inventory``); None on a bare handle.
+    per_row_layers: Optional[Dict[str, Any]] = None
+    # Set at install with ``low_bit_lane`` (``_prepare_low_bit_lane``).
+    lane_layers: Optional[Dict[str, Any]] = None
+
+    def __init__(self, model, *, low_bit_lane: bool = False):
         from .qwen3_next import (
             FusedDownSwitchGLU,
             FusedGateUpSwitchGLU,
@@ -443,6 +470,14 @@ class RowExactVerify:
             self._swapped.append((module, cls))
             module.__class__ = _subclass(mixin, cls)
         self.static_refusals = self._audit()
+        self.low_bit_lane = bool(low_bit_lane)
+        if self.low_bit_lane:
+            try:
+                self.lane_layers = self._prepare_low_bit_lane()
+            except ValueError:
+                self.remove()  # restore every class swapped above
+                raise
+        self.per_row_layers = self._per_row_inventory()
         object.__setattr__(model, "mtp_verify_backbone", self.verify_backbone)
         object.__setattr__(model, "mtp_verify_logits", self.verify_logits)
 
@@ -468,6 +503,123 @@ class RowExactVerify:
             refusals["tied_embedding_head"] = 1
         return refusals
 
+    def _per_row_inventory(self) -> Dict[str, Any]:
+        """Swapped projections whose verify rows run one one-row call each.
+
+        ``slow_path`` (and the receipt label) is raised by quantized layers
+        only; see the comment below.  A quantized layout the row-exact kernel does not cover (2/3-bit
+        weights above all; ``row_exact_qmv.layout_decline_reason``) and every
+        dense ``nn.Linear`` (``_RowExactLinear``) compute each verify row as
+        its own one-token call: exact, but the weights are read once per row,
+        so a wide verify window costs about that many decode steps.  Static:
+        the layout decides, not the device (off Metal every layer runs per
+        row anyway).  Pierre 2026-10-14: keep serving, say so."""
+        language = self.model.language_model
+        names = {id(module): name for name, module in language.named_modules()}
+        quantized: Dict[str, Any] = {"count": 0, "by_format": {}, "by_reason": {}, "layers": []}
+        dense: Dict[str, Any] = {"count": 0, "by_format": {}, "layers": []}
+        for module, cls in self._swapped:
+            if cls is nn.QuantizedLinear:
+                reason = REQ.layout_decline_reason(module)
+                if reason is None or REQ.lane_preparation(module) is not None:
+                    continue
+                entry = quantized
+                entry["by_reason"][reason] = entry["by_reason"].get(reason, 0) + 1
+            elif cls is nn.Linear:
+                entry = dense
+            else:
+                continue
+            label = REQ.layout_label(module)
+            entry["count"] += 1
+            entry["by_format"][label] = entry["by_format"].get(label, 0) + 1
+            entry["layers"].append(names.get(id(module), "?"))
+        for entry in (quantized, dense):
+            entry["layers"] = sorted(entry["layers"])[:_LABEL_LAYERS]
+        return {
+            "exact": True,
+            # Kernel-declined quantized layers are the slow path that
+            # matters (whole trunk or head matrices re-read per row).  Dense
+            # layers are listed but do not raise the flag: every Flash-Next
+            # artifact keeps tiny dense HC mixers (K = streams), and mixed
+            # artifacts a bf16 gate or inject, whose per-row calls are the
+            # designed one-token arithmetic at negligible weight bytes.
+            "slow_path": bool(quantized["count"]),
+            "path": "one stock one-row call per verify row; weights read once per row",
+            "quantized": quantized,
+            "dense": dense,
+        }
+
+    def _prepare_low_bit_lane(self) -> Dict[str, Any]:
+        """Prepare the lane matmul for every layer the row-exact kernel
+        declines (2/3-bit above all), opt-in (``low_bit_lane``).
+
+        Such a layer then runs one lane law for its one-token decode and its
+        verify rows instead of one stock call per verify row.  That law is
+        not stock MLX: MTP-on output still equals MTP-off output of this
+        route, but both differ from a route without the option, so the
+        receipt binds ``law_id`` and the adapter's numerics contract binds
+        it into APCv2.  On M1-M4 only the single-kernel ``affine_rows``
+        family is admitted (the scalar/matrix twins are checked by the lane
+        installer, which this route does not run).  Unqualified.
+
+        Explicit and all-or-nothing: a selection that would leave any
+        declined layer on the per-row path (no lane backend, a refused
+        layout), or that finds no declined layer at all, raises before any
+        layer is prepared, so a route never runs the option half-engaged."""
+        from ..lane import matmul as LM
+        from ..lane import simd as LS
+        from ..lane.installer import LAW_IDS
+
+        backend = LM.backend()
+        declined = [
+            module for module, cls in self._swapped
+            if cls is nn.QuantizedLinear and REQ.layout_decline_reason(module) is not None
+        ]
+        refused: Dict[str, int] = {}
+        prepared = []
+        for module in declined:
+            reason = None
+            if backend is None:
+                reason = "lane_unavailable"
+            else:
+                try:
+                    lw = LM.prepare(module, backend)
+                except LM.LaneUnsupported as error:
+                    reason = str(error)
+                else:
+                    if backend == "simd" and LS.path(
+                        lw.bits, lw.group_size, lw.n, lw.k, lw.scales_dtype, lw.biases.dtype
+                    ) != "affine":
+                        reason = "simd_twin_unchecked"
+            if reason is not None:
+                refused[reason] = refused.get(reason, 0) + 1
+            else:
+                prepared.append((module, lw))
+        if not declined:
+            raise ValueError(
+                "row_exact_low_bit_lane is selected but the model has no layer the "
+                "row-exact kernel declines"
+            )
+        if refused:
+            raise ValueError(
+                "row_exact_low_bit_lane cannot prepare every declined layer "
+                f"({len(prepared)} of {len(declined)}; refused {refused})"
+            )
+        by_format: Dict[str, int] = {}
+        for module, lw in prepared:
+            object.__setattr__(module, REQ.LANE_ATTR, lw)
+            label = REQ.layout_label(module)
+            by_format[label] = by_format.get(label, 0) + 1
+        return {
+            "backend": backend,
+            "law_id": f"{LAW_IDS[backend]}+row-exact-low-bit",
+            "intended": len(declined),
+            "count": len(prepared),
+            "by_format": by_format,
+            "refused": {},
+            "qualified": False,
+        }
+
     # -- control ---------------------------------------------------------------
     def enable(self, flag: bool = True) -> None:
         self.enabled = bool(flag)
@@ -478,6 +630,7 @@ class RowExactVerify:
     def remove(self) -> None:
         for module, cls in self._swapped:
             module.__class__ = cls
+            module.__dict__.pop(REQ.LANE_ATTR, None)
         self._swapped = []
         for name in ("mtp_verify_backbone", "mtp_verify_logits"):
             if name in self.model.__dict__:
@@ -609,13 +762,20 @@ class RowExactVerify:
                 reason = "window_fell_back"
             elif windows <= 0:
                 reason = "no_verify_window_observed"
-        return {
+        receipt = {
             "schema": SCHEMA,
             "row_exact": reason is None,
             "reason": reason,
             "windows": max(0, windows),
             "windows_not_exact": max(0, not_exact),
         }
+        if (self.per_row_layers or {}).get("slow_path"):
+            # Only when some layer takes the per-row path, so receipts of
+            # fully covered models are unchanged.
+            receipt["per_row_layers"] = self.per_row_layers
+        if (self.lane_layers or {}).get("count"):
+            receipt["low_bit_lane"] = self.lane_layers
+        return receipt
 
     def status(self) -> dict:
         # HTTP threads call this while the generation worker's _close()
@@ -629,6 +789,8 @@ class RowExactVerify:
                 "max_evidenced_lanes": MAX_EVIDENCED_LANES,
                 "installed_modules": len(self._swapped),
                 "static_refusals": dict(self.static_refusals),
+                "per_row_layers": self.per_row_layers,
+                "low_bit_lane": self.lane_layers,
                 "gdn_layers": len(self._gdn),
                 "windows": counts["windows"],
                 "windows_row_exact": counts["windows_row_exact"],
@@ -640,12 +802,15 @@ class RowExactVerify:
             }
 
 
-def install(model) -> RowExactVerify:
+def install(model, *, low_bit_lane: bool = False) -> RowExactVerify:
     """Install the route on a loaded qwen4_exp ``Model`` (disabled until
-    ``enable``)."""
+    ``enable``).  ``low_bit_lane`` (default off) runs the layers the row-exact
+    kernel declines on the lane law instead of one stock call per row."""
     existing = getattr(model, "_mlx2_row_exact_verify", None)
     if existing is not None:
+        if bool(getattr(existing, "low_bit_lane", False)) != bool(low_bit_lane):
+            raise ValueError("row-exact verify is already installed with another low_bit_lane")
         return existing
-    handle = RowExactVerify(model)
+    handle = RowExactVerify(model, low_bit_lane=low_bit_lane)
     object.__setattr__(model, "_mlx2_row_exact_verify", handle)
     return handle

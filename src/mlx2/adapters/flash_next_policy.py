@@ -220,6 +220,13 @@ class FlashNextPolicy:
     # Not an environment switch; installed on the loaded model and entered
     # in receipts only when enabled.
     row_exact_verify: bool = False
+    # Opt-in (default off, unqualified): the layers the row-exact kernel
+    # declines (2/3-bit above all; row_exact_qmv covers 4/5/6/8 bits) run the
+    # TensorFold-derived lane matmul for their one-token calls and verify
+    # rows instead of one stock one-row call per verify row.  A different
+    # numerical law for those layers (bound into receipts and APCv2); needs
+    # row_exact_verify.  qwen4_row_exact.RowExactVerify._prepare_low_bit_lane.
+    row_exact_low_bit_lane: bool = False
     # Opt-in wave-2 speed-up of the row-exact verify route (omlx #4041/#4105
     # attention window; qwen4_attn_window.py, qwen4_hc_decode.py): the
     # window's attention runs one norm/RoPE launch, one append and one
@@ -437,6 +444,7 @@ class FlashNextPolicy:
             "hc_decode_kernels",
             "attn_fused_rows",
             "row_exact_verify",
+            "row_exact_low_bit_lane",
             "row_exact_window_kernels",
             "invariant_prefill",
             "moe_window_row_exact",
@@ -507,6 +515,12 @@ class FlashNextPolicy:
             )
         if segment != 2048 and not self.gdn_prefill_chunk:
             raise ValueError("gdn_prefill_segment_rows requires gdn_prefill_chunk")
+        if self.row_exact_low_bit_lane and not self.row_exact_verify:
+            raise ValueError("row_exact_low_bit_lane requires row_exact_verify")
+        if self.row_exact_low_bit_lane and self.tensorfold_prefill:
+            # TensorFold prefill reads projection weights with its own stock
+            # product, which would bypass the lane law of a prepared layer.
+            raise ValueError("row_exact_low_bit_lane cannot be combined with tensorfold_prefill")
         if self.row_exact_verify and (self.tensorfold_qmv_rows or self.fp32_head_logits):
             # Both replace the one-row projection the verify rows must match;
             # the row-exact route reproduces only the stock one-row qmv.
@@ -580,6 +594,8 @@ class FlashNextPolicy:
             del values["tensorfold_prefill"]
         if not self.row_exact_verify:
             del values["row_exact_verify"]
+        if not self.row_exact_low_bit_lane:
+            del values["row_exact_low_bit_lane"]
         if not self.invariant_prefill:
             del values["invariant_prefill"]
         if not self.varlen_sparse_moe:

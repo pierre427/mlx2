@@ -273,7 +273,11 @@ APPROVED_QUALIFICATION_HARNESS = {
     # always); uncalibrated_* floor fallbacks are recorded as selected, not
     # observed with the reason, and the required check fails closed.
     # Receipts from 12047d25... must be regenerated.
-    "sha256": "17e5e86351c05ac968530696cb03eb8e82b864b0ef100af2c6403cffa235b24c",
+    # Re-pinned 2026-10-14 (rowexact Codex fix): feature_row_exact_low_bit_lane
+    # counts lane_exact projection growth only when every declined layer was
+    # prepared and no projection fell back per row.  Receipts from
+    # 17e5e863... must be regenerated.
+    "sha256": "753583387a3311a99e6bbd402d1850ab22c6abd404d61d31d1006d234c46bc11",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -1119,6 +1123,10 @@ def _default_on_mechanisms(settings):
                 required.add("row_exact_attn_window")
             if adapter_policy.get("moe_window_row_exact") is True:
                 required.add("moe_window_row_exact")
+            if adapter_policy.get("row_exact_low_bit_lane") is True:
+                # Its own engagement: generic row-exact windows are not
+                # evidence that any declined layer ran the lane law.
+                required.add("row_exact_low_bit_lane")
         else:
             not_observed["row_exact_verify"] = "route has no native MTP verify"
     if adapter_policy.get("moe_window_batch_decode") is True:

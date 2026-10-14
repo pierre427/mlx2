@@ -350,7 +350,9 @@ ENGAGED = _merged(HISTORY, {
             "windows_row_exact": 5,
             "windows_not_exact": 0,
             "failures": {},
-            "stages": {"attention": {"window_dense": 5}},
+            "stages": {"attention": {"window_dense": 5},
+                       "projections": {"lane_exact": 5}},
+            "low_bit_lane": {"count": 2, "intended": 2, "refused": {}},
         },
         "qsa_batch_decode_sparse": {"engagements": 3},
         "moe_nax_gather": {"mode": "gather", "calls": {"gather": 3}},
@@ -431,6 +433,8 @@ GROWTH = {
         "row_exact_verify": _X + ("row_exact_verify", "windows_row_exact"),
         "row_exact_attn_window": _X + (
             "row_exact_verify", "stages", "attention", "window_dense"),
+        "row_exact_low_bit_lane": _X + (
+            "row_exact_verify", "stages", "projections", "lane_exact"),
         "moe_window_row_exact": _X + ("moe", "moe_window", "calls", "row_exact"),
         "moe_window_batch_decode": _X + (
             "moe", "moe_window", "calls", "batch_decode"),

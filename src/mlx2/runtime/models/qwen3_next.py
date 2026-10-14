@@ -180,6 +180,11 @@ def _proj_signature(module):
     """Eligibility signature of one expert projection module."""
     if "bias" in module:
         return None
+    if getattr(module, "__dict__", {}).get(_ROW_EXACT_LANE_ATTR) is not None:
+        # A row-exact low-bit lane layer (qwen4_row_exact) must run its own
+        # call: a fused table's stock product would give its one-token
+        # decode other bits than its lane verify rows.
+        return None
     if isinstance(module, (QuantizedSwitchLinear, nn.QuantizedLinear)):
         return (
             "quantized",
@@ -191,6 +196,11 @@ def _proj_signature(module):
     if isinstance(module, (SwitchLinear, nn.Linear)):
         return ("float",)
     return None
+
+
+# row_exact_qmv.LANE_ATTR (kept literal: this module must not import the
+# kernel module at load).
+_ROW_EXACT_LANE_ATTR = "_mlx2_row_exact_lane"
 
 
 def _proj_identity(module):

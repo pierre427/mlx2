@@ -1255,6 +1255,69 @@ def self_mtp_verification_row_cap(config, *, max_lanes, copy_draft_policy=None):
     )
 
 
+def lane_exact_verify_window(lane_receipt, config, *, max_lanes, copy_draft_policy=None):
+    """Bind lane ``exact`` mode to the widest self-MTP verify call (Pierre
+    2026-10-14).
+
+    ``exact`` runs every call of 1..``max_rows`` rows on the lane law, so a
+    verify row equals the row decoded alone; a wider call runs stock MLX
+    (``stock_above_max_rows``) and silently loses that.  The widest call a
+    self-MTP route issues is, over cohort widths ``w <= max_lanes``,
+    ``w * (proposal depth at w + 1) + (max_lanes - w)`` (padded rows: every
+    lane gets the deepest lane's rows, beside the plain lanes; the depth
+    includes a draft loop's ceiling and a copied span).  Returns None unless an exact lane law is installed;
+    otherwise a receipt whose ``refused`` names the rows and the fixes when
+    the window does not hold them.
+
+    Refusing, not widening: ``max_rows`` is part of the law (``+rows-le-N``)
+    and of the APCv2 namespace, and it also moves prompt tails up to that
+    width onto the lane, so the operator chooses it.  The lane kernels are
+    row-invariant to their per-call limit (128 rows; GPU-gated 1..128), and
+    chunking (``chunk_above_max``) keeps each row's bits past it.
+    """
+    receipt = lane_receipt or {}
+    policy = receipt.get("policy") or {}
+    if not receipt.get("covered") or policy.get("mode") != "exact":
+        return None
+    from .runtime.draft_loop import cohort_proposal_depths
+    from .runtime.lane import MAX_ROWS as LANE_CALL_ROWS
+
+    # One target call holds the w verifying lanes' padded rows beside the
+    # max_lanes - w plain one-row lanes (as self_mtp_verification_row_cap
+    # counts them; Codex 2026-10-14).
+    by_width = {
+        str(lanes): lanes * (depth + 1) + (int(max_lanes) - lanes)
+        for lanes, depth in cohort_proposal_depths(
+            config, max_lanes=int(max_lanes), copy_draft_policy=copy_draft_policy
+        ).items()
+    }
+    rows = max(by_width.values())
+    max_rows = int(receipt.get("max_rows", policy.get("max_rows")))
+    chunk = bool(receipt.get("chunk_above_max", policy.get("chunk_above_max")))
+    refused = None
+    if rows > max_rows and not chunk:
+        fixes = (
+            f'--lane-policy \'{{"max_rows": {rows}}}\' (a wider law window)'
+            if rows <= LANE_CALL_ROWS
+            else f'--lane-policy \'{{"chunk_above_max": true}}\' (the lane takes at most '
+            f"{LANE_CALL_ROWS} rows a call; chunks keep each row's bits but also run prefill on the lane)"
+        )
+        refused = (
+            f"lane exact mode covers calls of 1-{max_rows} rows, but this self-MTP route "
+            f"verifies up to {rows} rows in one call (lanes x (draft ceiling + 1) "
+            f"plus plain lanes, max_lanes {int(max_lanes)}); "
+            f"wider calls would run stock MLX and lose verify == decode. Use {fixes}, "
+            "or lower max_lanes or the draft depth"
+        )
+    return {
+        "verify_rows": rows,
+        "by_width": by_width,
+        "max_rows": max_rows,
+        "chunk_above_max": chunk,
+        "refused": refused,
+    }
+
+
 def cache_semantic_fingerprint(tenant_scope):
     """APCv2 semantic namespace: shared, or bound to one tenant id."""
     if tenant_scope is None:
@@ -1803,6 +1866,7 @@ def lane_matmul_status(engine) -> dict:
         "declared_groups": receipt.get("declared_groups", {}),
         "min_rows": policy.get("min_rows"),
         "max_rows": policy.get("max_rows"),
+        "exact_verify_window": getattr(engine, "lane_exact_window", None),
         "detected": policy.get("detected"),
         "family": policy.get("family"),
         "sources": policy.get("sources"),
@@ -3658,6 +3722,8 @@ class ServingEngine:
         # Parse and validate overrides at startup, before any model loads.
         self.lane_policy_overrides = load_overrides(lane_policy)
         self.lane_matmul_receipt = None
+        # Lane exact mode's verify window (lane_exact_verify_window), or None.
+        self.lane_exact_window = None
         if draft_loop not in ("auto", "off"):
             raise ValueError("draft_loop must be auto or off")
         self.draft_loop_mode = draft_loop
@@ -8048,6 +8114,16 @@ class ServingEngine:
                 config.get("ingress_cohort"), max_lanes=self.max_lanes
             )
             config = self._select_draft_loop(adapter, config)
+            if self.mtp and not config.get("backend") == "external_draft":
+                window = lane_exact_verify_window(
+                    self.lane_matmul_receipt, config, max_lanes=self.max_lanes,
+                    copy_draft_policy=self.copy_draft_policy,
+                )
+                self.lane_exact_window = window
+                if window is not None:
+                    if window["refused"] is not None:
+                        raise ValueError(window["refused"])
+                    settings["lane_exact_window"] = window
             if self.mtp and exact_self_mtp_rows is not None:
                 # Report the ceiling the route verifies, loop included.
                 settings["exact_self_mtp_rows"] = constrain_self_mtp_draft_loop(
