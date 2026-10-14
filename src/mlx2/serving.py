@@ -2174,6 +2174,53 @@ def admission_memory_limit_bytes(advisory_gib, service_reserve_gib, driver_allow
     return int(budget * (1 << 30))
 
 
+def _checkpoint_arrays(value, out, depth=0):
+    """Collect the MLX arrays a checkpoint holds (caches, lists, dicts)."""
+    import mlx.core as mx
+
+    if depth > 8 or value is None:
+        return out
+    if isinstance(value, mx.array):
+        out.append(value)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _checkpoint_arrays(item, out, depth + 1)
+    elif isinstance(value, dict):
+        for item in value.values():
+            _checkpoint_arrays(item, out, depth + 1)
+    else:
+        try:
+            state = value.state
+        except Exception:  # noqa: BLE001 - APCv2's own freeze reports it
+            return out
+        _checkpoint_arrays(state, out, depth + 1)
+    return out
+
+
+def detach_checkpoint_graph(*values):
+    """Schedule a checkpoint's arrays so none keeps its batch buffer alive.
+
+    A lane's cache is extracted from the batch as ``mx.contiguous`` of a row
+    slice, which is lazy: until it is evaluated, the graph node holds the
+    whole batch K/V buffer (every row, at capacity) as its input, while
+    APCv2 charges the checkpoint for one row.  The end-of-request store went
+    in unevaluated, so on a 16-lane Qwen3-4B bf16 server APCv2 accounted
+    1.06 GiB while its entries pinned about 19 GiB more, and decode hit
+    Metal out-of-memory (lilicorr-headonly-m3-20261014).  Evaluating the
+    copy (asynchronously, no host sync) drops the reference to the batch.
+    The prompt-boundary capture already does this; every store passes here.
+    Returns the number of arrays scheduled.
+    """
+    import mlx.core as mx
+
+    arrays = []
+    for value in values:
+        _checkpoint_arrays(value, arrays)
+    if arrays:
+        mx.async_eval(arrays)
+    return len(arrays)
+
+
 def resident_device_bytes():
     """MLX active memory now (the loaded model before any lane), or ``None``."""
     try:
@@ -7216,6 +7263,9 @@ class ServingEngine:
             self.counts["apcv2_store_skipped_approximate"] += 1
             return False
         try:
+            # APCv2 charges what the arrays hold, so they must own their
+            # bytes before it takes them (see ``detach_checkpoint_graph``).
+            detach_checkpoint_graph(prompt_cache, kwargs.get("sidecar"))
             capabilities = apc.store(key, tokens, prompt_cache, **kwargs)
             return getattr(capabilities, "stored", None) is not False
         except Exception:  # noqa: BLE001 - the worker must outlive one bad checkpoint
