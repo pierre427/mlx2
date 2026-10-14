@@ -740,6 +740,27 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     # 15-proposal/16-row target verification geometry.
     max_exact_self_mtp_verification_rows = 9
     max_exact_self_mtp_rollback_rows = 9
+
+    def capture_teacher_windows(self, windows, sink, *, order="layer_major",
+                                activation_budget_bytes=512 << 20):
+        """Dedicated offline independent-window capture, using adapter math."""
+        from .qwen35_capture import Qwen35CaptureDriver
+        from ..runtime.offline_capture import capture_windows
+
+        manager = getattr(self, "weight_stream", None)
+        binding = {"artifact": self.identity["fingerprint"], "layout": self.layout,
+                   "environment": self.environment,
+                   "numerics": self.execution_numerics_contract(),
+                   "streaming": None if manager is None else manager.receipt()}
+        revision = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+        receipt = capture_windows(
+            Qwen35CaptureDriver(self.model, getattr(self, "weight_stream", None)),
+            windows, revision=revision, sink=sink, order=order,
+            activation_budget_bytes=activation_budget_bytes,
+        )
+        receipt["execution_binding"] = binding
+        return receipt
+
     default_route = "native_mtp"
     # Explicit because Qwen3.8 retains its independently measured threshold
     # instead of inheriting Flash-Next's width-three default.

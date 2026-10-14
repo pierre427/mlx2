@@ -977,6 +977,7 @@ class StreamStats:
     peak_transient_bytes: int = 0
     peak_staging_bytes: int = 0
     phase: str = "serve"
+    capture_reuses: int = 0
     _group: object = field(default=None, repr=False)
     _group_transient: int = field(default=0, repr=False)
     _group_members: set = field(default_factory=set, repr=False)
@@ -1860,6 +1861,9 @@ def install_expert_streaming(
 # ---------------------------------------------------------------------------
 
 
+_DENSE_CAPTURE = contextvars.ContextVar("mlx2_dense_capture", default=None)
+
+
 class ProjectionReader:
     """Whole-tensor reads of one quantized projection, into one buffer each."""
 
@@ -1885,6 +1889,12 @@ class ProjectionReader:
 
         for path in self.source_paths:
             self._handles.check(path)
+        capture = _DENSE_CAPTURE.get()
+        if capture is not None and id(self) in capture[0]:
+            cached = capture[1].get(id(self))
+            if cached is not None:
+                self._stats.capture_reuses += 1
+                return cached
         buffers = {
             key: np.empty(location.nbytes, dtype=np.uint8)
             for (key, location) in self.specs.items()
@@ -1924,6 +1934,12 @@ class ProjectionReader:
         del buffers
         self._stats.bump("page_ins")
         self._stats.bump("page_in_bytes", self.nbytes)
+        if capture is not None and id(self) in capture[0]:
+            # The host buffers have gone. The arrays are now retained weights,
+            # counted once until this offline layer window ends.
+            self._stats._group_transient = 0
+            self._stats.add_resident(self.nbytes)
+            capture[1][id(self)] = arrays
         return arrays
 
 
@@ -2024,13 +2040,50 @@ class DenseStreamManager(_ManagerBase):
     mode = "dense_mlp"
 
     def __init__(self, *, plan: DenseStreamPlan, stats: StreamStats, pool, handles,
-                 streamed_keys: Sequence[str]):
+                 streamed_keys: Sequence[str], readers=None):
         self.plan = plan
         self.stats = stats
         self.streamed_keys = tuple(streamed_keys)
         self.forced_stock: Dict[str, int] = {}
         self._pool = pool
         self._handles = handles
+        self._readers = dict(readers or {})
+
+    @contextmanager
+    def capture_layer(self, prefix: str):
+        """Reuse a layer's exact projections for independent offline windows.
+
+        Retained weights plus the next host/device read must fit the existing
+        staging reservation. Context-local: ordinary serving never reuses it.
+        Callers evaluate outputs/state before leaving the layer scope.
+        """
+        if self._handles is None:
+            raise StreamingUnavailable("dense streaming manager is closed")
+        if _DENSE_CAPTURE.get() is not None:
+            raise StreamingUnavailable("nested dense capture is unsupported")
+        readers = {id(r): r for p, r in self._readers.items()
+                   if p.startswith(prefix + ".")}
+        required = sum(r.nbytes for r in readers.values()) + max(
+            (r.nbytes for r in readers.values()), default=0
+        )
+        if required > self.reserved_bytes():
+            raise WorkingSetTooSmall(
+                f"offline layer capture needs {required} tracked weight bytes; "
+                f"reservation is {self.reserved_bytes()}"
+            )
+        arrays = {}
+        token = _DENSE_CAPTURE.set((readers, arrays))
+        try:
+            yield
+        finally:
+            _DENSE_CAPTURE.reset(token)
+            for key in arrays:
+                self.stats.remove_resident(readers[key].nbytes)
+            arrays.clear()
+            self.stats._group_transient = 0
+
+    def live_bytes(self) -> int:
+        return int(self.stats.resident_bytes)
 
     def reserved_bytes(self) -> int:
         return int(self.plan.staging_ceiling_bytes)
@@ -2044,6 +2097,7 @@ class DenseStreamManager(_ManagerBase):
             "dense_stream_load_page_in_bytes_total": stats.load_page_in_bytes,
             "dense_stream_peak_tracked_bytes": stats.peak_tracked_bytes,
             "dense_stream_peak_staging_bytes": stats.peak_staging_bytes,
+            "dense_stream_capture_reuses_total": stats.capture_reuses,
         }
 
     def close(self) -> None:
@@ -2120,8 +2174,10 @@ def install_dense_streaming(
         cls = _dense_class()
         replacements = []
         streamed_keys = []
+        readers = {}
         for (path, module, specs) in resolved:
             reader = ProjectionReader(specs, handles=shards, pool=pool, stats=stats)
+            readers[path] = reader
             (out_dims, packed) = module["weight"].shape
             replacements.append((path, cls(
                 reader=reader,
@@ -2149,7 +2205,8 @@ def install_dense_streaming(
             manifest_sha256=manifest,
         )
         return DenseStreamManager(
-            plan=plan, stats=stats, pool=pool, handles=shards, streamed_keys=streamed_keys
+            plan=plan, stats=stats, pool=pool, handles=shards, streamed_keys=streamed_keys,
+            readers=readers,
         )
     except BaseException:
         if pool is not None:

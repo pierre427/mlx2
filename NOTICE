@@ -602,3 +602,8 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Sushi layer-major offline capture: source https://github.com/beamivalice/sushi at
+ad562c4078a62d9d0a562add7e109cbc330de96b (MIT).
+mlx2 supplies adapter binding, bounds, refusals and operation receipts.
+These opt-in mechanisms do not establish trained-model quality or performance.

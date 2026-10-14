@@ -448,6 +448,11 @@ class Qwen36TextModel(DenseTextModel):
         self.ssm_idx = 0
         self.fa_idx = args.full_attention_interval - 1
 
+    def forward_scope(self, inputs, cache):
+        """The phase scope one trunk forward runs in.  Offline layer-major
+        capture enters it per layer so it reproduces this forward's phase."""
+        return _moe_nax.forward_scope(inputs, cache)
+
     def __call__(self, inputs, cache=None, input_embeddings=None, *args, **kwargs):
         # The NAX MoE gather (MLX2_MOE_NAX_GATHER, default off) is
         # prefill-only: the trunk forward decides the phase once, as
@@ -455,7 +460,7 @@ class Qwen36TextModel(DenseTextModel):
         # speculating cache) and prepared verify blocks are not prefill; the
         # MTP head runs outside this scope; the invariant prefill lane is
         # excluded at the MoE call sites.  A no-op while the mode is off.
-        with _moe_nax.forward_scope(
+        with self.forward_scope(
             inputs if inputs is not None else input_embeddings, cache
         ):
             return super().__call__(
