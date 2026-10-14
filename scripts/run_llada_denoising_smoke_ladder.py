@@ -24,6 +24,9 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import realistic_haystack
+
 LOCKS = (Path("/Users/Shared/mlxuag/gpu.lock"), Path("/tmp/gpu.lock"))
 TOTAL_CANVASES = (1024, 4096)
 GENERATION = {"gen_length": 32, "block_length": 32, "steps": 32}
@@ -187,38 +190,65 @@ def rendered_tokens(tokenizer: Any, prompt: str) -> list[int]:
 
 
 def _prompt_text(units: int, nonce: str, needle: str) -> str:
-    return (
-        f"Archive session {nonce}. Read every record, then answer the question.\n"
-        + " record" * units
-        + f"\nThe unique launch code is {needle}.\n"
-        + f"Reply with {needle} first."
+    """Header, ``units`` characters of varied artifact text, buried needle, question.
+
+    Reasoning models fail on one phrase repeated thousands of times, so the
+    filler is real, varied text and the question does not contain the answer.
+    """
+    filler = realistic_haystack.haystack(units, root=ROOT, exclude=("LLADA-",))
+    note = (
+        f"Operational note for the deployment checklist: the launch code is {needle}. "
+        "Keep this exact code; it will be needed later."
     )
+    return (
+        f"Session {nonce}. Read the shared material, then answer the question.\n"
+        + realistic_haystack.bury(filler, note)
+        + "\nWhat is the launch code recorded in the operational note above? "
+        + "Reply with the exact code first."
+    )
+
+
+def _needle(nonce: str) -> str:
+    # Independent of the header nonce: a header sharing the code's hex is a near-duplicate answer.
+    return f"LLADA-{hashlib.sha256(f'{nonce}-needle'.encode()).hexdigest()[:6].upper()}"
 
 
 def calibrate_prompt(tokenizer: Any, target_prompt_tokens: int, nonce: str, needle: str) -> dict[str, Any]:
     """Find an exact rendered length; refuse an inexact total canvas."""
-    low, high = 0, target_prompt_tokens * 2
-    if len(rendered_tokens(tokenizer, _prompt_text(low, nonce, needle))) > target_prompt_tokens:
+
+    def count(units: int) -> int:
+        return len(rendered_tokens(tokenizer, _prompt_text(units, nonce, needle)))
+
+    corpus_chars = len(realistic_haystack.artifact_corpus(ROOT, ("LLADA-",)))
+    limit = min(corpus_chars, target_prompt_tokens * 8)
+    low, high = 0, limit
+    if count(low) > target_prompt_tokens:
         raise ValueError("fixed semantic prompt exceeds the requested prompt canvas")
-    while len(rendered_tokens(tokenizer, _prompt_text(high, nonce, needle))) < target_prompt_tokens:
-        high *= 2
+    if count(high) <= target_prompt_tokens:
+        raise ValueError(f"artifact corpus too short for a {target_prompt_tokens}-token prompt")
     while low < high:
         middle = (low + high + 1) // 2
-        count = len(rendered_tokens(tokenizer, _prompt_text(middle, nonce, needle)))
-        if count <= target_prompt_tokens:
+        if count(middle) <= target_prompt_tokens:
             low = middle
         else:
             high = middle - 1
-    prompt = _prompt_text(low, nonce, needle)
-    count = len(rendered_tokens(tokenizer, prompt))
-    if count != target_prompt_tokens:
+    prompt_tokens = count(low)
+    if prompt_tokens != target_prompt_tokens:
+        # Token counts are not monotone at a mid-word cut; try neighbours before failing closed.
+        for units in range(max(0, low - 16), min(limit, low + 17)):
+            if count(units) == target_prompt_tokens:
+                low, prompt_tokens = units, target_prompt_tokens
+                break
+    if prompt_tokens != target_prompt_tokens:
         raise ValueError(
-            f"could not calibrate exact prompt canvas: wanted {target_prompt_tokens}, got {count}"
+            f"could not calibrate exact prompt canvas: wanted {target_prompt_tokens}, got {prompt_tokens}"
         )
+    prompt = _prompt_text(low, nonce, needle)
     return {
         "prompt": prompt,
-        "prompt_tokens": count,
+        "prompt_tokens": prompt_tokens,
         "filler_units": low,
+        "filler": "artifacts",
         "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
         "needle": needle,
     }
@@ -568,7 +598,7 @@ def main(argv: list[str] | None = None) -> int:
             warm_nonce = hashlib.sha256(
                 f"warmup-{total_canvas}-{time.time_ns()}".encode()
             ).hexdigest()[:12]
-            warm_needle = f"LLADA-{warm_nonce[:6].upper()}"
+            warm_needle = _needle(warm_nonce)
             warm_prompt = calibrate_prompt(
                 adapter.tokenizer, target_prompt, warm_nonce, warm_needle
             )
@@ -654,7 +684,7 @@ def main(argv: list[str] | None = None) -> int:
             nonce = hashlib.sha256(
                 f"measured-{total_canvas}-{time.time_ns()}".encode()
             ).hexdigest()[:12]
-            needle = f"LLADA-{nonce[:6].upper()}"
+            needle = _needle(nonce)
             calibrated = calibrate_prompt(adapter.tokenizer, target_prompt, nonce, needle)
             own = ancestors(os.getpid()) | process_tree({os.getpid()})
             foreign_before = foreign_snapshot(own)

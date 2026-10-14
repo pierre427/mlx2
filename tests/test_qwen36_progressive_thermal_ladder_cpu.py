@@ -123,7 +123,14 @@ def test_prompt_builder_hits_exact_length_and_binds_fresh_needle():
     assert recipe["needle"].startswith("NEEDLE-1024-")
     assert len(recipe["prompt_token_ids_sha256"]) == 64
     decoded = "".join(chr(token) for token in tokens)
-    assert recipe["needle"] in decoded
+    # Varied artifact filler with the needle buried once, a third of the way
+    # in; the closing question does not contain the answer.
+    assert recipe["filler"] == "artifacts"
+    assert "archival evidence" not in decoded
+    assert len(set(decoded.split())) > 50
+    assert decoded.count(recipe["needle"]) == 1
+    assert decoded.index(recipe["needle"]) < len(decoded) * 2 // 3
+    assert recipe["needle"] not in decoded.rsplit("\n", 1)[-1]
 
 
 def test_progressive_stats_report_real_engagement_and_acceptance():

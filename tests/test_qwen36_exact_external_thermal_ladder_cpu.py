@@ -43,6 +43,30 @@ def _args(**overrides):
     return SimpleNamespace(**values)
 
 
+class _Tokenizer:
+    def apply_chat_template(self, messages, *, tokenize, **_kwargs):
+        assert tokenize is False
+        return "CHAT:" + messages[0]["content"] + ":ASSISTANT"
+
+    def encode(self, text, *, add_special_tokens):
+        assert add_special_tokens is False
+        return [ord(character) for character in text]
+
+
+def test_prompt_builder_buries_fresh_needle_in_varied_filler():
+    module = _module()
+    tokens, recipe = module._prompt_tokens(_Tokenizer(), 4096, rung=4096)
+    assert len(tokens) == recipe["prompt_tokens"] == 4096
+    assert recipe["needle"].startswith("NEEDLE-4096-")
+    decoded = "".join(chr(token) for token in tokens)
+    assert recipe["filler"] == "artifacts"
+    assert "archival evidence" not in decoded
+    assert len(set(decoded.split())) > 100
+    assert decoded.count(recipe["needle"]) == 1
+    assert decoded.index(recipe["needle"]) < len(decoded) * 2 // 3
+    assert recipe["needle"] not in decoded.rsplit("\n", 1)[-1]
+
+
 def test_plan_is_exact_six_cell_single_session_performance_only():
     module = _module()
     plan = module._plan(_args())

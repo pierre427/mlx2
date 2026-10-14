@@ -26,9 +26,13 @@ from benchmark_adaptive_mtp import (
     _wait_ready,
     stop_process_group,
 )
+from realistic_haystack import haystack
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "mlx2.pr-sweep-followups-gpu.v1"
+# The old ``--prefix-repetitions`` unit: one repeat of the retired 36-character
+# phrase was about five tokens, or about 21 characters of varied text.
+CHARS_PER_REPETITION = 21
 
 
 def _delta(after: dict, before: dict, key: str) -> int:
@@ -124,7 +128,8 @@ def _ordinary_checks(args, url: str, initial: dict) -> dict:
         1,
     )
 
-    shared = "cache-coherent deterministic prefix " * args.prefix_repetitions
+    # Varied repository text: reasoning models stall on a repeated phrase.
+    shared = haystack(args.prefix_chars, offset=100_000) + "\n\n"
     warm_prompt = shared + "Finish with the word alpha."
     warm_first = _stream_request(url, warm_prompt, args.request_timeout, 2)
     warm_second = _stream_request(url, warm_prompt, args.request_timeout, 2)
@@ -288,11 +293,23 @@ def parse_args(argv=None):
     parser.add_argument("--depth", type=int, default=2)
     parser.add_argument("--max-context", type=int, default=32768)
     parser.add_argument("--cache-gib", type=int, default=8)
-    parser.add_argument("--prefix-repetitions", type=int, default=768)
+    parser.add_argument(
+        "--prefix-chars",
+        type=int,
+        default=16_000,
+        help="characters of shared varied prefix (about 4 per token)",
+    )
+    parser.add_argument(
+        "--prefix-repetitions",
+        type=int,
+        help="deprecated size unit, converted to about the same token count",
+    )
     parser.add_argument("--startup-timeout", type=float, default=900)
     parser.add_argument("--request-timeout", type=float, default=900)
     parser.add_argument("--template-compatibility-smoke", action="store_true")
     args = parser.parse_args(argv)
+    if args.prefix_repetitions is not None:
+        args.prefix_chars = args.prefix_repetitions * CHARS_PER_REPETITION
     args.output = args.output.resolve()
     args.run_dir = args.output.parent / f"{args.output.stem}-artifacts"
     return args

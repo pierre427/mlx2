@@ -81,23 +81,32 @@ def calibrate_prompt(
     nonce: str,
     timeout: float,
 ) -> tuple[str, int]:
-    """Return the largest server-tokenized prompt at or below the target."""
-    tail = (
-        f"\nThe exact identifier is {identifier}.\n"
-        f"Campaign nonce: {nonce}. Reply with {identifier} first, then one short sentence."
-    )
-    unit = " archival evidence"
-    if count_tokens(base, model, tail, timeout) > target_tokens:
+    """Return the largest server-tokenized prompt at or below the target.
+
+    The filler is the thermal ladder's varied artifact text with the
+    identifier buried a third of the way in: reasoning models fail on one
+    phrase repeated thousands of times, which would gate the model, not the
+    candidate kernel.
+    """
+    head = f"Campaign nonce: {nonce}. Read the shared material and answer the question at the end."
+
+    def count(units: int) -> int:
+        return count_tokens(
+            base, model, thermal.build_prompt(units, head, identifier), timeout
+        )
+
+    if count(0) > target_tokens:
         raise ValueError(f"target {target_tokens} is smaller than request framing")
-    low, high = 0, target_tokens
+    low, high = 0, min(len(thermal.artifact_corpus()), target_tokens * 8)
+    if count(high) <= target_tokens:
+        raise ValueError(f"artifact corpus too short for a {target_tokens}-token prompt")
     while low < high:
         middle = (low + high + 1) // 2
-        candidate = unit * middle + tail
-        if count_tokens(base, model, candidate, timeout) <= target_tokens:
+        if count(middle) <= target_tokens:
             low = middle
         else:
             high = middle - 1
-    text = unit * low + tail
+    text = thermal.build_prompt(low, head, identifier)
     return text, count_tokens(base, model, text, timeout)
 
 

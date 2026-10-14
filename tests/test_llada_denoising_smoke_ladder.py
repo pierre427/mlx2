@@ -81,23 +81,31 @@ def test_ownership_rejects_non_parent_lock_holder(monkeypatch, tmp_path):
 class LinearTokenizer:
     def apply_chat_template(self, messages, **kwargs):
         del kwargs
-        # The fixed text has no instances of the exact filler token.
-        units = messages[0]["content"].count(" record")
-        return list(range(12 + units))
+        # One token per character: every canvas length is reachable.
+        return list(range(12 + len(messages[0]["content"])))
 
 
 def test_calibration_requires_exact_total_canvas_prompt():
-    row = MODULE.calibrate_prompt(LinearTokenizer(), 992, "nonce", "NEEDLE")
+    row = MODULE.calibrate_prompt(LinearTokenizer(), 992, "nonce", "LLADA-ABC123")
     assert row["prompt_tokens"] == 992
     assert row["filler_units"] > 0
-    assert row["needle"] == "NEEDLE"
+    assert row["needle"] == "LLADA-ABC123"
+    prompt = row["prompt"]
+    # Varied artifact text, not one phrase repeated; the answer appears once,
+    # buried in the filler, and the closing question does not repeat it.
+    assert prompt.count(" record") < 10
+    assert len(set(prompt.split())) > 50
+    assert prompt.count("LLADA-ABC123") == 1
+    assert prompt.index("LLADA-ABC123") < len(prompt) * 2 // 3
+    assert "LLADA-ABC123" not in prompt.rsplit("\n", 1)[-1]
+    again = MODULE.calibrate_prompt(LinearTokenizer(), 992, "nonce", "LLADA-ABC123")
+    assert again["prompt_sha256"] == row["prompt_sha256"]
 
 
 class EvenTokenizer:
     def apply_chat_template(self, messages, **kwargs):
         del kwargs
-        units = messages[0]["content"].count(" record")
-        return list(range(10 + 2 * units))
+        return list(range(10 + 2 * len(messages[0]["content"])))
 
 
 def test_calibration_fails_closed_when_exact_canvas_is_unreachable():

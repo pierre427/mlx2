@@ -9,10 +9,14 @@ import json
 from pathlib import Path
 from typing import Any
 
+from realistic_haystack import artifact_corpus
 from run_qualification_matrix import atomic_json, validate_manifest
 
 
 TAIL = "\nStart with exactly LADDER_READY, then explain compiler optimization in numbered sections."
+# The filler is varied repository text, not one word repeated: reasoning models
+# answer a repeated-string context by describing the repetition.
+FILLER_EXCLUDE = ("LADDER_READY",)
 
 
 def rebase_model_paths(model: dict[str, Any], base: Path) -> None:
@@ -71,14 +75,22 @@ def calibrate(tokenizer: Any, target: int, renderer: str = "qwen_direct") -> str
     count = lambda value: rendered_tokens(tokenizer, value, renderer)
     if count(TAIL) > target:
         raise ValueError(f"target {target} is smaller than the chat-template tail")
-    low, high = 0, target
+    corpus = artifact_corpus(exclude=FILLER_EXCLUDE)
+    # Grow an upper bound in characters, then binary-search the longest corpus
+    # prefix whose rendered prompt still fits the target.
+    low, high = 0, min(len(corpus), 4 * target)
+    while count(corpus[:high] + TAIL) <= target:
+        if high == len(corpus):
+            raise ValueError(f"filler corpus is too short for a {target}-token prompt")
+        low, high = high, min(len(corpus), 2 * high)
+    high -= 1
     while low < high:
         middle = (low + high + 1) // 2
-        if count(" data" * middle + TAIL) <= target:
+        if count(corpus[:middle] + TAIL) <= target:
             low = middle
         else:
             high = middle - 1
-    text = " data" * low + TAIL
+    text = corpus[:low] + TAIL
     candidates = (" x", " 0", " a", " .", "\n", " ")
     while count(text) < target:
         current = count(text)

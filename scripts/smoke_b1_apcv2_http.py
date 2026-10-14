@@ -26,10 +26,19 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.append(str(ROOT / "scripts"))
+from realistic_haystack import bury, haystack
+
+# About 1K prompt tokens of varied repository text with the answer buried in
+# it; a repeated reference line made reasoning models describe the repetition.
 PROMPT = (
-    "Read this short reference and answer the final question in one sentence.\n"
-    + ("APCv2 retains exact prompt state. An ordinary B=1 request has one decode lane.\n" * 48)
-    + "Question: What does APCv2 retain?\nAnswer:"
+    "Read this reference and answer the final question in one sentence.\n\n"
+    + bury(
+        haystack(3400, offset=70_000),
+        "APCv2 retains exact prompt state. An ordinary B=1 request has one decode lane.",
+    )
+    + "\nQuestion: What does APCv2 retain?\nAnswer:"
 )
 
 
