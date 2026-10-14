@@ -3395,6 +3395,11 @@ class Job:
     # Lane bytes admission granted this job that its cache has not allocated
     # yet; cleared by its first generated token (see ``unmaterialized_lane_bytes``).
     admission_reserved_gib: float = 0.0
+    # Usage-limit hold taken at submit and released at finish; in ``reserve``
+    # mode ``usage_output_cap`` bounds max_tokens to the tenant's remaining
+    # output budget (see ``mlx2.usage``).
+    usage_reservation: object = None
+    usage_output_cap: int | None = None
     # Verify-span cap prompt-lookup admission seated this lane at, or None.
     prompt_lookup_span: int | None = None
     apc_interior_positions: tuple[int, ...] = ()
@@ -4682,18 +4687,25 @@ class ServingEngine:
     ):
         if not self.ready.is_set() or self.error or not self.thread.is_alive():
             raise RuntimeError(self.error or "model is not ready")
-        with self._admission_section():
-            self._ensure_admission(admission_class, admitted=admitted)
-            if not self.slots.acquire(blocking=False):
-                self.batch_metrics.rejected("maximum_inflight", self.queued_jobs)
-                raise Overloaded("maximum inflight requests reached")
-            # Preparation (media decoding, file loads) runs outside
-            # submission_lock, which the worker takes every loop.  The count
-            # keeps a drain or an exclusive operation from passing this
-            # admitted request before it is published.
-            self._admissions_preparing += 1
+        (reservation,) = self._usage_admit([request], tenant_id)
+        try:
+            with self._admission_section():
+                self._ensure_admission(admission_class, admitted=admitted)
+                if not self.slots.acquire(blocking=False):
+                    self.batch_metrics.rejected("maximum_inflight", self.queued_jobs)
+                    raise Overloaded("maximum inflight requests reached")
+                # Preparation (media decoding, file loads) runs outside
+                # submission_lock, which the worker takes every loop.  The
+                # count keeps a drain or an exclusive operation from passing
+                # this admitted request before it is published.
+                self._admissions_preparing += 1
+        except BaseException:
+            self._usage_release([reservation])
+            raise
+        job = None
         try:
             job = self._prepare_job(request, tenant_id=tenant_id)
+            self._usage_attach(job, reservation)
             with self.submission_lock:
                 # Admitted above: publish unless a drain timeout has since
                 # claimed the idle boundary.
@@ -4706,12 +4718,119 @@ class ServingEngine:
             if orphaned:
                 self._finish(job, {"error": self.error or "server stopped", "status": 503})
             return job
-        except BaseException:
+        except BaseException as error:
             self.slots.release()
+            self._usage_failed(tenant_id, [request], [reservation], error, [job])
             raise
         finally:
             with self.submission_lock:
                 self._admissions_preparing -= 1
+
+    def _usage_admit(self, requests, tenant_id):
+        """Usage-limit holds for ``requests``, all or none.
+
+        Raises :class:`~mlx2.usage.UsageLimitExceeded` when a configured
+        limit is reached; without a ledger or limits every hold is None.
+        """
+        ledger = getattr(self, "usage_ledger", None)
+        if ledger is None or ledger.limits is None:
+            return [None] * len(requests)
+        from .usage import requested_output_tokens
+
+        held = []
+        try:
+            for request in requests:
+                held.append(
+                    ledger.admit(
+                        tenant_id,
+                        request.get("session_id"),
+                        requested_output=requested_output_tokens(
+                            request, self.default_max_tokens
+                        ),
+                    )
+                )
+        except BaseException:
+            self._usage_release(held)
+            raise
+        return held
+
+    def _usage_release(self, reservations):
+        ledger = getattr(self, "usage_ledger", None)
+        if ledger is not None:
+            for reservation in reservations:
+                ledger.release(reservation)
+
+    def _usage_failed(self, tenant_id, requests, reservations, error, jobs=None):
+        """Account requests that failed after the engine accepted them.
+
+        A refusal (full engine, closed admission) is not a request that ran
+        and is only released.  A job that did get registered is left to
+        ``_finish``, which records it.
+        """
+        ledger = getattr(self, "usage_ledger", None)
+        if ledger is None:
+            return
+        refused = isinstance(error, (Overloaded, AdmissionClosed))
+        jobs = list(jobs or [None] * len(requests))
+        for request, reservation, job in zip(requests, reservations, jobs):
+            if job is not None:
+                with self.lock:
+                    registered = self.jobs.get(job.id) is job
+                if registered:
+                    continue
+            if refused:
+                ledger.release(reservation)
+                continue
+            try:
+                ledger.record(
+                    tenant_id,
+                    (request or {}).get("session_id"),
+                    status="failed",
+                    reservation=reservation,
+                )
+            except Exception:
+                log.exception("usage accounting failed for a refused submission")
+                ledger.release(reservation)
+
+    @staticmethod
+    def _usage_attach(job, reservation):
+        job.usage_reservation = reservation
+        job.usage_output_cap = getattr(reservation, "output_cap", None)
+
+    @staticmethod
+    def _usage_capped(job, maximum):
+        """``maximum`` lowered to a ``reserve``-mode usage cap, if any."""
+        cap = getattr(job, "usage_output_cap", None)
+        return maximum if cap is None else max(1, min(int(maximum), int(cap)))
+
+    def _record_usage(self, job, status):
+        """Account a terminal request against its tenant and session."""
+        ledger = getattr(self, "usage_ledger", None)
+        if ledger is None:
+            return
+        reservation = getattr(job, "usage_reservation", None)
+        if status is None:
+            # Not this request's terminal (it already finished): only make
+            # sure no hold outlives it.
+            ledger.release(reservation)
+            return
+        started = getattr(job, "started", 0) or 0
+        request = getattr(job, "request", None) or {}
+        try:
+            ledger.record(
+                getattr(job, "tenant_id", "default"),
+                request.get("session_id"),
+                status=status,
+                prompt_tokens=getattr(job, "prompt_tokens", 0),
+                cached_tokens=getattr(job, "cached_tokens", 0),
+                completion_tokens=getattr(job, "completion_tokens", 0),
+                reasoning_tokens=getattr(job, "reasoning_tokens", 0),
+                service_ms=(time.monotonic() - started) * 1000 if started else 0,
+                reservation=reservation,
+            )
+        except Exception:  # accounting must never fail a request's terminal
+            log.exception("usage accounting failed for %s", getattr(job, "id", "?"))
+            ledger.release(reservation)
 
     def recent_receipts(self, tenant_id=None):
         """Recent request receipts, only ``tenant_id``'s when one is given."""
@@ -5436,9 +5555,29 @@ class ServingEngine:
             raise ValueError("parallel samples are unavailable with live Spomin surgery")
         if not self.ready.is_set() or self.error or not self.thread.is_alive():
             raise RuntimeError(self.error or "model is not ready")
+        reservations = self._usage_admit(requests, tenant_id)
+        try:
+            return self._submit_many_held(
+                requests,
+                reservations,
+                tenant_id=tenant_id,
+                admission_class=admission_class,
+                admitted=admitted,
+            )
+        except BaseException as error:
+            # A failed parallel submission unregisters its jobs, so none of
+            # them reaches _finish's record.
+            self._usage_failed(tenant_id, requests, reservations, error)
+            raise
+
+    def _submit_many_held(
+        self, requests, reservations, *, tenant_id, admission_class, admitted
+    ):
         jobs = [
             self._prepare_job(request, tenant_id=tenant_id) for request in requests
         ]
+        for job, reservation in zip(jobs, reservations):
+            self._usage_attach(job, reservation)
         if len(jobs) > 1 and any(
             job.request.get("_mlx2_activation_capsule") is not None for job in jobs
         ):
@@ -6012,7 +6151,9 @@ class ServingEngine:
             "output_audio", execute, admission_class="audio"
         )
 
-    def rerank(self, query, documents):
+    def rerank(self, query, documents, *, with_usage=False):
+        """Scores for ``documents``; ``(scores, prompt_tokens)`` with usage."""
+
         def execute(adapter):
             from .adapters.base import decoder_input_representations
 
@@ -6031,7 +6172,7 @@ class ServingEngine:
             ]
             self.counts["rerank_prompt_tokens"] += prompt_tokens
             self.counts["rerank_documents"] += len(documents)
-            return scores
+            return (scores, int(prompt_tokens)) if with_usage else scores
 
         return self._exclusive_adapter_operation(
             "rerank", execute, admission_class="rerank"
@@ -6535,6 +6676,15 @@ class ServingEngine:
             job.prompt_progress_event = event
 
     def _finish(self, job, event):
+        try:
+            self._finish_terminal(job, event)
+        except BaseException:
+            # A cleanup step that raised before the usage record must not
+            # leave the job's usage-limit hold behind (release is idempotent).
+            self._usage_release([getattr(job, "usage_reservation", None)])
+            raise
+
+    def _finish_terminal(self, job, event):
         # Duck-typed jobs reach _finish from cohort/fanout rollback paths.
         fault = getattr(job, "fault", None)
         if (
@@ -6581,6 +6731,7 @@ class ServingEngine:
             manager.release(lora_slot)
         overflowed = self._claim_output_overflow(job, event)
         waiting_siblings = ()
+        usage_status = None
         with self.lock:
             fanout_role = getattr(job, "fanout_role", None)
             fanout_group = getattr(job, "fanout_group", None)
@@ -6611,6 +6762,7 @@ class ServingEngine:
                     if event.get("error") == "cancelled"
                     else "failed"
                 )
+                usage_status = status
                 if status == "cancelled":
                     # Every terminal passes here once, wherever the request
                     # was waiting (active, deferred, queued, or dequeued).
@@ -6621,6 +6773,9 @@ class ServingEngine:
                     if callable(finishing):
                         finishing(job.id, event.get("finish_reason"))
                     metrics.terminal(job.id, status)
+        # Before the terminal is emitted, so a client that reads its usage
+        # right after a response sees that response counted.
+        self._record_usage(job, usage_status)
         if getattr(job, "output_overflow", None) == "pending":
             self._deliver_output_overflow(job)
         else:
@@ -10447,6 +10602,7 @@ class ServingEngine:
                                 effective_context=context_limit,
                                 default_max_tokens=self.default_max_tokens,
                             )
+                            maximum = self._usage_capped(job, maximum)
                             job.effective_max_tokens = maximum
                             job.max_tokens_defaulted = defaulted
                             # Downstream generation owns one concrete cap; the
@@ -10563,6 +10719,7 @@ class ServingEngine:
                                 if not concrete:raise ValueError('shared cohort requires every concrete prompt before admission')
                                 if member.effective_max_tokens is None:
                                     cap,defaulted=resolve_output_limit(member.request,prompt_tokens=len(concrete),effective_context=context_limit,default_max_tokens=self.default_max_tokens)
+                                    cap=self._usage_capped(member,cap)
                                     member.effective_max_tokens=cap;member.max_tokens_defaulted=defaulted;member.request['max_tokens']=cap
                             fresh=getattr(attaching_cohort.jobs[0],'native_cohort_memory_receipt',None) is None
                             shared_bound=adapter_shared_cohort_admission(adapter,tuple(attaching_cohort.jobs),profile_path=os.environ.get('MLX2_NATIVE_PACKED_PREFILL_N20_PROFILE'),manifest_path=os.environ.get('MLX2_NATIVE_PAGED_MANIFEST'),mlx_wheel_path=os.environ.get('MLX2_NATIVE_PAGED_MLX_WHEEL'))
@@ -12719,6 +12876,7 @@ class ServingEngine:
                                         "max_tokens": job.effective_max_tokens,
                                         "max_tokens_defaulted": job.max_tokens_defaulted,
                                         "default_max_tokens": self.default_max_tokens,
+                                        "usage_output_cap": job.usage_output_cap,
                                         "logprobs": wants_logprobs(job.request),
                                         "top_logprobs": job.request.get("top_logprobs", 0),
                                         "return_token_trace": job.request.get("return_token_trace", False),

@@ -26,6 +26,7 @@ import select
 import socket
 import threading
 import time
+import sqlite3
 import struct
 import uuid
 
@@ -40,6 +41,7 @@ from .serving import (
     take_prompt_progress,
 )
 from .power_governor import PowerSignalUnavailable
+from .usage import UsageLimitExceeded, UsageReloadBusy, metered_pooled
 from .batch_metrics import http_metric_route
 from .runtime.int8_prefill import cli_value as int8_prefill_cli_value
 # The --cache-bytes default and its post-load clamp live in cache_sizing: pure
@@ -199,6 +201,34 @@ TENANT_AUTH_LOOPBACK_OPEN_PATHS = frozenset({"/metrics"})
 TENANT_AUTH_ADAPTER_PATHS = frozenset(
     {"/v1/load_lora_adapter", "/v1/unload_lora_adapter"}
 )
+# Any valid credential of a tenant reads that tenant's own usage; changing its
+# usage view needs the ``usage-admin`` scope.
+TENANT_USAGE_VIEW_PATHS = frozenset({"/v1/usage", "/v1/usage/metrics"})
+TENANT_USAGE_ADMIN_PATHS = frozenset(
+    {"/v1/usage/clear", "/v1/usage/pause", "/v1/usage/resume"}
+)
+USAGE_ADMIN_ACTIONS = ("clear", "pause", "resume", "reload-limits")
+USAGE_REQUIRES_TENANT_AUTH = (
+    "tenant usage views require tenant authentication "
+    "(--tenant-auth-keys-file or a tenant token secret); operators read "
+    "/v1/admin/usage"
+)
+
+
+def validate_usage_admin_body(body):
+    """``{"tenant": id|null, "ledger": view|accounting|all}`` for admin usage."""
+    from .usage import LEDGERS, OVERFLOW_TENANT
+    from .tenant_auth import validate_tenant
+
+    if not isinstance(body, dict) or set(body) - {"tenant", "ledger"}:
+        raise ValueError("usage admin body accepts only tenant and ledger")
+    tenant = body.get("tenant")
+    if tenant is not None and tenant != OVERFLOW_TENANT:
+        validate_tenant(tenant)
+    ledger = body.get("ledger", "all")
+    if ledger not in LEDGERS + ("all",):
+        raise ValueError("ledger must be view, accounting or all")
+    return tenant, ledger
 # The gate API key and tenant credentials are both read from Authorization
 # and x-api-key, and tenant auth refuses the two headers when they differ, so
 # together they refuse every request that does not present one value that is
@@ -1557,7 +1587,17 @@ def rerank_payload(engine, body):
         raise CapabilityUnavailable(
             "the loaded adapter does not implement a reranking score"
         )
-    scores = provider(query, documents)
+    import inspect
+
+    prompt_tokens = None
+    try:
+        reports_usage = "with_usage" in inspect.signature(provider).parameters
+    except (TypeError, ValueError):
+        reports_usage = False
+    if reports_usage:
+        scores, prompt_tokens = provider(query, documents, with_usage=True)
+    else:
+        scores = provider(query, documents)
     if not isinstance(scores, (list, tuple)) or len(scores) != len(documents):
         raise RuntimeError("rerank adapter returned the wrong number of scores")
     ranked = []
@@ -1570,11 +1610,15 @@ def rerank_payload(engine, body):
             item["document"] = {"text": documents[index]}
         ranked.append(item)
     ranked.sort(key=lambda item: (-item["relevance_score"], item["index"]))
-    return {
+    payload = {
         "id": "rerank_" + uuid.uuid4().hex,
         "model": model,
         "results": ranked[:top_n],
     }
+    if prompt_tokens is not None:
+        prompt_tokens = int(prompt_tokens)
+        payload["usage"] = {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens}
+    return payload
 
 
 def _generation_model(status, body):
@@ -2017,6 +2061,7 @@ def handler_for(
     semantic_middleware=None,
     tensorfold_owned_router=None,
     sse_keepalive_seconds: float | None = DEFAULT_SSE_KEEPALIVE_SECONDS,
+    usage_ledger=None,
 ):
     if (
         tenant_authenticator is not None
@@ -2027,6 +2072,7 @@ def handler_for(
     engine.agent_compat = compat_policy
     if tenant_authenticator is not None:
         engine.tenant_authenticator = tenant_authenticator
+    engine.usage_ledger = usage_ledger
     if request_tracer is not None:
         engine.request_tracer = request_tracer
     # Preserve the standalone/test embedding contract: callers that do not
@@ -2203,11 +2249,15 @@ def handler_for(
         if raw_body.get("stream"):
             raise ValueError("batch rows cannot stream")
         if endpoint == "/v1/embeddings":
-            return 200, embeddings_payload(
-                engine,
-                raw_body,
-                admission_class="batch",
-                admitted=True,
+            return 200, metered_pooled(
+                usage_ledger,
+                tenant_id,
+                lambda: embeddings_payload(
+                    engine,
+                    raw_body,
+                    admission_class="batch",
+                    admitted=True,
+                ),
             )
         responses_api = endpoint == "/v1/responses"
         options = None
@@ -2469,6 +2519,10 @@ def handler_for(
                     self.headers,
                     required_scope="adapters"
                     if path in TENANT_AUTH_ADAPTER_PATHS
+                    else "usage-admin"
+                    if path in TENANT_USAGE_ADMIN_PATHS
+                    else None
+                    if path in TENANT_USAGE_VIEW_PATHS
                     else "inference",
                 )
             except TenantAuthError as failure:
@@ -2571,6 +2625,120 @@ def handler_for(
                 headers=headers,
             )
             return False
+
+        def _usage_enabled(self):
+            if usage_ledger is None:
+                self.api_error(404, "usage stats are disabled (--no-usage-stats)")
+                return False
+            return True
+
+        def _tenant_usage_get(self, path):
+            if not self._usage_enabled():
+                return
+            if tenant_authenticator is None or self._tenant_auth_method is None:
+                self.api_error(403, USAGE_REQUIRES_TENANT_AUTH)
+                return
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            try:
+                if set(query) - {"session", "sessions"} or any(
+                    len(values) != 1 for values in query.values()
+                ):
+                    raise ValueError("usage accepts one session and one sessions flag")
+                session_id = (
+                    validate_session_id(query["session"][0])
+                    if "session" in query else None
+                )
+                sessions = query.get("sessions", ["1"])[0]
+                if sessions not in {"0", "1"}:
+                    raise ValueError("sessions must be 0 or 1")
+            except ValueError as error:
+                self.api_error(400, str(error))
+                return
+            if path == "/v1/usage/metrics":
+                from .prometheus import CONTENT_TYPE
+
+                self.send_text(
+                    200,
+                    usage_ledger.prometheus(self._tenant_id),
+                    content_type=CONTENT_TYPE,
+                )
+                return
+            self.send_json(
+                200,
+                usage_ledger.tenant_report(
+                    self._tenant_id,
+                    sessions=sessions == "1",
+                    session_id=session_id,
+                ),
+            )
+
+        def _tenant_usage_post(self, action):
+            if not self._usage_enabled():
+                return
+            if tenant_authenticator is None or self._tenant_auth_method is None:
+                self.api_error(403, USAGE_REQUIRES_TENANT_AUTH)
+                return
+            try:
+                body = self._read_json_body(allow_empty=True, max_bytes=4096)
+                if body:
+                    raise ValueError(
+                        "tenant usage actions take no body: they act on the "
+                        "caller's own usage view"
+                    )
+            except (ValueError, json.JSONDecodeError) as error:
+                self.api_error(400, str(error))
+                return
+            tenant = self._tenant_id
+            if action == "clear":
+                value = usage_ledger.clear(tenant, ledger="view")
+            else:
+                value = usage_ledger.set_paused(action == "pause", tenant, ledger="view")
+            self.send_json(200, value)
+
+        def _admin_usage_get(self):
+            if not self._usage_enabled():
+                return
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            try:
+                if set(query) - {"tenant"} or any(
+                    len(values) != 1 for values in query.values()
+                ):
+                    raise ValueError("admin usage accepts one tenant")
+                tenant, _ledger = validate_usage_admin_body(
+                    {"tenant": query["tenant"][0]} if "tenant" in query else {}
+                )
+            except ValueError as error:
+                self.api_error(400, str(error))
+                return
+            self.send_json(200, usage_ledger.operator_report(tenant))
+
+        def _admin_usage_post(self, action):
+            if not self._usage_enabled():
+                return
+            if action not in USAGE_ADMIN_ACTIONS:
+                self.api_error(404, "unknown usage action")
+                return
+            try:
+                body = self._read_json_body(allow_empty=True, max_bytes=4096)
+                if action == "reload-limits":
+                    if body:
+                        raise ValueError("reload-limits takes no body")
+                    value = usage_ledger.reload_limits()
+                else:
+                    tenant, ledger = validate_usage_admin_body(body)
+                    if action == "clear":
+                        value = usage_ledger.clear(tenant, ledger=ledger)
+                    else:
+                        value = usage_ledger.set_paused(
+                            action == "pause", tenant, ledger=ledger
+                        )
+            except UsageReloadBusy as error:
+                self.api_error(409, str(error))
+                return
+            except (OSError, ValueError, json.JSONDecodeError) as error:
+                self.api_error(400, str(error))
+                return
+            self.send_json(200, value)
 
         def _read_json_body(self, *, allow_empty=False, max_bytes=None):
             size = self._content_length()
@@ -2712,7 +2880,15 @@ def handler_for(
             if mlx2 is not None:
                 payload["mlx2"] = mlx2
             extra = dict(headers or {})
-            if status == 429 or retry_after:
+            if retry_after is None:
+                pass  # a limit with no reset: no retry time to advertise
+            elif (
+                isinstance(retry_after, int)
+                and not isinstance(retry_after, bool)
+                and retry_after > 0
+            ):
+                extra["Retry-After"] = str(retry_after)
+            elif status == 429 or retry_after:
                 extra["Retry-After"] = "1"
             self.send_json(status, payload, headers=extra or None)
 
@@ -2726,6 +2902,11 @@ def handler_for(
                     return
                 self.send_json(200, engine.service_state())
                 return
+            if path == "/v1/admin/usage":
+                if not self._authorize_admin():
+                    return
+                self._admin_usage_get()
+                return
             if path == "/v1/admin/power":
                 if not self._authorize_admin():
                     return
@@ -2736,6 +2917,9 @@ def handler_for(
                     self.send_json(200, state)
                 return
             if not self._authenticate_tenant(path):
+                return
+            if path in TENANT_USAGE_VIEW_PATHS:
+                self._tenant_usage_get(path)
                 return
             try:
                 session_route = self._session_route()
@@ -2928,6 +3112,19 @@ def handler_for(
                     return
                 if tenant_authenticator is not None:
                     payload += tenant_authenticator.prometheus()
+                if usage_ledger is not None:
+                    # Every tenant only for the operator (loopback, plus the
+                    # admin bearer when one is configured); a verified tenant
+                    # credential sees only its own families.  Unverified
+                    # X-Tenant-ID callers see none.
+                    if authorize_admin(
+                        self.client_address[0],
+                        self.headers.get("Authorization"),
+                        admin_token,
+                    ) is None:
+                        payload += usage_ledger.prometheus()
+                    elif self._tenant_auth_method is not None:
+                        payload += usage_ledger.prometheus(self._tenant_id)
                 self.send_text(200, payload, content_type=CONTENT_TYPE)
                 return
             status = engine.status()
@@ -3005,6 +3202,9 @@ def handler_for(
                         },
                         "tenant_auth": tenant_authenticator.status()
                         if tenant_authenticator is not None
+                        else {"enabled": False},
+                        "usage": usage_ledger.public_status()
+                        if usage_ledger is not None
                         else {"enabled": False},
                         "agent_compat": compat_policy.status(),
                         "semantic_memory": semantic_middleware.status()
@@ -3114,6 +3314,11 @@ def handler_for(
                 except (ValueError, json.JSONDecodeError) as error:
                     self.api_error(400, str(error))
                 return
+            if path.startswith("/v1/admin/usage/"):
+                if not self._authorize_admin():
+                    return
+                self._admin_usage_post(path.removeprefix("/v1/admin/usage/"))
+                return
             if path == "/v1/admin/power":
                 if not self._authorize_admin():
                     return
@@ -3131,6 +3336,9 @@ def handler_for(
                     self.api_error(400, str(error))
                 return
             if not self._authenticate_tenant(path):
+                return
+            if path in TENANT_USAGE_ADMIN_PATHS:
+                self._tenant_usage_post(path.removeprefix("/v1/usage/"))
                 return
             owned_header = self.headers.get("X-MLX2-TensorFold-Owned")
             if (self.headers.get("X-MLX2-TensorFold-Route") is not None
@@ -3402,10 +3610,24 @@ def handler_for(
                     self.send_json(200, batches.cancel(tenant_id, batch_id))
                     return
                 if path == "/v1/embeddings":
-                    self.send_json(200, embeddings_payload(engine, body))
+                    self.send_json(
+                        200,
+                        metered_pooled(
+                            usage_ledger,
+                            tenant_id,
+                            lambda: embeddings_payload(engine, body),
+                        ),
+                    )
                     return
                 if path == "/v1/rerank":
-                    self.send_json(200, rerank_payload(engine, body))
+                    self.send_json(
+                        200,
+                        metered_pooled(
+                            usage_ledger,
+                            tenant_id,
+                            lambda: rerank_payload(engine, body),
+                        ),
+                    )
                     return
                 if path == "/v1/load_lora_adapter":
                     self.send_json(200, lora_control_payload(engine, body, load=True))
@@ -4770,6 +4992,18 @@ def handler_for(
                     stream_failure(501, str(exc))
                 else:
                     self.api_error(501, str(exc), anthropic=anthropic)
+            except UsageLimitExceeded as exc:
+                if streaming:
+                    stream_failure(429, str(exc), code=exc.code)
+                else:
+                    self.api_error(
+                        429,
+                        str(exc),
+                        anthropic=anthropic,
+                        code=exc.code,
+                        retry_after=exc.retry_after,
+                        mlx2={"usage_limit": exc.receipt()},
+                    )
             except Overloaded as exc:
                 if streaming:
                     stream_failure(429, str(exc))
@@ -5102,6 +5336,9 @@ def build_parser():
         help="permit tenant auth without --tenant-scoped-cache (a shared "
         "prefix cache leaks prompts across tenants through TTFT/cached_tokens)",
     )
+    from .usage import add_server_arguments as add_usage_arguments
+
+    add_usage_arguments(parser)
     parser.add_argument(
         "--allowed-host",
         action="append",
@@ -6393,6 +6630,7 @@ def main():
         raise
 
     tensorfold_owned_router = None
+    usage_ledger = None
 
     def abort(message):
         # Everything from here on runs with the engine and the socket open
@@ -6410,8 +6648,26 @@ def main():
                     if request_tracer is not None:
                         request_tracer.close()
                 finally:
-                    server.server_close()
+                    try:
+                        if usage_ledger is not None:
+                            usage_ledger.close()
+                    finally:
+                        server.server_close()
         parser.error(message)
+
+    from . import usage as usage_accounting
+
+    try:
+        usage_ledger = usage_accounting.from_args(
+            args,
+            known_tenants=(
+                tenant_authenticator.configured_tenants()
+                if tenant_authenticator is not None
+                else ()
+            ),
+        )
+    except (OSError, ValueError, sqlite3.Error) as error:
+        abort(f"cannot start usage accounting: {error}")
 
     if tenant_authenticator is not None and tenant_authenticator.uses_secret(
         getattr(getattr(engine, "reasoning_signer", None), "_secret", None)
@@ -6487,6 +6743,7 @@ def main():
             semantic_middleware=semantic_middleware,
             tensorfold_owned_router=tensorfold_owned_router,
             sse_keepalive_seconds=args.sse_keepalive_seconds or None,
+            usage_ledger=usage_ledger,
         )
     except (OSError, RuntimeError, ValueError) as error:
         # The handler opens the tenant file store and resolves the semantic
@@ -6525,7 +6782,12 @@ def main():
             try:
                 request_tracer.close()
             finally:
-                server.server_close()
+                try:
+                    # After the engine: its last terminals are recorded first.
+                    if usage_ledger is not None:
+                        usage_ledger.close()
+                finally:
+                    server.server_close()
     if engine.error:
         raise SystemExit(engine.error)
 

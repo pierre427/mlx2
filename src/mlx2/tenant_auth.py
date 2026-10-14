@@ -48,7 +48,9 @@ MAX_CREDENTIAL_BYTES = 4096
 DEFAULT_TOKEN_MAX_TTL = 7 * 24 * 3600
 MAX_TOKEN_TTL = 366 * 24 * 3600  # the ceiling TenantAuthenticator accepts
 TOKEN_IAT_SKEW_SECONDS = 30
-SCOPES = frozenset({"inference", "adapters"})
+# ``usage-admin`` lets a tenant clear or pause its own usage view (never the
+# accounting ledger that limits read).
+SCOPES = frozenset({"inference", "adapters", "usage-admin"})
 DEFAULT_SCOPES = ("inference",)
 HEADER_POLICIES = ("must-match", "ignore")
 
@@ -400,8 +402,15 @@ class TenantAuthenticator:
             raise self._fail("expired")
         return TenantPrincipal(tenant=tenant, method="token", scopes=scopes)
 
+    def configured_tenants(self) -> frozenset:
+        """Tenants named by the keys file (token tenants are open-ended)."""
+        return frozenset(principal.tenant for principal, _ in self._keys.values())
+
     def authenticate(self, headers, *, required_scope="inference") -> TenantPrincipal:
-        """Return the verified principal or raise :class:`TenantAuthError`."""
+        """Return the verified principal or raise :class:`TenantAuthError`.
+
+        ``required_scope=None`` accepts any valid credential of the tenant.
+        """
         credential, problem = self._presented(headers)
         if problem is not None:
             raise self._fail(problem)
@@ -422,7 +431,7 @@ class TenantAuthenticator:
                 header_event = "tenant_header_ignored"
         else:
             header_event = None
-        if required_scope not in principal.scopes:
+        if required_scope is not None and required_scope not in principal.scopes:
             raise self._fail("scope")
         with self._lock:
             self.verified[principal.method] += 1
