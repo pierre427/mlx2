@@ -1632,6 +1632,7 @@ _INT8_PREFILL_OUTCOMES = {
     "fallback_rows": "below_row_threshold",
     "fallback_dtype": "unsupported_dtype",
     "fallback_unbound": "unbound_module",
+    "fallback_slice_offset": "tensor_slice_offset",
 }
 
 

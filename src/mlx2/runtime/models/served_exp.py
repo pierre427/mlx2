@@ -72,6 +72,18 @@ def is_device_fault(exc) -> bool:
     return device_fault_kind(exc) is not None
 
 
+def is_threadgroup_refusal(exc) -> bool:
+    """MLX's ``metal_kernel`` refusing a threadgroup above the compiled
+    pipeline's ``maxTotalThreadsPerThreadgroup`` (MLX 39400a0d4
+    ``custom_kernel.cpp`` raises ``std::invalid_argument``, a Python
+    ``ValueError``).  A kernel refusal, not a contract error: register-heavy
+    pipelines on M1-M4 can allow fewer than 1024 threads (TensorFold
+    #704/#715 measured 768-832)."""
+    return isinstance(exc, ValueError) and (
+        "maximum allowed threads per threadgroup" in str(exc)
+    )
+
+
 def same_bits(a: mx.array, b: mx.array) -> bool:
     from .qwen4_fused_gdn import same_bits as equal
 

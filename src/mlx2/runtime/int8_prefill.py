@@ -88,6 +88,13 @@ _TM, _TN, _NSIMD = 128, 128, 8
 # are served by the stock kernels); embeddings are never Linear modules.
 MAX_OUT = 32768
 MIN_DIM = 256
+# The plain int8 GEMM (``_GEMM_SRC``) builds whole-matrix Metal 4 tensors and
+# ``slice()``s them at each tile.  On M5 / macOS 26.6 a slice whose byte
+# offset from the tensor base reaches 2 GiB lands 4 GiB low (llama.cpp
+# #28748).  Calls whose last tile would pass this offset stay on the stock
+# kernels (``fallback_slice_offset``).  The Q8/Q4/Q5 in-place kernels index
+# with 64-bit pointers and take no tensor slice.
+MPP_SLICE_OFFSET_LIMIT = 2**31
 
 EXPERTS_NOTE = (
     "routed MoE experts (SwitchGLU / gather_qmm / gather_mm) stay on stock "
@@ -1242,6 +1249,17 @@ def _quantize_rows(x):
     return xq, xs
 
 
+def max_tensor_slice_offset(*, rows: int, k: int, n: int) -> int:
+    """Largest byte offset ``_GEMM_SRC`` passes to an MPP tensor ``slice()``.
+
+    Activation tile ``(0, m0)`` of the [M, K] int8 tensor and weight tile
+    ``(0, n0)`` of the [N, K] int8 tensor, for the last tile of each.
+    """
+    last_m0 = ((max(int(rows), 1) - 1) // _TM) * _TM
+    last_n0 = ((max(int(n), 1) - 1) // _TN) * _TN
+    return max(last_m0, last_n0) * int(k)
+
+
 def _int8_gemm(xq, xs, wq, ws, bias=None):
     import mlx.core as mx
 
@@ -1807,6 +1825,7 @@ class Int8PrefillHandle:
             "fallback_rows": 0,
             "fallback_dtype": 0,
             "fallback_unbound": 0,
+            "fallback_slice_offset": 0,
             "weight_builds": 0,
             "weight_evictions": 0,
             "activation_reuse": 0,
@@ -1858,6 +1877,12 @@ class Int8PrefillHandle:
         if x.dtype != mx.bfloat16:
             # The epilogue writes bf16; never change fp16/fp32 semantics.
             self.counts["fallback_dtype"] += 1
+            return base_call(module, x)
+        if (
+            max_tensor_slice_offset(rows=rows, k=k, n=bound.spec.n)
+            >= MPP_SLICE_OFFSET_LIMIT
+        ):
+            self.counts["fallback_slice_offset"] += 1
             return base_call(module, x)
         self._last_use = time.monotonic()
         wq, ws = self._weights(bound)

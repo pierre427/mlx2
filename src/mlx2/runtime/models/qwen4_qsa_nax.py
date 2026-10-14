@@ -35,7 +35,7 @@ def block_sparse_layout_supported(head_dim, n_heads, n_kv_heads, block_size):
     be a multiple of 32), one KV head's query heads must fit a 16-row tile,
     and the block size is fixed at 4 (the QSA compression ratio).
     """
-    if n_kv_heads <= 0 or n_heads % n_kv_heads:
+    if n_heads <= 0 or n_kv_heads <= 0 or n_heads % n_kv_heads:
         return False
     ds = head_dim // 4
     return (
@@ -202,6 +202,9 @@ def nax_qsa_attention(
     casts to the attention dtype.
     """
     (batch, nqh, length, dim) = q.shape
+    if nqh <= 0 or n_kv_heads <= 0 or nqh % n_kv_heads:
+        # GQA >= 1: the kernel's q-head clamp min(head_of, NQH - 1) needs NQH >= 1.
+        raise ValueError(f"NAX QSA needs a positive multiple of {n_kv_heads} query heads, got {nqh}")
     gqa = nqh // n_kv_heads
     if gqa > MTILE:
         raise ValueError("one token's heads must fit a 16-row NAX tile")

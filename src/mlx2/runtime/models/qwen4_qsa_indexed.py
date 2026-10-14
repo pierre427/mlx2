@@ -22,7 +22,7 @@ from .qwen4_qsa_indexed_merge import (
     record_native_gate_engaged,
 )
 from .qwen4_qsa_nax import compact_blocks_to_kernel_inputs, compact_token_validity
-from .served_exp import is_device_fault
+from .served_exp import is_device_fault, is_threadgroup_refusal
 
 from .import_env import snapshot as _import_env_snapshot
 from ..mlx_build import VERIFIED_MLX_BUILDS
@@ -1010,7 +1010,9 @@ def _measure_candidates(candidates, dispatch):
             (output, _) = dispatch(candidate)
             mx.eval(output)
             viable.append(candidate)
-        except RuntimeError as exc:
+        except (RuntimeError, ValueError) as exc:
+            if isinstance(exc, ValueError) and not is_threadgroup_refusal(exc):
+                raise
             if is_device_fault(exc):
                 raise
             continue
@@ -1022,7 +1024,9 @@ def _measure_candidates(candidates, dispatch):
             (output, counter) = dispatch(candidate)
             mx.eval(output)
             elapsed = time.perf_counter_ns() - started
-        except RuntimeError as exc:
+        except (RuntimeError, ValueError) as exc:
+            if isinstance(exc, ValueError) and not is_threadgroup_refusal(exc):
+                raise
             if is_device_fault(exc):
                 raise
             continue

@@ -361,3 +361,62 @@ def test_segmented_private_delta_fault_is_not_a_dense_fallback(
     ):
         with pytest.raises(RuntimeError, match="Command buffer execution failed"):
             mx.eval(segmented.segmented_attention(attention, hidden, None))
+
+
+# MLX's metal_kernel raises std::invalid_argument (Python ValueError) when a
+# threadgroup exceeds the compiled pipeline's maxTotalThreadsPerThreadgroup
+# (MLX 39400a0d4 custom_kernel.cpp).  The 1024-thread pass-2 combine can
+# meet that on an M1-M4 Max/Ultra with a register-heavy pipeline
+# (TensorFold #704/#715 measured 768-832 there).  That is a kernel refusal:
+# decline the candidate, or fall back to gather, never fail the step.
+THREADGROUP_REFUSAL = (
+    "[metal_kernel] Thread group size (1024) is greater than  the maximum "
+    "allowed threads per threadgroup (832)."
+)
+
+
+def test_measure_candidates_skips_a_threadgroup_refusal():
+    def dispatch(candidate):
+        if candidate[1] == 128:
+            raise ValueError(THREADGROUP_REFUSAL)
+        return (mx.zeros((2,)), mx.zeros((1,), dtype=mx.int32))
+
+    (selected, _, _, timings) = indexed._measure_candidates(
+        [(384, 128, 12), (384, 64, 12)], dispatch
+    )
+    assert selected == (384, 64, 12)
+    assert list(timings) == [(64, 12)]
+
+
+def test_threadgroup_refusal_in_the_combine_falls_back_to_gather():
+    gather_calls = []
+    patches = _route(None, gather_calls)
+
+    def combine(*args, **kwargs):
+        raise ValueError(THREADGROUP_REFUSAL)
+
+    patches.append(mock.patch.object(indexed, "_combine_sdpa_partials", combine))
+    assert _attend(patches) == GATHER
+    assert gather_calls == [1]
+
+
+def test_nax_layout_and_dispatch_refuse_zero_heads(monkeypatch):
+    # GQA == 0 would send the q-head clamp min(head_of, NQH - 1) to -1.
+    assert not nax.block_sparse_layout_supported(128, 0, 1, 4)
+    assert not nax.block_sparse_layout_supported(128, 24, 0, 4)
+    assert nax.block_sparse_layout_supported(128, 24, 2, 4)
+
+    def dispatched(*args, **kwargs):
+        raise AssertionError("a zero-head geometry reached a Metal launch")
+
+    monkeypatch.setattr(nax, "_KERNEL", dispatched)
+    q = mx.zeros((1, 0, 1, 128))
+    kv = mx.zeros((1, 1, 8, 128))
+    z = mx.zeros((1, 1, 1), dtype=mx.uint32)
+    for heads in (0,):
+        with pytest.raises(ValueError, match="heads"):
+            nax.nax_qsa_attention(q, kv, kv, z, z, z, mx.zeros((1, 1)), mx.zeros((1,)),
+                                  scale=1.0, u_width=8, total=8, n_kv_heads=1)
+    with pytest.raises(ValueError, match="heads"):
+        nax.nax_qsa_attention(mx.zeros((1, 2, 1, 128)), kv, kv, z, z, z, mx.zeros((1, 1)),
+                              mx.zeros((1,)), scale=1.0, u_width=8, total=8, n_kv_heads=0)

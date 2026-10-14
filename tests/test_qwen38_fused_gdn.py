@@ -284,3 +284,41 @@ def test_fused_gdn_diagnostics_export_tree_kernel_engagement(monkeypatch):
     assert report['tree_calls'] == 7
     assert report['tree_rows'] == 91
     assert report['decode_calls'] == report['verify_calls'] == 0
+
+
+def test_tree_gdn_pre_refuses_one_tap_and_mismatched_plans(monkeypatch):
+    """One tap leaves an empty conv state (0, C): the pre kernel's state-row
+    clamp min(row, TAPS - 2) would be -1.  A plan built for another tap count
+    indexes windows[w * TAPS + tap] out of step.  Both refuse before launch."""
+    from mlx2.runtime.models import qwen38_tree_gdn as S
+
+    def dispatched(*args, **kwargs):
+        raise AssertionError("refused geometry reached a Metal launch")
+
+    monkeypatch.setattr(S, "_kernel", dispatched)
+    nk, nv, dk = 1, 1, 32
+    C = 2 * nk * dk + nv * dk
+    rows = 2
+    qkv = mx.zeros((1, rows, C), dtype=mx.bfloat16)
+    zba = mx.zeros((1, rows, nv * dk + 2 * nv), dtype=mx.bfloat16)
+    a_log = mx.zeros((nv,), dtype=mx.float32)
+    dt_bias = mx.zeros((nv,), dtype=mx.float32)
+    one_tap = mx.zeros((C, 1), dtype=mx.bfloat16)
+    empty_state = mx.zeros((1, 0, C), dtype=mx.bfloat16)
+    plan0 = S.ConvPlan([[-1, 0]], n_keep=0)
+    with pytest.raises(ValueError, match="taps"):
+        S.gdn_pre(qkv, [empty_state], one_tap, plan0, zba, a_log, dt_bias,
+                  nk=nk, nv=nv, dk=dk, dv=dk)
+    four_taps = mx.zeros((C, 4), dtype=mx.bfloat16)
+    state3 = mx.zeros((1, 3, C), dtype=mx.bfloat16)
+    plan1 = S.ConvPlan([[-1, 0]], n_keep=1)
+    with pytest.raises(ValueError, match="taps"):
+        S.gdn_pre(qkv, [state3], four_taps, plan1, zba, a_log, dt_bias,
+                  nk=nk, nv=nv, dk=dk, dv=dk)
+    ab = mx.zeros((1, rows, nv), dtype=mx.bfloat16)
+    with pytest.raises(ValueError, match="taps"):
+        S.gdn_pre_split(qkv, empty_state, one_tap, mx.zeros((rows * 1,), dtype=mx.int32),
+                        ab, ab, a_log, dt_bias, nk=nk, nv=nv, dk=dk, dv=dk)
+    with pytest.raises(ValueError, match="taps"):
+        S.gdn_pre_split(qkv, state3, four_taps, mx.zeros((rows * 2,), dtype=mx.int32),
+                        ab, ab, a_log, dt_bias, nk=nk, nv=nv, dk=dk, dv=dk)

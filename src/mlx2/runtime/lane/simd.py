@@ -881,8 +881,9 @@ def check_geometry(*, bits: int, group_size: int, mode: str, n: int, k: int, wei
         raise SimdUnsupported("packed weights must be uint32")
     if scales_dtype not in (mx.bfloat16, mx.float16, mx.float32):
         raise SimdUnsupported("scales and biases must be bf16, fp16 or fp32")
-    if k % group_size or k % 32:
-        raise SimdUnsupported("K must be a multiple of the group size and of 32")
+    if k < group_size or k % group_size or k % 32:
+        # K == 0 would leave no weight group (G == 0) for the kernels' clamps.
+        raise SimdUnsupported("K must be a positive multiple of the group size and of 32")
     if n < 1:
         raise SimdUnsupported("N must be positive")
 
@@ -896,6 +897,8 @@ def qmm(x2: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, grou
     n = int(weight.shape[0])
     if not 1 <= rows <= MAX_ROWS:
         raise SimdUnsupported(f"simd matmul takes 1-{MAX_ROWS} rows, got {rows}")
+    if k < group_size:
+        raise SimdUnsupported(f"K must be a positive multiple of the group size, got {k}")
     family = path(bits, group_size, n, k, scales.dtype, biases.dtype)
     x2 = mx.contiguous(x2)
     if family == "simd4":

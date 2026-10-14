@@ -570,3 +570,39 @@ def test_qwen36_down_launch_covers_every_output_row(monkeypatch, shared, rps, ro
     assert grid[1] % group[1] == 0
     assert (grid[1] // group[1]) * rps == hidden
     assert grid[2] == rows
+
+
+@pytest.mark.parametrize("inter, fast", [(512, True), (640, False)])
+def test_qwen36_down_kernel_layout_follows_qmv_fast(monkeypatch, inter, fast):
+    """The stock-down kernel with the qmv_fast header walks K in whole
+    512-wide blocks with no guarded tail.  The split admission also accepts
+    non-512 intermediates (640, 768, ...) under the Qwen3.6 contract, so the
+    launch must pick the guarded (qmv) layout there, as MLX's stock path and
+    ``candidate_down_combine`` do, or it reads past each down row."""
+    from types import SimpleNamespace as NS
+
+    from mlx2.runtime.models import qwen36_moe_decode as M
+
+    layouts = []
+
+    def run(**kw):
+        return [mx.zeros(s, d) for s, d in zip(kw["output_shapes"], kw["output_dtypes"])]
+
+    def down_kernel(*args, **kwargs):
+        layouts.append((args, kwargs))
+        return run
+
+    monkeypatch.setattr(RD, "_kernels", lambda: [None, None, run])
+    monkeypatch.setattr(M, "down_kernel", down_kernel)
+    monkeypatch.setattr(RD, "expert_operands", lambda layer: ())
+    table = NS(weight=mx.zeros((256, inter, 1)))
+    M.routed_rows(
+        mx.zeros((1, 1, 2048), mx.bfloat16),
+        mx.zeros((1, 8), mx.uint32),
+        mx.zeros((1, 8), mx.bfloat16),
+        table,
+        table,
+        table,
+    )
+    (args, kwargs), = layouts
+    assert kwargs.get("fast", args[1] if len(args) > 1 else None) is fast

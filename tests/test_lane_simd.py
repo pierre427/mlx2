@@ -237,3 +237,20 @@ def test_admission_matches_tensorfold_layout_checks():
     module.biases = module.biases.astype(mx.float16)
     with pytest.raises(lane.LaneUnsupported, match="share one dtype"):
         lm.prepare(module, "simd")
+
+
+def test_zero_k_is_refused_before_any_family_or_dispatch(monkeypatch):
+    # K == 0 passes "a multiple of the group size and of 32" but leaves no
+    # weight group (G == 0): the kernels' clamp min(c, G - 1) would go to -1.
+    with pytest.raises(simd.SimdUnsupported, match="K must"):
+        simd.check_geometry(bits=4, group_size=64, mode="affine", n=64, k=0,
+                            weight_dtype=mx.uint32, scales_dtype=mx.bfloat16)
+
+    def dispatched(*args, **kwargs):
+        raise AssertionError("a zero-K matmul reached a Metal launch")
+
+    monkeypatch.setattr(simd, "_run", dispatched)
+    monkeypatch.setattr(simd, "_compiled", dispatched)
+    with pytest.raises(simd.SimdUnsupported, match="K must"):
+        simd.qmm(mx.zeros((1, 0), dtype=mx.bfloat16), mx.zeros((64, 0), dtype=mx.uint32),
+                 mx.zeros((64, 0), dtype=mx.bfloat16), mx.zeros((64, 0), dtype=mx.bfloat16), 64, 4)

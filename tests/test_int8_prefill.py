@@ -459,6 +459,58 @@ def test_unsupported_dtype_falls_back_even_above_threshold(fake_device):
         ip.remove(handle)
 
 
+def test_tensor_slice_offset_bound_matches_the_last_tile():
+    # The plain int8 GEMM slices whole-matrix MPP tensors at (0, m0) and
+    # (0, n0); the largest byte offsets are the last row/column tile's.
+    assert ip.max_tensor_slice_offset(rows=128, k=512, n=256) == 128 * 512
+    assert ip.max_tensor_slice_offset(rows=129, k=512, n=128) == 128 * 512
+    assert ip.max_tensor_slice_offset(rows=1, k=512, n=128) == 0
+    # 27B down_proj (K 17408) at a whole-prompt prefill of 128K rows passes
+    # 2 GiB; at the default 2048-row chunk it does not.
+    assert ip.max_tensor_slice_offset(rows=131072, k=17408, n=5120) >= 2**31
+    assert ip.max_tensor_slice_offset(rows=2048, k=17408, n=5120) < 2**31
+
+
+def test_slice_offset_past_the_mpp_limit_falls_back_to_stock(fake_device, monkeypatch):
+    # llama.cpp #28748: on M5 / macOS 26.6 the Metal 4 tensor slice() lands
+    # 4 GiB low once its byte offset reaches 2 GiB.  The plain int8 GEMM
+    # must not dispatch such a slice: the call stays on the stock kernel.
+    # (CPU proof with the limit lowered; the real limit is 2**31 bytes.)
+    model = _Model(hidden=512, inter=1024, bits=4)
+    layer = model.layers[0].mlp.up_proj
+    x = mx.random.normal((600, 512)).astype(mx.bfloat16)
+    reference = layer(x)
+    monkeypatch.setattr(ip, "MPP_SLICE_OFFSET_LIMIT", 512 * 512, raising=False)
+    handle = ip.apply(model, ip.Int8PrefillPolicy.from_value("mlp"))
+    try:
+        assert mx.array_equal(layer(x), reference).item()
+        assert handle.counts["fallback_slice_offset"] == 1
+        assert handle.counts["engaged_calls"] == 0
+    finally:
+        ip.remove(handle)
+
+
+def test_slice_offset_fallback_is_exported(fake_device):
+    from mlx2.prometheus import PrometheusBuilder, _add_int8_prefill
+
+    class Engine:
+        int8_prefill_policy = ip.Int8PrefillPolicy.from_value("mlp")
+        int8_prefill_handle = None
+
+    engine = Engine()
+    engine.int8_prefill_handle = ip.apply(_Model(bits=6), engine.int8_prefill_policy)
+    try:
+        engine.int8_prefill_handle.counts["fallback_slice_offset"] = 2
+        builder = PrometheusBuilder()
+        _add_int8_prefill(builder, engine)
+        assert (
+            'mlx2_int8_prefill_calls_total{outcome="tensor_slice_offset"} 2'
+            in builder.render()
+        )
+    finally:
+        ip.remove(engine.int8_prefill_handle)
+
+
 # --------------------------------------------------------------------------
 # adapter / serving / qualification / telemetry surfaces
 # --------------------------------------------------------------------------

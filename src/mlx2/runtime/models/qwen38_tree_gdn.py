@@ -185,8 +185,21 @@ class ConvPlan:
                 streams.append(s)
             first += len(rp)
         self.rows, self.streams = first, len(parents)
+        self.n_keep = n_keep
         self.windows = ints(flat)
         self.row_stream = ints(streams)
+
+
+def _require_taps(where, taps, plan_taps, state_sizes, channels):
+    """The pre kernel reads TAPS - 1 conv-state rows and indexes windows by
+    TAPS: one tap leaves an empty state (its row clamp would be -1), and a
+    plan or state built for another tap count reads out of step."""
+    if taps < 2:
+        raise ValueError(f"stream_gdn.{where}: conv taps must be at least 2, got {taps}")
+    if plan_taps != taps:
+        raise ValueError(f"stream_gdn.{where}: plan built for {plan_taps} taps, weight has {taps}")
+    if any(size != (taps - 1) * channels for size in state_sizes):
+        raise ValueError(f"stream_gdn.{where}: conv state must hold taps - 1 = {taps - 1} rows")
 
 
 def gdn_pre(
@@ -209,6 +222,7 @@ def gdn_pre(
     C = int(qkv.shape[-1])
     taps = int(conv_weight.shape[1])
     zs = int(zba.shape[-1])
+    _require_taps("gdn_pre", taps, plan.n_keep + 1, (int(s.size) for s in states), C)
     if (
         R != plan.rows
         or dk != dv
@@ -284,6 +298,11 @@ def gdn_pre_split(
     rows = int(qkv.shape[-2])
     channels = int(qkv.shape[-1])
     taps = int(conv_weight.shape[1])
+    _require_taps(
+        "gdn_pre_split", taps, int(windows.size) // max(rows, 1), (int(conv_state.size),), channels
+    )
+    if int(windows.size) != rows * taps:
+        raise ValueError("stream_gdn.gdn_pre_split: windows must hold rows x taps entries")
     if (
         dk != dv
         or dk % 32

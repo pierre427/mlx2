@@ -126,7 +126,7 @@ from .qwen4_qsa_stage1 import (
     qsa_stage1_select,
     qsa_stage1_supported,
 )
-from .served_exp import is_device_fault
+from .served_exp import is_device_fault, is_threadgroup_refusal
 from .qwen3_5 import GatedDeltaNet as Qwen35GatedDeltaNet
 from .qwen3_next import Qwen3NextSparseMoeBlock as SparseMoeBlock
 from . import qwen3_next
@@ -5483,7 +5483,9 @@ def _indexed_qsa_attention_or_gather(
         return qwen4_qsa_indexed_attention(
             q, k, v, compact, scale=scale, splits=splits, output_gate=output_gate
         )
-    except (QSAIndexedProbeDeclined, RuntimeError) as error:
+    except (QSAIndexedProbeDeclined, RuntimeError, ValueError) as error:
+        if isinstance(error, ValueError) and not is_threadgroup_refusal(error):
+            raise
         if is_device_fault(error):
             # The step's command buffer failed: serving recovers the lanes;
             # gather would continue on its partly written state.
@@ -5538,7 +5540,9 @@ def _indexed_qsa_quantized_attention_or_gather(
             key_bits=key_bits,
             value_bits=value_bits,
         )
-    except (QSAIndexedProbeDeclined, RuntimeError) as error:
+    except (QSAIndexedProbeDeclined, RuntimeError, ValueError) as error:
+        if isinstance(error, ValueError) and not is_threadgroup_refusal(error):
+            raise
         if is_device_fault(error):
             raise
         reason = (
@@ -5612,7 +5616,9 @@ def _capture_qsa_indexed_comparison(
         indexed_out = qwen4_qsa_indexed_attention(
             q, k, v, compact, scale=scale, splits=splits
         )
-    except (QSAIndexedProbeDeclined, RuntimeError) as error:
+    except (QSAIndexedProbeDeclined, RuntimeError, ValueError) as error:
+        if isinstance(error, ValueError) and not is_threadgroup_refusal(error):
+            raise
         if is_device_fault(error):
             raise
         indexed_out = None

@@ -100,17 +100,20 @@ def down_source(shared=False):
 
 
 @lru_cache(maxsize=8)
-def down_kernel(shared_format=None):
+def down_kernel(shared_format=None, fast=True):
+    """``fast``: MLX's qmv_fast layout (K in whole 512-wide blocks); else the
+    qmv layout with a guarded K tail, as MLX picks for the same shape."""
     shared = shared_format is not None
     shared_bits, shared_gs = shared_format if shared else (None, None)
     names = ["x", "w", "scales", "biases", "rhs", "scores"]
-    header = RD._header(fast=True)
+    header = RD._header(fast=fast)
     if shared:
         names += ["sdw", "sds", "sdb", "gate"]
         header += RD._format_header("shared_qmv", shared_bits, True, shared_gs)
     return mx.fast.metal_kernel(
         name="qwen36_stock_down_rows"
-        + (f"_shared{shared_bits}g{shared_gs}" if shared else ""),
+        + (f"_shared{shared_bits}g{shared_gs}" if shared else "")
+        + ("" if fast else "_qmv"),
         input_names=names,
         output_names=["y"],
         header=header,
@@ -208,7 +211,10 @@ def routed_rows(x, indices, scores, gate, up, down, *, shared=None, shared_gate=
     rps = RD.served_down_rows()
     # One simdgroup per slot; the grid counts threads, so it spans every slot.
     slots = top_k + int(shared is not None)
-    return down_kernel(shared_format)(
+    # The split admission takes non-512 intermediates too; a qmv_fast walk
+    # over those reads past each down row (no guarded tail).
+    fast = RD.qmv_fast_layout(inter, hidden)
+    return down_kernel(shared_format, fast)(
         inputs=[
             h,
             *RD.expert_operands(down),
