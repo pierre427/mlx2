@@ -260,6 +260,21 @@ def authorize_admin(client_address, authorization, token=None):
     return None
 
 
+def validate_apc_clear_body(body):
+    """``{}`` or ``{"reason": "<label>"}`` for ``POST /v1/admin/apc/clear``."""
+    if body in (None, {}):
+        return "admin"
+    if not isinstance(body, dict):
+        raise ValueError("APCv2 clear request must be a JSON object")
+    unknown = set(body) - {"reason"}
+    if unknown:
+        raise ValueError("unsupported APCv2 clear fields: " + ", ".join(sorted(unknown)))
+    reason = body.get("reason", "admin")
+    if not isinstance(reason, str) or not 1 <= len(reason) <= 64:
+        raise ValueError("APCv2 clear reason must be a string of 1-64 characters")
+    return reason
+
+
 def validate_quiesce_body(body):
     if not isinstance(body, dict):
         raise ValueError("quiesce request must be a JSON object")
@@ -3318,6 +3333,28 @@ def handler_for(
                 if not self._authorize_admin():
                     return
                 self._admin_usage_post(path.removeprefix("/v1/admin/usage/"))
+                return
+            if path == "/v1/admin/apc/clear":
+                # Destructive (drops every prefix and parked session), so it
+                # needs a configured admin key, not only a loopback client.
+                if admin_token is None:
+                    self.api_error(
+                        403, "APCv2 clear requires --admin-token-file on the server"
+                    )
+                    return
+                if not self._authorize_admin():
+                    return
+                try:
+                    body = self._read_json_body(allow_empty=True, max_bytes=4096)
+                    reason = validate_apc_clear_body(body)
+                    clear = getattr(engine, "clear_prefix_caches", None)
+                    if clear is None:
+                        raise APCReuseDisabled("this engine has no prefix caches")
+                    self.send_json(200, clear(reason=reason))
+                except APCReuseDisabled as error:
+                    self.api_error(409, str(error))
+                except (ValueError, json.JSONDecodeError) as error:
+                    self.api_error(400, str(error))
                 return
             if path == "/v1/admin/power":
                 if not self._authorize_admin():

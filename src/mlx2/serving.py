@@ -4429,6 +4429,48 @@ class ServingEngine:
         )
         return value
 
+    def clear_prefix_caches(self, *, reason: str = "admin") -> dict:
+        """Drop every in-memory prefix cache and return what was dropped.
+
+        For an operator or a measurement harness that needs each phase to
+        start from a cold cache (the context ladder clears between cells, so
+        a cell never inherits the APCv2 entries, spills and allocator state
+        of the cells before it).  Unlike ``_invalidate_model_state`` the
+        model revision is unchanged: the model is the same, only the cached
+        prefixes go.
+
+        ``APCv2.clear`` drops resident entries and their disk spills (parked
+        sessions included, reported as lost); the host prompt cache is
+        emptied; MLX's buffer pool is released.  A request already
+        generating may still store its own result afterwards.
+        """
+        report = {"reason": str(reason)[:64], "apc": None}
+        if self.apc is not None:
+            apc_report = self.apc.clear()
+            report["apc"] = apc_report
+            lost = (
+                int(apc_report.get("pinned_parks_lost", 0) or 0)
+                if isinstance(apc_report, dict) else 0
+            )
+            if lost:
+                self.counts["apc_admin_clear_pinned_parks_lost"] += lost
+                log.error(
+                    "APCv2 admin clear (%s) destroyed %d pinned session "
+                    "checkpoint(s) (sessions %s)",
+                    reason, lost, apc_report.get("lost_sessions", []),
+                )
+        report["host_prompt_cache_entries"] = self.host_prompt_cache.status().get("entries", 0)
+        self.host_prompt_cache.clear()
+        try:
+            import mlx.core as mx
+
+            report["mlx_cache_bytes_released"] = int(mx.get_cache_memory())
+            mx.clear_cache()
+        except ImportError:
+            report["mlx_cache_bytes_released"] = 0
+        self.counts["apc_admin_clears"] += 1
+        return report
+
     def quiesce(self, *, drain_timeout_seconds=600.0, suspend=True):
         if isinstance(drain_timeout_seconds, bool) or not isinstance(
             drain_timeout_seconds, (int, float)

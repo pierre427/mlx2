@@ -22,6 +22,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Hashable, Iterable, List, Optional
 import mlx.core as mx
+from .rolling_counter import RollingCounter
 from . import loop_trace as _loop_trace
 from .cache_capsule import CacheCapsuleGeneration, CacheCapsulePool
 from .cache_operations import cache_operations
@@ -794,6 +795,9 @@ class APCv2(PrefixIndex):
     _spill_jobs = ()
     _spill_writer = None
     _turn_supersessions = {}
+    # Windowed spill/restore activity (rolling_counter); created on first use
+    # so instances built with object.__new__ still report it.
+    _disk_windows = None
     _DISK_STAT_KEYS = (
         "idle_spills",
         "pressure_spills",
@@ -1082,6 +1086,7 @@ class APCv2(PrefixIndex):
         self._wall_time = wall_time_fn
         self._last_idle_scan = 0.0
         self._disk_stats = {key: 0 for key in self._DISK_STAT_KEYS}
+        self._disk_windows = None
         self._disk_bytes = 0
         self._rescan = {
             "registered": 0,
@@ -2317,26 +2322,41 @@ class APCv2(PrefixIndex):
         current.nbytes = 0
         self._capsule_generation.advance()
 
+    def _disk_window(self, name: str) -> RollingCounter:
+        windows = self._disk_windows
+        if windows is None:
+            windows = self._disk_windows = {
+                "spills": RollingCounter(), "restores": RollingCounter(),
+            }
+        return windows[name]
+
     def _spill_entry_locked(
         self, key, tokens, entry, *, reason: str, hard_cap: Optional[int] = None,
         keep_resident: bool = False, background: bool = False,
     ) -> bool:
-        if not _loop_trace.enabled():
-            return self._spill_entry_untraced_locked(
-                key, tokens, entry, reason=reason, hard_cap=hard_cap,
-                keep_resident=keep_resident, background=background,
-            )
         nbytes = int(getattr(entry, "nbytes", 0) or 0)
-        start = _loop_trace.now()
+        traced = _loop_trace.enabled()
+        start = _loop_trace.now() if traced else None
+        began = time.perf_counter()
         spilled = self._spill_entry_untraced_locked(
             key, tokens, entry, reason=reason, hard_cap=hard_cap,
             keep_resident=keep_resident, background=background,
         )
-        _loop_trace.event(
-            "apc_spill", start, _loop_trace.now(), reason=reason,
-            bytes=nbytes, tokens=len(tokens), spilled=bool(spilled),
-            background=bool(self._spill_job_of(entry) is not None),
-        )
+        # Seconds this call held the caller (for a synchronous spill, the
+        # whole write: on the idle path that is the model thread).
+        blocked = time.perf_counter() - began
+        queued = self._spill_job_of(entry) is not None
+        if spilled:
+            self._disk_window("spills").add(
+                bytes=nbytes, seconds=blocked, background=int(queued),
+                **{reason: 1},
+            )
+        if traced:
+            _loop_trace.event(
+                "apc_spill", start, _loop_trace.now(), reason=reason,
+                bytes=nbytes, tokens=len(tokens), spilled=bool(spilled),
+                background=bool(queued),
+            )
         return spilled
 
     def _spill_entry_untraced_locked(
@@ -2783,14 +2803,20 @@ class APCv2(PrefixIndex):
         return self._n_bytes <= temporary_limit - self._capsule_reserved_bytes
 
     def _restore_entry_locked(self, key, tokens, entry) -> bool:
-        if not _loop_trace.enabled():
-            return self._restore_entry_untraced_locked(key, tokens, entry)
-        start = _loop_trace.now()
+        traced = _loop_trace.enabled()
+        start = _loop_trace.now() if traced else None
+        began = time.perf_counter()
         restored = self._restore_entry_untraced_locked(key, tokens, entry)
-        _loop_trace.event(
-            "apc_restore", start, _loop_trace.now(), tokens=len(tokens),
-            restored=bool(restored),
-        )
+        if restored:
+            self._disk_window("restores").add(
+                bytes=int(getattr(entry, "nbytes", 0) or 0),
+                seconds=time.perf_counter() - began,
+            )
+        if traced:
+            _loop_trace.event(
+                "apc_restore", start, _loop_trace.now(), tokens=len(tokens),
+                restored=bool(restored),
+            )
         return restored
 
     def _restore_entry_untraced_locked(self, key, tokens, entry) -> bool:
@@ -5411,6 +5437,12 @@ class APCv2(PrefixIndex):
                 "background_spill_inflight": len(self._spill_jobs),
                 "background_spill_inflight_bytes": self._inflight_spill_nbytes_locked(),
                 "background_spill_max_bytes": self._background_spill_max_bytes,
+                # Spills and restores over the last 10 s, 1 min, 5 min and
+                # 30 min: count, bytes, seconds blocked, and per-reason counts.
+                "recent": {
+                    "spills": self._disk_window("spills").snapshot(),
+                    "restores": self._disk_window("restores").snapshot(),
+                },
                 "disk_entries": sum(
                     (
                         1
