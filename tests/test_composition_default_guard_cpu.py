@@ -99,7 +99,11 @@ def test_adapter_skipped_default_reaches_route_receipt(monkeypatch):
         skipped_route_defaults={"mtp_ordinary_handoff": "why"},
     )
     try:
-        assert engine.status()["settings"]["skipped_route_defaults"] == {
+        skipped = dict(engine.status()["settings"]["skipped_route_defaults"])
+        # The harness adapter declares no cache projection, so the default
+        # rolling checkpoints step aside too (on by default since 2026-10-14).
+        assert "cache projection" in skipped.pop("apc_rolling_checkpoints")
+        assert skipped == {
             "mtp_ordinary_handoff": "why",
             "proposal_composition": COMPOSITION_DEFAULT_SKIPPED_NO_EXACT_LAW,
         }

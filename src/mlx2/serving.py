@@ -741,12 +741,39 @@ def weight_streaming_refusals(
     return reasons
 
 
+# Rolling prefill checkpoints are on by default (Pierre, 2026-10-14): a
+# prefill cancelled between chunks keeps its progress for the retry (gufo
+# #491 shape).  The engine applies it only when the execution policy does not
+# name the key, and steps aside (``skipped_route_defaults``) on a route that
+# cannot capture.  ``interval_tokens`` is a floor (Splash's spacing): the
+# engine raises it to the smallest multiple of its prefill step at or above
+# it (``default_rolling_interval``), so a cold prefill gains no slice cut.
+APC_ROLLING_CHECKPOINT_DEFAULT = {"interval_tokens": 4096}
+
+
+def default_rolling_interval(prefill_step) -> int:
+    """The default rolling spacing for an engine prefilling ``prefill_step``.
+
+    Rolling boundaries sit at absolute multiples of the interval and a cold
+    prefill ends its slices at multiples of the step, so an interval that is
+    a step multiple adds no cut there (an 8192-token step would otherwise be
+    split in two at every 4096).  Autoscaled engines report their top rung,
+    which every lower power-of-two rung divides.
+    """
+    floor = APC_ROLLING_CHECKPOINT_DEFAULT["interval_tokens"]
+    step = int(prefill_step or 0)
+    if step <= 0:
+        return floor
+    return step * -(-floor // step)
+
+
 def apc_rolling_checkpoint_policy(value) -> dict:
-    """Validate the default-off disposable rolling prefill checkpoint policy.
+    """Validate an explicit disposable rolling prefill checkpoint policy.
 
     ``interval_tokens`` is the absolute spacing of rolling state boundaries;
-    absent or 0 disables them.  Design reference: Splash rolling checkpoints
-    every 4096 tokens (rev f58d36dd).
+    an explicit ``null`` or 0 disables them.  An absent key selects
+    ``APC_ROLLING_CHECKPOINT_DEFAULT`` (``ServingEngine``).  Design
+    reference: Splash rolling checkpoints every 4096 tokens (rev f58d36dd).
     """
     defaults = {"interval_tokens": 0}
     if value is None:
@@ -3577,8 +3604,16 @@ class ServingEngine:
         # simdgroup kernel (runtime/models/sp_qmm.py) where it measured faster.
         self.sp_qmm_enabled = sp_qmm_selected(execution_policy)
         self.sp_qmm_handle = None
-        self.apc_rolling_checkpoint_policy = apc_rolling_checkpoint_policy(
-            (execution_policy or {}).get("apc_rolling_checkpoints")
+        # An operator's key (including null or 0) wins; otherwise the default.
+        self.apc_rolling_checkpoint_default = (
+            "apc_rolling_checkpoints" not in (execution_policy or {})
+        )
+        self.apc_rolling_checkpoint_policy = (
+            dict(APC_ROLLING_CHECKPOINT_DEFAULT)
+            if self.apc_rolling_checkpoint_default
+            else apc_rolling_checkpoint_policy(
+                execution_policy["apc_rolling_checkpoints"]
+            )
         )
         # "hybrid": capture/publish during prefill; "kv": publish the partial
         # trimmable cache when a prefill is cancelled; None: off.
@@ -7102,9 +7137,10 @@ class ServingEngine:
                 <= int(job.request.get("_mlx2_media_token_end", 0) or 0)
             ):
                 continue
+            key = cache_key_for(job.tenant_id, request_apc_scope(job.request))
             stored = self._publish_checkpoint(
                 apc,
-                cache_key_for(job.tenant_id, request_apc_scope(job.request)),
+                key,
                 list(tokens),
                 prompt_cache,
                 retention_role="prefill_rolling",
@@ -7116,6 +7152,15 @@ class ServingEngine:
                 if stored
                 else "apc_rolling_checkpoints_skipped_publish_failed"
             ] += 1
+            if stored:
+                # A retry that resumed from an earlier progress point owns it:
+                # retire it once its successor is published, as the hybrid
+                # publisher does, or cancel/hit/cancel cycles accumulate
+                # rolling entries (rolling inserts never prune prefixes).
+                # The lane's own lease defers the drop until ``_finish``
+                # closes it and sweeps.
+                self._retire_rolling_checkpoint(apc, active, job)
+                job.rolling_checkpoint = (key, tokens)
 
     def _retire_rolling_checkpoint(self, apc, active, job):
         """Retire ``job``'s latest rolling checkpoint unless a peer still needs it.
@@ -7829,6 +7874,7 @@ class ServingEngine:
                 BoundaryPurpose,
                 budget_state_boundaries,
                 plan_state_boundaries,
+                rolling_reuse_prompt_tokens,
             )
             from .runtime.os_memory import PressureLevel, physical_footprint_bytes
             from .runtime.sample_utils import (
@@ -8013,7 +8059,11 @@ class ServingEngine:
             if self.apc_retention_policy is not None:
                 # Present only when selected so default receipts stay identical.
                 settings["apc_retention_policy"] = dict(self.apc_retention_policy)
-            if self.apc_rolling_checkpoint_policy["interval_tokens"]:
+            if (
+                self.apc_rolling_checkpoint_policy["interval_tokens"]
+                and not self.apc_rolling_checkpoint_default
+            ):
+                # The default is recorded once its route is known (below).
                 settings["apc_rolling_checkpoints"] = dict(
                     self.apc_rolling_checkpoint_policy
                 )
@@ -8273,12 +8323,80 @@ class ServingEngine:
                     f"{route} route"
                 )
             if self.apc_rolling_checkpoint_policy["interval_tokens"]:
-                self.apc_rolling_route = self._select_rolling_route(
-                    adapter,
-                    external_draft=external_draft,
-                    prompt_lookup=prompt_lookup,
-                    inspect=inspect_apc_capabilities,
-                )
+                try:
+                    self.apc_rolling_route = self._select_rolling_route(
+                        adapter,
+                        external_draft=external_draft,
+                        prompt_lookup=prompt_lookup,
+                        inspect=inspect_apc_capabilities,
+                    )
+                except Exception as error:  # noqa: BLE001 - see below
+                    if not self.apc_rolling_checkpoint_default:
+                        raise
+                    # A default never stops a startup that would otherwise
+                    # succeed (a route that cannot capture, or a cache that
+                    # cannot be probed): it steps aside and the settings say
+                    # why.
+                    self.skipped_route_defaults["apc_rolling_checkpoints"] = (
+                        str(error)
+                        if isinstance(error, ValueError)
+                        else f"cache probe failed: {type(error).__name__}: {error}"
+                    )
+                    self.apc_rolling_checkpoint_policy = {"interval_tokens": 0}
+                    self.apc_rolling_route = None
+                else:
+                    if (
+                        self.apc_rolling_checkpoint_default
+                        and self.apc_rolling_route == "hybrid"
+                        and not callable(getattr(adapter, "cache_budget", None))
+                    ):
+                        # Admission budgets hybrid captures against the
+                        # adapter's cache projection; without one it plans
+                        # none, so the default would be selected but inert.
+                        self.skipped_route_defaults["apc_rolling_checkpoints"] = (
+                            "the adapter declares no cache projection, so "
+                            "admission cannot budget hybrid rolling captures"
+                        )
+                        self.apc_rolling_checkpoint_policy = {"interval_tokens": 0}
+                        self.apc_rolling_route = None
+                    elif self.apc_rolling_checkpoint_default and (
+                        rolling_reuse_prompt_tokens(
+                            interval_tokens=default_rolling_interval(
+                                self.prefill_step
+                            ),
+                            prefill_step=self.prefill_step,
+                            max_context=self.max_context,
+                            autoscale=(
+                                self.prefill_step_source == "prompt_length_autoscale"
+                            ),
+                        )
+                        is None
+                    ):
+                        # No prompt this route accepts can pass the first
+                        # boundary by another slice, so a checkpoint could
+                        # never be published and reused (nor qualified); the
+                        # same rule sizes the qualifier's probe.
+                        interval = default_rolling_interval(self.prefill_step)
+                        self.skipped_route_defaults["apc_rolling_checkpoints"] = (
+                            f"max_context {self.max_context} cannot hold a "
+                            f"prefill past the first rolling boundary "
+                            f"({interval}) by one more prefill slice "
+                            f"(prefill_step {self.prefill_step})"
+                        )
+                        self.apc_rolling_checkpoint_policy = {"interval_tokens": 0}
+                        self.apc_rolling_route = None
+                    elif self.apc_rolling_checkpoint_default:
+                        self.apc_rolling_checkpoint_policy = {
+                            "interval_tokens": default_rolling_interval(
+                                self.prefill_step
+                            )
+                        }
+                        settings["apc_rolling_checkpoints"] = dict(
+                            self.apc_rolling_checkpoint_policy
+                        )
+                        # Selected by default, not by the operator: receipts
+                        # and qualification tell the two apart.
+                        settings["apc_rolling_checkpoints_default"] = True
             if self.apc_inflight_prefix_policy["enabled"]:
                 self.apc_inflight_route = self._select_inflight_route(
                     adapter,
@@ -10717,6 +10835,7 @@ class ServingEngine:
                         checkpoint_available = int(
                             available_checkpoint_bytes * headroom_fraction
                         )
+                        p1_planned = None
                         if planning_target and (
                             self.apc_rolling_route == "hybrid"
                             or junction_candidate is not None
@@ -10747,6 +10866,7 @@ class ServingEngine:
                                 if bound.purpose != BoundaryPurpose.ROLLING
                                 or bound.position > media_end
                             )
+                            p1_planned = planned
                             job.state_boundaries, _checkpoint_bytes = (
                                 budget_state_boundaries(
                                     planned,
@@ -10803,16 +10923,25 @@ class ServingEngine:
                                 self.counts["apc_interior_deepest_mib_last"] = int(
                                     checkpoint_projection(checkpoint_candidates[-1])
                                 ) >> 20
-                        if (
-                            checkpoint_candidates
-                            and headroom_fraction < 1.0
-                            and self.apc_rolling_route != "hybrid"
-                        ):
-                            uncapped, _ = budget_interior_checkpoint_positions(
-                                checkpoint_candidates,
-                                available_bytes=available_checkpoint_bytes,
-                                cache_projection=checkpoint_projection,
-                            )
+                        if checkpoint_candidates and headroom_fraction < 1.0:
+                            # Interior positions the fraction alone dropped:
+                            # the same planner run against the whole headroom.
+                            if p1_planned is not None:
+                                uncapped = [
+                                    bound.position
+                                    for bound in budget_state_boundaries(
+                                        p1_planned,
+                                        available_bytes=available_checkpoint_bytes,
+                                        cache_projection=checkpoint_projection,
+                                    )[0]
+                                    if bound.purpose == BoundaryPurpose.INTERIOR
+                                ]
+                            else:
+                                uncapped, _ = budget_interior_checkpoint_positions(
+                                    checkpoint_candidates,
+                                    available_bytes=available_checkpoint_bytes,
+                                    cache_projection=checkpoint_projection,
+                                )
                             self.counts["apc_interior_positions_headroom_capped"] += (
                                 len(uncapped) - len(job.apc_interior_positions)
                             )

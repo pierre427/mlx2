@@ -10,7 +10,8 @@ hybrid (checkpointed) and KV-only models:
   entry survives once the committed prompt boundary is published);
 * rolling entries are evicted before interior checkpoints;
 * a peer lease defers retirement until the lease is released;
-* default-off leaves settings and receipts unchanged.
+* an explicit off leaves settings and receipts unchanged (on by default since
+  2026-10-14).
 """
 
 import threading
@@ -114,7 +115,9 @@ def test_budget_matches_interior_budget_and_ranks_junction_then_rolling():
     ) == ((), 0)
 
 
-def test_rolling_policy_is_default_off_and_strict():
+def test_explicit_rolling_policy_null_is_off_and_strict():
+    # An absent key selects APC_ROLLING_CHECKPOINT_DEFAULT in the engine
+    # (tests/test_rolling_default_on_cpu.py); an explicit null is off.
     assert apc_rolling_checkpoint_policy(None) == {"interval_tokens": 0}
     assert apc_rolling_checkpoint_policy({"interval_tokens": 4096}) == {
         "interval_tokens": 4096
@@ -434,7 +437,10 @@ def test_cancelled_hybrid_prefill_leaves_rolling_checkpoint_a_retry_hits(
         assert not [r for r in _roles(engine) if r[1] == "prefill_rolling"]
     finally:
         engine.close()
-    cold = _engine(model, vocab, mtp=mtp)
+    # Rolling checkpoints are on by default since 2026-10-14; the cold
+    # reference turns them off explicitly, which must leave settings and
+    # receipts free of them.
+    cold = _engine(model, vocab, mtp=mtp, interval=0)
     try:
         cold_tokens, cold_receipt, _ = _run(cold, prompt)
         assert "state_boundaries" not in cold_receipt

@@ -44,6 +44,63 @@ RETENTION_ROLE = {
 }
 
 
+# Reach rule shared by the engine's rolling default and the qualifier's
+# cancel-and-retry probe (scripts/qualify_serving.py): a prompt must pass the
+# first rolling boundary by more prefill slices, so a cancel at the boundary
+# lands while prefill still runs and a retry can resume from it.
+ROLLING_REUSE_TAIL_SLICES = 3
+# The qualifier's long-context headroom (LONG_CONTEXT_HEADROOM) plus the
+# probe's completion budget: what the served context must leave free.
+ROLLING_REUSE_CONTEXT_RESERVE = 256 + 4
+# Tokens the probe's prompt may carry beyond its filler words (chat template,
+# nonce sentence, instruction).  An autoscaled engine picks its step from the
+# whole prompt, so the step is taken over this whole range.
+ROLLING_REUSE_PROMPT_OVERHEAD = 256
+
+
+def rolling_reuse_prompt_tokens(
+    *, interval_tokens, prefill_step, max_context, autoscale=False
+) -> Optional[int]:
+    """Prompt tokens that show a rolling checkpoint published and reused, or
+    None when the context cannot hold one.
+
+    The prompt reaches ``interval_tokens`` plus ``ROLLING_REUSE_TAIL_SLICES``
+    prefill slices, capped below ``max_context`` less the reserve, and must
+    pass the boundary by at least one slice.  An autoscaled engine prefills
+    at the schedule rung for the *whole* prompt
+    (``BatchGenerator._prompt_prefill_step``), so the slice is the widest
+    rung any length the prompt may have (filler plus overhead) selects; the
+    length and that rung are iterated to a fixed point, which exists because
+    the schedule only widens with length.
+    """
+    interval = int(interval_tokens or 0)
+    base = max(1, int(prefill_step or 0))
+    cap = int(max_context or 0) - ROLLING_REUSE_CONTEXT_RESERVE
+    if interval <= 0:
+        return None
+
+    def widest_step(length):
+        if not autoscale:
+            return base
+        from .prefill_plan import prompt_length_prefill_step
+
+        return max(
+            prompt_length_prefill_step(max(1, int(length) + extra), maximum=base)
+            for extra in (0, ROLLING_REUSE_PROMPT_OVERHEAD)
+        )
+
+    step = widest_step(interval + 1)
+    while True:
+        length = min(interval + ROLLING_REUSE_TAIL_SLICES * step, cap)
+        wider = widest_step(length)
+        if wider <= step:
+            break
+        step = wider
+    if length < interval + step:
+        return None
+    return length
+
+
 @dataclass(frozen=True)
 class StateBoundary:
     position: int  # len(history) covered by the snapshot

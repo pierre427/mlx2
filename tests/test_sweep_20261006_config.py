@@ -91,8 +91,11 @@ def test_skipped_route_defaults_reach_settings_as_provenance(monkeypatch):
     engine = make_engine(model, vocab, mtp=True,
                          skipped_route_defaults={"mtp_ordinary_handoff": "why"})
     try:
-        assert engine.status()["settings"]["skipped_route_defaults"] == {
-            "mtp_ordinary_handoff": "why"}
+        skipped = dict(engine.status()["settings"]["skipped_route_defaults"])
+        # The harness adapter declares no cache projection, so the default
+        # rolling checkpoints step aside too (on by default since 2026-10-14).
+        assert "cache projection" in skipped.pop("apc_rolling_checkpoints")
+        assert skipped == {"mtp_ordinary_handoff": "why"}
     finally:
         engine.close()
 

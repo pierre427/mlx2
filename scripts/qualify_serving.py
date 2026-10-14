@@ -2161,6 +2161,204 @@ def run_prefill_scheduling_forcing(
     return True, evidence
 
 
+# The rolling-checkpoint cancel-and-retry probe (see run_rolling_checkpoint_probe).
+# Prefill slices past the first rolling boundary, so the client sees the
+# boundary in a progress event and disconnects while prefill still runs.
+ROLLING_PROBE_COMPLETION_TOKENS = 4
+ROLLING_PROBE_SETUP_SECONDS = 120.0
+# /v1/status republishes counters at most once a second.
+ROLLING_PROBE_COUNTER_SETTLE_SECONDS = 10.0
+
+
+def rolling_checkpoint_counters(status):
+    """Rolling publication and reuse counters from a ``/v1/status`` snapshot."""
+    counts = status.get("counts") or {}
+    lifetime = (status.get("apcv2") or {}).get("lifetime") or {}
+    return {
+        "published": int(counts.get("apc_rolling_checkpoints_published", 0) or 0),
+        "cancel_published": int(
+            counts.get("apc_rolling_checkpoints_cancel_published", 0) or 0
+        ),
+        "rolling_hits": int(lifetime.get("rolling_hits", 0) or 0),
+    }
+
+
+def rolling_probe_prompt_words(settings):
+    """Prompt words for the probe, or None when the context cannot hold it.
+
+    The same reach rule decides whether the engine selects rolling
+    checkpoints by default (``rolling_reuse_prompt_tokens``), so a default
+    selection always admits this probe; only an explicit selection on a
+    context too short for it is refused here.
+    """
+    from mlx2.runtime.state_boundaries import rolling_reuse_prompt_tokens
+
+    return rolling_reuse_prompt_tokens(
+        interval_tokens=(settings.get("apc_rolling_checkpoints") or {}).get(
+            "interval_tokens"
+        ),
+        prefill_step=settings.get("prefill_step"),
+        max_context=settings.get("max_context"),
+        autoscale=settings.get("prefill_step_source") == "prompt_length_autoscale",
+    )
+
+
+def run_rolling_checkpoint_probe(
+    *,
+    get_status,
+    post,
+    settings,
+    nonce,
+    text_for=None,
+    setup_seconds=ROLLING_PROBE_SETUP_SECONDS,
+    settle_seconds=ROLLING_PROBE_COUNTER_SETTLE_SECONDS,
+    poll_seconds=0.05,
+    sleep=time.sleep,
+    monotonic=time.monotonic,
+):
+    """Cancel a prefill past a rolling boundary, retry it; ``(passed, evidence)``.
+
+    Rolling prefill checkpoints (on by default since 2026-10-14) engage only
+    when a prefill stops after a boundary; the qualifier's other cancellation
+    stops a decode.  This probe streams a fresh prompt with
+    ``return_progress``, disconnects as soon as the server reports prefill
+    past the first boundary, waits for the lane to end, then sends the same
+    prompt again.  It passes when the retry resumes at or past the boundary
+    and the server's own counters show the mechanism: a published rolling
+    checkpoint that was hit (hybrid route) or a cancelled prefill's
+    publication (KV route).  Fails closed when the context cannot hold the
+    probe, the prefill finishes before the boundary is seen, or the retry
+    resumes short of it.
+    """
+    policy = settings.get("apc_rolling_checkpoints") or {}
+    interval = int(policy.get("interval_tokens") or 0)
+    evidence = {
+        "schema": "mlx2.rolling-checkpoint-probe.v1",
+        "interval_tokens": interval,
+        "selection": (
+            "default" if settings.get("apc_rolling_checkpoints_default") is True
+            else "explicit"
+        ),
+        "prefill_step": settings.get("prefill_step"),
+        "max_context": settings.get("max_context"),
+    }
+
+    def fail(reason):
+        evidence["failure"] = reason
+        return False, evidence
+
+    if interval <= 0:
+        return fail("rolling checkpoints are not selected on this route")
+    words = rolling_probe_prompt_words(settings)
+    if words is None:
+        return fail(
+            "the served context cannot hold a prefill that passes a rolling "
+            "boundary with slices to spare"
+        )
+    evidence["prompt_words"] = words
+
+    def idle(what):
+        deadline = monotonic() + setup_seconds
+        while True:
+            status = get_status()
+            if status.get("inflight") == 0 and status.get("queue_depth", 0) == 0:
+                return status
+            if monotonic() >= deadline:
+                raise TimeoutError(
+                    f"{what}: inflight={status.get('inflight')} "
+                    f"queue_depth={status.get('queue_depth')}"
+                )
+            sleep(poll_seconds)
+
+    text = (
+        f"Rolling probe {nonce}. "
+        + (text_for or long_context_filler)(words)
+        + "\nReply OK."
+    )
+
+    def body(**extra):
+        return {
+            "messages": [{"role": "user", "content": text}],
+            "max_tokens": ROLLING_PROBE_COMPLETION_TOKENS,
+            "reasoning_effort": "none",
+            "think": False,
+            **extra,
+        }
+
+    try:
+        before = rolling_checkpoint_counters(idle("server not idle before the probe"))
+    except TimeoutError as error:
+        return fail(str(error))
+    evidence["counters_before"] = before
+    try:
+        stream = post(body(return_progress=True), stream=True)
+    except OSError as error:  # HTTPError included
+        return fail(f"probe request failed: {type(error).__name__}: {error}")
+    seen = None
+    try:
+        while seen is None:
+            raw = stream.readline()
+            if not raw:
+                return fail("probe stream closed before a boundary was reported")
+            line = raw.decode() if isinstance(raw, bytes) else raw
+            if line.startswith("data: [DONE]"):
+                return fail("probe prefill finished before a boundary was reported")
+            if not line.startswith("data: {"):
+                continue
+            chunk = json.loads(line[6:])
+            if "error" in chunk:
+                return fail(f"probe stream failed: {chunk['error']}")
+            progress = chunk.get("prompt_progress") or {}
+            if int(progress.get("processed") or 0) >= interval:
+                seen = {
+                    "processed": int(progress["processed"]),
+                    "total": int(progress.get("total") or 0),
+                }
+            elif any(
+                (choice.get("delta") or {}).get("content")
+                or choice.get("finish_reason")
+                for choice in chunk.get("choices") or ()
+            ):
+                return fail("probe prefill finished before a boundary was reported")
+    finally:
+        stream.close()
+    evidence["abandoned_at"] = seen
+    try:
+        idle("the abandoned probe lane did not end")
+        retry = post(body())
+    except TimeoutError as error:
+        return fail(str(error))
+    except HTTPError as error:
+        return fail(f"retry refused: {http_refusal(error)}")
+    receipt = retry.get("mlx2") or {}
+    cached = int(receipt.get("cached_tokens") or 0)
+    evidence["retry"] = {
+        "cached_tokens": cached,
+        "cache_checkpoint_role": receipt.get("cache_checkpoint_role"),
+        "prompt_tokens": (retry.get("usage") or {}).get("prompt_tokens"),
+    }
+
+    def engaged(after):
+        delta = {key: after[key] - before[key] for key in before}
+        return delta, (
+            min(delta["published"], delta["rolling_hits"]) > 0
+            or delta["cancel_published"] > 0
+        )
+
+    deadline = monotonic() + settle_seconds
+    while True:
+        delta, ok = engaged(rolling_checkpoint_counters(get_status()))
+        if ok or monotonic() >= deadline:
+            break
+        sleep(poll_seconds)
+    evidence["counter_delta"] = delta
+    if not ok:
+        return fail("no rolling checkpoint was published and reused")
+    if cached < interval:
+        return fail("the retry did not resume at or past the rolling boundary")
+    return True, evidence
+
+
 def sp_qmm_routed_observation(initial, final):
     """Count only routed calls made during this qualification run."""
     if initial is None:
@@ -4428,6 +4626,22 @@ def main():
                 nonce=uuid.uuid4().hex,
             )
             report["prefill_scheduling_forcing"] = forcing_evidence
+        rolling_probe = None
+        if (initial["settings"].get("apc_rolling_checkpoints") or {}).get(
+            "interval_tokens"
+        ):
+            # Selected rolling checkpoints (default or explicit) must show a
+            # cancelled prefill resuming from one; nothing else in the run
+            # stops a prefill.  Checked with the feature checks below.
+            import uuid
+
+            rolling_probe, rolling_evidence = run_rolling_checkpoint_probe(
+                get_status=lambda: get("/v1/status"),
+                post=post,
+                settings=initial["settings"],
+                nonce=uuid.uuid4().hex,
+            )
+            report["apc_rolling_checkpoint_probe"] = rolling_evidence
         final, quiescence = wait_for_quiescence(
             lambda: get("/v1/status"),
             timeout_seconds=args.quiescence_timeout,
@@ -4496,6 +4710,12 @@ def main():
                 "prefill_scheduling_forced_reorder",
                 forced,
                 report["prefill_scheduling_forcing"],
+            )
+        if rolling_probe is not None:
+            check(
+                "apc_rolling_checkpoint_cancel_retry",
+                rolling_probe,
+                report["apc_rolling_checkpoint_probe"],
             )
         # Host-gated mechanisms (MLX2_MOE_NAX_GATHER: M5 only, canaried; the
         # NAX QSA prefill kernel: M5 only, probed) that

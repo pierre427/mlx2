@@ -81,6 +81,15 @@ def required_generic_checks(descriptor, *, capabilities=None):
 # qualify_serving.py intentionally requires a source/runtime re-freeze and an
 # explicit update here; a receipt may not authorize its own producer.
 APPROVED_QUALIFICATION_HARNESS = {
+    # Re-pinned 2026-10-14: the rolling probe sizes its prompt with the
+    # engine's shared reach rule (state_boundaries.rolling_reuse_prompt_tokens),
+    # so a default selection always admits it.  Receipts from 08753e31...
+    # must be regenerated.
+    # Re-pinned 2026-10-14: rolling prefill checkpoints are on by default and
+    # a selected rolling policy (default or explicit) now runs a bounded
+    # cancel-mid-prefill/retry probe (run_rolling_checkpoint_probe) whose
+    # check, with feature_apc_rolling_checkpoints, gates the verdict.
+    # Receipts from 17e5e863... must be regenerated.
     # Re-pinned 2026-10-10: cache capsules and persistent blocks now require
     # run-local preparation and disk-lifecycle evidence, and a selected cache
     # capsule route runs an exact three-sample fanout oracle. Receipts from
@@ -276,8 +285,11 @@ APPROVED_QUALIFICATION_HARNESS = {
     # Re-pinned 2026-10-14 (rowexact Codex fix): feature_row_exact_low_bit_lane
     # counts lane_exact projection growth only when every declined layer was
     # prepared and no projection fell back per row.  Receipts from
-    # 17e5e863... must be regenerated.
-    "sha256": "753583387a3311a99e6bbd402d1850ab22c6abd404d61d31d1006d234c46bc11",
+    # 17e5e863... must be regenerated. Merged with the rolling re-pin
+    # (08753e31..., also never released) on the integration branch.
+    # The rolling short-context step-aside (rolling_reuse_prompt_tokens shared
+    # with the probe) changed qualify_serving.py again; merged pin below.
+    "sha256": "c46b308cfcd97a84a4b3f2c3f18762917046ec93a654ee0693968678aae25667",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -1689,8 +1701,11 @@ def _route_feature_checks(settings):
         # publishes an exact interior checkpoint for later reuse.
         features.add("apc_interior_checkpoints")
     if (settings.get("apc_rolling_checkpoints") or {}).get("interval_tokens", 0) > 0:
-        # A selected rolling policy must show a published progress point that
-        # a later request resumed from (hybrid) or a cancel publication (KV).
+        # A selected rolling policy (explicit, or the default since
+        # 2026-10-14) must show a published progress point that a later
+        # request resumed from (hybrid) or a cancel publication (KV); the
+        # qualifier's cancel-and-retry probe produces it.  A run without that
+        # evidence stays runnable but unqualified.
         features.add("apc_rolling_checkpoints")
     if settings.get("apc_junction_checkpoints") is True:
         # A junction must be captured and published at an observed branch
