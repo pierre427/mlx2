@@ -530,26 +530,50 @@ class LFM25MoEAdapter:
 
     @staticmethod
     def thinking_enabled(request):
-        return "messages" in request
+        return "messages" in request and request.get("enable_thinking", True) is not False
 
+    # Known model behaviour (Pierre, 2026-10-14): asked for two tools with
+    # tool_choice="required" and parallel_tool_calls=True, the model closes the
+    # call list after one call (SDK smoke openai.chat.tools_required_named_parallel
+    # returns weather(city='Toronto') only).  The forced-call grammar admits a
+    # multi-call list (``(?:, call)*``); stopping is the model's choice, as for
+    # Flash-Next MTP2 and Laguna (docs/QUALIFICATION.md Step 3).  It also may
+    # write hyphens as U+2011 (``NEEDLE‑E53CD8‑0``); the ladder harness collapses
+    # dash variants (qualification/runs/qualify-1010-correctness/needle_match.py).
+    # Evidence: qualification/runs/qualify-ce017ce9-lfm25-q36int8/.
     tool_call_open_marker = TOOL_CALL_START
 
     def _validate_request(self, request):
-        if request.get("enable_thinking") is False:
-            raise ValueError("LFM2.5 24B-A2B always reasons before its answer")
         validate_tool_request(request)
 
+    # The generation prompt always ends with ``<think>``; the template has no
+    # switch.  With reasoning off the adapter closes the channel at once, the
+    # spelling the template itself gives a turn with empty reasoning
+    # (``<think>`` + ``</think>`` + answer), so output starts in the answer and
+    # a client grammar binds from its first token.  The 2026-10-14 smoke found
+    # the earlier refusal broke every client that turns reasoning off,
+    # including the Messages and Responses defaults.
     def prompt_tokens(self, request):
         self._validate_request(request)
         if "messages" in request:
-            return render_chat(self.tokenizer, request, tokenize=True)
+            tokens = list(render_chat(self.tokenizer, request, tokenize=True))
+            if not self.thinking_enabled(request):
+                tokens += list(self._thinking_close_ids())
+            return tokens
         return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
 
     def render_prompt(self, request):
         self._validate_request(request)
         if "messages" in request:
-            return render_chat(self.tokenizer, request, tokenize=False)
+            text = render_chat(self.tokenizer, request, tokenize=False)
+            return text if self.thinking_enabled(request) else text + "</think>"
         return request["prompt"]
+
+    def _thinking_close_ids(self):
+        ids = self.thinking_close_token_ids()
+        if not ids:
+            raise ValueError("LFM2.5 tokenizer has no single </think> token")
+        return ids
 
     def thinking_close_token_ids(self):
         marker = "</think>"
@@ -563,7 +587,7 @@ class LFM25MoEAdapter:
 
     def output_parser(self, request):
         self._validate_request(request)
-        return make_output_parser(request)
+        return make_output_parser(request, thinking=self.thinking_enabled(request))
 
     def tool_constraint(self, request):
         return make_tool_constraint(request)

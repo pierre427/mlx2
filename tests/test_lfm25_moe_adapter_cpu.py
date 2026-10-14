@@ -188,7 +188,7 @@ def test_attention_topology_and_kv_quantization_are_declared():
 
 
 def test_present_official_artifact_when_download_complete():
-    path = Path("~/mlx-models/LFM2.5-24B-A2B-MLX-8bit")
+    path = Path.home() / "mlx-models/LFM2.5-24B-A2B-MLX-8bit"
     index_path = path / "model.safetensors.index.json"
     if not index_path.is_file():
         pytest.skip("official local artifact is not present")
@@ -226,3 +226,48 @@ def test_nax_gather_defaults_on_and_operator_value_wins(monkeypatch, env, expect
     adapter._claim_moe_globals()
     assert adapter.moe_nax_gather == expected
     assert claims[0][process_globals.MOE_NAX_GATHER][0] == expected
+
+
+def _real_tokenizer_adapter():
+    path = Path.home() / "mlx-models/LFM2.5-24B-A2B-MLX-8bit"
+    if not (path / "tokenizer.json").is_file():
+        pytest.skip("LFM2.5 artifact not present")
+    from transformers import AutoTokenizer
+
+    from mlx2.runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
+
+    adapter = object.__new__(LFM25MoEAdapter)
+    adapter.tokenizer = TokenizerWrapper(
+        AutoTokenizer.from_pretrained(path, local_files_only=True),
+        detokenizer_class=BPEStreamingDetokenizer,
+        eos_token_ids=[124900],
+    )
+    return adapter
+
+
+def _events(parser, text):
+    events = parser.push(text) + parser.finish("", "stop")
+    return (
+        "".join(e.get("reasoning_content", "") for e in events),
+        "".join(e.get("content", "") for e in events),
+    )
+
+
+def test_thinking_off_closes_the_channel_after_the_generation_prompt():
+    adapter = _real_tokenizer_adapter()
+    messages = [{"role": "user", "content": "What is 17 * 3?"}]
+    on = {"messages": messages}
+    off = {"messages": messages, "enable_thinking": False}
+    assert LFM25MoEAdapter.thinking_enabled(on)
+    assert not LFM25MoEAdapter.thinking_enabled(off)
+    assert not LFM25MoEAdapter.thinking_enabled({"prompt": "x"})
+    close = adapter.thinking_close_token_ids()
+    on_ids, off_ids = adapter.prompt_tokens(on), adapter.prompt_tokens(off)
+    assert off_ids == list(on_ids) + list(close)
+    assert adapter.tokenizer.decode(off_ids[-2:]) == "<think></think>"
+    assert adapter.render_prompt(off) == adapter.render_prompt(on) + "</think>"
+    assert adapter.render_prompt(on).endswith("<|im_start|>assistant\n<think>")
+    # Off: everything the model writes is the answer (its leading "\n\n" is
+    # template structure).  On: reasoning until </think>, as before.
+    assert _events(adapter.output_parser(off), "\n\n51") == ("", "51")
+    assert _events(adapter.output_parser(on), "r</think>\n\n51") == ("r", "51")
