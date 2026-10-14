@@ -400,6 +400,8 @@ _ENGINE_EVENTS = {
     "structured_engine_automaton": ("structured_output", "engine_automaton"),
     "structured_engine_scanner": ("structured_output", "engine_scanner"),
     "structured_deferred": ("structured_output", "deferred_past_thinking"),
+    "structured_reasoning_force_closed": ("structured_output", "reasoning_force_closed"),
+    "structured_reasoning_unclosed": ("structured_output", "reasoning_unclosed"),
     "thinking_budget_forced_closes": ("thinking_budget", "forced_close"),
     "tool_call_parse_fallbacks": ("tool_calls", "parse_fallback"),
     "tool_call_constraint_failures": ("tool_calls", "parallel_bound_failure"),

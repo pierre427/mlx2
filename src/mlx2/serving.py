@@ -3297,6 +3297,7 @@ class Job:
     fanout_one_prefill: bool = False
     fanout_reason: str | None = None
     structured: object = None
+    force_close: object = None
     thinking_guard: object = None
     thinking_budget: object = None
     thinking_budget_counted: bool = False
@@ -4103,6 +4104,8 @@ class ServingEngine:
                 "tool_call_id_replacements": 0,
                 "schema_ref_failures": 0,
                 "structured_output_dead_ends": 0,
+                "structured_reasoning_force_closed": 0,
+                "structured_reasoning_unclosed": 0,
                 "constrained_tool_grammar_engagements": 0,
                 "constrained_tool_grammar_skips": 0,
                 "constrained_tool_grammar_auto_engagements": 0,
@@ -11128,6 +11131,7 @@ class ServingEngine:
                             # reasoning channel is open, the grammar only after.
                             processors.append(job.thinking_guard)
                         from .structured_output import (
+                            ReasoningForceCloseProcessor,
                             ThinkingBudgetProcessor,
                             make_structured_processor,
                             structured_receipt,
@@ -11233,6 +11237,7 @@ class ServingEngine:
                             automata=job.structured_automata,
                         )
                         job.structured = structured
+                        job.force_close = None
                         if job.receipt_token_ids is None and (
                             job.thinking_guard is not None or structured is not None
                         ):
@@ -11254,7 +11259,47 @@ class ServingEngine:
                                 raise ValueError(
                                     "structured output requires thinking to be disabled"
                                 )
+                            release_ids = (
+                                thinking_release_token_ids(adapter)
+                                if structured_defer is not None
+                                and "messages" in job.request
+                                and thinking_enabled(adapter, job.request)
+                                else None
+                            )
+                            if release_ids is not None:
+                                # A model that stops while its reasoning is
+                                # open would leave the deferred grammar
+                                # unbound and the answer empty: the stop
+                                # writes the release marker instead, and the
+                                # grammar then constrains the answer.
+                                job.force_close = ReasoningForceCloseProcessor(
+                                    prompt_len,
+                                    release_ids,
+                                    stop_token_ids,
+                                    temperature=temp,
+                                    reasoning_message=thinking_message_ids(adapter),
+                                    top_p=top_p,
+                                    top_k=top_k,
+                                    min_p=min_p,
+                                )
                             processors.append(structured)
+                            if job.force_close is not None:
+                                # Last: it moves only the stop probability
+                                # the sampling filters keep, so it applies
+                                # them itself, after every other processor
+                                # as the sampler would.
+                                processors.append(job.force_close)
+                                if job.force_close.owns_sampling_filters:
+                                    # Every route then samples its output
+                                    # at the temperature alone: filtering
+                                    # twice would shrink the nucleus again.
+                                    top_p, top_k, min_p = 1.0, 0, 0.0
+                                    transform = make_transformed_logprobs(temp)
+
+                                    def sampler(logprobs, rng=rng, transform=transform):
+                                        return mx.random.categorical(
+                                            transform(logprobs), key=draw_key(rng)
+                                        )
                         sampling_config = {"sampling_temp": temp, "top_p": top_p, "top_k": top_k, "min_p": min_p, "shared_prefix_attestation": shared_prefix_attestation(hit)}
                         if external_draft:
                             sampling_config["emit_logprobs"] = wants_logprobs(job.request)
@@ -12242,7 +12287,11 @@ class ServingEngine:
                                 # Speculative routes leave these processors at
                                 # their last verify row; the receipts describe
                                 # the committed stream, as ordinary decode's do.
-                                for processor in (job.thinking_guard, job.structured):
+                                for processor in (
+                                    job.thinking_guard,
+                                    job.structured,
+                                    job.force_close,
+                                ):
                                     settle = getattr(processor, "settle", None)
                                     if callable(settle):
                                         settle(job.receipt_token_ids)
@@ -12371,6 +12420,12 @@ class ServingEngine:
                                 ] += 1
                                 if getattr(job.structured, "deferred", False):
                                     self.counts["structured_deferred"] += 1
+                                    if not getattr(job.structured, "constraining", True):
+                                        self.counts["structured_reasoning_unclosed"] += 1
+                                if job.force_close is not None and job.force_close.receipt()[
+                                    "reasoning_force_closed"
+                                ]:
+                                    self.counts["structured_reasoning_force_closed"] += 1
                             budget_fired = bool(job.thinking_budget_fired)
                             native_route = (
                                 getattr(response, "mtp_receipt", None)
@@ -12537,14 +12592,14 @@ class ServingEngine:
                                             {
                                                 "kind": "grammar",
                                                 "enforced": True,
-                                                **structured_receipt(job.structured, job.completion_tokens),
+                                                **structured_receipt(job.structured, job.completion_tokens, force_close=job.force_close),
                                             }
                                             if job.request.get("grammar") is not None
                                             and job.structured is not None
                                             else {
                                                 "kind": (job.request.get("response_format") or {}).get("type"),
                                                 "enforced": True,
-                                                **structured_receipt(job.structured, job.completion_tokens),
+                                                **structured_receipt(job.structured, job.completion_tokens, force_close=job.force_close),
                                             }
                                             if job.request.get("response_format") is not None
                                             and job.structured is not None
@@ -12554,6 +12609,7 @@ class ServingEngine:
                                                 **structured_receipt(
                                                     job.structured,
                                                     job.completion_tokens,
+                                                    force_close=job.force_close,
                                                 ),
                                             }
                                             if (

@@ -104,9 +104,11 @@ def test_deferred_passthrough_then_activation_exactly_after_the_marker(engine, m
     assert _admitted(processor, []) == EVERYTHING
     assert _admitted(processor, [2, 3, 7, 8]) == EVERYTHING
     assert processor.constraining is False
+    # Nothing has been constrained yet, so the receipt does not claim it was.
     assert structured_receipt(processor, completion_tokens=5) == {
         "engine": engine, "tail_mass_bound": 0.0, "parallel_scans": 0,
         "deferred": True, "deferred_tokens": 5,
+        "enforced": False, "unenforced_reason": "reasoning_not_closed",
     }
     # The marker itself was generated unconstrained; the very next token is
     # the first constrained one, from an empty constrained prefix.  Reasoning
@@ -231,6 +233,13 @@ def test_adapter_marker_accessor_requires_an_exact_nonempty_tokenization():
     assert thinking_close_token_ids(NS()) is None  # adapters without the accessor fail closed
 
 
+def _thinking_requested(request):
+    return bool(
+        request.get("enable_thinking")
+        or request.get("reasoning_effort") not in (None, "none")
+    )
+
+
 @pytest.fixture
 def scripted_engine(monkeypatch):
     """A real ServingEngine loop over a scripted model that honours processors."""
@@ -344,7 +353,7 @@ def scripted_engine(monkeypatch):
             self.tokenizer.detokenizer = Detokenizer()
             self.descriptor = NS(capabilities=frozenset({Capability.PROMPT_LOOKUP}))
             if state["declare_marker"]:
-                self.thinking_close_token_ids = lambda: (THINK_CLOSE,)
+                self.thinking_close_token_ids = lambda: state.get("marker", (THINK_CLOSE,))
             if state.get("answer_ids") is not None:
                 self.structured_answer_token_ids = lambda request: state["answer_ids"]
             if not state["declare_tool_constraint"]:
@@ -352,6 +361,9 @@ def scripted_engine(monkeypatch):
             self._thinking_direction = state["thinking_direction"]
             if state.get("sampling_defaults") is not None:
                 self.sampling_defaults = state["sampling_defaults"]
+            if state.get("thinking_from_effort"):
+                # A Responses request asks for reasoning by effort.
+                self.thinking_enabled = _thinking_requested
 
         def profile_name(self, mtp): return "fake"
         def execution_config(self, **kw): return {"num_draft": 0}
@@ -364,7 +376,11 @@ def scripted_engine(monkeypatch):
 
             return OutputParser(
                 chat="messages" in request,
-                thinking=request.get("enable_thinking", False),
+                thinking=(
+                    _thinking_requested(request)
+                    if state.get("thinking_from_effort")
+                    else request.get("enable_thinking", False)
+                ),
                 stops=request.get("stop", ()),
                 tools=request.get("tools"),
                 parse_tool=parse_tool_call,
@@ -710,6 +726,9 @@ def test_serving_defers_the_grammar_and_splits_reasoning_from_json(scripted_engi
     assert receipt["structured_output"] == {
         "kind": "json_object", "enforced": True, "engine": "automaton",
         "tail_mass_bound": 0.0, "parallel_scans": 0, "deferred": True, "deferred_tokens": 5,
+        # The model closed its reasoning itself.
+        "reasoning_force_closed": False, "force_close_tokens": 0,
+        "force_close_eos_share_max": 0.0,
     }
     # Thinking off: constrained from the first token, not deferred.
     state["script"] = [7, 8, 9, 10, 11]
@@ -1163,12 +1182,14 @@ def test_serving_length_or_eos_before_the_marker_is_not_a_failure(scripted_engin
     reasoning, content, final = _collect(engine.submit({**THINKING_JSON_REQUEST, "max_tokens": 4}))
     assert final.get("finish_reason") == "length" and "error" not in final
     assert reasoning == "Let me think think" and content == ""
-    # No grammar has engaged yet, so a generation terminal keeps main's normal
-    # stop semantics instead of forcing the model to continue thinking.
+    # A stop inside reasoning writes the close instead (2026-10-14 option D):
+    # the grammar then constrains the answer, and nothing fails.
     state["script"] = [2, 3, EOS]
     reasoning, content, final = _collect(engine.submit(dict(THINKING_JSON_REQUEST)))
     assert final.get("finish_reason") == "stop" and "error" not in final
-    assert reasoning == "Let me" and content == ""
+    assert reasoning == "Let me" and json.loads(content) == {}
+    structured = final["receipt"]["request_controls"]["structured_output"]
+    assert structured["reasoning_force_closed"] is True
     assert engine.counts["structured_output_failures"] == 0
 
 
@@ -1179,7 +1200,8 @@ def test_prompt_lookup_structured_stop_inside_thinking_finishes_normally(scripte
     state["script"] = [2, 3, EOS]
     reasoning, content, final = _collect(engine.submit(dict(THINKING_JSON_REQUEST)))
     assert final.get("finish_reason") == "stop" and "error" not in final
-    assert reasoning == "Let me" and content == ""
+    # The stop inside reasoning was turned into the close (option D).
+    assert reasoning == "Let me" and json.loads(content) == {}
     assert engine.counts["structured_output_failures"] == 0
 
 
@@ -1524,7 +1546,9 @@ def test_deferral_and_guard_receipts_describe_the_committed_stream(monkeypatch, 
         ordinary = run(engine, request)
     finally:
         engine.close()
-    assert ordinary["finish"] == "stop" and close not in ordinary["tokens"]
+    # The stop inside reasoning is written as the close (option D), so the
+    # oracle's markers past the final stop land in the answer channel.
+    assert ordinary["finish"] == "stop" and close in ordinary["tokens"]
     install_mtp_oracle(
         monkeypatch, {tuple(request["tokens"]): ordinary["tokens"] + [eos, close, close, close]}
     )
@@ -1541,7 +1565,9 @@ def test_deferral_and_guard_receipts_describe_the_committed_stream(monkeypatch, 
             == ordinary["receipt"]["request_controls"][name]
         ), name
     structured = ordinary["receipt"]["request_controls"]["structured_output"]
-    assert structured["deferred"] and structured["deferred_tokens"] == len(ordinary["tokens"]) + 1
+    close_at = ordinary["tokens"].index(close)
+    assert structured["deferred"] and structured["deferred_tokens"] == close_at + 1
+    assert structured["reasoning_force_closed"] is True
 
 
 def test_answer_header_defers_a_client_grammar_past_the_reply_framing(scripted_engine):

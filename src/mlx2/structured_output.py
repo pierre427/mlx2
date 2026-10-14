@@ -1219,6 +1219,249 @@ class ThinkingBudgetProcessor:
         )
         return logits + mask
 
+class ReasoningForceCloseProcessor:
+    """Turn an end-of-sequence while reasoning into the release marker.
+
+    A grammar deferred past reasoning never binds when the model stops
+    before it closes its reasoning: the request used to end with an empty
+    answer reported as an enforced success.  While a structured request's
+    reasoning is open, this processor gives the end-of-sequence ids' share of
+    the row's law to the release marker instead, so the model closes its
+    reasoning where it would have stopped and the grammar then constrains
+    the answer as usual.
+
+    * **The stop row.**  Greedy rows whose argmax is an end-of-sequence id
+      write the next marker token; other greedy rows are unchanged.  Sampled
+      rows move the end-of-sequence probability (at the request's
+      temperature) onto that token, so a draw that would have ended the
+      request writes it and every other draw keeps its probability.  The
+      request's top-p/min-p/top-k filters run first, here, so only stop
+      probability a draw could reach moves; the caller then samples this
+      output at its temperature without filtering again
+      (``owns_sampling_filters``).  A marker token an earlier processor
+      removed is not reinstated; one only the filters dropped is.
+    * **A multi-token marker** (GPT-OSS harmony) is then written token by
+      token, as ``ThinkingBudgetProcessor`` history mode forces it: while
+      reasoning is open, a proper marker prefix at the end of the output is
+      completed.  Which token comes next is the longest such prefix
+      (``ThinkingGuard._marker_offset``), read from the ids.  The cost of
+      reading it from the ids alone: a marker prefix the model wrote itself
+      while a grammar waits (a harmony ``<|end|>`` it meant to follow with a
+      second analysis message) is completed too.
+    * **Self-addressed reasoning** (Muse, ``reasoning_message``) keeps every
+      recipient choice the model's, as the thinking guard does: only stop
+      rows are redirected, one marker token at a time, so a ``to=self``
+      message after a natural ``<|eom|>`` is not cut.  A message to anybody
+      else (a tool call) ends reasoning without the release, and its stop
+      stays a stop.
+    * **Pure.**  The mask is a function of the generated ids and the row's
+      own logits (P5), so speculative verify rows and rollbacks need no
+      bookkeeping.  Reasoning is open exactly when ``ThinkingBudgetProcessor``
+      finds no close.
+    * **Receipt.**  Each evaluated row records, by position, its marker
+      token, the share of that token's probability that came from
+      end-of-sequence (1 or 0 on greedy rows), and whether it completed a
+      marker.  ``settle`` reads the rows of the committed stream only; the
+      records never change a mask.
+    """
+
+    # P5: the mask is a pure function of the token history and the row.
+    history_pure = True
+
+    def __init__(
+        self,
+        prompt_length,
+        release_token_ids,
+        eos_token_ids,
+        *,
+        temperature=0.0,
+        reasoning_message=None,
+        top_p=0.0,
+        top_k=0,
+        min_p=0.0,
+    ):
+        self._reasoning = ThinkingBudgetProcessor(
+            prompt_length, 0, release_token_ids, reasoning_message=reasoning_message
+        )
+        self.prompt_length = self._reasoning.prompt_length
+        self.release_token_ids = self._reasoning.close_token_ids
+        self.completes_marker = self._reasoning.reasoning_message is None
+        self.eos_token_ids = tuple(
+            sorted({int(token) for token in eos_token_ids} - set(self.release_token_ids))
+        )
+        self.temperature = float(temperature or 0.0)
+        if self.temperature < 0:
+            raise ValueError("force-close temperature must be non-negative")
+        # Sampled rows move only the stop probability the request's filters
+        # leave (Codex review of b99fb0c90): with ``top_k=1`` an ordinary
+        # draw can never stop, so nothing may move.  The filters therefore
+        # run here, on every row, before the move, and the caller samples this
+        # processor's output at its temperature with no filter of its own
+        # (``owns_sampling_filters``).  Greedy rows need none: no filter
+        # changes an argmax.
+        self.top_p = float(top_p or 0.0)
+        self.top_k = int(top_k or 0)
+        self.min_p = float(min_p or 0.0)
+        self.owns_sampling_filters = self.temperature > 0 and (
+            0.0 < self.top_p < 1.0 or self.top_k > 0 or self.min_p > 0.0
+        )
+        self._filter = None
+        if self.owns_sampling_filters:
+            from .runtime.sample_utils import make_transformed_logprobs
+
+            # The sampler's own compiled filter chain at temperature 1: the
+            # same kept set, as normalized log-probabilities.
+            self._filter = make_transformed_logprobs(
+                1.0, top_p=self.top_p, top_k=self.top_k, min_p=self.min_p
+            )
+        # position -> (marker token, lazy EOS share, completes a marker);
+        # receipt-only, the last evaluation at a position wins.
+        self._rows = {}
+        self._receipt = None
+
+    def _offset(self, generated):
+        marker = self.release_token_ids
+        length = len(generated)
+        for width in range(min(len(marker) - 1, length), 0, -1):
+            if tuple(generated[length - width : length]) == marker[:width]:
+                return width
+        return 0
+
+    def _apply(self, tokens, logits, record):
+        import mlx.core as mx
+
+        raw = logits
+        if self._filter is not None:
+            logits = self._filter(logits).astype(raw.dtype)
+        generated = self._reasoning._generated_values(tokens)
+        if self._reasoning._close_position(generated) is not None:
+            return logits
+        width = logits.shape[-1]
+        offset = self._offset(generated)
+        target = self.release_token_ids[offset]
+        if not 0 <= target < width:
+            return logits
+        index = mx.arange(width)
+        is_target = index == target
+        negative = mx.array(-float("inf"), dtype=logits.dtype)
+        # A marker an earlier processor removed stays removed; one only the
+        # sampling filters dropped still takes the stop probability they kept.
+        live = mx.isfinite(mx.take(raw, mx.array([target]), axis=-1))
+        target_logit = mx.take(logits, mx.array([target]), axis=-1)
+        forced = mx.where(is_target, mx.zeros_like(logits), negative)
+        if offset and self.completes_marker:
+            # The marker is being written: finish it.
+            if record:
+                self._rows[len(generated)] = (target, None, True)
+            return mx.where(live, forced, logits)
+        eos = [token for token in self.eos_token_ids if 0 <= token < width]
+        if not eos:
+            return logits
+        is_eos = mx.zeros((width,), dtype=mx.bool_)
+        is_eos = mx.put_along_axis(
+            is_eos, mx.array(eos), mx.ones((len(eos),), dtype=mx.bool_), axis=-1
+        )
+        if self.temperature == 0:
+            fired = mx.logical_and(
+                mx.take(is_eos, mx.argmax(logits, axis=-1, keepdims=True)), live
+            )
+            unforced = mx.where(is_eos, negative, logits)
+            out = mx.where(live, mx.where(fired, forced, unforced), logits)
+            share = fired.astype(mx.float32)
+        else:
+            scale = self.temperature
+            eos_mass = mx.logsumexp(
+                mx.where(is_eos, logits, negative) / scale, axis=-1, keepdims=True
+            )
+            merged = scale * mx.logaddexp(target_logit / scale, eos_mass)
+            substituted = mx.where(
+                is_target, merged, mx.where(is_eos, negative, logits)
+            )
+            out = mx.where(live, substituted, logits)
+            share = mx.where(
+                mx.logical_and(live, mx.isfinite(merged)),
+                mx.exp(eos_mass - merged / scale),
+                mx.zeros_like(merged),
+            ).astype(mx.float32)
+        if record:
+            self._rows[len(generated)] = (target, share.reshape(-1)[0], False)
+        return out
+
+    def __call__(self, tokens, logits):
+        return self._apply(tokens, logits, True)
+
+    def probe(self, tokens, logits):
+        """Evaluate a provisional draft row without recording it."""
+        return self._apply(tokens, logits, False)
+
+    def dormant(self, tokens):
+        """P5: whether ``tokens`` leave this processor masking nothing."""
+        generated = self._reasoning._generated_values(tokens)
+        return self._reasoning._close_position(generated) is not None
+
+    def __deepcopy__(self, memo):
+        # Recovery snapshots copy processors; the records are receipt-only
+        # and position-keyed, so a copy takes a snapshot of them.
+        clone = object.__new__(type(self))
+        memo[id(self)] = clone
+        clone.__dict__.update(self.__dict__)
+        clone._rows = dict(self._rows)
+        return clone
+
+    def settle(self, generated):
+        """Summarise the committed stream ``generated`` for the receipt."""
+        import mlx.core as mx
+
+        generated = [int(token) for token in generated]
+        rows = sorted(
+            (position, share, continued)
+            for position, (target, share, continued) in self._rows.items()
+            if position < len(generated) and generated[position] == target
+        )
+        lazy = [share for _, share, continued in rows if not continued]
+        values = (
+            iter(float(value) for value in mx.stack(lazy).tolist()) if lazy else iter(())
+        )
+        shares = {
+            position: (None if continued else next(values))
+            for position, _, continued in rows
+        }
+        redirected = sorted(
+            position for position, share in shares.items()
+            if share is not None and share >= 0.5
+        )
+        close = self._reasoning._close_position(generated)
+        width = len(self.release_token_ids)
+        span = range(close, close + width) if close is not None else range(0)
+        forced_close = any(position in span for position in redirected)
+        completed = [
+            position for position, share in shares.items()
+            if share is None and forced_close and position in span
+        ]
+        self._receipt = {
+            "reasoning_closed": close is not None,
+            "reasoning_force_closed": bool(forced_close),
+            "force_close_tokens": len(redirected) + len(completed),
+            "force_close_eos_share_max": max(
+                (share for share in shares.values() if share is not None),
+                default=0.0,
+            ),
+        }
+        return self._receipt
+
+    def receipt(self):
+        """The ``settle`` summary, or the empty one before any settle."""
+        return dict(
+            self._receipt
+            or {
+                "reasoning_closed": False,
+                "reasoning_force_closed": False,
+                "force_close_tokens": 0,
+                "force_close_eos_share_max": 0.0,
+            }
+        )
+
+
 class StructuredOutputProcessor:
     # P5: every mask is re-derived from the token ids (the tracking state is a
     # cache of them), so a replay rebuilds this processor from history alone.
@@ -1253,6 +1496,10 @@ class StructuredOutputProcessor:
             (tuple(int(t) for t in envelope[0]), tuple(int(t) for t in envelope[1]))
             if envelope else None
         )
+        # Forbid stop tokens while deferred (the model keeps reasoning).
+        # Serving does not set it: it installs ReasoningForceCloseProcessor,
+        # which turns such a stop into the reasoning close instead and leaves
+        # this switch no stop probability to remove.  Kept for direct callers.
         self.block_eos_while_deferred = bool(block_eos_while_deferred)
         self.constraining = not self.deferred
         self.deferred_tokens = 0
@@ -2595,18 +2842,38 @@ def prepare_structured_automata(
     return {constraint.pattern.pattern: automaton}
 
 
-def structured_receipt(processor, completion_tokens=0):
-    """Receipt fields describing how a request's constraint was enforced."""
+def structured_receipt(processor, completion_tokens=0, *, force_close=None):
+    """Receipt fields describing how a request's constraint was enforced.
+
+    ``enforced`` is False when the grammar never bound a token: the request
+    ended while its deferral was still open (reasoning never closed), so the
+    answer was not constrained.  ``force_close`` (a settled
+    ``ReasoningForceCloseProcessor``) adds whether the model's stop was
+    turned into the reasoning close.
+    """
     deferred = bool(getattr(processor, "deferred", False))
-    if deferred and not getattr(processor, "constraining", True):
+    engaged = not deferred or bool(getattr(processor, "constraining", True))
+    if deferred and not engaged:
         # The marker never appeared: every generated token was unconstrained.
         deferred_tokens = int(completion_tokens)
     else:
         deferred_tokens = int(getattr(processor, "deferred_tokens", 0)) if deferred else 0
-    return {
+    receipt = {
         "engine": getattr(processor, "engine", "scanner"),
         "tail_mass_bound": getattr(processor, "tail_mass_bound", 0.0),
         "parallel_scans": getattr(processor, "parallel_scans", 0),
         "deferred": deferred,
         "deferred_tokens": deferred_tokens,
     }
+    if not engaged:
+        receipt["enforced"] = False
+        receipt["unenforced_reason"] = "reasoning_not_closed"
+    if force_close is not None:
+        summary = force_close.receipt()
+        receipt["reasoning_force_closed"] = summary["reasoning_force_closed"]
+        receipt["force_close_tokens"] = summary["force_close_tokens"]
+        receipt["force_close_eos_share_max"] = summary["force_close_eos_share_max"]
+        if getattr(force_close, "owns_sampling_filters", False):
+            # The request's top-p/min-p/top-k ran inside the processor.
+            receipt["sampling_filters"] = "force_close_processor"
+    return receipt
