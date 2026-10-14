@@ -679,9 +679,11 @@ def test_reload_into_reserve_is_refused_while_requests_run(ledgers, tmp_path):
     assert ledger.reload_limits()["mode"] == "reserve"
 
 
-def test_finish_releases_the_hold_when_cleanup_raises(ledgers):
+def test_finish_records_the_request_when_a_cleanup_step_raises(ledgers):
     ledger = ledgers(limits=_limits(today={"requests": 1}))
     engine = _bare_engine(ledger)
+    emitted = []
+    engine._emit = lambda job, event: emitted.append(event)
     (reservation,) = engine._usage_admit([{}], "acme")
     job = Job({}, tenant_id="acme")
     engine._usage_attach(job, reservation)
@@ -691,7 +693,28 @@ def test_finish_releases_the_hold_when_cleanup_raises(ledgers):
 
     job.cache_branch = NS(close=broken_close)
     engine.jobs[job.id] = job
-    with pytest.raises(RuntimeError, match="branch close"):
+    # The cleanup failure is isolated: the request still reaches its terminal
+    # and is accounted, which consumes the hold.
+    engine._finish(job, {"finish_reason": "stop"})
+    assert emitted == [{"finish_reason": "stop"}]
+    assert reservation.released
+    assert engine.counts["finish_cleanup_failures_cache_branch_close"] == 1
+    assert ledger.windows("accounting", "acme")["overall"]["requests"] == 1
+
+
+def test_finish_releases_the_hold_when_terminal_handling_raises(ledgers):
+    ledger = ledgers(limits=_limits(today={"requests": 1}))
+    engine = _bare_engine(ledger)
+    (reservation,) = engine._usage_admit([{}], "acme")
+    job = Job({}, tenant_id="acme")
+    engine._usage_attach(job, reservation)
+
+    def broken_overflow(job, event):
+        raise RuntimeError("overflow claim failed")
+
+    engine._claim_output_overflow = broken_overflow
+    engine.jobs[job.id] = job
+    with pytest.raises(RuntimeError, match="overflow claim"):
         engine._finish(job, {"finish_reason": "stop"})
     assert reservation.released
     assert ledger.admit("acme") is not None

@@ -468,6 +468,18 @@ _ENGINE_EVENTS = {
     "atlas_observations_total": ("expert_atlas", "observation"),
     "atlas_trace_records_total": ("expert_atlas", "trace_record"),
     "atlas_trace_dropped_total": ("expert_atlas", "trace_dropped"),
+    # A ServingEngine._finish cleanup step that raised; the request was
+    # still released and given its terminal event.
+    **{
+        f"finish_cleanup_failures_{step}": ("request_finish_cleanup", f"{step}_failed")
+        for step in (
+            "cache_branch_close",
+            "apc_retirement_sweep",
+            "lora_unbind",
+            "lora_release",
+            "fanout_capsule_close",
+        )
+    },
 }
 # Agent-client wire compatibility (``--agent-compat``) mechanism counters.
 _ENGINE_EVENTS.update(
@@ -486,7 +498,7 @@ _OPTIONAL_COMPONENTS = frozenset(
     {
         "apcv2_rolling", "apcv2_junction", "apcv2_inflight", "memory_preemption",
         "expert_stream_load", "dense_stream", "dense_stream_load",
-        "gpu_keep_warm",
+        "gpu_keep_warm", "request_finish_cleanup",
     }
 )
 _OPTIONAL_ENGINE_EVENTS = {

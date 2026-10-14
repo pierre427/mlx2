@@ -6679,8 +6679,9 @@ class ServingEngine:
         try:
             self._finish_terminal(job, event)
         except BaseException:
-            # A cleanup step that raised before the usage record must not
+            # Terminal handling that raised before the usage record must not
             # leave the job's usage-limit hold behind (release is idempotent).
+            # Cleanup steps are isolated in _finish_cleanup and do not get here.
             self._usage_release([getattr(job, "usage_reservation", None)])
             raise
 
@@ -6714,21 +6715,31 @@ class ServingEngine:
         # a job object that some path forgot to detach from pinning memory.
         if getattr(job, "admission_reserved_gib", 0.0):
             job.admission_reserved_gib = 0.0
-        if branch is not None and hasattr(branch, "close"):
-            branch.close()
-            if getattr(self, "apc_rolling_route", None) is not None:
-                # This lease may have been the last one deferring the
-                # retirement of a rolling checkpoint the lane resumed from.
-                sweep = getattr(getattr(self, "apc", None), "sweep_retirements", None)
-                if callable(sweep):
-                    sweep()
+        # Each cleanup step is isolated: one that raises must not strand the
+        # job in ``self.jobs``, hold its inflight slot, or leave the client
+        # waiting for a terminal event until its timeout.
+        closed = (
+            branch is not None
+            and hasattr(branch, "close")
+            and self._finish_cleanup(job, "cache_branch_close", branch.close)
+        )
+        if closed and getattr(self, "apc_rolling_route", None) is not None:
+            # This lease may have been the last one deferring the
+            # retirement of a rolling checkpoint the lane resumed from.
+            sweep = getattr(getattr(self, "apc", None), "sweep_retirements", None)
+            if callable(sweep):
+                self._finish_cleanup(job, "apc_retirement_sweep", sweep)
         lora_slot = getattr(job, "lora_slot", None)
         if lora_slot is not None:
             job.lora_slot = None
             manager = self.multi_lora
             if job.uid is not None:
-                manager.unbind_uid(job.uid)
-            manager.release(lora_slot)
+                self._finish_cleanup(
+                    job, "lora_unbind", lambda: manager.unbind_uid(job.uid)
+                )
+            self._finish_cleanup(
+                job, "lora_release", lambda: manager.release(lora_slot)
+            )
         overflowed = self._claim_output_overflow(job, event)
         waiting_siblings = ()
         usage_status = None
@@ -6783,13 +6794,32 @@ class ServingEngine:
         if waiting_siblings:
             prepared = self.fanout_capsules.pop(fanout_group, None)
             if prepared is not None:
-                prepared.close()
+                # The waiting siblings still need their own terminals.
+                self._finish_cleanup(job, "fanout_capsule_close", prepared.close)
             sibling_event = {
                 "error": "parallel prefill leader ended before APCv2 fanout",
                 "status": event.get("status", 503),
             }
             for sibling in waiting_siblings:
                 self._finish(sibling, sibling_event)
+
+    def _finish_cleanup(self, job, step, cleanup):
+        """Run one ``_finish`` cleanup step; log and count it if it raises.
+
+        Returns whether the step completed.
+        """
+        try:
+            cleanup()
+        except Exception:
+            key = f"finish_cleanup_failures_{step}"
+            self.counts[key] = self.counts.get(key, 0) + 1
+            log.exception(
+                "request %s: %s failed while finishing; still releasing the "
+                "request and publishing its terminal event",
+                getattr(job, "id", None), step,
+            )
+            return False
+        return True
 
     def _release_fanout_siblings(self, leader, reason):
         """Admit a fanout leader's waiting siblings as independent samples.

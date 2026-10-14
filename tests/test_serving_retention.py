@@ -761,6 +761,139 @@ def test_terminal_event_is_published_after_branch_and_inflight_release():
     ]
 
 
+def _finishing_engine(job, events):
+    from mlx2 import serving
+
+    engine = serving.ServingEngine.__new__(serving.ServingEngine)
+    engine.lock = threading.Lock()
+    engine.jobs = {job.id: job}
+    engine.counts = Counter()
+    engine.slots = NS(release=lambda: events.append("slot_released"))
+    engine.batch_metrics = NS(terminal=lambda job_id, status:
+                              events.append(("terminal", job_id, status)))
+    engine._emit = lambda observed_job, event: events.append(("emit", event))
+    return engine
+
+
+def test_terminal_is_emitted_once_when_cache_branch_close_raises(caplog):
+    events = []
+
+    def close():
+        events.append("branch_close_attempted")
+        raise RuntimeError("lease already released")
+
+    job = NS(id="job", cache_branch=NS(close=close),
+             admission_hit=object(), admission_tokens=[1])
+    engine = _finishing_engine(job, events)
+    engine.apc_rolling_route = object()
+    engine.apc = NS(sweep_retirements=lambda: events.append("swept"))
+
+    with caplog.at_level("ERROR", logger="mlx2.serving"):
+        engine._finish(job, {"finish_reason": "stop"})
+
+    # The sweep follows a successful close only; the request is released and
+    # its single terminal published regardless.
+    assert events == [
+        "branch_close_attempted",
+        "slot_released",
+        ("terminal", "job", "completed"),
+        ("emit", {"finish_reason": "stop"}),
+    ]
+    assert job.cache_branch is None
+    assert engine.jobs == {}
+    assert engine.counts["finish_cleanup_failures_cache_branch_close"] == 1
+    assert any(
+        record.exc_info and "cache_branch_close" in record.getMessage()
+        for record in caplog.records
+    )
+
+    # A repeated finish of an already-terminal job must not emit again.
+    engine._finish(job, {"error": "late", "status": 500})
+    assert events.count("slot_released") == 1
+    assert sum(1 for item in events if item[0] == "terminal") == 1
+
+
+@pytest.mark.parametrize("failing", ["apc_retirement_sweep", "lora_unbind",
+                                     "lora_release"])
+def test_terminal_survives_each_failing_finish_cleanup_step(failing):
+    events = []
+
+    def step(name):
+        def run(*_args):
+            events.append(name)
+            if name == failing:
+                raise RuntimeError(f"{name} failed")
+        return run
+
+    job = NS(id="job", uid=7, lora_slot=2, cache_branch=NS(close=step("close")),
+             admission_hit=None, admission_tokens=None)
+    engine = _finishing_engine(job, events)
+    engine.apc_rolling_route = object()
+    engine.apc = NS(sweep_retirements=step("apc_retirement_sweep"))
+    engine.multi_lora = NS(unbind_uid=step("lora_unbind"),
+                           release=step("lora_release"))
+
+    engine._finish(job, {"finish_reason": "length"})
+
+    # Later steps still run after an earlier one raises.
+    assert events == [
+        "close",
+        "apc_retirement_sweep",
+        "lora_unbind",
+        "lora_release",
+        "slot_released",
+        ("terminal", "job", "completed"),
+        ("emit", {"finish_reason": "length"}),
+    ]
+    assert job.lora_slot is None
+    assert engine.jobs == {}
+    assert +engine.counts == Counter({f"finish_cleanup_failures_{failing}": 1})
+
+
+def test_fanout_siblings_get_terminals_when_capsule_close_raises():
+    events = []
+
+    def close():
+        raise RuntimeError("capsule close failed")
+
+    leader = NS(id="leader", cache_branch=None, admission_hit=None,
+                admission_tokens=None, fanout_role="prefill_leader",
+                fanout_group="group")
+    sibling = NS(id="sibling", cache_branch=None, admission_hit=None,
+                 admission_tokens=None, fanout_role="apcv2_sibling",
+                 fanout_group="group")
+    engine = _finishing_engine(leader, events)
+    engine.jobs[sibling.id] = sibling
+    engine.fanout_waiting = {"group": (sibling,)}
+    engine.fanout_capsules = {"group": NS(close=close)}
+    engine._emit = lambda job, event: events.append(("emit", job.id, event))
+
+    engine._finish(leader, {"error": "boom", "status": 500})
+
+    assert [item for item in events if item[0] == "emit"] == [
+        ("emit", "leader", {"error": "boom", "status": 500}),
+        ("emit", "sibling", {
+            "error": "parallel prefill leader ended before APCv2 fanout",
+            "status": 500,
+        }),
+    ]
+    assert engine.jobs == {} and engine.fanout_capsules == {}
+    assert engine.counts["finish_cleanup_failures_fanout_capsule_close"] == 1
+
+
+def test_finish_cleanup_failure_counters_are_optional_runtime_events():
+    from mlx2.prometheus import _ENGINE_EVENTS, _OPTIONAL_ENGINE_EVENTS
+
+    for step in ("cache_branch_close", "apc_retirement_sweep", "lora_unbind",
+                 "lora_release", "fanout_capsule_close"):
+        key = f"finish_cleanup_failures_{step}"
+        assert _OPTIONAL_ENGINE_EVENTS[key] == ("request_finish_cleanup", f"{step}_failed")
+        assert key not in _ENGINE_EVENTS
+    # The always-on request_finish outcome series stay unconditional.
+    assert _ENGINE_EVENTS["finish_stop"] == ("request_finish", "stop")
+    assert "finish_stop" not in _OPTIONAL_ENGINE_EVENTS
+
+
 def test_idle_worker_does_not_retain_evicted_cache_transfers(monkeypatch):
     from mlx2 import serving, memory
     from mlx2.runtime import apc_v2, generate, os_memory
