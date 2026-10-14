@@ -30,6 +30,16 @@ KNOWN_MODEL_BEHAVIOUR_STATUS = "known_model_behaviour"
 TOOLS_AUTO_TEXT_REPLY = "tools_auto_text_reply"
 TOOLS_FORCED_CHOICE = "required"
 
+# A context-ladder lane whose cold and warm requests both completed with the
+# same tokens and neither states the needle: the artifact's own retrieval
+# miss, reproduced exactly through APCv2, not a serving fault.  Judged by the
+# ladder verdict (qualify-1010-correctness/qualification_verdict.py), never
+# by the serving qualifier; ``limit`` bounds the missed share of lane-runs.
+LADDER_RETRIEVAL_CHECK = "ladder_retrieval"
+LADDER_RETRIEVAL_MODEL_MISS = "ladder_retrieval_model_miss"
+# Misses under a smaller forced answer are budget exhaustion, not this shape.
+LADDER_RETRIEVAL_MIN_MAX_TOKENS = 512
+
 
 @dataclass(frozen=True)
 class KnownModelBehaviour:
@@ -40,6 +50,7 @@ class KnownModelBehaviour:
     reason: str
     evidence: str
     declared: str
+    limit: float | None = None
 
     def artifact_label(self, artifact):
         return dict(self.artifacts).get(artifact)
@@ -54,7 +65,7 @@ class KnownModelBehaviour:
             "reason": self.reason,
             "evidence": self.evidence,
             "declared": self.declared,
-        }
+        } | ({"limit": self.limit} if self.limit is not None else {})
 
 
 KNOWN_MODEL_BEHAVIOURS: tuple[KnownModelBehaviour, ...] = (
@@ -88,6 +99,30 @@ KNOWN_MODEL_BEHAVIOURS: tuple[KnownModelBehaviour, ...] = (
         ),
         evidence="qualification/runs/qualify-1007-extra/QUALIFIED.md",
         declared="2026-10-08",
+    ),
+    KnownModelBehaviour(
+        id="lfm25-24b-a2b-8bit-ladder-retrieval-miss",
+        check=LADDER_RETRIEVAL_CHECK,
+        artifacts=(
+            (
+                "ce07be388dd4e5a6e5f4c48f015c0d1234e23ec73f1637b80bd3e26a36c8bc52",
+                "LFM2.5-24B-A2B-MLX-8bit (ordinary route)",
+            ),
+        ),
+        shape=LADDER_RETRIEVAL_MODEL_MISS,
+        reason=(
+            "On the realistic-artifact ladder with the 512-token reasoning budget "
+            "the always-reasoning model misses 3 of 60 lane-runs, each identically "
+            "cold and warm: it copies NEEDLE-7D13C8-3 as NELL-7D13C8-3 (1K w4), "
+            "writes 'the launch code is NEVER ...' and never recovers the code "
+            "(1K w4), or searches 16K of material for 512 tokens without finding "
+            "the note (16K w4). Every stated code is otherwise exact, and an earlier "
+            "replay reproduced the NEEDLE miscopy at width 1. Declared model "
+            "behaviour by Pierre, 2026-10-14."
+        ),
+        evidence="qualification/runs/qualify-ce017ce9-lfm25-q36int8/README.md",
+        declared="2026-10-14",
+        limit=0.10,
     ),
 )
 
