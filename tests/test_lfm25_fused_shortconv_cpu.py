@@ -138,6 +138,51 @@ class ShortConvCandidateTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "already installed"):
                 shortconv.install(model, shortconv.ShortConvCounters())
 
+    def test_text_install_engages_b1_decode_and_refuses_speculation(self):
+        calls = []
+
+        class Conv:
+            history = 2
+
+            def __init__(self):
+                self.conv = types.SimpleNamespace(weight=Array((2048, 3, 1)), bias=None,
+                                                  groups=2048, stride=1, dilation=1, padding=0)
+
+            def _convolve_projected(self, projected, mask, cache):
+                calls.append("reference")
+                return "reference"
+
+        target = Conv()
+        model = types.SimpleNamespace(layers=[
+            types.SimpleNamespace(is_attention_layer=False, conv=target),
+            types.SimpleNamespace(is_attention_layer=True),
+        ])
+        fake_mx = types.ModuleType("mlx.core")
+        fake_mx.bfloat16 = "bf16"
+        fake_mx.fast = types.SimpleNamespace(metal_kernel=lambda **kwargs: None)
+        fake_mx.metal = types.SimpleNamespace(is_available=lambda: True)
+        fake_mx.gpu = object()
+        fake_mx.default_device = lambda: fake_mx.gpu
+        fake_mlx = types.ModuleType("mlx")
+        fake_mlx.core = fake_mx
+        new_state = Array((1, 2, 2048))
+        with patch.dict(sys.modules, {"mlx": fake_mlx, "mlx.core": fake_mx}), \
+             patch.dict("os.environ", {shortconv.ENV: "1"}), \
+             patch.object(shortconv, "fused_projected", return_value=("fused", new_state)):
+            counters = shortconv.ShortConvCounters()
+            self.assertEqual(shortconv.install_text(model, counters), 1)
+            self.assertEqual(target._convolve_projected(self.projected, None, self.cache), "fused")
+            self.assertIs(self.cache[0], new_state)
+            self.assertEqual(self.cache.advanced, 1)
+            # A speculating cache needs the reference path's rollback record.
+            self.cache.speculating = True
+            self.assertEqual(target._convolve_projected(self.projected, None, self.cache),
+                             "reference")
+            self.assertEqual((counters.engaged, counters.refused), (1, 1))
+            self.assertEqual(calls, ["reference"])
+            with self.assertRaisesRegex(ValueError, "already installed"):
+                shortconv.install_text(model, shortconv.ShortConvCounters())
+
     def test_build_failure_uses_reference_without_cache_write(self):
         calls = []
 

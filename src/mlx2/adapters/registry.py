@@ -387,6 +387,12 @@ def _lfm25_vl(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.LFM25VLAdapter, module.LFM25_VL, artifact)
 
 
+def _lfm25_moe(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".lfm25_moe", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.LFM25MoEAdapter, module.DESCRIPTOR, artifact)
+
+
 def _smolvlm2(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".smolvlm2", __package__)
     artifact = module.inspect_artifact(path)
@@ -422,6 +428,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "gpt_oss": _gpt_oss,
     "gpt_oss_puzzle": _gpt_oss,
     "granitemoe_swa": _granite_swa,
+    "lfm2_moe": _lfm25_moe,
     "lfm2_vl": _lfm25_vl,
     "smolvlm": _smolvlm2,
     "qwen2_5_vl": _qwen25_vl,

@@ -351,6 +351,7 @@ def test_tf32_set_after_package_import_is_refused_by_every_profile(monkeypatch, 
 
 @pytest.mark.parametrize("module,cls", [
     ("olmo_hils", "OlmoHiLSAdapter"), ("granite_swa", "GraniteSWAAdapter"),
+    ("lfm25_moe", "LFM25MoEAdapter"),
 ])
 def test_tf32_set_after_package_import_is_refused_by_inline_profiles(
     monkeypatch, tmp_path, module, cls
@@ -381,7 +382,7 @@ def test_every_profile_that_spreads_process_numerics_is_covered():
     }
     assert spreading <= refusing, sorted(spreading - refusing)
     assert spreading == set(PROFILE_MODULES) | {
-        "olmo_hils", "granite_swa", "standard_decoder",
+        "olmo_hils", "granite_swa", "standard_decoder", "lfm25_moe",
     }
 
     # Qwen3.5 9B and dense Qwen3.6 inherit Qwen3.8's guarded constructor;

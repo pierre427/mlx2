@@ -156,3 +156,56 @@ def install(model, counters: ShortConvCounters) -> int:
         conv._mlx2_lfm25_shortconv_installed = True
         counters.installed += 1
     return counters.installed
+
+
+def install_text(model, counters: ShortConvCounters) -> int:
+    """Patch the LFM2.5 24B-A2B text model's ShortConv instances.
+
+    Same kernel, admission and switch as :func:`install`; the mlx2 text model
+    keeps its layers at ``model.layers`` and its seam takes no GDN sink.  A
+    speculating cache stays on the reference path, which records the exact
+    rollback a rejected proposal needs.
+    """
+    import mlx.core as mx
+
+    if not (enabled() and hasattr(mx, "fast") and hasattr(mx.fast, "metal_kernel")
+            and hasattr(mx, "metal") and mx.metal.is_available()
+            and mx.default_device() == mx.gpu):
+        return 0
+
+    conv_layers = [layer for layer in model.layers if not layer.is_attention_layer]
+    if any(getattr(layer.conv, "_mlx2_lfm25_shortconv_installed", False)
+           for layer in conv_layers):
+        raise ValueError("LFM ShortConv candidate is already installed")
+    for layer in conv_layers:
+        conv = layer.conv
+        reference = conv._convolve_projected
+
+        def projected_call(self, projected, mask, cache, *, _reference=reference):
+            state = None if cache is None else cache[0]
+            admission = admit(
+                projected=projected, state=state, weight=self.conv.weight,
+                bias=getattr(self.conv, "bias", None), mask=mask, cache=cache,
+                gdn_sink=True if getattr(cache, "speculating", False) else None,
+                dtype=mx.bfloat16,
+                kernel_size=self.history + 1, groups=self.conv.groups,
+                stride=self.conv.stride, dilation=self.conv.dilation,
+                padding=self.conv.padding,
+            )
+            if not admission.accepted:
+                counters.refused += 1
+                return _reference(projected, mask, cache)
+            try:
+                out, new_state = fused_projected(projected, state, self.conv.weight)
+            except (RuntimeError, ValueError, TypeError):
+                counters.build_failed += 1
+                return _reference(projected, mask, cache)
+            cache[0] = new_state
+            cache.advance(1)
+            counters.engaged += 1
+            return out
+
+        conv._convolve_projected = types.MethodType(projected_call, conv)
+        conv._mlx2_lfm25_shortconv_installed = True
+        counters.installed += 1
+    return counters.installed

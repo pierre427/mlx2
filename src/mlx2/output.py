@@ -214,6 +214,11 @@ class OutputParser:
     Design references: vllm#56661, vllm#57553, ollama#18467, ollama#18476.
     """
 
+    # The tool-block markers; an adapter with another wire spelling (LFM2.5's
+    # ``<|tool_call_start|>``/``<|tool_call_end|>``) overrides only these.
+    tool_open = "<tool_call>"
+    tool_close = "</tool_call>"
+
     def __init__(
         self, *, chat=False, thinking=False, tools=None, parse_tool=None, stops=(),
         constrained_tools=False, parallel_tool_calls=True,
@@ -391,7 +396,7 @@ class OutputParser:
                     self._reasoning_open = True
                 continue  # the answer may start here: recheck the stop gate
             if self.channel == "tool":
-                first = end = self.buffer.find("</tool_call>")
+                first = end = self.buffer.find(self.tool_close)
                 outcome = None
                 while end >= 0:
                     try:
@@ -408,7 +413,7 @@ class OutputParser:
                     # writes JSON arguments with a raw ``<``): the call runs
                     # on to a later closer, and fails at the first one unless
                     # a later one parses.
-                    end = self.buffer.find("</tool_call>", end + 1)
+                    end = self.buffer.find(self.tool_close, end + 1)
                 truncated = final and (stop_hit or self._length_finish)
                 if end < 0 and first >= 0 and final and not truncated:
                     # No later closer: the call is malformed.  (Under a stop
@@ -427,12 +432,12 @@ class OutputParser:
                     if final:
                         if self.constrained_tools or not self.tolerant_tool_markers:
                             raise ValueError("model produced an incomplete tool call")
-                        self._content(events, "<tool_call>" + self.buffer)
+                        self._content(events, self.tool_open + self.buffer)
                         self.tool_call_parse_fallbacks += 1
                         self.buffer = ""
                         self.channel = "content"
                     break
-                raw = "<tool_call>" + self.buffer[:end] + "</tool_call>"
+                raw = self.tool_open + self.buffer[:end] + self.tool_close
                 try:
                     if isinstance(outcome, BaseException):
                         raise outcome
@@ -476,7 +481,7 @@ class OutputParser:
                         raise ValueError(str(exc)) from exc
                     self._content(events, raw)
                     self.tool_call_parse_fallbacks += 1
-                    self.buffer = self.buffer[end + len("</tool_call>") :]
+                    self.buffer = self.buffer[end + len(self.tool_close) :]
                     self.channel = "content"
                     continue
                 # A parsed call confirms that pending whitespace separated two
@@ -485,7 +490,7 @@ class OutputParser:
                 self._pending_space = ""
                 events.extend(parsed_events)
                 self.tool_count += len(parsed_events)
-                self.buffer = self.buffer[end + len("</tool_call>") :]
+                self.buffer = self.buffer[end + len(self.tool_close) :]
                 self.channel = "content"
                 self._after_call = True
                 continue
@@ -496,21 +501,21 @@ class OutputParser:
             # never a call (vLLM parses tools from content only), under either
             # marker policy.  A call after ``</think>`` still parses.
             if self.tools and self.channel != "reasoning_content":
-                markers["<tool_call>"] = "tool"
+                markers[self.tool_open] = "tool"
             matches = [(self.buffer.find(m), m) for m in markers if m in self.buffer]
             if matches:
                 end, marker = min(matches)
                 if end:
                     self._emit(events, self.buffer[:end])
                 if (
-                    marker == "<tool_call>"
+                    marker == self.tool_open
                     and self.channel == "content"
                     and self._code.in_code()
                 ):
                     self._content(events, marker)  # a quoted example
                 else:
                     self.channel = markers[marker]
-                    if marker == "<tool_call>" and not self._shown_text:
+                    if marker == self.tool_open and not self._shown_text:
                         self._pending_space = ""
                     if marker == THINKING_CLOSE_MARKER:
                         self._reasoning_open = False
