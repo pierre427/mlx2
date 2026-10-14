@@ -14,6 +14,26 @@ def _is_strictly_increasing_ints(values: list[int]) -> bool:
     )
 
 
+def _refuse_other_draft_contracts(flat: Mapping, dflash: Mapping) -> None:
+    """Refuse checkpoint metadata declaring a draft contract mlx2 does not run.
+
+    The DFlash2 drafter drafts the anchor plus ``block - 1`` mask rows and
+    drops the anchor row, with full-head RoPE.  A DSpark-style
+    ``sample_from_anchor`` block (oMLX #4525) or partial RoPE (oMLX #4508)
+    changes every proposal; ignoring either key would serve the checkpoint
+    with a layout it was not trained with.
+    """
+    if flat.get("sample_from_anchor") or dflash.get("sample_from_anchor"):
+        raise ValueError("DFlash2 does not implement sample_from_anchor draft blocks.")
+    factors = [flat.get("partial_rotary_factor")]
+    for key in ("rope_parameters", "rope_scaling"):
+        nested = flat.get(key)
+        if isinstance(nested, Mapping):
+            factors.append(nested.get("partial_rotary_factor"))
+    if any(factor is not None and float(factor) != 1.0 for factor in factors):
+        raise ValueError("DFlash2 supports full-head RoPE only (partial_rotary_factor).")
+
+
 @dataclass
 class DFlash2Config(DFlashConfig):
     model_type: str = "dflash2"
@@ -111,6 +131,22 @@ class DFlash2Config(DFlashConfig):
         dflash = flat.pop("dflash_config", None)
         if not isinstance(dflash, Mapping):
             raise TypeError("DFlash2 requires a dflash_config object.")
+
+        _refuse_other_draft_contracts(flat, dflash)
+        # Every spelling of block causality the DFlash family uses selects
+        # ``is_causal``, which ``validate`` refuses: the drafter implements
+        # only the bidirectional block, and serving a causally trained
+        # checkpoint bidirectionally (or the reverse, vLLM #61537) would
+        # silently cut acceptance.
+        if any(
+            bool(value)
+            for value in (
+                dflash.get("causal"),
+                flat.get("dflash_query_causal"),
+                flat.get("is_causal"),
+            )
+        ):
+            flat["is_causal"] = True
 
         flat["backbone_model_type"] = str(flat.pop("model_type", "qwen3"))
         flat["model_type"] = "dflash2"

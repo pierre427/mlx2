@@ -99,6 +99,24 @@ class LagunaDFlashConfig:
         if aux is not None and list(aux) != [i + 1 for i in dflash.get("target_layer_ids", [])]:
             # Aux boundary ids are post-block taps shifted by one (HF hidden_states).
             raise ValueError("Laguna DFlash aux boundaries disagree with target_layer_ids")
+        # The drafter runs default full-head RoPE at ``rope_theta`` on an
+        # anchor-plus-masks block.  Checkpoint metadata for partial RoPE,
+        # scaled RoPE (oMLX #4508: Laguna S drafters) or a DSpark
+        # sample_from_anchor block (oMLX #4525) would otherwise be ignored
+        # and the checkpoint served with a geometry it was not trained with.
+        if config.get("sample_from_anchor") or dflash.get("sample_from_anchor"):
+            raise ValueError("Laguna DFlash does not implement sample_from_anchor blocks")
+        rope = [config.get(key) for key in ("rope_parameters", "rope_scaling")]
+        if config.get("partial_rotary_factor", 1.0) not in (None, 1, 1.0) or any(
+            value is not None
+            and (
+                not isinstance(value, Mapping)
+                or value.get("rope_type", "default") != "default"
+                or value.get("partial_rotary_factor", 1.0) not in (None, 1, 1.0)
+            )
+            for value in rope
+        ):
+            raise ValueError("Laguna DFlash supports default full-head RoPE only")
         flat = dict(config)
         flat.pop("model_type", None)
         for key in ("block_size", "mask_token_id", "target_layer_ids", "num_target_layers", "causal"):
