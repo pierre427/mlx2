@@ -10,6 +10,8 @@ import base64
 import hashlib
 import json
 import math
+import re
+from collections import Counter
 
 SMOL_MEDIA_CHECKS = frozenset(
     {
@@ -36,10 +38,39 @@ TEXT_SAMPLING = {
     "presence_penalty": 0.0,
     "frequency_penalty": 0.0,
 }
-NEAR_CONTEXT_PROMPT_SHA256 = {
-    "near_context": "71615d9b4f60fe2b46ac9b38703ea2125c4ea36863b9596760204d03ed43bd3d",
-    "near_context_control": "69ff49655e1104cf95f7d479686ef5488591aeda8697b13c1f7bfe15d9549854",
+# The near-context probe is one shared filler followed by one of these pinned
+# instructions.  The filler used to be pinned byte for byte (a fixed 54-word
+# LCG word salad); since 2026-10-14 it is varied repository text sized by the
+# served tokenizer (reasoning models fail on repeated input), which changes
+# with the snapshot, so its shape is checked instead of its bytes.
+NEAR_CONTEXT_SUFFIXES = {
+    "near_context": (
+        "\nQuestion: What topic should the answer discuss? "
+        "Answer: compiler optimization. Start your answer with compiler."
+    ),
+    "near_context_control": (
+        "\nQuestion: What is the final secret word? "
+        "The final secret word is SAPPHIRE. Answer: SAPPHIRE."
+    ),
 }
+# Answers the two instructions name; the filler may not contain any of them
+# (compared case-insensitively), so the only answer is at the far end.
+NEAR_CONTEXT_ANSWER_MARKERS = ("compiler", "sapphire")
+# Varied-text floor for the filler, measured on 16K-character windows of the
+# realistic haystack corpus (README, docs, runtime sources; 2026-10-14):
+# distinct-word share >= 0.113, top word <= 0.117, top ten words >= 0.127,
+# repeated 8-word runs <= 0.65 anywhere, and 0.40 / 0.05 / 0.15 / 0.0 at the
+# corpus head the producer reads.  The old word salad scores 0.02 distinct;
+# a repeated phrase puts its top word far above 0.12 or its 8-word runs at
+# 1.0; real text pasted twice repeats every run; a flat random draw from a
+# large vocabulary has its top ten words near 0.01.
+NEAR_CONTEXT_FILLER_MIN_WORDS = 512
+NEAR_CONTEXT_FILLER_MIN_DISTINCT_SHARE = 0.10
+NEAR_CONTEXT_FILLER_MAX_TOP_WORD_SHARE = 0.12
+NEAR_CONTEXT_FILLER_MIN_TOP10_SHARE = 0.08
+NEAR_CONTEXT_FILLER_RUN_WORDS = 8
+NEAR_CONTEXT_FILLER_MAX_REPEATED_RUN_SHARE = 0.5
+_WORD = re.compile(r"[a-z0-9]+")
 
 
 # The identity ``adapters/vlm_runtime.bind_backend`` publishes as
@@ -257,6 +288,56 @@ def _text_case(case, prompt, *, max_tokens=TEXT_TOKENS, min_tokens=0):
     )
 
 
+def near_context_filler_passes(filler):
+    """True when ``filler`` is varied text that names no probe answer.
+
+    Neither a repeated string, a small-vocabulary word salad, real text
+    pasted twice, nor a flat random draw from a large vocabulary passes.
+    """
+    if not isinstance(filler, str):
+        return False
+    lowered = filler.lower()
+    if any(marker in lowered for marker in NEAR_CONTEXT_ANSWER_MARKERS):
+        return False
+    words = _WORD.findall(lowered)
+    if len(words) < NEAR_CONTEXT_FILLER_MIN_WORDS:
+        return False
+    counts = Counter(words)
+    top10 = sum(count for _, count in counts.most_common(10))
+    span = NEAR_CONTEXT_FILLER_RUN_WORDS
+    runs = Counter(
+        tuple(words[index : index + span]) for index in range(len(words) - span + 1)
+    )
+    repeated = sum(count for count in runs.values() if count > 1)
+    return (
+        len(counts) / len(words) >= NEAR_CONTEXT_FILLER_MIN_DISTINCT_SHARE
+        and counts.most_common(1)[0][1] / len(words)
+        <= NEAR_CONTEXT_FILLER_MAX_TOP_WORD_SHARE
+        and top10 / len(words) >= NEAR_CONTEXT_FILLER_MIN_TOP10_SHARE
+        and repeated / sum(runs.values()) <= NEAR_CONTEXT_FILLER_MAX_REPEATED_RUN_SHARE
+    )
+
+
+def near_context_filler(cases):
+    """The one filler both near-context prompts share, or ``None``.
+
+    Each prompt must be the filler followed by its pinned instruction, the
+    two fillers must be identical, and the filler must pass
+    ``near_context_filler_passes``.
+    """
+    fillers = set()
+    for name, suffix in NEAR_CONTEXT_SUFFIXES.items():
+        case = cases.get(name) if isinstance(cases, dict) else None
+        prompt = case.get("prompt") if isinstance(case, dict) else None
+        if not isinstance(prompt, str) or not prompt.endswith(suffix):
+            return None
+        fillers.add(prompt[: -len(suffix)])
+    if len(fillers) != 1:
+        return None
+    (filler,) = fillers
+    return filler if near_context_filler_passes(filler) else None
+
+
 def _text_source(report, digest):
     trace = report.get("text_source")
     if not isinstance(trace, dict) or trace.get("artifact") != report.get("artifact"):
@@ -265,7 +346,7 @@ def _text_source(report, digest):
         return False
     cases = trace.get("cases")
     if not isinstance(cases, dict) or set(cases) != (
-        set(TEXT_PROMPTS) | set(NEAR_CONTEXT_PROMPT_SHA256)
+        set(TEXT_PROMPTS) | set(NEAR_CONTEXT_SUFFIXES)
     ):
         return False
     if not all(
@@ -280,13 +361,13 @@ def _text_source(report, digest):
         == cases["cold_text"]["prompt_tokens_sha256"]
     ):
         return False
-    for name, prompt_sha in NEAR_CONTEXT_PROMPT_SHA256.items():
+    if near_context_filler(cases) is None:
+        return False
+    for name in NEAR_CONTEXT_SUFFIXES:
         case = cases[name]
-        prompt = case.get("prompt")
+        prompt = case["prompt"]
         if not (
-            isinstance(prompt, str)
-            and hashlib.sha256(prompt.encode()).hexdigest() == prompt_sha
-            and _text_case(
+            _text_case(
                 case,
                 prompt,
                 max_tokens=NEAR_CONTEXT_TOKENS,

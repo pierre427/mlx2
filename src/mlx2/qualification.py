@@ -320,9 +320,15 @@ APPROVED_ADAPTER_CHECKS = (
 # the pinned near-context word filler (NEAR_CONTEXT_PROMPT_SHA256 is
 # unchanged) because the generic qualifier's filler is now varied text.
 # Companions from 15f1bad9... must be regenerated.
+# Re-pinned 2026-10-14: the frozen word filler is gone; the producer's
+# near-context filler is the realistic haystack sized by the adapter's prompt
+# tokens, and media_qualification checks its shape (pinned instructions, one
+# shared filler, no answer markers, varied text) instead of its bytes;
+# harness 85da0e6e... -> 9b8ca788....
+# Companions from 85da0e6e... must be regenerated.
 APPROVED_MEDIA_HARNESS = {
     "name": "scripts/qualify_media_serving.py",
-    "sha256": "85da0e6e9994888c07621389dfeeaa17cac4f820ffb9724be66f80a0d8aca33e",
+    "sha256": "9b8ca788848eba497bc9bdd68331bd699816909e1628a5faa21546ed81bce0b7",
 }
 # Re-pinned 2026-10-12 after review of Gemma3n shared-KV/lane projection
 # and video batch-default repairs. Old companion identities remain historical;
@@ -332,6 +338,11 @@ APPROVED_MEDIA_HARNESS = {
 # multimodal_encoder_batching when one default video can split, else the new
 # multimodal_encoder_unsplit. evaluator 498ddd0d... -> 0e9abb7a..., adapter_batching
 # 9d6c2346... -> 19e7822c..., Gemma3n/MiniCPM-o adapter_contract f8db4ba3... -> ba3ebfdb....
+# Re-pinned 2026-10-14: media_qualification.py replaced the SmolVLM2
+# near-context prompt byte pin with structural filler checks (realistic text,
+# not word salad). evaluator 0e9abb7a... -> 6eca4f9a... for all three native
+# producers; the native producer itself is unchanged. Companions from
+# 0e9abb7a... must be regenerated.
 APPROVED_MEDIA_PRODUCERS = {
     "smolvlm": (APPROVED_MEDIA_HARNESS, evaluate_smol_media_report, SMOL_MEDIA_CHECKS),
     "qwen2_5_vl": (
@@ -358,7 +369,7 @@ APPROVED_MEDIA_PRODUCERS = {
         {
             "name": "scripts/qualify_native_vlm_media.py",
             "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
-            "evaluator_sha256": "0e9abb7acb5464a91c0005de07c8466f0559e6026c77d69c242ba17e9d9ae974",
+            "evaluator_sha256": "6eca4f9a3a74ac56c932f8228268b842e2b21db0f740f43c9a9f0f043f972c20",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "19e7822ca5f4751e05b17d7ae9dbacc221fdb98234aef6243e306d38bb6cab04",
             "adapter_contract_sha256": "ba3ebfdb13db6a2df8e7f12950f58c5c3cc830fc26f5220227a835b7c25ba180",
@@ -371,7 +382,7 @@ APPROVED_MEDIA_PRODUCERS = {
         {
             "name": "scripts/qualify_native_vlm_media.py",
             "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
-            "evaluator_sha256": "0e9abb7acb5464a91c0005de07c8466f0559e6026c77d69c242ba17e9d9ae974",
+            "evaluator_sha256": "6eca4f9a3a74ac56c932f8228268b842e2b21db0f740f43c9a9f0f043f972c20",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "19e7822ca5f4751e05b17d7ae9dbacc221fdb98234aef6243e306d38bb6cab04",
             # Re-pinned 2026-10-12 (sweep 10-12 L5-03): e3c19168e changed
@@ -387,7 +398,7 @@ APPROVED_MEDIA_PRODUCERS = {
         {
             "name": "scripts/qualify_native_vlm_media.py",
             "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
-            "evaluator_sha256": "0e9abb7acb5464a91c0005de07c8466f0559e6026c77d69c242ba17e9d9ae974",
+            "evaluator_sha256": "6eca4f9a3a74ac56c932f8228268b842e2b21db0f740f43c9a9f0f043f972c20",
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "19e7822ca5f4751e05b17d7ae9dbacc221fdb98234aef6243e306d38bb6cab04",
             "adapter_contract_sha256": "ba3ebfdb13db6a2df8e7f12950f58c5c3cc830fc26f5220227a835b7c25ba180",

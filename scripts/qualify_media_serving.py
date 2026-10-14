@@ -45,32 +45,48 @@ TEXT_PROMPTS = {
     "cold_text": "Reply with exactly MLX2_READY",
 }
 MAX_ABS_TOLERANCE = 1e-4
-# Frozen: the near-context prompts below are pinned byte for byte
-# (media_qualification.NEAR_CONTEXT_PROMPT_SHA256).  The generic qualifier
-# moved its own near-limit probe to varied text sized by the served tokenizer
-# (2026-10-14: reasoning models fail on repeated input); this word salad stays
-# only until the SmolVLM2 evidence contract stops pinning prompt bytes, which
-# a corpus that changes with the repository cannot satisfy.
-NEAR_CONTEXT_WORDS = (
-    "data", "the", "system", "value", "table", "record", "signal", "network", "window",
-    "object", "format", "memory", "number", "simple", "paper", "river", "stone",
-    "garden", "market", "winter", "summer", "letter", "music", "color", "train",
-    "bridge", "forest", "island", "doctor", "teacher", "kitchen", "engine", "planet",
-    "silver", "orange", "yellow", "mountain", "village", "morning", "evening",
-    "history", "science", "future", "picture", "water", "light", "house", "story",
-    "world", "money", "power", "place", "point", "group",
-)
+# Tokens the shorter near-context instruction may render below the longer one;
+# the shared filler is sized so both prompts land inside the evaluator window.
+NEAR_CONTEXT_SUFFIX_MARGIN = 16
 
 
-def near_context_filler(tokens: int) -> str:
-    """The pinned near-context filler: one-token words in a fixed LCG order."""
-    state, words = 20260918, []
-    for _ in range(int(tokens)):
-        state = (state * 1103515245 + 12345) % (1 << 31)
-        words.append(NEAR_CONTEXT_WORDS[(state >> 8) % len(NEAR_CONTEXT_WORDS)])
-    if words:
-        words[0] = NEAR_CONTEXT_WORDS[0]
-    return " ".join(words)
+def near_context_prompts(harness, count_tokens) -> dict:
+    """Both near-context prompts: one shared varied filler, then each pinned
+    instruction (``media_qualification.NEAR_CONTEXT_SUFFIXES``).
+
+    The filler is the generic qualifier's realistic haystack (README, docs and
+    runtime sources), sized by ``fit_long_context_filler`` against
+    ``count_tokens(text)``, the adapter's rendered prompt-token count for a
+    user message carrying ``text``.  Reasoning models fail on repeated input,
+    so the old 54-word LCG word salad is gone (2026-10-14).  ``harness`` is
+    this producer's private copy of ``qualify_serving``; its filler exclusion
+    is widened to the probe's answers so neither is in the haystack.
+    """
+    from mlx2.media_qualification import (
+        NEAR_CONTEXT_ANSWER_MARKERS,
+        NEAR_CONTEXT_SUFFIXES,
+        near_context_filler,
+    )
+
+    harness.LONG_CONTEXT_FILLER_EXCLUDE = tuple(dict.fromkeys(
+        (*harness.LONG_CONTEXT_FILLER_EXCLUDE, *NEAR_CONTEXT_ANSWER_MARKERS)
+    ))
+    context = SETUP["max_context"]
+    floor = harness.near_limit_prompt_floor(context)
+    high = context - NEAR_CONTEXT_TOKENS
+    filler = harness.fit_long_context_filler(
+        lambda text: max(count_tokens(text + suffix)
+                         for suffix in NEAR_CONTEXT_SUFFIXES.values()),
+        floor + 1 + NEAR_CONTEXT_SUFFIX_MARGIN,
+        high,
+    )
+    prompts = {name: filler + suffix for name, suffix in NEAR_CONTEXT_SUFFIXES.items()}
+    for name, prompt in prompts.items():
+        if not floor < count_tokens(prompt) <= high:
+            raise AssertionError(f"{name} prompt is outside {floor + 1}..{high} tokens")
+    if near_context_filler({name: {"prompt": prompt} for name, prompt in prompts.items()}) is None:
+        raise AssertionError("near-context filler is not varied answer-free text")
+    return prompts
 
 
 def sha256(data: bytes) -> str:
@@ -317,16 +333,12 @@ def text_source_trace(model_path: str) -> dict:
         raise AssertionError("generic qualification prompt source is unavailable")
     harness = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(harness)
-    filler = near_context_filler(harness.near_limit_prompt_floor(4096))
-    near_prompts = {
-        "near_context": (filler + "\nQuestion: What topic should the answer discuss? "
-                         "Answer: compiler optimization. Start your answer with compiler."),
-        "near_context_control": (filler + "\nQuestion: What is the final secret word? "
-                                 "The final secret word is SAPPHIRE. Answer: SAPPHIRE."),
-    }
 
     adapter = SmolVLM2CandidateAdapter(model_path)
     try:
+        near_prompts = near_context_prompts(harness, lambda text: len(adapter.prompt_tokens(
+            {"messages": [{"role": "user", "content": text}]}
+        )))
         return {
             "artifact": adapter.identity["fingerprint"],
             "cases": {**{name: text_parity_arm(adapter, prompt)

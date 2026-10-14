@@ -209,7 +209,21 @@ def test_minicpmo_mechanism_check_follows_resolved_adapter_policy():
         required_descriptor_checks(MINICPMO, {"adapter_policy": {}})
 
 
-def _rebind_to_current_producer(companion):
+def _realistic_near_context_filler():
+    """Varied repository text free of the near-context probe's answers."""
+    import importlib.util
+
+    from mlx2.media_qualification import NEAR_CONTEXT_ANSWER_MARKERS
+
+    source = Path(__file__).resolve().parents[1] / "scripts/realistic_haystack.py"
+    spec = importlib.util.spec_from_file_location("_qualification_test_haystack", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    text = module.haystack(15_000, exclude=NEAR_CONTEXT_ANSWER_MARKERS)
+    return text[: text.rfind(" ")]
+
+
+def _rebind_to_current_producer(companion, realistic_filler=True):
     """The recorded 2026-09-26 M3 runs name the producer revision that ran
     them; the producers have since tightened the media-reuse predicate, which
     by design invalidates those receipts until they are re-run.  These tests
@@ -233,17 +247,34 @@ def _rebind_to_current_producer(companion):
             arm["binding"]["settings"]["mlx_vlm"] = dict(identity)
     for case in companion.get("text_source", {}).get("cases", {}).values():
         case["source_sha256"] = identity["source_sha256"]
+    # They also predate the varied-text near-context filler (2026-10-14):
+    # their prompts carry the 54-word LCG salad the evaluator now refuses.
+    # Re-bind the prompt text to a realistic filler (the token traces stay as
+    # recorded); the companion itself must be regenerated.
+    from mlx2.media_qualification import NEAR_CONTEXT_SUFFIXES
+
+    cases = companion.get("text_source", {}).get("cases", {})
+    if realistic_filler and set(NEAR_CONTEXT_SUFFIXES) <= set(cases):
+        filler = _realistic_near_context_filler()
+        for name, suffix in NEAR_CONTEXT_SUFFIXES.items():
+            cases[name]["prompt"] = filler + suffix
 
 
 def test_smol_companion_is_recomputed_before_route_selection(tmp_path):
     from mlx2.adapters.smolvlm2 import DESCRIPTOR
+    from mlx2.media_qualification import evaluate_smol_media_report
 
     companion_path = (Path(__file__).resolve().parents[1] / "docs/experiments"
                       / "SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json")
     if not companion_path.is_file():
         pytest.skip("private SMOLVLM2 media companion is not exported")
     companion = json.loads(companion_path.read_text())
+    recorded = json.loads(json.dumps(companion))
+    _rebind_to_current_producer(recorded, realistic_filler=False)
+    # The recorded word-salad near-context prompts are refused as they stand.
+    assert evaluate_smol_media_report(recorded)["text_source_parity"] is False
     _rebind_to_current_producer(companion)
+    assert all(evaluate_smol_media_report(companion).values())
     record = {
         "passed": True, "runtime": companion["runtime"],
         "artifact": companion["artifact"], "settings": companion["settings"],

@@ -1,14 +1,16 @@
 """A media companion must carry trace evidence, not only passed booleans."""
 
 from copy import deepcopy
+import functools
 import importlib.util
 from types import SimpleNamespace
 import hashlib
 import json
 from pathlib import Path
+import re
 
 from mlx2.media_qualification import SMOL_MEDIA_CHECKS, evaluate_smol_media_report
-from mlx2 import qualification
+from mlx2 import media_qualification, qualification
 import pytest
 
 
@@ -130,6 +132,27 @@ def _arm(kind="image"):
     }
 
 
+def _load_script(name):
+    source = Path(__file__).resolve().parents[1] / "scripts" / name
+    spec = importlib.util.spec_from_file_location(f"_media_test_{source.stem}", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fake_prompt_tokens(text):
+    """A CPU stand-in for ``adapter.prompt_tokens``: chat frame + ~4 chars/token."""
+    return 24 + len(text) // 4
+
+
+@functools.lru_cache(maxsize=1)
+def _near_context_prompts():
+    producer = _load_script("qualify_media_serving.py")
+    return producer.near_context_prompts(
+        _load_script("qualify_serving.py"), _fake_prompt_tokens
+    )
+
+
 def _text_source(artifact="artifact-fingerprint", revision=REV):
     def case(prompt, length, count=16, start=100):
         prompt_ids = list(range(length))
@@ -181,19 +204,9 @@ def _text_source(artifact="artifact-fingerprint", revision=REV):
             "min_tokens": count if count == 64 else 0,
         }
 
-    source = Path(__file__).resolve().parents[1] / "scripts/qualify_media_serving.py"
-    spec = importlib.util.spec_from_file_location("media_test_prompts", source)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    filler = module.near_context_filler(4096 - 256)
-    near_prompt = (
-        filler + "\nQuestion: What topic should the answer discuss? "
-        "Answer: compiler optimization. Start your answer with compiler."
-    )
-    control_prompt = (
-        filler + "\nQuestion: What is the final secret word? "
-        "The final secret word is SAPPHIRE. Answer: SAPPHIRE."
-    )
+    prompts = _near_context_prompts()
+    near_prompt = prompts["near_context"]
+    control_prompt = prompts["near_context_control"]
 
     return {
         "artifact": artifact,
@@ -304,6 +317,97 @@ def test_near_context_minimum_length_records_masked_stop_selection():
     control["decode"][5]["adapter_argmax"] = 2
     assert evaluate_smol_media_report(report)["text_source_parity"] is True
     control["decode"][5]["sampled_argmax"] = 2
+    assert evaluate_smol_media_report(report)["text_source_parity"] is False
+
+
+def test_producer_near_context_filler_is_sized_varied_repository_text():
+    """The SmolVLM2 producer's two near-context prompts share one realistic
+    haystack filler sized into the evaluator's token window; the frozen
+    word salad is gone."""
+    producer = _load_script("qualify_media_serving.py")
+    assert not hasattr(producer, "near_context_filler")
+    assert not hasattr(producer, "NEAR_CONTEXT_WORDS")
+    prompts = _near_context_prompts()
+    assert set(prompts) == set(media_qualification.NEAR_CONTEXT_SUFFIXES)
+    filler = media_qualification.near_context_filler(
+        {name: {"prompt": prompt} for name, prompt in prompts.items()}
+    )
+    assert filler is not None
+    assert filler.startswith("\n--- Shared artifact: README.md ---\n")
+    for name, prompt in prompts.items():
+        assert prompt == filler + media_qualification.NEAR_CONTEXT_SUFFIXES[name]
+        assert 4096 - 256 < _fake_prompt_tokens(prompt) <= 4096 - 64
+
+
+def _salad(vocabulary, count, seed=20260918):
+    """The pre-2026-10-14 producer filler: words in a fixed LCG order."""
+    state, words = seed, []
+    for _ in range(count):
+        state = (state * 1103515245 + 12345) % (1 << 31)
+        words.append(vocabulary[(state >> 8) % len(vocabulary)])
+    return " ".join(words)
+
+
+OLD_SALAD_WORDS = (
+    "data", "the", "system", "value", "table", "record", "signal", "network",
+    "window", "object", "format", "memory", "number", "simple", "paper", "river",
+    "stone", "garden", "market", "winter", "summer", "letter", "music", "color",
+    "train", "bridge", "forest", "island", "doctor", "teacher", "kitchen", "engine",
+    "planet", "silver", "orange", "yellow", "mountain", "village", "morning",
+    "evening", "history", "science", "future", "picture", "water", "light", "house",
+    "story", "world", "money", "power", "place", "point", "group",
+)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        "repeated_phrase",
+        "repeated_word",
+        "old_word_salad",
+        "large_vocabulary_salad",
+        "real_text_pasted_twice",
+        "names_topic_answer",
+        "names_secret_answer",
+        "different_fillers",
+        "empty",
+    ),
+)
+def test_repeated_or_word_salad_near_context_filler_fails(kind):
+    """Falsifier: a filler that is not varied, answer-free real text fails
+    text_source_parity even when every other trace field is intact."""
+    report = {
+        "artifact": "artifact-fingerprint",
+        "source_revision": REV,
+        "settings": deepcopy(SETTINGS),
+        "text_source": _text_source(),
+        "arms": {"image": _arm(), "video": _arm("video")},
+    }
+    assert evaluate_smol_media_report(report)["text_source_parity"] is True
+    cases = report["text_source"]["cases"]
+    real = media_qualification.near_context_filler(cases)
+    vocabulary = sorted(set(re.findall(r"[a-z]+", real.lower())))
+    fillers = {
+        "repeated_phrase": "The quick brown fox jumps over the lazy dog. " * 340,
+        "repeated_word": "data " * 3800,
+        "old_word_salad": _salad(OLD_SALAD_WORDS, 3840),
+        "large_vocabulary_salad": _salad(vocabulary, 2800),
+        "real_text_pasted_twice": real[: len(real) // 2] * 2,
+        "names_topic_answer": real.replace(" the ", " the compiler ", 1),
+        "names_secret_answer": real.replace(" the ", " the Sapphire ", 1),
+        "empty": "",
+    }
+    if kind == "different_fillers":
+        cases["near_context_control"]["prompt"] = (
+            real.replace(" the ", " a ", 1)
+            + media_qualification.NEAR_CONTEXT_SUFFIXES["near_context_control"]
+        )
+    else:
+        filler = fillers[kind]
+        assert not media_qualification.near_context_filler_passes(filler)
+        for name, suffix in media_qualification.NEAR_CONTEXT_SUFFIXES.items():
+            cases[name]["prompt"] = filler + suffix
+    assert media_qualification.near_context_filler(cases) is None
     assert evaluate_smol_media_report(report)["text_source_parity"] is False
 
 
