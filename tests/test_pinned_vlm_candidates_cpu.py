@@ -104,3 +104,25 @@ def test_vision_bridges_are_discoverable_and_resolve_unqualified():
         assert resolve_adapter(path) is result.adapter_type
         assert resolve_adapter(path, qualification_mode=True) is result.adapter_type
     assert "mlx.core" not in sys.modules
+
+
+def test_recurrent_candidate_refuses_mixed_length_lanes():
+    """Agnes runs the pinned mlx-vlm Qwen3.5 GDN stack, whose SSM mask helper
+    drops the right bound on the batch generator's right-padded prefill
+    (jundot/omlx#4526): padded tokens would advance the recurrent state.
+    Text-only attention candidates keep their lanes."""
+    from mlx2.adapters.agnes_vision import AgnesVisionCandidateAdapter
+    from mlx2.adapters.pinned_vlm_candidate import PinnedVisionCandidateAdapter
+
+    agnes = object.__new__(AgnesVisionCandidateAdapter)
+    assert agnes.execution_config(max_lanes=1, prefill_step=64)[
+        "segment_aware_cohort_size"] == 1
+    with pytest.raises(ValueError, match="max_lanes=1"):
+        agnes.execution_config(max_lanes=2, prefill_step=64)
+
+    class AttentionOnly(PinnedVisionCandidateAdapter):
+        descriptor = SimpleNamespace(state_planes=frozenset())
+
+    config = object.__new__(AttentionOnly).execution_config(max_lanes=4, prefill_step=64)
+    assert config["segment_aware_cohort_size"] == 4
+    assert "mlx.core" not in sys.modules

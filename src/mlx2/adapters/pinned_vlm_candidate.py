@@ -232,6 +232,16 @@ class PinnedVisionCandidateAdapter:
         return f"{self.model_type}-vision-ordinary-candidate"
 
     def execution_config(self, *, max_lanes, prefill_step):
+        if max_lanes != 1 and StatePlane.RECURRENT in self.descriptor.state_planes:
+            # The pinned mlx-vlm Qwen3.5 SSM mask helper returns no mask for
+            # the batch generator's right-padded prefill (left padding 0,
+            # lengths set) and its ArraysCache.make_mask keeps one bound, so
+            # padded tokens would advance GDN and conv state (omlx#4526).
+            raise ValueError(
+                f"{self.model_type} vision candidate requires max_lanes=1: "
+                "the pinned mlx-vlm SSM mask leaks right padding into "
+                "recurrent state"
+            )
         return {"persistent": True, "num_draft": 0, "backend": "ordinary",
                 "rate_gate": False, "prefill_step_size": prefill_step,
                 "segment_aware_live_tip": False, "segment_aware_cohort_size": max_lanes}
