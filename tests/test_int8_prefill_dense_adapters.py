@@ -275,12 +275,14 @@ def test_muse_external_draft_routes_stay_below_the_row_threshold():
         assert bound < ip.DEFAULT_ROW_THRESHOLD, num_draft
 
 
-def test_qwen36_27b_opts_out_of_int8_prefill():
-    # Measured no-go on tool-call text (int8-dense8-e2e-20261009); the
-    # Qwen3.8-27B parent keeps its declaration.
+def test_qwen36_27b_inherits_the_int8_prefill_declaration():
+    # The 2026-10-09 no-go was all-position KL on untrained prompt tokens;
+    # re-scored on generated positions it is within the stock chunking floor
+    # (lfm25-24b-a2b-int8-20261014/qwen36_27b_rescore.json).
     from mlx2.adapters.qwen36_27b import Qwen3627BAdapter
     from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
     from mlx2.runtime.int8_prefill import adapter_scopes
 
-    assert adapter_scopes(Qwen3627BAdapter) == frozenset()
+    assert "int8_prefill_supported" not in vars(Qwen3627BAdapter)
+    assert adapter_scopes(Qwen3627BAdapter) == {"mlp", "all"}
     assert adapter_scopes(Qwen3827BAdapter) == {"mlp", "all"}

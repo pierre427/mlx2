@@ -196,13 +196,15 @@ class Qwen3627BAdapter(Qwen3827BAdapter):
     environment_configurator = staticmethod(configure_environment)
     fused_gdn_architecture = "qwen38"
     from .qwen import QWEN36_27B_SAMPLING as sampling_defaults
-    # Opted out of int8 prefill (inherited from the Qwen3.8-27B adapter).  On
-    # Qwen3.6-27B-MLX-8bit the in-place Q8 mode moved tool-call text to KL
-    # 1.68 / top-1 0.808 against stock prefill, 2.5x what stock chunking alone
-    # does to this model (KL 0.65 / top-1 0.884), with every projection group
-    # in layers 0-31 contributing
-    # (qualification/runs/int8-dense8-e2e-20261009/Qwen3.6-27B-MLX-8bit/).
-    int8_prefill_supported = None
+    # int8 prefill is inherited from the Qwen3.8-27B adapter ("mlp", "all").
+    # The 2026-10-09 opt-out rested on tool-call KL measured at every position
+    # of a raw JSON dump (KL 1.68 vs a stock chunking floor of 0.65); this
+    # model's prompt-side predictions are untrained (system tool list 8.55
+    # nats/token vs 0.11 on assistant tokens).  Scored where the model
+    # generates, in-place Q8 sits within that floor: assistant tokens KL
+    # 0.0006 / top-1 0.998, own continuations KL <= 0.0007
+    # (qualification/runs/lfm25-24b-a2b-int8-20261014/qwen36_27b_rescore.json).
+    # ``auto`` still engages only under qualification evidence.
 
     def prefill_step_default(self):
         """Retain the artifact family's exercised 2,048-row prefill geometry."""

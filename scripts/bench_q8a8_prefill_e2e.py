@@ -47,10 +47,23 @@ def build_texts(tokenizer, repo: Path, n_tokens: int):
         turns.append({"role": "tool", "tool_call_id": f"call_{i}", "content": json.dumps(
             {"record_id": call["arguments"]["record_id"], "title": f"Item {i}",
              "owner": f"user{i % 5}", "status": ["open", "closed", "pending"][i % 3]})})
+    # Some templates (LFM2.5) render each argument by type and refuse the
+    # OpenAI JSON-string form; give them the decoded mapping instead.
+    dict_turns = [
+        {**t, "tool_calls": [
+            {**c, "function": {**c["function"],
+                               "arguments": json.loads(c["function"]["arguments"])}}
+            for c in t["tool_calls"]]} if t.get("tool_calls") else t
+        for t in turns]
     try:
-        tool_text = tokenizer.apply_chat_template(
-            turns, tools=tools, tokenize=False, add_generation_prompt=False)
-        tool_source = "chat_template"
+        try:
+            tool_text = tokenizer.apply_chat_template(
+                turns, tools=tools, tokenize=False, add_generation_prompt=False)
+            tool_source = "chat_template"
+        except Exception:  # noqa: BLE001 - retried with mapping arguments
+            tool_text = tokenizer.apply_chat_template(
+                dict_turns, tools=tools, tokenize=False, add_generation_prompt=False)
+            tool_source = "chat_template_mapping_arguments"
     except Exception as error:  # template without tool support
         print("tool template failed, using JSON text:", error, flush=True)
         tool_text = json.dumps({"tools": tools, "messages": turns}, indent=1)
@@ -82,6 +95,11 @@ def main():
                     help="settle seconds per context (aligned with --contexts)")
     ap.add_argument("--quality-tokens", type=int, default=2048)
     ap.add_argument("--skip-quality", action="store_true")
+    ap.add_argument("--skip-speed", action="store_true",
+                    help="quality only (implies --quality-first)")
+    ap.add_argument("--own-tokens", type=int, default=160,
+                    help="stock greedy continuation length for the own_* quality cells "
+                    "(0 = skip them)")
     ap.add_argument("--host-cpu-limit", type=float, default=50.0,
                     help="a foreign process at or above this %%CPU (or a pytest at >= 5%%) "
                     "marks a timed run contaminated")
@@ -197,9 +215,18 @@ def main():
 
     def run_quality():
         """Per category: the stock reference, then every arm against it, so one
-        full-vocab reference is resident at a time."""
+        full-vocab reference is resident at a time.
+
+        Rendered conversations are also scored on assistant-turn targets only
+        (``<cat>@assistant``), and ``own_*`` cells score each arm on the stock
+        model's own greedy continuation of served-style chat prompts
+        (``chat_quality``): chat models leave prompt-side predictions
+        untrained, so all-position KL there does not measure generation."""
+        import chat_quality
+
         quality = {name: {} for name in names if name != "off"}
         for cat, ids in texts.items():
+            mask = chat_quality.assistant_mask(adapter.tokenizer, ids[: a.quality_tokens])
             ref = logprobs(ids[: a.quality_tokens])
             for name in quality:
                 h = install(name)
@@ -218,11 +245,33 @@ def main():
                     "top1_agree": top1.mean().item(),
                     "delta_nll": (nll_arm.mean() - nll_ref.mean()).item(),
                 }
+                if mask is not None and any(mask[1:]):
+                    quality[name][cat + "@assistant"] = chat_quality.compare(
+                        ref[:-1], lp[:-1], rows=mask[1:])
                 del lp, p, kl, top1, nll_ref, nll_arm
                 mx.clear_cache()
                 print(name, cat, quality[name][cat], flush=True)
             del ref
             mx.clear_cache()
+        if a.own_tokens:
+            own = chat_quality.own_continuations(
+                adapter, Path(a.repo), new_tokens=a.own_tokens)
+            for cat, (prompt, cont) in own.items():
+                ref = chat_quality.continuation_logprobs(
+                    model, lambda: make_prompt_cache(model), prompt, cont,
+                    prefill_chunk=a.step)
+                for name in quality:
+                    h = install(name)
+                    lp = chat_quality.continuation_logprobs(
+                        model, lambda: make_prompt_cache(model), prompt, cont,
+                        prefill_chunk=a.step)
+                    int8_prefill.remove(h)
+                    quality[name][cat] = {"prompt_tokens": len(prompt),
+                                          **chat_quality.compare(ref, lp)}
+                    print(name, cat, quality[name][cat], flush=True)
+                    del lp
+                del ref
+                mx.clear_cache()
         return quality
 
     s0 = swapouts()
@@ -255,8 +304,16 @@ def main():
                 time.sleep(a.memory_log_s)
 
         threading.Thread(target=sampler, daemon=True).start()
-    if not a.skip_quality and a.quality_first:
+    if not a.skip_quality and (a.quality_first or a.skip_speed):
         quality = run_quality()
+    if a.skip_speed:
+        Path(a.out).write_text(json.dumps(
+            {"model": a.model, "arms": arms, "adapter": type(adapter).__name__,
+             "tool_text_source": tool_source, "quality_vs_off": quality,
+             "swapouts_delta": swapouts() - s0, "mlx": mx.__version__},
+            indent=1, default=str))
+        print(json.dumps({"quality": quality}, indent=1))
+        return
     # Warm-up every arm once (JIT, allocator, weight copies for cached modes).
     for name in names:
         h = install(name)

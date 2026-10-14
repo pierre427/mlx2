@@ -33,6 +33,8 @@ def main():
     ap.add_argument("--control-chunks", type=int, nargs="*", default=[],
                     help="stock-only controls: the same text prefilled in chunks of "
                     "this many rows (different kernel shapes, exact math otherwise)")
+    ap.add_argument("--own-tokens", type=int, default=160,
+                    help="stock greedy continuation length for own_* cells (0 = skip)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--i-own-the-gpu", action="store_true")
     a = ap.parse_args()
@@ -92,13 +94,43 @@ def main():
                 return int(seg)
         return -1
 
+    import chat_quality
+
     n_layers = 1 + max(layer_of(p) for p, _ in model.named_modules())
+    # Chat models leave prompt-side predictions untrained: score rendered
+    # conversations on assistant targets too, and score the stock model's own
+    # continuations of served-style prompts (chat_quality).
+    masks = {k: chat_quality.assistant_mask(adapter.tokenizer, v) for k, v in texts.items()}
+    own = (chat_quality.own_continuations(adapter, Path(__file__).resolve().parents[1],
+                                          new_tokens=a.own_tokens)
+           if a.own_tokens else {})
+
+    def own_lp(prompt, cont, chunk=None):
+        return chat_quality.continuation_logprobs(
+            model, lambda: make_prompt_cache(model), prompt, cont,
+            prefill_chunk=chunk or a.tokens)
+
     refs = {k: logprobs(v) for k, v in texts.items()}
-    results = {"off_repeat": {k: compare(refs[k], logprobs(v)) for k, v in texts.items()}}
+    own_refs = {k: own_lp(p, c) for k, (p, c) in own.items()}
+
+    def score(lp_of, own_of):
+        out = {}
+        for k, v in texts.items():
+            lp = lp_of(v)
+            out[k] = compare(refs[k], lp)
+            if masks[k] is not None and any(masks[k][1:]):
+                out[k + "@assistant"] = chat_quality.compare(
+                    refs[k][:-1], lp[:-1], rows=masks[k][1:])
+        for k, (p, c) in own.items():
+            out[k] = chat_quality.compare(own_refs[k], own_of(p, c))
+        return out
+
+    results = {"off_repeat": score(logprobs, own_lp)}
     print("off_repeat", results["off_repeat"], flush=True)
     for chunk in a.control_chunks:
         name = f"off_chunk{chunk}"
-        results[name] = {k: compare(refs[k], logprobs(v, chunk)) for k, v in texts.items()}
+        results[name] = score(lambda v, chunk=chunk: logprobs(v, chunk),
+                              lambda p, c, chunk=chunk: own_lp(p, c, chunk))
         print(name, results[name], flush=True)
 
     arms = []
@@ -124,14 +156,15 @@ def main():
             print(name, "error", error, flush=True)
             continue
         modules = handle.q8_module_count()
-        results[name] = {"modules": modules}
-        for k, v in texts.items():
-            results[name][k] = compare(refs[k], logprobs(v))
+        results[name] = {"modules": modules, **score(logprobs, own_lp)}
         int8_prefill.remove(handle)
         print(name, results[name], flush=True)
     Path(a.out).write_text(json.dumps(
         {"model": a.model, "adapter": type(adapter).__name__, "policy": POLICY,
          "tokens": a.tokens, "tool_text_source": tool_source, "results": results,
+         "own_prompts": {k: {"prompt_tokens": len(p), "continuation_tokens": len(c),
+                             "continuation": adapter.tokenizer.decode(c)}
+                         for k, (p, c) in own.items()},
          "mlx": mx.__version__}, indent=1))
 
 
