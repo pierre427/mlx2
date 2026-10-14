@@ -16,6 +16,9 @@ import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.append(str(Path(__file__).resolve().parent))
+from realistic_haystack import artifact_corpus, haystack
 
 QUALIFICATION_HARNESS_SCHEMA = "mlx2.qualification-harness.v1"
 APPROVED_ADAPTIVE_BENCHMARK_SHA256 = (
@@ -172,39 +175,100 @@ def cancellation_probe_budget(context_cap):
     return budget
 
 
-# Exactly one token each, with a leading space, in every supported tokenizer
-# (Qwen3.x/Qwen4, Muse-Glimmer, North/Cohere): verified by
-# tests/test_qualify_serving_receipts.py when the artifacts are present.
-LONG_CONTEXT_WORDS = (
-    "data the system value table record signal network window object format "
-    "memory number simple paper river stone garden market winter summer letter "
-    "music color train bridge forest island doctor teacher kitchen engine planet "
-    "silver orange yellow mountain village morning evening history science future "
-    "picture water light house story world money power place point group"
-).split()
+# A filler file that names a marker a probe checks for is left out, so the
+# answer is never in the haystack: LONG_READY and the requested topic
+# (long_context_answer_passes), and the SPOMIN and SRPT reply markers.
+LONG_CONTEXT_FILLER_EXCLUDE = ("LONG_READY", "compiler", "SPOMIN_OK", "SRPT_LONG")
+# Server token counts the filler search may spend before it fails loudly.
+LONG_CONTEXT_FIT_ATTEMPTS = 40
+# Prompt tokens a sized filler may render above the size it was asked for.
+LONG_CONTEXT_FILLER_SLACK = 64
 
 
-def long_context_filler(tokens):
-    """``tokens`` one-token words in a fixed pseudo-random order.
+def long_context_filler(chars):
+    """Up to ``chars`` characters of varied repository text, cut at a space.
 
-    A single repeated token is degenerate input: North-Mini-Code collapses to
-    an immediate end-of-turn on ~30K copies of ``data`` (GPU, 2026-09-18), which
-    says nothing about serving.  The order is a fixed LCG so every arm and every
-    repeat sees the same bytes and warm-prefix checks still hold.
+    Reasoning models do very poorly on repeated-string input, and a word
+    salad of a few dozen one-token words is repeated input too, so the
+    long-context probes read real text (README, docs and runtime sources:
+    ``realistic_haystack``).  The slice always starts at the corpus head, so
+    a shorter filler is a prefix of a longer one and every arm and repeat of
+    one size sees the same bytes (the warm-prefix checks depend on both).
     """
-    state, words = 20260918, []
-    for _ in range(int(tokens)):
-        state = (state * 1103515245 + 12345) % (1 << 31)
-        words.append(LONG_CONTEXT_WORDS[(state >> 8) % len(LONG_CONTEXT_WORDS)])
-    if words:
-        # The one word with no leading space; ``data`` is a single token bare.
-        words[0] = LONG_CONTEXT_WORDS[0]
-    return " ".join(words)
+    text = haystack(int(chars), exclude=LONG_CONTEXT_FILLER_EXCLUDE)
+    cut = max(text.rfind(" "), text.rfind("\n"))
+    return text[:cut] if cut > 0 else text
 
 
-def long_context_prompt(context_cap):
-    """Build the shared near-limit probe from one-token ASCII words."""
-    return long_context_filler(near_limit_prompt_floor(context_cap)) + LONG_CONTEXT_INSTRUCTION
+def fit_long_context_filler(count_tokens, low, high):
+    """The filler whose prompt the server counts at ``low..high`` tokens.
+
+    Real text is not one token per word, so the size comes from the served
+    tokenizer: ``count_tokens(filler)`` is the rendered prompt-token count of
+    the request that will carry ``filler`` (``POST /tokenize``, the same
+    adapter call admission uses).  The search interpolates on characters and
+    keeps a bracket, so it is deterministic for one tokenizer and size, and
+    it raises rather than return a prompt outside the window: an overflowing
+    near-limit probe would fail its check for the wrong reason, and a short
+    one would pass it without reaching the limit.
+    """
+    low, high = int(low), int(high)
+    if low > high:
+        raise ValueError(f"empty filler window {low}..{high}")
+    corpus = len(artifact_corpus(exclude=LONG_CONTEXT_FILLER_EXCLUDE))
+    base = count_tokens("")
+    if base > high:
+        raise ValueError(f"the prompt without filler is already {base} tokens (> {high})")
+    if base >= low:
+        return ""
+    target = (low + high) // 2
+    lo, lo_tokens, hi, hi_tokens = 0, base, None, None
+    chars, trace = min(corpus, 4 * (target - base)), []
+    for _ in range(LONG_CONTEXT_FIT_ATTEMPTS):
+        filler = long_context_filler(chars)
+        tokens = count_tokens(filler)
+        trace.append((chars, tokens))
+        if low <= tokens <= high:
+            return filler
+        if tokens < low:
+            lo, lo_tokens = chars, tokens
+        else:
+            hi, hi_tokens = chars, tokens
+        if hi is None:
+            if lo >= corpus:
+                raise ValueError(
+                    f"the filler corpus ({corpus} characters) renders only "
+                    f"{lo_tokens} tokens; {low} needed"
+                )
+            density = lo / max(1, lo_tokens - base)
+            chars = min(corpus, max(lo + 1, int(lo + (target - lo_tokens) * density) + 1))
+            continue
+        if hi - lo <= 1:
+            break
+        guess = lo + (target - lo_tokens) * (hi - lo) / max(1, hi_tokens - lo_tokens)
+        # Interpolate, but always shrink the bracket by a quarter or more.
+        margin = max(1, (hi - lo) // 4)
+        chars = int(min(max(guess, lo + margin), hi - margin))
+    raise ValueError(
+        f"no filler renders {low}..{high} prompt tokens (characters, tokens: {trace})"
+    )
+
+
+def long_context_prompt(context_cap, count_tokens):
+    """The shared near-limit probe: varied text, then the instruction.
+
+    ``count_tokens(text)`` is the server's prompt-token count for the probe
+    request carrying ``text``.  The rendered prompt lands above
+    ``near_limit_prompt_floor`` and leaves room for the full completion
+    budget, which is what ``near_limit_usage_passes`` requires.
+    """
+    floor = near_limit_prompt_floor(context_cap)
+    filler = fit_long_context_filler(
+        lambda filler: count_tokens(filler + LONG_CONTEXT_INSTRUCTION),
+        floor + 1,
+        int(context_cap) - LONG_CONTEXT_COMPLETION_TOKENS,
+    )
+    return filler + LONG_CONTEXT_INSTRUCTION
 
 
 def long_context_answer_passes(text):
@@ -1855,7 +1919,7 @@ def prefill_scheduling_reorders(before, after):
 
 
 def srpt_forcing_long_tokens(settings):
-    """Prompt words for the long request: one prefill slice plus a margin.
+    """Prompt tokens for the long request: one prefill slice plus a margin.
 
     ``_next_mtp`` applies SRPT only while a candidate still needs more than
     one slice (``prefill_step + 1`` residual tokens); a prompt that fits one
@@ -1941,6 +2005,16 @@ def run_prefill_scheduling_forcing(
     max_inflight = settings.get("max_inflight")
     if max_inflight is not None and int(max_inflight) < inflight:
         return fail(f"the forcing load needs --max-inflight >= {inflight}")
+    if long_text_for is None:
+        return fail("the forcing load needs a server-sized filler (long_text_for)")
+    long_words = srpt_forcing_long_tokens(settings)
+    evidence["long_prompt_words"] = long_words
+    # Sized before the hold starts: the filler search asks the server for
+    # token counts, and none of that belongs inside the staged queue.
+    try:
+        long_text = long_text_for(long_words)
+    except (OSError, ValueError) as error:
+        return fail(f"long prompt could not be sized: {type(error).__name__}: {error}")
 
     def wait_for(predicate, what):
         deadline = monotonic() + setup_seconds
@@ -2077,9 +2151,6 @@ def run_prefill_scheduling_forcing(
         if not cohort_held:
             return fail("the gating cohort was never published")
 
-        long_words = srpt_forcing_long_tokens(settings)
-        evidence["long_prompt_words"] = long_words
-        long_text = (long_text_for or long_context_filler)(long_words)
         # The nonce leads so no earlier prompt (the near-limit context check
         # uses the same filler) can serve the long prompt from APC.
         futures["long"] = pool.submit(call, no_thinking(
@@ -2184,7 +2255,7 @@ def rolling_checkpoint_counters(status):
 
 
 def rolling_probe_prompt_words(settings):
-    """Prompt words for the probe, or None when the context cannot hold it.
+    """Prompt tokens for the probe, or None when the context cannot hold it.
 
     The same reach rule decides whether the engine selects rolling
     checkpoints by default (``rolling_reuse_prompt_tokens``), so a default
@@ -2256,6 +2327,12 @@ def run_rolling_checkpoint_probe(
             "boundary with slices to spare"
         )
     evidence["prompt_words"] = words
+    if text_for is None:
+        return fail("the probe needs a server-sized filler (text_for)")
+    try:
+        filler = text_for(words)
+    except (OSError, ValueError) as error:
+        return fail(f"probe prompt could not be sized: {type(error).__name__}: {error}")
 
     def idle(what):
         deadline = monotonic() + setup_seconds
@@ -2272,7 +2349,7 @@ def run_rolling_checkpoint_probe(
 
     text = (
         f"Rolling probe {nonce}. "
-        + (text_for or long_context_filler)(words)
+        + filler
         + "\nReply OK."
     )
 
@@ -4441,11 +4518,39 @@ def main():
         # Keep the near-limit cohort alive long enough to join before decoding
         # finishes. A three-token sentinel can complete as B1 before its sibling
         # is prepared and therefore cannot qualify shared-prefix batching.
-        # Reserve enough room for the output budget and model-specific chat
-        # template overhead.  Muse's direct recipient suffix makes a fixed
-        # 128-token reserve too small even though every repeated ``data ``
-        # fragment is one token.
+        # The prompt is varied text sized by the server's own token count
+        # (/tokenize renders the probe request exactly as admission does), so
+        # chat-template overhead -- Muse's direct recipient suffix among it --
+        # is inside the count instead of guessed as a fixed reserve.
         n = near_limit_prompt_floor(initial["max_context"])
+        near_limit_texts = {}
+
+        def prompt_token_count(body):
+            return int(post_json("/tokenize", body)["count"])
+
+        def near_limit_text(context_cap):
+            # One search per cap; repeats must send identical bytes.
+            if context_cap not in near_limit_texts:
+                near_limit_texts[context_cap] = long_context_prompt(
+                    context_cap,
+                    lambda text: prompt_token_count(prompt(
+                        text, max_tokens=LONG_CONTEXT_COMPLETION_TOKENS,
+                        reasoning_effort="none", think=False,
+                    )),
+                )
+            return near_limit_texts[context_cap]
+
+        def sized_filler(tokens):
+            # Varied text whose bare prompt renders ``tokens`` tokens or a
+            # little more; the probes add their own nonce and instruction.
+            return fit_long_context_filler(
+                lambda text: prompt_token_count(prompt(
+                    text, reasoning_effort="none", think=False,
+                )),
+                tokens,
+                tokens + LONG_CONTEXT_FILLER_SLACK,
+            )
+
         def long_context_request(
             context_cap, completion_budget=LONG_CONTEXT_COMPLETION_TOKENS
         ):
@@ -4462,7 +4567,7 @@ def main():
             )
             return prompt(
                 source_near_case["prompt"] if source_near_case is not None
-                else long_context_prompt(context_cap),
+                else near_limit_text(context_cap),
                 max_tokens=completion_budget,
                 min_tokens=completion_budget,
                 **({"logprobs": True} if source_near_case is not None else {}),
@@ -4538,8 +4643,15 @@ def main():
                 and repeated["mlx2"]["cached_tokens"] > n - LONG_CONTEXT_CACHE_TOLERANCE,
                 {"cold": reply_evidence(long), "warm": reply_evidence(repeated)},
             )
+            # Past the cap by at most the near-limit headroom, by the server's
+            # own count, so the refusal is the context bound and nothing else.
+            over_limit = fit_long_context_filler(
+                lambda text: prompt_token_count(prompt(text, max_tokens=16)),
+                initial["max_context"] + 1,
+                initial["max_context"] + LONG_CONTEXT_HEADROOM,
+            )
             try:
-                post(prompt(long_context_filler(initial["max_context"]), max_tokens=16))
+                post(prompt(over_limit, max_tokens=16))
                 rejected = False
             except HTTPError as error:
                 rejected = error.code == 400
@@ -4590,7 +4702,7 @@ def main():
             # ever sees exact state, and repeated long prompts skip prefill.
             import uuid
 
-            filler = long_context_filler(int(spomin_policy["capacity_tokens"] * 0.8)) + " "
+            filler = sized_filler(int(spomin_policy["capacity_tokens"] * 0.8)) + "\n"
             spomin_request = prompt(
                 f"nonce {uuid.uuid4().hex} " + filler + "Reply with exactly SPOMIN_OK",
                 reasoning_effort="none", think=False, max_tokens=16,
@@ -4624,6 +4736,7 @@ def main():
                 post=post,
                 settings=initial["settings"],
                 nonce=uuid.uuid4().hex,
+                long_text_for=sized_filler,
             )
             report["prefill_scheduling_forcing"] = forcing_evidence
         rolling_probe = None
@@ -4640,6 +4753,7 @@ def main():
                 post=post,
                 settings=initial["settings"],
                 nonce=uuid.uuid4().hex,
+                text_for=sized_filler,
             )
             report["apc_rolling_checkpoint_probe"] = rolling_evidence
         final, quiescence = wait_for_quiescence(

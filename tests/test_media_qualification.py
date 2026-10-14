@@ -181,11 +181,11 @@ def _text_source(artifact="artifact-fingerprint", revision=REV):
             "min_tokens": count if count == 64 else 0,
         }
 
-    source = Path(__file__).resolve().parents[1] / "scripts/qualify_serving.py"
+    source = Path(__file__).resolve().parents[1] / "scripts/qualify_media_serving.py"
     spec = importlib.util.spec_from_file_location("media_test_prompts", source)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    filler = module.long_context_filler(module.near_limit_prompt_floor(4096))
+    filler = module.near_context_filler(4096 - 256)
     near_prompt = (
         filler + "\nQuestion: What topic should the answer discuss? "
         "Answer: compiler optimization. Start your answer with compiler."

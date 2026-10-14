@@ -289,7 +289,12 @@ APPROVED_QUALIFICATION_HARNESS = {
     # (08753e31..., also never released) on the integration branch.
     # The rolling short-context step-aside (rolling_reuse_prompt_tokens shared
     # with the probe) changed qualify_serving.py again; merged pin below.
-    "sha256": "c46b308cfcd97a84a4b3f2c3f18762917046ec93a654ee0693968678aae25667",
+    # Re-pinned 2026-10-14: the near-limit long-context probe uses realistic
+    # varied text instead of a one-token word salad (reasoning models fail on
+    # repeated input), sized by the server's /tokenize count; context_bound,
+    # SPOMIN, SRPT forcing and the rolling probe take the same sized filler.
+    # Receipts from c46b308c... must be regenerated.
+    "sha256": "338e1e1abcbba837308b78e606471a39cce2e69826266a989acf25a6c12a832a",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -311,9 +316,13 @@ APPROVED_ADAPTER_CHECKS = (
 # identity and refused every adapter.  Companion records from the previous
 # producers (2026-09-26/28) also carry the pre-contract ``settings.mlx_vlm``
 # and must be regenerated.
+# Re-pinned 2026-10-14: the SmolVLM2 producer carries its own frozen copy of
+# the pinned near-context word filler (NEAR_CONTEXT_PROMPT_SHA256 is
+# unchanged) because the generic qualifier's filler is now varied text.
+# Companions from 15f1bad9... must be regenerated.
 APPROVED_MEDIA_HARNESS = {
     "name": "scripts/qualify_media_serving.py",
-    "sha256": "15f1bad9a3fe8646c25cf0f0e18ef0c8c810c426f65790371192b5fd3fbfb067",
+    "sha256": "85da0e6e9994888c07621389dfeeaa17cac4f820ffb9724be66f80a0d8aca33e",
 }
 # Re-pinned 2026-10-12 after review of Gemma3n shared-KV/lane projection
 # and video batch-default repairs. Old companion identities remain historical;

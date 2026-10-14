@@ -26,26 +26,16 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.append(str(ROOT / "scripts"))
+# The serving qualifier's varied-text filler and its server-counted sizing:
+# reasoning models fail on repeated input, so no probe here repeats a string.
+from qualify_serving import fit_long_context_filler, long_context_filler
+
 LOCKS = (Path("/Users/Shared/mlxuag/gpu.lock"), Path("/tmp/gpu.lock"))
 SCHEMA = "mlx2.qsa-rollback-live-gate.v1"
-LONG_CONTEXT_WORDS = (
-    "data the system value table record signal network window object format "
-    "memory number simple paper river stone garden market winter summer letter "
-    "music color train bridge forest island doctor teacher kitchen engine planet "
-    "silver orange yellow mountain village morning evening history science future "
-    "picture water light house story world money power place point group"
-).split()
-
-
-def _long_context_filler(tokens: int) -> str:
-    """Deterministic one-token words shared with the serving qualifier."""
-    state, words = 20260918, []
-    for _ in range(tokens):
-        state = (state * 1103515245 + 12345) % (1 << 31)
-        words.append(LONG_CONTEXT_WORDS[(state >> 8) % len(LONG_CONTEXT_WORDS)])
-    if words:
-        words[0] = LONG_CONTEXT_WORDS[0]
-    return " ".join(words)
+# The no-prefix gate's context: about 100 tokens of varied text.
+CONTEXT_MARKER_CHARS = 400
 
 
 def _git(*args: str) -> str:
@@ -193,7 +183,10 @@ def run(argv: list[str] | None = None) -> int:
         "--shared-prefix-tokens",
         type=int,
         default=0,
-        help="Prime this many one-token words into APCv2 before the atomic B2 gate",
+        help=(
+            "Prime a prompt of about this many tokens of varied text (sized "
+            "by the server's /tokenize count) into APCv2 before the atomic B2 gate"
+        ),
     )
     parser.add_argument("--cpg-lease", required=True)
     parser.add_argument("--i-own-the-gpu", action="store_true")
@@ -281,14 +274,27 @@ def run(argv: list[str] | None = None) -> int:
             )
             _wait_ready(base, server, args.timeout_seconds)
             if args.shared_prefix_tokens:
+                instruction = "\nReturn READY eight times separated by single spaces."
+
+                def prompt_tokens(filler: str) -> int:
+                    body = {
+                        "messages": [{"role": "user", "content": filler + instruction}],
+                        "think": False,
+                    }
+                    return int(_request(base, "/tokenize", body)["count"])
+
                 content = (
-                    _long_context_filler(args.shared_prefix_tokens)
-                    + "\nReturn READY eight times separated by single spaces."
+                    fit_long_context_filler(
+                        prompt_tokens,
+                        args.shared_prefix_tokens,
+                        args.shared_prefix_tokens + 64,
+                    )
+                    + instruction
                 )
             else:
                 content = (
-                    "Return READY eight times separated by single spaces. Context marker "
-                    + ("alpha " * 96)
+                    "Return READY eight times separated by single spaces. Context marker:\n"
+                    + long_context_filler(CONTEXT_MARKER_CHARS)
                 )
             common = {
                 "messages": [{"role": "user", "content": content}],

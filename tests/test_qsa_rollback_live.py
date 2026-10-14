@@ -1,9 +1,25 @@
-from scripts.qualify_qsa_rollback_live import _long_context_filler, _validate
-from scripts.qualify_serving import long_context_filler
+from pathlib import Path
+
+import scripts.qualify_qsa_rollback_live as rollback
+import scripts.qualify_serving as qualify
+from scripts.qualify_qsa_rollback_live import _validate
 
 
-def test_long_context_filler_matches_serving_qualifier():
-    assert _long_context_filler(257) == long_context_filler(257)
+def test_long_context_filler_is_the_serving_qualifiers():
+    # Imported, not copied: one filler and one sizing search for both gates.
+    for name in ("long_context_filler", "fit_long_context_filler"):
+        assert (
+            getattr(rollback, name).__code__.co_filename
+            == getattr(qualify, name).__code__.co_filename
+        )
+    assert rollback.long_context_filler(2570) == qualify.long_context_filler(2570)
+
+
+def test_gate_prompts_are_varied_text_not_repetition():
+    source = Path(rollback.__file__).read_text()
+    assert '" * ' not in source and "LONG_CONTEXT_WORDS" not in source
+    words = rollback.long_context_filler(rollback.CONTEXT_MARKER_CHARS).split()
+    assert len(set(words)) > len(words) // 2
 
 
 def _response(*, width=2):

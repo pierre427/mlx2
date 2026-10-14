@@ -45,6 +45,32 @@ TEXT_PROMPTS = {
     "cold_text": "Reply with exactly MLX2_READY",
 }
 MAX_ABS_TOLERANCE = 1e-4
+# Frozen: the near-context prompts below are pinned byte for byte
+# (media_qualification.NEAR_CONTEXT_PROMPT_SHA256).  The generic qualifier
+# moved its own near-limit probe to varied text sized by the served tokenizer
+# (2026-10-14: reasoning models fail on repeated input); this word salad stays
+# only until the SmolVLM2 evidence contract stops pinning prompt bytes, which
+# a corpus that changes with the repository cannot satisfy.
+NEAR_CONTEXT_WORDS = (
+    "data", "the", "system", "value", "table", "record", "signal", "network", "window",
+    "object", "format", "memory", "number", "simple", "paper", "river", "stone",
+    "garden", "market", "winter", "summer", "letter", "music", "color", "train",
+    "bridge", "forest", "island", "doctor", "teacher", "kitchen", "engine", "planet",
+    "silver", "orange", "yellow", "mountain", "village", "morning", "evening",
+    "history", "science", "future", "picture", "water", "light", "house", "story",
+    "world", "money", "power", "place", "point", "group",
+)
+
+
+def near_context_filler(tokens: int) -> str:
+    """The pinned near-context filler: one-token words in a fixed LCG order."""
+    state, words = 20260918, []
+    for _ in range(int(tokens)):
+        state = (state * 1103515245 + 12345) % (1 << 31)
+        words.append(NEAR_CONTEXT_WORDS[(state >> 8) % len(NEAR_CONTEXT_WORDS)])
+    if words:
+        words[0] = NEAR_CONTEXT_WORDS[0]
+    return " ".join(words)
 
 
 def sha256(data: bytes) -> str:
@@ -291,7 +317,7 @@ def text_source_trace(model_path: str) -> dict:
         raise AssertionError("generic qualification prompt source is unavailable")
     harness = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(harness)
-    filler = harness.long_context_filler(harness.near_limit_prompt_floor(4096))
+    filler = near_context_filler(harness.near_limit_prompt_floor(4096))
     near_prompts = {
         "near_context": (filler + "\nQuestion: What topic should the answer discuss? "
                          "Answer: compiler optimization. Start your answer with compiler."),

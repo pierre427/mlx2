@@ -997,20 +997,56 @@ def test_stop_witness_response_normalizes_expected_and_observed_symmetrically():
     assert not qualify.stop_witness_response_matches(response, ["stop", "prefix"])
 
 
-def test_long_context_probe_uses_one_consistent_safe_headroom():
-    cap = 1024
-    text = qualify.long_context_prompt(cap)
+def _fake_server_count(chars_per_token, overhead=40):
+    calls = []
+
+    def count(text):
+        calls.append(len(text))
+        return len(text) // chars_per_token + overhead
+
+    return count, calls
+
+
+@pytest.mark.parametrize("chars_per_token", [2, 3, 7])
+def test_long_context_probe_is_varied_text_sized_by_the_server_count(chars_per_token):
+    cap = 8192
+    count, calls = _fake_server_count(chars_per_token)
+    text = qualify.long_context_prompt(cap, count)
     assert qualify.LONG_CONTEXT_HEADROOM == 256
     assert text.endswith(qualify.LONG_CONTEXT_INSTRUCTION)
-    filler = text[: -len(qualify.LONG_CONTEXT_INSTRUCTION)].split(" ")
-    assert len(filler) == cap - qualify.LONG_CONTEXT_HEADROOM
-    assert set(filler) <= set(qualify.LONG_CONTEXT_WORDS)
-    # Varied, not one repeated token; identical bytes on every call.
-    assert len(set(filler)) > 40
-    assert text == qualify.long_context_prompt(cap)
-    assert qualify.long_context_filler(2048).startswith(qualify.long_context_filler(512))
+    # Inside the near-limit window by the server's own count.
+    assert (
+        qualify.near_limit_prompt_floor(cap)
+        < count(text)
+        <= cap - qualify.LONG_CONTEXT_COMPLETION_TOKENS
+    )
+    assert len(calls) <= 10
+    filler = text[: -len(qualify.LONG_CONTEXT_INSTRUCTION)]
+    # Real, varied text: no word salad and no answer in the haystack.
+    words = filler.split()
+    assert len(set(words)) > len(words) // 4
+    for marker in qualify.LONG_CONTEXT_FILLER_EXCLUDE:
+        haystack = filler.lower() if marker.islower() else filler
+        assert marker not in haystack
+    # Identical bytes per cap; a smaller cap's filler is a prefix of a larger.
+    assert text == qualify.long_context_prompt(cap, count)
+    assert qualify.long_context_prompt(4 * cap, count).startswith(filler)
     with pytest.raises(ValueError, match="exceed near-limit headroom"):
-        qualify.long_context_prompt(qualify.LONG_CONTEXT_HEADROOM)
+        qualify.long_context_prompt(qualify.LONG_CONTEXT_HEADROOM, count)
+
+
+def test_long_context_filler_fails_loudly_instead_of_missing_the_window():
+    count, _ = _fake_server_count(3, overhead=600)
+    with pytest.raises(ValueError, match="without filler"):
+        qualify.long_context_prompt(512, count)
+    # A count that jumps over the window can never land in it.
+    with pytest.raises(ValueError, match="no filler renders"):
+        qualify.fit_long_context_filler(
+            lambda text: 0 if len(text) < 50_000 else 10**6, 1000, 1200
+        )
+    # More than the corpus holds: refused, never wrapped or repeated.
+    with pytest.raises(ValueError, match="filler corpus"):
+        qualify.fit_long_context_filler(lambda text: len(text) // 1000, 10**6, 10**6 + 64)
 
 
 def test_cancellation_probe_budget_is_long_but_context_bounded():
@@ -1362,7 +1398,7 @@ def test_long_context_answer_accepts_marker_or_topic_only():
     "Muse-Glimmer-30B-mlx-4bit", "North-Mini-Code-1.0-mlx-4bit",
     "Xing4.0-29B-A4B-mlx-6bit",
 ])
-def test_long_context_words_are_one_token_in_supported_tokenizers(artifact, monkeypatch):
+def test_long_context_prompt_sizes_with_supported_tokenizers(artifact, monkeypatch):
     import os
 
     path = os.path.expanduser("~/mlx-models/" + artifact)
@@ -1379,7 +1415,17 @@ def test_long_context_words_are_one_token_in_supported_tokenizers(artifact, monk
         tokenizer, _ = load_tokenizer(path)
     else:
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True)
-    assert len(tokenizer.encode(qualify.long_context_filler(4000), add_special_tokens=False)) == 4000
+    cap = 8192
+
+    def count(text):
+        return len(tokenizer.encode(text, add_special_tokens=False))
+
+    text = qualify.long_context_prompt(cap, count)
+    assert (
+        qualify.near_limit_prompt_floor(cap)
+        < count(text)
+        <= cap - qualify.LONG_CONTEXT_COMPLETION_TOKENS
+    )
 
 
 def test_thinking_default_servers_get_a_reasoning_allowance():
