@@ -1082,6 +1082,16 @@ class COWCacheOwner:
                 self.plane_manifest.invalidate(key.kind, reason)
             return changed
 
+    def branchable(self, *, expected_generation: int) -> bool:
+        """Whether ``branch`` at this generation would succeed right now."""
+        with self._lock:
+            return (
+                self._valid
+                and expected_generation == self._generation
+                and self._source_cache is not None
+                and not self._target_blocked_locked()
+            )
+
     def _target_blocked_locked(self) -> bool:
         return self.segment_manifest.invalid_required(include_mtp=False) or any(
             (kind in self._TARGET_BLOCKING_PLANES for kind in self._invalid_planes)

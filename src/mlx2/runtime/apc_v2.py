@@ -145,6 +145,12 @@ class APCLookup:
     branch_tokens: int = 0
     target_only_plain_fallback: bool = False
     codec_restored_leaves: int = 0
+    # A lookup without disk restore (admission) that still hit a resident
+    # prefix reports the depth a disk-only entry it had to defer would serve,
+    # when that is deeper than ``cached_tokens`` (0 otherwise).  Admission
+    # repeats the lookup with disk restore behind the cold allocation gate
+    # instead of keeping the shallower resident hit (gufo #436 shape).
+    deeper_disk_tokens: int = 0
     # What this lookup added to APCv2's request counters and entry hit
     # counts, so a caller that does not consume it can withdraw it
     # (``APCv2.discard_lookup_credit``).  None once withdrawn.
@@ -181,6 +187,11 @@ class MTPAPCSidecar:
 
 class _RestoreBudgetUnavailable(Exception):
     """The resident byte cap could not make room for a healthy disk snapshot."""
+
+
+class _StaleEntryDropped(Exception):
+    """A lookup met an entry whose frozen state can no longer branch; it was
+    dropped and the lookup runs again without it."""
 
 
 class _RestoreDigestFailure(Exception):
@@ -773,6 +784,8 @@ class APCv2(PrefixIndex):
     # Transient restore errors keep the snapshot for a retry this many times
     # before the entry is dropped as unusable.
     _RESTORE_TRANSIENT_STRIKES = 3
+    # Stale entries one lookup drops before it reports a stale miss instead.
+    _STALE_LOOKUP_RETRIES = 8
     # Background-spill defaults for instances built without __init__ (tests
     # use object.__new__); __init__ replaces the tuple with a list.
     _wall_time = staticmethod(time.time)
@@ -1273,6 +1286,9 @@ class APCv2(PrefixIndex):
             "retention_role": getattr(
                 entry, "_apc_retention_role", self._RETENTION_DEFAULT
             ),
+            "next_turn_boundary": bool(
+                getattr(entry, "_apc_next_turn_boundary", False)
+            ),
             "session_tags": [[tag[0], tag[1]] for tag in tags],
             "disk_pins": [
                 {"tenant": tag[0], "session_id": tag[1], "expires_at": expiry}
@@ -1488,6 +1504,9 @@ class APCv2(PrefixIndex):
                 entry = PrefixIndex.CacheEntry([], 0, cache_type, None)
                 entry._apc_disk = disk
                 entry._apc_retention_role = role
+                entry._apc_next_turn_boundary = (
+                    value.get("next_turn_boundary") is True
+                )
                 entry._apc_inserted_at = self._now()
                 entry._apc_last_access_at = self._now()
                 entry._apc_created_wall = float(value.get("created_at", now))
@@ -1724,13 +1743,20 @@ class APCv2(PrefixIndex):
     @classmethod
     def _entry_retention_rank(cls, entry) -> int:
         role = getattr(entry, "_apc_retention_role", cls._RETENTION_DEFAULT)
-        if role == cls._RETENTION_INTERIOR and int(
-            getattr(entry, "_apc_hit_count", 0)
-        ) > 0:
+        if role == cls._RETENTION_INTERIOR and (
+            int(getattr(entry, "_apc_hit_count", 0)) > 0
+            or getattr(entry, "_apc_next_turn_boundary", False)
+        ):
             # A reused interior checkpoint (typically a preamble shared across
             # sessions) has proven its value; evict it like ordinary entries
-            # instead of first.
-            return 1
+            # instead of first.  Ordinary entries rank 2 since finished turns
+            # joined prompt boundaries there; a reused preamble left at 1 was
+            # evicted before every turn, however stale (gufo #553, Strata
+            # #2325).  A next-turn boundary (the state before a generation
+            # prompt the template drops from history) is the next turn's only
+            # exact reuse point, so it ranks like a prompt boundary before its
+            # first hit too (vllm #61282).
+            return 2
         # A finished turn (default role) shares the prompt boundary's rank so
         # that recency decides between them.  Ranking it below every
         # boundary meant that once ``max_size`` boundaries from unrelated
@@ -1884,6 +1910,8 @@ class APCv2(PrefixIndex):
             # The prior decays from publication like a hit would, so an entry
             # nobody reuses loses its claim instead of keeping it forever.
             role = getattr(entry, "_apc_retention_role", self._RETENTION_DEFAULT)
+            if getattr(entry, "_apc_next_turn_boundary", False):
+                role = self._RETENTION_PROMPT_BOUNDARY
             prior = (
                 self._RETENTION_SUPERSEDED_BOUNDARY_PRIOR
                 if role == self._RETENTION_PROMPT_BOUNDARY
@@ -3948,15 +3976,25 @@ class APCv2(PrefixIndex):
             self._sweep_retirements_locked()
             before = dict(self._apc_stats)
             self._credited_entries = []
+            tokens = list(tokens)
             try:
-                result = self._lookup_locked(
-                    key,
-                    tokens,
-                    allow_disk_restore=allow_disk_restore,
-                    session_tag=session_tag,
-                    require_sidecar=require_sidecar,
-                    allow_target_only_plain=allow_target_only_plain,
-                )
+                for attempt in range(self._STALE_LOOKUP_RETRIES + 1):
+                    attempt_stats = dict(self._apc_stats)
+                    try:
+                        result = self._lookup_locked(
+                            key,
+                            tokens,
+                            allow_disk_restore=allow_disk_restore,
+                            session_tag=session_tag,
+                            require_sidecar=require_sidecar,
+                            allow_target_only_plain=allow_target_only_plain,
+                            drop_stale=attempt < self._STALE_LOOKUP_RETRIES,
+                        )
+                        break
+                    except _StaleEntryDropped:
+                        # The dropped entry was never served: this request's
+                        # lookup is the retry, counted once.
+                        self._apc_stats.update(attempt_stats)
                 credited = tuple(self._credited_entries)
             finally:
                 self._credited_entries = None
@@ -4127,6 +4165,7 @@ class APCv2(PrefixIndex):
         session_tag: Optional[tuple] = None,
         require_sidecar: bool = False,
         allow_target_only_plain: bool = True,
+        drop_stale: bool = False,
     ) -> APCLookup:
         if self._closed:
             raise RuntimeError("APCv2 is closed")
@@ -4167,6 +4206,10 @@ class APCv2(PrefixIndex):
         restore_deferred = False
         restore_requires_admission = False
         deferred_entries = []
+        # Disk-only paths this lookup may not restore (``allow_disk_restore``
+        # is False): one deeper than the resident hit makes admission repeat
+        # the lookup behind the cold gate (``deeper_disk_tokens``).
+        admission_deferred = []
 
         def restore_candidates(trie_result):
             yield from (trie_result.exact, trie_result.longer, trie_result.shorter)
@@ -4204,6 +4247,7 @@ class APCv2(PrefixIndex):
                         deferred_entries.append(
                             (trie_result.model, list(path), entry)
                         )
+                        admission_deferred.append(list(path))
                         continue
                     restored = self._restore_entry_locked(trie_result.model, path, entry)
                     if restored is None:
@@ -4295,6 +4339,21 @@ class APCv2(PrefixIndex):
                     else self._trie.search(key, tokens)
                 )
 
+        def deeper_than(cached):
+            """Depth a deferred disk entry would serve beyond ``cached``."""
+            if not cached or not (
+                admission_deferred or ancestor_deferred == "admission"
+            ):
+                return 0
+            depth = self._deferred_disk_depth_locked(
+                key,
+                tokens,
+                admission_deferred,
+                require_sidecar=require_sidecar,
+                allow_target_only_plain=allow_target_only_plain,
+            )
+            return depth if depth > int(cached) else 0
+
         def serve_sidecar(candidate):
             """Serve one sidecar checkpoint, or None to fall back to fetch."""
             nonlocal prefetch_expected
@@ -4302,6 +4361,10 @@ class APCv2(PrefixIndex):
             try:
                 restored_cache = _copy_prompt_cache_for_restore(entry.prompt_cache)
             except COWCacheStale:
+                if drop_stale and self._drop_stale_entries_locked(
+                    key, [selected_tokens]
+                ):
+                    raise _StaleEntryDropped()
                 self._apc_stats["lookups"] += 1
                 self._apc_stats["misses"] += 1
                 self._resolve_prefetch_locked(
@@ -4370,6 +4433,7 @@ class APCv2(PrefixIndex):
                     ),
                     branch_tokens=branch_beyond(covered),
                     codec_restored_leaves=restored_leaf_count(restored_cache),
+                    deeper_disk_tokens=deeper_than(covered),
                 )
         if sidecar_candidates:
             served = serve_sidecar(max(sidecar_candidates, key=lambda item: item[0]))
@@ -4415,6 +4479,20 @@ class APCv2(PrefixIndex):
         finally:
             for deferred_key, path, entry in hidden:
                 self._trie.add(deferred_key, path, entry)
+        if stale_generation and drop_stale:
+            view = self._fetch_view_locked(key, tokens)
+            if self._drop_stale_entries_locked(
+                key,
+                [
+                    path
+                    for path in (
+                        view.exact, view.longer, view.shorter,
+                        trie_result.exact, trie_result.longer, trie_result.shorter,
+                    )
+                    if path is not None
+                ],
+            ):
+                raise _StaleEntryDropped()
         malformed_topology = False
         if cache is not None:
             prep_telemetry = getattr(cache, "cow_prep_telemetry", None)
@@ -4551,7 +4629,84 @@ class APCv2(PrefixIndex):
             ),
             branch_tokens=branch_beyond(cached_tokens),
             codec_restored_leaves=restored_leaf_count(cache) if hit else 0,
+            deeper_disk_tokens=deeper_than(cached_tokens) if hit else 0,
         )
+
+    def _drop_stale_entries_locked(self, key, paths) -> bool:
+        """Drop the entries at ``paths`` whose frozen state cannot branch.
+
+        Such an entry fails every lookup that selects it and hides the
+        shallower prefixes behind it, so it leaves the index as soon as one
+        lookup finds it (TensorFold #835 shape).  A lease that still holds
+        its live branch keeps that branch: dropping the entry only releases
+        the index's reference.
+        """
+        dropped = False
+        for path in paths:
+            try:
+                entry = self._trie.get(key, list(path))
+            except KeyError:
+                continue
+            cache = getattr(entry, "prompt_cache", None)
+            if not isinstance(cache, COWFrozenPromptCache):
+                continue
+            if cache.cow_owner.branchable(expected_generation=cache.cow_generation):
+                continue
+            if getattr(entry, "_apc_disk", None) and self._spill_job_of(entry) is None:
+                # The disk copy was written from the state before it went
+                # stale and is verified on restore: keep it, drop the rest.
+                self._finish_spill_locked(
+                    key, list(path), entry, reason="stale", keep_resident=False
+                )
+            else:
+                self._drop_entry_locked(
+                    key, list(path), entry, reason="stale state"
+                )
+            self._apc_stale_drops = getattr(self, "_apc_stale_drops", 0) + 1
+            dropped = True
+        return dropped
+
+    def _deferred_disk_depth_locked(
+        self, key, tokens, deferred_paths, *, require_sidecar,
+        allow_target_only_plain,
+    ) -> int:
+        """Deepest prefix of ``tokens`` a disk-only entry would serve.
+
+        Without a sidecar requirement only the trie candidates the lookup
+        deferred matter: the deepest stored prefix is always one of them.  A
+        draft route resumes only from an entry whose recorded sidecar covers
+        its depth, which may sit anywhere on the path, so every disk-only
+        entry of ``key`` is checked (as ``_sidecar_ancestor_locked`` does).
+        """
+        best = 0
+        if require_sidecar:
+            for candidate_key, path, entry in self._entry_records_locked():
+                if (
+                    candidate_key != key
+                    or entry.prompt_cache
+                    or not getattr(entry, "_apc_disk", None)
+                ):
+                    continue
+                recorded = entry._apc_disk.get("sidecar") or {}
+                covered = int(recorded.get("covered_tokens", 0) or 0)
+                if (
+                    0 < covered < len(tokens)
+                    and len(path) >= covered
+                    and list(path[:covered]) == tokens[:covered]
+                ):
+                    best = max(best, covered)
+                elif (
+                    allow_target_only_plain
+                    and len(path) == len(tokens) - 1
+                    and list(path) == tokens[:-1]
+                ):
+                    best = max(best, len(path))
+            return best
+        for path in deferred_paths:
+            depth = len(path)
+            if 0 < depth <= len(tokens) and list(path) == tokens[:depth]:
+                best = max(best, depth if depth < len(tokens) else depth - 1)
+        return best
 
     def _sidecar_ancestor_locked(self, key, tokens, *, allow_disk_restore=True):
         """Deepest entry whose draft sidecar resumes ``tokens``.
@@ -4660,6 +4815,7 @@ class APCv2(PrefixIndex):
         compiled_schedule: Optional[CompiledScheduleMetadata] = None,
         retention_role: str = _RETENTION_DEFAULT,
         session_tag: Optional[tuple] = None,
+        next_turn_boundary: bool = False,
     ) -> APCCapabilities:
         if retention_role not in self._RETENTION_ROLES:
             raise ValueError(f"unknown APCv2 retention role: {retention_role!r}")
@@ -4677,6 +4833,7 @@ class APCv2(PrefixIndex):
                 compiled_schedule=compiled_schedule,
                 retention_role=retention_role,
                 session_tag=session_tag,
+                next_turn_boundary=next_turn_boundary,
             )
 
     def _store_locked(
@@ -4693,6 +4850,7 @@ class APCv2(PrefixIndex):
         compiled_schedule: Optional[CompiledScheduleMetadata] = None,
         retention_role: str = _RETENTION_DEFAULT,
         session_tag: Optional[tuple] = None,
+        next_turn_boundary: bool = False,
     ) -> APCCapabilities:
         if self._closed:
             raise RuntimeError("APCv2 is closed")
@@ -4899,6 +5057,12 @@ class APCv2(PrefixIndex):
                 (key, tuple(survivor.exact)), None
             )
             stored_entry._apc_retention_role = retention_role
+            # Sticky across republishes of the same tokens: a later plain
+            # interior capture at this position is still the next turn's point.
+            stored_entry._apc_next_turn_boundary = bool(
+                next_turn_boundary
+                or getattr(replaced_entry, "_apc_next_turn_boundary", False)
+            )
             stored_entry._apc_inserted_at = getattr(
                 replaced_entry, "_apc_inserted_at", now
             )
@@ -5233,6 +5397,8 @@ class APCv2(PrefixIndex):
             stats["overlength_rejections"] = self.overlength_rejections
             stats["boundary_rejections"] = self.boundary_rejections
             stats["nonfinite_state_rejections"] = self.nonfinite_state_rejections
+            # Entries a lookup found unable to branch and removed at once.
+            stats["stale_entry_drops"] = int(getattr(self, "_apc_stale_drops", 0))
             stats["idle_disk"] = {
                 "enabled": self._idle_disk_dir is not None,
                 "persistent": self._persist_dir is not None,

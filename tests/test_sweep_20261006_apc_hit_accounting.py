@@ -79,7 +79,8 @@ def test_refused_hit_credits_nothing_and_does_not_promote_retention():
     assert apc._entry_retention_rank(entry) == 0
     base = apc.lifetime_stats()
     hit = apc.lookup(key, prompt)
-    assert hit.cached_tokens == 300 and apc._entry_retention_rank(entry) == 1
+    # A reused interior ranks with ordinary entries (2).
+    assert hit.cached_tokens == 300 and apc._entry_retention_rank(entry) == 2
     hit.cache.close()
     apc.discard_lookup_credit(hit, "mtp_sidecar_missing")
     assert _delta(apc, base) == dict.fromkeys(STATS, 0)

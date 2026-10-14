@@ -1053,7 +1053,11 @@ def test_apcv2_target_segment_invalidation_rejects_atomic_restore():
     assert owner.invalidate_segment(target_segment.key, "test-stale")
     miss = apc.lookup(key, list(range(301)))
     assert not miss.hit
-    assert miss.miss_reason == "stale_cow_generation"
+    # The stale entry leaves the index on first contact (TensorFold #835
+    # shape) instead of failing every later lookup the same way.
+    assert miss.miss_reason == "no_compatible_prefix"
+    assert len(apc) == 0
+    assert apc.apc_stats["stale_entry_drops"] == 1
 
 
 def test_apcv2_transcript_segments_are_optional_and_independently_invalidatable():

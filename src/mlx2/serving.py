@@ -3269,6 +3269,9 @@ class Job:
     state_boundaries: tuple = ()
     state_boundary_planned_bytes: int = 0
     rolling_checkpoint: tuple | None = None
+    # Planned state just before a generation prompt the chat template drops
+    # from history: the next turn's only exact reuse point on a hybrid cache.
+    apc_turn_end_boundary: int | None = None
     state_boundaries_published: dict = field(default_factory=dict)
     effective_sampling: dict | None = None
     sampling_defaults: dict | None = None
@@ -9004,6 +9007,9 @@ class ServingEngine:
                             int(hit.cached_tokens),
                             int(getattr(hit, "branch_tokens", 0) or 0),
                         ),
+                        deeper_disk_tokens=int(
+                            getattr(hit, "deeper_disk_tokens", 0) or 0
+                        ),
                     )
                 if (
                     external_draft
@@ -9025,6 +9031,9 @@ class ServingEngine:
                         branch_tokens=max(
                             int(hit.cached_tokens),
                             int(getattr(hit, "branch_tokens", 0) or 0),
+                        ),
+                        deeper_disk_tokens=int(
+                            getattr(hit, "deeper_disk_tokens", 0) or 0
                         ),
                     )
                 return hit
@@ -9378,6 +9387,14 @@ class ServingEngine:
                         else None
                     ),
                 )
+                # The turn-end boundary is captured as an interior snapshot
+                # but serves the next turn, so APCv2 retains it like a prompt
+                # boundary rather than as a speculative lattice point.
+                next_turn = bool(
+                    owner is not None
+                    and owner.apc_turn_end_boundary is not None
+                    and len(checkpoint["tokens"]) == owner.apc_turn_end_boundary
+                )
                 if self._publish_checkpoint(
                     apc,
                     checkpoint_key,
@@ -9386,8 +9403,11 @@ class ServingEngine:
                     sidecar=checkpoint_sidecar,
                     retention_role=RETENTION_ROLE[purpose],
                     session_tag=session_tag_for(owner),
+                    **({"next_turn_boundary": True} if next_turn else {}),
                 ):
                     self.counts[counter + "_published"] += 1
+                    if next_turn:
+                        self.counts["apc_next_turn_boundaries_published"] += 1
                 else:
                     self.counts[
                         counter + "_skipped_publish_failed"
@@ -10213,6 +10233,9 @@ class ServingEngine:
                                     None,
                                     "media_boundary_not_cached",
                                     branch_tokens=getattr(hit, "branch_tokens", 0),
+                                    deeper_disk_tokens=int(
+                                        getattr(hit, "deeper_disk_tokens", 0) or 0
+                                    ),
                                 )
                                 self.counts["multimodal_apcv2_boundary_misses"] += 1
                             job.admission_hit = hit
@@ -10436,6 +10459,7 @@ class ServingEngine:
                             int(job.request.get("_mlx2_media_token_end", 0) or 0),
                         ):
                             turn_end_boundary = None
+                        job.apc_turn_end_boundary = turn_end_boundary
                         media_checkpoint_position = adapter_media_checkpoint_position(
                             adapter, job.request, tokens,
                             cached_tokens=int(hit.cached_tokens),
@@ -10712,7 +10736,21 @@ class ServingEngine:
                             for position in checkpoint_candidates
                             if position not in planned_positions
                         )
-                        if hit.miss_reason == "disk_restore_requires_admission":
+                        deeper_on_disk = int(
+                            getattr(hit, "deeper_disk_tokens", 0) or 0
+                        ) > int(hit.cached_tokens or 0)
+                        if (
+                            hit.miss_reason == "disk_restore_requires_admission"
+                            or deeper_on_disk
+                        ):
+                            # A miss, or a resident hit shallower than a
+                            # disk-only checkpoint (gufo #436 shape): restore
+                            # behind the cold gate.  The shallow lease is held
+                            # until the new lookup returns, so a restore that
+                            # cannot fit still finds the resident prefix.
+                            if deeper_on_disk:
+                                self.counts["apc_deeper_disk_restore_retries"] += 1
+                            shallow = hit
                             discard_lookup(hit, "disk_restore_admission")
                             hit = route_usable_hit(
                                 lookup_apc(
@@ -10726,7 +10764,15 @@ class ServingEngine:
                             )
                             if job.preempted:
                                 discard_lookup(hit, "preemption_replay")
+                            if (
+                                shallow.cache is not None
+                                and shallow.cache is not hit.cache
+                                and hasattr(shallow.cache, "close")
+                            ):
+                                shallow.cache.close()
+                            shallow = None
                             job.cache_branch = hit.cache
+                            job.admission_hit = hit
                         decoded_leaves = int(getattr(hit, "codec_restored_leaves", 0))
                         job.recurrent_codec_restored_leaves += decoded_leaves
                         if decoded_leaves:
