@@ -38,9 +38,9 @@ The convention is therefore decided per group, not per checkpoint:
      every shifted one is >= 0.23, so ``m <= UNPAIRED_RAW_MAX`` is raw and
      ``m >= UNPAIRED_SHIFTED_MIN`` is shifted.
 
-  In raw HF layout the layout is itself evidence that the head is raw; the
-  statistics are then only a contradiction check. In converted layout the
-  statistics must be decisive. Anything between the thresholds raises
+  In raw HF layout a head tensor must be known raw or statistically raw;
+  shifted evidence and ambiguity both refuse. In converted layout the
+  statistics must likewise be decisive. Anything between the thresholds raises
   :class:`NormConventionError` naming the tensors: the Qwen3.6-35B
   ``post_attention_layernorm`` (raw, yet gap +0.44) is exactly such a case and
   is resolved only because its raw hash is known.
@@ -340,18 +340,16 @@ def decide_norm_convention(
     shifted: Iterable[UnshiftedNorm] = KNOWN_SHIFTED_NORMS,
     trunk_means: Mapping[str, float] | None = None,
     check_trunk: bool = True,
-    on_ambiguous: str = "raise",
     hint: str = "",
 ) -> NormConventionReport:
     """Decide, per group and per head tensor, which stored norms are raw.
 
     Reads ``weights`` only. ``trunk_means`` (family -> runtime mean) replaces
     the trunk statistics for a head loaded without its trunk.
-    ``on_ambiguous="follow_trunk"`` keeps the legacy one-decision-per-checkpoint
-    behaviour for undecidable head tensors instead of raising.
+
+    An undecidable head tensor always raises: the whole load is refused, with
+    no follow-the-trunk or MTP-off fallback (Pierre, 2026-10-14).
     """
-    if on_ambiguous not in ("raise", "follow_trunk"):
-        raise ValueError(f"on_ambiguous must be 'raise' or 'follow_trunk', got {on_ambiguous!r}")
     suffixes = tuple(fold_suffixes)
     known: dict[tuple[str, str], tuple[bool, str]] = {}
     for entry in shifted:
@@ -402,6 +400,12 @@ def decide_norm_convention(
             # ``trunk_means``): a head family cannot be told from an unpaired
             # one, so nothing but a hash is decisive.
             verdict, evidence = None, f"mean {mean:.3f}, no trunk statistics to compare against"
+        # Ambiguity refuses under either trunk layout: a raw trunk is not
+        # evidence for a head gain whose own statistics are undecided (an
+        # already-shifted head on a raw trunk would get a second +1).
+        if verdict is None:
+            problems.append(f"{key}: {evidence}")
+            continue
         if trunk_raw:
             if verdict is False:
                 problems.append(
@@ -411,14 +415,6 @@ def decide_norm_convention(
             report.decisions.append(
                 NormDecision(key, "head", True, f"trunk decided raw; {evidence}", mean)
             )
-            continue
-        if verdict is None:
-            if on_ambiguous == "follow_trunk":
-                report.decisions.append(
-                    NormDecision(key, "head", False, f"ambiguous, followed trunk; {evidence}", mean)
-                )
-                continue
-            problems.append(f"{key}: {evidence}")
             continue
         report.decisions.append(NormDecision(key, "head", verdict, evidence, mean))
     if problems:

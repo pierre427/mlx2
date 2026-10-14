@@ -12741,8 +12741,20 @@ class ServingEngine:
                     if _loop_trace.enabled():
                         trace_iteration["snapshot1"] = _loop_trace.now()
         except BaseException as exc:
-            log.exception("generation worker failed")
-            self.error = f"{type(exc).__name__}: {exc}"
+            if self.adapter is None and not self.ready.is_set():
+                # The model never loaded (a refused checkpoint, e.g. an
+                # undecidable MTP-head norm convention).  Name the artifact
+                # and keep the whole refusal in the record itself, at
+                # CRITICAL: the process must not serve, and the reason must
+                # not hide in a traceback.
+                self.error = (
+                    f"model load refused for {self.model_path}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                log.critical("%s", self.error, exc_info=exc)
+            else:
+                log.exception("generation worker failed")
+                self.error = f"{type(exc).__name__}: {exc}"
         finally:
             with self.lock:
                 # Published under the same lock: a submission that registers

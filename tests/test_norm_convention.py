@@ -195,6 +195,22 @@ def test_raw_layout_with_an_already_shifted_head_raises():
         _qwen38_sanitize(weights)
 
 
+@pytest.mark.parametrize(
+    "name, stored",
+    [
+        ("layers.0.self_attn.q_norm", 1.06),  # gap +0.40 to the 1.46 trunk family
+        ("pre_fc_norm_hidden", 0.10),  # between the unpaired thresholds
+    ],
+)
+def test_raw_layout_with_an_ambiguous_head_tensor_raises(name, stored):
+    """A raw trunk is not evidence enough for an ambiguous head gain: an
+    already-shifted head grafted onto a raw trunk would get a second +1."""
+    weights = _checkpoint(mx.bfloat16, raw_layout=True)
+    weights[f"language_model.mtp.{name}.weight"] = _vec(stored, mx.bfloat16)
+    with pytest.raises(NormConventionError, match=f"mtp.{name}.weight"):
+        _qwen38_sanitize(weights)
+
+
 def test_trunk_decision_is_verified():
     # Converted layout but an unshifted trunk: the pooled trunk check refuses.
     weights = _checkpoint(mx.bfloat16, raw_head=())
@@ -297,12 +313,14 @@ def test_qwen4_all_shifted_unchanged_and_ambiguous_raises(monkeypatch):
     weights["mtp.layers.0.self_attn.q_norm.weight"] = _vec(1.05, mx.bfloat16)
     with pytest.raises(NormConventionError, match="q_norm"):
         _qwen4_sanitize(weights)
-    # The documented escape hatch keeps the legacy follow-the-trunk behaviour.
+    # No escape hatch reaches an undecidable head gain (Pierre, 2026-10-14:
+    # refuse the whole load, no follow-the-trunk fallback). The unchecked
+    # switch skips only the pooled trunk check.
     monkeypatch.setenv("MLX_QWEN4_NORM_CONVENTION_UNCHECKED", "1")
     weights = _qwen4_checkpoint(mx.bfloat16, raw_head=())
     weights["mtp.layers.0.self_attn.q_norm.weight"] = _vec(1.05, mx.bfloat16)
-    _, report = _qwen4_sanitize(weights)
-    assert report.applied == []
+    with pytest.raises(NormConventionError, match="q_norm"):
+        _qwen4_sanitize(weights)
 
 
 def test_qwen4_raw_trunk_without_fold_is_refused(monkeypatch):
@@ -348,3 +366,105 @@ def qwen4_exp_suffixes():
         "pre_fc_norm_embedding.weight",
         "pre_fc_norm_hidden.weight",
     )
+
+
+# --- TensorFold#626: a converted trunk with a fully zero-centered MTP head ---
+#
+# mlx-serve's Qwen3.8-27B conversions bake the +1 into every trunk norm but
+# ship every MTP-head norm zero-centered; a loader that assumes one convention
+# per checkpoint drafts nothing.  The stored head means below are the raw
+# (zero-centered) head of ~/mlx-models/ThinkingCap-Qwen3.8-27B and the trunk
+# family means are the runtime ones of Qwen3.8-27B-oQ4e-mtp (both measured on
+# CPU 2026-10-14).
+
+MLX_SERVE_TRUNK = {
+    "input_layernorm": 1.061,
+    "post_attention_layernorm": 1.021,
+    "self_attn.q_norm": 1.495,
+    "self_attn.k_norm": 1.486,
+}
+MLX_SERVE_FINAL_NORM = 1.944
+MLX_SERVE_RAW_HEAD = {
+    "layers.0.input_layernorm": 0.036,
+    "layers.0.post_attention_layernorm": 0.206,
+    "layers.0.self_attn.q_norm": 0.791,
+    "layers.0.self_attn.k_norm": 0.780,
+    "norm": 1.252,
+    "pre_fc_norm_embedding": -0.461,
+    "pre_fc_norm_hidden": -0.157,
+}
+
+
+def _mlx_serve_checkpoint(dtype, *, head_baked):
+    w = {}
+    for i in range(16):
+        p = f"language_model.model.layers.{i}."
+        w[p + "input_layernorm.weight"] = _vec(MLX_SERVE_TRUNK["input_layernorm"], dtype, seed=i)
+        w[p + "post_attention_layernorm.weight"] = _vec(
+            MLX_SERVE_TRUNK["post_attention_layernorm"], dtype, seed=i + 40
+        )
+        if i % 4 == 3:
+            w[p + "self_attn.q_norm.weight"] = _vec(MLX_SERVE_TRUNK["self_attn.q_norm"], dtype, seed=i)
+            w[p + "self_attn.k_norm.weight"] = _vec(MLX_SERVE_TRUNK["self_attn.k_norm"], dtype, seed=i + 1)
+        else:
+            w[p + "linear_attn.conv1d.weight"] = mx.zeros((8, 3, 1), dtype=dtype)
+    w["language_model.model.norm.weight"] = _vec(MLX_SERVE_FINAL_NORM, dtype, seed=77)
+    for name, stored in MLX_SERVE_RAW_HEAD.items():
+        w[f"language_model.mtp.{name}.weight"] = _vec(
+            stored + (1.0 if head_baked else 0.0), dtype, seed=len(name) + 3
+        )
+    return w
+
+
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16], ids=str)
+def test_zero_centered_head_under_a_baked_trunk_is_unshifted(dtype):
+    out, report = _qwen38_sanitize(_mlx_serve_checkpoint(dtype, head_baked=False))
+    assert not report.trunk_raw
+    assert sorted(report.repaired_head_keys) == sorted(
+        f"language_model.mtp.{name}.weight" for name in MLX_SERVE_RAW_HEAD
+    )
+    for name, stored in MLX_SERVE_RAW_HEAD.items():
+        assert _mean(out[f"language_model.mtp.{name}.weight"]) == pytest.approx(
+            stored + 1.0, abs=0.02
+        ), name
+    # The trunk is already baked and stays untouched.
+    assert _mean(out["language_model.model.norm.weight"]) == pytest.approx(
+        MLX_SERVE_FINAL_NORM, abs=0.02
+    )
+    _, again = _qwen38_sanitize(dict(out))
+    assert again.applied == []
+
+
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16], ids=str)
+def test_baked_head_under_a_baked_trunk_is_kept(dtype):
+    weights = _mlx_serve_checkpoint(dtype, head_baked=True)
+    before = dict(weights)
+    out, report = _qwen38_sanitize(weights)
+    assert report.applied == [] and report.repaired_head_keys == []
+    assert all(out[k] is before[k] for k in before if "conv1d" not in k)
+
+
+def test_qwen4_fully_zero_centered_head_never_loads_silently(monkeypatch):
+    """The Flash-Next shape of TensorFold#626: every head gain zero-centered.
+
+    Gains whose raw value sits decisively below the trunk are unshifted; the
+    head q/k_norm (stored +2.2 above the trunk when shifted, +1.2 when raw)
+    cannot be placed without a pin, so the load refuses instead of guessing.
+    """
+    monkeypatch.delenv("MLX_QWEN4_NORM_CONVENTION", raising=False)
+    monkeypatch.delenv("MLX_QWEN4_NORM_CONVENTION_UNCHECKED", raising=False)
+    head = (
+        "hyper_connection_mixer.hc_norm",
+        "layers.0.attn_hyper_connection.hc_norm",
+        "layers.0.self_attn.indexer.q_layernorm",
+        "layers.0.self_attn.q_norm",
+        "layers.0.self_attn.k_norm",
+        "pre_fc_norm_embedding",
+        "pre_fc_norm_hidden",
+    )
+    with pytest.raises(NormConventionError, match="q_norm"):
+        _qwen4_sanitize(_qwen4_checkpoint(mx.bfloat16, raw_head=head, head_qk=3.68))
+    # With q/k_norm placeable, the whole head is unshifted exactly once.
+    out, report = _qwen4_sanitize(_qwen4_checkpoint(mx.bfloat16, raw_head=head, head_qk=1.60))
+    assert sorted(report.repaired_head_keys) == sorted(f"mtp.{n}.weight" for n in head)
+    assert _mean(out["mtp.pre_fc_norm_hidden.weight"]) == pytest.approx(0.67, abs=0.02)

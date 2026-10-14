@@ -54,6 +54,25 @@ class FlashNextVLMCPUTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "tensor counts differ"):
                 inspect_flash_next_vlm(root)
 
+    def test_rejects_an_unconsumed_ngram_table_scale(self):
+        # TensorFold#774: an oQ conversion of the FP8 checkpoint keeps the
+        # table's weight_scale; no Flash-Next route applies it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("config.json", "tokenizer.json", "tokenizer_config.json",
+                         "preprocessor_config.json"):
+                (root / name).symlink_to(ARTIFACT / name)
+            index = json.loads((ARTIFACT / "model.safetensors.index.json").read_text())
+            shard = next(k for k in index["weight_map"] if ".ngram_embedding.shard_0." in k)
+            table = shard.split(".shard_0.")[0]
+            index["weight_map"][f"{table}.weight_scale"] = index["weight_map"][shard]
+            (root / "model.safetensors.index.json").write_text(json.dumps(index))
+            for name in sorted(set(index["weight_map"].values())):
+                (root / name).symlink_to(ARTIFACT / name)
+            with self.assertRaisesRegex(ValueError, "weight_scale"):
+                inspect_flash_next_vlm(root)
+        self.assertNotIn("mlx", sys.modules)
+
     def test_direct_candidate_binds_media_and_extracted_mtp(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

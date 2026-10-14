@@ -186,3 +186,96 @@ def test_pack_check_fails_a_declared_rule_without_tokenizer_json(tmp_path):
         env={"PYTHONPATH": str(script.parents[1] / "src")},
     )
     assert "missing" in result.stdout and result.returncode == 1
+
+
+# ---------------------------------------------------------------------------
+# transformers#49579: since 5.18 a Qwen3.5-family config.json loads as
+# Qwen3_5Tokenizer, whose rebuild drops tokenizer.json's normalizer,
+# pre-tokenizer and decoder.  5.17 (the pinned venv) does not, so the rebuild
+# is simulated on the loaded backend.  A load must either restore the file's
+# behaviour or refuse; it must never serve different ids or text silently.
+# ---------------------------------------------------------------------------
+
+from mlx2.runtime.tokenizer_integrity import (  # noqa: E402
+    PARITY_PROBES,
+    TokenizerParityError,
+)
+
+
+def _wemm_pack(tmp_path):
+    """Byte-level pack whose file normalizer strips one trailing newline."""
+    pack = _byte_level_pack(tmp_path, DIGITS, "PreTrainedTokenizerFast")
+    tok = json.loads((pack / "tokenizer.json").read_text())
+    tok["normalizer"] = {
+        "type": "Sequence",
+        "normalizers": [
+            {"type": "Replace", "pattern": {"Regex": "\n$"}, "content": ""},
+            {"type": "NFC"},
+        ],
+    }
+    (pack / "tokenizer.json").write_text(json.dumps(tok))
+    return pack
+
+
+def _file_reference(pack):
+    from tokenizers import Tokenizer
+
+    return Tokenizer.from_file(str(pack / "tokenizer.json"))
+
+
+def test_rebuilt_normalizer_drops_no_trailing_newline(tmp_path):
+    from tokenizers import normalizers
+
+    pack = _wemm_pack(tmp_path)
+    tok = transformers.PreTrainedTokenizerFast(tokenizer_file=str(pack / "tokenizer.json"))
+    tok.backend_tokenizer.normalizer = normalizers.NFC()  # the 5.18 class default
+    text = "<|im_start|>user\nhello<|im_end|>\n"
+    assert tok.encode(text, add_special_tokens=False) != _file_reference(pack).encode(text).ids
+    receipt = repair_loaded_tokenizer(tok, pack)
+    assert receipt["parity"]["status"] == "consistent"
+    assert tok.encode(text, add_special_tokens=False) == _file_reference(pack).encode(text).ids
+
+
+def test_rebuilt_decoder_is_restored_from_the_file(tmp_path):
+    from tokenizers import decoders
+
+    pack = _byte_level_pack(tmp_path, DIGITS, "PreTrainedTokenizerFast")
+    tok = transformers.PreTrainedTokenizerFast(tokenizer_file=str(pack / "tokenizer.json"))
+    tok.backend_tokenizer.decoder = decoders.WordPiece()
+    reference = _file_reference(pack)
+    ids = reference.encode("Order 1234567 today").ids
+    assert tok.backend_tokenizer.decode(ids) != reference.decode(ids)
+    receipt = repair_loaded_tokenizer(tok, pack)
+    assert "decoder" in receipt["parity"]["restored"]
+    assert tok.backend_tokenizer.decode(ids) == reference.decode(ids)
+    assert repair_loaded_tokenizer(tok, pack)["parity"] == {
+        "status": "consistent", "probes": len(PARITY_PROBES), "restored": []
+    }
+
+
+def test_unrepairable_drift_refuses_the_load(tmp_path):
+    pack = _byte_level_pack(tmp_path, DIGITS, "PreTrainedTokenizerFast")
+    tok = transformers.PreTrainedTokenizerFast(tokenizer_file=str(pack / "tokenizer.json"))
+    tok.add_tokens(["hello"])  # an id the file does not have
+    with pytest.raises(TokenizerParityError, match="hello"):
+        repair_loaded_tokenizer(tok, pack)
+
+
+def test_declared_rule_is_part_of_the_reference(tmp_path):
+    # The file keeps a stale rule the config overrides on purpose: the loaded
+    # tokenizer is compared with the file under the declared rule, not raw.
+    pack = _pack(tmp_path, OLD)
+    tok = transformers.PreTrainedTokenizerFast(tokenizer_file=str(pack / "tokenizer.json"))
+    receipt = repair_loaded_tokenizer(tok, pack)
+    assert receipt["declared"]["status"] == "repaired"
+    assert receipt["parity"]["status"] == "consistent"
+
+
+def test_parity_is_skipped_where_the_load_changes_the_file_on_purpose(tmp_path):
+    pack = _byte_level_pack(tmp_path, DIGITS, "PreTrainedTokenizerFast", add_prefix_space=True)
+    tok = transformers.PreTrainedTokenizerFast(tokenizer_file=str(pack / "tokenizer.json"))
+    assert repair_loaded_tokenizer(tok, pack)["parity"]["status"] == "skipped"
+    (tmp_path / "b").mkdir()
+    pack2 = _byte_level_pack(tmp_path / "b", DIGITS, "PreTrainedTokenizerFast")
+    tok2 = transformers.PreTrainedTokenizerFast(tokenizer_file=str(pack2 / "tokenizer.json"))
+    assert repair_loaded_tokenizer(tok2, pack2, file_authoritative=False)["parity"]["status"] == "skipped"

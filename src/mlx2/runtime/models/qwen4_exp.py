@@ -7369,9 +7369,11 @@ class TextModel(nn.Module):
         # Per-group fold (see adapters/norm_repair): the trigger above decides
         # the trunk and the pooled check verifies it over trunk tensors only;
         # each MTP-head gain is decided on its own evidence (known-raw hash,
-        # then its mean against the trunk family), and ambiguity raises.  A
-        # head-sized family pooled with the trunk is diluted 12-97:1, which is
-        # why the check no longer mixes the two.
+        # then its mean against the trunk family), and ambiguity always
+        # refuses the load.  A head-sized family pooled with the trunk is
+        # diluted 12-97:1, which is why the check no longer mixes the two.
+        # MLX_QWEN4_NORM_CONVENTION_UNCHECKED skips only the pooled trunk
+        # check; no switch lets an undecidable head gain load.
         from ...adapters.norm_repair import resolve_norm_convention
 
         unchecked = os.environ.get(
@@ -7382,7 +7384,6 @@ class TextModel(nn.Module):
             fold_suffixes=zero_centered,
             trunk_raw=raw,
             check_trunk=not unchecked,
-            on_ambiguous="follow_trunk" if unchecked else "raise",
             hint=self.NORM_CONVENTION_HINT,
         )
         for key, value in list(weights.items()):
@@ -7393,7 +7394,8 @@ class TextModel(nn.Module):
     NORM_CONVENTION_HINT = (
         "Set MLX_QWEN4_NORM_CONVENTION=raw|converted to force the trunk fold "
         "(the checks still run), or MLX_QWEN4_NORM_CONVENTION_UNCHECKED=1 to skip "
-        "the trunk check and let undecidable head gains follow the trunk."
+        "the pooled trunk check. An undecidable MTP-head gain has no override: pin "
+        "its float32 SHA-256 in norm_repair or fix the checkpoint."
     )
 
     @property

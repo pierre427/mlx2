@@ -74,6 +74,10 @@ def inspect_flash_next_vlm(path: str | Path) -> dict:
     }
     if not required.issubset(weights):
         raise ValueError("Flash-Next index lacks embedded vision or MTP tensors")
+    # A table tensor the route does not read (an oQ weight_scale) refuses here.
+    from ..runtime.models.ngram_table_keys import check_ngram_table_tensors
+
+    check_ngram_table_tensors(weights)
     vision_keys = [key for key in weights if key.startswith("vision_tower.")]
     mtp_keys = [key for key in weights if key.startswith("mtp.")]
     ple_keys = [key for key in weights if "ngram_embedding.shard_" in key]

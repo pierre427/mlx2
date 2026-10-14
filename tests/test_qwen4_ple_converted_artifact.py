@@ -247,3 +247,65 @@ def test_native_layout_with_missing_shard_is_refused(tmp_path):
     }
     with pytest.raises(ValueError, match="shard indices"):
         verify_sidecar_content(sidecar, tmp_path, manifest)
+
+
+# --- N-gram table tensors the file-backed table would not consume -----------
+#
+# The file-backed table serves 4-bit/g32 affine rows (weight, scales, biases)
+# and nothing else; the loader drops every ``.shard_`` tensor before the
+# strict load.  oQ conversions of the FP8 checkpoint also store the table's
+# ``weight_scale``, which must multiply every looked-up row (TensorFold#774:
+# without it "every reply is garbage while every equality still holds").  Any
+# table tensor the route does not consume must refuse the load by name.
+
+
+def _add_tensors(root: Path, extra: dict, *, drop=()) -> None:
+    index = json.loads((root / "model.safetensors.index.json").read_text())
+    weight_map = {k: v for k, v in index["weight_map"].items() if k not in drop}
+    name = "model-extra.safetensors"
+    _write_safetensors(root / name, extra)
+    weight_map.update({k: name for k in extra})
+    _write_index(root, weight_map)
+
+
+_ONE = np.ones((1, 2), np.uint8)
+
+
+@pytest.mark.parametrize(
+    "extra, match",
+    [
+        ({f"{PREFIX}.weight_scale": _ONE}, "weight_scale"),
+        ({f"{PREFIX}.shard_0.weight_scale": _ONE}, "weight_scale"),
+        ({f"{PREFIX}.shards.0.weight": _ONE}, r"shards\.0\.weight"),
+        ({f"{PREFIX}.shard_9.weight": _ONE}, r"shard_9"),
+    ],
+    ids=["table_scale", "shard_scale", "plural_spelling", "extra_shard"],
+)
+def test_native_layout_with_unconsumed_table_tensor_is_refused(tmp_path, extra, match):
+    sidecar, manifest = _native_artifact(tmp_path)
+    _add_tensors(tmp_path, extra)
+    with pytest.raises(ValueError, match=match):
+        verify_sidecar_content(sidecar, tmp_path, manifest)
+
+
+def test_unquantized_table_is_refused_by_name(tmp_path):
+    # omlx#4476 keeps the table at 16 bits: shards carry only ``weight``.
+    sidecar, manifest = _native_artifact(tmp_path)
+    drop = [f"{PREFIX}.shard_{i}.{p}" for i in range(NUM_SHARDS) for p in PARTS]
+    rows = np.zeros((ROWS_PER_SHARD, 2 * sum(PARTS.values())), np.uint8)
+    _add_tensors(tmp_path, {f"{PREFIX}.shard_{i}.weight": rows for i in range(NUM_SHARDS)}, drop=drop)
+    with pytest.raises(ValueError, match="scales"):
+        verify_sidecar_content(sidecar, tmp_path, manifest)
+
+
+def test_converted_layout_with_a_table_scale_is_refused(tmp_path):
+    sidecar, manifest = _converted_artifact(tmp_path)
+    _add_tensors(tmp_path, {f"{PREFIX}.weight_scale": _ONE})
+    # Re-bind the receipt and manifest to the new index so only the scale differs.
+    index_hash = hashlib.sha256((tmp_path / "model.safetensors.index.json").read_bytes()).hexdigest()
+    manifest["source_index_sha256"] = index_hash
+    receipt = json.loads((tmp_path / "mlx2-conversion.json").read_text())
+    receipt["source_index_sha256"] = index_hash
+    (tmp_path / "mlx2-conversion.json").write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match="weight_scale"):
+        verify_sidecar_content(sidecar, tmp_path, manifest)

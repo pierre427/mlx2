@@ -16,6 +16,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from .. import round_levers as _lv
+from .ngram_table_keys import check_ngram_table_tensors
 
 MANIFEST_FORMAT = "qwen4-ple-rows"
 MANIFEST_VERSION = 1
@@ -365,6 +366,11 @@ def verify_sidecar_content(sidecar_path: str, model_path, manifest: dict) -> str
     (``"converted"``). A partial set of source shards still goes through the
     spot check, which refuses it.
     """
+    with open(Path(model_path) / "model.safetensors.index.json") as f:
+        weight_map = json.load(f)["weight_map"]
+    check_ngram_table_tensors(
+        weight_map, prefix=manifest["tensor_prefix"], num_shards=manifest["num_shards"]
+    )
     if _source_shard_refs(model_path, manifest):
         spot_check_sidecar_rows(
             sidecar_path,
