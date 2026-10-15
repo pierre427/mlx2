@@ -14,7 +14,7 @@ import os
 import stat
 import tempfile
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -315,7 +315,6 @@ class CoreMLProjectionExecutor:
             owned = np.array(array, dtype=np.float16, order="C", copy=True)
             input_digest = hashlib.sha256(owned.tobytes()).hexdigest()
             result = self._model.predict({self.input_name: owned})
-            self._predictions += 1
             if not isinstance(result, dict) or set(result) != {self.output_name}:
                 raise ValueError("Core ML prediction returned unexpected output features")
             output = np.asarray(result[self.output_name])
@@ -334,6 +333,10 @@ class CoreMLProjectionExecutor:
             if not np.isfinite(output).all():
                 raise ValueError("projection output overflows the fixed float16 contract")
             output.setflags(write=False)
+            # Count only a validated, publishable projection.  A native call
+            # that returned malformed data is not a completed prediction for
+            # route-status or compute-plan receipts.
+            self._predictions += 1
             return output, {
                 **self.spec.receipt(),
                 "compiled_model_sha256": self._binding["compiled_model_sha256"],
@@ -403,3 +406,93 @@ class CoreMLProjectionExecutor:
 
     def __exit__(self, *_args):
         self.close()
+
+
+class AdapterProjection:
+    """Adapter-owned Core ML projection with an ordinary reference gate.
+
+    The adapter owns both implementations.  Serving may invoke this binding,
+    but it cannot install one by model name or silently use the ordinary arm
+    after Core ML fails.  A result is publishable only after the complete
+    output agrees with the ordinary reference under the declared tolerance.
+    """
+
+    def __init__(
+        self,
+        executor: CoreMLProjectionExecutor,
+        ordinary_reference: Callable[[object], object],
+        *,
+        absolute_tolerance: float,
+        relative_tolerance: float,
+    ) -> None:
+        if not isinstance(executor, CoreMLProjectionExecutor):
+            raise TypeError("adapter projection requires a CoreMLProjectionExecutor")
+        if not callable(ordinary_reference):
+            raise TypeError("adapter projection requires an ordinary reference")
+        for name, value in (
+            ("absolute_tolerance", absolute_tolerance),
+            ("relative_tolerance", relative_tolerance),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be finite and nonnegative")
+        self.executor = executor
+        self.spec = executor.spec
+        self.ordinary_reference = ordinary_reference
+        self.absolute_tolerance = float(absolute_tolerance)
+        self.relative_tolerance = float(relative_tolerance)
+        self._completed = 0
+        self._lock = threading.RLock()
+
+    def status(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                **self.spec.receipt(),
+                "route": "coreml_projection",
+                "selected": False,
+                "prediction_completed": self._completed > 0,
+                "prediction_count": self._completed,
+                "ordinary_reference": True,
+                "execution_device_observed": False,
+            }
+
+    def predict(self, values):
+        """Execute Core ML, then gate publication on the ordinary reference."""
+        import numpy as np
+
+        with self._lock:
+            if not isinstance(values, np.ndarray):
+                raise TypeError("projection input must be a float16 ndarray")
+            # Retain two independent immutable inputs before either implementation
+            # runs.  A native bridge or an adapter reference cannot mutate the
+            # other arm's input and manufacture parity.
+            native_input = np.array(values, dtype=values.dtype, order="C", copy=True)
+            reference_input = np.array(values, dtype=values.dtype, order="C", copy=True)
+            native_input.setflags(write=False)
+            reference_input.setflags(write=False)
+            output, execution = self.executor.predict(native_input)
+            reference = np.asarray(self.ordinary_reference(reference_input))
+            parity = verify_projection_output(
+                self.spec,
+                output,
+                reference,
+                absolute_tolerance=self.absolute_tolerance,
+                relative_tolerance=self.relative_tolerance,
+            )
+            self._completed += 1
+            return output, {
+                **execution,
+                **parity,
+                "route": "coreml_projection",
+                "adapter_owned": True,
+                "selected": True,
+                "prediction_completed": True,
+                "prediction_count": self._completed,
+                "ordinary_reference": True,
+                # This field refers specifically to actual Neural Engine use.
+                "observed_used": False,
+            }

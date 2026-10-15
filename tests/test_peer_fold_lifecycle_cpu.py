@@ -226,13 +226,43 @@ def test_fold_pending_context_and_long_context_workspace_are_admitted():
     newly_allocated = sum(entry.nbytes for entry in cache)
     assert pending + 2 * 3 * 1 * 4 * 4 * len(cache) >= newly_allocated
     workspace = draft.extra_memory_reservation(
-        cache, append=0, pending_tokens=0, prefill=False
+        cache, append=3, pending_tokens=0, prefill=False
     )
-    assert workspace > 0
+    growth_only = draft.extra_memory_reservation(
+        cache, append=3, pending_tokens=0, prefill=True
+    )
+    assert workspace > growth_only
     assert (
         draft.extra_memory_reservation(cache, append=0, pending_tokens=0, prefill=True)
         == 0
     )
+
+
+@pytest.mark.parametrize("append", [0, 1, 4, 8])
+def test_fold_workspace_reserves_only_admitted_proposal_rows(append):
+    _, draft = _models()
+    cache = draft.make_cache()
+    pending = 17
+    prefill = draft.extra_memory_reservation(
+        cache, append=append, pending_tokens=pending, prefill=True
+    )
+    decode = draft.extra_memory_reservation(
+        cache, append=append, pending_tokens=pending, prefill=False
+    )
+    proposal_rows = max(0, append - 1)
+    expected = 0
+    for layer, entry in zip(draft.layers, cache):
+        attention = layer.self_attn
+        if getattr(attention, "fold_policy", None) is None:
+            continue
+        context = int(entry.offset) + pending + append
+        heads, dim = int(attention.n_heads), int(attention.head_dim)
+        expected += 4 * proposal_rows * heads * (
+            4 * (context + proposal_rows) * dim
+            + 6 * (context + proposal_rows)
+            + 8 * dim
+        )
+    assert decode - prefill == expected
 
 
 @pytest.mark.parametrize("bad", [-1, True, 1.5, float("nan")])

@@ -134,8 +134,9 @@ def test_invalid_native_output_cannot_yield_success_receipt(compiled, runtime, o
     with make_executor(compiled) as executor:
         with pytest.raises(ValueError):
             executor.predict(np.ones((1, 4), dtype=np.float16))
-        # Native completion is distinct from validated numerical output.
-        assert executor.compute_plan()["prediction_completed"] is True
+        plan = executor.compute_plan()
+        assert plan["prediction_completed"] is False
+        assert plan["prediction_count"] == 0
 
 
 def test_coreml_bridge_float32_output_is_bounded_back_to_fp16(compiled, runtime):

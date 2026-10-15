@@ -2,8 +2,8 @@
 
 A generation that ends on the output cap (``finish_reason:"length"``) is a
 Responses object with ``status:"incomplete"`` and
-``incomplete_details:{"reason":"max_output_tokens"}``; its message item is
-``incomplete`` too, and a stream ends with ``response.incomplete`` instead of
+``incomplete_details:{"reason":"max_output_tokens"}``; the item it cut off
+(the last) is ``incomplete`` and earlier items ``completed``, and a stream ends with ``response.incomplete`` instead of
 ``response.completed``.  The live, streamed, stored and batch-row objects all
 come from ``responses_payload`` and agree.  A normal stop is unchanged.
 """
@@ -118,9 +118,16 @@ def test_a_truncated_response_is_incomplete_and_stored_that_way(reasoning_only):
     assert engine.requests[0]["max_tokens"] == 2
     assert payload["status"] == "incomplete"
     assert payload["incomplete_details"] == INCOMPLETE
-    # The cut-off answer is an incomplete item; the reasoning before it ended.
-    assert _message(payload)["status"] == "incomplete"
-    assert _message(payload)["content"][0]["text"] == ("" if reasoning_only else "partial")
+    statuses = [(item["type"], item["status"]) for item in payload["output"]]
+    if reasoning_only:
+        # Cut inside reasoning: that item is incomplete, and so is the empty
+        # answer item stateless replay round-trips.
+        assert statuses == [("reasoning", "incomplete"), ("message", "incomplete")]
+        assert _message(payload)["content"][0]["text"] == ""
+    else:
+        # The cut-off answer is an incomplete item; the reasoning before it ended.
+        assert statuses == [("reasoning", "completed"), ("message", "incomplete")]
+        assert _message(payload)["content"][0]["text"] == "partial"
     assert stored == payload
 
 
@@ -209,3 +216,128 @@ def test_a_normal_stop_stays_completed(stream):
             "response.completed", "response.incomplete", "response.failed")]
         assert terminal == ["response.completed"], terminal
         assert "event: response.incomplete\n" not in raw
+
+
+class _Job:
+    id = "job1"
+    created = 0
+    request = {}
+
+
+def _payload(message, finish_reason, last_output=None):
+    from mlx2.openai_compat import responses_payload
+
+    usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    job = _Job()
+    if last_output is not None:
+        job.responses_last_output = last_output
+    return responses_payload(
+        job=job, model="fixture",
+        choice={"message": message, "finish_reason": finish_reason},
+        usage=usage, receipt={}, metadata={},
+    )
+
+
+def _call(index):
+    return {"id": f"call_{index}", "type": "function",
+            "function": {"name": "f", "arguments": "{}"}}
+
+
+def test_a_truncated_tool_call_is_the_incomplete_item():
+    payload = _payload(
+        {"content": "let me check", "reasoning_content": "plan",
+         "tool_calls": [_call(0), _call(1)]},
+        "length",
+    )
+    assert payload["status"] == "incomplete"
+    assert [(item["type"], item["status"]) for item in payload["output"]] == [
+        ("reasoning", "completed"),
+        ("message", "completed"),
+        ("function_call", "completed"),
+        ("function_call", "incomplete"),
+    ]
+    finished = _payload({"content": "", "tool_calls": [_call(0)]}, "tool_calls")
+    assert [item["status"] for item in finished["output"]] == ["completed"]
+
+
+@pytest.mark.parametrize("status", ["incomplete", "completed"])
+def test_agent_compat_custom_tool_call_keeps_the_item_status(status):
+    from mlx2.agent_compat import (
+        AgentCompatPolicy,
+        rewrite_responses_output,
+        translate_responses_tools,
+    )
+
+    compat = AgentCompatPolicy("auto", "off").resolve(
+        {"X-MLX2-Agent-Compat": "on"}, "default", "/v1/responses"
+    )
+    _, tool_map = translate_responses_tools(
+        [{"type": "custom", "name": "t"}], compat, Counter()
+    )
+    payload = {
+        "output": [{
+            "type": "function_call", "id": "fc_1", "call_id": "call_1",
+            "status": status, "name": "t",
+            "arguments": json.dumps({"input": "x"}),
+        }],
+        "mlx2": {},
+    }
+    rewrite_responses_output(payload, tool_map, compat, Counter())
+    (item,) = payload["output"]
+    assert (item["type"], item["status"]) == ("custom_tool_call", status)
+
+
+def test_the_cut_item_is_marked_again_after_a_stream_reorders_output():
+    # Codex review: a grammar call streamed before the text that was cut;
+    # the stream sorts output into arrival order after responses_payload.
+    from mlx2.openai_compat import mark_truncated_output
+
+    payload = _payload(
+        {"content": "trailing text", "tool_calls": [_call(0)]}, "length"
+    )
+    assert [item["type"] for item in payload["output"]] == ["message", "function_call"]
+    payload["output"].reverse()  # arrival order: the call opened first
+    mark_truncated_output(payload)
+    assert [(item["type"], item["status"]) for item in payload["output"]] == [
+        ("function_call", "completed"),
+        ("message", "incomplete"),
+    ]
+
+
+def test_marking_leaves_other_item_statuses_alone():
+    from mlx2.openai_compat import mark_truncated_output
+
+    payload = {"status": "incomplete", "output": [
+        {"type": "web_search_call", "status": "failed"},
+        {"type": "message", "status": "completed", "content": [{"text": "x"}]},
+    ]}
+    mark_truncated_output(payload)
+    assert [item["status"] for item in payload["output"]] == ["failed", "incomplete"]
+
+
+def test_a_non_streamed_cut_marks_the_kind_that_arrived_last():
+    # Codex review round 2: a call completed, then trailing text hit the cap.
+    # The payload lists the message first, so position alone marks the call.
+    message = {"content": "trailing text", "tool_calls": [_call(0)]}
+    cut_text = _payload(message, "length", last_output="message")
+    assert [(item["type"], item["status"]) for item in cut_text["output"]] == [
+        ("message", "incomplete"), ("function_call", "completed"),
+    ]
+    cut_call = _payload(message, "length", last_output="function_call")
+    assert [(item["type"], item["status"]) for item in cut_call["output"]] == [
+        ("message", "completed"), ("function_call", "incomplete"),
+    ]
+
+
+def test_the_output_kind_is_recorded_from_deltas():
+    from mlx2.openai_compat import note_output_kind
+
+    job = _Job()
+    for delta, kind in (
+        ({"reasoning_content": "r"}, "reasoning"),
+        ({"content": "a"}, "message"),
+        ({"tool_calls": [_call(0)]}, "function_call"),
+        ({"content": ""}, "function_call"),
+    ):
+        note_output_kind(job, delta)
+        assert job.responses_last_output == kind

@@ -9,9 +9,11 @@ of that choice.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
-from collections.abc import Mapping
+import threading
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 
@@ -289,3 +291,242 @@ def admission_receipt(
         "state_revision": request.state_revision,
         "rank_capabilities": normalized,
     }
+
+
+class DenseReplicaBinding:
+    """Adapter-owned, exact two-rank dense replica transaction.
+
+    This initial serving binding deliberately executes two complete replicas;
+    it is not tensor or pipeline sharding.  Bytes are the adapter boundary so
+    request and output identities are stable without importing a tensor
+    runtime.  The result is published only after both ranks agree byte-for-byte
+    and an independent ordinary reference returns the same bytes.
+    """
+
+    MAX_PAYLOAD_BYTES = 1 << 20
+
+    def __init__(
+        self,
+        cluster: ClusterIdentity,
+        rank_steps: Mapping[int, Callable[[bytes], bytes]],
+        ordinary_reference: Callable[[bytes], bytes],
+        *,
+        available_bytes: Mapping[int, int],
+        reserved_bytes: Mapping[int, int],
+        initial_state_revision: int = 0,
+    ) -> None:
+        if not cluster.route.endswith(".dense_replica"):
+            raise ValueError("dense replica route must end with .dense_replica")
+        if set(rank_steps) != {0, 1} or any(
+            not callable(callback) for callback in rank_steps.values()
+        ):
+            raise ValueError("dense replica binding requires callable ranks 0 and 1")
+        if not callable(ordinary_reference):
+            raise TypeError("dense replica binding requires an ordinary reference")
+        if set(available_bytes) != {0, 1} or set(reserved_bytes) != {0, 1}:
+            raise ValueError("dense replica binding requires memory state for both ranks")
+        if type(initial_state_revision) is not int or initial_state_revision < 0:
+            raise ValueError("initial_state_revision must be a nonnegative integer")
+        self.cluster = cluster
+        self._rank_steps = dict(rank_steps)
+        self._ordinary_reference = ordinary_reference
+        self.rank_capabilities = {
+            rank: {
+                "cluster_sha256": cluster.digest,
+                "route": cluster.route,
+                "available_bytes": available_bytes[rank],
+                "reserved_bytes": reserved_bytes[rank],
+            }
+            for rank in (0, 1)
+        }
+        # Validate the declared memory fields at construction, before any
+        # serving request can cause rank work.
+        probe = RequestIdentity(
+            "binding-validation",
+            hashlib.sha256(b"binding-validation").hexdigest(),
+            cluster.digest,
+            initial_state_revision,
+            1,
+        )
+        admission_receipt(cluster, probe, rank_capabilities=self.rank_capabilities)
+        self._state_revision = initial_state_revision
+        self._completed = 0
+        self._aborted = 0
+        self._last_receipt: dict[str, object] | None = None
+        self._lock = threading.RLock()
+
+    @property
+    def adapter_key(self) -> str:
+        return self.cluster.route.removesuffix(".dense_replica")
+
+    @staticmethod
+    def _payload(name: str, value: object) -> bytes:
+        if not isinstance(value, bytes):
+            raise TypeError(f"{name} must be bytes")
+        if not 1 <= len(value) <= DenseReplicaBinding.MAX_PAYLOAD_BYTES:
+            raise ValueError(f"{name} must contain 1 to 1048576 bytes")
+        return bytes(value)
+
+    def status(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "schema": SCHEMA,
+                "route": self.cluster.route,
+                "cluster_sha256": self.cluster.digest,
+                "world_size": 2,
+                "execution": "dense_replica",
+                "implemented": True,
+                "qualified": False,
+                "selected": False,
+                "observed_used": self._completed > 0,
+                "state_revision": self._state_revision,
+                "completed": self._completed,
+                "aborted": self._aborted,
+                "ordinary_reference": True,
+                "cross_host_observed": False,
+                "sharded_model": False,
+                "last_receipt": (
+                    None
+                    if self._last_receipt is None
+                    else copy.deepcopy(self._last_receipt)
+                ),
+            }
+
+    def execute(
+        self,
+        payload: bytes,
+        *,
+        request_id: str,
+        tenant_sha256: str,
+        state_revision: int,
+    ) -> tuple[bytes, dict[str, object]]:
+        payload = self._payload("distributed request payload", payload)
+        with self._lock:
+            if state_revision != self._state_revision:
+                raise RuntimeError("distributed request state revision is stale")
+            request = RequestIdentity(
+                request_id,
+                tenant_sha256,
+                self.cluster.digest,
+                state_revision,
+                1,
+            )
+            admission = admission_receipt(
+                self.cluster, request, rank_capabilities=self.rank_capabilities
+            )
+            transaction = RequestTransaction(request)
+            sequence = 0
+            current_revision = state_revision
+            abort_recorded = False
+
+            def apply(phase, rank, digest, *, revision=None):
+                nonlocal current_revision, sequence
+                result = transaction.apply(
+                    RankMessage(
+                        phase,
+                        request.digest,
+                        sequence,
+                        rank,
+                        current_revision if revision is None else revision,
+                        digest,
+                    )
+                )
+                sequence += 1
+                if result is not None and result.get("event") == "step_committed":
+                    current_revision = int(result["state_revision"])
+                return result
+
+            input_sha256 = hashlib.sha256(payload).hexdigest()
+            apply(Phase.ADMIT, 0, input_sha256)
+            apply(Phase.ACK, 0, input_sha256)
+            apply(Phase.ACK, 1, input_sha256)
+            try:
+                outputs = {}
+                for rank in (0, 1):
+                    outputs[rank] = self._payload(
+                        f"rank {rank} output", self._rank_steps[rank](bytes(payload))
+                    )
+                    digest = hashlib.sha256(outputs[rank]).hexdigest()
+                    apply(Phase.STEP, rank, digest)
+                reference = self._payload(
+                    "ordinary reference output",
+                    self._ordinary_reference(bytes(payload)),
+                )
+                if reference != outputs[0]:
+                    aborted = apply(
+                        Phase.ABORT,
+                        0,
+                        hashlib.sha256(reference).hexdigest(),
+                    )
+                    self._aborted += 1
+                    self._last_receipt = {
+                        **admission,
+                        **aborted,
+                        "status": "aborted",
+                        "reason": "ordinary_reference_mismatch",
+                        "transaction_state_revision": current_revision,
+                        "transaction_terminal": True,
+                        "selected": True,
+                        "observed_used": False,
+                    }
+                    abort_recorded = True
+                    raise RuntimeError(
+                        "distributed rank output differs from the ordinary reference"
+                    )
+                committed = apply(
+                    Phase.COMMIT,
+                    0,
+                    hashlib.sha256(reference).hexdigest(),
+                )
+            except BaseException as error:
+                if not transaction.terminal:
+                    aborted = apply(
+                        Phase.ABORT,
+                        0,
+                        hashlib.sha256(type(error).__name__.encode()).hexdigest(),
+                    )
+                    self._last_receipt = {
+                        **admission,
+                        **aborted,
+                        "status": "aborted",
+                        "reason": type(error).__name__,
+                        "transaction_state_revision": current_revision,
+                        "transaction_terminal": True,
+                        "selected": True,
+                        "observed_used": False,
+                    }
+                    self._aborted += 1
+                elif not abort_recorded:
+                    self._last_receipt = {
+                        **admission,
+                        "event": "abort",
+                        "published_state_revision": None,
+                        "status": "aborted",
+                        "reason": type(error).__name__,
+                        "transaction_state_revision": current_revision,
+                        "transaction_terminal": True,
+                        "selected": True,
+                        "observed_used": False,
+                    }
+                    self._aborted += 1
+                raise
+
+            self._state_revision = int(committed["published_state_revision"])
+            self._completed += 1
+            receipt = {
+                **admission,
+                **committed,
+                "status": "completed",
+                "input_sha256": input_sha256,
+                "output_sha256": hashlib.sha256(outputs[0]).hexdigest(),
+                "transaction_state_revision": current_revision,
+                "transaction_terminal": True,
+                "execution": "dense_replica",
+                "ordinary_reference": True,
+                "selected": True,
+                "observed_used": True,
+                "cross_host_observed": False,
+                "sharded_model": False,
+            }
+            self._last_receipt = receipt
+            return bytes(outputs[0]), copy.deepcopy(receipt)

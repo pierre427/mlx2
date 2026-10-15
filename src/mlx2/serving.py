@@ -1294,7 +1294,14 @@ def self_mtp_verification_row_cap(config, *, max_lanes, copy_draft_policy=None):
     )
 
 
-def lane_exact_verify_window(lane_receipt, config, *, max_lanes, copy_draft_policy=None):
+# A generator that cannot state its verify widths is bounded past every
+# window, so lane exact mode refuses it rather than assuming it fits.
+LANE_EXACT_UNBOUNDED_ROWS = 1 << 30
+
+
+def lane_exact_verify_window(
+    lane_receipt, config, *, max_lanes, copy_draft_policy=None, rows_by_width=None
+):
     """Bind lane ``exact`` mode to the widest self-MTP verify call (Pierre
     2026-10-14).
 
@@ -1321,15 +1328,22 @@ def lane_exact_verify_window(lane_receipt, config, *, max_lanes, copy_draft_poli
     from .runtime.draft_loop import cohort_proposal_depths
     from .runtime.lane import MAX_ROWS as LANE_CALL_ROWS
 
-    # One target call holds the w verifying lanes' padded rows beside the
-    # max_lanes - w plain one-row lanes (as self_mtp_verification_row_cap
-    # counts them; Codex 2026-10-14).
-    by_width = {
-        str(lanes): lanes * (depth + 1) + (int(max_lanes) - lanes)
-        for lanes, depth in cohort_proposal_depths(
-            config, max_lanes=int(max_lanes), copy_draft_policy=copy_draft_policy
-        ).items()
-    }
+    if rows_by_width is not None:
+        # An external drafter's generator states its own widest calls
+        # (ExternalDraftBatchGenerator.verify_rows_by_width).
+        by_width = {str(lanes): int(rows) for lanes, rows in rows_by_width.items()}
+        route = "external-draft"
+    else:
+        # One target call holds the w verifying lanes' padded rows beside the
+        # max_lanes - w plain one-row lanes (as self_mtp_verification_row_cap
+        # counts them; Codex 2026-10-14).
+        by_width = {
+            str(lanes): lanes * (depth + 1) + (int(max_lanes) - lanes)
+            for lanes, depth in cohort_proposal_depths(
+                config, max_lanes=int(max_lanes), copy_draft_policy=copy_draft_policy
+            ).items()
+        }
+        route = "self-MTP"
     rows = max(by_width.values())
     max_rows = int(receipt.get("max_rows", policy.get("max_rows")))
     chunk = bool(receipt.get("chunk_above_max", policy.get("chunk_above_max")))
@@ -1342,9 +1356,9 @@ def lane_exact_verify_window(lane_receipt, config, *, max_lanes, copy_draft_poli
             f"{LANE_CALL_ROWS} rows a call; chunks keep each row's bits but also run prefill on the lane)"
         )
         refused = (
-            f"lane exact mode covers calls of 1-{max_rows} rows, but this self-MTP route "
-            f"verifies up to {rows} rows in one call (lanes x (draft ceiling + 1) "
-            f"plus plain lanes, max_lanes {int(max_lanes)}); "
+            f"lane exact mode covers calls of 1-{max_rows} rows, but this {route} route "
+            f"verifies up to {rows} rows in one call (lanes x (draft ceiling + 1)"
+            f"{' plus plain lanes' if route == 'self-MTP' else ''}, max_lanes {int(max_lanes)}); "
             f"wider calls would run stock MLX and lose verify == decode. Use {fixes}, "
             "or lower max_lanes or the draft depth"
         )
@@ -3277,6 +3291,11 @@ def render_prompt_tokens(adapter, request):
     serializable``.  Either is a client-side omission; neither should reach a
     caller as an unhandled 500.
     """
+    from .runtime.literal_control_text import protect_control_text
+
+    if "_mlx2_prompt_tokens" not in request:
+        # Prepared media prompts were protected before their encoder ran.
+        request = protect_control_text(getattr(adapter, "tokenizer", None), request)
     try:
         return adapter.prompt_tokens(request)
     except (ValueError, Overloaded, MemoryError):
@@ -4383,7 +4402,10 @@ class ServingEngine:
         cls(model_path, _validate_only=True, **kwargs)
 
     _ADMISSION_CLASSES = frozenset(
-        {"generation", "embeddings", "rerank", "audio", "batch", "session_prefetch"}
+        {
+            "generation", "embeddings", "rerank", "projection", "distributed",
+            "audio", "batch", "session_prefetch",
+        }
     )
 
     def _transition_service_locked(self, state, result):
@@ -5025,7 +5047,14 @@ class ServingEngine:
             render = getattr(adapter, "render_prompt", None)
             if not callable(render):
                 return None
-            return render(engine_request(request))
+            from .runtime.literal_control_text import protect_control_text
+
+            # The text whose encoding is the generation prompt.
+            return render(
+                protect_control_text(
+                    getattr(adapter, "tokenizer", None), engine_request(request)
+                )
+            )
 
     def _prepare_job(self, request, *, tenant_id):
         from .contracts import Capability
@@ -5138,6 +5167,12 @@ class ServingEngine:
                 if media_loader is not None
                 else None
             )
+            from .runtime.literal_control_text import protect_control_text
+
+            # The media hook renders and tokenizes the prompt itself.
+            public_request = protect_control_text(
+                getattr(self.adapter, "tokenizer", None), public_request
+            )
             public_request = prepare(public_request, file_loader=file_loader)
             if not isinstance(public_request, dict):
                 raise RuntimeError(
@@ -5229,6 +5264,14 @@ class ServingEngine:
         for _attempt in range(3):
             with self.prompt_lock:
                 adapter = self.adapter
+                if "_mlx2_prompt_tokens" not in request:
+                    from .runtime.literal_control_text import protect_control_text
+
+                    # Before both caches and the incremental renderer, which
+                    # renders with its own tokenizer snapshot.
+                    request = protect_control_text(
+                        getattr(adapter, "tokenizer", None), request
+                    )
                 prepared = (
                     incremental.prepare(request)
                     if incremental is not None and incremental.selected
@@ -6050,6 +6093,8 @@ class ServingEngine:
             return {
                 **self.snapshot,
                 **self._representation_route_state(self.adapter),
+                **self._coreml_projection_state(self.adapter),
+                **self._distributed_dense_state(self.adapter),
                 "healthy": self.ready.is_set()
                 and self.thread.is_alive()
                 and not self.error,
@@ -6172,6 +6217,30 @@ class ServingEngine:
             "representation": representation,
             "route_receipt": {**route, **state, "representation": representation},
         }
+
+    @staticmethod
+    def _coreml_projection_state(adapter):
+        """Expose adapter-owned availability without selecting the operation."""
+        from .runtime.ane_projection import AdapterProjection
+
+        projection = getattr(adapter, "coreml_projection", None)
+        return (
+            {"coreml_projection": projection.status()}
+            if isinstance(projection, AdapterProjection)
+            else {}
+        )
+
+    @staticmethod
+    def _distributed_dense_state(adapter):
+        """Expose adapter-owned replica availability without selecting it."""
+        from .runtime.distributed_serving import DenseReplicaBinding
+
+        binding = getattr(adapter, "distributed_dense", None)
+        return (
+            {"distributed_dense": binding.status()}
+            if isinstance(binding, DenseReplicaBinding)
+            else {}
+        )
 
     def _exclusive_adapter_operation(
         self,
@@ -6312,6 +6381,99 @@ class ServingEngine:
     def supports_multimodal(self):
         return callable(
             getattr(getattr(self, "adapter", None), "prepare_multimodal_request", None)
+        )
+
+    def project_fixed(self, values, *, admission_class="projection", admitted=False):
+        """Run an explicitly installed adapter-owned fixed Core ML projection.
+
+        This is an auxiliary adapter operation rather than a generation route.
+        It drains in-flight model work and fails closed when the loaded adapter
+        did not install the binding or when its identity differs from the
+        binding.  The binding itself preserves and verifies the ordinary
+        reference; serving never falls back after a failed native prediction.
+        """
+
+        def execute(adapter):
+            from .api_resources import CapabilityUnavailable
+            from .runtime.ane_projection import AdapterProjection
+
+            projection = getattr(adapter, "coreml_projection", None)
+            if not isinstance(projection, AdapterProjection):
+                raise CapabilityUnavailable(
+                    "the selected adapter has no fixed Core ML projection"
+                )
+            descriptor = getattr(adapter, "descriptor", None)
+            if descriptor is None or projection.spec.adapter != descriptor.key:
+                raise RuntimeError(
+                    "Core ML projection identity differs from the loaded adapter"
+                )
+            identity = getattr(adapter, "identity", None)
+            fingerprint = (
+                identity.get("fingerprint")
+                if isinstance(identity, Mapping)
+                else None
+            )
+            if fingerprint != projection.spec.artifact_sha256:
+                raise RuntimeError(
+                    "Core ML projection artifact differs from the loaded adapter"
+                )
+            return projection.predict(values)
+
+        return self._exclusive_adapter_operation(
+            "coreml_projection",
+            execute,
+            admission_class=admission_class,
+            admitted=admitted,
+        )
+
+    def execute_distributed_dense(
+        self,
+        payload,
+        *,
+        request_id,
+        tenant_sha256,
+        state_revision,
+        admission_class="distributed",
+        admitted=False,
+    ):
+        """Execute an adapter-owned exact two-rank dense replica transaction."""
+
+        def execute(adapter):
+            from .api_resources import CapabilityUnavailable
+            from .runtime.distributed_serving import DenseReplicaBinding
+
+            binding = getattr(adapter, "distributed_dense", None)
+            if not isinstance(binding, DenseReplicaBinding):
+                raise CapabilityUnavailable(
+                    "the selected adapter has no distributed dense binding"
+                )
+            descriptor = getattr(adapter, "descriptor", None)
+            if descriptor is None or binding.adapter_key != descriptor.key:
+                raise RuntimeError(
+                    "distributed dense identity differs from the loaded adapter"
+                )
+            identity = getattr(adapter, "identity", None)
+            fingerprint = (
+                identity.get("fingerprint")
+                if isinstance(identity, Mapping)
+                else None
+            )
+            if fingerprint != binding.cluster.artifact_sha256:
+                raise RuntimeError(
+                    "distributed dense artifact differs from the loaded adapter"
+                )
+            return binding.execute(
+                payload,
+                request_id=request_id,
+                tenant_sha256=tenant_sha256,
+                state_revision=state_revision,
+            )
+
+        return self._exclusive_adapter_operation(
+            "distributed_dense",
+            execute,
+            admission_class=admission_class,
+            admitted=admitted,
         )
 
     def synthesize_speech(
@@ -10082,6 +10244,21 @@ class ServingEngine:
                     )
 
             batch = build_batch()
+            lane_policy = (self.lane_matmul_receipt or {}).get("policy") or {}
+            if external_draft and lane_policy.get("mode") == "exact":
+                # The self-MTP bound above skips this route: its tree and chain
+                # widths are the generator's, so bind them once it exists.
+                rows_by_width = getattr(batch, "verify_rows_by_width", None)
+                window = lane_exact_verify_window(
+                    self.lane_matmul_receipt, config, max_lanes=self.max_lanes,
+                    rows_by_width=(
+                        rows_by_width(self.max_lanes) if callable(rows_by_width)
+                        else {str(self.max_lanes): LANE_EXACT_UNBOUNDED_ROWS}
+                    ),
+                )
+                self.lane_exact_window = window
+                if window is not None and window["refused"] is not None:
+                    raise ValueError(window["refused"])
             # The guard fronts lane admission, which seats a lane at its floor
             # (MTP depth 0, prompt-lookup span 0) when the full width does not
             # fit; charging the full width refused n>1 that admission serves.

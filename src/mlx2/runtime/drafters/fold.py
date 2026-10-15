@@ -241,7 +241,6 @@ def extra_memory_reservation(model, caches, *, append, pending_tokens, prefill):
     if len(caches) != len(model.layers):
         raise ValueError("FOLD reservation cache topology mismatch")
     required = 0
-    block = int(model.config.block_size)
     for layer, cache in zip(model.layers, caches):
         attention = layer.self_attn
         if getattr(attention, "fold_policy", None) is None:
@@ -256,6 +255,15 @@ def extra_memory_reservation(model, caches, *, append, pending_tokens, prefill):
                      for value in cache.state) * elements * 4
         required += max(0, growth - 2 * append * elements * 4)
         if not prefill:
+            # ``append`` is the target verification width: one committed
+            # anchor row plus at most ``append - 1`` draft proposal rows.
+            # FOLD runs only for those proposal rows.  Reserving the trained
+            # checkpoint's maximum block here made a short final-budget round
+            # look as expensive as a full-width round and could strand an
+            # exact rollback retry after the failed round's buffers reduced
+            # measured headroom.  The admitted append width is already an
+            # upper bound when adaptive depth selects fewer proposals.
+            block = max(0, append - 1)
             heads, dim = int(attention.n_heads), int(attention.head_dim)
             # K/V repeats plus FP32 casts, logits/concentration/softmax and
             # branch outputs/normalizers for local and far branches together.

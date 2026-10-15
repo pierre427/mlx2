@@ -75,6 +75,8 @@ from .openai_compat import (
     responses_input_items,
     responses_input_items_page,
     responses_logprob,
+    mark_truncated_output,
+    note_output_kind,
     responses_payload,
     responses_to_chat_request,
 )
@@ -1857,6 +1859,7 @@ def collect_nonstream_job(job, body, *, chat, responses=False):
             parts.append(delta.get("content", ""))
             reasoning.append(delta.get("reasoning_content", ""))
             calls.extend(delta.get("tool_calls", []))
+            note_output_kind(job, delta)
         if "finish_reason" not in event:
             continue
         text_logprobs.finish()
@@ -4199,6 +4202,7 @@ def handler_for(
                         parts.append(delta.get("content", ""))
                         reasoning.append(delta.get("reasoning_content", ""))
                         calls.extend(delta.get("tool_calls", []))
+                        note_output_kind(job, delta)
                         # A keepalive may have opened a buffered stream early;
                         # it still sends nothing before its terminal contract.
                         if (
@@ -4664,6 +4668,10 @@ def handler_for(
                                         key=lambda item: streamed_output_indexes.get(
                                             item["id"], float("inf")
                                         )
+                                    )
+                                    # Statuses follow the final, streamed order.
+                                    mark_truncated_output(
+                                        payload, getattr(job, "responses_last_output", None)
                                     )
                                 store_response(
                                     tenant_id, response_options, payload, message

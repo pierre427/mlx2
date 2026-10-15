@@ -2782,6 +2782,53 @@ class ExternalDraftBatchGenerator:
             self.tree_node_budget_by_lanes, self.dynamic_tree_max_width, width
         )
 
+    def verify_rows_by_width(self, max_lanes):
+        """The widest target verify call, by cohort width, this route can issue.
+
+        A tree round verifies the width's node budget plus the root a lane --
+        one lane a forward under reference execution, up to the provider's
+        cohort limit otherwise: the fixed ``tree15`` topology at every width,
+        the dynamic route only up to its widest tree.  A chain verifies ``num_draft + 1`` rows a lane,
+        capped past the widest tree as ``_chain_draft_cap`` caps it.  A
+        continuation-pool round verifies one lane's paths in one forward --
+        up to ``limit`` paths of ``num_draft`` tokens plus the anchor -- or,
+        longest-first, one path a forward.  Upper
+        bounds: a round may draft fewer.  Lane ``exact`` mode refuses a route
+        whose window does not hold them.
+        """
+        from .proposal_providers import LONGEST_FIRST_EXACT_PREFIX
+
+        dynamic = bool(getattr(self, "dynamic_singleton_tree", False))
+        continuation = getattr(self, "continuation_policy", None)
+        continuation_rows = 0
+        if continuation is not None:
+            # Parallel verification forwards every path of one lane together
+            # (max_depth=num_draft); longest-first verifies one path a launch.
+            strategy = getattr(getattr(self, "continuation_strategy", None), "algorithm", None)
+            serial = LONGEST_FIRST_EXACT_PREFIX in (
+                strategy, getattr(continuation, "verification_algorithm", None)
+            )
+            continuation_rows = (1 if serial else int(continuation.limit)) * (self.num_draft + 1)
+        rows = {}
+        for lanes in range(1, int(max_lanes) + 1):
+            tree = (
+                lanes <= self.dynamic_tree_max_width
+                if dynamic
+                else self.draft_topology == "tree15"
+            )
+            if tree:
+                # Reference execution runs each lane's tree alone; a provider
+                # packs at most its cohort limit of lanes into one forward.
+                tree_lanes = lanes if getattr(self, "target_execution", None) == "provider" else 1
+                tree_lanes = min(tree_lanes, int(getattr(self, "target_tree_cohort_limit", lanes)))
+                width_rows = tree_lanes * (self._tree_node_budget(lanes) + 1)
+            else:
+                cap = self._chain_draft_cap(lanes)
+                depth = self.num_draft if cap is None else min(self.num_draft, cap)
+                width_rows = lanes * (depth + 1)
+            rows[str(lanes)] = max(width_rows, continuation_rows)
+        return rows
+
     def _tree_count(self, lane):
         return min(self._tree_node_budget(), lane.maximum - lane.generated - 1)
 

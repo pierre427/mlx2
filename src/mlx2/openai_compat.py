@@ -1153,6 +1153,64 @@ class ResponsesTextLogprobs:
         return trailing
 
 
+def note_output_kind(job, delta):
+    """Record on ``job`` which output kind the latest delta extended.
+
+    A Responses payload lists its message before its function calls; a
+    ``max_output_tokens`` cut ended whichever kind arrived last.
+    """
+    if delta.get("content"):
+        job.responses_last_output = "message"
+    elif delta.get("tool_calls"):
+        job.responses_last_output = "function_call"
+    elif delta.get("reasoning_content"):
+        job.responses_last_output = "reasoning"
+
+
+_CUT_ITEM_TYPES = {
+    "message": ("message",),
+    "function_call": ("function_call", "custom_tool_call"),
+    "reasoning": ("reasoning",),
+}
+
+
+def mark_truncated_output(payload, cut_kind=None):
+    """Mark the item a ``max_output_tokens`` cut ended.
+
+    ``cut_kind`` is the output kind that arrived last (``note_output_kind``);
+    its last item is the one cut off, and every other item finished.  Without
+    it the last listed item is.  A cut inside reasoning leaves the reasoning
+    item incomplete and, when listed, its empty answer item too.  Only
+    statuses this marks are reset, so a stream that reorders its items
+    afterwards calls it again.
+    """
+    output = payload.get("output") or []
+    if payload.get("status") != "incomplete" or not output:
+        return payload
+    for item in output:
+        if item.get("status") == "incomplete":
+            item["status"] = "completed"
+    types = _CUT_ITEM_TYPES.get(cut_kind, ())
+    cut = [item for item in output if item.get("type") in types]
+    last = cut[-1] if cut else output[-1]
+    last["status"] = "incomplete"
+    empty_answer = last.get("type") == "message" and not any(
+        part.get("text") for part in last.get("content", ()) if isinstance(part, Mapping)
+    )
+    if cut_kind == "reasoning" or (cut_kind is None and empty_answer):
+        for item in output:
+            if item.get("type") == "reasoning" or (
+                item.get("type") == "message"
+                and not any(
+                    part.get("text")
+                    for part in item.get("content", ())
+                    if isinstance(part, Mapping)
+                )
+            ):
+                item["status"] = "incomplete"
+    return payload
+
+
 def responses_payload(
     *,
     job,
@@ -1178,8 +1236,11 @@ def responses_payload(
     request's value is echoed.  A choice cut off by the output cap
     (``finish_reason:"length"``, including a hosted-tool loop that spent its
     budget) is OpenAI's truncation: ``status:"incomplete"`` with
-    ``incomplete_details.reason:"max_output_tokens"``, and the message item
-    it cut off is ``incomplete``.  Every other finish is ``completed``.
+    ``incomplete_details.reason:"max_output_tokens"``, and the item it cut
+    off -- the last one, a message or a function call -- is ``incomplete``;
+    items finished before it are ``completed``.  A cut inside reasoning
+    leaves the reasoning item ``incomplete`` too, beside the empty message
+    item that stateless replay needs.  Every other finish is ``completed``.
     """
     message = choice["message"]
     truncated = choice.get("finish_reason") == "length"
@@ -1203,7 +1264,7 @@ def responses_payload(
         output_by_kind["message"] = {
                 "id": f"msg_{job.id}",
                 "type": "message",
-                "status": "incomplete" if truncated else "completed",
+                "status": "completed",
                 "role": "assistant",
                 "content": [
                     {
@@ -1280,6 +1341,7 @@ def responses_payload(
         },
         "mlx2": receipt,
     }
+    mark_truncated_output(payload, getattr(job, "responses_last_output", None))
     if compat_tool_map is not None and agent_compat is not None:
         payload["mlx2"] = dict(receipt) if isinstance(receipt, Mapping) else receipt
         _agent.rewrite_responses_output(

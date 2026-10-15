@@ -539,7 +539,7 @@ def rewrite_responses_output(payload, tool_map, compat: AgentCompat, counts=None
             output[position] = {
                 "id": "ctc_" + str(item["id"]).removeprefix("call_").removeprefix("fc_"),
                 "type": "custom_tool_call",
-                "status": "completed",
+                "status": item.get("status", "completed"),
                 "call_id": call_id,
                 "name": name,
                 "input": text,
