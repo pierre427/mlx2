@@ -6,11 +6,35 @@ CPU tests use NumPy. Returned values own no device arrays or cache references.
 
 import math
 
-
 # The OpenAI contract admits 0..20 alternatives per position.  The early cap of
 # 11 rejected valid requests (eval harnesses send 20) and saved nothing: one
 # argpartition over the vocabulary serves any count.
 MAX_TOP_LOGPROBS = 20
+
+
+def distribution_contract():
+    """Declared API laws, not a claim that every token used one route.
+
+    A native-MTP request may hand off to ordinary decode. At temperature zero
+    both speculative verifiers publish processed log-softmax, not their
+    one-hot greedy verification law. Keep this explicit for diagnostic clients.
+    """
+    return {
+        "schema": "mlx2.logprob-distribution.v1",
+        "source": "execution_target",
+        "normalization_dtype": "float32",
+        "ordinary": "post_processor_pre_sampler",
+        "native_mtp": {
+            "greedy": "post_processor_pre_sampler",
+            "sampled": "post_temperature_and_sampling_filters",
+        },
+        "external_draft": {
+            "greedy": "post_processor_pre_sampler",
+            "sampled": "post_temperature_and_sampling_filters",
+        },
+        "route_can_change_within_request": True,
+        "draft_or_residual_probabilities": False,
+    }
 
 
 def wants_logprobs(request):
@@ -49,7 +73,7 @@ matching the unified runtime's existing response contract.
     if not 0 <= token < vocab:
         raise ValueError("emitted token is outside the probability vocabulary")
     if isinstance(top_n, bool) or not isinstance(top_n, int) or not 0 <= top_n <= MAX_TOP_LOGPROBS:
-        raise ValueError("top_logprobs must be an integer from 0 to 11")
+        raise ValueError(f"top_logprobs must be an integer from 0 to {MAX_TOP_LOGPROBS}")
     count = min(top_n, vocab)
     top_ids = (
         array_module.argpartition(-logprobs, kth=count - 1)[:count].tolist()

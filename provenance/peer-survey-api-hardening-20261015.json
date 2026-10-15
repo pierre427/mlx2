@@ -1,0 +1,69 @@
+{
+  "mechanism": "bounded hosted MCP transport, incremental tool-buffer ownership, and explicit API contracts",
+  "decision": "original mlx2 implementations; peer failure descriptions informed regression cases; no peer implementation copied",
+  "sources": [
+    {
+      "repository": "https://github.com/ashhart/TensorFold",
+      "pull_request": 882,
+      "revision": "fe4299b0130f9e46afb3f91096f1ba9ab93f0b0d",
+      "paths": [
+        "zig/src/server/tool_parse.zig",
+        "zig/src/server/reply_text.zig"
+      ],
+      "license": "Apache-2.0",
+      "license_evidence": "https://raw.githubusercontent.com/ashhart/TensorFold/fe4299b0130f9e46afb3f91096f1ba9ab93f0b0d/LICENSE",
+      "used": "failure class and forward-only marker-search principle from the PR description; local parser uses chunk retention, cached quoted-closer errors, and a cumulative grammar-input work bound"
+    }
+  ],
+  "destination_paths": [
+    "src/mlx2/tool_backend.py",
+    "src/mlx2/output.py",
+    "src/mlx2/server.py",
+    "src/mlx2/reasoning_signatures.py",
+    "src/mlx2/logprobs.py",
+    "src/mlx2/serving.py"
+  ],
+  "modifications": [
+    "MCP operation deadline covers lock wait, DNS lookup, connect, headers, body, handshake, retry and discovery pages; cancellation aborts local sockets without retrying ambiguous tool execution",
+    "Final publication review repaired TLS ownership and bounded waiting: wrap without an implicit handshake, register the SSLSocket before TLS I/O, use a nonblocking handshake with read/write readiness waits of at most 50 milliseconds, refresh the remaining timeout before ordinary HTTP, close failed wrapping state, and preserve typed cancellation/deadline errors. Existing proxy CONNECT, origin SNI, certificate and hostname verification remain intact.",
+    "MCP response-byte, SSE-event and JSON-depth limits are operator-configurable and surfaced without URLs or secrets",
+    "Disconnected streaming and nonstreaming clients cancel the configured hosted executor",
+    "Generic tool parsing buffers unfinished bodies as chunks and never retries a known quoted closer on each subsequent token; distinct candidates consume a bounded work budget",
+    "Existing readable signed v1 reasoning replay remains wire compatible and explicitly declares no confidentiality",
+    "Logprob route laws are machine-readable without changing existing numerical semantics; documentation and top-count validation text match current source"
+  ],
+  "validation": {
+    "kind": "focused CPU-only tests and loopback HTTP fixtures; no GPU use, full preflight or qualification",
+    "tests": [
+      "tests/test_peer_mcp_bounds_cpu.py",
+      "tests/test_peer_output_complexity_cpu.py",
+      "tests/test_peer_api_contracts_cpu.py",
+      "tests/test_tool_backend.py",
+      "tests/test_output.py",
+      "tests/test_logprobs_cpu.py",
+      "tests/test_responses_integrations.py",
+      "tests/test_sweep_20261008_api_hosted_output_budget.py",
+      "tests/test_tenant_auth.py",
+      "tests/test_http_security.py"
+    ],
+    "status": "passed",
+    "tls_publication_followup": {
+      "focused_result": "119 passed in 29.20 seconds across MCP bounds, tool backend, Responses integrations, hosted output budgets, API contracts, HTTP security and tenant authentication",
+      "old_path_negative_controls": "Both new real-loopback regressions fail with the prior inherited HTTPSConnection.connect: cancellation leaves the handshake alive after 1 second; a 1.5-second operation with 1 second consumed by TCP setup returns after 2.505 seconds, exceeding the 2-second assertion ceiling.",
+      "positive_controls": "Real HTTPS success, untrusted-certificate rejection, hostname-mismatch rejection, raw-socket close on wrapping failure, and real proxy CONNECT with origin SNI all passed. Temporary local certificate/key files are removed after loading; no external endpoint or retained secret fixture is used.",
+      "lint": "Ruff passes for tool_backend.py and test_peer_mcp_bounds_cpu.py; git diff --check passes",
+      "scope": "CPU-only loopback transport contracts; no GPU use or route qualification. A new final full publication gate follows this source repair."
+    },
+    "tls_lost_wakeup_followup": {
+      "observed_defect": "A real stalled TLS cancellation reproduced after 53 successful repetitions on macOS CPython 3.12. The watchdog and peer had exited, but the caller remained inside OpenSSL do_handshake until its original socket timeout. Tracking and closing the SSL socket alone did not guarantee prompt cancellation.",
+      "deterministic_negative_control": "Two real-loopback cases suppress only the cross-thread socket wakeup while retaining the recorded budget failure. Cancellation and a shortened aggregate deadline both fail the prior blocking handshake within the one-second assertion (2 failed in 6.15 seconds). Both pass the nonblocking handshake, including caller-owned socket close.",
+      "final_focused_result": "199 passed in 32.39 seconds across MCP, tool backend, Responses, hosted output budgets, API contracts, HTTP security, tenant authentication, proposal privacy, proposal pool, terminal receipts, prefix deduplication, Prometheus, drafter metrics and host counters.",
+      "repeat_control": "120 consecutive real TLS cancellation repetitions passed after the repair. Earlier 20 real header/body drip repetitions also passed after separating generous transport setup from the 150-millisecond live deadline.",
+      "positive_controls": "Real trusted TLS, certificate and hostname refusal, wrapping failure cleanup, proxy CONNECT with correct origin SNI, SSLWantWrite readiness, and restoration of a positive remaining timeout all passed.",
+      "diagnostics": "Cancellation liveness failure captures live thread stacks before bounded cleanup. Raw probe logs remain outside the repository.",
+      "lint": "tool_backend.py and test_peer_mcp_bounds_cpu.py pass Ruff; git diff --check passes.",
+      "scope": "Focused CPU transport validation only; no GPU use, no full preflight and no qualification."
+    }
+  },
+  "qualification": "No serving-route math or qualification/default changes. CPU fixtures verify contracts and bounded transport, not model behavior or performance."
+}

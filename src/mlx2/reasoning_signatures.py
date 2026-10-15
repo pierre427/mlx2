@@ -104,6 +104,24 @@ class ReasoningSigner:
             secret, b"mlx2-key-id", hashlib.sha256
         ).hexdigest()[:16]
 
+    def status(self):
+        """Public replay contract; no secret, tenant or payload is exposed.
+
+        ``encrypted_content`` is the Responses wire field, not a claim about
+        this local v1 format. Changing the envelope would invalidate existing
+        stateless and durable continuations, so expose its properties instead
+        of silently substituting a different cryptographic format.
+        """
+        return {
+            "enabled": True,
+            "format": "mlx2.reasoning.v1",
+            "authentication": "HMAC-SHA256",
+            "confidentiality": False,
+            "payload_encoding": "base64url-utf8",
+            "scope": ["model", "tenant"],
+            "key_persistence": "process" if self.ephemeral else "configured",
+        }
+
     @classmethod
     def configured(cls, *, key_file=None, key_env=None):
         if key_file and key_env:

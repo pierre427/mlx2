@@ -27,7 +27,7 @@ class _EngineReached(BaseException):
     pass
 
 
-def run_main_until_engine(monkeypatch, argv):
+def run_main_until_engine(monkeypatch, argv, *, route="ordinary"):
     """Run the real ``main()`` through its bind; stop where it loads weights."""
     from mlx2 import exit_trace, server
     from mlx2.adapters import registry
@@ -44,7 +44,11 @@ def run_main_until_engine(monkeypatch, argv):
         server,
         "resolve_route_selection",
         lambda args, policy, resolution: types.SimpleNamespace(
-            native_mtp=False, route="ordinary", source="engine_argument"
+            native_mtp=False,
+            route=route,
+            source=(
+                "capability_default" if route == "prompt_lookup" else "engine_argument"
+            ),
         ),
     )
     monkeypatch.setattr(
@@ -59,6 +63,7 @@ def run_main_until_engine(monkeypatch, argv):
         validate_arguments = staticmethod(server.ServingEngine.validate_arguments)
 
         def __init__(self, *args, **kwargs):
+            built["engine_kwargs"] = dict(kwargs)
             raise _EngineReached
 
     monkeypatch.setattr(server, "ServingEngine", Engine)
@@ -67,6 +72,16 @@ def run_main_until_engine(monkeypatch, argv):
         server.main()
     # main() closes the server when engine construction fails.
     return built
+
+
+def test_main_propagates_capability_default_prompt_lookup_to_engine(monkeypatch):
+    built = run_main_until_engine(
+        monkeypatch,
+        ["--host", "127.0.0.1", "--port", "0"],
+        route="prompt_lookup",
+    )
+    assert built["engine_kwargs"]["prompt_lookup"] is True
+    assert built["engine_kwargs"]["route_selection_source"] == "capability_default"
 
 
 @pytest.mark.parametrize("inflight", [8, 32, 96])

@@ -32,9 +32,9 @@ class ToolCallConstraintError(ValueError):
 
     Retained so a parser outside this module can still fail closed, and so the
     engine keeps its escape hatch and its ``tool_call_constraint_failures``
-    counter.  The parsers in this tree no longer raise it: over-calling is a
-    model behaviour the request bound already answers (see
-    :func:`within_parallel_bound`), not a server fault.
+    counter. Over-calling is handled by :func:`within_parallel_bound`, not
+    this error. Exhausting a parser resource budget still fails closed rather
+    than returning an unvalidated partial tool as answer text.
     """
 
     tool_call_constraint_error = True
@@ -223,7 +223,10 @@ class OutputParser:
         self, *, chat=False, thinking=False, tools=None, parse_tool=None, stops=(),
         constrained_tools=False, parallel_tool_calls=True,
         tolerant_tool_markers=False, think_close_separator="", partial_names=None,
+        max_tool_parse_chars=64 * 1024 * 1024,
     ):
+        if type(max_tool_parse_chars) is not int or max_tool_parse_chars <= 0:
+            raise ValueError("max_tool_parse_chars must be a positive integer")
         self.chat, self.tools, self.parse_tool = chat, tools or [], parse_tool
         # The grammar's reader of a stop-cut call's committed name (see
         # :func:`stop_cut_record`); a tool parser publishes its own as
@@ -280,6 +283,32 @@ class OutputParser:
         self._shown_text = False
         # Set only for the duration of :meth:`finish` on a ``length`` stop.
         self._length_finish = False
+        # A long unfinished tool is retained as chunks plus a marker-sized
+        # tail, not recopied/rescanned on every generated token. A closer that
+        # the grammar identified as quoted is never parsed a second time.
+        self._tool_chunks = []
+        self._tool_buffered_chars = 0
+        self._tool_first_close = -1
+        self._tool_first_error = None
+        self.tool_parse_work_chars = 0
+        self.tool_marker_scan_chars = 0
+        self.max_tool_parse_chars = max_tool_parse_chars
+
+    def _join_tool_buffer(self):
+        prefix = self._tool_buffered_chars
+        if self._tool_chunks:
+            self.buffer = "".join((*self._tool_chunks, self.buffer))
+            self._tool_chunks = []
+            self._tool_buffered_chars = 0
+        return prefix
+
+    def _hold_tool_buffer(self):
+        hold = max(0, len(self.tool_close) - 1)
+        end = max(0, len(self.buffer) - hold)
+        if end:
+            self._tool_chunks.append(self.buffer[:end])
+            self._tool_buffered_chars += end
+            self.buffer = self.buffer[end:]
 
     def _emit(self, events, text):
         if self.channel == "content":
@@ -396,15 +425,30 @@ class OutputParser:
                     self._reasoning_open = True
                 continue  # the answer may start here: recheck the stop gate
             if self.channel == "tool":
-                first = end = self.buffer.find(self.tool_close)
-                outcome = None
+                self.tool_marker_scan_chars += len(self.buffer)
+                end = self.buffer.find(self.tool_close)
+                if end >= 0 or final:
+                    prefix = self._join_tool_buffer()
+                    if end >= 0:
+                        end += prefix
+                first = self._tool_first_close
+                outcome = self._tool_first_error
                 while end >= 0:
+                    if first < 0:
+                        first = self._tool_first_close = end
+                    # New quoted closers can require a full grammar parse.
+                    # Bound cumulative grammar input as well as eliminating
+                    # repeated work on old closers; adversarial quoted-marker
+                    # chains must not consume quadratic unbounded CPU.
+                    self.tool_parse_work_chars += end
+                    if self.tool_parse_work_chars > self.max_tool_parse_chars:
+                        raise ToolCallConstraintError("tool parsing exceeded its character-work budget")
                     try:
                         outcome = self.parse_tool(self.buffer[:end], self.tools)
                         break
                     except (KeyError, TypeError, ValueError) as exc:
                         if end == first:
-                            outcome = exc
+                            outcome = self._tool_first_error = exc.with_traceback(None)
                         if not getattr(exc, "tool_call_close_quoted", False):
                             end = first
                             break
@@ -436,6 +480,8 @@ class OutputParser:
                         self.tool_call_parse_fallbacks += 1
                         self.buffer = ""
                         self.channel = "content"
+                    else:
+                        self._hold_tool_buffer()
                     break
                 raw = self.tool_open + self.buffer[:end] + self.tool_close
                 try:
@@ -515,8 +561,13 @@ class OutputParser:
                     self._content(events, marker)  # a quoted example
                 else:
                     self.channel = markers[marker]
-                    if marker == self.tool_open and not self._shown_text:
-                        self._pending_space = ""
+                    if marker == self.tool_open:
+                        self._tool_chunks = []
+                        self._tool_buffered_chars = 0
+                        self._tool_first_close = -1
+                        self._tool_first_error = None
+                        if not self._shown_text:
+                            self._pending_space = ""
                     if marker == THINKING_CLOSE_MARKER:
                         self._reasoning_open = False
                         self._drop_separator = bool(self.think_close_separator)
