@@ -1,0 +1,66 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "Opt-in same-executor ordinary B1 exact decode checkpoint and resume for capability-owned KV and recurrent state",
+  "recorded_at": "2026-10-15",
+  "origin": "Original MLX2 implementation; no peer source copied. Built on current GenerationBatch ownership, native cache safetensors serialization and the retained I/O ownership mechanism recorded in peer-survey-io-resilience-20261015.json.",
+  "source_revision": "2db68c1bb",
+  "license": "Apache-2.0",
+  "implemented": true,
+  "selected_by_default": false,
+  "qualified": false,
+  "performance_qualified": false,
+  "modifications": [
+    "Keep the complete ordinary GenerationBatch control plane: already sampled next token/logprobs, lane RNG, callable sampler/processors, stop matcher prefix, token context, counters and execution width. Park only exact evaluated BatchKVCache backing state.",
+    "Store immutable cache bytes in a private unlinked TemporaryFile through one bounded I/O owner. Admit two payload windows plus bounded safetensors header allowance; retain descriptors/payloads until timed-out workers drain, and refuse replacement while ownership remains.",
+    "Bind restore to the originating BatchGenerator, model identity, request/revision/cache key and ordinary B1 SDPA numerical law. Verify staged bytes digest and complete cache geometry, then attach the original control object without a constructor/prompt-tail forward or RNG reconstruction.",
+    "Stage the empty executor before capture; restore exact state if ledger detach fails. If rollback fails, terminate the affected lane. Cancelled queued checkpoints and server-owned corrupt/failed restores close ownership and return cancellation/503 without orphaning the worker.",
+    "Add explicit server memory_preemption.exact_decode_checkpoint=false policy. Only capability-supported ordinary width-one routes opt in; all decode prompt replay remains refused. Pressure-triggered B1 capture is reachable as well as diagnostic fault injection.",
+    "Separate exact checkpoint/resume counts from replay counts and expose implemented/selected/observed-used/qualified route receipt state. Make initial/resume lane-attachment metrics best effort with a dedicated failure counter so telemetry cannot terminate an attached live lane.",
+    "Extend eligibility through cache-owned contracts rather than model names. Exact base ArraysCache recurrent state and exact BatchKVCache SDPA state each declare capture/restore behavior; speculative rollback state, cache subclasses, non-SDPA KV and right-padded KV remain refused.",
+    "Make checkpoint byte admission and geometry validation recursive across nested recurrent state, including exact list/tuple/mapping structure, array shapes and dtypes. Restore reconstructs recurrent host mirrors and the KV padding/backend contract only after digest and full geometry validation."
+  ],
+  "mlx2_paths": [
+    "src/mlx2/runtime/decode_checkpoint.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/memory_preemption.py",
+    "src/mlx2/serving.py",
+    "scripts/probe_exact_decode_checkpoint.py",
+    "tests/test_exact_decode_checkpoint_cpu.py",
+    "tests/test_peer_exact_checkpoint_review_cpu.py",
+    "tests/test_peer_exact_checkpoint_boundaries_cpu.py",
+    "tests/test_suspend_replay.py"
+  ],
+  "validation": {
+    "focused_cpu_command": "MLX2_PREFLIGHT_CPU_ONLY=1 PYTHONPATH=$PWD/src private artifact -m pytest -q -o addopts= tests/test_exact_decode_checkpoint_cpu.py tests/test_peer_exact_checkpoint_review_cpu.py tests/test_suspend_replay.py tests/test_peer_survey_io_deadlines_cpu.py tests/test_peer_survey_ple_io_cpu.py tests/test_peer_survey_persistence_cpu.py",
+    "focused_cpu_result": "81 passed in 7.77 seconds; final exact checkpoint file including the real single-lane pressure-trigger regression passed all 14 tests in 3.57 seconds",
+    "cross_review": "Numerical/state subagent independently reviewed transaction boundaries, same-executor identity, stateful processor and partial stop matcher preservation, geometry refusal/retry, and telemetry failures; expanded 88-test checkpoint/terminal/publication/reserve/fairness run passed.",
+    "mixed_cache_cpu_follow_up": {
+      "command": "MLX2_PREFLIGHT_CPU_ONLY=1 PYTHONPATH=$PWD/src private artifact -m pytest -q -o addopts= tests/test_peer_exact_checkpoint_boundaries_cpu.py tests/test_exact_decode_checkpoint_cpu.py tests/test_peer_exact_checkpoint_review_cpu.py; plus tests/test_host_prompt_cache.py tests/test_recurrent_state_codec.py tests/test_arrays_cache_unpadded_mask.py tests/test_arrays_cache_full_rewind.py",
+      "result": "27 checkpoint tests and 45 cache serialization/recurrent-state tests passed on CPU",
+      "scope": "Tiny Qwen3.8-style four-layer hybrid model with both ArraysCache and BatchKVCache. Greedy and temperature-0.8 sampled arms each resumed nine times across a 256-token KV allocation boundary with exact tokens, full logprobs, RNG draw count, pending sample and control identity. Server fault injection observed the capability-owned route receipt. Cancelled and digest-corrupt mixed checkpoints closed their descriptors and the emptied executor accepted a fresh request. Active speculative recurrent state is refused before capture; a changed recurrent-cache contract is refused while retaining the exact checkpoint for a successful retry.",
+      "qualification": false,
+      "gpu_used": false
+    },
+    "metal_diagnostic": {
+      "runner": "Root agent under validated CPG/radio lease and paired locks; I/O subagent did not claim or use GPU",
+      "device": "Apple M3 Pro",
+      "mlx_version": "0.32.2.dev20260919+39400a0d4",
+      "task": "0c6670e4bfe94448b4d6fd3b8082eae3",
+      "generation": 5,
+      "window_utc": "2026-10-15 15:43:26 to 15:43:27",
+      "evidence": "private validation evidence",
+      "result": "4/4 tiny real executor cases passed: greedy/sampled temperature0.8 crossed with normal/cross-pause stop prefix; 11 exactness and refusal checks per case",
+      "tested_checkpoint_source_sha256": "8583cc0311697dd0cf263df593607853ea60ce20dde98593464768eb551281a0",
+      "post_probe_source_change": "Only a SIM115 lint-suppression comment was added to decode_checkpoint.py after the probe. No executable checkpoint code changed.",
+      "lease_and_locks_released": true,
+      "qualification": false
+    },
+    "lint": "Ruff passes for new I/O/checkpoint/probe and uniquely named tests; git diff --check passes"
+  },
+  "limits": [
+    "Same-process, same-executor, width-one ordinary SDPA with exact base BatchKVCache and base ArraysCache only. No process-restart, cache subclasses, rotating/ring, native-paged, speculative rollback state, multimodal, LoRA, persistent activation-input, approximate-cache or cohort checkpoint support is claimed.",
+    "Private spill requires admitted serialization/restore headroom; capture declines safely if its staging window cannot fit. It retains small request/control objects in memory and is not an entirely memory-free suspension.",
+    "The tiny CPU/Metal evidence demonstrates this mechanism and numerical continuation. The mixed-cache extension has CPU evidence only; the complete Qwen3.8-27B artifact still requires an owned M3 long-context, repeated pressure/suspend, greedy/sampled and failure-cleanup run. No full-artifact qualification, performance, arbitrary model behavior or broader lane widths is claimed. The route remains unqualified and default-off.",
+    "An uninterruptible syscall is not cancelled. Its owner remains quarantined until return. Caller waits for payload I/O and worker draining are bounded; an underlying worker may remain retained indefinitely. Final descriptor close remains synchronous, so universal bounded shutdown is not claimed."
+  ]
+}

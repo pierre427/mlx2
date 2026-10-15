@@ -212,7 +212,10 @@ def load_prompt_cache(file_name, return_metadata=False):
         List[Any] or Tuple[List[Any], Dict[str, str]]: The prompt cache and
             the metadata if requested.
     """
-    (arrays, cache_metadata) = mx.load(file_name, return_metadata=True)
+    # APC refault reads bounded bytes off-thread, then deserializes on the
+    # model thread. File-like inputs have no suffix for MLX format dispatch.
+    options = {"format": "safetensors"} if hasattr(file_name, "read") else {}
+    (arrays, cache_metadata) = mx.load(file_name, return_metadata=True, **options)
     cache_metadata = tree_unflatten(list(cache_metadata.items()))
     (info, metadata, classes) = cache_metadata[:3]
     arrays = dict(arrays)
@@ -2265,6 +2268,38 @@ class ArraysCache(_BaseCache):
             self.left_padding = mx.array(host_left_padding)
             self._host_left_padding = (self.left_padding, host_left_padding)
 
+    def exact_decode_checkpoint_contract(self):
+        """Declare exact ordinary-checkpoint support for the base recurrent cache.
+
+        Speculative rollback state is intentionally excluded: it is transient
+        execution state rather than committed ordinary decode state, and is not
+        part of ``state``/``meta_state`` serialization.
+        """
+        if (
+            type(self) is not ArraysCache
+            or self.speculating
+            or self._rollbacks
+            or self._rollback_position
+            or self._rollback_positions is not None
+        ):
+            return None
+        return ("arrays-cache-v1",)
+
+    def restore_exact_decode_checkpoint(self, contract):
+        if contract != ("arrays-cache-v1",):
+            raise ValueError("exact decode checkpoint recurrent-cache contract changed")
+        if (
+            self.speculating
+            or self._rollbacks
+            or self._rollback_position
+            or self._rollback_positions is not None
+        ):
+            raise ValueError("restored recurrent cache contains speculative state")
+        # Host mirrors are acceleration-only and must be rebuilt against the
+        # restored arrays rather than retained from another cache object.
+        self._host_lengths = None
+        self._host_left_padding = None
+
     def start_speculation(self, rollback_window: Optional[int] = None):
         self.speculating = True
         self._rollback_window = max(
@@ -3696,6 +3731,42 @@ class BatchKVCache(_BaseCache):
         self._idx = 0
         self._right_padding = None
         self._configure_attention_backend(attention_backend)
+
+    def exact_decode_checkpoint_contract(self):
+        """Return the complete supported ordinary B1 SDPA restore contract."""
+        if (
+            type(self) is not BatchKVCache
+            or self.attention_backend != "sdpa"
+            or self._right_padding is not None
+        ):
+            return None
+        return (
+            "batch-kv-sdpa-v1",
+            tuple(self._padding_floor()),
+            getattr(self, "_unpadded_ref", None) is self.left_padding,
+        )
+
+    def restore_exact_decode_checkpoint(self, contract):
+        if not isinstance(contract, (tuple, list)):
+            raise TypeError("exact decode checkpoint KV-cache contract changed")
+        try:
+            tag, floor, unpadded = contract
+        except ValueError:
+            raise ValueError(
+                "exact decode checkpoint KV-cache contract changed"
+            ) from None
+        if tag != "batch-kv-sdpa-v1":
+            raise ValueError("exact decode checkpoint KV-cache contract changed")
+        if (
+            not isinstance(floor, (tuple, list))
+            or len(floor) != int(self.left_padding.size)
+            or any(type(value) is not int for value in floor)
+            or type(unpadded) is not bool
+        ):
+            raise ValueError("exact decode checkpoint KV padding contract changed")
+        self._configure_attention_backend("sdpa")
+        self._host_padding_floor = (self.left_padding, list(floor))
+        self._unpadded_ref = self.left_padding if unpadded else None
 
     def _configure_attention_backend(self, attention_backend=None):
         backend = attention_backend
