@@ -51,7 +51,7 @@ def test_profiles_are_read_from_exact_family_producers_and_map_to_server_flags(
     assert native["max_context"] == 8192
     assert native["max_lanes"] == 2
     assert native["max_inflight"] == 4
-    assert native["cache_bytes"] == 2 << 30
+    assert native["cache_bytes"] == 16 << 30
     assert "--ordinary" not in native_args
 
 

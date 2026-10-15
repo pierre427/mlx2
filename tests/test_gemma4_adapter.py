@@ -81,7 +81,7 @@ def test_mismatched_model_or_quantization_fails_before_load(tmp_path):
     config["audio_config"] = None
     config["quantization"] = {"bits": 4, "group_size": 64, "mode": "affine"}
     (tmp_path / "config.json").write_text(json.dumps(config))
-    with pytest.raises(ValueError, match="affine 8-bit"):
+    with pytest.raises(ValueError, match="affine 8-bit or mxfp8"):
         inspect_gemma4_artifact(tmp_path)
 
 
@@ -105,6 +105,70 @@ def test_conversion_provenance_must_match_resolved_variant(tmp_path):
         "source_revision": "24548b62aa021d562695c04aaf7758a1ea47990b",
     }))
     with pytest.raises(ValueError, match="conversion source"):
+        inspect_gemma4_artifact(tmp_path)
+
+
+def test_instruct_conversions_are_accepted_per_variant(tmp_path):
+    # Pierre, 2026-10-14: serve the instruct 26B-A4B as MLX mxfp8 (group 32).
+    config = _artifact(tmp_path, sparse=True)
+    config["quantization"] = {"bits": 8, "group_size": 32, "mode": "mxfp8"}
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    (tmp_path / "source-and-quantization.json").write_text(json.dumps({
+        "source_repo": "google/gemma-4-26B-A4B-it",
+        "source_revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+    }))
+    artifact = inspect_gemma4_artifact(tmp_path)
+    assert artifact["precision"] == "mlx-mxfp8"
+    assert artifact["source_revision"] == "4d7ae4984b7db7de8f8457170b3f1a419ee76d52"
+    dense = tmp_path / "dense"
+    dense.mkdir()
+    config = _artifact(dense, sparse=False)
+    config["quantization"] = {"bits": 8, "group_size": 32, "mode": "mxfp8"}
+    (dense / "config.json").write_text(json.dumps(config))
+    (dense / "source-and-quantization.json").write_text(json.dumps({
+        "source_repo": "google/gemma-4-26B-A4B-it",
+        "source_revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+    }))
+    with pytest.raises(ValueError, match="conversion source"):
+        inspect_gemma4_artifact(dense)
+    # The 31B instruct source is pinned for the dense variant (affine q8).
+    config["quantization"] = {"bits": 8, "group_size": 64, "mode": "affine"}
+    (dense / "config.json").write_text(json.dumps(config))
+    (dense / "source-and-quantization.json").write_text(json.dumps({
+        "source_repo": "google/gemma-4-31B-it",
+        "source_revision": "842da3794eaa0b77d5f08bae87a17459d91ff475",
+    }))
+    assert inspect_gemma4_artifact(dense)["precision"] == "mlx-affine-8bit"
+
+
+def test_pinned_prequantized_download_is_accepted_only_at_its_revision(tmp_path):
+    # Pierre, 2026-10-14: serve mlx-community's 8-bit build as downloaded.
+    config = _artifact(tmp_path, sparse=True)
+    config["quantization"] = {"bits": 8, "group_size": 64, "mode": "affine"}
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    record = {
+        "prequantized_repo": "mlx-community/gemma-4-26b-a4b-it-8bit",
+        "prequantized_revision": "33c6d23798a0af159529890f79329206dbfbd73c",
+    }
+    (tmp_path / "source-and-quantization.json").write_text(json.dumps(record))
+    artifact = inspect_gemma4_artifact(tmp_path)
+    assert artifact["precision"] == "mlx-affine-8bit"
+    assert artifact["source_revision"] == record["prequantized_revision"]
+    record["prequantized_revision"] = "0" * 40
+    (tmp_path / "source-and-quantization.json").write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="conversion source"):
+        inspect_gemma4_artifact(tmp_path)
+
+
+@pytest.mark.parametrize("quant", [
+    {"bits": 8, "group_size": 64, "mode": "mxfp8"},
+    {"bits": 4, "group_size": 32, "mode": "mxfp4"},
+])
+def test_other_quantizations_are_refused(tmp_path, quant):
+    config = _artifact(tmp_path, sparse=True)
+    config["quantization"] = quant
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="affine 8-bit or mxfp8"):
         inspect_gemma4_artifact(tmp_path)
 
 
@@ -221,12 +285,13 @@ def test_prepared_media_route_requires_complete_apcv2_identity():
     assert adapter.validate_prepared_media_route(video)["apcv2_exact"] is True
 
 
-def _served_adapter(cls, encoded):
+def _served_adapter(cls, encoded, chat_template="{{ messages }}"):
     """An adapter shell with a fake tokenizer: no weights, no mlx-vlm."""
     adapter = object.__new__(cls)
-    tokenizer = SimpleNamespace(bos_token_id=2)
+    tokenizer = SimpleNamespace(bos_token_id=2, chat_template=None)
     adapter.processor = SimpleNamespace(
         tokenizer=tokenizer,
+        chat_template=chat_template,
         apply_chat_template=lambda messages, **_: messages[-1]["content"],
     )
     adapter.tokenizer = SimpleNamespace(encode=lambda text, add_special_tokens: list(encoded))
@@ -244,6 +309,13 @@ def test_text_prompts_start_with_bos_exactly_once(cls):
     ) == [2, 818, 5279]
     already = _served_adapter(cls, [2, 818])
     assert already.prompt_tokens({"prompt": "<bos>The"}) == [2, 818]
+    # A base checkpoint (no chat template) still serves completions with
+    # <bos>, but refuses chat: mlx-vlm would join the raw message text and the
+    # base model would continue it (Gemma 4 26B-A4B base, 2026-10-14).
+    base = _served_adapter(cls, [818, 5279], chat_template=None)
+    assert base.prompt_tokens({"prompt": "The capital"}) == [2, 818, 5279]
+    with pytest.raises(ValueError, match="no chat template"):
+        base.prompt_tokens({"messages": [{"role": "user", "content": "The capital"}]})
     # Processor-built media prompts already carry their own ids untouched.
     prepared = {
         "messages": [],

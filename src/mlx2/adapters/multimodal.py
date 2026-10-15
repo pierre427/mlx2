@@ -78,13 +78,27 @@ class MediaFeatureCache:
             return {"entries": len(self.entries), "bytes": self.bytes, **self.counts}
 
 
-def install_media_feature_cache(model, cache: MediaFeatureCache, *, family: str):
+def install_media_feature_cache(
+    model, cache: MediaFeatureCache, *, family: str, per_item_reuse=False
+):
     """Cache evaluated vision projections at the model embedding boundary."""
+    if per_item_reuse and family != "minicpmo":
+        raise ValueError("per-item reuse requires the MiniCPM-o sequential contract")
     original = model.get_input_embeddings
 
     def cached_embeddings(bound, input_ids=None, pixel_values=None, **kwargs):
         key = kwargs.pop("_mlx2_vision_cache_key", None)
-        if key is not None and pixel_values is not None:
+        item_keys = kwargs.pop("_mlx2_vision_item_keys", None)
+        if per_item_reuse and item_keys is not None and pixel_values is not None:
+            import mlx.core as mx
+
+            from .minicpmo_feature_reuse import cached_sequential_features
+
+            kwargs["cached_image_features"] = cached_sequential_features(
+                bound, cache, pixel_values, kwargs.get("tgt_sizes"), item_keys,
+                array_module=mx,
+            )
+        elif key is not None and pixel_values is not None:
             features = cache.get(key)
             if features is None:
                 if family == "gemma3n":
@@ -249,6 +263,7 @@ class MiniCPMOExecutionPolicy:
     # sequential reference path unless an operator explicitly opts in.
     batch_vision_input: bool = False
     vision_batch_size: int = 1
+    per_item_feature_reuse: bool = False
     slice_mode: bool = True
     max_slice_nums: int = 9
     scale_resolution: int = 448
@@ -261,12 +276,14 @@ class MiniCPMOExecutionPolicy:
         slice_config = dict(config.get("slice_config") or {})
         batch_vision_input = False
         vision_batch_size = 1
+        per_item_feature_reuse = False
         if media_options is not None:
             if not isinstance(media_options, dict):
                 raise ValueError("minicpm_o_media policy must be an object")
             unknown = set(media_options) - {
                 "batch_vision_input",
                 "vision_batch_size",
+                "per_item_feature_reuse",
             }
             if unknown:
                 raise ValueError(
@@ -283,6 +300,11 @@ class MiniCPMOExecutionPolicy:
                 if type(value) is not int or not 1 <= value <= 64:
                     raise ValueError("vision_batch_size must be between 1 and 64")
                 vision_batch_size = value
+            if "per_item_feature_reuse" in media_options:
+                value = media_options["per_item_feature_reuse"]
+                if type(value) is not bool:
+                    raise ValueError("per_item_feature_reuse must be a boolean")
+                per_item_feature_reuse = value
             if batch_vision_input and vision_batch_size < 2:
                 raise ValueError(
                     "vision batching opt-in requires vision_batch_size >= 2"
@@ -294,6 +316,7 @@ class MiniCPMOExecutionPolicy:
         return cls(
             batch_vision_input=batch_vision_input,
             vision_batch_size=vision_batch_size,
+            per_item_feature_reuse=per_item_feature_reuse,
             slice_mode=bool(config.get("slice_mode", True)),
             max_slice_nums=int(slice_config.get("max_slice_nums", 9)),
             scale_resolution=int(
@@ -313,6 +336,10 @@ class MiniCPMOExecutionPolicy:
             raise ValueError("MiniCPM-o batch_vision_input must be a boolean")
         if type(self.vision_batch_size) is not int:
             raise ValueError("MiniCPM-o vision_batch_size must be an integer")
+        if type(self.per_item_feature_reuse) is not bool:
+            raise ValueError("MiniCPM-o per_item_feature_reuse must be a boolean")
+        if self.per_item_feature_reuse and self.batch_vision_input:
+            raise ValueError("MiniCPM-o per-item reuse requires sequential vision")
         if (
             self.vision_batch_size < 1
             or self.vision_batch_size > 64
@@ -383,6 +410,9 @@ class MiniCPMOExecutionPolicy:
         return {
             "batch_vision_input": self.batch_vision_input,
             "vision_batch_size": self.vision_batch_size,
+            # Default-off addition leaves existing qualified policy receipts
+            # unchanged; enabling it creates a distinct unqualified shape.
+            **({"per_item_feature_reuse": True} if self.per_item_feature_reuse else {}),
             "slice_mode": self.slice_mode,
             "max_slice_nums": self.max_slice_nums,
             "audio_chunk_length": self.audio_chunk_length,

@@ -17,7 +17,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-GEMMA4_31B = Path.home() / "mlx-models" / "gemma-4-31B-MLX-8bit"
+GEMMA4_31B = next(
+    (Path.home() / "mlx-models" / name
+     for name in ("gemma-4-31B-it-MLX-8bit", "gemma-4-31B-MLX-8bit")
+     if (Path.home() / "mlx-models" / name).is_dir()),
+    Path.home() / "mlx-models" / "gemma-4-31B-it-MLX-8bit",
+)
 QWEN25_VL = (
     Path.home() / ".cache/huggingface/hub/models--Qwen--Qwen2.5-VL-3B-Instruct"
     / "snapshots/66285546d2b821cf421d4f5eb2576359d3770cd3"
@@ -70,6 +75,7 @@ class _Gemma4Processor:
     """The pinned Gemma 4 processor pairs each marker with the next image."""
 
     image_token, video_token = "<|image|>", "<|video|>"
+    chat_template = "fake"
 
     def __init__(self):
         self.calls = 0
@@ -185,6 +191,16 @@ def gemma4_adapter():
 
     adapter = object.__new__(Gemma431BAdapter)
     adapter.processor = load_processor(GEMMA4_31B)
+    # A base conversion has no chat template and its chat requests fail
+    # closed; give it a minimal turn template so the marker guard, not the
+    # template check, is what these tests reach.
+    adapter.processor.chat_template = adapter.processor.chat_template or (
+        "{% for m in messages %}<start_of_turn>{{ m['role'] }}\n"
+        "{% if m['content'] is string %}{{ m['content'] }}{% else %}"
+        "{% for p in m['content'] %}{% if p['type'] == 'text' %}{{ p['text'] }}"
+        "{% else %}<|image|>{% endif %}{% endfor %}{% endif %}<end_of_turn>\n"
+        "{% endfor %}<start_of_turn>model\n"
+    )
     adapter.identity = {"fingerprint": "x"}
     adapter.media_feature_cache = MediaFeatureCache()
     return adapter

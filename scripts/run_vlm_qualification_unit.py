@@ -129,6 +129,9 @@ def server_argv(*, python, root, artifact, profile, host, port, policy_path):
     ]
     if profile.get("route_selection_source") == "explicit_flag":
         command.append("--ordinary")
+    if profile.get("int8_prefill") is not None:
+        # The producer's engine and the serving route select int8 prefill alike.
+        command.extend(("--int8-prefill", str(profile["int8_prefill"])))
     policy = profile.get("execution_policy")
     if policy is not None:
         with policy_path.open("x", encoding="utf-8") as stream:

@@ -381,6 +381,25 @@ def register_mlx_vlm_window_compaction():
     register_window_compactable_batch_cache(BatchRotatingKVCache)
 
 
+NO_CHAT_TEMPLATE = (
+    "this model has no chat template, so a chat request would reach it as raw "
+    "text; send a completions request (prompt) instead"
+)
+
+
+def require_chat_template(processor):
+    """Fail a chat render closed when the artifact ships no chat template.
+
+    mlx-vlm processors fall back to joining the message text when neither the
+    processor nor its tokenizer has a template; a base model then continues
+    the user's words instead of answering (Gemma 4 26B-A4B base, 2026-10-14).
+    """
+    tokenizer = getattr(processor, "tokenizer", None)
+    if not (getattr(processor, "chat_template", None)
+            or getattr(tokenizer, "chat_template", None)):
+        raise ValueError(NO_CHAT_TEMPLATE)
+
+
 class _MLXVLMAdapter:
     default_route = "ordinary"
     reasoning_effort_semantics = "boolean"
@@ -397,7 +416,7 @@ class _MLXVLMAdapter:
     VISION_FEATURE_CACHE_KEYS = ("_mlx2_vision_cache_key", "_image_key", "_video_key")
 
     def validate_prefill_inputs(self, request, remaining_tokens, prefill_input):
-        """Bind the projected-feature cache to the request's LoRA.
+        """Bind projected-feature caches to trusted tenant and LoRA identity.
 
         Serving attaches ``_mlx2_lora_fingerprint`` after prepare, and
         multi-LoRA may wrap the vision projector, so features computed under
@@ -405,11 +424,18 @@ class _MLXVLMAdapter:
         model (sweep 2026-10-06 G5-01).  APCv2 already scopes by it.
         """
         lora = request.get("_mlx2_lora_fingerprint")
-        if lora is None:
-            return prefill_input
+        scope = hashlib.sha256(json.dumps([
+            request.get("_mlx2_feature_cache_tenant", "default"), lora,
+        ], separators=(",", ":")).encode()).hexdigest()
         for name in self.VISION_FEATURE_CACHE_KEYS:
             if prefill_input.get(name) is not None:
-                prefill_input[name] = f"{prefill_input[name]}:lora={lora}"
+                prefill_input[name] = f"{prefill_input[name]}:scope={scope}"
+        item_keys = prefill_input.get("_mlx2_vision_item_keys")
+        if item_keys is not None:
+            prefill_input["_mlx2_vision_item_keys"] = tuple(
+                tuple(f"{key}:scope={scope}" for key in sample)
+                for sample in item_keys
+            )
         return prefill_input
 
     def execution_config(self, *, max_lanes, prefill_step):
@@ -503,6 +529,7 @@ class _MLXVLMAdapter:
         )
 
     def _render(self, messages):
+        require_chat_template(self.processor)
         processor_renderer = getattr(self.processor, "apply_chat_template", None)
         tokenizer_renderer = getattr(
             getattr(self.processor, "tokenizer", None), "apply_chat_template", None
@@ -835,6 +862,25 @@ class MiniCPMOAdapter(_MLXVLMAdapter):
     descriptor = MINICPMO
     sampling_defaults = MINICPMO_SAMPLING
 
+    def validate_prefill_inputs(self, request, remaining_tokens, prefill_input):
+        # Hash the actual processor inputs at the final CPU handoff. Never
+        # authorize reuse from a caller-supplied private key or trust flag.
+        prefill_input.pop("_mlx2_vision_item_keys", None)
+        if self.media_policy.per_item_feature_reuse:
+            from .minicpmo_feature_reuse import item_keys
+
+            keys = item_keys(
+                prefill_input.get("pixel_values"), prefill_input.get("tgt_sizes"),
+                namespace=json.dumps(
+                    [self.identity["fingerprint"], self.mlx_vlm_runtime,
+                     self.media_policy.receipt()], sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            if keys is not None:
+                prefill_input["_mlx2_vision_item_keys"] = keys
+        return super().validate_prefill_inputs(request, remaining_tokens, prefill_input)
+
     def cache_budget(self, *, mtp):
         from .mlx_vlm_memory import SlidingKVCacheBudget
 
@@ -875,8 +921,12 @@ class MiniCPMOAdapter(_MLXVLMAdapter):
         # distinct qualification receipts.
         self.policy = self.media_policy
         install_minicpmo_vision_batching(self.model, self.media_policy)
+        if self.media_policy.per_item_feature_reuse:
+            # Item granularity needs more slots, but preserves the same byte cap.
+            self.media_feature_cache = MediaFeatureCache(max_entries=256)
         install_media_feature_cache(
-            self.model, self.media_feature_cache, family="minicpmo"
+            self.model, self.media_feature_cache, family="minicpmo",
+            per_item_reuse=self.media_policy.per_item_feature_reuse,
         )
 
     def prepare_multimodal_request(self, request, *, file_loader=None):

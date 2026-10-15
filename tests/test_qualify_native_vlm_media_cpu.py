@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from mlx2.media_qualification import (
+    NATIVE_CONTINUOUS_BATCH_PROMPTS,
     NATIVE_VLM_SOURCE_REVISIONS,
+    classify_continuous_batch_trace,
     evaluate_encoder_batching_observation,
     evaluate_native_vlm_report,
 )
@@ -87,7 +89,7 @@ def _report(family):
                     "cached_tokens": cached,
                 },
             }
-    batch_prompts = ("Two plus two is", "Three plus three is")
+    batch_prompts = NATIVE_CONTINUOUS_BATCH_PROMPTS
 
     def batch_row(prompt, request_id, text, *, cold):
         return {
@@ -716,3 +718,161 @@ def test_native_continuous_batch_is_a_real_required_gate():
     report, expected = _report("gemma4")
     report["batch"]["rows"][0]["receipt"]["request_id"] = "other"
     assert _eval(report, expected)["continuous_batch"] is False
+
+
+def _token(token, alternate, margin):
+    """One greedy token: ``token`` leads ``alternate`` by ``margin`` nats."""
+    selected = -0.5
+    return {
+        "id": token,
+        "logprob": selected,
+        "top": [[token, selected], [alternate, selected - margin]],
+    }
+
+
+def _flip_report(*, margin=0.2, batched_margin=None, batched_top=None):
+    """Batched row 0 flips at position 1 of a three-token completion."""
+    report, expected = _report("gemma4")
+    reference, batched = report["batch"]["reference_rows"][0], report["batch"]["rows"][0]
+    reference["tokens"] = [_token(11, 99, 4.0), _token(21, 22, margin), _token(31, 32, 3.0)]
+    batched["tokens"] = [
+        _token(11, 99, 4.0),
+        _token(22, 21, margin if batched_margin is None else batched_margin),
+        _token(41, 42, 3.0),
+    ]
+    if batched_top is not None:
+        batched["tokens"][1]["top"] = batched_top
+    for row in (reference, batched):
+        row["receipt"]["completion_tokens"] = len(row["tokens"])
+    batched["text"] = "5"
+    return report, expected
+
+
+def test_native_continuous_batch_exact_rows_pass_without_token_evidence():
+    report, expected = _report("gemma4")
+    classified = classify_continuous_batch_trace(report["batch"])
+    assert classified["passed"] is True
+    assert {row["classification"] for row in classified["rows"].values()} == {"exact"}
+    assert _eval(report, expected)["continuous_batch"] is True
+
+
+def test_native_continuous_batch_accepts_a_recorded_near_tie_flip():
+    report, expected = _flip_report(margin=0.2)
+    assert _eval(report, expected)["continuous_batch"] is True
+    row = classify_continuous_batch_trace(report["batch"])["rows"][NATIVE_CONTINUOUS_BATCH_PROMPTS[0]]
+    assert row["classification"] == "near_tie"
+    assert row["first_divergence_index"] == 1
+    assert (row["reference_token_id"], row["batched_token_id"]) == (21, 22)
+    assert row["margins_nats"] == pytest.approx({"reference": 0.2, "batched": 0.2})
+    # A later finish-reason change is a consequence of the flip, not a new one.
+    report["batch"]["rows"][0]["finish_reason"] = "stop"
+    assert _eval(report, expected)["continuous_batch"] is True
+
+
+def test_native_continuous_batch_ignores_a_producer_written_label():
+    report, expected = _flip_report(margin=2.0)
+    report["continuous_batch_equivalence"] = {"passed": True}
+    report["batch"]["equivalence"] = {"passed": True}
+    assert _eval(report, expected)["continuous_batch"] is False
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        ({"margin": 2.0}, "first divergence is not a near tie"),
+        ({"margin": 0.2, "batched_margin": 2.0}, "first divergence is not a near tie"),
+        ({"margin": 0.51}, "first divergence is not a near tie"),
+        (
+            {"batched_top": [[22, -0.5], [77, -0.6]]},
+            "flipped tokens are not each other's recorded top-2 alternatives",
+        ),
+        (
+            {"batched_top": [[22, -0.5]]},
+            "token evidence is missing or malformed",
+        ),
+        (
+            {"batched_top": [[22, -0.5], [21, float("nan")]]},
+            "token evidence is missing or malformed",
+        ),
+        (
+            {"batched_top": [[22, -0.9], [21, -0.7]]},
+            "token evidence is missing or malformed",
+        ),
+        ({"margin": -0.2}, "a selected token is below its recorded alternative"),
+    ],
+)
+def test_native_continuous_batch_fails_confident_or_unbound_flips(kwargs, reason):
+    report, expected = _flip_report(**kwargs)
+    assert _eval(report, expected)["continuous_batch"] is False
+    row = classify_continuous_batch_trace(report["batch"])["rows"][NATIVE_CONTINUOUS_BATCH_PROMPTS[0]]
+    assert row == {**row, "classification": "failed", "reason": reason}
+
+
+@pytest.mark.parametrize("side", ["reference_rows", "rows"])
+def test_native_continuous_batch_fails_closed_without_token_evidence(side):
+    report, expected = _flip_report()
+    del report["batch"][side][0]["tokens"]
+    assert _eval(report, expected)["continuous_batch"] is False
+    report, expected = _report("gemma4")
+    report["batch"]["rows"][0]["text"] = "4 and later text"
+    assert _eval(report, expected)["continuous_batch"] is False
+    row = classify_continuous_batch_trace(report["batch"])["rows"][NATIVE_CONTINUOUS_BATCH_PROMPTS[0]]
+    assert row["reason"] == "token evidence is missing or malformed"
+
+
+def test_native_continuous_batch_token_trace_must_cover_the_receipt():
+    report, expected = _flip_report()
+    report["batch"]["rows"][0]["receipt"]["completion_tokens"] = 8
+    assert _eval(report, expected)["continuous_batch"] is False
+    report, expected = _flip_report()
+    del report["batch"]["reference_rows"][0]["receipt"]["completion_tokens"]
+    assert _eval(report, expected)["continuous_batch"] is False
+
+
+def test_native_continuous_batch_rejects_traces_without_a_token_flip():
+    # Identical ids cannot explain differing text.
+    report, expected = _flip_report()
+    report["batch"]["rows"][0]["tokens"] = [
+        dict(entry) for entry in report["batch"]["reference_rows"][0]["tokens"]
+    ]
+    assert _eval(report, expected)["continuous_batch"] is False
+    # A length-only divergence (one trace a prefix of the other) is not a flip.
+    report, expected = _flip_report()
+    batched = report["batch"]["rows"][0]
+    batched["tokens"] = [
+        dict(entry) for entry in report["batch"]["reference_rows"][0]["tokens"][:2]
+    ]
+    batched["receipt"]["completion_tokens"] = 2
+    assert _eval(report, expected)["continuous_batch"] is False
+    row = classify_continuous_batch_trace(report["batch"])["rows"][NATIVE_CONTINUOUS_BATCH_PROMPTS[0]]
+    assert row["reason"] == "token traces do not contain a token flip"
+
+
+def test_native_stream_drain_captures_per_token_top_two_evidence():
+    events = queue.Queue()
+    for event in (
+        {
+            "logprob": {
+                "id": 7,
+                "token": "a",
+                "bytes": [97],
+                "logprob": -0.1,
+                "top_logprobs": [
+                    {"id": 7, "token": "a", "bytes": [97], "logprob": -0.1},
+                    {"id": 8, "token": "b", "bytes": [98], "logprob": -0.3},
+                ],
+            }
+        },
+        {"delta": {"content": "a"}},
+        {"logprob": "malformed"},
+        {"finish_reason": "length", "receipt": {"completion_tokens": 2}},
+    ):
+        events.put(event)
+
+    result = _drain(SimpleNamespace(events=events, id="req-5"), capture_tokens=True)
+
+    assert result["text"] == "a"
+    assert result["tokens"] == [
+        {"id": 7, "logprob": -0.1, "top": [[7, -0.1], [8, -0.3]]},
+        {"id": None, "logprob": None, "top": None},
+    ]

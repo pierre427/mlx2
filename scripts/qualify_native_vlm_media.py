@@ -27,8 +27,20 @@ SETUP = {
     "max_lanes": 2,
     "max_inflight": 4,
     "max_context": 8192,
-    "prefill_step": 256,
-    "cache_bytes": 2 << 30,
+    # 512: int8 prefill engages only on chunks of >= 512 rows, so at 256 the
+    # Gemma 4 31B selected it (auto) but never ran it (feature_int8_prefill
+    # unobserved, 2026-10-15); 512 is also that adapter's own default.
+    "prefill_step": 512,
+    # 16 GiB: the dense Gemma 4 31B keeps ~0.9 MB of KV per token. At 2 GiB
+    # the original video was evicted before its replay (2026-10-14); at
+    # 8 GiB the generic run's protected entries left no room for the
+    # 4096-token rolling checkpoint, so it was rejected and never reused
+    # (publication_rejections 2, resident 7.0 of 8 GiB, 2026-10-15).
+    "cache_bytes": 16 << 30,
+    # The CLI default, so the companion records the int8 prefill selection the
+    # serving route makes (Gemma 4 31B dense 8-bit enables it; Pierre
+    # 2026-10-15); ServingEngine itself defaults to off.
+    "int8_prefill": "auto",
 }
 
 
@@ -514,12 +526,41 @@ def _apc_counter_delta(before, after, counter_keys):
     return delta
 
 
-def _drain(job):
+def _token_evidence(probability):
+    """Keep one ``logprob`` event's selected id and top alternatives.
+
+    The engine emits ``{"logprob": {"id", "logprob", "top_logprobs": [...]}}``
+    once per generated token, before that token's deltas. Malformed values are
+    kept as-is so the shared evaluator fails closed on them.
+    """
+    if not isinstance(probability, dict):
+        return {"id": None, "logprob": None, "top": None}
+    alternatives = probability.get("top_logprobs")
+    return {
+        "id": probability.get("id"),
+        "logprob": probability.get("logprob"),
+        "top": (
+            [
+                [item.get("id"), item.get("logprob")]
+                if isinstance(item, dict)
+                else None
+                for item in alternatives
+            ]
+            if isinstance(alternatives, list)
+            else None
+        ),
+    }
+
+
+def _drain(job, *, capture_tokens=False):
     content = []
+    tokens = []
     while True:
         event = job.events.get(timeout=120)
         if "error" in event:
             raise RuntimeError(str(event))
+        if capture_tokens and "logprob" in event:
+            tokens.append(_token_evidence(event["logprob"]))
         delta = event.get("delta")
         if isinstance(delta, dict):
             piece = delta.get("content")
@@ -532,12 +573,15 @@ def _drain(job):
         elif delta is not None:
             raise TypeError("serving delta must be text or a content mapping")
         if "finish_reason" in event:
-            return {
+            row = {
                 "finish_reason": event["finish_reason"],
                 "text": "".join(content),
                 "receipt": event.get("receipt"),
                 "request_id": getattr(job, "id", None),
             }
+            if capture_tokens:
+                row["tokens"] = tokens
+            return row
 
 
 def _clear_apc_for_isolated_baseline(engine):
@@ -652,6 +696,7 @@ def run_family(family, model_path, *, adapter_execution_policy=None):
     import mlx.core as mx
 
     mx.clear_cache()
+    from mlx2.media_qualification import NATIVE_CONTINUOUS_BATCH_PROMPTS
     from mlx2.serving import ServingEngine
 
     setup = dict(SETUP)
@@ -673,10 +718,19 @@ def run_family(family, model_path, *, adapter_execution_policy=None):
         ordinary = _drain(
             engine.submit({"prompt": "Reply with exactly VLM_READY", "max_tokens": 8})
         )
-        batch_prompts = ("Two plus two is", "Three plus three is")
+        batch_prompts = NATIVE_CONTINUOUS_BATCH_PROMPTS
 
         def batch_request(prompt):
-            return {"prompt": prompt, "temperature": 0, "max_tokens": 8}
+            # Per-token top-2 evidence lets the evaluator accept a near-tie
+            # first divergence and fail a confident one (Pierre 2026-10-15).
+            return {
+                "messages": [{"role": "user", "content": prompt}],
+                "enable_thinking": False,
+                "temperature": 0,
+                "max_tokens": 8,
+                "logprobs": True,
+                "top_logprobs": 2,
+            }
 
         def batch_prompt_sha(prompt):
             return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -684,7 +738,7 @@ def run_family(family, model_path, *, adapter_execution_policy=None):
         batch_reference = []
         for prompt in batch_prompts:
             _clear_apc_for_isolated_baseline(engine)
-            row = _drain(engine.submit(batch_request(prompt)))
+            row = _drain(engine.submit(batch_request(prompt)), capture_tokens=True)
             batch_reference.append(
                 {
                     **row,
@@ -700,7 +754,7 @@ def run_family(family, model_path, *, adapter_execution_policy=None):
         for prompt, job in jobs:
             batch_rows.append(
                 {
-                    **_drain(job),
+                    **_drain(job, capture_tokens=True),
                     "prompt": prompt,
                     "prompt_sha256": batch_prompt_sha(prompt),
                 }
@@ -855,6 +909,7 @@ def main(argv=None):
         )
         result["gpu_lease_owner"] = owner
         from mlx2.media_qualification import (
+            classify_continuous_batch_trace,
             evaluate_native_vlm_report,
         )
 
@@ -868,6 +923,11 @@ def main(argv=None):
             name: {"passed": value, "evidence": "recomputed_from_native_trace"}
             for name, value in sorted(checks.items())
         }
+        # Per-row exact/near-tie record for the report; the route loader
+        # recomputes the continuous_batch check from the raw rows instead.
+        result["continuous_batch_equivalence"] = classify_continuous_batch_trace(
+            result.get("batch")
+        )
         result["passed"] = bool(checks) and all(checks.values())
         result["status"] = (
             "candidate_checks_passed" if result["passed"] else "candidate_checks_failed"

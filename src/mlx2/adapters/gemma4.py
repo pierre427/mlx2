@@ -23,15 +23,37 @@ from .mlx_vlm import (
     _require_media_markers,
     _source,
     inspect_artifact,
+    require_chat_template,
 )
 
 _TOPOLOGIES = {
     "26b-a4b": {"layers": 30, "hidden": 2816, "moe": True, "experts": 128},
     "31b": {"layers": 60, "hidden": 5376, "moe": False, "experts": None},
 }
+# Pinned conversion sources per variant: the base checkpoints (no chat
+# template; chat fails closed) and the instruct checkpoints.
 _SOURCE_REVISIONS = {
-    "26b-a4b": ("google/gemma-4-26B-A4B", "24548b62aa021d562695c04aaf7758a1ea47990b"),
-    "31b": ("google/gemma-4-31B", "5bbc2fb1c1b2c611d06e3d9f23c170ba21659d89"),
+    "26b-a4b": {
+        ("google/gemma-4-26B-A4B", "24548b62aa021d562695c04aaf7758a1ea47990b"),
+        ("google/gemma-4-26B-A4B-it", "4d7ae4984b7db7de8f8457170b3f1a419ee76d52"),
+    },
+    "31b": {
+        ("google/gemma-4-31B", "5bbc2fb1c1b2c611d06e3d9f23c170ba21659d89"),
+        ("google/gemma-4-31B-it", "842da3794eaa0b77d5f08bae87a17459d91ff475"),
+    },
+}
+# Pinned third-party MLX builds served as downloaded, per variant: the
+# provenance file names the Hub repo and revision instead of a conversion.
+_PREQUANTIZED_REVISIONS = {
+    "26b-a4b": {
+        ("mlx-community/gemma-4-26b-a4b-it-8bit", "33c6d23798a0af159529890f79329206dbfbd73c"),
+    },
+    "31b": set(),
+}
+# Local conversions: affine 8-bit group 64, or MLX mxfp8 (group 32).
+_QUANTIZATIONS = {
+    (8, 64, "affine"): "mlx-affine-8bit",
+    (8, 32, "mxfp8"): "mlx-mxfp8",
 }
 _MEDIA_POLICY = {
     "family": "gemma4",
@@ -88,27 +110,35 @@ def inspect_gemma4_artifact(model_path):
             "Expected vision/video Gemma 4 artifact without an audio tower"
         )
     quant = config.get("quantization")
-    if quant and any(
-        quant.get(key) != value
-        for key, value in {"bits": 8, "group_size": 64, "mode": "affine"}.items()
-    ):
-        raise ValueError("Only the local affine 8-bit Gemma 4 conversion is supported")
+    precision = (
+        _QUANTIZATIONS.get(
+            (quant.get("bits"), quant.get("group_size"), quant.get("mode", "affine"))
+        )
+        if quant
+        else "bf16"
+    )
+    if precision is None:
+        raise ValueError(
+            "Only the local affine 8-bit or mxfp8 Gemma 4 conversions are supported"
+        )
     provenance = path / "source-and-quantization.json"
     if quant and not provenance.is_file():
         raise ValueError("Gemma 4 conversion source provenance is required")
     if provenance.is_file():
         source = json.loads(provenance.read_text())
-        expected_repo, expected_rev = _SOURCE_REVISIONS[variant]
-        if (source.get("source_repo"), source.get("source_revision")) != (
-            expected_repo,
-            expected_rev,
-        ):
+        declared = (source.get("source_repo"), source.get("source_revision"))
+        if "prequantized_repo" in source:
+            declared = (source.get("prequantized_repo"), source.get("prequantized_revision"))
+            pinned = _PREQUANTIZED_REVISIONS[variant]
+        else:
+            pinned = _SOURCE_REVISIONS[variant]
+        if declared not in pinned:
             raise ValueError(
                 "Gemma 4 conversion source does not match its declared model"
             )
-        artifact["source_revision"] = expected_rev
+        artifact["source_revision"] = declared[1]
     artifact["variant"] = variant
-    artifact["precision"] = "mlx-affine-8bit" if quant else "bf16"
+    artifact["precision"] = precision
     artifact["full_attention_layers"] = layers.count("full_attention")
     artifact["sliding_attention_layers"] = layers.count("sliding_attention")
     return artifact
@@ -520,8 +550,10 @@ class _Gemma4Adapter(_MLXVLMAdapter):
         return ids
 
     def _render(self, messages):
-        # Base Gemma 4 tokenizer files have no chat template; the processor
-        # handles them and preserves explicit media placeholders.
+        # Base Gemma 4 artifacts ship no chat template; their chat requests
+        # fail closed (completions still work).  The processor renders
+        # instruct templates and preserves explicit media placeholders.
+        require_chat_template(self.processor)
         render = getattr(self.processor, "apply_chat_template", None)
         if not callable(render):
             raise TypeError("Gemma 4 processor has no prompt renderer")

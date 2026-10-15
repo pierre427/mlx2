@@ -477,15 +477,143 @@ def _hex(s):
     )
 
 
-NATIVE_CONTINUOUS_BATCH_PROMPTS = ("Two plus two is", "Three plus three is")
+# Short chat prompts: the instruct checkpoints answer chat, while raw
+# completions take them off-template, where low-confidence tokens make the
+# batched-versus-single comparison meaningless (Gemma 4 26B-A4B, 2026-10-15).
+NATIVE_CONTINUOUS_BATCH_PROMPTS = (
+    "What is two plus two? Answer with one word.",
+    "What is three plus three? Answer with one word.",
+)
+CONTINUOUS_BATCH_EQUIVALENCE_SCHEMA = "mlx2.continuous-batch-equivalence.v1"
+# A batched-versus-single first divergence is accepted only at a near tie
+# (Pierre 2026-10-15: "we always accept near flips"). Same ceiling and
+# semantics as scripts/assess_apcv2_replay_equivalence.py DEFAULT_MARGIN_NATS.
+CONTINUOUS_BATCH_NEAR_TIE_NATS = 0.5
+_LOGPROB_TOLERANCE = 1e-6
 
 
-def _valid_continuous_batch_trace(batch):
+def _finite_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _continuous_batch_token_trace(row):
+    """Parse one row's per-token evidence, or ``None`` when it is unusable.
+
+    Each entry is ``{"id", "logprob", "top": [[id, logprob], [id, logprob]]}``
+    from the serving engine's per-token ``logprob`` event. The trace must cover
+    every generated token the receipt counts.
+    """
+    tokens = row.get("tokens")
+    count = (row.get("receipt") or {}).get("completion_tokens")
+    if (
+        not isinstance(tokens, list)
+        or not tokens
+        or type(count) is not int
+        or count != len(tokens)
+    ):
+        return None
+    trace = []
+    for entry in tokens:
+        if not isinstance(entry, dict):
+            return None
+        token = entry.get("id")
+        logprob = entry.get("logprob")
+        top = entry.get("top")
+        if (
+            type(token) is not int
+            or token < 0
+            or not _finite_number(logprob)
+            or not isinstance(top, list)
+            or len(top) != 2
+        ):
+            return None
+        alternatives = {}
+        for pair in top:
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                return None
+            alternative, alternative_logprob = pair
+            if (
+                type(alternative) is not int
+                or alternative < 0
+                or alternative in alternatives
+                or not _finite_number(alternative_logprob)
+            ):
+                return None
+            alternatives[alternative] = float(alternative_logprob)
+        if (
+            token in alternatives
+            and abs(alternatives[token] - logprob) > _LOGPROB_TOLERANCE
+        ):
+            return None
+        trace.append((token, alternatives))
+    return trace
+
+
+def _classify_continuous_batch_row(reference, batched):
+    if (
+        reference["text"] == batched["text"]
+        and reference["finish_reason"] == batched["finish_reason"]
+    ):
+        return {"classification": "exact"}
+
+    def failed(reason, **evidence):
+        return {"classification": "failed", "reason": reason, **evidence}
+
+    reference_trace = _continuous_batch_token_trace(reference)
+    batched_trace = _continuous_batch_token_trace(batched)
+    if reference_trace is None or batched_trace is None:
+        return failed("token evidence is missing or malformed")
+    index = next(
+        (
+            position
+            for position, (left, right) in enumerate(
+                zip(reference_trace, batched_trace)
+            )
+            if left[0] != right[0]
+        ),
+        None,
+    )
+    if index is None:
+        # Identical ids up to the shorter trace cannot explain differing
+        # output; a length-only divergence is not near-tie evidence.
+        return failed("token traces do not contain a token flip")
+    reference_token, reference_top = reference_trace[index]
+    batched_token, batched_top = batched_trace[index]
+    flip = {reference_token, batched_token}
+    evidence = {
+        "first_divergence_index": index,
+        "reference_token_id": reference_token,
+        "batched_token_id": batched_token,
+    }
+    if set(reference_top) != flip or set(batched_top) != flip:
+        return failed(
+            "flipped tokens are not each other's recorded top-2 alternatives",
+            **evidence,
+        )
+    margins = {
+        "reference": reference_top[reference_token] - reference_top[batched_token],
+        "batched": batched_top[batched_token] - batched_top[reference_token],
+    }
+    evidence["margins_nats"] = margins
+    if any(margin < -_LOGPROB_TOLERANCE for margin in margins.values()):
+        return failed("a selected token is below its recorded alternative", **evidence)
+    if any(margin > CONTINUOUS_BATCH_NEAR_TIE_NATS for margin in margins.values()):
+        return failed("first divergence is not a near tie", **evidence)
+    return {"classification": "near_tie", **evidence}
+
+
+def _classify_continuous_batch_trace_unchecked(batch):
+    result = {
+        "schema": CONTINUOUS_BATCH_EQUIVALENCE_SCHEMA,
+        "margin_ceiling_nats": CONTINUOUS_BATCH_NEAR_TIE_NATS,
+        "passed": False,
+        "rows": {},
+    }
     if not isinstance(batch, dict):
-        return False
+        return {**result, "reason": "batch trace is missing"}
     width = batch.get("peak_observed_width")
     if type(width) is not int or width < 2:
-        return False
+        return {**result, "reason": "batch never reached physical width two"}
     prompts = set(NATIVE_CONTINUOUS_BATCH_PROMPTS)
 
     def index_rows(rows, *, cold):
@@ -532,17 +660,49 @@ def _valid_continuous_batch_trace(batch):
     reference = index_rows(batch.get("reference_rows"), cold=True)
     concurrent = index_rows(batch.get("rows"), cold=False)
     if reference is None or concurrent is None:
-        return False
+        return {**result, "reason": "batch rows are malformed"}
     reference_rows, reference_ids = reference
     concurrent_rows, concurrent_ids = concurrent
     if reference_ids & concurrent_ids:
-        return False
-    return all(
-        reference_rows[prompt]["text"] == concurrent_rows[prompt]["text"]
-        and reference_rows[prompt]["finish_reason"]
-        == concurrent_rows[prompt]["finish_reason"]
-        for prompt in prompts
-    )
+        return {**result, "reason": "reference and batched request ids overlap"}
+    rows = {
+        prompt: _classify_continuous_batch_row(
+            reference_rows[prompt], concurrent_rows[prompt]
+        )
+        for prompt in NATIVE_CONTINUOUS_BATCH_PROMPTS
+    }
+    return {
+        **result,
+        "passed": all(row["classification"] != "failed" for row in rows.values()),
+        "rows": rows,
+    }
+
+
+def classify_continuous_batch_trace(batch):
+    """Recompute per-row batched-versus-single equivalence from raw traces.
+
+    Rows whose text and finish reason match the isolated reference are
+    ``exact``. Otherwise a row passes only as ``near_tie``: both token traces
+    are present and cover the receipt's completion tokens, the generated ids
+    agree before the first differing token, the two selected tokens are
+    exactly each side's recorded top-2, and both selected-minus-alternate
+    margins are within ``CONTINUOUS_BATCH_NEAR_TIE_NATS``. Anything else fails
+    closed. Never trusts a producer-written classification.
+    """
+    try:
+        return _classify_continuous_batch_trace_unchecked(batch)
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        return {
+            "schema": CONTINUOUS_BATCH_EQUIVALENCE_SCHEMA,
+            "margin_ceiling_nats": CONTINUOUS_BATCH_NEAR_TIE_NATS,
+            "passed": False,
+            "rows": {},
+            "reason": "batch trace is malformed",
+        }
+
+
+def _valid_continuous_batch_trace(batch):
+    return classify_continuous_batch_trace(batch)["passed"] is True
 
 
 NATIVE_VLM_MODALITIES = {

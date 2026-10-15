@@ -36,13 +36,14 @@ class VisionFeatureCertificate:
     prompt_sha256: str
     scope: str = "prompt_v1"
     tower_sha256: str | None = None
+    tenant_scope: str = "default"
 
     @classmethod
     def from_prepared(cls, *, family: str, artifact_fingerprint: str,
                       source_revision: str, processor_fingerprint: str,
                       adaptation_fingerprint: str, media_fingerprint: str,
                       prompt_tokens: list[int], scope: str = "prompt_v1",
-                      tower_sha256: str | None = None):
+                      tower_sha256: str | None = None, tenant_scope: str = "default"):
         fields = (family, artifact_fingerprint, source_revision,
                   processor_fingerprint, adaptation_fingerprint,
                   media_fingerprint)
@@ -57,11 +58,13 @@ class VisionFeatureCertificate:
         ).hexdigest()
         if scope not in ("prompt_v1", "tower_inputs_v1"):
             raise ValueError("unsupported vision feature reuse scope")
+        if not isinstance(tenant_scope, str) or not tenant_scope:
+            raise ValueError("vision feature tenant scope must be nonempty text")
         if scope == "tower_inputs_v1" and (not isinstance(tower_sha256, str)
                 or len(tower_sha256) != 64
                 or any(char not in "0123456789abcdef" for char in tower_sha256)):
             raise ValueError("tower input digest is required for tower-only reuse")
-        return cls(*fields, prompt_hash, scope, tower_sha256)
+        return cls(*fields, prompt_hash, scope, tower_sha256, tenant_scope)
 
 
 def tower_input_digest(family: str, values: dict, *, max_bytes: int = 512 << 20) -> str | None:
@@ -190,6 +193,7 @@ def certify_cold_prefill(request, remaining_tokens, prefill_input, *,
         source_revision=source_revision, processor_fingerprint=processor_fingerprint,
         adaptation_fingerprint=adaptation, media_fingerprint=media_identity,
         prompt_tokens=expected, scope=scope, tower_sha256=tower_sha256,
+        tenant_scope=request.get("_mlx2_feature_cache_tenant", "default"),
     )
     result["_mlx2_vision_feature_verified"] = True
     return result
@@ -208,7 +212,7 @@ def _key(certificate, *, family, artifact_fingerprint, source_revision,
                 certificate.family, certificate.artifact_fingerprint,
                 certificate.source_revision, certificate.processor_fingerprint,
                 certificate.adaptation_fingerprint, certificate.media_fingerprint,
-                certificate.tower_sha256)
+                certificate.tower_sha256, certificate.tenant_scope)
     if certificate.scope != "prompt_v1":
         return None
     return ("vision-features-v1", model_instance, certificate)

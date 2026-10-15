@@ -1,0 +1,46 @@
+{
+  "mechanism": "exact independent MiniCPM-o vision item reuse and trusted tenant partitions",
+  "decision": "original mlx2 cache orchestration over the existing source encoder; no upstream code copied",
+  "sources": [
+    {
+      "repository": "https://github.com/Blaizzy/mlx-vlm",
+      "revision": "67599f2e8ec31bf35cbb7b02794114f20844f0bb",
+      "paths": [
+        "mlx_vlm/models/minicpmo/minicpmo.py",
+        "mlx_vlm/models/minicpmo/processing_minicpmo.py"
+      ],
+      "license": "MIT",
+      "used": "verified source contract: processor NumPy items and target geometry feed independent width-one vision/resampler calls; source stacks complete outputs and owns final placeholder merge"
+    }
+  ],
+  "destination_paths": [
+    "src/mlx2/adapters/minicpmo_feature_reuse.py",
+    "src/mlx2/adapters/multimodal.py",
+    "src/mlx2/adapters/mlx_vlm.py",
+    "src/mlx2/adapters/vision_feature_reuse.py",
+    "src/mlx2/serving.py"
+  ],
+  "modifications": [
+    "Default-off MiniCPM-o per_item_feature_reuse policy is incompatible with batched encoder execution and creates a distinct effective policy receipt",
+    "Final CPU handoff discards caller item keys and derives bounded exact-content keys under current artifact/source/policy identity; no unsupported device-to-host conversion",
+    "Misses call the unchanged independent source encoder with one item, hits preserve original item order, and the original source performs final embedding merge",
+    "Authenticated tenant scope is overwritten before and after media preparation and joins existing whole-group, prompt and tower feature-cache keys as well as independent items",
+    "Existing default policy receipts and Gemma 3n encoder grouping remain unchanged"
+  ],
+  "validation": {
+    "kind": "focused CPU tests, source encoder seam with CPU tensor fixtures, no artifact loading or GPU use",
+    "tests": [
+      "tests/test_peer_vision_feature_cache_cpu.py",
+      "tests/test_peer_api_contracts_cpu.py",
+      "tests/test_minicpmo_vision_batch_policy_cpu.py",
+      "tests/test_minicpmo_media_alignment.py",
+      "tests/test_vision_feature_reuse_cpu.py",
+      "tests/test_sweep_20261006_adapters_other.py",
+      "tests/test_api_execution.py",
+      "tests/test_multimodal_prefill_contract_cpu.py",
+      "tests/test_smolvlm2_apcv2_cpu.py"
+    ],
+    "result": "86 pytest items passed (including isolated host suites), 1 existing fixture mel-filter warning; source encoder seam test ran, no skip"
+  },
+  "boundaries": "Implemented and CPU-tested only; default-off, no model qualification or measured performance. In-memory cache only; persistent tier requires a separate artifact-bound storage/retirement design. No generic splitting of Gemma, Qwen or Smol encoder batches. Trained text embeddings/reranking require an actual task-trained artifact and adapter; current pooled decoder input representations remain honestly labelled."
+}
