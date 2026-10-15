@@ -10,6 +10,8 @@ from typing import Any, Mapping
 
 class Capability(str, Enum):
     TEXT = "text"
+    EMBEDDINGS = "embeddings"
+    RERANK = "rerank"
     VISION = "vision"
     VIDEO = "video"
     AUDIO = "audio"

@@ -1,0 +1,12 @@
+MiniLM embedding adapter source attribution
+
+Transformers BERT reference implementation
+Copyright 2018 The Google AI Language Team Authors and The HuggingFace Inc. team.
+Copyright (c) 2018, NVIDIA CORPORATION. All rights reserved.
+Licensed under the Apache License, Version 2.0.
+https://www.apache.org/licenses/LICENSE-2.0
+
+Source: https://github.com/huggingface/transformers, v5.17.0
+MLX2 re-expresses inference-only BERT math in MLX. The exact sentence-transformer
+recipe, artifact revision, modifications and validation are recorded in
+minilm-embeddings.json. No model weights are included in this repository change.

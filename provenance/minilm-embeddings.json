@@ -1,0 +1,129 @@
+{
+  "status": "implemented and CPU reference-tested; selected only for exact pinned local artifact; unqualified",
+  "source": [
+    {
+      "repository": "https://github.com/huggingface/transformers",
+      "revision": "v5.17.0",
+      "paths": [
+        "src/transformers/models/bert/modeling_bert.py"
+      ],
+      "local_source_sha256": "52a08d21afefc9b1e63af46d91ddd0cc73f048019dffde40ea583347bf673a40",
+      "license": "Apache-2.0"
+    },
+    {
+      "repository": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2",
+      "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+      "paths": [
+        "README.md",
+        "config.json",
+        "modules.json",
+        "sentence_bert_config.json",
+        "1_Pooling/config.json",
+        "tokenizer.json",
+        "model.safetensors"
+      ],
+      "license": "Apache-2.0"
+    }
+  ],
+  "modifications": [
+    "Re-expressed inference-only bidirectional BERT math in MLX; omitted dropout, decoder/cross-attention branches and unused CLS pooler execution.",
+    "Adapter pins artifact content, validates exact tensor names/shapes/dtypes, uses serialized WordPiece tokenizer with 256-token truncation including special tokens, masked mean and L2 normalization.",
+    "Embedding-only route uses existing exclusive adapter-operation admission and never constructs autoregressive generators or APCv2 state. It refuses generation and rerank requests; a separate pinned MiniLM sequence-classification adapter now owns task-trained reranking.",
+    "Host-only forward-start accounting keeps implementation/qualification/selection/use receipts consistent before, during and after failed execution. Per-operation observed use counts only forwards started by that operation, not earlier requests."
+  ],
+  "validation": [
+    {
+      "date": "2026-10-15",
+      "kind": "focused CPU functional/reference tests; not preflight or qualification",
+      "passed": 247,
+      "failed": 0,
+      "modules": [
+        "tests/test_minilm_embeddings_cpu.py",
+        "tests/test_api_execution.py",
+        "tests/test_api_invalid_values.py",
+        "tests/test_default_routes.py",
+        "tests/test_peer_api_contracts_cpu.py",
+        "tests/test_serving_quiesce.py",
+        "tests/test_api_batch_lifecycle.py",
+        "tests/test_apcv2_sessions_persistence.py"
+      ],
+      "reference": {
+        "implementation": "locally installed Transformers 5.17.0 BertModel eager attention, torch CPU float32; cached pinned artifact only",
+        "max_absolute_vector_error": 2.253800630569458e-07,
+        "minimum_normalized_vector_dot_product": 0.9999998771482336,
+        "cases": "Mixed lengths, Unicode/accent folding, Chinese text, whitespace-only input and right truncation beyond 256 tokens; exact WordPiece IDs and retained-token counts."
+      },
+      "integration": "Actual ServingEngine/HTTP embeddings returns contextual trained vectors; generation, Responses, generation-tokenizer and rerank requests fail with 501; no APCv2 created; quiesce/resume and concurrent close retain operation ownership. Existing decoder embedding semantics remain covered.",
+      "adversarial": "Missing/extra/shape/dtype/offset/payload/header mismatch refusal, full payload corruption before tensor loading, generic BERT recipe drift refusal, no tensor/reference imports in inspection, zero/nonfinite/all-masked readout refusal, dimensions/input budgets and generation-option refusal.",
+      "source_sha256": {
+        "src/mlx2/adapters/minilm.py": "90bd1abb709433e7ed0912c8159e4d0b9606a691cf390df53186a8dd2ac0274a",
+        "src/mlx2/runtime/models/bert.py": "a7843452bf45eda496d81fc74c4fdabfddfddf61c6db054a837f7c5259531794",
+        "src/mlx2/adapters/registry.py": "3166db3e4d5826a3435ebbb9375e4ae5a047f5382eddbb1790c2718947451a48",
+        "src/mlx2/contracts.py": "3c762ecea7b1971d25312dd779bd371963b1f96eb82b44492df55998ac1406d6",
+        "src/mlx2/server.py": "f719b974d14dbcf5787197af1f227e51ebe756eb41479c3c86da958adc82017f",
+        "src/mlx2/serving.py": "4baff30b1336015a92b1d1e15bcb0a09f661ed2685a3bc83f0ca9563ccc80f35",
+        "tests/test_minilm_embeddings_cpu.py": "4451ecccac2df0a3399a4ae1f0de3ca3259bcf32af102fc4b73d88206183f8a2"
+      }
+    },
+    {
+      "date": "2026-10-15",
+      "kind": "focused CPU receipt/lifecycle follow-up; not preflight or qualification",
+      "passed": 248,
+      "failed": 0,
+      "errors": 0,
+      "modules": [
+        "tests/test_minilm_embeddings_cpu.py",
+        "tests/test_api_execution.py",
+        "tests/test_api_invalid_values.py",
+        "tests/test_default_routes.py",
+        "tests/test_peer_api_contracts_cpu.py",
+        "tests/test_serving_quiesce.py",
+        "tests/test_api_batch_lifecycle.py",
+        "tests/test_apcv2_sessions_persistence.py"
+      ],
+      "integration": "Initial selected/unqualified receipt, validation refusal without use, in-flight forward use, failure after actual execution, later refusal without per-operation use, successful HTTP use and preserved lifetime use after shutdown. Existing decoder embedding and exclusive-operation behavior remain covered.",
+      "source_sha256": {
+        "src/mlx2/adapters/minilm.py": "3cccb50fc4c35f8643f273894b54b5e4e3a28e7b7162445d406ac6ab49a9c439",
+        "src/mlx2/serving.py": "e16dd827f0ce66d50ddef8d1f65eab9fb6c833dbeabb0cc78e0b52f434a2c2d1",
+        "tests/test_minilm_embeddings_cpu.py": "0c815dee6840ad1ea6d9c93181fc928ab8e6fc0c29ab0bf7e276ebe40068b975"
+      }
+    },
+    {
+      "date": "2026-10-15",
+      "kind": "bounded public retrieval quality diagnostic on CPU",
+      "details": "provenance/minilm-retrieval-evaluation.json",
+      "qualification": false
+    },
+    {
+      "date": "2026-10-15",
+      "kind": "owned Apple M3 Pro MLX GPU artifact diagnostic; not preflight, performance or formal qualification",
+      "details": "Pinned embedding and reranker artifacts loaded with verified payloads under CPG generation 2027 and both GPU locks. Two embedding runs and two reranker runs were bit-exact; embeddings were finite normalized [3,384] with zero measured norm error; the relevant rollback document ranked first. Peak MLX memory was 216,332,953 bytes.",
+      "device": "Device(gpu, 0)",
+      "observed_used": true,
+      "qualified": false,
+      "performance_claim": false
+    }
+  ],
+  "limits": [
+    "An owned M3 MLX GPU diagnostic loaded and executed the exact embedding and reranker artifacts, but formal route qualification and controlled performance testing have not been run. CPU reference/HTTP tests and the bounded public SciFact evaluation are not broad retrieval-quality qualification.",
+    "Only the exact pinned all-MiniLM-L6-v2 bytes are accepted by this embedding adapter. Arbitrary BERT checkpoints, quantization, dimension truncation, reranking through this route, generation, streaming and APCv2/KV operations are unsupported; provenance/minilm-reranker.json records the separate relevance-trained route.",
+    "Inputs execute as independent width-one encoder forwards. This does not claim physical encoder batching or batched numerical invariance.",
+    "The existing decoder input-embedding means and cosine ranking remain separate unchanged contracts; they are not relabelled task-trained.",
+    "Embedding forwards are synchronous and are not interrupted mid-tensor-operation. Shutdown refuses callbacks that have not started and retains the adapter for active work; close uses the existing 30-second join timeout and can return while that owned worker finishes. No bounded execution-time or hard-cancellation guarantee is claimed."
+  ],
+  "implementation_paths": [
+    "src/mlx2/runtime/models/bert.py",
+    "src/mlx2/adapters/minilm.py",
+    "src/mlx2/adapters/registry.py",
+    "src/mlx2/contracts.py",
+    "src/mlx2/serving.py",
+    "src/mlx2/server.py"
+  ],
+  "artifact_binding": {
+    "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+    "weights_sha256": "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
+    "tensor_count": 104,
+    "load_contract": "Exact serialized recipe file hashes, bounded strict safetensors header schema, and full weight hash; MLX loads the same immutable bytes that passed verification. Tensor-free inspection labels payload verification false until load."
+  },
+  "notice": "provenance/minilm-embeddings.NOTICE"
+}

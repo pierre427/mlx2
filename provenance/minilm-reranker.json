@@ -1,0 +1,85 @@
+{
+  "status": "implemented; CPU reference/HTTP integration and owned M3 GPU artifact diagnostic tested; unqualified",
+  "sources": [
+    {
+      "repository": "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2",
+      "revision": "233902d25c440f23af6f7d6e94d2946bac0bee0a",
+      "paths": [
+        "README.md",
+        "config.json",
+        "tokenizer.json",
+        "model.safetensors"
+      ],
+      "license": "Apache-2.0"
+    },
+    {
+      "repository": "https://github.com/huggingface/transformers",
+      "revision": "v5.17.0",
+      "paths": [
+        "src/transformers/models/bert/modeling_bert.py:BertForSequenceClassification",
+        "src/transformers/models/bert/modeling_bert.py:BertPooler"
+      ],
+      "license": "Apache-2.0"
+    }
+  ],
+  "modifications": [
+    "Reuse the independently implemented MLX BERT encoder and add the actual trained tanh CLS pooler plus scalar relevance classifier. Exact artifact-byte pins and complete tensor schema. Width-one query/document pairs with 512-token longest-first right truncation; raw relevance logits with identity activation, not sigmoid probability or cosine similarity."
+  ],
+  "validation": [
+    {
+      "kind": "focused CPU tests",
+      "passed": 266,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 12.673,
+      "modules": [
+        "tests/test_minilm_reranker_cpu.py",
+        "tests/test_minilm_retrieval_evaluation_cpu.py",
+        "tests/test_minilm_embeddings_cpu.py",
+        "tests/test_api_execution.py",
+        "tests/test_api_invalid_values.py",
+        "tests/test_default_routes.py",
+        "tests/test_peer_api_contracts_cpu.py",
+        "tests/test_serving_quiesce.py",
+        "tests/test_api_batch_lifecycle.py",
+        "tests/test_apcv2_sessions_persistence.py"
+      ],
+      "reference": "Pinned local Transformers 5.17.0 BertForSequenceClassification, eager float32 attention, actual immutable cached artifact, eight query/document pairs covering normal, Unicode, and truncation cases. Exact pair token IDs/type IDs and retained token accounting; repeat determinism.",
+      "maximum_absolute_relevance_logit_error": 2.384185791015625e-06,
+      "integration": "Actual ServingEngine and HTTP rerank route returns sorted raw relevance logits, document selection, token usage and artifact/recipe/observed-use receipts. Unsupported embedding/generation/tokenization requests refuse, quiesce/resume/close retain operation ownership. Existing decoder cosine behavior remains unchanged.",
+      "negative_controls": "Metadata activation drift, missing/extra/wrong-shape/wrong-dtype weights and malformed/oversized input refuse. No trained head or route is fabricated.",
+      "preflight": false,
+      "formal_qualification": false,
+      "gpu_used": false
+    },
+    {
+      "kind": "bounded public CPU retrieval diagnostic",
+      "provenance": "provenance/minilm-retrieval-evaluation.json",
+      "result": "Reordering embedding top10 on 24 SciFact queries / 360 candidates decreased nDCG@10 from 0.7674088957813697 to 0.7449639865396994. No quality/default promotion."
+    },
+    {
+      "kind": "owned Apple M3 Pro MLX GPU artifact diagnostic",
+      "result": "Exact pinned embedding and reranker payloads loaded under CPG generation 2027 and both GPU locks. Two reranker executions were bit-exact and ranked the relevant rollback document first; MLX default device was gpu. Peak memory for both resident adapters and diagnostic work was 216,332,953 bytes.",
+      "observed_used": true,
+      "qualified": false,
+      "performance_claim": false
+    }
+  ],
+  "qualified": false,
+  "artifact": {
+    "repository": "cross-encoder/ms-marco-MiniLM-L6-v2",
+    "revision": "233902d25c440f23af6f7d6e94d2946bac0bee0a",
+    "weight_file": "model.safetensors",
+    "weight_bytes": 90870598,
+    "weight_sha256": "821d1aa69520101d6e0737f78a042ae25b19e5cb9160701909d10434f4aeb0ae",
+    "serialized_tensors": 106,
+    "weight_schema": "Exact F32 learned tensors and I64 position_ids; exact metadata byte hashes; immutable verified payload passed directly to MLX loader."
+  },
+  "limits": [
+    "Only the exact pinned artifact is supported; no arbitrary BERT classifier, remote code, implicit download, quantization or dynamic head loading.",
+    "Raw identity-activation relevance logits are not calibrated probabilities; no sigmoid is silently applied.",
+    "Width-one pairs with longest-first right truncation at 512 tokens; query and document share that budget.",
+    "Embedding, generation, KV/APCv2, streaming and generation policies are unsupported for this adapter. Existing generative cosine reranking remains a separate contract.",
+    "Owned M3 GPU execution is observed for the exact pinned artifacts. No full preflight, formal route qualification, performance claim or broad retrieval-quality qualification is made. The bounded scientific retrieval result does not support default reranking."
+  ]
+}

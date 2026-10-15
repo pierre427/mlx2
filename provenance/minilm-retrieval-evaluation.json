@@ -1,0 +1,48 @@
+{
+  "status": "bounded CPU evaluation completed; no broad quality qualification or default promotion",
+  "sources": [
+    {
+      "repository": "https://github.com/allenai/scifact",
+      "paths": [
+        "LICENSE.md",
+        "README.md"
+      ],
+      "licenses": {
+        "claims_and_annotations": "CC BY 4.0",
+        "abstracts": "ODC-By 1.0"
+      },
+      "original_authors": "David Wadden et al., Fact or Fiction: Verifying Scientific Claims, EMNLP 2020"
+    },
+    {
+      "repository": "https://huggingface.co/datasets/BeIR/scifact",
+      "revision": "a75ae049398addde9b70f6b268875f5cbce99089",
+      "paths": [
+        "corpus.jsonl.gz",
+        "queries.jsonl.gz"
+      ],
+      "packaging_license_metadata": "CC BY-SA 4.0"
+    },
+    {
+      "repository": "https://huggingface.co/datasets/BeIR/scifact-qrels",
+      "revision": "2938d17dc3b09882fdb8c12bbbe2e2dc0e75a029",
+      "paths": [
+        "test.tsv"
+      ]
+    }
+  ],
+  "modifications": [
+    "No dataset text is redistributed. Load exact public corpus/query/judgment bytes by SHA256, select a fixed diagnostic subset and compute independent lexical, trained embedding and conditional rerank metrics."
+  ],
+  "selection": "24 SHA256-ordered test query ids; all their gold documents + each query's full-corpus TF-IDF top10 +128 SHA256-ordered corpus ids; no model-dependent selection",
+  "limits": [
+    "Reduced corpus includes gold documents, making recall optimistic relative to full BEIR.",
+    "No tuning, full benchmark, task-wide quality qualification or performance measurement.",
+    "Reranking only reorders embedding top10; missing retrieved relevance remains missing.",
+    "Model-native truncation: embeddings256 and query/document pairs512 tokens."
+  ],
+  "qualified": false,
+  "performance_claim": false,
+  "script": "scripts/evaluate_minilm_retrieval_cpu.py",
+  "script_sha256": "3bd20ffd3c8529e75f2b4241da06283504be9ed20e7e3b5ac9ad5abd29ec6722",
+  "validation": "Reproducible public-dataset CPU evaluation tooling is included. Generated query results, ranking metrics, raw reports and local artifact bindings are excluded from this projection."
+}
