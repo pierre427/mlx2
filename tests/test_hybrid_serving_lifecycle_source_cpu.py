@@ -340,11 +340,21 @@ class ServingCompletionContracts(unittest.TestCase):
         self.assertIs(result['route_receipt'],env['native_route'])
     def test_hybrid_completion_uses_native_apc_skip_counter(self):
         branch=next(node for node in ast.walk(self.source) if isinstance(node,ast.If) and
-            any(isinstance(item,ast.AugAssign) and isinstance(item.target,ast.Subscript) and
-                isinstance(item.target.slice,ast.Constant) and item.target.slice.value=='apcv2_store_skipped_native'
+            any(isinstance(item,ast.Expr) and isinstance(item.value,ast.Call) and
+                isinstance(item.value.func,ast.Name) and item.value.func.id=='count_add' and
+                len(item.value.args)>1 and isinstance(item.value.args[1],ast.Constant) and
+                item.value.args[1].value=='apcv2_store_skipped_native'
                 for item in node.body))
         response=NS(finish_reason='length',mtp_receipt={'route':'native_hybrid_paged_b2'})
-        self.assertTrue(eval(compile(ast.Expression(branch.test),'serving.py','eval'),{'response':response}))
+        counters={}
+        metrics=load_file('native_lifecycle_host_counters','src/mlx2/host_counters.py')
+        env={'response':response,'self':NS(counts=counters),'count_add':metrics.count_add}
+        predicate=compile(ast.Expression(branch.test),'serving.py','eval')
+        self.assertTrue(eval(predicate,env))
+        exec(compile(ast.Module(body=branch.body,type_ignores=[]),'serving.py','exec'),env)
+        self.assertEqual(counters,{'apcv2_store_skipped_native':1})
+        response.mtp_receipt={'route':'continuous_batched_self_mtp'}
+        self.assertFalse(eval(predicate,env))
     def test_unequal_output_caps_fit_pinned_upper_bound(self):
         function=next(node for node in self.source.body if isinstance(node,ast.FunctionDef) and
                       node.name=='_hybrid_output_caps_match')

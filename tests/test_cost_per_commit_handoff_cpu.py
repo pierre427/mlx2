@@ -459,6 +459,9 @@ def _cost_package(uid):
         num_draft=3,
         ntoks=5,
         seed_h=None,
+        numerical_schedule_changed=True,
+        numerical_initial_geometry=("self_mtp", 1, 4, "test"),
+        numerical_last_geometry=("self_mtp", 2, 4, "test"),
         stats=SimpleNamespace(total_emitted=5, draft_accepted=4, draft_proposed=6),
     )
     return SimpleNamespace(
@@ -542,6 +545,8 @@ def test_static_handoff_releases_cost_state_into_its_receipt():
     batch._handoff_all_to_plain(decision={"reason": "width"}, projected_width=4)
     assert 5 not in batch._cost_handoff_states
     evidence = package.handoff_receipt["cost_per_commit_handoff"]
+    assert package.handoff_receipt["numerical_schedule_changed"] is True
+    assert package.handoff_receipt["numerical_last_geometry"][1] == 2
     assert evidence["handoff_triggered"] is False
     assert evidence["ordinary"]["1"]["samples"] == 1
 
@@ -553,6 +558,7 @@ def test_fallback_releases_cost_state_into_its_receipt():
     batch._memory_queued.add(6)
     assert batch.demote_oldest_paused_to_plain() == 6
     assert package.handoff_receipt["transition"] == "fallback"
+    assert package.handoff_receipt["numerical_schedule_changed"] is True
     assert 6 not in batch._cost_handoff_states
     evidence = package.handoff_receipt["cost_per_commit_handoff"]
     assert evidence["ordinary"]["1"]["samples"] == 1

@@ -1,0 +1,23 @@
+{
+  "component": "Shared-prefix and multi-tenant scheduling fairness review",
+  "implementation": "Original regression coverage; no production scheduler or default change",
+  "source_repository": "mlx2 local current source",
+  "source_paths": [
+    "src/mlx2/serving.py:_select_inflight_prefix_leader, prefix_wait_ready, admission selection",
+    "src/mlx2/runtime/adaptive_policy.py:PrefillOrder, DecodeTimeFairness"
+  ],
+  "license": "Original mlx2 code; repository license",
+  "destination_paths": [
+    "tests/test_peer_shared_prefix_fairness_cpu.py"
+  ],
+  "findings": [
+    "No concrete starvation defect found: ready prefix followers have priority, but the bounded waiter set cannot be replenished without first consuming incoming work and each request waits only once.",
+    "Tenant-scoped namespaces prevent unrelated requests from attaching to a foreign leader. Publication, leader completion/removal, capture failure, cancellation, and bounded timeout release waits.",
+    "Existing SRPT max-bypass tests cover continuing short arrivals; decode fairness repays finite prefill debt and defers stale host gaps only once per decode gap."
+  ],
+  "validation": {
+    "new_real_serving_regressions": "4 passed: ordinary/native MTP crossed with default/SRPT, three cold shared-prefix followers, a decoding tenant and three other short-traffic tenants; exact budgets complete, unrelated tenant first-token and inter-token gaps are bounded in scheduler rounds, checkpoint reuse succeeds and wait ledgers drain.",
+    "scope": "Tiny actual CPU model/executor/ServingEngine; no full-artifact fairness, latency or throughput claim.",
+    "combined_focused_regressions": "78 passed: new multi-tenant shared-prefix tests, existing in-flight prefix waits, SRPT, decode fairness executor tests, and analytic/actual factorized controller tests. CPU-only repair-tree run."
+  }
+}

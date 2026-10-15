@@ -1,0 +1,38 @@
+{
+  "mechanism": "Reconcile verified repairs from the isolated completeness branch",
+  "source_repository": "mlx2",
+  "source_revision": "6e6432f530562f0c7ba8041735ce95950dc4ee40",
+  "source_paths": [
+    "src/mlx2/adapters/muse_glimmer_config.py",
+    "tests/test_muse_glimmer_port.py",
+    "src/mlx2/host_counters.py",
+    "src/mlx2/serving.py",
+    "src/mlx2/runtime/gpu_keep_warm.py",
+    "tests/test_host_counters.py"
+  ],
+  "license": "Same as the mlx2 repository; no external code incorporated",
+  "modifications": [
+    "Port explicit rejection of unsupported or malformed Muse RoPE declarations and inconsistent aliases; preserve current-main implementation and defaults outside that validation",
+    "Adapt lock-owned host counters and atomic increment/max helpers to current serving, GPU ticker and agent compatibility telemetry; retain plain-mapping CPU fixture compatibility.",
+    "Make terminal completion idempotent before resource transfer; retain failed cleanup ownership with worker retries, admission/drain refusal and LoRA unbind-before-release ordering.",
+    "Close retained fanout resources before request removal; isolate metrics and usage failures from terminal delivery; synchronize receipt publication and snapshots.",
+    "Consume executor numerical-schedule change evidence before publishing generated APC state. Prompt-only snapshots remain eligible."
+  ],
+  "validation": {
+    "status": "focused CPU regressions passed; peer review completed for terminal/planning paths",
+    "tests": [
+      "tests/test_muse_glimmer_port.py",
+      "tests/test_host_counters.py",
+      "tests/test_peer_terminal_ownership_cpu.py",
+      "tests/test_peer_checkpoint_publication_cpu.py",
+      "tests/test_serving_retention.py",
+      "tests/test_serving_quiesce.py",
+      "tests/test_tenant_auth.py",
+      "tests/test_usage_cpu.py",
+      "tests/test_prometheus.py"
+    ],
+    "qualified": false,
+    "full_preflight": false
+  },
+  "remaining": "Selective mining only; media-serving and deliberation branches are not wholesale merged. Exact paused-decode state ownership is a separate feature."
+}

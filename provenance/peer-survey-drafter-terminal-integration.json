@@ -1,0 +1,39 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "Preserve terminal ownership across multi-drafter telemetry failures",
+  "recorded_at": "2026-10-15",
+  "origin": "Original MLX2 integration repair; no external source copied.",
+  "license": "Apache-2.0",
+  "integration_source": {
+    "repository": "mlx2",
+    "revision": "588d537775c8a67c14f54fb4321dbea2dd073b80",
+    "subsequent_integration_revision": "63c1eb69be59ab322aaf39c3e7e965e92e122f11",
+    "paths": [
+      "src/mlx2/drafter_metrics.py",
+      "src/mlx2/serving.py"
+    ]
+  },
+  "modifications": [
+    "Contain drafter receipt observation exceptions at the serving terminal seam so malformed telemetry cannot fail the worker or prevent request cleanup and terminal delivery.",
+    "Preserve incoming drafter_metric_failures accounting through HostCounters/count_add, receipt-log locking, and observations outside the lifecycle lock.",
+    "Retain incoming tenant_metrics_scoped behavior: verified scoped operation passes each job's tenant; unscoped operation aggregates under default.",
+    "After incoming conversion hardening made malformed counters nonthrowing, inject a failure of the observer itself through a tiny CPU ServingEngine. Verify both scoped and default aggregation paths preserve completion, owner cleanup, a second request, and exactly one diagnostic failure.",
+    "Independently verify malformed counters and depth maps are accepted by the actual hardened aggregator while valid fields reach both tenant and operator snapshots."
+  ],
+  "validation": {
+    "regression_before_fix": "On the original portfolio integration, the injected conversion error escaped the worker and emitted a 503. Subsequent upstream conversion hardening removes that trigger; the terminal regression now injects an independent observer failure.",
+    "focused_modules": [
+      "tests/test_peer_drafter_terminal_cpu.py",
+      "tests/test_peer_terminal_ownership_cpu.py",
+      "tests/test_drafter_metrics.py",
+      "tests/test_host_counters.py",
+      "tests/test_peer_exact_checkpoint_review_cpu.py"
+    ],
+    "result": "20 passed; CPU only"
+  },
+  "limits": [
+    "A failed observation can leave partial telemetry aggregates; it is counted and logged, without retry or duplicate completion."
+  ],
+  "qualified": false,
+  "performance_qualified": false
+}

@@ -1,0 +1,36 @@
+{
+  "source_repository": "mlx2 local reviewed integration branch branch",
+  "source_revision": "6e6432f530562f0c7ba8041735ce95950dc4ee40",
+  "source_paths": [
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/runtime/hybrid_speculative.py",
+    "tests/test_checkpoint_publication_safety_cpu.py",
+    "tests/test_self_mtp_numerical_schedule_cpu.py"
+  ],
+  "license": "Original mlx2 code; repository license",
+  "relationship": "Selectively reconciled retained local fixes; no wholesale branch merge or peer implementation copied.",
+  "destination_paths": [
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/runtime/hybrid_speculative.py",
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "src/mlx2/runtime/multi_lora.py"
+  ],
+  "modifications": [
+    "Carry observed self-MTP numerical geometry through terminal and ordinary-handoff receipts for generated-state publication gating.",
+    "Reject non-finite self-MTP hidden evidence before draft teacher forcing, checkpoint publication, and restored-seed use; retire failed construction without orphaning selected peers.",
+    "Original additional repairs stage external-draft cohort insertion atomically and include nested LoRA modules, parameter arrays, and row IDs in PLE compiled-graph identity.",
+    "Preserve current route defaults; leave unrelated fairness-tracing branch changes out.",
+    "Strengthen retained atomic-cohort poison cleanup to close all already prepared siblings even if one close raises, then preserve the first cleanup exception."
+  ],
+  "validation": {
+    "cpu": "329 focused CPU tests passed and one existing external-DFlash test was skipped because paired local qualification artifacts are absent. Covered SIMD/lane policy, real multiround external sampling, construction/rollback, hybrid cold-warm continuation, reachable PLE LoRA captures, composition provenance, observed native-to-ordinary numerical schedules, checkpoint poison guards, and handoff failures. Added declared atomic-cohort poison and failed-close cleanup tests afterward, validated with the focused checkpoint/handoff regression set.",
+    "gpu": "No GPU validation for checkpoint, sampling, or LoRA repairs; CPU component evidence is not full-route qualification.",
+    "limits": [
+      "Known-target stochastic law tests replace only final target logits with an analytic Markov law and use tiny real target/draft/cache routes; they do not establish full artifact-serving distribution equivalence.",
+      "LoRA evidence executes the actual PLE CPU-compiled chain and MultiLoRA slots; GPU artifact capture remains unqualified.",
+      "Cold/warm coverage uses real tiny recurrent/KV models and APCv2 on CPU; Metal batch-width numerical equivalence remains separate."
+    ],
+    "follow_up": "59 checkpoint/publication/numerical-schedule/atomic-handoff/failure-atomicity CPU regressions passed, including the three added atomic-cohort poison/failed-close cases."
+  }
+}

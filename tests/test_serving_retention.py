@@ -151,12 +151,12 @@ def test_ingress_deadline_expiry_retains_prepared_follower_for_normal_admission(
     retry_counter = next(
         node
         for node in ast.walk(run)
-        if isinstance(node, ast.AugAssign)
-        and isinstance(node.target, ast.Subscript)
-        and isinstance(node.target.value, ast.Attribute)
-        and node.target.value.attr == "counts"
-        and isinstance(node.target.slice, ast.Constant)
-        and node.target.slice.value == "memory_admission_retries"
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "count_add"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "memory_admission_retries"
     )
     retry_guard = next(
         node
@@ -835,19 +835,24 @@ def test_terminal_survives_each_failing_finish_cleanup_step(failing):
 
     engine._finish(job, {"finish_reason": "length"})
 
-    # Later steps still run after an earlier one raises.
-    assert events == [
+    # Independent cleanup continues, but a still-bound LoRA slot cannot be
+    # released/reused until its unbind succeeds.
+    expected = [
         "close",
         "apc_retirement_sweep",
         "lora_unbind",
-        "lora_release",
+        *([] if failing == "lora_unbind" else ["lora_release"]),
         "slot_released",
         ("terminal", "job", "completed"),
         ("emit", {"finish_reason": "length"}),
     ]
+    assert events == expected
     assert job.lora_slot is None
     assert engine.jobs == {}
-    assert +engine.counts == Counter({f"finish_cleanup_failures_{failing}": 1})
+    counts = Counter({f"finish_cleanup_failures_{failing}": 1})
+    if failing == "lora_unbind":
+        counts["finish_cleanup_failures_lora_release"] = 1
+    assert +engine.counts == counts
 
 
 def test_fanout_siblings_get_terminals_when_capsule_close_raises():

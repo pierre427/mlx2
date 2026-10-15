@@ -1022,6 +1022,7 @@ class CohortAdaptiveMTPDepth:
     goodput_window: int = 8
     probe_interval: int = 16
     stale_rounds: int = 128
+    cost_model: str = "goodput"
     adaptive_single_lane: bool = False
     # Qualification-only escape hatch: allow deterministic cost probes to
     # exercise alternate greedy verification widths. Strict token-correctness
@@ -1107,6 +1108,16 @@ class CohortAdaptiveMTPDepth:
         self.stale_rounds = _positive_integer(
             self.stale_rounds, name="adaptive MTP stale_rounds"
         )
+        if self.cost_model not in ("goodput", "factorized"):
+            raise ValueError("adaptive MTP cost_model must be goodput or factorized")
+        self._factorized = None
+        if self.cost_model == "factorized":
+            from .factorized_depth import FactorizedDepthCost
+
+            self._factorized = FactorizedDepthCost(
+                self.max_depth, alpha=self.goodput_alpha,
+                min_samples=self.min_samples_per_depth, stale_rounds=self.stale_rounds,
+            )
         if not isinstance(self.adaptive_single_lane, bool):
             raise ValueError("adaptive MTP adaptive_single_lane must be boolean")
         if not isinstance(self.reproducible_greedy, bool):
@@ -1225,7 +1236,11 @@ class CohortAdaptiveMTPDepth:
                     if value
                 },
             }
-        return {"active_bucket": self._active_bucket, "buckets": buckets}
+        result = {"active_bucket": self._active_bucket, "buckets": buckets}
+        if self._factorized is not None:
+            result["cost_model"] = "factorized"
+            result["factorized"] = self._factorized.diagnostics()
+        return result
 
     def _classify_transition(self, old: int, new: int, *, width: int) -> None:
         if new < old and width > 1:
@@ -1276,6 +1291,17 @@ class CohortAdaptiveMTPDepth:
             if admitted_cap is None
             else max(0, min(self.max_depth, int(admitted_cap)))
         )
+        predictions = {}
+        if self._factorized is not None:
+            predictions = self._factorized.predictions(
+                width=width, cap=cap, boundary=int(state["rounds"])
+            )
+            current = int(state["chosen_depth"])
+            if (not self._greedy_pinned and (width > 1 or self.adaptive_single_lane)
+                    and current in predictions):
+                best = max(predictions, key=lambda d: (predictions[d], -d))
+                if predictions[best] > predictions[current] * (1 + self.goodput_hysteresis):
+                    self._set_chosen_depth(state, best, width=width, cost_change=True)
         chosen = int(state["chosen_depth"])
         if int(self.current_depth) != chosen:
             old = int(self.current_depth)
@@ -1314,6 +1340,7 @@ class CohortAdaptiveMTPDepth:
                 for candidate in candidates
                 if int(state["samples"].get(candidate, 0))
                 < self.min_samples_per_depth
+                and (self._factorized is None or candidate not in predictions)
             ]
             stale = [
                 candidate
@@ -1321,6 +1348,7 @@ class CohortAdaptiveMTPDepth:
                 if int(state["rounds"])
                 - int(state["last_sample"].get(candidate, 0))
                 >= self.stale_rounds
+                and (self._factorized is None or candidate not in predictions)
             ]
             eligible = under_sampled or stale
             if eligible:
@@ -1348,6 +1376,10 @@ class CohortAdaptiveMTPDepth:
             "current_before_observation": int(self.current_depth),
             "probe_kind": probe_kind,
         }
+        if self._factorized is not None:
+            self._active_trace["factorized_predictions"] = {
+                str(depth): value for depth, value in predictions.items()
+            }
         self.trace.append(self._active_trace)
         self._sync_public_state(state)
         return depth
@@ -1361,6 +1393,8 @@ class CohortAdaptiveMTPDepth:
         observed_compute_width: int | None = None,
         committed: int | None = None,
         elapsed_seconds: float | None = None,
+        landing_depths: Sequence[int] | None = None,
+        landing_accepted: Sequence[int] | None = None,
     ) -> None:
         proposed, accepted = int(proposed), int(accepted)
         width = _positive_integer(width, name="adaptive MTP width")
@@ -1391,10 +1425,7 @@ class CohortAdaptiveMTPDepth:
         )
         if (committed is None) != (elapsed_seconds is None):
             raise ValueError("adaptive MTP goodput requires committed and elapsed_seconds")
-        cost_changed = False
-        estimate_updated = False
-        pooled_goodput = None
-        if committed is not None and elapsed_seconds is not None:
+        if committed is not None:
             committed = int(committed)
             elapsed_seconds = _finite_number(
                 elapsed_seconds, name="adaptive MTP elapsed_seconds"
@@ -1403,6 +1434,23 @@ class CohortAdaptiveMTPDepth:
                 raise ValueError(
                     "adaptive MTP committed must be nonnegative and elapsed_seconds positive"
                 )
+        if (landing_depths is None) != (landing_accepted is None):
+            raise ValueError("factorized depth requires both landing vectors")
+        if self._factorized is not None and landing_depths is not None:
+            if (landing_accepted is None or elapsed_seconds is None
+                    or observed_compute_width != width):
+                raise ValueError("factorized depth requires matching unpadded round evidence")
+            if proposed != sum(landing_depths) or accepted != sum(landing_accepted):
+                raise ValueError("factorized depth landing vectors must match aggregate evidence")
+            self._factorized.observe(
+                width=width, depth=selected_depth, depths=landing_depths,
+                accepted=landing_accepted, seconds=elapsed_seconds,
+                boundary=int(state["rounds"]),
+            )
+        cost_changed = False
+        estimate_updated = False
+        pooled_goodput = None
+        if committed is not None and elapsed_seconds is not None:
             state["samples"][selected_depth] = min(
                 _COUNTER_MAX, int(state["samples"].get(selected_depth, 0)) + 1
             )
@@ -1448,6 +1496,8 @@ class CohortAdaptiveMTPDepth:
             current = int(state["chosen_depth"])
             estimates = state["goodput"]
             if (
+                self._factorized is None
+                and
                 not self._greedy_pinned
                 and estimate_updated
                 and current in estimates
@@ -1490,6 +1540,17 @@ class CohortAdaptiveMTPDepth:
                 self._active_trace.update(
                     current_after_observation=int(self.current_depth),
                     chosen_after_observation=int(state["chosen_depth"]),
+                )
+            self._sync_public_state(state)
+            return
+        if self._factorized is not None:
+            # This selection uses only its explicit per-position evidence;
+            # aggregate acceptance must not silently substitute another law.
+            if self._active_trace is not None:
+                self._active_trace.update(
+                    current_after_observation=int(self.current_depth),
+                    chosen_after_observation=int(state["chosen_depth"]),
+                    factorized_observation=landing_depths is not None,
                 )
             self._sync_public_state(state)
             return
@@ -1598,6 +1659,7 @@ class AdaptiveMTPDepthPolicy:
     goodput_window: int = 8
     probe_interval: int = 16
     stale_rounds: int = 128
+    cost_model: str = "goodput"
     adaptive_single_lane: bool = False
     qualification_greedy_probes: bool = False
 
@@ -1644,6 +1706,7 @@ class AdaptiveMTPDepthPolicy:
             "goodput_window",
             "probe_interval",
             "stale_rounds",
+            "cost_model",
             "adaptive_single_lane",
             "qualification_greedy_probes",
         }
@@ -1669,6 +1732,8 @@ class AdaptiveMTPDepthPolicy:
         }
         if self.adaptive_single_lane:
             values["adaptive_single_lane"] = True
+        if self.cost_model != "goodput":
+            values["cost_model"] = self.cost_model
         if self.qualification_greedy_probes:
             values["qualification_greedy_probes"] = True
         return values
@@ -1696,6 +1761,8 @@ class AdaptiveMTPDepthPolicy:
             )
             if self.adaptive_single_lane:
                 values["adaptive_single_lane"] = True
+            if self.cost_model != "goodput":
+                values["cost_model"] = self.cost_model
             if self.qualification_greedy_probes:
                 values["qualification_greedy_probes"] = True
         return values

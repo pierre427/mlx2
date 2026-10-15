@@ -24,6 +24,8 @@ import math
 import time
 from dataclasses import asdict, dataclass
 
+from ..host_counters import count_add, counter_snapshot
+
 #: ``engine.counts`` keys; present only when the policy is enabled.
 COUNTERS = {
     "gpu_keep_warm_ticks": "tick",
@@ -122,7 +124,7 @@ class GpuKeepWarm:
             return
         if self._window_open and self._ticked_in_window:
             # This request arrived while the ticker held the GPU awake.
-            self.counts["gpu_keep_warm_warm_resumes"] += 1
+            count_add(self.counts, "gpu_keep_warm_warm_resumes", 1)
         self._window_open = False
         self._ticked_in_window = False
         self._last_work = self.clock() if now is None else now
@@ -138,10 +140,10 @@ class GpuKeepWarm:
         now = self.clock() if now is None else now
         if not self._window_open:
             self._window_open = True
-            self.counts["gpu_keep_warm_idle_windows"] += 1
+            count_add(self.counts, "gpu_keep_warm_idle_windows", 1)
         if now - self._last_work > self.policy.window_seconds:
             # The window ran out: stop until real work starts a new one.
-            self.counts["gpu_keep_warm_expired_windows"] += 1
+            count_add(self.counts, "gpu_keep_warm_expired_windows", 1)
             self._last_work = None
             self._window_open = False
             self._ticked_in_window = False
@@ -159,19 +161,20 @@ class GpuKeepWarm:
             self.op()
         except Exception:  # keep-warm is advisory; serving must not fail
             self._failed = True
-            self.counts["gpu_keep_warm_failures"] += 1
+            count_add(self.counts, "gpu_keep_warm_failures", 1)
             return False
         self._last_tick = now
         self._ticked_in_window = True
-        self.counts["gpu_keep_warm_ticks"] += 1
+        count_add(self.counts, "gpu_keep_warm_ticks", 1)
         return True
 
     def status(self) -> dict:
+        counts = counter_snapshot(self.counts)
         return {
             **self.policy.as_dict(),
             "active": self.enabled,
             "failed": self._failed,
             "counts": {
-                event: int(self.counts.get(key, 0)) for key, event in COUNTERS.items()
+                event: int(counts.get(key, 0)) for key, event in COUNTERS.items()
             },
         }

@@ -19,7 +19,7 @@ from .cow_cache import (
 )
 import numpy as np
 from .speculative_sampling import count_delivered_relaxed_accepts
-from .generate import generation_stream
+from .generate import PromptChunkCorruption, generation_stream
 from .models.cache import (
     can_trim_prompt_cache,
     make_prompt_cache,
@@ -197,6 +197,31 @@ class SelfMTPLane:
     draft_loop: Optional[Any] = None
     draft_loop_decisions: int = 0
     draft_loop_extensions: int = 0
+    numerical_schedule_changed: bool = False
+    numerical_initial_geometry: tuple[Any, ...] | None = None
+    numerical_last_geometry: tuple[Any, ...] | None = None
+
+
+def record_self_mtp_verify_geometry(lane, *, compute_width, draft_depth, backend_mode):
+    """Host-only evidence of the row law that actually ran for this lane."""
+    geometry = ("self_mtp", int(compute_width), int(draft_depth) + 1, str(backend_mode))
+    if lane.numerical_initial_geometry is None:
+        lane.numerical_initial_geometry = geometry
+        requested = getattr(lane, "_requested_num_draft", None)
+        expected_depth = lane.num_draft if requested is None else requested
+        lane.numerical_schedule_changed |= int(draft_depth) != int(expected_depth)
+    else:
+        lane.numerical_schedule_changed |= geometry != lane.numerical_initial_geometry
+    lane.numerical_last_geometry = geometry
+
+
+def self_mtp_numerical_schedule(lane):
+    return {
+        "numerical_schedule_changed": bool(lane.numerical_schedule_changed),
+        "numerical_initial_geometry": lane.numerical_initial_geometry,
+        "numerical_last_geometry": lane.numerical_last_geometry,
+        "numerical_schedule_cache_contract": "stable_initial_law_only;transitioned_state_not_bound",
+    }
 
 
 @dataclass
@@ -364,7 +389,25 @@ def _mtp_proposal_step(model, hidden, tokens, cache, lanes):
     return model.mtp_step(hidden, tokens, cache)
 
 
-def _restore_mtp_state(cache, mtp_state):
+def _validate_mtp_checkpoint_hidden(hidden, *, rows=1, uid=None):
+    """Validate the declared MTP boundary evidence, never scan cache planes.
+
+    Every teacher-forced hidden row enters the draft cache. Validate it before
+    that mutation, and validate restored/captured seeds before they can be
+    reused. This is separate from the host-only transaction publication guard.
+    """
+    shape = tuple(getattr(hidden, "shape", ()))
+    valid_shape = len(shape) == 3 and shape[0] == 1 and shape[1] == rows and shape[2] > 0
+    if not valid_shape or not bool(mx.isfinite(hidden).all().item()):
+        reason = "self-MTP prefill produced invalid checkpoint hidden evidence"
+        if uid is not None:
+            raise PromptChunkCorruption((uid,), reason)
+        from .checkpoint_publication import CheckpointPublicationUnsafe
+
+        raise CheckpointPublicationUnsafe(reason)
+
+
+def _restore_mtp_state(cache, mtp_state, *, uid=None):
     """Validate and unpack an MTP sidecar paired with ``cache``.
 
     A persistent MTP cache contains one fewer teacher-forced pair than the
@@ -384,6 +427,7 @@ def _restore_mtp_state(cache, mtp_state):
             raise ValueError(
                 f"mtp_state offset mismatch: MTP cache covers {mtp_offset} pairs but the prompt_cache prefix has {prefix_len} tokens (expected {prefix_len - 1} pairs). The prefix snapshot and its draft sidecar were not captured together."
             )
+        _validate_mtp_checkpoint_hidden(restored_seed_h, uid=uid)
     elif restored_seed_h is not None or mtp_offset != 0:
         raise ValueError(
             f"mtp_state carries a restored draft context ({mtp_offset} pairs, prev_tail_hidden {('set' if restored_seed_h is not None else 'unset')}) but the prompt_cache prefix is empty; the sidecar must cover exactly the cached tokens."
@@ -1001,7 +1045,7 @@ def prepare_self_mtp_lane(
         draft_cache = model.make_mtp_cache()
         restored_seed_h = None
     else:
-        (draft_cache, restored_seed_h) = _restore_mtp_state(target_cache, mtp_state)
+        (draft_cache, restored_seed_h) = _restore_mtp_state(target_cache, mtp_state, uid=uid)
     _reject_unsupported_self_mtp_caches(draft_cache)
     diagnostic_started_ns = time.perf_counter_ns()
 
@@ -1038,6 +1082,7 @@ def prepare_self_mtp_lane(
             context = scope(fused_gdn_catchup) if callable(scope) else nullcontext()
             with context:
                 (_, h_chunk) = _mtp_backbone(model, y[:n][None], target_cache)
+            _validate_mtp_checkpoint_hidden(h_chunk, rows=n, uid=uid)
             if diagnostic_stages is not None:
                 mx.eval(h_chunk, [c.state for c in target_cache])
             finish_diagnostic_stage("target_catchup_ms")
@@ -1084,6 +1129,7 @@ def prepare_self_mtp_lane(
             )
         try:
             (logit_hidden, hidden) = _mtp_backbone(model, y[None], target_cache)
+            _validate_mtp_checkpoint_hidden(hidden, rows=int(y.size), uid=uid)
             if diagnostic_stages is not None:
                 mx.eval(logit_hidden, hidden, [c.state for c in target_cache])
             finish_diagnostic_stage("final_target_m1_ms")
@@ -1166,6 +1212,7 @@ def advance_self_mtp_prefill(
     max_tokens: int,
     fused_gdn_catchup: bool = False,
     clear_cache: bool = True,
+    uid: int | None = None,
 ) -> Tuple[mx.array, List[Any], Tuple[List[Any], mx.array], int]:
     """Advance one exact teacher-forced self-MTP prefill slice.
 
@@ -1187,7 +1234,7 @@ def advance_self_mtp_prefill(
         draft_cache = model.make_mtp_cache()
         prev_h = None
     else:
-        (draft_cache, prev_h) = _restore_mtp_state(target_cache, mtp_state)
+        (draft_cache, prev_h) = _restore_mtp_state(target_cache, mtp_state, uid=uid)
     _reject_unsupported_self_mtp_caches(draft_cache)
     n = min(int(max_tokens), int(prompt.size) - 1)
     if n <= 0:
@@ -1197,6 +1244,7 @@ def advance_self_mtp_prefill(
         context = scope(fused_gdn_catchup) if callable(scope) else nullcontext()
         with context:
             (_, h_chunk) = _mtp_backbone(model, prompt[:n][None], target_cache)
+        _validate_mtp_checkpoint_hidden(h_chunk, rows=n, uid=uid)
         if prev_h is None:
             (hs, ts) = (h_chunk[:, :-1], prompt[1:n][None])
         else:
@@ -1220,6 +1268,7 @@ def capture_self_mtp_checkpoint(
     *,
     rng_key=None,
     rng_draws: int = 0,
+    uid: int | None = None,
 ):
     """Capture one exact committed target/draft checkpoint.
 
@@ -1243,6 +1292,7 @@ def capture_self_mtp_checkpoint(
         return None
     if covered_tokens <= 0 or seed_h is None or draft_covered != covered_tokens - 1:
         return None
+    _validate_mtp_checkpoint_hidden(seed_h, uid=uid)
     values = [c.state for c in target_cache]
     values.extend((c.state for c in draft_cache))
     values.append(seed_h)

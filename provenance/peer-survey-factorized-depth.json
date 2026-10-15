@@ -1,0 +1,36 @@
+{
+  "component": "Opt-in factorized adaptive MTP depth cost model",
+  "implementation": "Original host-only mlx2 implementation; no peer source code copied",
+  "source_repository": "https://github.com/ashhart/TensorFold",
+  "source_revision": "b1a51eee6128cee1c5dc7cd32aa5fbcc8f334890",
+  "source_paths": [
+    "PR #788 description, draft-depth CostDepth mechanism"
+  ],
+  "source_verified": "PR MCP index fresh 2026-10-15; pinned LICENSE fetched at source revision is Apache-2.0",
+  "license": "Apache-2.0 at the inspected pinned revision; idea-only original implementation",
+  "destination_paths": [
+    "src/mlx2/runtime/factorized_depth.py",
+    "src/mlx2/runtime/adaptive_policy.py",
+    "src/mlx2/runtime/generate.py",
+    "tests/test_factorized_depth_cpu.py",
+    "tests/test_peer_factorized_executor_cpu.py"
+  ],
+  "modifications": [
+    "Separate conditional prefix acceptance from measured whole-round seconds; censored rejected tails never become independent rejection evidence.",
+    "Exact physical-width tables, max32 LRU width owners, minimum sample counts, stale expiry, monotone interpolation only within observed rows; no persisted cross-artifact costs.",
+    "Opt-in adaptive_mtp_depth.cost_model=factorized. Existing policy/default receipts unchanged; greedy and single-lane pinning and independent admission caps preserved.",
+    "Only successful, nonterminal, unpadded, head-only constant-depth cohorts feed position evidence. Mixed/copied/terminal rounds stay excluded.",
+    "Predict intermediate depths and retain bounded exploration cadence; no extrapolated timing, load-time probe seed, quality claim or speedup claim.",
+    "Validate scalar cost and per-lane landing evidence, paired vectors, and aggregate agreement before mutating either the controller or factorized learned state."
+  ],
+  "validation": {
+    "analytic_controller_tests": "10 passed",
+    "existing_adaptive_regressions": "150 passed",
+    "model_performance_test": false,
+    "qualified": false,
+    "default_selected": false,
+    "real_executor_and_invalid_evidence_tests": "11 passed; actual tiny native MTP executor trains valid homogeneous rounds and excludes terminal, copied-span, and segmented physical-width-mismatch observations; default goodput stays unchanged. Seven invalid-evidence negative controls preserve learned state and diagnostics.",
+    "focused_combined_tests": "21 passed with MLX2_PREFLIGHT_CPU_ONLY=1 and repair-worktree PYTHONPATH; CPU correctness evidence only."
+  },
+  "qualification_boundary": "Changing execution depth can change numerical schedule; generated APC publication is suppressed after such changes. A full-model controlled A/B is required before promotion."
+}

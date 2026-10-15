@@ -1609,6 +1609,16 @@ class GenerationBatch:
     def _record_execution_width(receipt, width):
         if receipt is None:
             return
+        if "numerical_initial_geometry" in receipt:
+            geometry = ("ordinary", int(width), 1, "ordinary")
+            initial = receipt.get("numerical_initial_geometry")
+            if initial is None:
+                receipt["numerical_initial_geometry"] = geometry
+            else:
+                receipt["numerical_schedule_changed"] = bool(
+                    receipt.get("numerical_schedule_changed") or tuple(initial) != geometry
+                )
+            receipt["numerical_last_geometry"] = geometry
         ordinary_widths = set(receipt.get("ordinary_compute_widths", ()))
         ordinary_widths.add(int(width))
         receipt["ordinary_compute_widths"] = sorted(ordinary_widths)
@@ -2518,6 +2528,17 @@ class MTPGenerationBatch:
                     raise ValueError("MTP draft depth must be positive")
                 paused.detached.lane.num_draft = depth
 
+    def numerical_schedule_for_uid(self, uid):
+        """Publication evidence for currently owned native-MTP request state."""
+        from .hybrid_speculative import self_mtp_numerical_schedule
+
+        lanes = list(self.state.lanes) + [item.detached.lane for item in self._paused.values()]
+        lanes.extend(item.detached.lane for item in self._plain_ready)
+        for lane in lanes:
+            if lane.uid == uid:
+                return self_mtp_numerical_schedule(lane)
+        return None
+
     def _detach_packages(self, indices: Sequence[int]):
         from .hybrid_speculative import detach_self_mtp_lanes
 
@@ -2683,6 +2704,7 @@ class MTPGenerationBatch:
         }
         for package in packages:
             lane = package.detached.lane
+            from .hybrid_speculative import self_mtp_numerical_schedule
             stats = dict(vars(lane.stats))
             stats["total_emitted"] = int(lane.stats.total_emitted)
             stats["draft_acceptance"] = float(lane.stats.draft_accepted) / max(
@@ -2693,6 +2715,7 @@ class MTPGenerationBatch:
                 self._observed_widths_by_uid.pop(lane.uid, set())
             )
             lane_receipt["num_draft_before_handoff"] = int(lane.num_draft)
+            lane_receipt.update(self_mtp_numerical_schedule(lane))
             lane_receipt["committed_tokens_before_handoff"] = int(
                 package.num_tokens
             )
@@ -2773,6 +2796,8 @@ class MTPGenerationBatch:
 
     def _mark_plain_fallback(self, packages, *, reason):
         """Record a progress fallback without selecting policy handoff."""
+        from .hybrid_speculative import self_mtp_numerical_schedule
+
         packages = list(packages)
         _bump_bounded_counter(self.scheduler_stats, "mtp_plain_fallback_events")
         _bump_bounded_counter(
@@ -2795,6 +2820,7 @@ class MTPGenerationBatch:
             )
             cost_receipt = _release_cost_handoff_state(self, lane.uid)
             package.handoff_receipt = {
+                **self_mtp_numerical_schedule(lane),
                 "transition": "fallback",
                 "selected": False,
                 "engaged": True,
@@ -3650,6 +3676,8 @@ class MTPGenerationBatch:
         return (matcher_state, reason)
 
     def _complete_responses(self, terminal_indices, last_response_by_index):
+        from .hybrid_speculative import self_mtp_numerical_schedule
+
         packages = self._detach_packages(terminal_indices)
         for idx, package in zip(sorted(terminal_indices), packages):
             response = last_response_by_index[idx]
@@ -3677,6 +3705,7 @@ class MTPGenerationBatch:
                 int(lane.stats.draft_proposed), 1
             )
             response.mtp_receipt = {
+                **self_mtp_numerical_schedule(lane),
                 "route": "segmented_self_mtp"
                 if self.segmented_live_tip
                 else "continuous_batched_self_mtp",
@@ -3958,9 +3987,15 @@ class MTPGenerationBatch:
             if true_batched_segmented or not self.segmented_live_tip
             else 1
         )
-        for lane in self.state.lanes:
+        from .hybrid_speculative import record_self_mtp_verify_geometry
+        for row, lane in enumerate(self.state.lanes):
             self._observed_widths_by_uid.setdefault(lane.uid, set()).add(
                 compute_width
+            )
+            record_self_mtp_verify_geometry(
+                lane, compute_width=compute_width,
+                draft_depth=proposal.draft_depths[row],
+                backend_mode=proposal.verify_layout.get("backend_mode", "segmented_b1"),
             )
         try:
             emitted_counts = []
@@ -4044,6 +4079,13 @@ class MTPGenerationBatch:
                             time.perf_counter() - round_started, 1e-12
                         ),
                     }
+                    if (getattr(self.adaptive_depth_policy, "cost_model", None) == "factorized"
+                            and not any(terminal) and compute_width == cohort_width
+                            and all(int(d) == cohort_depth for d in proposal.draft_depths)):
+                        cost.update(
+                            landing_depths=tuple(int(d) for d in proposal.draft_depths),
+                            landing_accepted=tuple(int(a) for a in proposal.accepted_lengths),
+                        )
                 self.adaptive_depth_policy.observe(
                     sum(
                         depth
@@ -6049,36 +6091,60 @@ class BatchGenerator:
             prompt_boundary = {}
             prepare_contended = self._prefill_contends_decode()
             tic = time.perf_counter()
-            (lane, first) = prepare_self_mtp_lane(
-                mx.array(prompt, dtype=mx.uint32),
-                self.model,
-                uid=uid,
-                max_tokens=maximum,
-                prompt_cache=prompt_cache,
-                mtp_state=self._mtp_states.pop(uid, None),
-                lane_rng=self._mtp_lane_rngs.pop(uid, None),
-                num_draft=int(config.get("num_draft", 1)),
-                sampling_temp=float(config.get("sampling_temp", 0.0)),
-                sampling_top_p=float(config.get("top_p", 1.0)),
-                sampling_top_k=int(config.get("top_k", 0)),
-                sampling_min_p=float(config.get("min_p", 0.0)),
-                accept_rule=config.get("accept_rule", "residual"),
-                logits_processors=prepare_processors,
-                prefill_step_size=int(
-                    config.get("prefill_step_size", self.prefill_step_size)
-                ),
-                # The parent serving route selects shared QSA by default. Keep
-                # an explicit False as the fail-safe opt-out for qualification
-                # controls and bisects.
-                share_index_state=_share_index_state_for_config(
-                    config, getattr(self.model, "mtp_index_state_policy", None)
-                ),
-                diagnostic_stages=config.get("_diagnostic_prepare_stages"),
-                fused_gdn_catchup=bool(config.get("fused_gdn_catchup", False)),
-                prompt_boundary_out=prompt_boundary,
-                fly_verification=getattr(self, "fly_verification", None),
-                clear_cache=prefill_clear_cache(self._has_active_decode()),
-            )
+            try:
+                (lane, first) = prepare_self_mtp_lane(
+                    mx.array(prompt, dtype=mx.uint32),
+                    self.model,
+                    uid=uid,
+                    max_tokens=maximum,
+                    prompt_cache=prompt_cache,
+                    mtp_state=self._mtp_states.pop(uid, None),
+                    lane_rng=self._mtp_lane_rngs.pop(uid, None),
+                    num_draft=int(config.get("num_draft", 1)),
+                    sampling_temp=float(config.get("sampling_temp", 0.0)),
+                    sampling_top_p=float(config.get("top_p", 1.0)),
+                    sampling_top_k=int(config.get("top_k", 0)),
+                    sampling_min_p=float(config.get("min_p", 0.0)),
+                    accept_rule=config.get("accept_rule", "residual"),
+                    logits_processors=prepare_processors,
+                    prefill_step_size=int(
+                        config.get("prefill_step_size", self.prefill_step_size)
+                    ),
+                    # The parent serving route selects shared QSA by default. Keep
+                    # an explicit False as the fail-safe opt-out for qualification
+                    # controls and bisects.
+                    share_index_state=_share_index_state_for_config(
+                        config, getattr(self.model, "mtp_index_state_policy", None)
+                    ),
+                    diagnostic_stages=config.get("_diagnostic_prepare_stages"),
+                    fused_gdn_catchup=bool(config.get("fused_gdn_catchup", False)),
+                    prompt_boundary_out=prompt_boundary,
+                    fly_verification=getattr(self, "fly_verification", None),
+                    clear_cache=prefill_clear_cache(self._has_active_decode()),
+                )
+            except PromptChunkCorruption as exc:
+                if atomic_cohort:
+                    # Strict-width cohorts fail as one unit. Retire previously
+                    # prepared siblings; unrelated active lanes remain owned.
+                    close_error = None
+                    for prepared in detached:
+                        try:
+                            _close_segmented_detached(prepared, release_cache=True)
+                        except BaseException as error:  # noqa: BLE001 - finish cleanup, then re-raise
+                            if close_error is None:
+                                close_error = error
+                    self._record_atomic_cohort_failure(
+                        [item[0] for item in sequences],
+                        config.get("batch_cohort") or {}, str(exc),
+                    )
+                    if close_error is not None:
+                        raise close_error from exc
+                    return (None, [])
+                self._native_lane_failures.append({"uid": uid, "reason": str(exc)})
+                _bump_bounded_counter(self.scheduler_stats, "mtp_prefill_hidden_corruption_lanes")
+                # Remaining selected rows are still prepared and returned, so
+                # a poison refusal cannot orphan a healthy popped queue peer.
+                continue
             toc = time.perf_counter()
             # A one-call preparation is a prefill forward like any slice: it
             # calibrates the self-MTP stall bound and owes decode debt when
@@ -6121,6 +6187,8 @@ class BatchGenerator:
                 if covered <= len(full_prompt):
                     prompt_boundary["tokens"] = list(full_prompt[:covered])
                     self._prompt_boundaries[uid] = prompt_boundary
+        if not detached:
+            return (None, progress)
         configured_segmented = _segment_aware_live_tip_enabled(self.self_mtp)
         existing_rows = bool(self._generation_batch.mtp_cycle_state())
         segmented_join = configured_segmented and (
@@ -6377,6 +6445,7 @@ class BatchGenerator:
         checkpoint = capture_self_mtp_checkpoint(
             prompt_cache,
             mtp_state,
+            uid=uid,
             rng_key=None if lane_rng is None else lane_rng.key,
             rng_draws=0 if lane_rng is None else int(lane_rng.draws),
         )
@@ -6438,6 +6507,7 @@ class BatchGenerator:
         (remaining, prompt_cache, mtp_state, processed) = advance_self_mtp_prefill(
             mx.array(prompt, dtype=mx.uint32),
             self.model,
+            uid=uid,
             prompt_cache=prompt_cache,
             mtp_state=self._mtp_states.get(uid),
             max_tokens=max_tokens,
@@ -6736,6 +6806,11 @@ class BatchGenerator:
                 adaptive = transition.get("adaptive_depth_before_handoff")
                 if adaptive is not None:
                     receipt["adaptive_depth"] = copy.deepcopy(adaptive)
+            if receipt is not None:
+                receipt.update({name: transition[name] for name in (
+                    "numerical_schedule_changed", "numerical_initial_geometry",
+                    "numerical_last_geometry", "numerical_schedule_cache_contract",
+                ) if name in transition})
             matcher_state = package.matcher_state
             initial = package.initial_output
             if initial is not None:
@@ -6988,6 +7063,51 @@ class BatchGenerator:
             if uid in uids:
                 results[uid] = (4, -1)
         return results
+
+    def ordinary_checkpoint_block(self, uid):
+        from .decode_checkpoint import checkpoint_block
+        if (self.self_mtp is not None or self._native_continuations
+                or getattr(self, "_ordinary_held", None) is not None
+                or len(self._plain_fallback_batch) or len(self._prompt_batch)
+                or self._unprocessed_sequences):
+            return "exact_checkpoint_route_unsupported"
+        return checkpoint_block(self._generation_batch, uid)
+
+    def ordinary_checkpoint_staging_bytes(self):
+        from .decode_checkpoint import checkpoint_staging_bytes
+        return checkpoint_staging_bytes(self._generation_batch)
+
+    def suspend_ordinary_checkpoint(self, uid, binding):
+        from .decode_checkpoint import OrdinaryDecodeCheckpoint
+        reason = self.ordinary_checkpoint_block(uid)
+        if reason:
+            raise ValueError(reason)
+        empty = GenerationBatch.empty(self.model, self.sampler)
+        checkpoint = OrdinaryDecodeCheckpoint.capture(self._generation_batch, uid, binding)
+        self._generation_batch = empty
+        try:
+            self.remove([uid])
+        except BaseException:
+            try:
+                self._generation_batch = checkpoint.restore(self.model, binding)
+            finally:
+                checkpoint.close()
+            raise
+        checkpoint.owner_executor = self
+        return checkpoint
+
+    def resume_ordinary_checkpoint(self, checkpoint, binding):
+        if getattr(checkpoint, "owner_executor", None) is not self:
+            raise ValueError("exact checkpoint belongs to a different executor")
+        if (self.self_mtp is not None or len(self._generation_batch)
+                or len(self._prompt_batch) or self._unprocessed_sequences
+                or self._native_continuations or len(self._plain_fallback_batch)):
+            raise ValueError("exact checkpoint requires an empty ordinary executor")
+        restored = checkpoint.restore(self.model, binding)
+        # No constructor call: its prompt-tail forward would consume the
+        # saved pending sample twice and advance the request RNG again.
+        self._generation_batch = restored
+        return checkpoint.uid
 
     def extract_cache(self, uids):
         results = {}

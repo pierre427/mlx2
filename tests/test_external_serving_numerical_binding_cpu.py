@@ -170,7 +170,16 @@ def test_rebound_pool_runs_and_publishes_revision_bound_paired_sidecar():
             "ranking_registry"
         ]
         assert ranking["target_revision"] == adapter._external_target_revision
-        assert ranking["model_counts"] and ranking["session_counts"]
+        assert ranking["session_counts"]
+        assert "model_counts" not in ranking and "global_counts" not in ranking
+        pool = adapter.draft_model.proposal_pool
+        internal = pool.ranking_registry.receipt(
+            pool.session, ranking["session_scope_hash"]
+        )
+        assert internal["target_revision"] == ranking["target_revision"]
+        assert internal["model_key"] == ranking["model_key"]
+        assert internal["model_counts"]
+        assert internal["session_counts"] == ranking["session_counts"]
     finally:
         batch.close()
 

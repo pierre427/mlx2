@@ -502,8 +502,13 @@ def test_fanout_leases_a_boundary_republished_over_its_spilled_copy(
 
         run(prompt)
         run(prompt[:8] + [111])
-        for k in range(apc.max_size - 1):
+        # Changed MTP verification schedules deliberately skip generated
+        # checkpoints, so requests do not add a fixed number of entries.
+        # Fill the real count pool until the specific seed boundary spills.
+        for k in range(2 * apc.max_size):
             run([(k * 13 + 7 * i) % 120 + 1 for i in range(12)])
+            if boundary_resident() == [False]:
+                break
         assert boundary_resident() == [False]
 
         jobs = engine.submit_many(

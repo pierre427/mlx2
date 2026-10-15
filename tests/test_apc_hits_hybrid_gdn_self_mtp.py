@@ -222,7 +222,12 @@ def test_hybrid_gdn_self_mtp_apc_hits_are_nonzero(host, factory):
     assert r2["mtp"]["route"] == "continuous_batched_self_mtp"
     assert r2["mtp"]["stats"]["draft_cycles"] > 0
     assert r2.get("cache_checkpoint_role") == "committed_prompt_boundary"
-    assert int(j3.cached_tokens) >= len(prompt) + len(out1) - 1
+    # Terminal exhaustion shortens the verification shape. Generated state
+    # under that changed law is intentionally withheld; its exact prompt
+    # boundary remains reusable with the paired MTP sidecar.
+    assert r1["mtp"]["numerical_schedule_changed"] is True
+    assert counts.get("apcv2_store_skipped_numerical_schedule", 0) > 0
+    assert int(j3.cached_tokens) == len(prompt) - 1
     assert out_t2 == out_cold_t2
 
     # Mechanism assertions.

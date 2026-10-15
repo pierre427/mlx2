@@ -39,6 +39,7 @@ POLICY = {"memory_preemption": {"enabled": True}}
 def test_policy_defaults_off_and_validates():
     assert memory_preemption_policy(None) == {
         "enabled": False, "stall_seconds": 60.0, "on_pressure": True,
+        "exact_decode_checkpoint": False,
     }
     assert memory_preemption_policy({"enabled": True, "stall_seconds": 5})[
         "stall_seconds"

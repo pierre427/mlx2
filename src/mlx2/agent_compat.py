@@ -23,6 +23,7 @@ import logging
 import re
 from collections.abc import Mapping
 
+from .host_counters import count_add
 from .lark_regex import LarkGrammarError, lark_to_regex
 
 _LOG = logging.getLogger(__name__)
@@ -301,7 +302,7 @@ def require_compat(compat, what):
 def count(counts, key, amount=1):
     """Increment one agent-compat counter when the engine exposes counts."""
     if counts is not None and amount:
-        counts[key] += amount
+        count_add(counts, key, amount)
 
 
 # ---------------------------------------------------------------------------
