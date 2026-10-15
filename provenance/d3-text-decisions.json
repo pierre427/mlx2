@@ -1,0 +1,72 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "implementation": "D3 independent text decision adapter",
+  "source_repository": "https://huggingface.co/vllm-sr/d3-edge",
+  "source_revision": "cab71e6ad3461b8086d51ddb572c656babd63b0b",
+  "source_paths": [
+    "d3_format.py",
+    "d3_runtime.py:PromptEncoder",
+    "config.json",
+    "decision_config.json"
+  ],
+  "license": "Apache-2.0",
+  "local_paths": [
+    "src/mlx2/decisions/candidates/d3.py",
+    "src/mlx2/decisions/candidates/d3_format.py",
+    "src/mlx2/decisions/candidates/d3_model.py"
+  ],
+  "modifications": [
+    "Retain exact trained prompt bytes, answer-code selection, ordered score options, temperature and FP32 readout.",
+    "Implement an independent MLX text backbone with explicit layer_types, bidirectional full attention and causal GDN using existing local Qwen tensor primitives. Preserve raw HF RMSNorm weights and FP32 normalization arithmetic.",
+    "Use serialized width-one independent question forwards without APCv2, chunking, batching, vision, video or permutation averaging. Refuse oversized inputs without truncation.",
+    "Strict indexed or single-file backbone loading excludes the separately loaded FP32 readout; no remote model code execution.",
+    "Validate actual text tensor names, shapes and BF16 dtype before materialization, and loaded dtype again; bind each indexed tensor to its actual shard.",
+    "Preserve trained prompt/scoring semantics while retaining the existing MLX2 public confidence, rounding and JSON score-legend conventions. Public response bodies are not claimed byte-identical to source D3.",
+    "Execute the BF16 stored backbone with explicit FP32 raw-weight RMSNorm, GDN recurrence and FP32 readout. Keep partial text RoPE stored-dtype multiply/add boundaries."
+  ],
+  "validation": {
+    "focused_cpu": "39 passed in 9.67 seconds: D3 schema/prompt contracts, production-width partial-RoPE, independent hybrid reference, pinned BF16 artifact and existing candidate-family regressions.",
+    "real_artifact": "Pinned d3-edge cab71e6ad3461b8086d51ddb572c656babd63b0b, exact prompt/token parity for choice/noul/score, independent Transformers CPU backbone and trained FP32 readout.",
+    "bf16_max_probability_absolute_difference": 0.003211699426174164,
+    "bf16_max_last_hidden_absolute_difference": 0.078125,
+    "same_decisions": "3 of 3 diagnostic questions; not a quality evaluation.",
+    "fp32_diagnostic_max_probability_absolute_difference": 3.5762786865234375e-07,
+    "fp32_diagnostic_max_last_hidden_absolute_difference": 1.1920928955078125e-05,
+    "fp32_scope": "Both backbones widened for diagnosis only; serving retains BF16.",
+    "independent_review": "Second agent production head_dim=256/partial RoPE tiny reference max absolute error 1.19e-6.",
+    "oracle_correction": "Discard earlier real-artifact diagnostics made with a meta-device nonpersistent rotary frequency buffer. Corrected harness explicitly constructs CPU rotary buffers and asserts all reference parameters and buffers are on CPU.",
+    "gpu_executed": false,
+    "full_preflight_executed": false,
+    "formal_qualification": false,
+    "command": "PYTHONPATH=$PWD/src MLX2_PREFLIGHT_CPU_ONLY=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q -o addopts= tests/test_d3_decisions_cpu.py tests/test_d3_numerics_cpu.py tests/test_candidate_decisions_cpu.py",
+    "source_sha256": {
+      "src/mlx2/decisions/candidates/d3.py": "abaa1ce84709c10c2d9e6365b06d1e830a2f771ef8bc699bd52fda7ee2c934f8",
+      "src/mlx2/decisions/candidates/d3_format.py": "ccfc0ea21a61f9c357d31f59e3ff0195abe2a8be03841737ab9b11c3a40d9d69",
+      "src/mlx2/decisions/candidates/d3_model.py": "207a651c771aff84e9d587d4764d3f698ffcadf557cd12951f00341583c63035",
+      "src/mlx2/decisions/candidates/base.py": "8de6e61d57a27e20200bf9eef59d99c0e46d3ade8b8a18eccc3dc8355c852f20",
+      "src/mlx2/decisions/runtime.py": "e4eb51675d3b8f06896cf510c6fabc6ec7bd6087e344b80ab11c311879d66024",
+      "tests/test_d3_decisions_cpu.py": "3e1034724839bf921e798c484877b354a0430e42a5f7c34757707930f3f05a22",
+      "tests/test_d3_numerics_cpu.py": "f4ab2afb7d3d4ac79934f6d5b379ea328489e1073303a380ca3b1a35c427012a"
+    }
+  },
+  "qualified": false,
+  "additional_sources": [
+    {
+      "source_repository": "https://github.com/huggingface/transformers",
+      "source_revision": "installed distribution 5.17.0",
+      "source_paths": [
+        "src/transformers/models/qwen3_5/modeling_qwen3_5.py"
+      ],
+      "source_sha256": "762feb6c7426a7f15b5bf830df54c07438bf9e7c27b8cdb23179045920412c3b",
+      "license": "Apache-2.0",
+      "use": "Independent CPU reference and explicit raw RMSNorm, gated recurrence precision and text partial-RoPE arithmetic; existing local Qwen primitives retain their prior provenance."
+    }
+  ],
+  "limits": [
+    "Text only, serialized independent question forwards. No image/video, question batching, APC reuse, causal chunking or permutation averaging.",
+    "Initial context cap 32768; overlong prompts always refused, including requests with truncate=true.",
+    "BF16 cross-backend rounding is not bitwise parity. Three diagnostic questions do not establish broad decision quality or long-context correctness.",
+    "No GPU, full-route formal qualification, controlled performance result or default promotion."
+  ],
+  "notice": "provenance/d3-text-decisions.NOTICE"
+}

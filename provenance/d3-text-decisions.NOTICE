@@ -1,0 +1,16 @@
+D3 text decision adapter source attribution
+
+D3 edge (Decision 3.0)
+Copyright 2026 vLLM Semantic Router Team
+Built on Qwen/Qwen3.5-0.8B (Apache-2.0).
+Source: https://huggingface.co/vllm-sr/d3-edge
+Revision: cab71e6ad3461b8086d51ddb572c656babd63b0b
+
+Transformers Qwen3.5 reference arithmetic
+Copyright 2025 The Qwen Team and The HuggingFace Inc. team. All rights reserved.
+Licensed under the Apache License, Version 2.0.
+https://www.apache.org/licenses/LICENSE-2.0
+
+MLX2 adapts the trained text format and re-expresses the reference tensor math
+in MLX. Modifications and validation are recorded in d3-text-decisions.json.
+No model weights are included in this repository change.

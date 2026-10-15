@@ -67,6 +67,27 @@ model-name substring. Decision 2.0, pplx-decider, and JEV share the Qwen trunk
 owner and service lifecycle, while their trained prompt and tensor math remain
 in separate modules under `mlx2.decisions.candidates`.
 
+The separate **D3 edge text route** is implemented and CPU reference-tested,
+but remains unqualified. It accepts the pinned `vllm-sr/d3-edge` bare BF16
+backbone at revision `cab71e6ad3461b8086d51ddb572c656babd63b0b`, its exact
+tokenizer and separate trained `255 x 1024` FP32 readout. D3 executes its
+explicit hybrid layer sequence: full-attention layers see the entire question
+prompt, while GDN layers retain their causal scan. Each question runs
+independently at width one. This is not the existing causal pplx route.
+
+The trained prompt bytes, answer-code ordering and scoring are preserved.
+Responses use MLX2's established confidence, four-decimal probabilities and
+caller score-legend conventions. Three pinned-artifact CPU diagnostic questions
+matched decisions; maximum probability difference from the independently
+loaded BF16 Transformers reference was 0.00322. A widened-FP32 diagnostic
+matched within 3.6e-7, but serving retains BF16. Neither comparison establishes
+general decision quality, GPU behavior or formal qualification. See
+[`provenance/d3-text-decisions.json`](../provenance/d3-text-decisions.json).
+
+D3's initial per-question context cap is 32,768 tokens. Oversized prompts are
+always refused, including with `truncate: true`. Images, video, permutation
+averaging, question batching, chunked prefill and state reuse are not supported.
+
 ## Request
 
 ```json
@@ -98,10 +119,15 @@ in separate modules under `mlx2.decisions.candidates`.
 
 The trained family calibration is always used, so request temperature must be
 `1`. Images, video, generation, and unknown artifact layouts fail closed.
-JEV score questions require exactly six levels; Decision 2.0 and pplx-decider
-accept two to ten. The shared request cap is narrowed further where a trained
+JEV score questions require exactly six levels; D3, Decision 2.0 and pplx-decider
+accept two to ten. A score answer echoes the request's level descriptions as
+`legend` and says where they went in `legend_source`: `"prompt"` for Clef,
+D3, Decision 2.0 and pplx-decider, which render each description as an option;
+`"caller"` for JEV, whose trained, parity-gated prompt is the fixed scale
+`0` (lowest) to `5` (highest) and never contains the descriptions, so its
+legend is label text supplied by the caller, not semantics the model scored. The shared request cap is narrowed further where a trained
 family head requires it.
-`truncate` defaults to `true`; candidate-family truncation is an mlx2 service
+`truncate` defaults to `true`; except for D3, candidate-family truncation is an mlx2 service
 extension rather than reference behavior. Set it to `false` to fail closed on
 an overlong state. Truncation also fails closed if fitting the fixed prompt
 would remove the entire nonempty state. A request may contain at most 64
@@ -155,6 +181,10 @@ operational statistics into a controlled performance claim.
 - pplx-decider requires the official bare 27B Qwen3.8 backbone,
   `decision_config.json`, and the exact `255 x 5120` readout. Vision tensors
   may be present but are discarded before materialization.
+- D3 requires its bare edge topology, explicit layer types, BF16 text tensors,
+  exact answer-code tokenizer contract and separate FP32 readout. Actual shard
+  keys, tensor shapes and dtypes are checked before loading. Vision tensors
+  in the package are discarded; they do not enable media requests.
 - JEV requires a prepared MLX text artifact whose merged weights and
   calibration are represented by `model_type: jev_text`. The ordinary LM head
   is retained only as JEV's trained verbalizer readout.

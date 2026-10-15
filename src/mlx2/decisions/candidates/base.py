@@ -79,10 +79,14 @@ def inspect_index(
     metadata_paths: Iterable[Path],
     allowed_prefixes: tuple[str, ...],
     required_prefixes: tuple[str, ...],
+    weight_map: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Validate one local indexed artifact without importing MLX."""
-    index = read_object(index_path)
-    weight_map = index.get("weight_map")
+    if weight_map is None:
+        index = read_object(index_path)
+        weight_map = index.get("weight_map")
+    else:
+        weight_map = dict(weight_map)
     if not isinstance(weight_map, dict) or not weight_map:
         raise ValueError(f"{index_path.name} has no indexed weights")
     unknown = [key for key in weight_map if not key.startswith(allowed_prefixes)]

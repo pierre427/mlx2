@@ -322,12 +322,18 @@ def inspect_decision_model(model_path: str | Path) -> dict:
 
         return inspect_jev(path)
     if model_type == "qwen3_5" and (path / "decision_config.json").is_file():
+        from .candidates.base import read_object
+
+        if read_object(path / "decision_config.json").get("format_id") == "d3-code-readout-v1":
+            from .candidates.d3 import inspect_artifact as inspect_d3
+
+            return inspect_d3(path)
         from .candidates import inspect_pplx
 
         return inspect_pplx(path)
     raise ValueError(
         f"unsupported decision model type {model_type!r}; expected clef, "
-        "decision2, jev_text, or a pplx-decider package"
+        "decision2, jev_text, or a D3/pplx-decider package"
     )
 
 
@@ -347,6 +353,10 @@ def load_decision_engine(
 
         return JevEngine(model_path, served_model_name=served_model_name)
     if model_type == "qwen3_5":
+        if artifact.get("decision_config", {}).get("format_id") == "d3-code-readout-v1":
+            from .candidates.d3 import D3Engine
+
+            return D3Engine(model_path, served_model_name=served_model_name)
         from .candidates import PplxDeciderEngine
 
         return PplxDeciderEngine(model_path, served_model_name=served_model_name)
