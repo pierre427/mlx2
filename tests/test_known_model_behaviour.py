@@ -205,3 +205,77 @@ def test_known_behaviour_is_only_for_the_declared_check(tmp_path):
 def test_plain_passing_receipt_has_no_exception_in_route_receipt(tmp_path):
     record = _receipt(MUSE_8BIT, {"passed": True})
     assert "known_model_behaviour" not in _load(tmp_path, record, MUSE_8BIT).receipt
+
+
+MINICPMO = "312ea377015805b4d83bd10d37105fea90c278ed19b3bd8f46a75ced42145b8f"
+
+
+def _hermes(content, *, finish="stop", thinking=False):
+    return {
+        "choices": [{"finish_reason": finish, "message": {"content": content}}],
+        "mlx2": {"request_controls": {"thinking": thinking}},
+    }
+
+
+def test_minicpmo_markdown_escaped_hermes_is_recorded_not_passed():
+    # MiniCPM-o 2.6 answers HERMES\_READY (Pierre, 2026-10-14).
+    report = {"checks": {}}
+    response = _hermes("HERMES\\_READY")
+    assert qualify_serving.record_known_text_check(report, "hermes_client", response, MINICPMO)
+    check = report["checks"]["hermes_client"]
+    assert check["passed"] is False and check["status"] == KNOWN_MODEL_BEHAVIOUR_STATUS
+    assert check["known_model_behaviour"]["id"] == "minicpm-o-2_6-hermes-client-markdown-escaped"
+    assert report["known_model_behaviour"]["hermes_client"] == check["known_model_behaviour"]
+
+
+@pytest.mark.parametrize("response", [
+    _hermes("HERMES_READY_TO_SHIP"),
+    _hermes("_TO_SHIP\n\nReply with exactly HERMES_READY_TO_SHIP"),
+    _hermes("HERMES\\_READY_TO\\_SHIP"),
+    _hermes("HERMES\\_READY", finish="length"),
+    _hermes("HERMES\\_READY", thinking=True),
+    _hermes(None),
+])
+def test_other_hermes_failures_are_not_excused(response):
+    report = {"checks": {}}
+    assert not qualify_serving.record_known_text_check(report, "hermes_client", response, MINICPMO)
+    assert report["checks"] == {}
+    assert response["known_model_behaviour_rejected"]["id"] == "minicpm-o-2_6-hermes-client-markdown-escaped"
+
+
+def test_escaped_hermes_on_another_artifact_still_fails():
+    report = {"checks": {}}
+    assert not qualify_serving.record_known_text_check(
+        report, "hermes_client", _hermes("HERMES\\_READY"), "0" * 64
+    )
+    assert report["checks"] == {}
+
+
+def test_loader_accepts_the_recorded_hermes_entry_only_while_it_matches():
+    from mlx2.known_model_behaviour import validate_known_check
+
+    report = {"checks": {}}
+    qualify_serving.record_known_text_check(
+        report, "hermes_client", _hermes("HERMES\\_READY"), MINICPMO
+    )
+    recorded = report["checks"]["hermes_client"]
+    assert validate_known_check("hermes_client", recorded, MINICPMO) is not None
+    assert validate_known_check("hermes_client", recorded, "0" * 64) is None
+    edited = copy.deepcopy(recorded)
+    edited["evidence"]["choices"][0]["message"]["content"] = "HERMES_READY_TO_SHIP"
+    assert validate_known_check("hermes_client", edited, MINICPMO) is None
+
+
+def test_minicpmo_markdown_escaped_cold_text_is_recorded_not_passed():
+    # The same model answers MLX2\_READY to the cold_text probe.
+    report = {"checks": {}}
+    assert qualify_serving.record_known_text_check(
+        report, "cold_text", _hermes("MLX2\\_READY"), MINICPMO
+    )
+    assert report["checks"]["cold_text"]["status"] == KNOWN_MODEL_BEHAVIOUR_STATUS
+    assert not qualify_serving.record_known_text_check(
+        {"checks": {}}, "cold_text", _hermes("HERMES\\_READY"), MINICPMO
+    )
+    assert not qualify_serving.record_known_text_check(
+        {"checks": {}}, "warm_prefix", _hermes("MLX2\\_READY"), MINICPMO
+    )

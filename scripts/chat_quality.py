@@ -178,3 +178,23 @@ def compare(ref, lp, rows=None):
             "p99_kl": round(float(mx.sort(kl)[int(0.99 * (kl.size - 1))].item()), 4),
             "frac_kl_gt_1": round((kl > 1).astype(mx.float32).mean().item(), 4),
             "top1": round(top1.mean().item(), 4)}
+
+
+def quality_evidence_manifest(quality):
+    """Classify A/B cells by what they can say about generation quality.
+
+    Whole rendered prompts contain system, user, tool-result and template rows.
+    Those rows are useful diagnostics, but chat training commonly masks their
+    loss, so they cannot veto a generation-quality promotion.  Assistant-only
+    rows and stock-generated continuations exercise tokens the model actually
+    predicts and are the promotion gates.
+    """
+    cells = sorted({cell for result in quality.values() for cell in result})
+    gates = [cell for cell in cells if cell.startswith("own_") or cell.endswith("@assistant")]
+    diagnostics = [cell for cell in cells if cell not in gates]
+    return {
+        "schema": "mlx2.int8-prefill-quality-evidence.v1",
+        "promotion_gate_cells": gates,
+        "diagnostic_only_cells": diagnostics,
+        "rule": "own continuations and assistant-turn targets gate generation quality; all-position prompt rows are diagnostic only",
+    }

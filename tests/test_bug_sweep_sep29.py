@@ -15,6 +15,7 @@ from mlx2.adapters.multimodal import (
     install_gemma3n_vision_batching,
     install_minicpmo_vision_batching,
 )
+from mlx2.runtime import apc_v2
 from mlx2.runtime.apc_v2 import APCv2
 from mlx2.runtime.memory_policy import (
     SelfMTPLaneAdmissionController,
@@ -41,17 +42,22 @@ def test_failed_parked_republication_preserves_previous_snapshot(
     before_bytes = apc.nbytes
     disk_bytes = apc._disk_bytes
     manifest = Path(previous._apc_disk["manifest"])
+    injected = []
     with monkeypatch.context() as patch:
         if failure == "payload":
 
             def fail(*args):
+                injected.append(args[0])
                 raise OSError("injected disk full")
 
-            patch.setattr(apc, "_atomic_save_cache", fail)
+            # Evaluated cache payloads are serialized by the bounded writer.
+            patch.setattr(apc_v2, "_atomic_save_payload", fail)
         else:
             patch.setattr(apc, "_write_manifest_locked", lambda *args: False)
         result = apc.store(key, tokens, [_state(16, 500)], session_tag=tag)
     assert result.stored is False
+    if failure == "payload":
+        assert injected, "the actual payload writer must reach the injected failure"
     assert apc._trie.get(key, tokens) is previous
     assert apc.nbytes == before_bytes
     assert apc._disk_bytes == disk_bytes

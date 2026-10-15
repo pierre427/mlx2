@@ -4,6 +4,7 @@
   "source_repository": "https://github.com/vllm-project/vllm",
   "source_revision": "3bb0a03f35269185b6358753e64932bb946cc531",
   "source_pull_request": "https://github.com/vllm-project/vllm/pull/52228",
+  "source_blog": "https://vllm.ai/blog/2026-10-14-adaptive-verification-online-estimator",
   "source_paths": [
     "vllm/v1/worker/gpu/spec_decode/acceptance_estimator.py",
     "vllm/v1/worker/gpu/spec_decode/speculator.py"
@@ -50,6 +51,8 @@
     "production_model_artifact_loads": false,
     "synthetic_tiny_artifact_loads": true,
     "hybrid_contracts": "Actual tiny target math and random tiny XPress heads: independent committed-prefix replay of recurrent/conv/KV/QSA index/pool state, stateful processor settlement, cancellation and final-budget ordinary boundaries, late physical-group atomic rollback, and paired-sidecar validation. No compatible trained hybrid draft checkpoint was loaded.",
-    "tensorfold": "CPU dispatch seam exercised forward/forward_many signatures and physical groups using HybridVerifyRows as an explicit substitute; native TensorFold kernels were not executed."
+    "tensorfold": "CPU dispatch seam exercised forward/forward_many signatures and physical groups using HybridVerifyRows as an explicit substitute; native TensorFold kernels were not executed.",
+    "upstream_crosscheck_2026_10_15": "The vLLM write-up confirms the shipped feature is logit(max q), not the sampled token probability. mlx2's dense and compact proposal-law feature tests cover that invariant; stochastic lagged_q is committed prior-round state and never a current sampled-token feature.",
+    "live_candidate_2026_10_15": "M5 Max Muse-Glimmer-30B-mlx-8bit plus Muse-Glimmer-30B-DFlash2 depth-15 matrix passed ordinary greedy equality, sampled target-law parity, estimator accounting, rollback/backstop checks, and observed physical target-row trimming at B1/B2/B4. This is candidate evidence only: preflight was omitted by request, and the synchronized cost samples are not a performance qualification."
   }
 }

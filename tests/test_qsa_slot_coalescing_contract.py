@@ -85,7 +85,11 @@ def launches(monkeypatch):
     """Fake kernel builders + forbidden GPU capability calls; returns the launch log."""
     log = []
     monkeypatch.setattr(indexed, "_quantized_partition_kernel", lambda: FakeKernel("partition", log))
-    monkeypatch.setattr(indexed, "_combine_kernel", lambda gated=False: FakeKernel(f"combine:{gated}", log))
+    monkeypatch.setattr(
+        indexed,
+        "_combine_kernel",
+        lambda gated=False, gate_dtype=None: FakeKernel(f"combine:{gated}", log),
+    )
     for name in ("_partition_kernel", "_private_delta_partition_kernel",
                  "_private_delta_exact_set_partition_kernel", "_measure_candidates", "combine_indexed_partials"):
         monkeypatch.setattr(indexed, name, _forbid(name))

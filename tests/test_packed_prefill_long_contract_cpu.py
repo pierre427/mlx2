@@ -63,9 +63,13 @@ class Tests(unittest.TestCase):
             setattr(raw,name,value)
         cap['scratch_bytes']=1
         with self.assertRaises(ValueError):L.require_long_capabilities(raw,backend,L.COUNTS)
-    @unittest.skipUnless(PRIVATE_MODEL_CONFIG.is_file(), 'private Qwen3.8 model config is not installed')
     def test_whole_projection_charge_is_not_hidden_in_short_budget(self):
-        config=json.loads(PRIVATE_MODEL_CONFIG.read_text())['text_config']
+        # Declared 27B projection geometry; this accounting test needs no
+        # downloaded checkpoint or host-specific model directory.
+        config=dict(hidden_size=5120,intermediate_size=17408,
+            linear_num_key_heads=16,linear_key_head_dim=128,
+            linear_num_value_heads=48,linear_value_head_dim=128,
+            num_attention_heads=24,num_key_value_heads=4)
         candidate=NS(args=NS(**config),native_layer_count=16,bootstrap_staging_bytes=lambda n:0)
         charge=S.scratch_bound(candidate,L.COUNTS,long_fused=True)
         self.assertGreater(charge,24<<30);self.assertLess(charge,40<<30)

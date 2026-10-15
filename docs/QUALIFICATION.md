@@ -271,6 +271,13 @@ Reading results:
   hermes, MiniCPM-o hermes, Flash-Next MTP2 / Laguna
   `tools_required_named_parallel` (near-tie parameter names), and the
   Muse-Glimmer 30B 8-bit qualifier `tools` check (declared, below).
+  MiniCPM-o 2.6's Markdown-escaped exact replies (`HERMES\_READY` for
+  `hermes_client`, `MLX2\_READY` for `cold_text`; plain-text form of each
+  check only) are declared too (Pierre, 2026-10-14).
+  The local Gemma 4 26B-A4B 8-bit artifact is converted from the base model
+  (google/gemma-4-26B-A4B, no chat template), so chat requests reach it as raw
+  text and it continues them; that is not declared: its chat route cannot
+  qualify until an instruction-tuned artifact is used.
 - **Declared known model behaviour in the qualifier.** The qualifier stops
   at its first failed check, so a model-behaviour failure early in the run
   hides every later check. A failure Pierre has explicitly classified as

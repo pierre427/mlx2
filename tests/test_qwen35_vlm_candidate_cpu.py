@@ -1,5 +1,6 @@
 """CPU-only checks for the separate Qwen3.5 full vision candidate."""
 
+import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -50,6 +51,24 @@ def test_local_vision_artifacts_and_mtp_are_distinct():
 
 
 def test_direct_media_request_uses_injected_backend_without_mlx(tmp_path, monkeypatch):
+    # Synthetic metadata exercises the real inspector and injected backend;
+    # the request contract must not depend on a local trained checkpoint.
+    artifact = tmp_path / "model"
+    artifact.mkdir()
+    (artifact / "config.json").write_text(json.dumps({
+        "model_type": "qwen3_5",
+        "text_config": {"num_hidden_layers": 64, "hidden_size": 5120},
+        "vision_config": {"depth": 27, "hidden_size": 1152,
+                          "num_heads": 16, "patch_size": 16},
+        "image_token_id": 248056, "video_token_id": 248057,
+    }))
+    weights = {f"vision_tower.blocks.{layer}.fixture_{i}.weight": "model.safetensors"
+               for layer in range(27) for i in range(12)}
+    for layer in (0, 26):
+        weights[f"vision_tower.blocks.{layer}.attn.qkv.weight"] = "model.safetensors"
+    (artifact / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": weights}))
+    (artifact / "model.safetensors").write_bytes(b"\0" * 8)
     image = tmp_path / "frame.png"
     image.write_bytes(b"example")
     seen = []
@@ -74,7 +93,7 @@ def test_direct_media_request_uses_injected_backend_without_mlx(tmp_path, monkey
     monkeypatch.setitem(sys.modules, "mlx_vlm.generate", fake)
     monkeypatch.setitem(sys.modules, "mlx_vlm.prompt_utils", prompt_utils)
     adapter = Qwen35VLMAdapter(
-        ROOT / "Qwen3.8-27B-MLX-4bit",
+        artifact,
         backend_factory=lambda _: (SimpleNamespace(config=SimpleNamespace(model_type="qwen3_5")), object()),
     )
     result = adapter.generate_response("Describe this", images=[image], max_tokens=32)

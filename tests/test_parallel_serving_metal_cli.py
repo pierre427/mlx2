@@ -31,6 +31,30 @@ def arguments(*extra):
     )
 
 
+def test_public_pool_ranking_accepts_real_session_labels_and_refuses_shared_counts():
+    from test_proposal_pool import D, path, pool, round_
+
+    proposals = pool()
+    selected = proposals.select([path((1,))], round_(scope=D))
+    proposals.commit_feedback(selected, [1])
+    public = proposals.receipt(D)
+    registry = harness.committed_session_ranking({"ranking": public})
+    assert registry["session_scope_hash"] == D
+    assert registry["session_counts"][0]["accepted"] == 1
+    # Internal model/global learning is still real and testable; an HTTP
+    # request receipt must not be required to expose it to qualify this route.
+    internal = proposals.ranking_registry.receipt(proposals.session, D)
+    assert internal["model_counts"] and internal["global_counts"]
+    for changed in (
+        {**public, "telemetry_scope": "operator"},
+        {**public, "source_health": {}},
+        {**public, "ranking_registry": internal},
+        {**public, "ranking_registry": {**registry, "session_counts": []}},
+    ):
+        with pytest.raises(AssertionError, match="HTTP pool"):
+            harness.committed_session_ranking({"ranking": changed})
+
+
 def test_http_validation_dry_run_cannot_import_tensor_or_spawn_server():
     code = """
 import sys, runpy, subprocess

@@ -1,0 +1,39 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "oMLX single-array recurrent APC and template-exact thinking close checks",
+  "recorded_at": "2026-10-15",
+  "source_repository": "https://github.com/jundot/omlx",
+  "license": "MIT",
+  "sources": [
+    {
+      "pull_request": "https://github.com/jundot/omlx/pull/4532",
+      "source_revision": "535fb8d70cb50aadd16403a06f561376ebe3455e",
+      "scope": "LFM2 and LFM2.5 single-array recurrent prefix-cache restoration"
+    },
+    {
+      "pull_request": "https://github.com/jundot/omlx/pull/4539",
+      "source_revision": "a2d8297fafcd4a052a8939eecae4ce469ebee3fd",
+      "scope": "generation-template-exact forced thinking close"
+    }
+  ],
+  "implementation_paths": [
+    "src/mlx2/adapters/flash_next.py",
+    "src/mlx2/serving.py",
+    "tests/test_qwen_thinking_release_cpu.py",
+    "tests/test_lfm25_apcv2_warm_hit_cpu.py"
+  ],
+  "modifications": [
+    "Kept mlx2 APCv2 and its existing arbitrary-length ArraysCache serialization; added a direct LFM2.5-shaped store and multi-turn warm-hit regression rather than importing oMLX cache code.",
+    "Separated the Qwen parser close marker from the generation-side release sequence and require an exact tokenizer round trip for newline-think-close-newline-newline.",
+    "Made an explicitly declared but invalid release fail closed instead of falling back to the bare history marker. Qwen3.6 and Qwen3.8 adapters inherit this adapter-owned template contract."
+  ],
+  "validation": {
+    "host_component": "focused LFM2.5 APCv2, Qwen forced-close, and related intake suites passed",
+    "live_lfm25": "M5 Max ordinary candidate on the official 8-bit artifact: cold cached_tokens=0, warm cached_tokens=19, identical generated deltas",
+    "live_qwen36": "local Qwen3.6 artifact tokenizer round-tripped ids (198, 248069, 271) to newline-think-close-newline-newline; no live decode claim",
+    "live_qwen38": "local Qwen3.8 artifact tokenizer round-tripped ids (198, 248069, 271) to newline-think-close-newline-newline; no live decode claim",
+    "qualified": false,
+    "selected": true,
+    "observed_used": "LFM2.5 APCv2 warm hit observed; Qwen forced-close is host-validated but not live-model observed"
+  }
+}

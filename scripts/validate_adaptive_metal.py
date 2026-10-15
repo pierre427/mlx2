@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded real-XPress Metal correctness and adaptive-cost diagnostic.
+"""Bounded real external-draft Metal correctness and adaptive-cost diagnostic.
 
 One target/head load is shared by all cells. Costs are synchronized, uncontrolled
 forward diagnostics, never a quoted benchmark or qualification. Run under the
@@ -241,6 +241,7 @@ def run(args, receipt):
     import mlx.core as mx
     import numpy as np
 
+    from mlx2.adapters.registry import inspect_model
     from mlx2.adapters.standard_decoder import StandardDecoderAdapter
     from mlx2.runtime.acceptance_estimator import AdaptiveVerificationPolicy
     from mlx2.runtime.cow_cache import (
@@ -277,7 +278,13 @@ def run(args, receipt):
             ),
             "production_precision_changed": False,
         }
-    adapter = StandardDecoderAdapter(
+    try:
+        adapter_type = inspect_model(args.target).adapter_type
+    except FileNotFoundError:
+        # Retain the validator's explicit synthetic fixture seam.  Real
+        # artifacts always resolve through the registry above.
+        adapter_type = StandardDecoderAdapter
+    adapter = adapter_type(
         str(args.target),
         execution_policy={
             "draft_model": str(args.draft),

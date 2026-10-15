@@ -294,7 +294,19 @@ APPROVED_QUALIFICATION_HARNESS = {
     # repeated input), sized by the server's /tokenize count; context_bound,
     # SPOMIN, SRPT forcing and the rolling probe take the same sized filler.
     # Receipts from c46b308c... must be regenerated.
-    "sha256": "338e1e1abcbba837308b78e606471a39cce2e69826266a989acf25a6c12a832a",
+    # Re-pinned 2026-10-14: a failed plain-text hermes_client or cold_text
+    # check is recorded as known model behaviour when the artifact declares
+    # that exact shape (record_known_text_check; MiniCPM-o's Markdown-escaped
+    # HERMES\\_READY / MLX2\\_READY); a source-bound token witness is never
+    # excused.  Receipts from 338e1e1a... and 28e5082a... must be regenerated.
+    # Re-pinned 2026-10-14: after a declared cold_text, the stream, stop and
+    # recovery checks compare with the route's own cold answer (as the
+    # source-bound path already did) instead of the literal MLX2_READY.
+    # Receipts from 020f99e4... must be regenerated.
+    # Re-pinned 2026-10-14: the batch check accepts a lane that ends its answer
+    # with a natural stop before the 160-token budget (MiniCPM-o).
+    # Receipts from 5b26cc60... must be regenerated.
+    "sha256": "18803913c4081995761a8d62680994a25ce3e9178432c3e60efb2a65d31f2493",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -343,6 +355,9 @@ APPROVED_MEDIA_HARNESS = {
 # not word salad). evaluator 0e9abb7a... -> 6eca4f9a... for all three native
 # producers; the native producer itself is unchanged. Companions from
 # 0e9abb7a... must be regenerated.
+# Re-pinned 2026-10-15: trusted tenant-scoped feature keys and opt-in
+# MiniCPM-o per-item reuse change the reviewed adapter contract. Existing
+# companions do not qualify these changed sources and must be regenerated.
 APPROVED_MEDIA_PRODUCERS = {
     "smolvlm": (APPROVED_MEDIA_HARNESS, evaluate_smol_media_report, SMOL_MEDIA_CHECKS),
     "qwen2_5_vl": (
@@ -368,11 +383,26 @@ APPROVED_MEDIA_PRODUCERS = {
     "gemma3n": (
         {
             "name": "scripts/qualify_native_vlm_media.py",
-            "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
-            "evaluator_sha256": "6eca4f9a3a74ac56c932f8228268b842e2b21db0f740f43c9a9f0f043f972c20",
+            # Re-pinned 2026-10-14: native media SETUP cache budget 2 -> 8 GiB
+            # (Gemma 4 31B evicted the original video before its replay).
+            # Companions from 1fa89f4d... must be regenerated.
+            # Re-pinned 2026-10-15: SETUP selects int8 prefill like the CLI
+            # (auto) and batch rows carry top-2 token evidence for the
+            # near-tie rule.  Companions from 7b95216d... must be regenerated.
+            # Re-pinned 2026-10-15: continuous-batch probe uses short chat
+            # prompts (instruct checkpoints are off-template on raw text).
+            # Re-pinned 2026-10-15: native SETUP cache budget 8 -> 16 GiB
+            # (Gemma 4 31B rolling checkpoint did not fit).
+            # Re-pinned 2026-10-15: native SETUP prefill_step 256 -> 512 so
+            # int8 prefill (row threshold 512) engages on the Gemma 4 31B.
+            "sha256": "0ddb47b12b384cbfc7115a14b1e8518c9a3358f792e9ace6a49c718ec12b9f55",
+            "evaluator_sha256": "bc0b592481184c82a9f1e8013f21ccc9b9fd9332906efbcacf3976ef3c204b22",  # 2026-10-15: near-tie flips; chat batch prompts
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
-            "adapter_batching_sha256": "19e7822ca5f4751e05b17d7ae9dbacc221fdb98234aef6243e306d38bb6cab04",
-            "adapter_contract_sha256": "ba3ebfdb13db6a2df8e7f12950f58c5c3cc830fc26f5220227a835b7c25ba180",
+            "adapter_batching_sha256": "ac58a0734eb7fc536ab3414186b66d30e8e1352f0eab09f6496871310262f58c",
+            # Re-pinned 2026-10-14: debd7c639 made the mlx-vlm chat render
+            # fail closed without a chat template (adapters/mlx_vlm.py).
+            # Companions from ba3ebfdb... must be regenerated.
+            "adapter_contract_sha256": "19a21c414b0d9602dade38f20c113bab03691a90af8cc2428f175888cc6a7d32",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["gemma3n"],
@@ -381,14 +411,34 @@ APPROVED_MEDIA_PRODUCERS = {
     "gemma4": (
         {
             "name": "scripts/qualify_native_vlm_media.py",
-            "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
-            "evaluator_sha256": "6eca4f9a3a74ac56c932f8228268b842e2b21db0f740f43c9a9f0f043f972c20",
+            # Re-pinned 2026-10-14: native media SETUP cache budget 2 -> 8 GiB
+            # (Gemma 4 31B evicted the original video before its replay).
+            # Companions from 1fa89f4d... must be regenerated.
+            # Re-pinned 2026-10-15: SETUP selects int8 prefill like the CLI
+            # (auto) and batch rows carry top-2 token evidence for the
+            # near-tie rule.  Companions from 7b95216d... must be regenerated.
+            # Re-pinned 2026-10-15: continuous-batch probe uses short chat
+            # prompts (instruct checkpoints are off-template on raw text).
+            # Re-pinned 2026-10-15: native SETUP cache budget 8 -> 16 GiB
+            # (Gemma 4 31B rolling checkpoint did not fit).
+            # Re-pinned 2026-10-15: native SETUP prefill_step 256 -> 512 so
+            # int8 prefill (row threshold 512) engages on the Gemma 4 31B.
+            "sha256": "0ddb47b12b384cbfc7115a14b1e8518c9a3358f792e9ace6a49c718ec12b9f55",
+            "evaluator_sha256": "bc0b592481184c82a9f1e8013f21ccc9b9fd9332906efbcacf3976ef3c204b22",  # 2026-10-15: near-tie flips; chat batch prompts
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
-            "adapter_batching_sha256": "19e7822ca5f4751e05b17d7ae9dbacc221fdb98234aef6243e306d38bb6cab04",
+            "adapter_batching_sha256": "ac58a0734eb7fc536ab3414186b66d30e8e1352f0eab09f6496871310262f58c",
             # Re-pinned 2026-10-12 (sweep 10-12 L5-03): e3c19168e changed
             # adapters/gemma4.py (descriptor execution-contract metadata and
             # the media policy); 5605b41a... refused every new companion.
-            "adapter_contract_sha256": "f143292422b28f200dc39dbbaaffe3004cbda57f51356f18b2203f488b6277ac",
+            # Re-pinned 2026-10-14: debd7c639 (chat fails closed without a
+            # chat template), c16c5ffeb (instruct 26B-A4B source, mxfp8) and
+            # the instruct 31B source changed adapters/mlx_vlm.py and
+            # adapters/gemma4.py.  Companions from f1432924... and
+            # 8917aeda... must be regenerated.
+            # Re-pinned 2026-10-14: pinned prequantized downloads
+            # (mlx-community 26B-A4B 8-bit).  Companions from 05838caa... must
+            # be regenerated.
+            "adapter_contract_sha256": "43fae4adce82eeca7128205ee0f2977cf7c0550c44a06580eaf47052843b766a",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["gemma4"],
@@ -397,11 +447,24 @@ APPROVED_MEDIA_PRODUCERS = {
     "minicpmo": (
         {
             "name": "scripts/qualify_native_vlm_media.py",
-            "sha256": "1fa89f4dd626b60ecbfdc4c496d5c4f4776970480e70cf675f91f84b71fa0722",
-            "evaluator_sha256": "6eca4f9a3a74ac56c932f8228268b842e2b21db0f740f43c9a9f0f043f972c20",
+            # Re-pinned 2026-10-14: native media SETUP cache budget 2 -> 8 GiB
+            # (Gemma 4 31B evicted the original video before its replay).
+            # Companions from 1fa89f4d... must be regenerated.
+            # Re-pinned 2026-10-15: SETUP selects int8 prefill like the CLI
+            # (auto) and batch rows carry top-2 token evidence for the
+            # near-tie rule.  Companions from 7b95216d... must be regenerated.
+            # Re-pinned 2026-10-15: continuous-batch probe uses short chat
+            # prompts (instruct checkpoints are off-template on raw text).
+            # Re-pinned 2026-10-15: native SETUP cache budget 8 -> 16 GiB
+            # (Gemma 4 31B rolling checkpoint did not fit).
+            # Re-pinned 2026-10-15: native SETUP prefill_step 256 -> 512 so
+            # int8 prefill (row threshold 512) engages on the Gemma 4 31B.
+            "sha256": "0ddb47b12b384cbfc7115a14b1e8518c9a3358f792e9ace6a49c718ec12b9f55",
+            "evaluator_sha256": "bc0b592481184c82a9f1e8013f21ccc9b9fd9332906efbcacf3976ef3c204b22",  # 2026-10-15: near-tie flips; chat batch prompts
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
-            "adapter_batching_sha256": "19e7822ca5f4751e05b17d7ae9dbacc221fdb98234aef6243e306d38bb6cab04",
-            "adapter_contract_sha256": "ba3ebfdb13db6a2df8e7f12950f58c5c3cc830fc26f5220227a835b7c25ba180",
+            "adapter_batching_sha256": "ac58a0734eb7fc536ab3414186b66d30e8e1352f0eab09f6496871310262f58c",
+            # Re-pinned 2026-10-14 with gemma3n (debd7c639, adapters/mlx_vlm.py).
+            "adapter_contract_sha256": "19a21c414b0d9602dade38f20c113bab03691a90af8cc2428f175888cc6a7d32",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["minicpmo"],
@@ -1947,7 +2010,13 @@ def load_qualified_route(
         if key not in PROVENANCE_ONLY_SETTINGS
     }
     if qualified_settings != serving_settings:
-        raise ValueError("qualification does not match serving settings")
+        message = "qualification does not match serving settings"
+        if settings.get("route_selection_source") == "capability_default":
+            message += (
+                "; this adapter now defaults to prompt lookup, so pass "
+                "--ordinary to use an ordinary-route receipt"
+            )
+        raise ValueError(message)
     checks = record.get("checks", {})
     selected_for_checks = effective_route_capabilities(
         descriptor.capabilities,

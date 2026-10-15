@@ -12,7 +12,7 @@ spec.loader.exec_module(module)
 
 
 @pytest.mark.parametrize(
-    "build", ["0.32.2.dev20260919+39400a0d4", "unknown-future-build"]
+    "build", ["0.32.2.dev20260919+39400a0d4", "0.32.4", "unknown-future-build"]
 )
 def test_inventory_never_turns_a_source_check_into_compatibility(build):
     catalog = json.loads(PATH.with_name("mlx_mechanism_contracts.json").read_text())

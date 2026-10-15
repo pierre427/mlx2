@@ -257,6 +257,20 @@ def stream(base, body, *, cancel=False, timeout=240):
     }
 
 
+def committed_session_ranking(pool_receipt):
+    """Validate the public HTTP contract without requiring private aggregates."""
+    ranking = pool_receipt.get("ranking") or {}
+    registry = ranking.get("ranking_registry") or {}
+    if ranking.get("telemetry_scope") != "session" or not registry.get("session_counts"):
+        raise AssertionError("HTTP pool lacks committed session-scoped ranking labels")
+    if {"source_health", "feedback_revision", "ranking_revision"} & ranking.keys() or {
+        "global_counts", "model_counts", "revision", "retained_models",
+        "retained_sessions", "evictions",
+    } & registry.keys():
+        raise AssertionError("HTTP pool exposes shared ranking diagnostics")
+    return registry
+
+
 def run_route(args, report, route):
     work = args.out.parent / route
     work.mkdir(parents=True, exist_ok=True)
@@ -432,15 +446,7 @@ def run_route(args, report, route):
                     raise AssertionError(
                         "HTTP pool did not execute 15 complete path rows"
                     )
-                registry = find(steps["warm"], "ranking_registry")
-                if not registry or not all(
-                    registry.get(key)
-                    for key in ("global_counts", "model_counts", "session_counts")
-                ):
-                    raise AssertionError(
-                        "HTTP pool lacks committed session/model/global ranking labels"
-                    )
-                cell["pool_ranking"] = registry
+                cell["pool_ranking"] = committed_session_ranking(pool_receipt)
                 cell["pool_receipt"] = pool_receipt
             cell["passed"] = True
         finally:

@@ -13,6 +13,7 @@ class Guard(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0,Guard())
 import spomin_400case_native_suite as S
 import spomin_400case_phased_http_bench as B
+from mlx2.host_counters import count_add
 class Tests(unittest.TestCase):
  @pytest.mark.skipif(not INPUTS.is_file(),reason='requires retained spomin400 native input evidence')
  def test_original400_body_fields_preserved_ordinary_has_no_atomic_cohort(self):
@@ -24,7 +25,7 @@ class Tests(unittest.TestCase):
     self.assertEqual('batch_cohort' in b,native);self.assertIs(b['skip_writing_prefix_cache'],True)
  def test_actual_engine_publication_keeps20_ordinary_requests_independent(self):
   tree=ast.parse((ROOT/'src/mlx2/serving.py').read_text());node=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='_publish_job')
-  env={'time':time,'Overloaded':RuntimeError};exec(compile(ast.Module(body=[node],type_ignores=[]),'actual engine publication','exec'),env)
+  env={'time':time,'Overloaded':RuntimeError,'count_add':count_add};exec(compile(ast.Module(body=[node],type_ignores=[]),'actual engine publication','exec'),env)
   calls=[];engine=NS(max_lanes=20,pending_cohorts={},jobs={},lock=RLock(),counts=defaultdict(int),_publish_jobs=lambda jobs,**kw:calls.append((tuple(jobs),kw)))
   row={'body':{'messages':[{'role':'user','content':'actual'}],'max_tokens':192,'temperature':0,'enable_thinking':False},'case_id':'actual'}
   for uid in range(20):env['_publish_job'](engine,NS(request=S.request_body(row,model='m',native=False,cohort_id='x'),tenant_id='tenant',id=str(uid)))

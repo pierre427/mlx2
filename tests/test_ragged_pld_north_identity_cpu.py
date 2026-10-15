@@ -76,7 +76,9 @@ NORTH_SOURCE = "src/mlx2/adapters/north_mini_code.py"
 # artifact_paths.shard_within_artifact, so Hub snapshot links into the
 # repository's own blobs are accepted.  The allowlist is unchanged; the helper
 # joins the reference globals (AST-extracted below, stdlib only).
-NORTH_SHA256 = "97cbda34b54b652a2072f22031716f7a9e26f274ad5c433d2185ce995f5602d4"
+# Re-pinned 2026-10-15: adapter-owned metadata planning was added; the
+# allowlisted artifact inspector functions and constants remain unchanged.
+NORTH_SHA256 = "29f9cc7137f28863616f5a8ae0ff9040307271a4b73fee0bf2073d4339d0504d"
 REFERENCE_FUNCTIONS = ("_load_json", "_safe_index", "_quantized_shapes", "_expected_weight_headers",
                        "_validate_weight_headers", "_unique_pairs", "inspect_artifact")
 REFERENCE_CONSTANTS = ("_SAFETENSORS_HEADER_LIMIT", "_DTYPE_BYTES")

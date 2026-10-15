@@ -587,6 +587,39 @@ def record_tools_probe(report, probe):
         raise AssertionError("tools")
 
 
+def record_known_text_check(report, name, evidence, artifact):
+    """Record a failed plain-text check as declared known model behaviour.
+
+    Only when ``artifact`` declares a known behaviour for ``name`` and the
+    response matches its shape exactly; then the check is recorded (never as
+    passed) and the run continues.  Returns whether it was recorded; a
+    rejected match is noted on the evidence and the caller fails the check.
+    """
+    from mlx2.known_model_behaviour import (
+        KNOWN_MODEL_BEHAVIOUR_STATUS,
+        known_model_behaviour_for,
+        match_shape,
+    )
+
+    entry = known_model_behaviour_for(name, artifact)
+    if entry is None:
+        return False
+    matched, reasons = match_shape(entry.shape, evidence, name)
+    if not matched:
+        evidence["known_model_behaviour_rejected"] = {"id": entry.id, "reasons": reasons}
+        return False
+    known = entry.record(artifact)
+    report["checks"][name] = {
+        "passed": False,
+        "status": KNOWN_MODEL_BEHAVIOUR_STATUS,
+        "known_model_behaviour": known,
+        "evidence": evidence,
+    }
+    report.setdefault("known_model_behaviour", {})[name] = known
+    print(f"{name}: KNOWN MODEL BEHAVIOUR ({entry.id})", flush=True)
+    return True
+
+
 def selected_capability_scope(status):
     """Trust only the selected route's capabilities, cross-checked at status."""
     selected = status.get("selected_capabilities")
@@ -4068,8 +4101,13 @@ def main():
                 hermes, source_cases["hermes_client"], prompt_text=hermes_text
             ) if source_cases is not None else content(hermes) == "HERMES_READY"
         )
-        check("hermes_client", hermes_output_ok and
-              hermes["mlx2"]["request_controls"]["thinking"] is False, hermes)
+        hermes_ok = (hermes_output_ok
+                     and hermes["mlx2"]["request_controls"]["thinking"] is False)
+        # A source-bound token witness is a parity check and is never excused.
+        if hermes_ok or source_cases is not None or not record_known_text_check(
+            report, "hermes_client", hermes, initial["artifact"]
+        ):
+            check("hermes_client", hermes_ok, hermes)
         probability_request = prompt("Write a short sentence about compilers.", max_tokens=8)
         probability_reference = post(probability_request)
         probability_response = post({**probability_request, "logprobs": True,
@@ -4188,7 +4226,18 @@ def main():
                 cold, source_cases["cold_text"], prompt_text=cold_text_prompt
             ) if source_cases is not None else content(cold) == "MLX2_READY"
         )
-        check("cold_text", cold_output_ok, cold["mlx2"])
+        if cold_output_ok or source_cases is not None or not record_known_text_check(
+            report, "cold_text", cold, initial["artifact"]
+        ):
+            check("cold_text", cold_output_ok, cold["mlx2"])
+        # Later checks hold the route to its own cold answer: the source-bound
+        # witness, or a declared known reply shape; otherwise the literal.
+        cold_reference = (
+            content(cold)
+            if source_cases is not None
+            or report["checks"].get("cold_text", {}).get("status") == "known_model_behaviour"
+            else "MLX2_READY"
+        )
         check(
             "warm_prefix",
             content(warm) == content(cold)
@@ -4322,8 +4371,7 @@ def main():
         )
         check(
             "stream",
-            normalize_chat_content(text)
-            == (content(cold) if source_cases is not None else "MLX2_READY")
+            normalize_chat_content(text) == cold_reference
             and wire.endswith("data: [DONE]\n\n")
             and "mlx2" in chunks[-1],
             chunks,
@@ -4383,7 +4431,7 @@ def main():
             (stop_witness is not None if source_cases is not None else True)
             and (stop_witness_response_matches(stopped, stop_witness)
                  if stop_witness else (
-                     content(stopped) == "MLX2"
+                     content(stopped) == cold_reference.split(stop_text)[0]
                      and stopped["choices"][0]["finish_reason"] == "stop")),
             stopped,
         )
@@ -4436,9 +4484,16 @@ def main():
                 widths = sorted(set(widths) | {
                     int((r["mlx2"].get("speculation") or {}).get("target_width") or 0) for r in batch
                 })
+            # A lane may end its answer before the budget (MiniCPM-o finished
+            # photosynthesis in 120 tokens); a natural stop is a full row.
             check(
                 "batch",
-                all(r["usage"]["completion_tokens"] == 160 and content(r) for r in batch)
+                all(
+                    content(r)
+                    and (r["usage"]["completion_tokens"] == 160
+                         or r["choices"][0]["finish_reason"] == "stop")
+                    for r in batch
+                )
                 and (
                     max(widths, default=0) >= 2
                     or (prompt_lookup_route and elapsed < 0.6 * lane_seconds)
@@ -4686,7 +4741,7 @@ def main():
         recovered = post(request)
         check(
             "recovery",
-            content(recovered) == (content(cold) if source_cases is not None else "MLX2_READY")
+            content(recovered) == cold_reference
             and (source_cases is None or source_token_response_matches(
                 recovered, source_cases["cold_text"], prompt_text=cold_text_prompt
             ))
