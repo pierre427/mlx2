@@ -45,6 +45,11 @@ multimodal = [
 radio = ["mlx>=0.32", "numpy>=2", "pillow>=10"]
 image-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
 gguf-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
+flux3-image = [
+    "mlx>=0.32,<0.33", "numpy>=2", "pillow>=10.4,<13", "torch>=2.4",
+    "huggingface-hub>=0.35", "transformers>=5.12,<6",
+    "mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@67599f2e8ec31bf35cbb7b02794114f20844f0bb",
+]
 
 [project.scripts]
 mlx2-serve = "mlx2.server:main"

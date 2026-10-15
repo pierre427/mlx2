@@ -1,0 +1,38 @@
+{
+  "mechanism": "FLUX 3 Image Klein direct MLX image generation and editing",
+  "source_repository": "https://github.com/black-forest-labs/flux-3-image-klein",
+  "source_revision": "45e57c9fb06f9751cdced29a65c5d2171003be05",
+  "source_paths": [
+    "src/flux3/dit.py",
+    "src/flux3/autoencoder.py",
+    "src/flux3/sampling.py",
+    "src/flux3/text_encoder.py",
+    "src/flux3/pipeline.py"
+  ],
+  "license": "Apache-2.0",
+  "license_file": "provenance/LICENSE.flux3.txt",
+  "model_repository": "black-forest-labs/flux-3-image-klein",
+  "model_revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+  "model_license": "FLUX Kommunity License v1.0 (retained with downloaded weights)",
+  "modifications": [
+    "Port DiT, four-axis rotary embeddings, flow-map Euler integration and NHWC VAE to native MLX.",
+    "Bound execution to one image with up to ten references; preserve FP32 integration state and VAE arithmetic.",
+    "Load the pinned BF16 package locally with strict key/shape validation and verified download receipts.",
+    "Use the project's pinned mlx-vlm Qwen3-VL text layers, collecting the eight reference hidden states without autoregressive decoding or a KV cache.",
+    "Keep the direct image lane separate from causal serving; no automatic prompt upsampler or quantized CUDA variants."
+  ],
+  "text_runtime": {
+    "repository": "https://github.com/Blaizzy/mlx-vlm",
+    "revision": "67599f2e8ec31bf35cbb7b02794114f20844f0bb",
+    "paths": [
+      "mlx_vlm/models/qwen3_vl/language.py",
+      "mlx_vlm/models/qwen3_vl/config.py"
+    ],
+    "license": "MIT"
+  },
+  "validation": {
+    "cpu": "Artifact/request contracts and independent transformer, rotary, VAE and text-feature parity tests. Historical strict-load and bounded direct generation/edit smokes completed; generated media and raw host/run receipts are excluded from this public projection.",
+    "qualified": false,
+    "performance_qualified": false
+  }
+}
