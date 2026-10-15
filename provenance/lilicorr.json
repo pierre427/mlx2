@@ -15,6 +15,15 @@
     "https://github.com/sgl-project/sglang/pull/37462",
     "https://github.com/NVIDIA/Model-Optimizer/pull/2342"
   ],
+  "independent_oracles": [
+    {
+      "repository": "https://github.com/ggml-org/llama.cpp",
+      "pull_request": "https://github.com/ggml-org/llama.cpp/pull/30506",
+      "source_revision": "595dfe522128403ed432bf61e2828d8cb8c87dec",
+      "reviewed_on": "2026-10-15",
+      "finding": "Independently matches the full top-k lattice, learned in/out correlation vectors and left-to-right predecessor-conditioned cosine walk. It is a useful conversion and numerical oracle, but it does not supply a public compatible checkpoint or remove mlx2's artifact gate."
+    }
+  ],
   "modifications": [
     "MLX nongated-SiLU lattice transformer, exported QKV layout, learned relative/same-slot additive bias, full-vocabulary candidate confidence features, frozen target embeddings and normalized committed-target-tap anchor",
     "Exact normalized outgoing/incoming-factor cosine similarities and correlation-only left-to-right predecessor-conditioned greedy walk",
@@ -29,10 +38,11 @@
     "Shadow export rechecks trained geometry and head parameters before publication and records initial-head, frozen-example and final-head hashes; target/draft revision pins are explicitly caller declarations rather than independent teacher attestation"
   ],
   "checkpoint_availability": {
-    "checked_on": "2026-10-01",
+    "checked_on": "2026-10-15",
     "public_checkpoint_found": false,
-    "evidence": "Current SGLang PR #37462 explicitly states checkpoints are not yet published and its E2E test is disabled pending a published drafter; Hugging Face API search lilicorr returned no models. NVIDIA page and pinned vLLM documentation supply no released checkpoint identifier.",
-    "no_substitute": "A DFlash2 selector or heuristic lattice cannot stand in for a co-trained LiLiCorr head."
+    "evidence": "A fresh Hugging Face API search for LiLiCorr returned zero models. SGLang PR #37462 explicitly ships no checkpoints or training code and leaves its E2E test disabled until a drafter is published. llama.cpp #30506 requires a converted artifact whose architecture is LiLiCorrDraftModel; it supplies the loader and decoder, not weights. The paper's head is co-trained with DFlash, so an ordinary DFlash2 artifact is incompatible.",
+    "no_substitute": "An ordinary DFlash2 artifact cannot substitute for a trained LiLiCorr head.",
+    "scope": "Historical checkpoint search at intake; see lilicorr-nemotron-export-inspection.json and nemotron35-super-vl-text.json for the later pinned companion."
   },
   "validation": "CPU-only independent NumPy parity for attention, learned biases, candidate confidence inputs, factor fusion/cosines and scaled transition table; plain/grouped-convolution strict BF16 tiny artifacts; exact point-mass proposals; full-block prefix preservation; initial/chunked prefill target-anchor parity; APCv2 first-boundary paired resume parity; strict config/schema/conv closure under hard metadata MLX import guard; bounded censored teacher capture and synthetic shadow-head loss decrease without source mutation plus hashed unselected export. No real checkpoint qualification or performance claims. Per-layer finite/full draft-window validation before tensor allocation, 18-position absolute-RoPE context oracle across long chunks and ring wrap, bounded draft KV planes, target greedy equality, sampled target point-mass rejection-law Monte Carlo, APCv2 paired resume and revision separation, exact rollback of both planes and RNG after target failure.",
   "implemented": true,

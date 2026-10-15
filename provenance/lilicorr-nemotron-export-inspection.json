@@ -1,0 +1,61 @@
+{
+  "component": "Strict Nemotron LiLiCorr export plans and pinned BF16 executable slice",
+  "source_repository": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4-LiLiCorr",
+  "source_revision": "7c7221aeb4cb3139307aa457f7dce11a8fb6ceb2",
+  "source_paths": [
+    "config.json",
+    "hf_quant_config.json",
+    "model.safetensors headers"
+  ],
+  "license": "No source implementation copied and no model weights included; original shape inspection reuses the Apache-2.0 head schema documented in provenance/lilicorr.json",
+  "mlx2_paths": [
+    "src/mlx2/adapters/lilicorr.py",
+    "src/mlx2/adapters/lilicorr_nemotron.py",
+    "src/mlx2/adapters/nemotron35_super_vl.py",
+    "src/mlx2/runtime/drafters/lilicorr.py",
+    "tests/test_lilicorr_nemotron_metadata.py",
+    "tests/test_nemotron35_super_vl_cpu.py"
+  ],
+  "modifications": [
+    "Pin all three local config identities; validate complete BF16, native U32/U8/FP32-global-scale and ModelOpt U8/FP8/FP32-global-scale tensor names, shapes, exclusions and payload extents",
+    "Bind metadata-only plans to the exact ordinary-text Nemotron target fingerprint, vocabulary, feature width and tap indices; draft attention head geometry is independent of target head geometry",
+    "Validate conversion receipts and report expected payload digests separately from actually checked metadata/header identity",
+    "Add an executable contract only for the pinned BF16 export: retain its owned final norm and LM head, enforce its immutable trained 8192-token window, and bind exact Nemotron post-layer taps plus rollback through an adapter-owned target contract",
+    "Retain strict refusal for the native NVFP4 and ModelOpt packed exports until their numerical conversion laws are independently supported",
+    "Override the inherited reset contract so an owned-head drafter reuses and revalidates its immutable target contract while retaining its private LM head."
+  ],
+  "validation": {
+    "state": "passed",
+    "scope": "38 focused LiLiCorr/Nemotron tests: all three export headers remain metadata-inspectable; a tiny BF16 fixture strict-loads with owned norm/head, trained-window caches and exact target binding; paired wrapped draft KV plus Nemotron recurrent/KV state roll back together; native/modelopt execution refuses before allocation",
+    "tests": [
+      "tests/test_lilicorr_nemotron_metadata.py"
+    ],
+    "combined_regression": "38 passed in 0.51 seconds for LiLiCorr, export and Nemotron adapter coverage; no GPU and no 3.1-GB artifact load",
+    "actual_export_headers": [
+      {
+        "variant": "bf16",
+        "tensor_count": 125,
+        "tensor_bytes": 3328709396,
+        "header_sha256": "8f520e8a4e3cce593adb421048157747cccac263b964869e3b1c45b96ab45e2e"
+      },
+      {
+        "variant": "native",
+        "tensor_count": 177,
+        "tensor_bytes": 1317933948,
+        "header_sha256": "61ee19f373834ed501adf28ca5d1582acbf127cf9704b24d5f932cf7e58a4420"
+      },
+      {
+        "variant": "modelopt",
+        "tensor_count": 177,
+        "tensor_bytes": 1317933948,
+        "header_sha256": "6dcc8cc1e74de8a3cf6619edea5e3d56d0bd4d60f7032f7c8c25625681af975d"
+      }
+    ],
+    "post_review": "Owned-head reset/rebind retains the private head and trained-window caches; strict target mismatch still refuses."
+  },
+  "artifact_schema_inspection_implemented": true,
+  "runtime_load_supported": "pinned-bf16-only",
+  "qualified": false,
+  "selected": false,
+  "observed_used": false
+}

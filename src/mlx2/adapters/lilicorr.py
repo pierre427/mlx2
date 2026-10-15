@@ -1,7 +1,8 @@
 """Strict CPU-safe inspection/loading for a trained LiLiCorr companion artifact.
 
-Public pretrained checkpoints are not published as of 2026-10-01. This loader
-accepts complete compatible exported artifacts, never a heuristic replacement.
+This loader accepts complete compatible exported artifacts, never a heuristic
+replacement. Newly acquired owned-head/sliding-attention exports require their
+own explicit schema and target contract; artifact presence is not compatibility.
 Provenance: provenance/lilicorr.json.
 """
 
@@ -29,13 +30,47 @@ class LiLiCorrConfig(DFlashConfig):
     lilicorr_logit_scale: float = 1.0
     conv_kernel_size: int = 0
     conv_group_size: int = 0
+    has_own_lm_head: bool = False
 
     def __post_init__(self):
-        # Shared backbone contract, independently of any XPress head.
-        XPressConfig(
-            **{k: getattr(self, k) for k in DFlashConfig.__dataclass_fields__},
-            xpress_num_passes=1,
-        )
+        # The original Qwen3 export shares XPress' full-attention backbone.
+        # The pinned Nemotron export instead owns its vocabulary head and was
+        # trained with every draft layer on one fixed sliding window.
+        backbone = {
+            k: getattr(self, k) for k in DFlashConfig.__dataclass_fields__
+        }
+        if self.has_own_lm_head:
+            for key in (
+                "hidden_size", "intermediate_size", "num_hidden_layers",
+                "num_attention_heads", "num_key_value_heads", "head_dim",
+                "vocab_size", "num_target_layers", "block_size",
+            ):
+                if type(getattr(self, key)) is not int or getattr(self, key) <= 0:
+                    raise ValueError(f"LiLiCorr {key} must be a positive integer")
+            if (
+                self.block_size < 2
+                or self.num_attention_heads % self.num_key_value_heads
+                or self.attention_bias is not False
+                or self.rope_scaling is not None
+                or type(self.sliding_window) is not int
+                or self.sliding_window <= 1
+                or self.layer_types
+                != ["sliding_attention"] * self.num_hidden_layers
+            ):
+                raise ValueError("Invalid owned-head LiLiCorr sliding backbone")
+            if (
+                not self.target_layer_ids
+                or self.target_layer_ids != sorted(set(self.target_layer_ids))
+                or any(
+                    type(index) is not int
+                    or not 0 <= index < self.num_target_layers
+                    for index in self.target_layer_ids
+                )
+            ):
+                raise ValueError("Invalid owned-head LiLiCorr target taps")
+        else:
+            # Shared backbone contract, independently of any XPress head.
+            XPressConfig(**backbone, xpress_num_passes=1)
         width = self.lilicorr_hidden_size
         if type(width) is not int or width < 0:
             raise ValueError("Invalid LiLiCorr hidden size")
@@ -175,8 +210,13 @@ def expected_weight_shapes(args):
     from .xpress import expected_weight_shapes as backbone_shapes
 
     # This uses only the common DFlash namespace; XPress head shapes are removed.
+    backbone = {k: getattr(args, k) for k in DFlashConfig.__dataclass_fields__}
+    # Sliding policy does not change parameter shapes.  Reuse the mature
+    # Qwen3 shape oracle without claiming its attention contract.
+    backbone["layer_types"] = ["full_attention"] * args.num_hidden_layers
+    backbone["sliding_window"] = None
     shared = XPressConfig(
-        **{k: getattr(args, k) for k in DFlashConfig.__dataclass_fields__},
+        **backbone,
         xpress_num_passes=1,
     )
     shapes = {
@@ -233,6 +273,8 @@ def expected_weight_shapes(args):
                     2 * args.conv_kernel_size * (model_h // args.conv_group_size),
                     model_h,
                 ]
+    if args.has_own_lm_head:
+        shapes["lm_head.weight"] = [args.vocab_size, args.hidden_size]
     return shapes
 
 

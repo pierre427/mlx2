@@ -1,0 +1,74 @@
+{
+  "component": "Nemotron 3.5 Super VL ordinary text adapter",
+  "source_repository": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+  "source_revision": "533d66230b6e75518bf32d2d7a7b95a24c3dd517",
+  "source_paths": [
+    "modeling_nemotron_h_omni.py",
+    "configuration_nemotron_h_omni.py",
+    "config.json"
+  ],
+  "license": "Apache-2.0 for reference Python; model weights are not included",
+  "existing_mechanism": "src/mlx2/runtime/models/nemotron_h.py; original MIT intake documented in provenance/nemotron3-super-5bit.json",
+  "modifications": [
+    "Original metadata-only schema and adapter; no external Python executed or copied",
+    "Reuse existing Nemotron-H text tensor math because the source Omni forward delegates text embeddings directly to the nested language model",
+    "Pin converted artifact metadata, validate exact language names/shapes and affine 4/8-bit module mapping, and drop vision/MTP tensors before evaluation",
+    "Expose an ordinary text reference and conservative unmeasured memory projection; refuse media, native MTP and unbound external drafts"
+  ],
+  "validation": {
+    "state": "passed",
+    "scope": "Focused CPU synthetic quantized hybrid load/ordinary/tap/cache parity, pinned native header inspection and actual tokenizer-only initialization; no full target tensors loaded, GPU, preflight or qualification",
+    "tests": [
+      "tests/test_nemotron35_super_vl_cpu.py",
+      "tests/test_lilicorr_nemotron_metadata.py",
+      "tests/test_nemotron_external_taps_cpu.py",
+      "tests/test_nemotron3_super_adapter.py",
+      "tests/test_nemotron35_lightning_adapter.py",
+      "tests/test_lilicorr_artifact_metadata.py",
+      "tests/test_lilicorr_cpu.py",
+      "tests/test_lilicorr_serving_cpu.py"
+    ],
+    "result": "90 passed, 15 skipped in 4.85s; skips are existing artifact-dependent tests",
+    "new_target_tests": 12,
+    "new_export_tests": 13,
+    "actual_target_headers": {
+      "shards": 22,
+      "indexed_tensors": 1731,
+      "ordinary_text_tensors": 1309,
+      "excluded_media_mtp_tensors": 422,
+      "resident_text_weight_bytes": 72738232320,
+      "excluded_weight_bytes": 3476391976,
+      "largest_source_shard_bytes": 3997015480,
+      "payload_rehashed": false
+    },
+    "actual_tokenizer": {
+      "class": "TokenizersBackend",
+      "vocabulary": 131072,
+      "eos": 11,
+      "integrity_probes": 12,
+      "integrity": "consistent",
+      "synthetic_prompt_tokens": 19,
+      "thinking_marker": true
+    },
+    "cache_projection_8192_tokens_B1_bytes": 311431168
+  },
+  "implemented": true,
+  "qualified": false,
+  "selected": false,
+  "observed_used": false,
+  "target": {
+    "config_sha256": "d04bef96be42705e90a60034800b23cb9b22bfdae27cca7c49d6dafd53454901",
+    "index_sha256": "be78ca60affeba9bc90e6ba22cc387926e8a4f63fffc8672f0781bad3a91037e",
+    "conversion_recipe": "nemotron35-super-vl-affine-experts4-protected8-v1"
+  },
+  "remaining": [
+    "Full target ordinary reference/load/serving evidence on a host with adequate weight, load-peak, KV, transient and OS headroom; M3 36GiB cannot hold the72.7GB text weights",
+    "The4GiB per-lane forward allowance is unmeasured and is not a peak-memory bound",
+    "Vision/audio/native-MTP and old-family exact-prefix cascade binding remain unsupported. The separately pinned BF16 LiLiCorr companion has an executable unqualified adapter-owned route; native and ModelOpt packed companions remain refused.",
+    "Artifact integrity binds pinned metadata, headers and file identity; weight payloads were not rehashed by inspection"
+  ],
+  "source_file_sha256": {
+    "modeling_nemotron_h_omni.py": "dfe88cc516f27b1dc8508ec7e448d81143aaf13d01400f5f93525b7f1271d929",
+    "configuration_nemotron_h_omni.py": "83f0c11fd9fb4da4a3de434759e1a18958b69f9fce672bafed4346a616ec20d4"
+  }
+}

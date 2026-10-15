@@ -212,11 +212,82 @@ class LiLiCorrDraftModel(XPressDraftModel):
         if config.conv_kernel_size:
             self.layer_class = DFlash2DecoderLayer
         DFlashDraftModel.__init__(self, config)
+        if getattr(config, "has_own_lm_head", False):
+            self.lm_head = nn.Linear(
+                config.hidden_size, config.vocab_size, bias=False
+            )
         configure_attention_windows(self, windows)
         self.lilicorr = LiLiCorrHead(config)
         self.stats = {"backbone_blocks": 0, "lattice_blocks": 0}
         self.feedback_manager = None
         self.draft_feedback_payloads = None
+
+    def bind(self, target_model, *, target_contract=None):
+        """Bind target embeddings while preserving an exported owned head."""
+        owned = bool(getattr(self.config, "has_own_lm_head", False))
+        if owned:
+            required = {
+                "schema": "mlx2.nemotron-lilicorr-target.v1",
+                "target_model_type": "nemotron_h_omni",
+                "capture": "post-layer-pre-final-norm",
+                "ordinary_reference_preserved": True,
+                "speculative_rollback": "exact",
+                "owned_lm_head": True,
+                "owned_final_norm": True,
+                "qualified": False,
+            }
+            allowed = set(required) | {
+                "target_fingerprint", "target_layer_ids", "target_feature_width"
+            }
+            if (
+                not isinstance(target_contract, dict)
+                or set(target_contract) != allowed
+                or any(
+                    target_contract.get(key) != value
+                    for key, value in required.items()
+                )
+                or not isinstance(target_contract.get("target_fingerprint"), str)
+                or not target_contract["target_fingerprint"]
+                or target_contract.get("target_feature_width")
+                != len(self.config.target_layer_ids) * self.config.hidden_size
+            ):
+                raise ValueError("Nemotron LiLiCorr target contract differs")
+            if tuple(target_contract.get("target_layer_ids", ())) != tuple(
+                self.config.target_layer_ids
+            ):
+                raise ValueError("Nemotron LiLiCorr target taps differ")
+            args = getattr(target_model, "speculative_args", target_model.args)
+            if (
+                getattr(args, "hidden_size", None) != self.config.hidden_size
+                or getattr(args, "vocab_size", None) != self.config.vocab_size
+                or getattr(args, "num_hidden_layers", None)
+                != self.config.num_target_layers
+                or not callable(getattr(target_model, "forward_with_taps", None))
+                or not callable(getattr(target_model, "prefill_body", None))
+                or getattr(target_model, "supports_speculative_rollback", False)
+                is not True
+            ):
+                raise ValueError("Nemotron LiLiCorr target interface differs")
+            head = self.lm_head
+            super().bind(target_model)
+            self.lm_head = head
+            self.target_contract = dict(target_contract)
+            return self
+        if target_contract is not None:
+            raise ValueError("shared-head LiLiCorr does not accept a target contract")
+        return super().bind(target_model)
+
+    def reset(self, target_model):
+        """Reset caches without dropping the immutable owned-head binding."""
+        if getattr(self.config, "has_own_lm_head", False):
+            self.bind(
+                target_model,
+                target_contract=getattr(self, "target_contract", None),
+            )
+            self.accept_lens = []
+            self.draft_lens = []
+            return self.make_cache()
+        return super().reset(target_model)
 
     @property
     def receipt_settings(self):
@@ -229,6 +300,9 @@ class LiLiCorrDraftModel(XPressDraftModel):
             "proposal_distribution": self.proposal_distribution,
             "anchor_convention": "normalized_last_committed_target_taps_or_invalid_zero_context",
             "co_trained_head_required": True,
+            "owned_lm_head": bool(getattr(self.config, "has_own_lm_head", False)),
+            "owned_final_norm": True,
+            "trained_sliding_window": self.config.sliding_window,
             "draft_attention_windows": None
             if self.draft_attention_windows is None
             else list(self.draft_attention_windows),
