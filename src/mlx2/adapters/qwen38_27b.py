@@ -357,6 +357,7 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "progressive_multilane_draft_cap",
         "progressive_verification_fidelity",
         "cost_per_commit_handoff",
+        "fold",
     }
 )
 # Target-wide keys the adapter consumes before an external policy is split
@@ -454,6 +455,9 @@ def inspect_external_policy(
             raise ValueError(f"Qwen3.8 27B external draft policy must pin {key}")
     if policy.get("pairwise_selection", "host") not in ("host", "batched"):
         raise ValueError("pairwise_selection must be 'host' or 'batched'")
+    from ..runtime.drafters.fold_reference import FOLDPolicy
+
+    FOLDPolicy.from_value(policy.get("fold"))
     strategy = policy.get("continuation_strategy")
     if strategy is not None:
         if not allow_continuation_strategy:
@@ -1635,6 +1639,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 "algorithm": "block-verification-sun-2024-alg2-v1",
             }
         return contract
+
+    @staticmethod
+    def planning_cache_budget(config, *, mtp):
+        """CPU-only projection; the loaded route still measures real residency."""
+        from .qwen38_memory import Qwen38CacheBudget
+
+        return Qwen38CacheBudget.from_config(config.get("text_config", config), mtp=mtp)
 
     def cache_budget(self, *, mtp):
         from .flash_next import gdn_state_bytes

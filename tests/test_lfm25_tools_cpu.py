@@ -730,3 +730,47 @@ def test_unrepresentable_optional_parameter_is_refused():
         "required": ["q"]}}}
     with pytest.raises(ValueError, match="output format"):
         validate_tool_request({"tools": [tool]})
+
+
+def _channels(events):
+    out = {}
+    for event in events:
+        for key, value in event.items():
+            if isinstance(value, str):
+                out[key] = out.get(key, "") + value
+    return out
+
+
+CHAT = {"messages": [{"role": "user", "content": "x"}]}
+
+
+def test_reasoning_off_holds_late_reasoning_until_the_model_closes_it():
+    # Pierre, 2026-10-15: with reasoning off the always-reasoning model may
+    # still reason and write its own </think>; hold the output back until the
+    # marker (held text becomes reasoning) or the end (it is the answer).
+    parser = make_output_parser(CHAT, thinking=False)
+    assert parser.push("We need to read ") == []
+    assert parser.push("the note.") == []
+    events = parser.push("</think>\n\nNELL-1")
+    assert events[0] == {"reasoning_content": "We need to read the note."}
+    assert parser.push(" done") == [{"content": " done"}]
+    out = _channels(events + parser.finish("", "stop"))
+    assert out["content"] == "NELL-1"
+    assert parser.late_reasoning_chars == len("We need to read the note.")
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+def test_reasoning_off_releases_a_direct_answer_at_the_end(finish_reason):
+    parser = make_output_parser(CHAT, thinking=False)
+    events = parser.push("\n\nNEEDLE-1") + parser.push(" is the code.")
+    assert events == []
+    out = _channels(events + parser.finish("", finish_reason))
+    assert out == {"content": "NEEDLE-1 is the code."}
+    assert parser.late_reasoning_chars == 0
+
+
+def test_reasoning_on_and_completions_do_not_hold_back():
+    on = make_output_parser(CHAT, thinking=True)
+    assert on.push("plan</think>\n\nanswer") != []
+    completion = make_output_parser({"prompt": "x"}, thinking=False)
+    assert completion.push("raw text") == [{"content": "raw text"}]

@@ -321,6 +321,13 @@ class FlashNextAdapter:
     def profile_name(self, mtp):
         return f"flash-next-apcv2-mtp{self.policy.num_draft}" if mtp else "flash-next-apcv2-ordinary"
 
+    @staticmethod
+    def planning_cache_budget(config, *, mtp):
+        """CPU-only projection using the same fp32 cache envelope as serving."""
+        from .flash_next_memory import FlashNextCacheBudget
+
+        return FlashNextCacheBudget.from_config(config, mtp=mtp)
+
     def cache_budget(self, *, mtp):
         from .flash_next_memory import FlashNextCacheBudget
         return FlashNextCacheBudget.from_config(
@@ -715,6 +722,29 @@ class FlashNextAdapter:
         except Exception:  # noqa: BLE001 - undeclared marker, not a load failure
             return None
         return (int(ids[0]),)
+
+    def thinking_release_token_ids(self):
+        """Exact Qwen generation-template sequence used to leave reasoning.
+
+        ``thinking_close_token_ids`` remains the bare parser/grammar marker.
+        A forced budget close is model input, however, and must include the
+        surrounding newlines emitted by the Qwen generation template.  A
+        tokenizer/template mismatch therefore disables forced release instead
+        of silently falling back to the bare marker.
+        """
+        release = "\n</think>\n\n"
+        try:
+            ids = tuple(
+                int(token)
+                for token in self.tokenizer.encode(
+                    release, add_special_tokens=False
+                )
+            )
+            if not ids or self.tokenizer.decode(list(ids)) != release:
+                return None
+        except Exception:  # noqa: BLE001 - undeclared release, fail closed
+            return None
+        return ids
 
     def output_parser(self, request):
         from ..output import OutputParser, constrained_tool_choice

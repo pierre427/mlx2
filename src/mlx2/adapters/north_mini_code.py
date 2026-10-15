@@ -904,6 +904,13 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
             }
         }
 
+    @staticmethod
+    def planning_cache_budget(config, *, mtp):
+        """CPU-only projection sharing ordinary serving's cache geometry."""
+        from .north_memory import NorthCacheBudget
+
+        return NorthCacheBudget.from_config(config, mtp=mtp)
+
     def cache_budget(self, *, mtp):
         from .north_memory import NorthCacheBudget
 

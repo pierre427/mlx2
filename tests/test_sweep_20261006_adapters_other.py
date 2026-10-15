@@ -117,8 +117,9 @@ def test_vision_feature_cache_is_bound_to_the_request_lora(tmp_path):
     lora_kwargs = adapter.validate_prefill_inputs(
         {"_mlx2_lora_fingerprint": "lora-a"}, [], dict(prepared))
     base_kwargs = adapter.validate_prefill_inputs({}, [], dict(prepared))
-    assert base_kwargs["_image_key"] == prepared["_image_key"]
-    assert lora_kwargs["_image_key"] != prepared["_image_key"]
+    # Base and LoRA requests now both carry the trusted tenant partition.
+    assert base_kwargs["_image_key"] != prepared["_image_key"]
+    assert lora_kwargs["_image_key"] != base_kwargs["_image_key"]
 
     rows = bind_lora_rows(wrapped, [1])
     lora_embeds = model.get_input_embeddings(ids, **lora_kwargs).inputs_embeds
@@ -131,7 +132,18 @@ def test_vision_feature_cache_is_bound_to_the_request_lora(tmp_path):
     np.testing.assert_allclose(np.array(base_cached), np.array(base_true), atol=1e-5)
 
 
-GEMMA4_31B = MODELS / "gemma-4-31B-MLX-8bit"
+GEMMA4_31B = next(
+    (MODELS / name for name in ("gemma-4-31B-it-MLX-8bit", "gemma-4-31B-MLX-8bit")
+     if (MODELS / name).is_dir()),
+    MODELS / "gemma-4-31B-it-MLX-8bit",
+)
+MINIMAL_GEMMA4_TEMPLATE = (
+    "{% for m in messages %}<start_of_turn>{{ m['role'] }}\n"
+    "{% if m['content'] is string %}{{ m['content'] }}{% else %}"
+    "{% for p in m['content'] %}{% if p['type'] == 'text' %}{{ p['text'] }}"
+    "{% elif p['type'] == 'video' %}<|video|>{% else %}<|image|>{% endif %}"
+    "{% endfor %}{% endif %}<end_of_turn>\n{% endfor %}<start_of_turn>model\n"
+)
 
 
 @pytest.fixture(scope="module")
@@ -148,6 +160,8 @@ def gemma4_media_adapter():
 
     adapter = object.__new__(Gemma431BAdapter)
     adapter.processor = load_processor(GEMMA4_31B)
+    # Chat renders fail closed without a template (base conversions).
+    adapter.processor.chat_template = adapter.processor.chat_template or MINIMAL_GEMMA4_TEMPLATE
     adapter.identity = {"fingerprint": "x"}
     adapter.media_feature_cache = MediaFeatureCache()
     return adapter

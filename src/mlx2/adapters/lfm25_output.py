@@ -46,6 +46,7 @@ import copy
 import json
 
 from ..output import (
+    THINKING_CLOSE_MARKER,
     OutputParser,
     callable_tools,
     constrained_tool_choice,
@@ -183,6 +184,7 @@ def make_output_parser(request: dict, *, thinking=None):
         # trims content when it renders history, so those newlines are
         # structure, not the answer (as Nemotron 3 Super declares).
         think_close_separator="\r\n",
+        hold_late_reasoning=chat and thinking is False,
     )
 
 
@@ -198,7 +200,42 @@ def make_tool_constraint(request: dict):
 
 
 class LfmOutputParser(OutputParser):
-    """:class:`OutputParser` whose tool blocks use the LFM markers."""
+    """:class:`OutputParser` whose tool blocks use the LFM markers.
+
+    With reasoning off the prompt already closes the think channel, yet the
+    always-reasoning model sometimes reasons anyway and closes it again with
+    its own ``</think>`` (2026-10-14 ladder: "We need to read the shared
+    material ... </think>NELL-7D13C8-3").  Text before that marker cannot be
+    told from a direct answer until the marker arrives or the output ends, so
+    ``hold_late_reasoning`` holds the output back until one of the two
+    (Pierre, 2026-10-15): a marker turns the held text into reasoning and the
+    rest streams as the answer; the end of output releases it as the answer.
+    """
 
     tool_open = TOOL_CALL_START
     tool_close = TOOL_CALL_END
+
+    def __init__(self, *args, hold_late_reasoning=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._holding = bool(hold_late_reasoning) and self.channel == "content"
+        self._held = ""
+        self.late_reasoning_chars = 0
+
+    def push(self, text, *, final=False):
+        if not self._holding:
+            return super().push(text, final=final)
+        self._held += text
+        index = self._held.find(THINKING_CLOSE_MARKER)
+        if index < 0 and not final:
+            return []
+        self._holding = False
+        held, self._held = self._held, ""
+        if index < 0:
+            return super().push(held, final=final)
+        reasoning = held[:index]
+        self.late_reasoning_chars = len(reasoning)
+        events = [{"reasoning_content": reasoning}] if reasoning else []
+        # The answer after the model's own close starts like any answer after
+        # a close: its separator run is template structure.
+        self._drop_separator = bool(self.think_close_separator)
+        return events + super().push(held[index + len(THINKING_CLOSE_MARKER):], final=final)

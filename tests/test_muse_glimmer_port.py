@@ -97,6 +97,43 @@ def test_default_topology_and_layout():
     assert ModelArgs(sliding_window=1024).cache_layout != args.cache_layout
 
 
+@pytest.mark.parametrize("field", ["rope_parameters", "rope_scaling"])
+@pytest.mark.parametrize("parameters", [
+    {"rope_type": "linear", "factor": 2}, {"type": "yarn"},
+    {"rope_type": "unknown"}, {"type": "default", "factor": 1},
+    None, [], "default", {"rope_theta": float("nan")},
+    {"rope_theta": float("inf")}, {"rope_theta": -1},
+])
+def test_muse_refuses_unimplemented_or_malformed_rope_scaling(field, parameters):
+    if parameters is None:
+        # Missing scaling is the default config, not a requested scaling law.
+        assert ModelArgs.from_dict({field: parameters}).cache_layout == ModelArgs().cache_layout
+        return
+    with pytest.raises(ValueError, match="RoPE"):
+        ModelArgs.from_dict({field: parameters})
+
+
+def test_muse_default_rope_aliases_normalize_to_same_cache_identity():
+    plain = ModelArgs(rope_theta=10000)
+    nested = ModelArgs.from_dict({"text_config": {"rope_parameters": {
+        "rope_type": "default", "rope_theta": 10000,
+    }}})
+    assert nested.cache_layout == plain.cache_layout
+    assert ModelArgs.from_dict({"rope_scaling": {"type": "default"}}).cache_layout == ModelArgs().cache_layout
+    assert nested.cache_layout != ModelArgs().cache_layout
+    assert ModelArgs.from_dict({"rope_scaling": {"type": "default", "rope_theta": 10000}}).cache_layout == plain.cache_layout
+    with pytest.raises(ValueError, match="aliases disagree"):
+        ModelArgs.from_dict({"rope_scaling": {"type": "default", "rope_theta": 10000},
+                             "rope_parameters": {"rope_theta": 500000}})
+
+
+@pytest.mark.parametrize("theta", [float("nan"), float("inf"), -1, True, "10000"])
+def test_muse_refuses_invalid_explicit_local_theta(theta):
+    with pytest.raises(ValueError, match="RoPE"):
+        ModelArgs(layer_rope_theta=[theta if t == "sliding_attention" else 0
+                                    for t in ModelArgs().layer_types])
+
+
 def test_row_exact_external_policy_is_explicit_and_boolean():
     base = {"draft_model": "/draft", "proposal_composition": False}
     assert "target_verify_row_exact" not in normalize_external_policy(base)

@@ -2,6 +2,8 @@
 # Adapted from mlx-lm-unified; see provenance/muse-glimmer.json and .NOTICE.
 """GPU-free Muse text configuration and cache topology."""
 
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -34,13 +36,28 @@ class ModelArgs:
     def from_dict(cls, params):
         # Meta's original checkpoint nests the language-model fields under
         # "text_config"; the mlx-community conversions flatten them. Accept both.
+        if not isinstance(params, Mapping):
+            raise ValueError("Muse configuration must be a mapping")  # noqa: TRY004 - artifact validation contract
         if "text_config" in params:
+            if not isinstance(params["text_config"], Mapping):
+                raise ValueError("Muse text_config must be a mapping")
             merged = dict(params)
             merged.update(params["text_config"])
             params = merged
         params = dict(params, model_type="muse_glimmer")
         if params.get("attention_bias", False):
             raise ValueError("Muse port requires bias-free attention")
+        # The tensor implementation uses plain per-layer RoPE. Do not silently
+        # accept a checkpoint whose advertised scaling changes that law.
+        if params.get("rope_scaling") is not None:
+            cls._validate_rope_parameters(params["rope_scaling"])
+            if params.get("rope_parameters") is None:
+                params = dict(params, rope_parameters=dict(params["rope_scaling"]))
+            elif "rope_theta" in params["rope_scaling"]:
+                cls._validate_rope_parameters(params["rope_parameters"])
+                theta = params["rope_parameters"].get("rope_theta", params.get("rope_theta", 500000.0))
+                if params["rope_scaling"]["rope_theta"] != theta:
+                    raise ValueError("Muse RoPE parameter aliases disagree")
         fields = {f.name for f in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in params.items() if k in fields})
 
@@ -69,8 +86,11 @@ class ModelArgs:
         if self.final_logit_softcapping <= 0:
             raise ValueError("Muse logit softcap must be positive")
         # rope_theta may live under rope_parameters (as in Meta's config)
+        if self.rope_parameters is not None:
+            self._validate_rope_parameters(self.rope_parameters)
         if self.rope_parameters and "rope_theta" in self.rope_parameters:
             self.rope_theta = self.rope_parameters["rope_theta"]
+        self._validate_theta(self.rope_theta)
         if self.layer_types is None:
             # default [local, local, local, global] repeating
             pat = ["sliding_attention"] * 3 + ["full_attention"]
@@ -83,6 +103,27 @@ class ModelArgs:
                 for t in self.layer_types
             ]
         self.validate_topology()
+
+    @staticmethod
+    def _validate_theta(theta):
+        if (
+            isinstance(theta, bool)
+            or not isinstance(theta, (int, float))
+            or not math.isfinite(theta)
+            or theta <= 0
+        ):
+            raise ValueError("Muse local RoPE theta must be finite and positive")
+
+    @classmethod
+    def _validate_rope_parameters(cls, parameters):
+        if not isinstance(parameters, Mapping):
+            raise ValueError("Muse RoPE parameters must be a mapping")  # noqa: TRY004 - artifact validation contract
+        if any(parameters.get(key, "default") != "default" for key in ("type", "rope_type")):
+            raise ValueError("Muse port supports only default RoPE scaling")
+        if set(parameters) - {"type", "rope_type", "rope_theta"}:
+            raise ValueError("Muse port does not support RoPE scaling parameters")
+        if "rope_theta" in parameters:
+            cls._validate_theta(parameters["rope_theta"])
 
     @property
     def cache_layout(self):
@@ -116,3 +157,8 @@ class ModelArgs:
             for t, theta in zip(self.layer_types, self.layer_rope_theta)
         ):
             raise ValueError("Muse requires local RoPE and global NoPE")
+        for kind, theta in zip(self.layer_types, self.layer_rope_theta):
+            if kind == "sliding_attention":
+                self._validate_theta(theta)
+            elif isinstance(theta, bool) or not isinstance(theta, (int, float)):
+                raise ValueError("Muse global NoPE theta must be numeric zero")
