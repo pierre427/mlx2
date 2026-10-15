@@ -54,6 +54,7 @@ flux3-image = [
 [project.scripts]
 mlx2-serve = "mlx2.server:main"
 mlx2 = "mlx2.cli:main"
+mlx2-fit = "mlx2.planning:main"
 mlx2-decisions = "mlx2.decisions.server:main"
 mlx2-diarize = "mlx2.diarize_cli:main"
 mlx2-radio = "mlx2.radio_cli:main"

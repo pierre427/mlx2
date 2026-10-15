@@ -1,0 +1,28 @@
+{
+  "component": "M3 lane geometry and KV allocation diagnostics",
+  "source_repository": "mlx2",
+  "source_revision": "2db68c1bb7fed2d34bce7bebcfaf9c48ad84920a",
+  "source_paths": [
+    "scripts/lane_matmul_gate.py",
+    "src/mlx2/runtime/models/cache.py"
+  ],
+  "destination_paths": [
+    "scripts/probe_peer_geometry.py",
+    "docs/audits/2026-10-15-peer-survey-repairs/component-evidence.json"
+  ],
+  "license": "Same as mlx2; original harness around existing repository mechanisms",
+  "modifications": [
+    "Validate active CPG ownership and paired GPU locks before MLX import.",
+    "Run existing low-bit correctness/row-invariance gate with timing disabled.",
+    "Measure live allocator changes around retained-source B1/B2 KV merge and first append; verify source tensors remain unchanged.",
+    "Write atomic non-overwriting receipt and explicitly avoid physical-copy-traffic or performance claims."
+  ],
+  "validation": {
+    "device": "Apple M3 Pro",
+    "geometry_cases_passed": 36,
+    "widths_per_case": 24,
+    "cache_cases_passed": 6,
+    "qualified": false,
+    "performance_qualified": false
+  }
+}

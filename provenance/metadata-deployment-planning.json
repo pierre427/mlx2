@@ -1,0 +1,28 @@
+{
+  "mechanism": "Metadata-only deployment planning",
+  "implementation": "original mlx2 implementation; no peer code copied",
+  "source_repository": "mlx2",
+  "source_revision": "2db68c1bb7fed2d34bce7bebcfaf9c48ad84920a",
+  "source_paths": [
+    "src/mlx2/adapters/registry.py",
+    "src/mlx2/adapters/flash_next_memory.py",
+    "src/mlx2/adapters/qwen38_memory.py",
+    "src/mlx2/adapters/north_memory.py",
+    "src/mlx2/runtime/memory_policy.py",
+    "src/mlx2/cache_sizing.py"
+  ],
+  "license": "Same as the mlx2 repository; no additional external source incorporated",
+  "changes": [
+    "Expose explicit adapter-owned metadata cache projections without instantiating adapters",
+    "Report storage proxies, cache, scratch, side-cache and shared host reserves with unknowns",
+    "Refuse unsupported routes, foreign shard paths and malformed metadata",
+    "Never label a metadata plan fit, qualified, selected, observed-used or admission-authorized"
+  ],
+  "usage": "mlx2-fit MODEL --context 32768 --lanes 1 --host-gib 36 --apc-gib 4",
+  "validation": {
+    "focused_cpu_tests": "tests/test_peer_planning_cpu.py tests/test_qwen38_memory.py tests/test_adapter_registry.py: 37 passed",
+    "metadata_diagnostic": "Local Qwen3.8 27B q4 metadata report completed without weight loading",
+    "tensor_and_network_import_guard": "CLI subprocess refuses MLX, torch, mlx_lm, requests and httpx imports",
+    "qualification": "not performed; this is planning advice only"
+  }
+}
