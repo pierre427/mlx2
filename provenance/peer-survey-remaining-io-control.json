@@ -1,0 +1,69 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "Bound startup, source-identity checks, atlas persistence and final descriptor close",
+  "recorded_at": "2026-10-15",
+  "state": "implemented_focused_cpu_validation",
+  "sources": [
+    {
+      "source_repository": "mlx2",
+      "source_revision": "05af57e87080f08be11284007bbb8523f3686018",
+      "source_paths": [
+        "src/mlx2/runtime/io_ownership.py",
+        "src/mlx2/runtime/apc_v2.py",
+        "src/mlx2/runtime/weight_stream.py",
+        "src/mlx2/runtime/expert_atlas.py",
+        "src/mlx2/runtime/decode_checkpoint.py",
+        "src/mlx2/runtime/models/qwen4_ple_nvme.py"
+      ],
+      "license": "Apache-2.0; the existing PLE module retains its MIT provenance",
+      "use": "Original extension of existing local bounded-worker ownership; no new external implementation copied. Earlier peer design precedent and source/license details remain in peer-survey-io-resilience-20261015.json."
+    }
+  ],
+  "supersedes_limits": [
+    "The item 1 startup inventory, live source-identity stat, atlas/trace flush and final descriptor-close exceptions in the original repair ledger.",
+    "The startup and ordinary-close synchronous filesystem exceptions in peer-survey-io-resilience-20261015.json and peer-survey-apc-metadata-accounting.json, for the production cache/streaming/PLE/atlas paths named here."
+  ],
+  "modifications": [
+    "Reuse the fixed daemon ReadPool for bounded host-only control calls. A timeout revokes consumption while retaining the worker, its arguments and descriptor owner; replacement pools remain refused while abandoned work drains.",
+    "Give each existing pool at most one daemon finalizer, with a bounded caller wait. A blocked or failed final close retains ownership and blocks replacement; repeated close never retries an uncertain descriptor number. No device cleanup runs in the finalizer.",
+    "Move APC path resolution, directory security, lock acquisition, manifest inventory, quarantine and scratch cleanup into one unpublished constructor worker. Keep cache-budget enforcement and device release on the model thread. Preserve raw lock descriptors through partial-open failures and defer final unlock/close until every writer and startup worker drains.",
+    "Bound streamed-weight header inventory, shard opening/header checks and live fstat/path identity verification. Retain late-open descriptors and uncertain-close inventories; prevent publication when integrity checking expires.",
+    "Bound PLE manifest/content validation, startup open/fstat, preverified identity stat and hot-row-file inventory. Keep foreground and prefetch leases through late startup completion. Remove filesystem work from the fork/rebuild lock and reset that lock after fork, so blocked final close cannot trap a replacement constructor.",
+    "Bound optional expert atlas/trace bind, writes, persistence and final close. Snapshot counts on the caller thread and publish persisted-observation accounting only after success; late writes may finish on disk but never receive successful persistence credit.",
+    "Remove the exact-checkpoint close path's second direct file.close call; the I/O pool exclusively owns its one final close.",
+    "Strengthen one existing read-timeout test to await true finalizer completion rather than an event emitted inside a still-running close callback."
+  ],
+  "mlx2_paths": [
+    "src/mlx2/runtime/io_ownership.py",
+    "src/mlx2/runtime/apc_v2.py",
+    "src/mlx2/runtime/weight_stream.py",
+    "src/mlx2/runtime/expert_atlas.py",
+    "src/mlx2/runtime/decode_checkpoint.py",
+    "src/mlx2/runtime/models/qwen4_ple_nvme.py",
+    "tests/test_peer_remaining_io_control_cpu.py",
+    "tests/test_peer_survey_io_deadlines_cpu.py"
+  ],
+  "validation": {
+    "command": "MLX2_PREFLIGHT_CPU_ONLY=1 PYTHONPATH=$PWD/src private artifact -m pytest -o addopts= -q tests/test_peer_remaining_io_control_cpu.py tests/test_peer_survey_io_deadlines_cpu.py tests/test_peer_survey_ple_io_cpu.py tests/test_peer_apc_metadata_review_cpu.py tests/test_apcv2_sessions_persistence.py tests/test_moe_expert_streaming.py tests/test_disk_weight_streaming.py tests/test_qwen4_ple_read_policy.py tests/test_qwen4_ple_converted_artifact.py tests/test_exact_decode_checkpoint_cpu.py",
+    "focused_cpu_result": "298 passed in 18.58 seconds; one existing multithreaded-fork deprecation warning",
+    "new_fault_injection_cases": 17,
+    "oracles": [
+      "Caller deadlines under blocked startup open, source fstat before and after read, APC lock/security/rescan, atlas persistence, PLE hot-row inventory and descriptor close.",
+      "Actual descriptors stay open while workers still use them, close after late completion and never close twice after an fd number could be reused.",
+      "Blocked or uncertain close refuses replacement pools; a permanently blocked finalizer cannot hold interpreter exit.",
+      "Partial APC fstat/fdopen failures release the descriptor; timed-out startup never publishes an APC manager.",
+      "Late atlas persistence and PLE preheat never publish success accounting or cache entries."
+    ],
+    "gpu_executed": false,
+    "full_preflight_executed": false,
+    "formal_qualification": false,
+    "performance_qualified": false
+  },
+  "limits": [
+    "These are bounded caller waits, not syscall interruption. A permanently blocked worker or finalizer retains its existing owner; replacement is refused until it drains. An uncertain close error remains quarantined for the process lifetime and requires process restart rather than an unsafe retry.",
+    "The default control/startup operation deadline is 60 seconds and each final-close caller wait is 2 seconds. Existing payload, spill and metadata deadlines remain distinct. This is not one global deadline for all model construction or shutdown.",
+    "MLX evaluation, synchronization, array creation, cache release and model-thread scheduling are outside this pure-filesystem guarantee and remain on their owning thread.",
+    "Raw offline serialization/header/atlas helpers and externally supplied nonproduction executors retain their explicit synchronous behavior. General model artifact loaders outside the named cache/streaming/PLE paths are not covered by this change.",
+    "A timed-out atlas write can complete on disk after the caller reports failure; the collector is poisoned, further writes are refused and persisted-observation accounting is not advanced. No performance or route qualification claim is made."
+  ]
+}

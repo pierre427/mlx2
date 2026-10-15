@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+ATLAS_IO_SECONDS = 60.0
 ATLAS_FORMAT = "mlx2-weight-atlas"
 ATLAS_VERSION = 1
 ATLAS_KIND = "moe_expert"
@@ -122,6 +123,26 @@ class AtlasCollector:
         self._steps = 0
         self._dropped = 0
         self._closed = False
+        from .io_ownership import CloseAction, ReadPool
+
+        self._io_pool = (
+            ReadPool(1, "expert-atlas", timeout=ATLAS_IO_SECONDS, max_pending=1)
+            if self.sink is not None or self.trace_path is not None else None
+        )
+        self._close_owner = CloseAction(self._close_trace)
+        self._io_failure = None
+
+    def _io(self, function, *args):
+        from .io_ownership import ReadTimeout
+
+        if self._io_failure is not None:
+            raise ReadTimeout(self._io_failure)
+        try:
+            return self._io_pool.call(function, *args)
+        except Exception as error:
+            self._io_failure = str(error)
+            self._io_pool.close(self._close_owner)
+            raise
 
     def bind(self, *, num_layers: int, num_units: int) -> None:
         import numpy as np
@@ -130,11 +151,16 @@ class AtlasCollector:
         self.num_units = int(num_units)
         self.counts = np.zeros((self.num_layers, self.num_units), dtype=np.uint64)
         self._persisted_counts = np.zeros_like(self.counts)
+        if self._io_pool is not None:
+            self._persisted_atlas = self._io(self._bind_io)
+
+    def _bind_io(self):
+        prior = None
         if self.sink is not None:
             # The first flush merges onto the sink as it then stands. Keep
             # the atlas it holds now, validated as that flush validates it,
             # so a sink lost before the first flush is rebuilt from it too.
-            self._persisted_atlas = load_atlas(
+            prior = load_atlas(
                 self.sink, expect_digest=self._digest(), geometry=self.counts.shape
             )
         if self.trace_path is not None and self._trace is None:
@@ -144,9 +170,10 @@ class AtlasCollector:
                 TRACE_MAGIC
                 + struct.pack("<II", self.num_layers, self.num_units)
             )
+        return prior
 
     def observe(self, layer: int, units) -> None:
-        if self.counts is None:
+        if self.counts is None or self._closed:
             return
         import numpy as np
 
@@ -156,13 +183,13 @@ class AtlasCollector:
         np.add.at(self.counts[layer], ids, np.uint64(1))
         self.observations += int(ids.size)
         self._steps += 1
-        if self._trace is not None:
+        if self._trace is not None and self._io_failure is None:
             if not self._trace_full and self._trace_written + ids.size <= self.trace_limit:
                 payload = np.empty((ids.size + 1, 2), dtype=np.uint32)
                 payload[0] = (_TRACE_CALL, ids.size)
                 payload[1:, 0] = layer
                 payload[1:, 1] = ids
-                self._trace.write(payload.tobytes())
+                self._io(self._write_trace, payload.tobytes())
                 self._trace_written += int(ids.size)
             else:
                 self._trace_full = True
@@ -170,6 +197,7 @@ class AtlasCollector:
                 self._dropped += int(ids.size)
         if (
             self.sink is not None
+            and self._io_failure is None
             and self.checkpoint_every > 0
             and self.observations - self.persisted_observations
             >= self.checkpoint_every
@@ -179,20 +207,35 @@ class AtlasCollector:
     def note_lost_call(self, layer: int) -> None:
         """An ``acquire`` that raised: it changed the LRU (it evicts before it
         reads) but no call was observed, so the trace marks the gap."""
-        if self._trace is not None and not self._trace_full:
-            self._trace.write(struct.pack("<II", _TRACE_LOST, int(layer)))
+        if self._trace is not None and not self._trace_full and self._io_failure is None:
+            self._io(self._write_trace, struct.pack("<II", _TRACE_LOST, int(layer)))
+
+    def _write_trace(self, payload):
+        self._trace.write(payload)
 
     def counters(self) -> Dict[str, int]:
         return {
             "atlas_observations_total": self.observations,
             "atlas_trace_records_total": self._trace_written,
             "atlas_trace_dropped_total": self._dropped,
+            "atlas_io_failed": int(self._io_failure is not None or
+                                   (self._io_pool is not None and self._io_pool.failure is not None)),
         }
 
     def flush(self) -> Optional[Path]:
         """Merge into the persisted atlas and rewrite it atomically."""
         if self.sink is None or self.counts is None:
             return None
+        snapshot = self.counts.copy()
+        observations = self.observations
+        atlas = self._io(self._flush_io, snapshot, observations)
+        self._persisted_atlas = atlas
+        self._persisted_counts = snapshot
+        self.persisted_observations = observations
+        return self.sink
+
+    def _flush_io(self, snapshot, observations):
+        """Only host arrays/files; caller publishes accounting after success."""
         prior = load_atlas(
             self.sink, expect_digest=self._digest(), geometry=self.counts.shape
         )
@@ -207,8 +250,7 @@ class AtlasCollector:
             # with none, nothing is persisted and the difference is every
             # observation.
             prior = self._persisted_atlas
-        snapshot = self.counts.copy()
-        new_observations = self.observations - self.persisted_observations
+        new_observations = observations - self.persisted_observations
         merged = merge_counts(
             prior.counts if prior is not None else None,
             snapshot - self._persisted_counts,
@@ -232,15 +274,12 @@ class AtlasCollector:
             ],
         )
         write_atlas(self.sink, manifest, merged)
-        self._persisted_atlas = Atlas(
+        return Atlas(
             counts=merged,
             total_observations=manifest["total_observations"],
             generations=manifest["generations"],
             manifest=manifest,
         )
-        self._persisted_counts = snapshot
-        self.persisted_observations = self.observations
-        return self.sink
 
     def close(self) -> None:
         """Persist the trace tail and the sink once; later calls do nothing.
@@ -251,18 +290,19 @@ class AtlasCollector:
             return
         self._closed = True
         try:
-            if self._trace is not None:
-                try:
-                    # The end row: the trace closed cleanly, and how many
-                    # calls the record limit dropped.
+            if self._io_failure is None:
+                if self._trace is not None:
                     dropped = min(self._trace_dropped_calls, 0xFFFFFFFF)
-                    self._trace.write(struct.pack("<II", _TRACE_END, dropped))
-                    self._trace.flush()
-                finally:
-                    self._trace.close()
-                    self._trace = None
+                    self._io(self._write_trace, struct.pack("<II", _TRACE_END, dropped))
+                self.flush()
         finally:
-            self.flush()
+            if self._io_pool is not None:
+                self._io_pool.close(self._close_owner)
+
+    def _close_trace(self):
+        if self._trace is not None:
+            self._trace.close()
+            self._trace = None
 
     def _digest(self) -> str:
         if self.model_path is None:

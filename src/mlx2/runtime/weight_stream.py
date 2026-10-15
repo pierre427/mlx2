@@ -57,12 +57,25 @@ import logging
 import os
 import stat as stat_module
 import threading
+import time
 from collections import OrderedDict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+
+from .io_ownership import (
+    CloseAction,
+    ReadPool as _ReadPool,
+)
+from .io_ownership import (
+    ReadTimeout as WeightReadTimeout,
+)
+from .io_ownership import (
+    close_read_pool as _close_read_pool,
+)
+from .io_ownership import call_io
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +89,10 @@ DEFAULT_READ_WORKERS = 16
 STAGING_WINDOW_PER_WORKER = 2
 # Dense projections are read in chunks so a large tensor still uses the pool.
 DENSE_READ_CHUNK_BYTES = 8 << 20
+# One submitted read may occupy its ownership window for at most this long.
+# A timeout fails the streamed route; it does not make the worker's buffers
+# or descriptors reusable before the underlying system call returns.
+READ_TIMEOUT_SECONDS = 60.0
 # Bumped whenever the streamed arithmetic or its addressing contract changes;
 # bound into the APCv2 numerics namespace and the settings receipt.
 MECHANISM_REVISION = "weight-stream-v2"
@@ -132,6 +149,13 @@ class WeightSourceChanged(RuntimeError):
     the weights it serves are no longer the weights it bound.  The check is a
     ``stat`` tuple -- a mutation detector, not a content hash.
     """
+
+
+def _read_timeout(pool):
+    error = WeightReadTimeout("streamed weight read exceeded its I/O deadline")
+    if isinstance(pool, _ReadPool):
+        pool.fail(error)
+    return error
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +251,11 @@ class SafetensorsIndex:
 
     @classmethod
     def from_model_path(cls, model_path) -> "SafetensorsIndex":
+        return call_io("weight-header-inventory", cls._from_model_path, model_path,
+                       timeout=READ_TIMEOUT_SECONDS)
+
+    @classmethod
+    def _from_model_path(cls, model_path) -> "SafetensorsIndex":
         root = Path(model_path).expanduser()
         shards = sorted(root.glob("*.safetensors"))
         if not shards:
@@ -348,6 +377,8 @@ class _FileHandles:
         self._table: Dict[Path, int] = {}
         self._owner = os.getpid()
         self._closed = False
+        self._close_pool = _ReadPool(1, "weight-file-close")
+        self._close_owner = CloseAction(self._close_fds)
 
     def get(self, path: Path) -> int:
         if os.getpid() != self._owner:
@@ -372,11 +403,16 @@ class _FileHandles:
         return []
 
     def close(self) -> None:
+        self._close_pool.close(self._close_owner)
+
+    def _close_fds(self) -> None:
         with self._lock:
             table, self._table = self._table, {}
             self._closed = True
-        for fd in table.values():
+            self._closing_fds = table
+        for path, fd in tuple(table.items()):
             os.close(fd)
+            del self._closing_fds[path]
 
     def pread(self, path: Path, offset: int, length: int) -> bytes:
         return _pread_all(self.get(path), offset, length, path)
@@ -404,13 +440,25 @@ class BoundShards:
     """
 
     def __init__(self, root, names: Sequence[str], *, records=None, weight_map=None):
-        self.root = Path(root).expanduser().resolve()
+        self.root = Path(root).expanduser()
         self._lock = threading.Lock()
         self._closed = False
         self._fds: Dict[Path, int] = {}
         self._pins: Dict[Path, Tuple[int, int, int, int, int]] = {}
         self._names: Dict[Path, str] = {}
         self.weight_map = dict(weight_map) if weight_map else None
+        self._control_pool = _ReadPool(1, "weight-source-control", timeout=READ_TIMEOUT_SECONDS,
+                                      max_pending=1)
+        self._close_owner = CloseAction(self._close_fds)
+        try:
+            self._control_pool.call(self._open, tuple(names), records)
+        except BaseException:
+            self._control_pool.close(self._close_owner)
+            raise
+
+    def _open(self, names, records):
+        """Descriptor/header startup is host-only and unpublished until return."""
+        self.root = self.root.resolve()
         record_map = None
         if records is not None:
             record_map = {}
@@ -455,7 +503,9 @@ class BoundShards:
                 entries.append((path, _read_header_fd(fd, info.st_size, path), info.st_size))
             self.index = SafetensorsIndex.from_headers(entries)
         except BaseException:
-            self.close()
+            # The constructor's control finalizer owns cleanup, including an
+            # uncertain close. Never retry it from both worker and caller.
+            self._closed = True
             raise
 
     @property
@@ -472,6 +522,9 @@ class BoundShards:
         return fd
 
     def check(self, path: Path) -> None:
+        self._control_pool.call(self._check, path)
+
+    def _check(self, path: Path) -> None:
         path = Path(path)
         info = os.fstat(self._fd(path))
         pinned = self._pins[path]
@@ -484,11 +537,17 @@ class BoundShards:
             )
 
     def check_all(self) -> None:
+        self._control_pool.call(self._check_all)
+
+    def _check_all(self) -> None:
         for path in self._fds:
-            self.check(path)
+            self._check(path)
 
     def verify_paths(self) -> None:
         """The artifact paths still name the bound files (no replacement)."""
+        self._control_pool.call(self._verify_paths)
+
+    def _verify_paths(self) -> None:
         for (path, pinned) in self._pins.items():
             try:
                 info = os.stat(path)
@@ -501,7 +560,7 @@ class BoundShards:
                 raise WeightSourceChanged(
                     f"weight shard {self._names[path]} was replaced during load"
                 )
-            self.check(path)
+            self._check(path)
 
     def sources_receipt(self) -> List[list]:
         """``[name, size, mtime_ns]`` per bound shard; no host-local inodes."""
@@ -516,14 +575,16 @@ class BoundShards:
         _readinto(self._fd(path), offset, view, path)
 
     def close(self) -> None:
+        self._control_pool.close(self._close_owner)
+
+    def _close_fds(self) -> None:
         with self._lock:
             fds, self._fds = dict(self._fds), {}
             self._closed = True
-        for fd in fds.values():
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+            self._closing_fds = fds
+        for path, fd in tuple(fds.items()):
+            os.close(fd)
+            del self._closing_fds[path]
 
 
 # ---------------------------------------------------------------------------
@@ -808,7 +869,7 @@ class ExpertSliceReader:
         specs: Sequence[ExpertSliceSpec],
         *,
         handles,
-        pool: Optional[ThreadPoolExecutor] = None,
+        pool: Optional[_ReadPool | ThreadPoolExecutor] = None,
         window: int = 0,
     ):
         if not specs:
@@ -828,6 +889,8 @@ class ExpertSliceReader:
             )
         )
         self._outstanding = 0
+        self._late_reads = set()
+        self._late_lock = threading.Lock()
 
     def check_sources(self) -> None:
         check = getattr(self._handles, "check", None)
@@ -837,7 +900,13 @@ class ExpertSliceReader:
 
     def outstanding_bytes(self) -> int:
         """Host staging currently held for this reader (in flight or ready)."""
-        return self._outstanding * self.expert_bytes
+        with self._late_lock:
+            late = sum(not future.done() for future in self._late_reads)
+            return (self._outstanding + late) * self.expert_bytes
+
+    def _release_late_read(self, future):
+        with self._late_lock:
+            self._late_reads.discard(future)
 
     def read_bytes(self, expert: int) -> Tuple[Tuple[bytes, ...], ...]:
         """Raw rows for ``expert``.  Safe to run off the model thread."""
@@ -864,7 +933,15 @@ class ExpertSliceReader:
         The caller materializes and drops each payload as it is yielded.
         """
         experts = list(experts)
-        if self._pool is None or len(experts) <= 1:
+        # Lightweight tests and inspection tools may construct a reader
+        # without __init__; execution still gets the same ownership guard.
+        if not hasattr(self, "_late_lock"):
+            self._late_lock = threading.Lock()
+            self._late_reads = set()
+        with self._late_lock:
+            if self._late_reads:
+                raise StreamingUnavailable("previous expert reads have not drained")
+        if self._pool is None:
             for expert in experts:
                 self._outstanding = 1
                 try:
@@ -875,18 +952,31 @@ class ExpertSliceReader:
         window = self.window or len(experts)
         queue = iter(experts)
         pending = {}
+        deadlines = {}
 
         def submit_next():
             for expert in queue:
-                pending[self._pool.submit(self.read_bytes, expert)] = expert
+                future = self._pool.submit(self.read_bytes, expert)
+                pending[future] = expert
+                deadlines[future] = time.monotonic() + READ_TIMEOUT_SECONDS
                 return
 
         try:
             for _ in range(min(window, len(experts))):
                 submit_next()
             while pending:
+                if isinstance(self._pool, _ReadPool) and self._pool.failure:
+                    raise WeightReadTimeout(self._pool.failure)
                 self._outstanding = len(pending)
-                (done, not_done) = wait(tuple(pending), return_when=FIRST_COMPLETED)
+                deadline = min(deadlines[f] for f in pending)
+                (done, not_done) = wait(
+                    tuple(pending), timeout=max(0.0, deadline - time.monotonic()),
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    raise _read_timeout(self._pool)
+                if isinstance(self._pool, _ReadPool) and self._pool.failure:
+                    raise WeightReadTimeout(self._pool.failure)
                 # Take ONE completed read and drop every other handle to it
                 # before yielding: a retained ``done`` set or future would keep
                 # its payload alive outside the window.  Other completed reads
@@ -894,6 +984,7 @@ class ExpertSliceReader:
                 future = next(iter(done))
                 del done, not_done
                 expert = pending.pop(future)
+                deadlines.pop(future)
                 payload = future.result()
                 del future
                 self._outstanding = len(pending) + 1
@@ -905,6 +996,15 @@ class ExpertSliceReader:
         finally:
             for future in pending:
                 future.cancel()
+            # A running read still owns its staging. Keep it visible until
+            # completion, including when a consumer abandons the iterator.
+            with self._late_lock:
+                late = [future for future in pending if not future.done()]
+                self._late_reads.update(late)
+            for future in late:
+                future.add_done_callback(self._release_late_read)
+            if late and isinstance(self._pool, _ReadPool):
+                self._pool.fail("expert read window ended with I/O still in flight")
             pending.clear()
             self._outstanding = 0
 
@@ -1490,6 +1590,8 @@ class _ManagerBase:
             "load_phase": plan["load_phase"],
             "load_peak_bounded": plan["load_phase"] == "pre_materialization",
             "reserved_bytes": int(self.reserved_bytes()),
+            "read_timeout_seconds": READ_TIMEOUT_SECONDS,
+            "read_timeout_action": "fail_route_retain_io_ownership",
             "manifest_sha256": plan.get("manifest_sha256", ""),
             "forced_stock": dict(self.forced_stock or {}),
             "bound_kind": "tracked-weight-bytes",
@@ -1513,7 +1615,7 @@ class ExpertStreamManager(_ManagerBase):
         *,
         plan: ExpertStreamPlan,
         stats: StreamStats,
-        pool: Optional[ThreadPoolExecutor],
+        pool: Optional[_ReadPool | ThreadPoolExecutor],
         caches: Dict[str, ExpertLRU],
         collector=None,
         handles=None,
@@ -1542,6 +1644,8 @@ class ExpertStreamManager(_ManagerBase):
     def counters(self) -> Dict[str, int]:
         self.stats.resident_bytes = self.live_bytes()
         counters = self.stats.as_dict()
+        if isinstance(self._pool, _ReadPool):
+            counters.update(self._pool.counters())
         if self.collector is not None:
             counters.update(self.collector.counters())
         if self.overlaps:
@@ -1561,14 +1665,8 @@ class ExpertStreamManager(_ManagerBase):
         return super().apc_revision() + (":gated-immutable-bank-v1" if self.overlaps else "")
 
     def close(self) -> None:
-        if self._pool is not None:
-            # Running page-ins finish before their descriptors close (see
-            # ``_FileHandles.close``); queued ones are dropped.
-            self._pool.shutdown(wait=True, cancel_futures=True)
-            self._pool = None
-        if self._handles is not None:
-            self._handles.close()
-            self._handles = None
+        _close_read_pool(self._pool, self._handles)
+        self._pool = self._handles = None
         if not self._closed:
             self._closed = True
             for cache in self.caches.values():
@@ -1820,7 +1918,8 @@ def install_expert_streaming(
             handles,
         )
 
-        pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="expert-stream")
+        pool = _ReadPool(max_workers=workers, thread_name_prefix="expert-stream",
+                         timeout=READ_TIMEOUT_SECONDS)
         stats = StreamStats(phase="load" if early else "serve")
         caches: Dict[str, ExpertLRU] = {}
         replacements = []
@@ -1890,10 +1989,7 @@ def install_expert_streaming(
             overlaps=overlaps,
         )
     except BaseException:
-        if pool is not None:
-            pool.shutdown(wait=True, cancel_futures=True)
-        if handles is not None:
-            handles.close()
+        _close_read_pool(pool, handles)
         raise
 
 
@@ -1947,14 +2043,27 @@ class ProjectionReader:
             for start in range(0, location.nbytes, self._chunk):
                 stop = min(location.nbytes, start + self._chunk)
                 jobs.append((location.path, location.begin + start, view[start:stop]))
-        if self._pool is None or len(jobs) <= 1:
+        if self._pool is None:
             for job in jobs:
                 self._handles.readinto(*job)
         else:
-            futures = [self._pool.submit(self._handles.readinto, *job) for job in jobs]
-            wait(futures)
-            for future in futures:
-                future.result()
+            futures = []
+            try:
+                deadline = time.monotonic() + READ_TIMEOUT_SECONDS
+                for job in jobs:
+                    futures.append(self._pool.submit(self._handles.readinto, *job))
+                _done, pending = wait(
+                    futures, timeout=max(0.0, deadline - time.monotonic())
+                )
+                if pending:
+                    raise _read_timeout(self._pool)
+                if isinstance(self._pool, _ReadPool) and self._pool.failure:
+                    raise WeightReadTimeout(self._pool.failure)
+                for future in futures:
+                    future.result()
+            finally:
+                for future in futures:
+                    future.cancel()
         # Re-check after the reads: a mutation during I/O fails here, before
         # the bytes become arrays any forward can consume.
         for path in self.source_paths:
@@ -2131,7 +2240,7 @@ class DenseStreamManager(_ManagerBase):
 
     def counters(self) -> Dict[str, int]:
         stats = self.stats
-        return {
+        counters = {
             "dense_stream_page_ins_total": stats.page_ins,
             "dense_stream_page_in_bytes_total": stats.page_in_bytes,
             "dense_stream_load_page_ins_total": stats.load_page_ins,
@@ -2140,14 +2249,13 @@ class DenseStreamManager(_ManagerBase):
             "dense_stream_peak_staging_bytes": stats.peak_staging_bytes,
             "dense_stream_capture_reuses_total": stats.capture_reuses,
         }
+        if isinstance(self._pool, _ReadPool):
+            counters.update(self._pool.counters())
+        return counters
 
     def close(self) -> None:
-        if self._pool is not None:
-            self._pool.shutdown(wait=True, cancel_futures=True)
-            self._pool = None
-        if self._handles is not None:
-            self._handles.close()
-            self._handles = None
+        _close_read_pool(self._pool, self._handles)
+        self._pool = self._handles = None
 
 
 def install_dense_streaming(
@@ -2210,7 +2318,8 @@ def install_dense_streaming(
             shards,
         )
         workers = max(1, int(read_workers))
-        pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dense-stream")
+        pool = _ReadPool(max_workers=workers, thread_name_prefix="dense-stream",
+                         timeout=READ_TIMEOUT_SECONDS)
         stats = StreamStats(phase="load")
         cls = _dense_class()
         replacements = []
@@ -2250,9 +2359,7 @@ def install_dense_streaming(
             readers=readers,
         )
     except BaseException:
-        if pool is not None:
-            pool.shutdown(wait=True, cancel_futures=True)
-        shards.close()
+        _close_read_pool(pool, shards)
         raise
 
 

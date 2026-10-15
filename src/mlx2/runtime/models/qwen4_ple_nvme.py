@@ -9,13 +9,14 @@ import threading
 import time
 import warnings
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import TimeoutError as FutureTimeout, wait
 from dataclasses import dataclass
 from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from .. import round_levers as _lv
+from ..io_ownership import CloseAction, ReadPool, ReadQueueFull, ReadTimeout, call_io
 from .ngram_table_keys import check_ngram_table_tensors
 
 MANIFEST_FORMAT = "qwen4-ple-rows"
@@ -29,7 +30,34 @@ READ_POLICY_CHOICES = frozenset(("pooled", "serial", "adaptive"))
 READ_POLICY_CALIBRATION_ROWS = 128
 READ_POLICY_POOL_MARGIN_PERCENT = 20
 READ_POLICY_WARM_CHUNK_BYTES = 8 << 20
+READ_TIMEOUT_SECONDS = 60.0
 _FORK_RESOURCE_LOCK = threading.RLock()
+
+
+def _after_fork():
+    global _FORK_RESOURCE_LOCK
+    _FORK_RESOURCE_LOCK = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork)
+
+
+class _DescriptorLease:
+    """One read pool's share of a descriptor; close only after both drain."""
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.closed = False
+
+    def close(self):
+        with self.owner["lock"]:
+            if self.closed:
+                return
+            self.closed = True
+            self.owner["remaining"] -= 1
+            if self.owner["remaining"] == 0 and self.owner["fd"] is not None:
+                os.close(self.owner["fd"])
 
 
 @dataclass(frozen=True)
@@ -366,6 +394,11 @@ def verify_sidecar_content(sidecar_path: str, model_path, manifest: dict) -> str
     (``"converted"``). A partial set of source shards still goes through the
     spot check, which refuses it.
     """
+    return call_io("ple-content-inventory", _verify_sidecar_content,
+                   sidecar_path, model_path, manifest, timeout=READ_TIMEOUT_SECONDS)
+
+
+def _verify_sidecar_content(sidecar_path, model_path, manifest):
     with open(Path(model_path) / "model.safetensors.index.json") as f:
         weight_map = json.load(f)["weight_map"]
     check_ngram_table_tensors(
@@ -390,6 +423,11 @@ def verify_sidecar_against_artifact(sidecar_path: str, model_path) -> dict:
     sidecar file size. Raises ``ValueError`` on any mismatch. Returns the
     parsed manifest.
     """
+    return call_io("ple-manifest-inventory", _verify_sidecar_against_artifact,
+                   sidecar_path, model_path, timeout=READ_TIMEOUT_SECONDS)
+
+
+def _verify_sidecar_against_artifact(sidecar_path, model_path):
     manifest = load_manifest(sidecar_path)
     expected = manifest["source_index_sha256"]
     actual = index_json_sha256(model_path)
@@ -421,6 +459,23 @@ def assert_sidecar_not_in_weight_files(sidecar_path: str) -> None:
         raise ValueError(
             f"PLE sidecar name {name!r} matches the model*.safetensors weight glob; it would be loaded as weights and UBC-evicted. Name it ple_rows.bin."
         )
+
+
+def _read_hot_row_ids(path, vocab_size, capacity):
+    ordered = {}
+    with open(path) as handle:
+        for line in handle:
+            text = line.split("#", 1)[0].strip()
+            if not text:
+                continue
+            row_id = int(text)
+            if not 0 <= row_id < vocab_size:
+                raise ValueError(
+                    f"hot-row id {row_id} in {path} is outside the PLE table [0, {vocab_size})"
+                )
+            if len(ordered) < capacity:
+                ordered.setdefault(row_id, None)
+    return list(ordered)
 
 
 class FileBackedShardedEmbedding(nn.Module):
@@ -497,16 +552,12 @@ class FileBackedShardedEmbedding(nn.Module):
                     "adaptive PLE reads require at least "
                     f"{2 * READ_POLICY_CALIBRATION_ROWS} rows"
                 )
-            expected_size = self.data_offset + self.vocab_size * self.row_bytes
-            actual_size = os.path.getsize(self.sidecar_path)
-            if actual_size < expected_size:
-                raise ValueError(
-                    f"adaptive PLE sidecar has {actual_size} bytes, needs {expected_size}"
-                )
         self._lifecycle_lock = threading.Lock()
         self._read_policy_lock = threading.Lock()
         self._warm_stop = threading.Event()
         self._warm_thread = None
+        self._warm_pool = None
+        self._warm_future = None
         self._warm_state = (
             "not_started" if self._adaptive_warm_enabled else "disabled"
         )
@@ -539,8 +590,7 @@ class FileBackedShardedEmbedding(nn.Module):
         self._stat_cache_hits = 0
         self._stat_cache_misses = 0
         self._stat_cache_evictions = 0
-        with _FORK_RESOURCE_LOCK:
-            self._open_resources()
+        self._open_resources()
         if self.read_policy == "adaptive":
             try:
                 self._calibrate_read_policy("load")
@@ -549,20 +599,44 @@ class FileBackedShardedEmbedding(nn.Module):
                 raise
 
     def _open_resources(self):
-        fd = os.open(self.sidecar_path, os.O_RDONLY)
         pool = None
         try:
-            pool = ThreadPoolExecutor(
+            pool = ReadPool(
                 max_workers=max(self.decode_workers, self.prefill_workers),
                 thread_name_prefix="ple-nvme",
+                timeout=READ_TIMEOUT_SECONDS,
             )
-            prefetch_pool = ThreadPoolExecutor(
-                max_workers=PREFETCH_WORKERS, thread_name_prefix="ple-nvme-prefetch"
+            prefetch_pool = ReadPool(
+                max_workers=PREFETCH_WORKERS, thread_name_prefix="ple-nvme-prefetch",
+                timeout=READ_TIMEOUT_SECONDS, max_pending=2 * PREFETCH_WORKERS,
             )
         except BaseException:
             if pool is not None:
-                pool.shutdown(wait=True)
-            os.close(fd)
+                pool.close()
+            raise
+        owner = {"fd": None, "remaining": 2, "lock": threading.Lock()}
+        leases = (_DescriptorLease(owner), _DescriptorLease(owner))
+        path = self.sidecar_path
+        expected_size = (self.data_offset + self.vocab_size * self.row_bytes
+                         if self.read_policy == "adaptive" else None)
+
+        def open_file():
+            # Keep an opened descriptor owned even if fstat or the open itself
+            # returns after the startup deadline. No model state is touched.
+            owner["fd"] = os.open(path, os.O_RDONLY)
+            if expected_size is not None:
+                actual_size = os.fstat(owner["fd"]).st_size
+                if actual_size < expected_size:
+                    raise ValueError(
+                        f"adaptive PLE sidecar has {actual_size} bytes, needs {expected_size}"
+                    )
+            return owner["fd"]
+
+        try:
+            fd = pool.call(open_file)
+        except BaseException:
+            pool.close(leases[0])
+            prefetch_pool.close(leases[1])
             raise
         self._lru = OrderedDict()
         self._lru_lock = threading.Lock()
@@ -571,6 +645,7 @@ class FileBackedShardedEmbedding(nn.Module):
         self._fd = fd
         self._pool = pool
         self._prefetch_pool = prefetch_pool
+        self._fd_leases = leases
         self._owner_pid = os.getpid()
 
     def _check_owner(self, *, reopen: bool = True) -> None:
@@ -586,12 +661,15 @@ class FileBackedShardedEmbedding(nn.Module):
             with _FORK_RESOURCE_LOCK:
                 if os.getpid() != self._owner_pid:
                     inherited_fd = self._fd
+                    inherited_close_pool = ReadPool(1, "ple-inherited-close")
                     self._lifecycle_lock = threading.Lock()
                     self._lru_lock = threading.Lock()
                     self._dq_lock = threading.Lock()
                     self._read_policy_lock = threading.Lock()
                     self._warm_stop = threading.Event()
                     self._warm_thread = None
+                    self._warm_pool = None
+                    self._warm_future = None
                     self._warm_state = (
                         "not_started" if self._adaptive_warm_enabled else "disabled"
                     )
@@ -619,7 +697,11 @@ class FileBackedShardedEmbedding(nn.Module):
                             self._owner_pid = os.getpid()
                     finally:
                         if inherited_fd is not None:
-                            os.close(inherited_fd)
+                            inherited_close_pool.close(
+                                CloseAction(lambda: os.close(inherited_fd))
+                            )
+                        else:
+                            inherited_close_pool.close()
 
     def _submit(self, use_prefetch_pool: bool, fns, required: bool):
         """Submit ``fns`` atomically with the closed/fork check.
@@ -629,13 +711,13 @@ class FileBackedShardedEmbedding(nn.Module):
         Detect the pid change and rebuild fd + pools in the child (the
         parent's descriptors stay untouched). Submitting under the
         lifecycle lock makes the closed check atomic with the submission,
-        so close() either sees the futures (and drains them before closing
-        the fd) or the submission observes the closed flag. ``required``
+        so close() either sees the futures (and defers closing
+        the fd until they return) or the submission observes the closed flag. ``required``
         submissions raise when closed; optional (prefetch) ones no-op.
 
         Each fn is called as ``fn(fd)``; the fd stays valid while the
-        returned futures may still run because close() drains the pools
-        before closing it.
+        returned futures may still run because close() retains their descriptor
+        leases until all running calls return.
         """
         self._check_owner()
         with self._lifecycle_lock:
@@ -644,7 +726,17 @@ class FileBackedShardedEmbedding(nn.Module):
                     raise RuntimeError("FileBackedShardedEmbedding is closed")
                 return []
             pool = self._prefetch_pool if use_prefetch_pool else self._pool
-            return [pool.submit(fn, self._fd) for fn in fns]
+            futures = []
+            try:
+                for fn in fns:
+                    futures.append(pool.submit(fn, self._fd))
+            except (ReadQueueFull, ReadTimeout):
+                for future in futures:
+                    future.cancel()
+                if required:
+                    raise
+                return []
+            return futures
 
     def close(self):
         self._check_owner(reopen=False)
@@ -652,16 +744,14 @@ class FileBackedShardedEmbedding(nn.Module):
             if self._closed:
                 return
             self._closed = True
-            (fd, pool, prefetch_pool) = (self._fd, self._pool, self._prefetch_pool)
-        self._warm_stop.set()
-        warm_thread = self._warm_thread
-        if warm_thread is not None and warm_thread is not threading.current_thread():
-            warm_thread.join()
-        pool.shutdown(wait=True)
-        prefetch_pool.shutdown(wait=True)
-        with _FORK_RESOURCE_LOCK:
-            os.close(fd)
+            (pool, prefetch_pool) = (self._pool, self._prefetch_pool)
+            leases = self._fd_leases
             self._fd = self._pool = self._prefetch_pool = None
+        self._warm_stop.set()
+        if self._warm_pool is not None:
+            self._warm_pool.close()
+        pool.close(leases[0])
+        prefetch_pool.close(leases[1])
         with self._lru_lock:
             self._lru.clear()
         with self._dq_lock:
@@ -705,6 +795,8 @@ class FileBackedShardedEmbedding(nn.Module):
 
             def task(fd):
                 for i in range(start, stop):
+                    if self._closed or (self._pool is not None and self._pool.failure):
+                        raise ReadTimeout("PLE read ownership was revoked")
                     offset = base + int(row_ids[i]) * row_bytes
                     data = os.pread(fd, row_bytes, offset)
                     if len(data) != row_bytes:
@@ -715,15 +807,9 @@ class FileBackedShardedEmbedding(nn.Module):
 
             return task
 
-        if inline:
-            self._check_owner()
-            with self._lifecycle_lock:
-                if self._closed:
-                    raise RuntimeError("FileBackedShardedEmbedding is closed")
-                read_span(0, n)(self._fd)
-            return out
-
-        workers = max(1, min(workers, n))
+        # Serial still means one I/O worker; it must not run an unbounded
+        # filesystem call while holding the model thread/lifecycle lock.
+        workers = 1 if inline else max(1, min(workers, n))
         bounds = np.linspace(0, n, workers + 1, dtype=np.int64)
         futures = self._submit(
             False,
@@ -734,9 +820,20 @@ class FileBackedShardedEmbedding(nn.Module):
             ],
             required=True,
         )
-        wait(futures)
-        for future in futures:
-            future.result()
+        try:
+            _done, pending = wait(futures, timeout=READ_TIMEOUT_SECONDS)
+            if pending:
+                error = ReadTimeout("PLE foreground read exceeded its I/O deadline")
+                if self._pool is not None:
+                    self._pool.fail(error)
+                raise error
+            for future in futures:
+                future.result()
+            if self._pool is None or self._pool.failure:
+                raise ReadTimeout("PLE read ownership was revoked")
+        finally:
+            for future in futures:
+                future.cancel()
         return out
 
     def _pread_rows(self, row_ids: np.ndarray, workers: int) -> np.ndarray:
@@ -875,7 +972,8 @@ class FileBackedShardedEmbedding(nn.Module):
                 fd = os.open(self.sidecar_path, os.O_RDONLY)
                 remaining = self.vocab_size * self.row_bytes
                 offset = self.data_offset
-                while remaining and not self._warm_stop.is_set():
+                while (remaining and not self._warm_stop.is_set()
+                       and not self._warm_pool.failure):
                     amount = min(READ_POLICY_WARM_CHUNK_BYTES, remaining)
                     data = os.pread(fd, amount, offset)
                     if len(data) != amount:
@@ -885,7 +983,7 @@ class FileBackedShardedEmbedding(nn.Module):
                     offset += amount
                     remaining -= amount
                 with self._read_policy_lock:
-                    if self._warm_stop.is_set():
+                    if self._warm_stop.is_set() or self._warm_pool.failure:
                         self._warm_state = "stopped"
                         return
                     self._warm_state = "completed"
@@ -898,20 +996,19 @@ class FileBackedShardedEmbedding(nn.Module):
                 if fd is not None:
                     os.close(fd)
 
-        self._warm_thread = threading.Thread(
-            target=warm,
-            name="ple-nvme-adaptive-warm",
-            daemon=True,
-        )
-        self._warm_thread.start()
+        self._warm_pool = ReadPool(1, "ple-nvme-adaptive-warm", timeout=READ_TIMEOUT_SECONDS)
+        self._warm_future = self._warm_pool.submit(warm)
         return True
 
     def wait_for_adaptive_warm(self, timeout: float | None = None) -> bool:
-        thread = self._warm_thread
-        if thread is None:
+        future = self._warm_future
+        if future is None:
             return self._warm_state == "completed"
-        thread.join(timeout)
-        return not thread.is_alive() and self._warm_state == "completed"
+        try:
+            future.result(timeout=READ_TIMEOUT_SECONDS if timeout is None else timeout)
+        except FutureTimeout:
+            return False
+        return self._warm_state == "completed"
 
     @property
     def read_policy_status(self) -> dict:
@@ -924,6 +1021,12 @@ class FileBackedShardedEmbedding(nn.Module):
                 "effective": self._read_policy_effective,
                 "phase": self._read_policy_phase,
                 "failure": self._read_policy_failure,
+                "io": {
+                    "deadline_seconds": READ_TIMEOUT_SECONDS,
+                    "foreground_failure": self._pool.failure if self._pool else None,
+                    "prefetch_failure": self._prefetch_pool.failure if self._prefetch_pool else None,
+                    "warm_failure": self._warm_pool.failure if self._warm_pool else None,
+                },
                 "warming": {
                     "enabled": self._adaptive_warm_enabled,
                     "state": self._warm_state,
@@ -943,8 +1046,11 @@ class FileBackedShardedEmbedding(nn.Module):
                 ),
             }
 
-    def _cache_put(self, row_ids, rows: np.ndarray) -> None:
+    def _cache_put(self, row_ids, rows: np.ndarray, *, authority=None) -> None:
         """Insert packed rows; evict LRU entries over the byte budget."""
+        if authority is not None:
+            authority.publish(self._cache_put, row_ids, rows)
+            return
         if not self.lru_capacity_rows:
             return
         self._check_owner()
@@ -1008,6 +1114,8 @@ class FileBackedShardedEmbedding(nn.Module):
         self._check_owner()
         if self._closed:
             raise RuntimeError("FileBackedShardedEmbedding is closed")
+        if self._pool.failure:
+            raise ReadTimeout(self._pool.failure)
         _ht_t0 = 0.0
         started = time.perf_counter() if self.stats_timing else None
         shape = indices.shape
@@ -1127,6 +1235,10 @@ class FileBackedShardedEmbedding(nn.Module):
         and freshly-read rows are inserted, so prefetched rows survive
         page-cache eviction under memory pressure.
         """
+        self._check_owner()
+        authority = self._prefetch_pool
+        if authority is None or authority.failure:
+            return []
         flat = np.unique(np.asarray(indices, dtype=np.int64).reshape(-1))
         if self.lru_capacity_rows and flat.size:
             self._check_owner()
@@ -1148,9 +1260,13 @@ class FileBackedShardedEmbedding(nn.Module):
             def task(fd):
                 span = []
                 for i in range(start, stop):
+                    if self._closed or authority.failure:
+                        return
                     span.append(
                         os.pread(fd, row_bytes, base + int(flat[i]) * row_bytes)
                     )
+                    if self._closed or authority.failure:
+                        return
                 if cache_put is not None:
                     complete = [
                         (int(flat[start + j]), data)
@@ -1164,6 +1280,7 @@ class FileBackedShardedEmbedding(nn.Module):
                                 np.frombuffer(data, dtype=np.uint8)
                                 for (_, data) in complete
                             ],
+                            authority=authority,
                         )
 
             return task
@@ -1192,6 +1309,10 @@ class FileBackedShardedEmbedding(nn.Module):
         """
         if self.dequant_backend != "numpy":
             return 0
+        self._check_owner()
+        authority = self._prefetch_pool
+        if authority is None or authority.failure:
+            return 0
         flat = np.unique(np.asarray(indices, dtype=np.int64).reshape(-1))
         if flat.size == 0:
             return 0
@@ -1219,24 +1340,34 @@ class FileBackedShardedEmbedding(nn.Module):
                 need = list(range(ids.size))
             (fresh_ids, fresh_rows) = ([], [])
             for j in need:
+                if self._closed or authority.failure:
+                    return
                 data = os.pread(fd, row_bytes, base + int(ids[j]) * row_bytes)
+                if self._closed or authority.failure:
+                    return
                 if len(data) != row_bytes:
                     return
                 rows[j] = np.frombuffer(data, dtype=np.uint8)
                 fresh_ids.append(int(ids[j]))
                 fresh_rows.append(rows[j])
             if lru and fresh_ids:
-                self._cache_put(fresh_ids, fresh_rows)
+                self._cache_put(fresh_ids, fresh_rows, authority=authority)
             bits = dequant_rows_numpy(rows, dims)
-            with self._dq_lock:
-                if len(self._dq_cache) >= self._DQ_CACHE_MAX_ROWS:
-                    self._dq_cache.clear()
-                for j, row_id in enumerate(ids.tolist()):
-                    self._dq_cache[row_id] = bits[j]
-            _lv.bump("ple_prefetch_rows", int(ids.size))
 
-        self._submit(True, [task], required=False)
-        return int(ids.size)
+            def publish():
+                with self._dq_lock:
+                    if self._closed:
+                        return
+                    if len(self._dq_cache) >= self._DQ_CACHE_MAX_ROWS:
+                        self._dq_cache.clear()
+                    for j, row_id in enumerate(ids.tolist()):
+                        self._dq_cache[row_id] = bits[j]
+                _lv.bump("ple_prefetch_rows", int(ids.size))
+
+            authority.publish(publish)
+
+        submitted = self._submit(True, [task], required=False)
+        return int(ids.size) if submitted else 0
 
     def submit_prefetch(self, fn) -> None:
         """Run ``fn`` (id hashing + ``prefetch_rows``) on the prefetch pool.
@@ -1257,19 +1388,8 @@ class FileBackedShardedEmbedding(nn.Module):
             raise ValueError(
                 "MLX_QWEN4_PLE_NVME_PREHEAT requires MLX_QWEN4_PLE_NVME_LRU_MB to be set to a positive budget"
             )
-        ids = []
-        with open(path) as f:
-            for line in f:
-                text = line.split("#", 1)[0].strip()
-                if not text:
-                    continue
-                row_id = int(text)
-                if not 0 <= row_id < self.vocab_size:
-                    raise ValueError(
-                        f"hot-row id {row_id} in {path} is outside the PLE table [0, {self.vocab_size})"
-                    )
-                ids.append(row_id)
-        ordered = list(dict.fromkeys(ids))[: self.lru_capacity_rows]
+        ordered = self._pool.call(_read_hot_row_ids, path, self.vocab_size,
+                                  self.lru_capacity_rows)
         if not ordered:
             return 0
         id_array = np.asarray(ordered, dtype=np.int64)
@@ -1312,7 +1432,8 @@ def install_file_backed_ple(
         verify_sidecar_content(sidecar_path, model_path, manifest)
     else:
         expected_manifest, expected_stat = preverified
-        stat = os.stat(sidecar_path)
+        stat = call_io("ple-source-identity", os.stat, sidecar_path,
+                       timeout=READ_TIMEOUT_SECONDS)
         current_stat = (stat.st_dev, stat.st_ino, stat.st_size,
                         stat.st_mtime_ns, stat.st_ctime_ns)
         if manifest != expected_manifest or current_stat != expected_stat:

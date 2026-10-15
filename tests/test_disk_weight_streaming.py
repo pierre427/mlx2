@@ -16,6 +16,7 @@ import json
 import os
 import resource
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -541,11 +542,21 @@ def test_aliased_shard_spellings_fail_closed_without_leaking(tmp_path, monkeypat
         return fd
 
     monkeypatch.setattr(os, "open", tracked)
+    bound = BoundShards.__new__(BoundShards)
     try:
         with pytest.raises(StreamingUnavailable):
-            BoundShards(tmp_path, names, records=records)
+            BoundShards.__init__(bound, tmp_path, names, records=records)
     finally:
         monkeypatch.undo()
+        # A failed startup can publish its exception before the worker's done
+        # callback hands descriptors to the finalizer. Observe that original
+        # cleanup completing; do not close its fd underneath the owner.
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            finalizer = bound._control_pool._finalizer
+            if finalizer is not None and finalizer.done():
+                break
+            time.sleep(0.005)
         leaked = []
         for (fd, identity) in opened:
             try:

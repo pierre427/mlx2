@@ -1,0 +1,76 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "Bounded serving I/O with retained late-worker ownership and persistence representation regressions",
+  "recorded_at": "2026-10-15",
+  "state": "implemented_focused_cpu_validation",
+  "sources": [
+    {
+      "source_repository": "https://github.com/sgl-project/sglang",
+      "source_revision": "4908f3a3ddc23f139ee7818839a956f3675c2728",
+      "pull_request": "https://github.com/sgl-project/sglang/pull/44343",
+      "source_paths": [
+        "python/sglang/srt/mem_cache/storage_call_guard.py",
+        "python/sglang/srt/mem_cache/pool_host/base.py",
+        "test/registered/unit/mem_cache/test_storage_call_guard.py"
+      ],
+      "license": "Apache-2.0",
+      "use": "Design and fault-injection precedent only; no source copied. The PR remains open/draft. Retain storage ownership after a deadline instead of pretending the underlying call was cancelled."
+    },
+    {
+      "source_repository": "https://github.com/jjang-ai/vmlx",
+      "source_revision": "8e076b57804d51fcfa877e924dfbce8e01b0c1ce",
+      "pull_request": "https://github.com/jjang-ai/vmlx/pull/295",
+      "source_paths": [
+        "vmlx_engine/disk_cache.py",
+        "tests/test_disk_cache_bf16_lossless.py",
+        "tests/test_disk_cache_native_bf16.py"
+      ],
+      "license": "Apache-2.0",
+      "use": "Test-design precedent only; no source copied. Exhaustive BF16 bit-pattern, strided, mixed-dtype and fresh-manager persistence oracles exercise MLX2's existing native safetensors representation."
+    }
+  ],
+  "modifications": [
+    "Bound APC background spill settlement with one shared batch deadline; revoke timed-out publication while retaining evaluated payloads until the writer returns.",
+    "Keep spill quarantine across clear/unload so replacing APC instances cannot accumulate hung write windows. Late completion removes files and releases quarantine.",
+    "Run production streamed expert and dense reads, including singleton requests, through fixed daemon I/O workers. Reject further reads after a timeout and defer descriptor closure until all running calls return.",
+    "Refuse replacement weight pools while timed-out or closing pools retain reads; queued calls can be cancelled but running system calls cannot.",
+    "Report outstanding/failed/timed-out weight reads and retained/blocked spill state.",
+    "Exercise real late writes, iterator abandonment, descriptor lifetime, permanently hung-reader process exit, BF16 codec representation, target/draft/RNG/hidden state refault, and corrupt-component atomic refusal.",
+    "Bound initial APC payload writes on the existing writer after model-thread payload evaluation; a synchronous fallback first settles the bounded background window rather than adding another queue behind a blocked write.",
+    "Bound APC payload verification, block materialization and byte reads on one retained I/O worker. Limit serialized staging to the expected resident byte estimate plus a 16 MiB metadata allowance and deserialize target/draft/aux on the model thread; a timed-out read pool permanently refuses further reads.",
+    "Apply the same descriptor-lease, bounded queue and deadline mechanism to PLE foreground reads, optional prefetch and adaptive warming, including serial policy. Compute MLX hash constants before submitting host-only NumPy prefetch callbacks.",
+    "Add no-waiter prefetch watchdog, idempotent fail/close, bounded refault staging and caller-thread deserialization tests. Update existing APC fault-injection seams to the evaluated payload serializer and distinguish background policy from thread identity.",
+    "Confirm existing dynamic expert/KV guard integration: admission subtracts currently unfilled expert/dense reservation, default APC sizing uses that same reserve, and OOM recovery uses the full reservation. No new adaptive allocation policy or performance claim.",
+    "Cross-review repairs: autonomous read deadlines also reject late completion when the consumer or watchdog is delayed; atomic packed/dequantized PLE cache publication cannot race pool revocation; failed writer diagnostics no longer retain payload tracebacks; persisted refault checksums bind the exact staged bytes rather than a previous path read."
+  ],
+  "mlx2_paths": [
+    "src/mlx2/runtime/apc_v2.py",
+    "src/mlx2/runtime/weight_stream.py",
+    "tests/test_peer_survey_io_deadlines_cpu.py",
+    "tests/test_peer_survey_persistence_cpu.py",
+    "src/mlx2/runtime/io_ownership.py",
+    "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/runtime/models/qwen4_ple_nvme.py",
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "tests/test_peer_survey_ple_io_cpu.py",
+    "tests/test_apcv2_background_spill_cpu.py",
+    "tests/test_apcv2_restore_spill_publication_cpu.py",
+    "tests/test_apcv2_lifecycle.py",
+    "tests/test_apcv2_sessions_persistence.py"
+  ],
+  "validation": {
+    "command": "MLX2_PREFLIGHT_CPU_ONLY=1 PYTHONPATH=$PWD/src private artifact -m pytest -o addopts= -q tests/test_peer_survey_io_deadlines_cpu.py tests/test_peer_survey_persistence_cpu.py tests/test_peer_survey_ple_io_cpu.py tests/test_apcv2_background_spill_cpu.py tests/test_apcv2_restore_spill_publication_cpu.py tests/test_apcv2_restore_resilience_cpu.py tests/test_apcv2_lifecycle.py tests/test_apcv2_sessions_persistence.py tests/test_disk_weight_streaming.py tests/test_moe_expert_streaming.py tests/test_adapter_weight_stream_close.py tests/test_persistent_blocks_cpu.py tests/test_qwen4_ple_read_policy.py tests/test_known_tail_ple_prefetch.py tests/test_qwen4_ple_compile_cache.py tests/test_qwen4_ple_converted_artifact.py tests/test_perf_defaults.py::test_clamp_host_default_cache_bytes_arithmetic",
+    "gpu_executed": false,
+    "formal_qualification": false,
+    "performance_qualified": false,
+    "focused_cpu_result": "396 passed, 1 existing fork deprecation warning, 22.30 seconds"
+  },
+  "limits": [
+    "Follow-up peer-survey-apc-metadata-accounting.json bounds live manifest writes and payload/manifest deletion and removes hot accounting filesystem reads. Startup inventory/security/quarantine/lock acquisition and ordinary-close lock release remain synchronous; this is not universal interruptible filesystem I/O.",
+    "The APC serialized restore window is a separately bounded transient host allocation, reported as reserved staging bytes; it is not a zero-copy restore or an adaptive physical-memory allocation policy.",
+    "A poisoned streamed weight, PLE or APC read pool refuses further reads and requires owner reload after retained I/O drains; running system calls are not cancelled.",
+    "Raw reader utilities explicitly constructed without a pool remain synchronous; production streamed-weight installation always supplies the bounded pool. Initial artifact validation and metadata discovery are outside the serving payload deadlines.",
+    "The separate opt-in ordinary B1 exact checkpoint slice is recorded in peer-survey-exact-decode-checkpoint.json. Decode-token prompt replay remains refused on every route.",
+    "All validation is focused CPU functional coverage, not GPU qualification, performance qualification or a full preflight."
+  ]
+}
