@@ -1,0 +1,56 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "feature": "adapter-owned fixed-shape Core ML projection executor and owned M3 diagnostic",
+  "date": "2026-10-15",
+  "sources": [
+    {
+      "repository": "apple/coremltools",
+      "revision": "a207b1a3452eafe02f2d870f486287834af2c82d",
+      "paths": [
+        "coremltools/models/model.py",
+        "coremltools/models/compute_plan.py",
+        "coremltools/models/utils.py",
+        "coremltools/converters/_converters_entry.py"
+      ],
+      "license": "BSD-3-Clause",
+      "use": "Public API documentation and source reviewed 2026-10-15: CompiledMLModel prediction, CPU_AND_NE policy, MLComputePlan structure traversal, MIL conversion and compile_model. Original implementation; no source copied."
+    },
+    {
+      "repository": "Apple Developer Documentation",
+      "revision": "documentation-reviewed-2026-10-15",
+      "paths": [
+        "MLComputePlanDeviceUsage",
+        "Core ML model performance report"
+      ],
+      "license": "documentation reference",
+      "use": "Evidence boundary: MLComputePlan describes anticipated placement and cannot by itself establish observed Neural Engine execution. No source copied."
+    }
+  ],
+  "modifications": "Original immutable artifact/shape/minimum-memory contract; bounded regular-file compiled-byte binding and hash-verified private snapshot; lazy Core ML import; strict finite fp16 prediction and serialized close; native float16/float32 bridge validation followed by an owned float16 copy; nested compute-plan recording that never promotes anticipated placement to observed execution. Added an M3-only synthetic MIL projection probe with full-output float32 reference parity, existing CPG/radio plus paired-lock validation, process supervision and atomic external evidence.",
+  "validation": {
+    "state": "executor_and_probe_implemented_cpu_contract_tested_native_prediction_diagnostic_completed_on_m3_placement_unobserved",
+    "qualified": false,
+    "selected": false,
+    "observed_used": false,
+    "limitations": [
+      "No serving adapter selects this route yet; direct executor calls are explicit selection only.",
+      "coremltools is absent from the primary development virtualenv, so CPU tests use a fake runtime. An external owned Apple M3 Pro run with Core ML Tools 9.0 compiled the deterministic synthetic model and completed six predictions with exact numerical parity.",
+      "The native Core ML bridge exposed the fp16 output feature as float32. The executor validated it and returned an owned fp16 copy; unsupported dtypes and fp16-overflowing values fail closed.",
+      "The compiled Core ML model and artifact-bound M3 receipts are retained outside the repository at private validation evidence Artifact SHA-256 is 613daabdc7a829dd1da0b9c52774e3778690704b54eb60117217510120fee971; compiled tree SHA-256 is 2511521fdfd14eb177267f1b7bbaea24b5d10684fadef6e1be0625ba19fe49c4.",
+      "Core ML Tools 9.0 in the M3 diagnostic did not expose coremltools.models.MLComputePlan, so anticipated placement was unavailable and actual execution device was not observed.",
+      "CPU_AND_NE permission and MLComputePlan anticipated placement are not post-execution Neural Engine evidence; observed_used remains false even though native prediction completed.",
+      "Synchronous Core ML prediction has no cancellation contract here. Probe timeout terminates/reaps the worker; uninterruptible OS work retains its supervisor and ownership until exit. Process exit does not prove Core ML daemon/device drain.",
+      "Declared tensor bytes are a minimum, not native peak memory. The regular-file copy is capped at 64 MiB and 4096 entries. Filesystem metadata and ownership validation are not universal hard deadline operations.",
+      "No asynchronous serving integration, trained model head, automatic fallback, quality qualification or performance claim is included."
+    ],
+    "focused_tests": [
+      "tests/test_ane_projection_cpu.py",
+      "tests/test_coreml_projection_executor_cpu.py"
+    ],
+    "run_instructions": "docs/COREML-PROJECTION.md",
+    "source_sha256": {
+      "scripts/probe_coreml_projection.py": "10007b47d749b9a9353835d3ee354b41c84867bed7daceb45ae2b2c5d328641f",
+      "src/mlx2/runtime/ane_projection.py": "8a263a9c3d1b152ee9c5ee85a5332adce3800859cb3ce44be152b5f602503784"
+    }
+  }
+}
