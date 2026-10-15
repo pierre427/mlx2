@@ -1,0 +1,69 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "component": "semantic memory conflict lifecycle",
+  "source": {
+    "repository": "mlx2",
+    "revision": "3e07325a321637b97e94d6d9444385261222e208",
+    "paths": [
+      "src/mlx2/runtime/semantic_memory.py",
+      "tests/test_semantic_bundles.py"
+    ],
+    "license": "Apache-2.0"
+  },
+  "modifications": [
+    "Mine only semantic edge conflict status and authority ordering into current main; preserve current request, tenant, session and CAS lifecycle.",
+    "Refuse weaker explicit supersession and cross-key/subject/relation supersession. Retain legacy committed-edge eligibility only for active facts so existing neural/capsule consumers do not promote contested or retired facts.",
+    "Keep host-provided conflict keys explicit; generic remember statements are not assumed to describe single-valued properties.",
+    "Reject lower-authority overwrite of the same fact and removal/change of an existing conflict binding. Idempotent evidence retries cannot reactivate retired facts.",
+    "Normalize legacy v1 edge metadata on read without mutating the stored capsule or session revision. Keep persisted edge identity bound to its subject, relation, object and evidence digest.",
+    "Preserve current post-delivery, authenticated-session and expected-revision CAS publication; failed supersession rolls back the complete proposal batch and never invokes derived-state publication."
+  ],
+  "validation": {
+    "status": "passed",
+    "pytest_items_passed": 123,
+    "subtests_passed": 12,
+    "junit_total": 135,
+    "failures": 0,
+    "skipped": 0,
+    "seconds": 4.154,
+    "modules": [
+      "tests/test_semantic_conflicts_cpu.py",
+      "tests/test_semantic_bundles.py",
+      "tests/test_semantic_sidecar.py",
+      "tests/test_neural_concepts.py",
+      "tests/experimental/test_hysparse2_capsules.py",
+      "tests/test_semantic_memory_startup_binding_cpu.py",
+      "tests/test_hyper_directory.py",
+      "tests/test_semantic_capsule_storage_hardening.py",
+      "tests/test_semantic_handoff.py",
+      "tests/test_semantic_activation_integration.py"
+    ],
+    "covered": [
+      "Equal-tier contradiction labels and exclusion from verified context",
+      "Stronger supersession; weaker implicit contradiction remains contested",
+      "Weaker explicit supersession and same-fact replacement refuse atomically",
+      "Unknown/cross-key/cross-subject/cross-relation supersession refuses",
+      "Conflict-key removal and retired-evidence replay cannot reactivate stale facts",
+      "Actual existing CapsuleMemory reader consumes active facts and refuses an all-contested graph",
+      "Legacy capsule read compatibility, retired-edge suppression, bounded references",
+      "Existing neural derivation, tenant/session CAS, post-delivery gates, startup and storage regressions"
+    ],
+    "ruff": "passed for changed Python files",
+    "git_diff_check": "passed",
+    "gpu_used": false,
+    "full_preflight": false,
+    "formal_qualification": false,
+    "evidence": "Outside repository: private validation evidence and focused.log"
+  },
+  "status": "implemented; focused CPU regressions passed; no deliberation route integration or quality claim",
+  "limits": [
+    "Conflict keys are explicit host-provided single-valued-fact identifiers. The existing generic remember extractor does not infer conflicts among arbitrary multi-valued properties.",
+    "Authority tiers are trusted-caller classifications, not cryptographic verification. No model/user text authority parser or new signature-verification mechanism is added.",
+    "Retired statuses are understood by readers; this slice does not expose a new public retraction endpoint.",
+    "No branch messaging, hosted deliberation route, media control plane or GPU policy is ported. No model-quality improvement is claimed."
+  ],
+  "source_sha256": {
+    "src/mlx2/runtime/semantic_memory.py": "e7bd133679467db14257c888e883395df720aed0ca5a24631a3d85f5fe55e909",
+    "tests/test_semantic_conflicts_cpu.py": "d9ac205c25df30350c959fb58d2aa353876cedb11a327b0f016ce3c1c5b43def"
+  }
+}
