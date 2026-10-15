@@ -1,0 +1,471 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "FOLD long-context far-memory component probe for DFlash2",
+  "recorded_at": "2026-10-15",
+  "state": "v2_bounded_cold_warm_durable_continuation_and_rollback_state_observed_retry_capacity_refused_unqualified_default_off",
+  "source_repository": "https://github.com/NuyoahNasuS/FOLD",
+  "source_revision": "22beb43a7704beeabd6e5a242404aa2f44982a79",
+  "source_paper": "https://arxiv.org/abs/2610.20392",
+  "source_paths": [
+    "fold/reference.py",
+    "fold/attention.py",
+    "fold/kernels.py"
+  ],
+  "license": "Apache-2.0",
+  "implementation_paths": [
+    "src/mlx2/runtime/drafters/fold_reference.py",
+    "src/mlx2/runtime/drafters/fold.py",
+    "src/mlx2/runtime/drafters/dflash_base.py",
+    "src/mlx2/runtime/drafters/dflash2.py",
+    "src/mlx2/adapters/external_draft_policy.py",
+    "qualification/policies/qwen38-27b-dflash2-fold.json",
+    "tests/test_fold_reference_cpu.py",
+    "tests/test_fold_live.py",
+    "tests/test_peer_fold_identity_cpu.py",
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/runtime/drafter_portfolio.py",
+    "tests/test_peer_fold_lifecycle_cpu.py",
+    "tests/test_peer_exact_checkpoint_boundaries_cpu.py",
+    "scripts/probe_fold_lifecycle.py"
+  ],
+  "modifications": [
+    "Reimplemented equations 1-4 as a dense NumPy oracle with no PyTorch, Triton, CUDA or vLLM dependency.",
+    "Added an MLX live attention path that preserves the ordinary DFlash2 target and verifier, exact local RoPE positions, position-free far queries, alpha-concentrated memory normalization and mass-weighted branch merging. Full-attention layers use the paper's row-varying local split; sliding layers retain their native exact window and add all older entries as far memory, matching the published plugin variant.",
+    "Added an adapter-owned full rotated K/V plus unrotated-K cache whose state, cache-operations contract, checkpoint-publication descriptors, byte accounting, trim boundary and route identity include the far-memory plane.",
+    "Used an fp32-reduction RMSNorm equivalent only on the selected FOLD drafter path because MLX 0.32.4's fused Metal RMSNorm crashed inside the long-context FOLD graph. Unit evidence binds it numerically to stock RMSNorm; the ordinary DFlash2 path is unchanged.",
+    "Kept the route explicit, revision-bound, default-off and unqualified. The Qwen3.8 candidate uses W=4096, alpha=2 and enables far memory on its five native sliding-attention layers."
+  ],
+  "original_identity_repair": {
+    "reviewed_repository_revision": "204046b44c8fabf386ceff408bb9d12bbe422fbc",
+    "implementation_origin": "Original MLX2 review repair; no new upstream implementation mined.",
+    "defect": "Default/explicit proposal composition and continuation-pool binding overwrote the FOLD policy identity before constructing the APC fingerprint and cache layout. Distinct windows and concentration factors collided with each other and the ordinary route.",
+    "repair": "Bind canonical FOLD policy independently in the final route digest; preserve existing non-FOLD identities and accept the already-supported explicit fold:false disabled policy.",
+    "validation": "Five focused CPU cases bind actual tiny DFlash2 adapters through default, explicit, disabled and continuation wrappers, require distinct cache identities for window/alpha/ordinary changes, canonical equivalent identities, and ordinary identity for fold:false. Four cases reproduced failures before the repair. No GPU, throughput or qualification claim."
+  },
+  "validation": {
+    "cpu": "Dense NumPy oracle, policy, live MLX parity, cache identity, state, continuation, rollback and allocation/admission contracts are covered by focused CPU tests.",
+    "scope": "Direct component probes were performed privately; no model files, raw output, performance results or qualification receipts are included in this projection.",
+    "qualified": false,
+    "performance_qualified": false
+  },
+  "original_lifecycle_repair": {
+    "reviewed_repository_revision": "05af57e87",
+    "implementation_origin": "Original MLX2 correctness and admission repair; no additional upstream implementation mined.",
+    "numerics": "mlx2.fold-drafter.v2",
+    "defects_and_repairs": [
+      "Validate every selected attention layer before installing FOLD, so a later incompatible native window cannot leave partial configuration. Installed policies may be reapplied identically without resetting counters; changing or disabling an installed policy requires a fresh drafter and cache identity.",
+      "Reserve three-plane allocation growth, pending context and conservative full-context FOLD workspace through an adapter-owned memory hook; preserve ordinary DFlash2 behavior and forward the hook through composition, continuation and portfolio providers. Reject malformed reservations before allocation.",
+      "Use the selected unfused FOLD key normalization during committed append_context as well as proposal execution. Bind this corrected arithmetic as v2 in the final external policy/cache identity so prior persisted FOLD state cannot silently mix."
+    ],
+    "validation": {
+      "focused_cpu": "47 passed: peer FOLD lifecycle, repeated ordinary exact checkpoint boundaries, FOLD live/oracle/identity, and portfolio transactions.",
+      "test_paths": [
+        "tests/test_peer_fold_lifecycle_cpu.py",
+        "tests/test_peer_exact_checkpoint_boundaries_cpu.py",
+        "tests/test_fold_live.py",
+        "tests/test_peer_fold_identity_cpu.py",
+        "tests/test_fold_reference_cpu.py",
+        "tests/test_peer_portfolio_transactions_cpu.py"
+      ],
+      "meaningful_boundaries": "Actual tiny executor greedy/sampled APC leases and fresh persistent manager; all three draft planes, RNG and parent immutability; real post-proposal and terminal publication fault/retry; admission one-byte boundary; pending allocation growth; malformed/portfolio/wrapper reserves; selected fused-norm negative control; changed numerical identity; narrowing/disable policy refusal.",
+      "exact_resume": "Two actual ordinary-executor cases repeatedly suspend/restore seven times across the 256-token physical KV growth boundary, preserving complete logprob rows, pending samples, RNG draws, control ownership and cache geometry. No new exact-resume production defect found in this slice.",
+      "gpu": {
+        "kind": "bounded_component_and_route_diagnostic_not_qualification",
+        "evidence_directory": "private artifact integration branch",
+        "source_baseline": "05af57e87080f08be11284007bbb8523f3686018",
+        "snapshot_scope": "Baseline plus six settled FOLD production files and the diagnostic script; concurrent D3, MiniLM and I/O follow-up changes excluded. Separate combined CPU integration passed559 tests across26 affected modules.",
+        "source_sha256": {
+          "src/mlx2/runtime/drafters/fold.py": "ac4f775740cdb706c70b8471c39b33f6db0212cb833f306d200eb6b673fa827e",
+          "src/mlx2/runtime/drafters/dflash2.py": "b0e0fbb4ce57b5d12457e3725c49ab8fe0b42e51eab239996a0bf320de4511d4",
+          "src/mlx2/runtime/external_speculative.py": "6848ae80a2a012918c2b3edf9ad6082e8e649ebc21509dfc9b3fb62e322c393d",
+          "src/mlx2/adapters/external_draft_policy.py": "061a6fd5a342bdf9025e71dc8f8d11317edc858cc2a38fd8aec2b7df0319fe14",
+          "src/mlx2/runtime/apc_v2.py": "b7129b761428b7bd343eab54508d0720403cc76121342e987a85b0a7a52d0e17",
+          "scripts/probe_fold_lifecycle.py": "931af8052c0bd6a4751bc4228c8deaef3775beb70d7150753c8f1d381cca4391"
+        },
+        "target": "private artifact",
+        "target_content_revision": "9c16ace451ecdddf16d79a0daa8683a1bdd6b23150cb37772e5ee0bb57d82514",
+        "drafter_content_revision": "34ec93d71399f3dd6db9646194f1ad4db345715c61258d72318325e0d8095c90",
+        "mlx_version": "0.32.2.dev20260919+39400a0d4",
+        "device": "Apple M3 Pro",
+        "context_tokens": 2216,
+        "fold_numerics": "mlx2.fold-drafter.v2",
+        "bf16_drafter": {
+          "ordinary_reference_passed": true,
+          "external_rounds": 0,
+          "result": "bounded HTTP429 memory admission refusal before FOLD decode",
+          "reservation_bytes": 7884490752,
+          "fold_extra_reservation_bytes": 5922211840,
+          "receipt": "probe-04/receipt.json"
+        },
+        "q4_drafter": {
+          "policy": {
+            "draft_model": "/tmp/mlx2-peer-remaining-20261015-2017/artifacts/Qwen3.8-27B-DFlash2",
+            "num_draft": 7,
+            "pairwise_selection": "batched",
+            "draft_revision": "34ec93d71399f3dd6db9646194f1ad4db345715c61258d72318325e0d8095c90",
+            "target_revision": "9c16ace451ecdddf16d79a0daa8683a1bdd6b23150cb37772e5ee0bb57d82514",
+            "fold": {
+              "window": 4096,
+              "alpha": 2.0,
+              "sliding_layers": "fold"
+            },
+            "draft_quantization": {
+              "bits": 4,
+              "group_size": 64
+            }
+          },
+          "execution_fingerprint": "b6a09f336830a6def033e1c9d6c9c324ec0f65ed7a3483fe2f3bace3996d3874",
+          "cold_tokens": [
+            369,
+            33295,
+            11,
+            321,
+            279,
+            29877,
+            15339,
+            6942
+          ],
+          "ordinary_reference_tokens": [
+            369,
+            33295,
+            11,
+            321,
+            279,
+            29877,
+            15339,
+            6942
+          ],
+          "cold_exact": true,
+          "cold_external_route_used": true,
+          "cold_far_memory_calls": 5,
+          "warm_paired_restore_observed": 1,
+          "warm_result": "bounded HTTP429 memory admission refusal after paired APC restore; no warm output comparison",
+          "persisted_continuation": "not reached on GPU",
+          "rollback": "not reached on GPU",
+          "receipt": "probe-05/receipt.json",
+          "selected_proposal_source": "prompt_lookup",
+          "fold_proposal_acceptance_observed": false,
+          "cold_scope": "FOLD forward/far-memory execution observed on the external route; default composition selected prompt_lookup proposals. Exact output parity is not evidence of FOLD-proposal acceptance or quality."
+        },
+        "prior_probe_setup_failures": [
+          "Attempt1: metadata fingerprint used instead of payload revision; validator refused.",
+          "Attempt2: diagnostic imported runtime before adapter profile pinning; import-order guard refused.",
+          "Attempt3: ordinary reference passed; public completions rejected token-list input; corrected to text and production prompt_tokens."
+        ],
+        "ownership": {
+          "task": "0c6670e4bfe94448b4d6fd3b8082eae3",
+          "bf16_generation": 13,
+          "q4_generation": 15,
+          "released_status": "planned",
+          "released_generation": 16,
+          "released_at": "2026-10-15T20:39:15Z",
+          "after_check": "2026-10-15T20:39:46Z: both empty sentinel files, no holders/waiters/probe processes; owned reverse tunnel stopped."
+        },
+        "thermal_states": [
+          0
+        ],
+        "swap_before": "vm.swapusage: total = 4096.00M  used = 2612.44M  free = 1483.56M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 4096.00M  used = 2612.44M  free = 1483.56M  (encrypted)",
+        "full_lifecycle_passed": false,
+        "qualified": false,
+        "performance_qualified": false,
+        "remaining": "Historical attempt: later gpu_phases evidence supersedes the earlier absence of selected-FOLD cold/warm, durable continuation and rollback-state observations; historical artifact/profile results remain separate."
+      },
+      "qualified": false,
+      "performance_qualified": false,
+      "historical_evidence_scope": "Prior oQ4e 8K/32K/64K/128K candidate receipts above predate v2 and are not transferred to the alternate M3 artifact or this repaired arithmetic.",
+      "source_sha256": {
+        "src/mlx2/runtime/drafters/fold.py": "ac4f775740cdb706c70b8471c39b33f6db0212cb833f306d200eb6b673fa827e",
+        "src/mlx2/runtime/drafters/dflash2.py": "b0e0fbb4ce57b5d12457e3725c49ab8fe0b42e51eab239996a0bf320de4511d4",
+        "src/mlx2/runtime/external_speculative.py": "6848ae80a2a012918c2b3edf9ad6082e8e649ebc21509dfc9b3fb62e322c393d",
+        "src/mlx2/runtime/drafter_portfolio.py": "44b5eb36152bfda0497a90fb75fc4fa87b59a82172aa5614de03a14f4ffb2a75",
+        "src/mlx2/adapters/external_draft_policy.py": "061a6fd5a342bdf9025e71dc8f8d11317edc858cc2a38fd8aec2b7df0319fe14",
+        "src/mlx2/runtime/drafters/fold_reference.py": "27801fed2eb7e52e2e22544eaa801d1f8680abb4e51232a36d4c149ae0233939"
+      },
+      "gpu_phases": {
+        "kind": "bounded_real_artifact_lifecycle_diagnostic_not_qualification",
+        "recorded_at": "2026-10-15T21:20:00Z",
+        "evidence_directory": "private artifact integration branch",
+        "source_baseline": "dfae78cef4271ab51c0969aaa328393b127a460e",
+        "snapshot_scope": "Published baseline plus the diagnostic script; concurrent unrelated serving/adapter features excluded. Production FOLD arithmetic, identity, cache, and admission were unchanged.",
+        "source_sha256": {
+          "src/mlx2/runtime/drafters/fold.py": "ac4f775740cdb706c70b8471c39b33f6db0212cb833f306d200eb6b673fa827e",
+          "src/mlx2/runtime/drafters/dflash2.py": "b0e0fbb4ce57b5d12457e3725c49ab8fe0b42e51eab239996a0bf320de4511d4",
+          "src/mlx2/runtime/external_speculative.py": "6848ae80a2a012918c2b3edf9ad6082e8e649ebc21509dfc9b3fb62e322c393d",
+          "src/mlx2/runtime/drafter_portfolio.py": "44b5eb36152bfda0497a90fb75fc4fa87b59a82172aa5614de03a14f4ffb2a75",
+          "src/mlx2/adapters/external_draft_policy.py": "061a6fd5a342bdf9025e71dc8f8d11317edc858cc2a38fd8aec2b7df0319fe14",
+          "src/mlx2/runtime/apc_v2.py": "8f60917da4e96bca5b4e9ac0c2f9bae57d4188a31469936b68fb3eca4a845b43",
+          "src/mlx2/serving.py": "e16dd827f0ce66d50ddef8d1f65eab9fb6c833dbeabb0cc78e0b52f434a2c2d1",
+          "scripts/probe_fold_phases.py": "9c166e47bf2c5877b926dc2cbd269b98de2efaf9bef05da19753cee9e3946acf"
+        },
+        "script": "scripts/probe_fold_phases.py",
+        "cpu_validation": {
+          "test": "tests/test_peer_fold_probe_cpu.py",
+          "passed": 3,
+          "ruff": "passed",
+          "scope": "Actual tiny FOLD executor rollback/retry, complete checkpoint digest across a fresh disk owner, and negative controls for raw-key changes/logical boundary/count. CPU evidence is not real-artifact GPU qualification."
+        },
+        "artifact_identity": {
+          "path": "private artifact",
+          "fingerprint": "d2761ab601a65f25c9d83754907e78bb1a8815d7dcc5dcf63c56684fe4695752",
+          "files": [
+            [
+              "model-00001-of-00003.safetensors",
+              5343268662,
+              1786730104000000000
+            ],
+            [
+              "model-00002-of-00003.safetensors",
+              5354185130,
+              1786730128000000000
+            ],
+            [
+              "model-00003-of-00003.safetensors",
+              5357087557,
+              1786730151000000000
+            ],
+            [
+              "model-mtp.safetensors",
+              238934700,
+              1791577948783995487
+            ]
+          ],
+          "draft_revision": "34ec93d71399f3dd6db9646194f1ad4db345715c61258d72318325e0d8095c90",
+          "target_revision": "9c16ace451ecdddf16d79a0daa8683a1bdd6b23150cb37772e5ee0bb57d82514",
+          "target_fingerprint": "02cfd4fd0c0ae3312a5d0a27a0fd7ae63b5eb6bbe5342c7c5f778b09848b71ba",
+          "draft_fingerprint": "d9f0692eec0353d2af9e703adc2db6321d6c23d941717452e5de2ab0cc7d4ad8",
+          "target_execution_fingerprint": "6e8f1c58f9761e866231c4ef743d6a380b7d1372c31b838847088128500c8f3b"
+        },
+        "policy": {
+          "draft_model": "/tmp/mlx2-peer-remaining-20261015-2017/artifacts/Qwen3.8-27B-DFlash2",
+          "num_draft": 7,
+          "pairwise_selection": "batched",
+          "draft_revision": "34ec93d71399f3dd6db9646194f1ad4db345715c61258d72318325e0d8095c90",
+          "target_revision": "9c16ace451ecdddf16d79a0daa8683a1bdd6b23150cb37772e5ee0bb57d82514",
+          "fold": {
+            "window": 4096,
+            "alpha": 2.0,
+            "sliding_layers": "fold"
+          },
+          "draft_quantization": {
+            "bits": 4,
+            "group_size": 64
+          },
+          "proposal_composition": false
+        },
+        "mlx_version": "0.32.2.dev20260919+39400a0d4",
+        "device": "Apple M3 Pro",
+        "fold_numerics": "mlx2.fold-drafter.v2",
+        "profile": {
+          "context_tokens": 2064,
+          "native_sliding_window": 2048,
+          "http_max_tokens": 4,
+          "prefill_step": 128,
+          "lanes": 1,
+          "inflight": 1,
+          "apc_bytes": 536870912,
+          "persistent_http_cache": true,
+          "proposal_composition": false,
+          "processes": "fresh process per reference/cold/warm/seed/continuation/rollback phase",
+          "hard_reserve_bytes": 4298035200
+        },
+        "ordinary_reference": {
+          "passed": true,
+          "tokens": [
+            19,
+            15,
+            26,
+            24544
+          ]
+        },
+        "cold_http": {
+          "passed": true,
+          "tokens": [
+            19,
+            15,
+            26,
+            24544
+          ],
+          "cached_tokens": 0,
+          "external_rounds": 1,
+          "accepted_proposals": 3,
+          "proposed_tokens": 3,
+          "far_memory_calls": 5,
+          "checks": {
+            "ordinary_tokens_exact": true,
+            "external_executed": true,
+            "sole_fold_provider": true,
+            "far_memory_executed": true,
+            "cache_boundary": true
+          }
+        },
+        "warm_http": {
+          "passed": true,
+          "tokens": [
+            19,
+            15,
+            26,
+            24544
+          ],
+          "cached_tokens": 2063,
+          "external_rounds": 1,
+          "accepted_proposals": 3,
+          "proposed_tokens": 3,
+          "far_memory_calls": 5,
+          "checks": {
+            "ordinary_tokens_exact": true,
+            "external_executed": true,
+            "sole_fold_provider": true,
+            "far_memory_executed": true,
+            "cache_boundary": true
+          }
+        },
+        "sampled_durable_checkpoint": {
+          "passed": true,
+          "sampling_temperature": 0.8,
+          "seed": 53,
+          "emitted_tokens": [
+            19,
+            15,
+            26
+          ],
+          "covered_tokens": 2066,
+          "rng_draws": 5,
+          "target_cache_entries": 64,
+          "draft_planes_per_layer": [
+            3,
+            3,
+            3,
+            3,
+            3
+          ],
+          "park": {
+            "spilled": 1,
+            "skipped": 0,
+            "pinned_skipped": 0
+          },
+          "settling": {
+            "memory_footprint_settles": 1,
+            "memory_footprint_settle_quiet": 1,
+            "memory_footprint_settle_wait_ms": 549,
+            "memory_footprint_settle_released_bytes": 1456750592
+          }
+        },
+        "fresh_process_continuation": {
+          "passed": true,
+          "restore_exact": true,
+          "emitted_tokens": [
+            24544,
+            33295,
+            26,
+            30396
+          ],
+          "paired_cache_resumes": 1,
+          "external_rounds": 1,
+          "accepted_proposals": 3,
+          "proposed_tokens": 3,
+          "restore_scope": "Exact digests of all target cache state and metadata, draft rotated keys/values/raw keys, pending tail, RNG, covered boundary and binding."
+        },
+        "post_proposal_rollback": {
+          "restore_exact": true,
+          "rollback_exact": true,
+          "retry_output_observed": false,
+          "retry_result": "MemoryError: direct diagnostic cannot progress under unchanged serving admission",
+          "memory_after_synchronized_reclaim_and_bounded_settle": {
+            "label": "direct_capacity_refusal",
+            "active_bytes": 16893520910,
+            "cached_bytes": 0,
+            "footprint_bytes": 18190742608,
+            "host_available_bytes": 10784948224,
+            "raw_headroom_bytes": 10784948224,
+            "hard_reserve_bytes": 4298035200,
+            "usable_headroom_bytes": 6486913024,
+            "recommended_bytes": 30150672384,
+            "reservation_bytes": 7249006592,
+            "fold_extra_reservation_bytes": 5516431360,
+            "shortfall_bytes": 762093568,
+            "minimum_free_before_reserve_bytes": 11547041792
+          },
+          "settling": {
+            "memory_footprint_settles": 1,
+            "memory_footprint_settle_settled": 1,
+            "memory_footprint_settle_wait_ms": 149,
+            "memory_footprint_settle_released_bytes": 815071232
+          },
+          "scope": "The injected fault ran after real FOLD proposal computation. Committed target/draft/tail/RNG/history digests were unchanged and no output was published. Retry output was refused by measured host-available headroom after diagnostic hashing/injected work; this is not proof of a fundamental hardware limit or a runtime regression."
+        },
+        "eight_token_profile": {
+          "attempt": "attempt02",
+          "cold_http": {
+            "passed": true,
+            "tokens": [
+              19,
+              15,
+              26,
+              24544,
+              33295,
+              26,
+              30396,
+              7629
+            ],
+            "cached_tokens": 0,
+            "external_rounds": 1,
+            "accepted_proposals": 7,
+            "proposed_tokens": 7,
+            "far_memory_calls": 5,
+            "checks": {
+              "ordinary_tokens_exact": true,
+              "external_executed": true,
+              "sole_fold_provider": true,
+              "far_memory_executed": true,
+              "cache_boundary": true
+            }
+          },
+          "warm_result": "HTTPError: HTTP Error 429: Too Many Requests",
+          "paired_cache_resumes": 1,
+          "memory": {
+            "label": "live",
+            "active_bytes": 16798985044,
+            "cached_bytes": 0,
+            "footprint_bytes": 18446595488,
+            "host_available_bytes": 16540778496,
+            "raw_headroom_bytes": 11704076896,
+            "hard_reserve_bytes": 4298035200,
+            "usable_headroom_bytes": 7406041696,
+            "recommended_bytes": 30150672384,
+            "reservation_bytes": 7481362432,
+            "fold_extra_reservation_bytes": 5519083520,
+            "shortfall_bytes": 75320736,
+            "minimum_free_before_reserve_bytes": 11779397632
+          },
+          "scope": "Same all-layer Q4 FOLD policy at 2064 tokens; warm eight-token verifier reservation exceeded the available recommended-working-set budget by 75,320,736 bytes. The four-token profile executes fewer target verifier rows but keeps the full FOLD workspace bound unchanged."
+        },
+        "prior_diagnostic_setup_findings": [
+          "attempt01 refused before the cold request because tuple metadata compared against JSON lists; canonical JSON identity comparison repaired the harness.",
+          "attempt03 HTTP cold/warm passed; standalone direct batch omitted serving allocator reclaim and stopped before sampled decode.",
+          "attempt04 supplied synchronized reclaim but measured before asynchronous OS footprint release; attempt05 uses the existing bounded settling method and remeasures actual bytes.",
+          "The suggested sliding_layers=window route was not run: artifact metadata declares five sliding_attention layers and no full-attention layer, so this policy selects no FOLD layer. No topology was changed."
+        ],
+        "ownership": {
+          "task": "0c6670e4bfe94448b4d6fd3b8082eae3",
+          "generation": 35,
+          "claimed_at": "2026-10-15T21:14:41Z",
+          "released_at": "2026-10-15T21:17:34Z",
+          "after_check": "Both empty sentinel files, no waiters or probe/wrapper processes at 21:18:11Z. Tunnel retained for parent-owned follow-up.",
+          "paired_receipt_sha256": "210c638d3e0762e2985c8da0075e47017555daf8eef0152c1b114f68926376b1",
+          "trusted_wrapper_receipt_sha256": "baab1a5f36c2ef0f2742b698587df237f3922240947cc66cfe1c222bdb65fc02"
+        },
+        "thermal_states": [
+          0
+        ],
+        "swap_after": "vm.swapusage: total = 4096.00M  used = 2612.44M  free = 1483.56M  (encrypted)",
+        "qualified": false,
+        "performance_qualified": false,
+        "full_lifecycle_passed": false,
+        "observed_used": true,
+        "selected_provider": "FOLD external drafter; prompt-lookup composition explicitly disabled",
+        "remaining": "GPU retry-output parity after injected rollback remains unobserved under this host-memory pressure; CPU actual-executor retry parity passes. Larger contexts, sustained output, quality/acceptance benefit versus non-FOLD, multi-lane behavior, formal qualification and performance are not established by this bounded diagnostic. No default promotion or reservation weakening."
+      }
+    }
+  }
+}

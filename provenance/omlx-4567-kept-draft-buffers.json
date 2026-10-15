@@ -1,0 +1,33 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "Compact materialized hidden tails in durable external-draft sidecars",
+  "recorded_at": "2026-10-15",
+  "source_repository": "https://github.com/jundot/omlx",
+  "pull_request": "https://github.com/jundot/omlx/pull/4567",
+  "source_revision": "cf306fb6e3fd562d3d95d13ced3af1f8a3a45e9b",
+  "license": "Apache-2.0",
+  "source_paths": [
+    "omlx/speculative/dflash/drafter.py",
+    "tests/test_dflash_context_memory.py"
+  ],
+  "source_use": "Reviewed the source patch and allocator regression. Adapted the failure shape and fresh-process allocation method to mlx2's paired APCv2 sidecars; no oMLX request-history machinery imported.",
+  "destination_paths": [
+    "src/mlx2/runtime/external_speculative.py",
+    "tests/test_external_draft_kept_buffers.py"
+  ],
+  "modifications": [
+    "Original mlx2 repair targets durable sidecar publication, not recovery or prelaunch descriptor snapshots.",
+    "Keep the exact pending tail and all paired draft-cache offsets; do not truncate a target/draft boundary to a sliding-window size.",
+    "Allocator probes cover batched row views, history tail views and zero-length views, without reading the saved tail before measuring retention.",
+    "Explicit mx.array copy plus async_eval detaches contiguous and empty views without a host synchronization. Global COW and recovery snapshots remain descriptor aliases."
+  ],
+  "validation": {
+    "state": "repair verified by fail-first CPU overlap and Metal allocation probes",
+    "focused_cpu": "191 passed, 4 skipped; exact MLX 0.32.4",
+    "metal": "3 fresh-process allocation cases fail before repair and pass after, values and boundaries preserved",
+    "evidence": "private validation evidence",
+    "qualified": false,
+    "performance_claim": false,
+    "full_preflight": "not run; user explicitly requested direct main commit and private-origin push after focused validation"
+  }
+}

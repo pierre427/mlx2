@@ -6,7 +6,12 @@ import mlx.core as mx
 import mlx.nn as nn
 
 
-from .dflash_base import DFlashDecoderLayer, DFlashDraftModel, append_context_kv
+from .dflash_base import (
+    DFlashDecoderLayer,
+    DFlashDraftModel,
+    _fold_rms_norm,
+    append_context_kv,
+)
 
 from .dflash2_config import DFlash2Config
 
@@ -76,13 +81,24 @@ class DFlash2DecoderLayer(DFlashDecoderLayer):
         )
 
     def __call__(self, x, x_ctx, rope, cache):
+        fold = getattr(self.self_attn, "fold_policy", None) is not None
         residual = x
-        x, kernel = self.attention_conv.prepare(self.input_layernorm(x))
+        normalized = (
+            _fold_rms_norm(self.input_layernorm, x)
+            if fold
+            else self.input_layernorm(x)
+        )
+        x, kernel = self.attention_conv.prepare(normalized)
         x = residual + self.attention_conv.finish(
             self.self_attn(x, x_ctx, rope, cache), kernel
         )
         residual = x
-        x, kernel = self.mlp_conv.prepare(self.post_attention_layernorm(x))
+        normalized = (
+            _fold_rms_norm(self.post_attention_layernorm, x)
+            if fold
+            else self.post_attention_layernorm(x)
+        )
+        x, kernel = self.mlp_conv.prepare(normalized)
         return residual + self.mlp_conv.finish(self.mlp(x), kernel)
 
 
@@ -155,7 +171,7 @@ class DFlash2DraftModel(DFlashDraftModel):
     @property
     def receipt_settings(self):
         """Effective proposal geometry bound into route and session identity."""
-        return {
+        settings = {
             "trained_block_size": self.config.block_size,
             "runtime_block_size": self.config.runtime_block_size,
             "target_layer_ids": list(self.config.target_layer_ids),
@@ -167,6 +183,12 @@ class DFlash2DraftModel(DFlashDraftModel):
             "tree_ranking": "best_first_cumulative_sibling_log_law",
             "tree_max_nodes": 15,
         }
+        from .fold import status as fold_status
+
+        fold = fold_status(self)
+        if fold is not None:
+            settings["fold"] = fold
+        return settings
 
     def validate_target_compatibility(self, target_model) -> None:
         # Hybrid targets nest text geometry; they expose it here (mlx2).
@@ -404,12 +426,28 @@ def _draft_distributions(
 
 def _append_context(self, hidden, cache):
     """Project only committed target context; no draft block or vocabulary head."""
-    context = self.hidden_norm(self.fc(hidden))
+    projected = self.fc(hidden)
+    context = (
+        _fold_rms_norm(self.hidden_norm, projected)
+        if getattr(self, "fold_policy", None) is not None
+        else self.hidden_norm(projected)
+    )
     for layer, entry in zip(self.layers, cache):
         attn = layer.self_attn
         batch, length, _ = context.shape
-        keys = attn.k_norm(attn.k_proj(context).reshape(batch, length, attn.n_kv_heads, attn.head_dim)).transpose(0, 2, 1, 3)
+        key_rows = attn.k_proj(context).reshape(batch, length, attn.n_kv_heads, attn.head_dim)
+        keys = (
+            _fold_rms_norm(attn.k_norm, key_rows)
+            if getattr(attn, "fold_policy", None) is not None
+            else attn.k_norm(key_rows)
+        ).transpose(0, 2, 1, 3)
         values = attn.v_proj(context).reshape(batch, length, attn.n_kv_heads, attn.head_dim).transpose(0, 2, 1, 3)
+        if getattr(attn, "fold_policy", None) is not None:
+            from .fold import FOLDKVCache
+
+            if not isinstance(entry, FOLDKVCache):
+                raise TypeError("FOLD context append requires FOLDKVCache")
+            entry.append_raw_keys(keys)
         keys = self.rope(keys, offset=entry.offset)
         append_context_kv(entry, keys, values)
         if hasattr(entry, "max_size") and entry.keys.shape[2] > entry.max_size:
@@ -432,14 +470,34 @@ DFlash2DraftModel.batch_caches = _batch_caches
 
 def _make_serializable_cache(self):
     caches = super(DFlash2DraftModel, self).make_cache()
+    from .fold import FOLDKVCache
+
+    for index, layer in enumerate(self.layers):
+        if getattr(layer.self_attn, "fold_policy", None) is not None:
+            caches[index] = FOLDKVCache()
     # Empty rotating planes must be serializable at a one-token prompt's
     # first committed boundary; None-backed rings have no .state shape.
     for cache in caches:
         cache.keys = mx.zeros((1,self.config.num_key_value_heads,0,self.config.head_dim))
         cache.values = mx.zeros_like(cache.keys)
+        if isinstance(cache, FOLDKVCache):
+            cache.raw_keys = mx.zeros_like(cache.keys)
     return caches
 
 DFlash2DraftModel.make_cache = _make_serializable_cache
+
+
+def _extra_memory_reservation(self, cache, *, append, pending_tokens, prefill):
+    if getattr(self, "fold_policy", None) is None:
+        return 0
+    from .fold import extra_memory_reservation
+
+    return extra_memory_reservation(
+        self, cache, append=append, pending_tokens=pending_tokens, prefill=prefill
+    )
+
+
+DFlash2DraftModel.extra_memory_reservation = _extra_memory_reservation
 
 
 # Batched pairwise selection (Splash-derived design; see

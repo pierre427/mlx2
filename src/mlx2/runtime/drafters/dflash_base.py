@@ -7,6 +7,18 @@ import mlx.nn as nn
 
 def swiglu(gate, value):
     return nn.silu(gate) * value
+
+
+def _fold_rms_norm(norm, value):
+    """RMSNorm without MLX 0.32.4's crashing fused Metal primitive."""
+    dtype = value.dtype
+    value = value.astype(mx.float32)
+    value = value * mx.rsqrt(
+        mx.mean(value * value, axis=-1, keepdims=True) + float(norm.eps)
+    )
+    return (value * norm.weight.astype(mx.float32)).astype(dtype)
+
+
 from ..models.cache import KVCache, RotatingKVCache
 def initialize_rope(*, dims, base, traditional, scaling_config):
     # Default RoPE has no position bound to configure, so the checkpoint's
@@ -70,22 +82,51 @@ class DFlashAttention(nn.Module):
         ctx_values = self.v_proj(x_ctx)
         prop_keys = self.k_proj(x)
         prop_values = self.v_proj(x)
-        queries = self.q_norm(queries.reshape(B, L, self.n_heads, -1)).transpose(
-            0, 2, 1, 3
-        )
-        ctx_keys = self.k_norm(ctx_keys.reshape(B, S, self.n_kv_heads, self.head_dim)).transpose(
-            0, 2, 1, 3
-        )
+        fold = getattr(self, "fold_policy", None) is not None
+        query_rows = queries.reshape(B, L, self.n_heads, -1)
+        context_key_rows = ctx_keys.reshape(B, S, self.n_kv_heads, self.head_dim)
+        proposal_key_rows = prop_keys.reshape(B, L, self.n_kv_heads, -1)
+        queries = (
+            _fold_rms_norm(self.q_norm, query_rows)
+            if fold
+            else self.q_norm(query_rows)
+        ).transpose(0, 2, 1, 3)
+        ctx_keys = (
+            _fold_rms_norm(self.k_norm, context_key_rows)
+            if fold
+            else self.k_norm(context_key_rows)
+        ).transpose(0, 2, 1, 3)
         ctx_values = ctx_values.reshape(B, S, self.n_kv_heads, self.head_dim).transpose(0, 2, 1, 3)
-        prop_keys = self.k_norm(prop_keys.reshape(B, L, self.n_kv_heads, -1)).transpose(
-            0, 2, 1, 3
-        )
+        prop_keys = (
+            _fold_rms_norm(self.k_norm, proposal_key_rows)
+            if fold
+            else self.k_norm(proposal_key_rows)
+        ).transpose(0, 2, 1, 3)
         prop_values = prop_values.reshape(B, L, self.n_kv_heads, -1).transpose(
             0, 2, 1, 3
         )
         if hasattr(cache, "rows"):
             outputs = []
             for row, entry in enumerate(cache.rows):
+                if getattr(self, "fold_policy", None) is not None:
+                    from .fold import FOLDKVCache, fold_attention
+
+                    if not isinstance(entry, FOLDKVCache):
+                        raise TypeError("FOLD attention requires FOLDKVCache")
+                    entry.append_raw_keys(ctx_keys[row:row+1])
+                    ck = rope(ctx_keys[row:row+1], offset=entry.offset)
+                    append_context_kv(entry, ck, ctx_values[row:row+1])
+                    folded, used_far = fold_attention(
+                        queries[row:row+1], prop_keys[row:row+1],
+                        prop_values[row:row+1], rope=rope, cache=entry,
+                        policy=self.fold_policy, scale=self.scale,
+                        local_context=(self.sliding_window - 1 if self.is_sliding else None),
+                    )
+                    self.fold_calls += 1
+                    self.fold_far_calls += int(used_far)
+                    self.fold_max_context = max(self.fold_max_context, entry.offset)
+                    outputs.append(folded)
+                    continue
                 q = rope(queries[row:row+1], offset=entry.offset + S)
                 ck = rope(ctx_keys[row:row+1], offset=entry.offset)
                 pk = rope(prop_keys[row:row+1], offset=entry.offset + S)
@@ -96,6 +137,23 @@ class DFlashAttention(nn.Module):
                 outputs.append(mx.fast.scaled_dot_product_attention(q, mx.concatenate([keys,pk],axis=2), mx.concatenate([values,prop_values[row:row+1]],axis=2), scale=self.scale,mask=None))
             o = mx.concatenate(outputs,axis=0)
             return self.o_proj(o.transpose(0,2,1,3).reshape(B,L,-1))
+        if getattr(self, "fold_policy", None) is not None:
+            from .fold import FOLDKVCache, fold_attention
+
+            if not isinstance(cache, FOLDKVCache):
+                raise TypeError("FOLD attention requires FOLDKVCache")
+            cache.append_raw_keys(ctx_keys)
+            ctx_keys = rope(ctx_keys, offset=cache.offset)
+            append_context_kv(cache, ctx_keys, ctx_values)
+            o, used_far = fold_attention(
+                queries, prop_keys, prop_values, rope=rope, cache=cache,
+                policy=self.fold_policy, scale=self.scale,
+                local_context=(self.sliding_window - 1 if self.is_sliding else None),
+            )
+            self.fold_calls += 1
+            self.fold_far_calls += int(used_far)
+            self.fold_max_context = max(self.fold_max_context, cache.offset)
+            return self.o_proj(o.transpose(0, 2, 1, 3).reshape(B, L, -1))
         queries = rope(queries, offset=cache.offset + S)
         ctx_keys = rope(ctx_keys, offset=cache.offset)
         prop_keys = rope(prop_keys, offset=cache.offset + S)
@@ -254,10 +312,16 @@ class DFlashDraftModel(nn.Module):
         cache: List[KVCache],
     ) -> mx.array:
         h = self._embed_input_tokens(inputs)
-        h_ctx = self.hidden_norm(self.fc(target_hidden))
+        fold = getattr(self, "fold_policy", None) is not None
+        projected_context = self.fc(target_hidden)
+        h_ctx = (
+            _fold_rms_norm(self.hidden_norm, projected_context)
+            if fold
+            else self.hidden_norm(projected_context)
+        )
         for layer, c in zip(self.layers, cache):
             h = layer(h, h_ctx, self.rope, c)
-        return self.norm(h)
+        return _fold_rms_norm(self.norm, h) if fold else self.norm(h)
 
     def _embed_input_tokens(self, inputs: mx.array) -> mx.array:
         return self.embed_tokens(inputs) * self.embed_scale

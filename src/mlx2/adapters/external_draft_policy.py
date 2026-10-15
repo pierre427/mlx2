@@ -216,6 +216,16 @@ class ExternalDraftAdapterMixin:
                 self.external_policy.get("progressive_verification_fidelity", "exact"),
             )
         self.draft_model = loader(record, self.model)
+        fold_identity = ""
+        fold_value = self.external_policy.get("fold")
+        if fold_value is not None and fold_value is not False:
+            from ..runtime.drafters.fold import FOLD_NUMERICS_VERSION, configure
+
+            policy = configure(self.draft_model, self.external_policy["fold"])
+            fold_identity = json.dumps(
+                {"fold": policy.as_dict(), "fold_numerics": FOLD_NUMERICS_VERSION},
+                sort_keys=True, separators=(",", ":")
+            )
         if (
             "proposal_composition" not in self.external_policy
             and "continuation_pool" not in self.external_policy
@@ -382,6 +392,8 @@ class ExternalDraftAdapterMixin:
                 + record["fingerprint"]
                 + self.EXTERNAL_ROUTE_TAG
                 + composition_identity
+                # Wrapper policy must not erase the drafter cache's FOLD law.
+                + fold_identity
                 + numerical_identity
             ).encode()
         ).hexdigest()
