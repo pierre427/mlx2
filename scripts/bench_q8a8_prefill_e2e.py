@@ -21,7 +21,8 @@ import time
 from pathlib import Path
 
 
-def build_texts(tokenizer, repo: Path, n_tokens: int):
+def build_texts(adapter, repo: Path, n_tokens: int):
+    tokenizer = adapter.tokenizer
     prose = "\n\n".join(
         p.read_text() for p in sorted((repo / "docs").glob("*.md"))[:40]
     )
@@ -57,13 +58,19 @@ def build_texts(tokenizer, repo: Path, n_tokens: int):
         for t in turns]
     try:
         try:
-            tool_text = tokenizer.apply_chat_template(
-                turns, tools=tools, tokenize=False, add_generation_prompt=False)
-            tool_source = "chat_template"
+            tool_text = adapter.render_prompt({
+                "messages": turns,
+                "tools": tools,
+                "enable_thinking": False,
+            })
+            tool_source = "adapter_serving_path"
         except Exception:  # noqa: BLE001 - retried with mapping arguments
-            tool_text = tokenizer.apply_chat_template(
-                dict_turns, tools=tools, tokenize=False, add_generation_prompt=False)
-            tool_source = "chat_template_mapping_arguments"
+            tool_text = adapter.render_prompt({
+                "messages": dict_turns,
+                "tools": tools,
+                "enable_thinking": False,
+            })
+            tool_source = "adapter_serving_path_mapping_arguments"
     except Exception as error:  # template without tool support
         print("tool template failed, using JSON text:", error, flush=True)
         tool_text = json.dumps({"tools": tools, "messages": turns}, indent=1)
@@ -135,7 +142,9 @@ def main():
     model = adapter.model
     mx.eval(model.parameters())
     mx.set_cache_limit(6 << 30)
-    texts, tool_source = build_texts(adapter.tokenizer, Path(a.repo), max(max(a.contexts), a.quality_tokens))
+    texts, tool_source = build_texts(
+        adapter, Path(a.repo), max(max(a.contexts), a.quality_tokens)
+    )
     base_ids = texts["prose"] + texts["code"]
 
     def swapouts():
@@ -187,6 +196,26 @@ def main():
     def status(handle):
         return {} if handle is None else handle.status()
 
+    def quality_status(handle):
+        """Small per-cell proof that the quality arm physically executed."""
+        current = status(handle)
+        return {
+            key: current[key]
+            for key in (
+                "schema",
+                "revision",
+                "device",
+                "modules",
+                "skipped",
+                "fidelity",
+                "weight_copy_bytes",
+                "rotation_build_transient_bytes_max",
+                "hadamard_rotation",
+                "counts",
+            )
+            if key in current
+        }
+
     def prefill(n):
         ids = mx.array(base_ids[:n], mx.uint32)[None]
         cache = make_prompt_cache(model)
@@ -225,12 +254,14 @@ def main():
         import chat_quality
 
         quality = {name: {} for name in names if name != "off"}
+        execution = {name: {} for name in names if name != "off"}
         for cat, ids in texts.items():
             mask = chat_quality.assistant_mask(adapter.tokenizer, ids[: a.quality_tokens])
             ref = logprobs(ids[: a.quality_tokens])
             for name in quality:
                 h = install(name)
                 lp = logprobs(ids[: a.quality_tokens])
+                execution[name][cat] = quality_status(h)
                 int8_prefill.remove(h)
                 p = mx.exp(ref.astype(mx.float32))
                 kl = (p * (ref.astype(mx.float32) - lp.astype(mx.float32))).sum(-1)
@@ -265,6 +296,7 @@ def main():
                     lp = chat_quality.continuation_logprobs(
                         model, lambda: make_prompt_cache(model), prompt, cont,
                         prefill_chunk=a.step)
+                    execution[name][cat] = quality_status(h)
                     int8_prefill.remove(h)
                     quality[name][cat] = {"prompt_tokens": len(prompt),
                                           **chat_quality.compare(ref, lp)}
@@ -272,12 +304,14 @@ def main():
                     del lp
                 del ref
                 mx.clear_cache()
-        return quality
+        return quality, chat_quality.quality_evidence_manifest(quality), execution
 
     s0 = swapouts()
     print("LOADED; swapouts", s0, flush=True)
     names = list(arms)
     quality = {}
+    quality_evidence = {}
+    quality_execution = {}
     if a.memory_log_s:
         import os
         import subprocess
@@ -305,14 +339,16 @@ def main():
 
         threading.Thread(target=sampler, daemon=True).start()
     if not a.skip_quality and (a.quality_first or a.skip_speed):
-        quality = run_quality()
+        quality, quality_evidence, quality_execution = run_quality()
     if a.skip_speed:
         Path(a.out).write_text(json.dumps(
             {"model": a.model, "arms": arms, "adapter": type(adapter).__name__,
              "tool_text_source": tool_source, "quality_vs_off": quality,
+             "quality_evidence": quality_evidence,
+             "quality_execution": quality_execution,
              "swapouts_delta": swapouts() - s0, "mlx": mx.__version__},
             indent=1, default=str))
-        print(json.dumps({"quality": quality}, indent=1))
+        print(json.dumps({"quality": quality, "quality_evidence": quality_evidence}, indent=1))
         return
     # Warm-up every arm once (JIT, allocator, weight copies for cached modes).
     for name in names:
@@ -373,15 +409,18 @@ def main():
                                          clean_min=min(clean), clean_max=max(clean))
 
     if not a.skip_quality and not a.quality_first:
-        quality = run_quality()
+        quality, quality_evidence, quality_execution = run_quality()
     rec = {"model": a.model, "step": a.step, "reps": a.reps, "arms": arms,
            "adapter": type(adapter).__name__, "adapter_select": a.adapter_select,
            "tool_text_source": tool_source,
            "summary": summary, "paired_gain_vs_off": paired, "contamination": contamination, "quality_vs_off": quality,
+           "quality_evidence": quality_evidence,
+           "quality_execution": quality_execution,
            "int8_status_first_run": engaged, "peak_gib": mx.get_peak_memory() / 2**30,
            "swapouts_delta": swapouts() - s0, "mlx": mx.__version__}
     Path(a.out).write_text(json.dumps(rec, indent=1, default=str))
-    print(json.dumps({"paired_gain_vs_off": paired, "quality": quality}, indent=1))
+    print(json.dumps({"paired_gain_vs_off": paired, "quality": quality,
+                      "quality_evidence": quality_evidence}, indent=1))
 
 
 if __name__ == "__main__":

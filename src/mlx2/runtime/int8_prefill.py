@@ -38,6 +38,14 @@ threshold, see :func:`validate_decode_row_bound`) keep the stock kernels and
 bit-exact numerics.  Prefix state produced under int8 prefill must live in its
 own APCv2 namespace (:func:`apc_semantic_fingerprint`).
 
+Hadamard rotation (``hadamard_rotation``, default off; reimplementation of
+Splash #436) rotates dense MLP activations and weights alike before their int8
+row quantizers: 128-value blocks for gate/up inputs and 512-value blocks for
+down inputs. It preserves the underlying matmul before quantization while
+spreading channel outliers. This first implementation retains a rotated int8
+weight copy and accounts its one-module-at-a-time build transient; packed
+in-place Q8/Q4/Q5 kernels remain separate.
+
 Routed MoE experts (``SwitchGLU`` / ``gather_qmm``) stay on the stock kernels;
 see ``EXPERTS_NOTE``.
 
@@ -175,6 +183,9 @@ class Int8PrefillPolicy:
     # plus Q8 when q8_inplace is also on); every other projection stays on
     # stock kernels, never the requantization path.
     inplace_only: bool = False
+    # Splash #436: deterministic signed block-Hadamard rotation before the
+    # activation and weight row quantizers. Dense MLP scope only, default off.
+    hadamard_rotation: bool = False
 
     def __post_init__(self):
         if not isinstance(self.enabled, bool):
@@ -221,6 +232,18 @@ class Int8PrefillPolicy:
             raise ValueError(
                 "int8 prefill q8_only binds Q8 alone; with q45_inplace use inplace_only"
             )
+        if not isinstance(self.hadamard_rotation, bool):
+            raise TypeError("int8 prefill hadamard_rotation must be a boolean")
+        if self.hadamard_rotation and not self.enabled:
+            raise ValueError("int8 prefill hadamard_rotation requires an enabled policy")
+        if self.hadamard_rotation and self.scope != "mlp":
+            raise ValueError(
+                "int8 prefill hadamard_rotation currently supports mlp scope only"
+            )
+        if self.hadamard_rotation and (self.q8_inplace or self.q45_inplace):
+            raise ValueError(
+                "int8 prefill hadamard_rotation cannot use packed in-place kernels"
+            )
 
     @classmethod
     def from_value(cls, value) -> Int8PrefillPolicy:
@@ -248,6 +271,7 @@ class Int8PrefillPolicy:
                 "q8_only",
                 "q45_inplace",
                 "inplace_only",
+                "hadamard_rotation",
             }
             if unknown:
                 raise ValueError(f"unknown int8 prefill policy keys: {sorted(unknown)}")
@@ -273,6 +297,8 @@ class Int8PrefillPolicy:
             out["act_scale"] = self.act_scale
             if self.inplace_only:
                 out["inplace_only"] = True
+        if self.hadamard_rotation:
+            out["hadamard_rotation"] = True
         return out
 
     @property
@@ -307,6 +333,13 @@ class Int8PrefillPolicy:
             }
             if self.inplace_only:
                 fields["q45_inplace"]["inplace_only"] = True
+        if self.hadamard_rotation:
+            fields["hadamard_rotation"] = {
+                "source": "splash-436",
+                "input_block": 128,
+                "intermediate_block": 512,
+                "sign_revision": "mlx2-sha256-signs-v1",
+            }
         payload = json.dumps(fields, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -1249,6 +1282,60 @@ def _quantize_rows(x):
     return xq, xs
 
 
+def _rotation_block(path: str) -> int:
+    """Splash geometry: down consumes the wider intermediate activation."""
+    projection = path.rsplit(".", 1)[-1]
+    if projection in ("gate_proj", "up_proj"):
+        return 128
+    if projection == "down_proj":
+        return 512
+    raise Int8PrefillError(
+        f"{path}: Hadamard int8 prefill has no declared rotation geometry"
+    )
+
+
+def _rotation_signs(block: int):
+    """Stable Rademacher signs for a revision-bound orthonormal rotation.
+
+    Splash seeds ``std::mt19937``. mlx2 uses a portable SHA-256 stream so the
+    same source revision produces the same signs on every host. This is a
+    mechanism reimplementation, not a byte-for-byte kernel port.
+    """
+    import mlx.core as mx
+    import numpy as np
+
+    values = []
+    counter = 0
+    while len(values) < block:
+        digest = hashlib.sha256(
+            f"mlx2-int8-hadamard-v1:{block}:{counter}".encode()
+        ).digest()
+        values.extend(
+            1.0 if byte & (1 << bit) else -1.0
+            for byte in digest
+            for bit in range(8)
+        )
+        counter += 1
+    return mx.array(np.asarray(values[:block], dtype=np.float32))
+
+
+def rotate_quantizer_blocks(x, block: int):
+    """Signed orthonormal Hadamard rotation over last-axis blocks."""
+    import mlx.core as mx
+
+    if type(block) is not int or block not in (128, 512):
+        raise ValueError("int8 prefill rotation block must be 128 or 512")
+    if x.shape[-1] % block:
+        raise Int8PrefillError(
+            f"int8 prefill rotation block {block} does not divide {x.shape[-1]}"
+        )
+    shape = x.shape
+    rows = x.reshape(-1, block)
+    rotated = mx.hadamard_transform(rows, scale=1.0 / math.sqrt(block))
+    rotated = rotated * _rotation_signs(block).astype(rotated.dtype)
+    return rotated.reshape(shape)
+
+
 def max_tensor_slice_offset(*, rows: int, k: int, n: int) -> int:
     """Largest byte offset ``_GEMM_SRC`` passes to an MPP tensor ``slice()``.
 
@@ -1886,7 +1973,15 @@ class Int8PrefillHandle:
             return base_call(module, x)
         self._last_use = time.monotonic()
         wq, ws = self._weights(bound)
-        xq, xs = self._activation(x, k)
+        xq, xs = self._activation(
+            x,
+            k,
+            block=(
+                _rotation_block(bound.spec.path)
+                if self.policy.hadamard_rotation
+                else None
+            ),
+        )
         bias = module["bias"] if "bias" in module else None
         y = _int8_gemm(xq, xs, wq, ws, bias=bias)
         self.counts["engaged_calls"] += 1
@@ -2010,6 +2105,23 @@ class Int8PrefillHandle:
             # Defensive: an in-place module never builds an int8 copy.
             raise Int8PrefillError(f"{spec.path}: in-place module has no weight copy")
         self.counts["weight_builds"] += 1
+        if self.policy.hadamard_rotation:
+            import mlx.core as mx
+
+            weight = (
+                module["weight"]
+                if spec.kind == "linear"
+                else mx.dequantize(
+                    module["weight"],
+                    module["scales"],
+                    module["biases"],
+                    group_size=spec.group_size,
+                    bits=spec.bits,
+                )
+            )
+            return _quantize_rows(
+                rotate_quantizer_blocks(weight, _rotation_block(spec.path))
+            )
         if spec.kind == "linear":
             return _quantize_rows(module["weight"])
         return _requant_packed(
@@ -2023,6 +2135,10 @@ class Int8PrefillHandle:
     def _cache_mode(self, bound) -> str:
         cache = self.policy.cache
         if cache == "auto":
+            if self.policy.hadamard_rotation:
+                # Rotation/dequantization is a startup-style weight build, not
+                # work to repeat for every prefill call.
+                return "resident"
             # bf16 weights: requantizing reads 2 B/elt per call, so keep the
             # int8 copy (half the bf16 footprint, accounted in weight_bytes).
             # Packed weights: the fused requant is cheap; build per call.
@@ -2047,16 +2163,19 @@ class Int8PrefillHandle:
                 bound.nbytes = int(wq.nbytes + ws.nbytes)
             return bound.wq, bound.ws
 
-    def _activation(self, x, k):
+    def _activation(self, x, k, *, block=None):
         # q/k/v and gate/up share one input tensor: quantize it once.  The
         # entry holds a strong reference, so the id() key cannot be reused
         # while it is cached; one entry bounds the retained tail.
         entry = self._act_entry  # single read: the reaper may clear it
-        if entry is not None and entry[0] is x:
+        if entry is not None and entry[0] is x and entry[1] == block:
             self.counts["activation_reuse"] += 1
-            return entry[1], entry[2]
-        xq, xs = _quantize_rows(x.reshape(-1, k))
-        self._act_entry = (x, xq, xs)
+            return entry[2], entry[3]
+        source = x.reshape(-1, k)
+        if block is not None:
+            source = rotate_quantizer_blocks(source, block)
+        xq, xs = _quantize_rows(source)
+        self._act_entry = (x, block, xq, xs)
         return xq, xs
 
     # -- lifecycle --------------------------------------------------------
@@ -2175,8 +2294,36 @@ class Int8PrefillHandle:
 
     def weight_copy_bytes(self) -> int:
         """Admission-facing int8 weight-copy bytes: resident copies once built
-        plus the worst per-call transient copy."""
-        return self.resident_estimate_bytes() + self.transient_weight_bytes_max()
+        plus the worst per-call or rotation-build transient copy."""
+        return (
+            self.resident_estimate_bytes()
+            + self.transient_weight_bytes_max()
+            + self.rotation_build_transient_bytes_max()
+        )
+
+    def unfilled_reserve_bytes(self) -> int:
+        """Future weight/metadata allocation beyond the measured resident set.
+
+        Cached copies already appear in free-memory probes. Per-call copies
+        and rotation scratch do not; reserve them even after warmup. Retaining
+        the build scratch also covers a TTL eviction between admission and use.
+        """
+        with self._lock:
+            return (
+                max(0, self.resident_estimate_bytes() - self.weight_bytes())
+                + self.transient_weight_bytes_max()
+                + max(0, self.metadata_copy_bytes() - self.metadata_bytes())
+                + self.rotation_build_transient_bytes_max()
+            )
+
+    def rotation_build_transient_bytes_max(self) -> int:
+        """Conservative dequantized + rotated weight build peak, one module."""
+        if not self.policy.hadamard_rotation:
+            return 0
+        return max(
+            (8 * b.spec.n * b.spec.k for b in tuple(self._bound.values())),
+            default=0,
+        )
 
     def status(self) -> dict:
         kinds: dict = {}
@@ -2205,6 +2352,8 @@ class Int8PrefillHandle:
             "resident_estimate_bytes": self.resident_estimate_bytes(),
             "transient_weight_bytes_max": self.transient_weight_bytes_max(),
             "weight_copy_bytes": self.weight_copy_bytes(),
+            "unfilled_reserve_bytes": self.unfilled_reserve_bytes(),
+            "rotation_build_transient_bytes_max": self.rotation_build_transient_bytes_max(),
             "counts": dict(self.counts),
         }
         if self.policy.q8_inplace:
@@ -2261,6 +2410,17 @@ class Int8PrefillHandle:
             "applies_to": "forward calls with rows >= row_threshold",
             "modules": len(self._bound),
             "weight_copy_bytes": self.weight_copy_bytes(),
+            **(
+                {
+                    "hadamard_rotation": {
+                        "input_block": 128,
+                        "intermediate_block": 512,
+                        "build_transient_bytes_max": self.rotation_build_transient_bytes_max(),
+                    }
+                }
+                if self.policy.hadamard_rotation
+                else {}
+            ),
             **({"q8_inplace": self._q8_summary()} if self.policy.q8_inplace else {}),
             **({"q45_inplace": self._q45_summary()} if self.policy.q45_inplace else {}),
         }
@@ -2296,6 +2456,11 @@ def apply(
             if reason and not reason.startswith("unsupported module type"):
                 handle._skipped[path] = reason
             continue
+        if policy.hadamard_rotation:
+            # Do not silently apply Splash's gate/up geometry to a differently
+            # named MLP projection. An adapter for that family must first
+            # declare the correct mathematical role and block geometry.
+            _rotation_block(spec.path)
         q8 = q45 = False
         if policy.q8_inplace:
             q8, why = q8_inplace_eligible(spec, module)
@@ -2443,6 +2608,8 @@ def bind_for_serving(
     speculation,
     prompt_lookup_policy=None,
     copy_draft_policy=None,
+    memory_headroom=None,
+    hard_reserve_bytes=0,
 ):
     """Serving-engine entry: validate, install on ``adapter.model`` and return
     ``(handle, settings fragment)``.  Raises (fail closed) on any refusal."""
@@ -2459,6 +2626,14 @@ def bind_for_serving(
     validate_decode_row_bound(policy, bound)
     handle = apply_for_adapter(adapter, policy)
     try:
+        if memory_headroom is not None:
+            available = memory_headroom()
+            required = int(hard_reserve_bytes) + handle.unfilled_reserve_bytes()
+            if (isinstance(available, bool) or not isinstance(available, (int, float))
+                    or not math.isfinite(available) or available < required):
+                raise Int8PrefillError(
+                    f"int8 prefill weight build needs {required} headroom bytes; available {available}"
+                )
         warmed = handle.warmup()
     except BaseException:
         # Never leave a half-bound install behind a refusal.
@@ -2550,7 +2725,10 @@ def checkpoint_census(adapter, scope: str) -> dict:
     return counts
 
 
-def resolve_auto(adapter, *, qualification_mode, qualified_settings, conflicts=()):
+def resolve_auto(
+    adapter, *, qualification_mode, qualified_settings, conflicts=(),
+    max_prefill_rows=None,
+):
     """Resolve ``--int8-prefill auto`` once the model is loaded.
 
     Returns ``(policy or None, receipt)``.  On only when every condition holds:
@@ -2563,7 +2741,12 @@ def resolve_auto(adapter, *, qualification_mode, qualified_settings, conflicts=(
     approximate, and approximate state may only be published through a
     qualified approximate operation (AGENTS.md), so an unqualified route
     resolves off.  Off adds nothing to the route settings, so records of
-    every route that resolves off still match."""
+    every route that resolves off still match.
+
+    ``max_prefill_rows`` is the largest row count one prefill projection call
+    can present on this route; below the policy's row threshold the wrapper
+    could never run, so auto resolves off instead of selecting an inert
+    mechanism (Gemma 4 31B at prefill_step 256, 2026-10-15)."""
     receipt = {"requested": AUTO}
 
     def off(reason):
@@ -2587,6 +2770,11 @@ def resolve_auto(adapter, *, qualification_mode, qualified_settings, conflicts=(
         return off("no 8-bit or 4/5-bit gs64 affine projection in scope")
     policy = auto_policy(adapter, census)
     receipt["policy"] = policy.as_dict()
+    if max_prefill_rows is not None and int(max_prefill_rows) < policy.row_threshold:
+        return off(
+            f"prefill calls present at most {int(max_prefill_rows)} rows, below "
+            f"the int8 row threshold {policy.row_threshold}; it could never run"
+        )
     if qualification_mode:
         evidence = "qualification mode"
     elif qualified_settings is not None:

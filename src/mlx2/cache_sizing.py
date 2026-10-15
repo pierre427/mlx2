@@ -96,6 +96,7 @@ def clamp_host_default_cache_bytes(
     stream_reserve_bytes,
     lane_need_bytes,
     lanes,
+    workspace_reserve_bytes=0,
 ):
     """Bound a host-default cache by what the loaded model leaves free.
 
@@ -128,6 +129,8 @@ def clamp_host_default_cache_bytes(
         "lane_need_bytes": None if lane_need_bytes is None else int(lane_need_bytes),
         "budget_bytes": None,
     }
+    if workspace_reserve_bytes:
+        detail["workspace_reserve_bytes"] = int(workspace_reserve_bytes)
     if admission_limit_bytes is None or resident_bytes is None or lane_need_bytes is None:
         detail["reason"] = "headroom_unmeasured"
         return (floor, detail)
@@ -135,6 +138,7 @@ def clamp_host_default_cache_bytes(
         int(admission_limit_bytes)
         - int(resident_bytes)
         - int(stream_reserve_bytes)
+        - int(workspace_reserve_bytes)
         - int(lanes) * int(lane_need_bytes)
     )
     detail["budget_bytes"] = budget

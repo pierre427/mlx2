@@ -1,0 +1,36 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "signed block-Hadamard rotation for approximate int8 prefill",
+  "recorded_at": "2026-10-15",
+  "state": "implemented_unqualified_default_off",
+  "source_repository": "https://github.com/incoai/splash",
+  "source_revision": "9e49965044ff78a2f06fdb3024cb78b599317853",
+  "source_pull_request": "https://github.com/incoai/splash/pull/436",
+  "source_paths": [
+    "runtime/metal/kernels/common/ane_ffn_rotation.h",
+    "runtime/metal/kernels/prefill/int8_ffn.metal",
+    "runtime/ops/Int8Ffn.cpp"
+  ],
+  "license": "Apache-2.0",
+  "implementation_paths": [
+    "src/mlx2/runtime/int8_prefill.py",
+    "tests/test_int8_prefill_hadamard_cpu.py"
+  ],
+  "modifications": [
+    "Reimplemented the orthonormal signed block-Hadamard mechanism with MLX hadamard_transform and portable SHA-256-derived signs rather than copying Splash Metal or C++ code.",
+    "Kept Splash's 128-value gate/up input blocks and 512-value down/intermediate blocks.",
+    "Restricted the candidate to dense MLP scope and made it incompatible with packed in-place Q8/Q4/Q5 kernels until those kernels rotate packed weights directly.",
+    "Built and retained one rotated int8 weight copy per projection; quantized source weights are dequantized one module at a time, with a conservative build transient exposed to status and receipts.",
+    "Bound rotation geometry and sign revision into the int8 numerical revision and therefore APCv2 identity. Ordinary decode and sub-threshold verification continue on stock kernels."
+  ],
+  "validation": {
+    "cpu": "focused signed-rotation and existing int8-prefill contract suites passed",
+    "metal": "M5 Max component smoke built and evaluated a 1024x512 rotated int8 weight plus a 3x512 rotated activation; finite outputs and the 4 MiB transient receipt were observed",
+    "model_quality": "M5 Max Qwen3.8-27B-MLX-4bit candidate on exact MLX 0.32.4: adapter-rendered all-position prompt diagnostics were strong for prose/code/reasoning but the synthetic tool transcript remained poor at 0.869 top-1 / 0.662 mean KL. Generation-relevant stock continuations passed: tool-chat 1.000 top-1 over 50 positions, summary 0.9932 over 146, and code 1.000 over 160, with mean KL at or below 0.00049. All eligible 512-row prefill chunks engaged the rotated int8 path; continuation-tail fallback rows were sub-threshold ordinary decode, not mechanism failures. The diagnostic/gate distinction is now explicit in the harness receipt.",
+    "candidate_quality_gate": "passed_without_preflight",
+    "qualified": false,
+    "selected": false,
+    "observed_used": true,
+    "performance_qualified": false
+  }
+}

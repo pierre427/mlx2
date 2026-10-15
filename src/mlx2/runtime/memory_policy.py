@@ -353,6 +353,7 @@ class SelfMTPLaneAdmissionController:
         driver_allowance_gib: Optional[float] = None,
         transient_gib_per_lane: float = K2_TRANSIENT_GIB_PER_LANE,
         stream_reserve_gib: float = 0.0,
+        workspace_reserve_gib: float = 0.0,
         saturation_lane_cap: Optional[int] = SATURATION_LANE_CAP,
         verification_row_cap: Optional[int] = None,
         cache_estimator: Optional[Callable[[int], int]] = None,
@@ -396,6 +397,8 @@ class SelfMTPLaneAdmissionController:
             stream_reserve_gib = float(stream_reserve_gib or 0.0)
         if not math.isfinite(stream_reserve_gib) or stream_reserve_gib < 0:
             raise ValueError("streamed weight reserve must be non-negative")
+        self._workspace_reserve_source = workspace_reserve_gib
+        _ = self.workspace_reserve_gib  # Validate constants and live providers now.
         if saturation_lane_cap is not None and (
             isinstance(saturation_lane_cap, bool)
             or not isinstance(saturation_lane_cap, int)
@@ -436,6 +439,15 @@ class SelfMTPLaneAdmissionController:
         self._stream_reserve_constant = float(value)
 
     @property
+    def workspace_reserve_gib(self) -> float:
+        source = getattr(self, "_workspace_reserve_source", 0.0)
+        value = source() if callable(source) else source
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            raise ValueError("projection workspace reserve must be finite and non-negative")
+        return float(value)
+
+    @property
     def hard_reserve_gib(self) -> float:
         """Service + driver + the streamed weight reservation.
 
@@ -462,6 +474,7 @@ class SelfMTPLaneAdmissionController:
             self.service_reserve_gib
             + self.driver_allowance_gib
             + self.stream_reserve_gib
+            + self.workspace_reserve_gib
         )
 
     def lane_gib(

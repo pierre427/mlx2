@@ -1,0 +1,34 @@
+{
+  "component": "Projection weight and rotation workspace admission",
+  "source_repository": "mlx2",
+  "source_revision": "2db68c1bb7fed2d34bce7bebcfaf9c48ad84920a",
+  "source_paths": [
+    "src/mlx2/runtime/int8_prefill.py",
+    "src/mlx2/runtime/memory_policy.py",
+    "src/mlx2/cache_sizing.py",
+    "src/mlx2/serving.py"
+  ],
+  "license": "Same as mlx2; original repair, no external code copied",
+  "problem": "Existing weight_copy_bytes reported cost but no admission consumer reserved unfilled projection copies or rotation scratch.",
+  "modifications": [
+    "Add locked handle accounting for missing resident copies and metadata, worst per-call copies and rotation-build scratch.",
+    "Add a separate dynamic workspace reserve to lane admission, HTTP hard reserve and default APC sizing; subtract already resident copies.",
+    "Refuse insufficient or unknown startup headroom before warmup and remove the partial installation.",
+    "Keep Hadamard default-off and candidate fidelity status; no M5 GPU run or performance claim."
+  ],
+  "validation": {
+    "focused_tests": [
+      "tests/test_peer_projection_reserve_cpu.py",
+      "tests/test_int8_prefill.py",
+      "tests/test_int8_prefill_hadamard_cpu.py",
+      "tests/test_int8_prefill_q8_inplace.py",
+      "tests/test_int8_prefill_q45_inplace.py",
+      "tests/test_int8_prefill_auto.py",
+      "tests/test_host_memory_signals.py",
+      "tests/test_qwen38_memory.py",
+      "tests/test_moe_expert_streaming.py"
+    ],
+    "result": "passed; optional Metal tests skipped by CPU guard",
+    "qualified": false
+  }
+}

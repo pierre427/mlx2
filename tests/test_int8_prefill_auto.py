@@ -131,6 +131,17 @@ def test_auto_resolves_on_in_qualification_mode(device_ok):
     assert receipt["census"] == {"q8": 10, "q45": 0, "other_quantized": 0, "linear": 0}
 
 
+def test_auto_steps_aside_when_prefill_never_reaches_the_threshold(device_ok):
+    # Gemma 4 31B at prefill_step 256 (2026-10-15): selected, never ran.
+    adapter = _Adapter(_Model(**Q8_ONLY))
+    threshold = AUTO_POLICY.row_threshold
+    policy, receipt = _resolve(adapter, qualification_mode=True, max_prefill_rows=threshold - 1)
+    assert policy is None and receipt["resolved"] == "off"
+    assert "could never run" in receipt["reason"]
+    policy, receipt = _resolve(adapter, qualification_mode=True, max_prefill_rows=threshold)
+    assert policy == AUTO_POLICY and receipt["resolved"] == "on"
+
+
 def test_auto_follows_the_qualification_record(device_ok):
     adapter = _Adapter(_Model(**Q8_ONLY))
     recorded = {"int8_prefill": {**AUTO_POLICY.as_dict(), "revision": AUTO_POLICY.revision}}
@@ -325,6 +336,23 @@ def test_engine_auto_binds_in_qualification_mode(serving_host, device_ok):
         assert recorded["q8_only"] is True and recorded["q8_modules"] > 0
         auto = status["int8_prefill"]["auto"]
         assert auto["resolved"] == "on" and auto["evidence"] == "qualification mode"
+    finally:
+        engine.close()
+
+
+def test_engine_auto_is_off_when_lanes_times_step_stay_below_the_threshold(
+    serving_host, device_ok
+):
+    engine = _engine(
+        _q8_serving_model(), qualification_mode=True, int8_prefill="auto",
+        prefill_step=128, max_lanes=1, max_inflight=1,
+    )
+    try:
+        assert engine.ready.wait(60), engine.error
+        status = engine.status()
+        assert "int8_prefill" not in status["settings"]
+        auto = status["int8_prefill"]["auto"]
+        assert auto["resolved"] == "off" and "could never run" in auto["reason"]
     finally:
         engine.close()
 
