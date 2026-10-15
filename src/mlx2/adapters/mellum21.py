@@ -21,6 +21,29 @@ from ..sampling_defaults import MODEL_CARD, SamplingDefaults, VendorSampling
 CACHE_LAYOUT = "mellum21-mixed-kv-layer-segments-v1"
 SOURCE_REPOSITORY = "JetBrains/Mellum2.1-12B-A2.5B-Thinking"
 SOURCE_REVISION = "92ddae9fc7665e9f801d141d2e5a6b2caf2460c4"
+MTP_SOURCE_LAYER = 28
+MTP_REQUIRED_TENSORS = frozenset(
+    {
+        "mtp.fc.weight",
+        "mtp.pre_fc_norm_embedding.weight",
+        "mtp.pre_fc_norm_hidden.weight",
+        "mtp.norm.weight",
+        "mtp.layers.28.self_attn.q_proj.weight",
+        "mtp.layers.28.self_attn.k_proj.weight",
+        "mtp.layers.28.self_attn.v_proj.weight",
+        "mtp.layers.28.self_attn.o_proj.weight",
+        "mtp.layers.28.self_attn.q_norm.weight",
+        "mtp.layers.28.self_attn.k_norm.weight",
+        "mtp.layers.28.input_layernorm.weight",
+        "mtp.layers.28.post_attention_layernorm.weight",
+        "mtp.layers.28.mlp.gate.weight",
+    }
+    | {
+        f"mtp.layers.28.mlp.experts.{expert}.{projection}.weight"
+        for expert in range(64)
+        for projection in ("gate_proj", "up_proj", "down_proj")
+    }
+)
 
 MELLUM21_THINKING = ModelDescriptor(
     model_type="mellum",
@@ -91,6 +114,71 @@ def _expected_layers() -> list[str]:
     ]
 
 
+def inspect_mtp_schema(config: dict, weight_map: dict) -> dict | None:
+    """Validate the published one-layer Mellum MTP *artifact* contract.
+
+    This deliberately does not make the route loadable.  It gives the ordinary
+    artifact inspector an exact, adapter-owned boundary for future weights so
+    an unfamiliar or partial head is refused before model construction.
+    """
+    primary = config.get("num_mtp_layers")
+    alias = config.get("num_nextn_predict_layers")
+    for name, value in (
+        ("num_mtp_layers", primary),
+        ("num_nextn_predict_layers", alias),
+    ):
+        if value is not None and type(value) is not int:
+            raise ValueError(f"Mellum {name} must be an integer")
+    if primary is not None and alias is not None and primary != alias:
+        raise ValueError("Mellum MTP layer-count aliases disagree")
+    raw_count = primary if primary is not None else alias
+    if raw_count is None:
+        count = 0
+    else:
+        count = raw_count
+    mtp_keys = {key for key in weight_map if key.startswith("mtp.")}
+    if count == 0 and not mtp_keys:
+        if any(config.get(name) for name in ("mtp_layer_types", "mtp_mlp_layer_types")):
+            raise ValueError("Mellum MTP geometry requires exactly one declared layer")
+        return None
+    if count != 1:
+        raise ValueError("Mellum MTP artifacts must declare exactly one layer")
+    if config.get("mtp_layer_types", ["sliding_attention"]) != [
+        "sliding_attention"
+    ] or config.get("mtp_mlp_layer_types", ["sparse"]) != ["sparse"]:
+        raise ValueError("Mellum MTP requires one sliding-attention sparse-MoE layer")
+    missing = sorted(MTP_REQUIRED_TENSORS - mtp_keys)
+    if missing:
+        raise ValueError(f"Mellum MTP artifact is incomplete: missing {missing[0]}")
+    extra = sorted(mtp_keys - MTP_REQUIRED_TENSORS)
+    if extra:
+        raise ValueError(f"Mellum MTP artifact has unexpected tensor: {extra[0]}")
+    layer_pattern = re.compile(r"^mtp\.layers\.(\d+)\.")
+    source_layers = {
+        int(match.group(1))
+        for key in mtp_keys
+        if (match := layer_pattern.match(key)) is not None
+    }
+    if source_layers != {MTP_SOURCE_LAYER}:
+        raise ValueError(
+            "Mellum MTP tensors must use the target-depth source layer 28"
+        )
+    return {
+        "schema": "mlx2.mellum21-mtp-artifact.v1",
+        "layers": 1,
+        "source_layer": MTP_SOURCE_LAYER,
+        "attention": "sliding_attention",
+        "mlp": "sparse",
+        "projection_order": ("embedding", "previous_hidden"),
+        "cache": "private_rotating_kv",
+        "post_norm": "mtp.norm",
+        "shared_embedding": True,
+        "shared_lm_head": True,
+        "tensor_count": len(mtp_keys),
+        "runtime_load_supported": False,
+    }
+
+
 def inspect_artifact(model_path: str | Path) -> dict:
     """Validate Mellum 2.1 topology, shard closure and identity without MLX."""
     path = Path(model_path).expanduser().resolve()
@@ -148,8 +236,19 @@ def inspect_artifact(model_path: str | Path) -> dict:
     weight_map = index.get("weight_map")
     if not isinstance(weight_map, dict) or not weight_map:
         raise ValueError("Mellum artifact must have a nonempty weight index")
+    mtp_contract = inspect_mtp_schema(config, weight_map)
+    if mtp_contract is not None:
+        raise ValueError(
+            "Mellum MTP artifact schema is recognized, but the route remains "
+            "disabled until trained weights receive real-artifact parity and rollback validation"
+        )
+    extra_decoder_layer = re.compile(r"^(?:model\.)?layers\.(\d+)\.")
     if any(
         key.startswith(("mtp.", "model.mtp.", "language_model.mtp.", "draft."))
+        or (
+            (match := extra_decoder_layer.match(key)) is not None
+            and int(match.group(1)) >= expected["num_hidden_layers"]
+        )
         for key in weight_map
     ):
         raise ValueError("embedded speculative tensors are not an ordinary Mellum target")

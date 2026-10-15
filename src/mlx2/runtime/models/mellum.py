@@ -43,6 +43,9 @@ class ModelArgs(BaseModelArgs):
     sliding_window: int = 1024
     layer_types: list[str] = field(default_factory=list)
     rope_parameters: dict[str, Any] = field(default_factory=dict)
+    num_mtp_layers: int = 0
+    mtp_layer_types: list[str] = field(default_factory=list)
+    mtp_mlp_layer_types: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.layer_types:
@@ -61,6 +64,19 @@ class ModelArgs(BaseModelArgs):
             raise ValueError("Mellum query heads must be divisible by KV heads")
         if not 0 < self.num_experts_per_tok <= self.num_experts:
             raise ValueError("Mellum expert routing geometry is invalid")
+        if self.num_mtp_layers is None:
+            self.num_mtp_layers = 0
+        if type(self.num_mtp_layers) is not int or self.num_mtp_layers not in {0, 1}:
+            raise ValueError("Mellum supports zero or one MTP layer")
+        if self.num_mtp_layers:
+            self.mtp_layer_types = self.mtp_layer_types or ["sliding_attention"]
+            self.mtp_mlp_layer_types = self.mtp_mlp_layer_types or ["sparse"]
+            if self.mtp_layer_types != ["sliding_attention"]:
+                raise ValueError("Mellum MTP must use sliding attention")
+            if self.mtp_mlp_layer_types != ["sparse"]:
+                raise ValueError("Mellum MTP must use sparse MoE")
+        elif self.mtp_layer_types or self.mtp_mlp_layer_types:
+            raise ValueError("Mellum MTP geometry requires one MTP layer")
 
 
 def _rope_for(layer_type: str, args: ModelArgs):
@@ -81,7 +97,9 @@ def _rope_for(layer_type: str, args: ModelArgs):
 
 
 class Attention(nn.Module):
-    def __init__(self, args: ModelArgs, layer_index: int):
+    def __init__(
+        self, args: ModelArgs, layer_index: int, *, layer_type: str | None = None
+    ):
         super().__init__()
         dim = args.hidden_size
         self.n_heads = args.num_attention_heads
@@ -94,7 +112,7 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(self.n_heads * self.head_dim, dim, bias=False)
         self.q_norm = nn.RMSNorm(self.head_dim, eps=args.rms_norm_eps)
         self.k_norm = nn.RMSNorm(self.head_dim, eps=args.rms_norm_eps)
-        self.rope = _rope_for(args.layer_types[layer_index], args)
+        self.rope = _rope_for(layer_type or args.layer_types[layer_index], args)
 
     def __call__(self, x, mask=None, cache=None):
         batch, length, _ = x.shape
@@ -134,9 +152,11 @@ class SparseMoE(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, args: ModelArgs, layer_index: int):
+    def __init__(
+        self, args: ModelArgs, layer_index: int, *, layer_type: str | None = None
+    ):
         super().__init__()
-        self.self_attn = Attention(args, layer_index)
+        self.self_attn = Attention(args, layer_index, layer_type=layer_type)
         self.mlp = SparseMoE(args)
         self.input_layernorm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
         self.post_attention_layernorm = nn.RMSNorm(
@@ -178,23 +198,43 @@ class Decoder(nn.Module):
         return self.norm(hidden)
 
 
+class MTPModule(nn.Module):
+    """One-layer Mellum MTP math from Transformers PR 49531.
+
+    The released Mellum 2.1 artifacts do not contain these trained tensors.
+    This component therefore remains unreachable from the serving adapter; it
+    exists so a future artifact has exact fusion, cache and tensor-name owners.
+    """
+
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        hidden = args.hidden_size
+        self.fc = nn.Linear(2 * hidden, hidden, bias=False)
+        self.pre_fc_norm_embedding = nn.RMSNorm(hidden, eps=args.rms_norm_eps)
+        self.pre_fc_norm_hidden = nn.RMSNorm(hidden, eps=args.rms_norm_eps)
+        self.layers = [DecoderLayer(args, 0, layer_type="sliding_attention")]
+        self.norm = nn.RMSNorm(hidden, eps=args.rms_norm_eps)
+
+    def fuse(self, embeddings, previous_hidden):
+        embeddings = self.pre_fc_norm_embedding(embeddings)
+        previous_hidden = self.pre_fc_norm_hidden(previous_hidden)
+        return self.fc(mx.concatenate([embeddings, previous_hidden], axis=-1))
+
+
 class Model(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.args = args
         self.model_type = args.model_type
         self.model = Decoder(args)
+        self.mtp = MTPModule(args) if args.num_mtp_layers == 1 else None
         self.completed_forwards = 0
         if not args.tie_word_embeddings:
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
     def __call__(self, inputs, cache=None):
         hidden = select_checkpoint_rows(self.model(inputs, cache))
-        logits = (
-            self.model.embed_tokens.as_linear(hidden)
-            if self.args.tie_word_embeddings
-            else self.lm_head(hidden)
-        )
+        logits = self.logits(hidden)
         self.completed_forwards += 1
         return logits
 
@@ -209,10 +249,42 @@ class Model(nn.Module):
         checkpoint is 24.3 GB, so this avoids retaining a second checkpoint's
         worth of lazy stack expressions during load.
         """
+        raw_mtp = any(key.startswith("mtp.") for key in weights)
+        if self.mtp is None:
+            if raw_mtp:
+                raise ValueError("Mellum MTP tensors require a one-layer MTP model")
+        elif raw_mtp:
+            converted = {}
+            for key, value in weights.items():
+                if key.startswith("mtp.layers.28."):
+                    key = "mtp.layers.0." + key.removeprefix("mtp.layers.28.")
+                elif key.startswith("mtp.layers."):
+                    raise ValueError("Mellum MTP predictor tensors must use source layer 28")
+                if key in converted:
+                    raise ValueError(f"duplicate Mellum tensor after MTP conversion: {key}")
+                converted[key] = value
+            weights = converted
+            required = {
+                "mtp.fc.weight",
+                "mtp.pre_fc_norm_embedding.weight",
+                "mtp.pre_fc_norm_hidden.weight",
+                "mtp.norm.weight",
+                "mtp.layers.0.self_attn.q_proj.weight",
+                "mtp.layers.0.mlp.gate.weight",
+            }
+            if not required <= set(weights):
+                raise ValueError("Mellum MTP tensors are incomplete after conversion")
+        elif self.mtp is not None:
+            raise ValueError("one-layer Mellum MTP model requires MTP tensors")
         if self.args.tie_word_embeddings:
             weights.pop("lm_head.weight", None)
-        for layer in range(self.args.num_hidden_layers):
-            prefix = f"model.layers.{layer}.mlp"
+        layer_prefixes = [
+            f"model.layers.{layer}.mlp"
+            for layer in range(self.args.num_hidden_layers)
+        ]
+        if self.mtp is not None:
+            layer_prefixes.append("mtp.layers.0.mlp")
+        for prefix in layer_prefixes:
             packed = []
             for projection in ("up_proj", "down_proj", "gate_proj"):
                 first = f"{prefix}.experts.0.{projection}.weight"
@@ -224,7 +296,7 @@ class Model(nn.Module):
                 ]
                 if any(name not in weights for name in names):
                     raise ValueError(
-                        f"Mellum layer {layer} has an incomplete {projection} expert table"
+                        f"Mellum {prefix} has an incomplete {projection} expert table"
                     )
                 parts = [weights.pop(name) for name in names]
                 value = mx.stack(parts)
@@ -254,3 +326,42 @@ class Model(nn.Module):
             else RotatingKVCache(max_size=self.args.sliding_window)
             for layer_type in self.args.layer_types
         ]
+
+    def logits(self, hidden):
+        return (
+            self.model.embed_tokens.as_linear(hidden)
+            if self.args.tie_word_embeddings
+            else self.lm_head(hidden)
+        )
+
+    def mtp_backbone(self, inputs, cache=None):
+        """Return target logits hidden and the identical final-norm MTP seed."""
+        hidden = self.model(inputs, cache)
+        return hidden, hidden
+
+    def make_mtp_cache(self):
+        if self.mtp is None:
+            raise RuntimeError("Mellum MTP head is not loaded")
+        return [RotatingKVCache(max_size=self.args.sliding_window)]
+
+    def mtp_step(self, hidden, tokens, mtp_cache):
+        """Advance one private Mellum MTP pair stream.
+
+        ``hidden`` is the target's final-norm state at position p and
+        ``tokens`` contains tokens at p+1.  The MTP cache offset therefore
+        counts pairs; the uniform positional shift cancels inside its private
+        attention stream.  Generic self-MTP serving owns commit/rollback.
+        """
+        if self.mtp is None:
+            raise RuntimeError("Mellum MTP head is not loaded")
+        if not isinstance(mtp_cache, list) or len(mtp_cache) != 1:
+            raise ValueError("Mellum MTP requires one private cache")
+        embeddings = self.model.embed_tokens(tokens)
+        x = self.mtp.fuse(embeddings, hidden.astype(embeddings.dtype))
+        cache = mtp_cache[0]
+        mask = create_attention_mask(
+            x, cache, window_size=self.args.sliding_window
+        )
+        x = self.mtp.layers[0](x, mask=mask, cache=cache)
+        post = self.mtp.norm(x)
+        return self.logits(post), post

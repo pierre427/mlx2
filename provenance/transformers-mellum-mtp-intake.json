@@ -1,0 +1,55 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "Transformers Mellum2 and Mellum2.1 native MTP contract intake",
+  "recorded_at": "2026-10-15",
+  "state": "component_implemented_artifact_blocked",
+  "source_repository": "https://github.com/huggingface/transformers",
+  "license": "Apache-2.0",
+  "sources": [
+    {
+      "pull_request": "https://github.com/huggingface/transformers/pull/49531",
+      "source_revision": "0a977f444abe4ba9a7a0fdd7ee0f76d98f4559b5"
+    },
+    {
+      "pull_request": "https://github.com/huggingface/transformers/pull/49544",
+      "source_revision": "9a6284b02bb51d44791f43eb29da4a3c7d815515"
+    }
+  ],
+  "source_paths": [
+    "src/transformers/models/mellum/modular_mellum.py",
+    "src/transformers/modeling_layers.py",
+    "src/transformers/generation/candidate_generator.py",
+    "src/transformers/conversion_mapping.py"
+  ],
+  "implementation_paths": [
+    "src/mlx2/adapters/mellum21.py",
+    "src/mlx2/runtime/models/mellum.py",
+    "tests/test_mellum21_adapter_cpu.py",
+    "tests/test_mellum21_mtp_contract_cpu.py"
+  ],
+  "findings": [
+    "Mellum aliases num_mtp_layers to num_nextn_predict_layers, permits at most one layer, and defaults that layer to sliding attention plus sparse MoE.",
+    "The merged upstream schema stores fusion and post-normalization tensors at mtp.fc, mtp.pre_fc_norm_embedding, mtp.pre_fc_norm_hidden and mtp.norm; its sparse predictor block is source layer 28 and shares the target embedding and LM head.",
+    "The MTP layer concatenates normalized next-token embeddings before normalized target final-norm hidden state, applies the learned 2H-to-H projection, then one private sliding-attention sparse-MoE block and post norm.",
+    "The locally recorded Mellum2.1 artifact declares no MTP layer and contains no MTP tensors, so it cannot load, qualify or select this route.",
+    "The PR index was fresh at 2026-10-15T21:10:33Z: Transformers #49531 and #49544 were merged, but neither publishes trained Mellum MTP weights."
+  ],
+  "modifications": [
+    "Added an adapter-owned exact future-artifact schema for one source-layer-28 sliding-attention sparse-MoE head, including projection order, shared tensors, private cache identity and strict incomplete/wrong-layer refusal.",
+    "Added the one-layer fusion, predictor block, private rotating-KV state, shared target projection and mtp_step component behind the existing ordinary-only adapter gate.",
+    "Kept ordinary decode unchanged and the MTP capability absent. Even a synthetically complete index is refused until trained weights receive real-artifact reference parity and serving rollback/APCv2 validation.",
+    "CPU tests compare fusion against an independent NumPy reference and verify full speculative rollback followed by width-one recomputation preserves exact cache and continuation logits."
+  ],
+  "validation": {
+    "focused_cpu_tests": "22 passed: tests/test_mellum21_adapter_cpu.py and tests/test_mellum21_mtp_contract_cpu.py",
+    "ruff": "passed on both implementation files and both focused test files",
+    "compatible_artifact_found": false,
+    "artifact_search": "All official JetBrains Mellum2/2.1 repositories checked on 2026-10-15 lacked a trained MTP head; no weights were downloaded.",
+    "component_implemented": true,
+    "artifact_load_implemented": false,
+    "serving_route_implemented": false,
+    "qualified": false,
+    "selected": false,
+    "observed_used": false
+  }
+}

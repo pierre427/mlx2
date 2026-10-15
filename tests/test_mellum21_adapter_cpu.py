@@ -12,9 +12,11 @@ from mlx2.adapters.mellum21 import (
     CACHE_LAYOUT,
     MELLUM21_SAMPLING,
     MELLUM21_THINKING,
+    MTP_REQUIRED_TENSORS,
     SOURCE_REVISION,
     Mellum21ThinkingAdapter,
     inspect_artifact,
+    inspect_mtp_schema,
 )
 from mlx2.adapters.registry import inspect_model, resolve_adapter
 from mlx2.contracts import Capability
@@ -134,6 +136,124 @@ def test_topology_and_hybrid_cache_contract(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps(config))
     with pytest.raises(ValueError, match="topology"):
         inspect_artifact(tmp_path)
+
+
+def test_native_mtp_metadata_and_tensor_layout_fail_closed(tmp_path):
+    root = artifact(tmp_path)
+    config = mellum_config()
+    config.update(
+        {
+            "num_mtp_layers": 1,
+            "mtp_layer_types": ["sliding_attention"],
+            "mtp_mlp_layer_types": ["sparse"],
+        }
+    )
+    (root / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="incomplete"):
+        inspect_artifact(root)
+
+    artifact(root)
+    index_path = root / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    index["weight_map"]["model.layers.28.fc.weight"] = "model.safetensors"
+    index_path.write_text(json.dumps(index))
+    with pytest.raises(ValueError, match="not an ordinary Mellum target"):
+        inspect_artifact(root)
+
+
+def test_complete_future_mtp_schema_is_recognized_but_route_stays_disabled(tmp_path):
+    root = artifact(tmp_path)
+    config = mellum_config()
+    config.update(
+        {
+            "num_mtp_layers": 1,
+            "mtp_layer_types": ["sliding_attention"],
+            "mtp_mlp_layer_types": ["sparse"],
+        }
+    )
+    (root / "config.json").write_text(json.dumps(config))
+    index_path = root / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    for name in MTP_REQUIRED_TENSORS:
+        index["weight_map"][name] = "model.safetensors"
+    index_path.write_text(json.dumps(index))
+
+    contract = inspect_mtp_schema(config, index["weight_map"])
+    assert contract == {
+        "schema": "mlx2.mellum21-mtp-artifact.v1",
+        "layers": 1,
+        "source_layer": 28,
+        "attention": "sliding_attention",
+        "mlp": "sparse",
+        "projection_order": ("embedding", "previous_hidden"),
+        "cache": "private_rotating_kv",
+        "post_norm": "mtp.norm",
+        "shared_embedding": True,
+        "shared_lm_head": True,
+        "tensor_count": len(MTP_REQUIRED_TENSORS),
+        "runtime_load_supported": False,
+    }
+    with pytest.raises(ValueError, match="real-artifact parity and rollback"):
+        inspect_artifact(root)
+
+
+def test_future_mtp_schema_rejects_wrong_layer_geometry():
+    config = mellum_config()
+    config["num_nextn_predict_layers"] = 1
+    weights = {
+        key.replace("layers.28", "layers.0"): "model.safetensors"
+        for key in MTP_REQUIRED_TENSORS
+    }
+    with pytest.raises(ValueError, match="incomplete"):
+        inspect_mtp_schema(config, weights)
+
+
+@pytest.mark.parametrize("count", [True, 1.0, "1"])
+def test_future_mtp_schema_rejects_non_integer_layer_count(count):
+    config = mellum_config()
+    config["num_mtp_layers"] = count
+    with pytest.raises(ValueError, match="must be an integer"):
+        inspect_mtp_schema(
+            config, {key: "model.safetensors" for key in MTP_REQUIRED_TENSORS}
+        )
+
+
+@pytest.mark.parametrize("count", [False, 0.0])
+def test_ordinary_mtp_schema_rejects_non_integer_zero_count(count):
+    config = mellum_config()
+    config["num_mtp_layers"] = count
+    with pytest.raises(ValueError, match="must be an integer"):
+        inspect_mtp_schema(config, {})
+
+
+@pytest.mark.parametrize(
+    ("primary", "alias"),
+    [(0, False), (False, 0), (1, 1.0), (1.0, 1)],
+)
+def test_mtp_schema_validates_each_layer_count_alias_type(primary, alias):
+    config = mellum_config()
+    config["num_mtp_layers"] = primary
+    config["num_nextn_predict_layers"] = alias
+    weights = {key: "model.safetensors" for key in MTP_REQUIRED_TENSORS}
+    with pytest.raises(ValueError, match="must be an integer"):
+        inspect_mtp_schema(config, weights if primary == 1 else {})
+
+
+def test_future_mtp_schema_rejects_unrecognized_mtp_tensor():
+    config = mellum_config()
+    config["num_mtp_layers"] = 1
+    weights = {key: "model.safetensors" for key in MTP_REQUIRED_TENSORS}
+    weights["mtp.unreviewed.weight"] = "model.safetensors"
+    with pytest.raises(ValueError, match="unexpected tensor"):
+        inspect_mtp_schema(config, weights)
+
+
+def test_null_native_mtp_count_is_an_ordinary_artifact(tmp_path):
+    root = artifact(tmp_path)
+    config = mellum_config()
+    config["num_mtp_layers"] = None
+    (root / "config.json").write_text(json.dumps(config))
+    assert inspect_artifact(root)["supports_native_mtp"] is False
 
 
 def test_packed_quantized_expert_layout_is_admitted(tmp_path):
