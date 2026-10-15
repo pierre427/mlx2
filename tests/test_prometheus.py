@@ -15,6 +15,7 @@ from mlx2.prometheus import (
     PrometheusBuilder,
     render_engine_metrics,
 )
+import mlx2.server as server_module
 from mlx2.server import handler_for
 
 
@@ -664,6 +665,28 @@ def test_http_metrics_endpoint_uses_prometheus_content_type():
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_non_tenant_remote_operator_scrape_keeps_host_metrics(monkeypatch):
+    # Simulate authorize_admin's non-loopback refusal. Without tenant auth,
+    # /metrics remains the legacy operator endpoint once the HTTP gate admits
+    # the request.
+    monkeypatch.setattr(
+        server_module, "authorize_admin", lambda *_args: {"status": 403}
+    )
+    engine = FakeEngine()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urlopen(f"http://127.0.0.1:{server.server_port}/metrics") as response:
+            payload = response.read().decode()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert "mlx2_num_requests_running" in payload
+    assert engine.tenant_metrics_scoped is False
 
 
 def test_http_metrics_keep_the_route_label_the_server_names():

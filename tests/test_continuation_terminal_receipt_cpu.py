@@ -50,14 +50,20 @@ def full_pool_then_ordinary(monkeypatch):
     generator._round([lane])
     assert lane.generated == 3 and lane.external_rounds == 1
     before = draft.proposal_pool.receipt(lane.session_scope_hash)
+    assert before["ranking_registry"]["session_counts"]
+    # Three-tier learning remains internal; request receipts carry only their
+    # own session evidence, including on an ordinary terminal token.
+    internal = draft.proposal_pool.ranking_registry.receipt(
+        draft.proposal_pool.session, lane.session_scope_hash
+    )
     assert all(
-        before["ranking_registry"][key]
+        internal[key]
         for key in ("global_counts", "model_counts", "session_counts")
     )
     return draft, generator, lane, before
 
 
-def test_terminal_ordinary_receipt_retains_actual_committed_three_tier_counts(
+def test_terminal_ordinary_receipt_retains_only_own_committed_session_counts(
     monkeypatch,
 ):
     draft, generator, lane, before = full_pool_then_ordinary(monkeypatch)
@@ -69,11 +75,11 @@ def test_terminal_ordinary_receipt_retains_actual_committed_three_tier_counts(
         assert final.speculative_receipt["continuation_pool"]["observed_used"]
         ranking = final.speculative_receipt["continuation_pool"]["ranking"]
         assert ranking == before == draft.proposal_pool.receipt(lane.session_scope_hash)
-        assert ranking["feedback_revision"] == 1
-        assert all(
-            ranking["ranking_registry"][key]
-            for key in ("global_counts", "model_counts", "session_counts")
-        )
+        assert draft.proposal_pool.feedback_revision == 1
+        assert ranking["ranking_registry"]["session_counts"]
+        assert "feedback_revision" not in ranking and "source_health" not in ranking
+        assert "global_counts" not in ranking["ranking_registry"]
+        assert "model_counts" not in ranking["ranking_registry"]
         assert not draft.proposal_pool._pending
     finally:
         generator.close()

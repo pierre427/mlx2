@@ -245,6 +245,7 @@ _ENGINE_EVENTS = {
     "apcv2_fanout_boundaries": ("apcv2_fanout", "boundary_reused"),
     "apcv2_store_failures": ("apcv2", "store_failure"),
     "apcv2_store_skipped_approximate": ("apcv2", "store_skipped_approximate"),
+    "apcv2_store_skipped_numerical_schedule": ("apcv2", "store_skipped_numerical_schedule"),
     "apcv2_write_suppressed_requests": ("apcv2", "write_suppressed_request"),
     "apcv2_fanout_write_suppressed": ("apcv2_fanout", "write_suppressed"),
     "apc_interior_checkpoints_captured": ("apcv2_interior", "captured"),
@@ -478,8 +479,10 @@ _ENGINE_EVENTS = {
             "lora_unbind",
             "lora_release",
             "fanout_capsule_close",
+            "usage_reservation_release",
         )
     },
+    "finish_observation_failures": ("request_finish", "observation_failed"),
 }
 # Agent-client wire compatibility (``--agent-compat``) mechanism counters.
 _ENGINE_EVENTS.update(
@@ -1995,7 +1998,102 @@ def _add_power_governor(builder: PrometheusBuilder, engine: Any) -> None:
         builder.counter(metric, help_text, float(counts.get(key) or 0))
 
 
-def render_engine_metrics(engine: Any) -> str:
+def _add_drafter_metrics(
+    builder: PrometheusBuilder, engine: Any, *, tenant_id=None
+) -> None:
+    metrics = getattr(engine, "drafter_metrics", None)
+    if metrics is None or not hasattr(metrics, "prometheus_snapshot"):
+        return
+    data = metrics.prometheus_snapshot(tenant_id=tenant_id)
+    for (drafter, event), value in sorted(data["events"].items()):
+        builder.counter(
+            "mlx2_drafter_rounds_total",
+            "Multi-drafter rounds by bounded provider mechanism and lifecycle outcome.",
+            value,
+            {"drafter": drafter, "outcome": event},
+        )
+    for (drafter, kind), value in sorted(data["tokens"].items()):
+        builder.counter(
+            "mlx2_drafter_tokens_total",
+            "Multi-drafter proposed and target-accepted tokens.",
+            value,
+            {"drafter": drafter, "kind": kind},
+        )
+    for (drafter, kind, depth), value in sorted(data["depths"].items()):
+        builder.counter(
+            "mlx2_drafter_depth_observations_total",
+            "Multi-drafter proposal, acceptance, rejection and selected-rank observations.",
+            value,
+            {"drafter": drafter, "kind": kind, "depth": depth},
+        )
+    drafters = {
+        drafter for drafter, _kind in data["tokens"]
+    } | {drafter for drafter, _event in data["events"]}
+    for drafter in sorted(drafters):
+        proposed = float(data["tokens"].get((drafter, "proposed"), 0))
+        accepted = float(data["tokens"].get((drafter, "accepted"), 0))
+        contributed = float(data["events"].get((drafter, "contributed"), 0))
+        builder.gauge(
+            "mlx2_drafter_acceptance_ratio",
+            "Target-accepted proposal tokens divided by proposed tokens.",
+            accepted / proposed if proposed else 0.0,
+            {"drafter": drafter},
+        )
+        builder.gauge(
+            "mlx2_drafter_average_accepted_depth",
+            "Mean accepted proposal depth over contributing rounds.",
+            accepted / contributed if contributed else 0.0,
+            {"drafter": drafter},
+        )
+        score = float(data["scores"].get((drafter, "sum"), 0.0))
+        observations = float(
+            data["scores"].get((drafter, "observations"), 0)
+        )
+        builder.counter(
+            "mlx2_drafter_score_observations_total",
+            "Ranked winning-path score observations.",
+            observations,
+            {"drafter": drafter},
+        )
+        builder.gauge(
+            "mlx2_drafter_average_selected_score",
+            "Mean lagged-critic score for target-selected paths.",
+            score / observations if observations else 0.0,
+            {"drafter": drafter},
+        )
+    for contributors, value in sorted(data["combinations"].items()):
+        builder.counter(
+            "mlx2_multi_drafter_winning_paths_total",
+            "Target-selected paths by one or multiple agreeing contributors.",
+            value,
+            {"contributors": contributors},
+        )
+    for resource, value in sorted(data["budget"].items()):
+        builder.counter(
+            "mlx2_multi_drafter_budget_units_total",
+            "Cumulative lane and tile budget units observed at terminal receipts.",
+            value,
+            {"resource": resource},
+        )
+    for drafter, current in sorted(data["states"].items()):
+        for state in ("active", "idle", "parked"):
+            builder.gauge(
+                "mlx2_drafter_latch_state",
+                "Most recently observed provider latch state in this scrape scope.",
+                int(current == state),
+                {"drafter": drafter, "state": state},
+            )
+    if tenant_id is None:
+        builder.counter(
+            "mlx2_drafter_metric_tenant_evictions_total",
+            "Bounded tenant metric accumulators evicted from memory.",
+            int(data["evictions"]),
+        )
+
+
+def render_engine_metrics(
+    engine: Any, *, tenant_id=None, include_request_metrics=True,
+) -> str:
     """Render one non-destructive scrape from host-side engine snapshots."""
 
     snapshot, counts, queue_depth = _copy_engine_state(engine)
@@ -2032,6 +2130,16 @@ def render_engine_metrics(engine: Any) -> str:
         "Whether the serving engine has published a ready snapshot.",
         int(snapshot.get("state") == "ready"),
     )
+    if not include_request_metrics:
+        # No tenant identifier is guaranteed unused in legacy header mode.
+        # Public scrapes explicitly omit request-derived telemetry instead.
+        return builder.render()
+    if tenant_id is not None:
+        # An authenticated tenant scrape exposes static route identity and only
+        # that tenant's request-derived drafter aggregates.  Host, scheduler,
+        # cache, HTTP and other tenants' activity remain operator-only.
+        _add_drafter_metrics(builder, engine, tenant_id=tenant_id)
+        return builder.render()
     service_state = str(snapshot.get("service_state") or "serving")
     for state in ("serving", "draining", "quiesced", "suspended"):
         builder.gauge(
@@ -2085,6 +2193,7 @@ def render_engine_metrics(engine: Any) -> str:
         1,
     )
     _add_batch_metrics(builder, engine, queue_depth)
+    _add_drafter_metrics(builder, engine)
     _add_http_metrics(builder, engine)
     _add_capabilities(builder, snapshot)
     resources = getattr(engine, "api_resources", None)

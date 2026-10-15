@@ -20,7 +20,16 @@ from threading import RLock
 
 VERIFICATION_CONTRACT = "target_draw_then_prefix_match"
 MECHANISMS = frozenset(
-    {"prompt_lookup", "native_mtp", "xpress", "lilicorr", "dflash2", "dpara"}
+    {
+        "prompt_lookup",
+        "native_mtp",
+        "xpress",
+        "lilicorr",
+        "dflash2",
+        "dflash2_fold",
+        "dspark",
+        "dpara",
+    }
 )
 
 
@@ -82,6 +91,9 @@ class ProposalSource:
     loaded: bool = True
     token_path_support: bool = True
     max_depth: int = 15
+    lane_cost: int = 1
+    tile_rows: int = 1
+    fallback: bool = False
 
     def __post_init__(self):
         _name(self.source_id, "source_id")
@@ -96,6 +108,10 @@ class ProposalSource:
             _pin(getattr(self, field), field)
         _positive(self.vocab_size, "vocab_size")
         _positive(self.max_depth, "max_depth")
+        _positive(self.lane_cost, "lane_cost")
+        _positive(self.tile_rows, "tile_rows")
+        if type(self.fallback) is not bool:
+            raise ValueError("source fallback flag must be boolean")
         if type(self.loaded) is not bool or type(self.token_path_support) is not bool:
             raise ValueError("source admission flags must be boolean")
 
@@ -637,6 +653,7 @@ class ProposalPool:
         self._request_tickets = {}
         self._last_committed = OrderedDict()
         self._feedback_revision = 0
+        self._source_health = {}
         for source in sources:
             if not isinstance(source, ProposalSource):
                 raise TypeError("ProposalSource required")
@@ -657,6 +674,16 @@ class ProposalPool:
             if source.max_depth > max_depth:
                 raise ValueError("source depth exceeds pool bound")
             self.sources[source.source_id] = source
+            self._source_health[source.source_id] = {
+                "rounds": 0,
+                "proposed": 0,
+                "accepted": 0,
+                "zero": 0,
+                "partial": 0,
+                "full": 0,
+                "low_streak": 0,
+                "parked_until": 0,
+            }
             if len(self.sources) > 32:
                 raise ValueError("too many loaded proposal sources")
         if len(self.sources) > 32:
@@ -715,6 +742,50 @@ class ProposalPool:
             if observed
             else "declared_neutral_prior",
         )
+
+    def source_prediction(self, source_id, scope, depth):
+        """Lagged committed-prefix estimate for pre-generation admission.
+
+        This deliberately ignores the current round's private provider score.
+        It is safe to call before any provider performs stochastic work.
+        """
+        source = self.sources.get(source_id)
+        if source is None:
+            raise ValueError("unknown proposal source")
+        _pin(scope, "session_scope_hash")
+        if type(depth) is not int or not 1 <= depth <= min(
+            source.max_depth, self.max_depth
+        ):
+            raise ValueError("source prediction depth is outside its bound")
+        survival = 1.0
+        expected = 0.0
+        probabilities = []
+        observed = 0
+        for position in range(depth):
+            probability, count = self.ranking_registry.predict(
+                self.session, source, scope, position, None
+            )
+            probabilities.append(probability)
+            survival *= probability
+            expected += survival
+            observed += count
+        return {
+            "source_id": source_id,
+            "mechanism": source.mechanism,
+            "depth": depth,
+            "conditional_acceptance": tuple(probabilities),
+            "expected_accepted_tokens": expected,
+            "observations": observed,
+            "lane_cost": source.lane_cost,
+            "tile_rows": source.tile_rows,
+            "fallback": source.fallback,
+            "health": dict(self._source_health[source_id]),
+        }
+
+    def source_health(self, source_id):
+        if source_id not in self.sources:
+            raise ValueError("unknown proposal source")
+        return dict(self._source_health[source_id])
 
     def select(self, paths, round, *, limit=15):
         with self.ranking_registry.lock:
@@ -965,6 +1036,39 @@ class ProposalPool:
         for source_id, cost in costs.items():
             total, count, _units = self._costs.get(source_id, (0.0, 0, cost_units))
             self._costs[source_id] = (total + float(cost), count + 1, cost_units)
+        # Source health is admission evidence derived only from
+        # this committed teacher prefix.  A common candidate prefix is counted
+        # once per source, matching the critic's de-duplication contract.
+        per_source = {}
+        for ranked in selection.paths:
+            for path in ranked.contributors:
+                entry = per_source.setdefault(
+                    path.source_id, {"proposed": 0, "accepted": 0}
+                )
+                proposed = min(len(path.tokens), len(teacher_tokens))
+                accepted = 0
+                for token, teacher in zip(path.tokens, teacher_tokens):
+                    if token != teacher:
+                        break
+                    accepted += 1
+                if proposed > entry["proposed"] or (
+                    proposed == entry["proposed"]
+                    and accepted > entry["accepted"]
+                ):
+                    entry.update(proposed=proposed, accepted=accepted)
+        for source_id, observed in per_source.items():
+            health = self._source_health[source_id]
+            proposed = observed["proposed"]
+            accepted = min(observed["accepted"], proposed)
+            health["rounds"] += 1
+            health["proposed"] += proposed
+            health["accepted"] += accepted
+            if accepted == 0:
+                health["zero"] += 1
+            elif accepted == proposed:
+                health["full"] += 1
+            else:
+                health["partial"] += 1
         registry_events = {}
         for (source_id, position, prefix, token), (label, buckets) in labels.items():
             source = self.sources[source_id]
@@ -1000,6 +1104,28 @@ class ProposalPool:
         )
 
     def receipt(self, session_scope_hash=None):
+        """Expose scoped request evidence, or unscoped operator diagnostics.
+
+        Shared priors and source health still inform internal admission. Their
+        counts, revisions and retention activity are not caller-owned telemetry.
+        """
+        scope = self.session_scope_hash if session_scope_hash is None else session_scope_hash
+        if scope is not None:
+            _pin(scope, "session_scope_hash")
+        with self.ranking_registry.lock:
+            receipt = self._receipt_locked(scope)
+            receipt["telemetry_scope"] = "session" if scope is not None else "operator"
+            if scope is not None:
+                for field in ("source_health", "feedback_revision", "ranking_revision"):
+                    receipt.pop(field)
+                for field in (
+                    "global_counts", "model_counts", "revision", "retained_models",
+                    "retained_sessions", "evictions",
+                ):
+                    receipt["ranking_registry"].pop(field)
+            return receipt
+
+    def _receipt_locked(self, scope):
         return {
             "session": asdict(self.session),
             "sources": [asdict(source) for source in self.sources.values()],
@@ -1015,9 +1141,13 @@ class ProposalPool:
             "request_replay_guard_bound": self.max_requests,
             "confidence": "same_source_lagged_label_calibration; never joint_q",
             "provider_scores": "same_source_ordinals_only; cold_ties_interleave_sources",
+            "source_health": {
+                source_id: dict(health)
+                for source_id, health in sorted(self._source_health.items())
+            },
             "source_admission_authority": "adapter_asserted_loaded_session_identity",
             "ranking_registry": self.ranking_registry.receipt(
-                self.session, session_scope_hash or self.session_scope_hash
+                self.session, scope
             ),
             "qualified": False,
             "performance_claim": False,

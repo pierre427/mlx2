@@ -10,6 +10,7 @@ from mlx2.runtime.continuation_strategy import (
     ContinuationStrategy,
     LongestFirstExactPrefix,
 )
+from mlx2.runtime.proposal_providers import ContinuationContext
 
 
 def test_qwen36_owns_measured_prefill_step_instead_of_dense_autoscale():
@@ -84,3 +85,55 @@ def test_dflash2_is_a_bound_complete_path_source_not_target_state():
     assert source.mechanism == "dflash2"
     assert [path.tokens for path in paths] == [(10, 11, 12), (20, 21, 22)]
     assert all(path.confidence_features == (None, None, None) for path in paths)
+
+
+def test_fold_keeps_dflash2_complete_path_protocol_with_distinct_identity():
+    class Draft:
+        proposal_distribution = "categorical_distribution"
+        fold_policy = SimpleNamespace(window=4096)
+        config = SimpleNamespace(block_size=8)
+
+        def propose_tree(self, *_args, **_kwargs):
+            return ([10, 11], [-1, 0]), None
+
+    source = ExternalContinuationSource(Draft())
+    paths = source(
+        SimpleNamespace(
+            depth=2,
+            anchor=17,
+            pending_features=None,
+            draft_cache=[],
+        ),
+        limit=8,
+    )
+    assert source.mechanism == "dflash2_fold"
+    assert [path.tokens for path in paths] == [(10, 11)]
+
+
+def test_dspark_complete_path_bridge_is_a_supported_provider_contract():
+    class RenamedDSparkWrapper:
+        proposal_distribution = "deterministic_point_mass"
+        continuation_protocol = "dspark"
+        config = SimpleNamespace(block_size=8)
+
+        @staticmethod
+        def propose_complete_paths(context, limit):
+            context.draft_cache.append("private-mutation")
+            return [
+                {
+                    "tokens": [3, 4, 5],
+                    "confidence_features": [0.1, 0.2, 0.3],
+                    "ranking_score": 0.75,
+                }
+            ][:limit]
+
+    source = ExternalContinuationSource(RenamedDSparkWrapper())
+    shared_cache = []
+    paths = source(
+        ContinuationContext((), 17, 3, shared_cache, None),
+        limit=5,
+    )
+    assert source.mechanism == "dspark"
+    assert paths[0].tokens == (3, 4, 5)
+    assert paths[0].ranking_convention == "dspark_complete_path_private_proxy"
+    assert shared_cache == []

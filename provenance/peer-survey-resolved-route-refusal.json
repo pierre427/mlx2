@@ -1,0 +1,38 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "Refuse incompatible approximate KV against the resolved serving route before startup",
+  "recorded_at": "2026-10-15",
+  "origin": "Original MLX2 integration repair; no external implementation copied.",
+  "license": "Apache-2.0",
+  "source_repository": "ssh://git@<private-git-host>/user/mlx2.git",
+  "source_revision": "44b52d0f64dc99567fed2647d65579af00e5514c",
+  "source_paths": [
+    "src/mlx2/server.py:resolve_route_selection",
+    "src/mlx2/server.py:approximate_kv_mode",
+    "src/mlx2/server.py:main"
+  ],
+  "modifications": [
+    "Pass the resolved route into approximate-KV compatibility validation so policy-selected single/multiple drafters and default PLD get the same early refusal as explicit flags.",
+    "Preserve explicit ordinary and native-MTP composition contracts; no model loading or numerical behavior changed."
+  ],
+  "validation": {
+    "pre_fix": "All3 real CLI cases reached the forbidden server-bind/model-allocation boundary instead of rejecting the incompatible route.",
+    "post_fix": {
+      "passed": 60,
+      "seconds": 17.46,
+      "modules": [
+        "tests/test_peer_resolved_route_refusal_cpu.py",
+        "tests/test_approximate_kv_serving.py",
+        "tests/test_approximate_kv_mtp.py",
+        "tests/test_default_routes.py"
+      ]
+    },
+    "gpu_used": false,
+    "formal_qualification": false
+  },
+  "integration_followup": {
+    "revision": "9d2ec419cad2ecb7a3cc05e543e3307df513fc4a",
+    "scope": "Incoming main now requires explicit external-draft selection and propagates resolved prompt lookup into its flag. Keep resolved-route validation as a defensive contract; align the policy fixtures with explicit intent and add the new --draft-model path. Historical pre-fix results above refer to44b52d0f6.",
+    "focused_passed": 67
+  }
+}

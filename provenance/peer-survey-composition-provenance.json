@@ -1,0 +1,20 @@
+{
+  "source_repository": "mlx2 local reviewed integration branch branch",
+  "source_revision": "6e6432f530562f0c7ba8041735ce95950dc4ee40",
+  "source_paths": [
+    "src/mlx2/runtime/proposal_composition.py",
+    "tests/test_proposal_composition_cpu.py"
+  ],
+  "license": "Original mlx2 code; repository license",
+  "relationship": "Reconciled local retained repairs, not a wholesale branch merge.",
+  "destination_paths": [
+    "src/mlx2/runtime/proposal_composition.py",
+    "tests/test_proposal_composition_cpu.py"
+  ],
+  "modifications": [
+    "Mine source-role/range/content-bound trusted prompt-copy evidence and ambiguity rejection.",
+    "Age all lane-owned proposal score buckets and validate feedback before publication.",
+    "Preserve current main tests and defaults; routes without executor-owned source ranges continue exact verification."
+  ],
+  "validation": "86 focused proposal-composition CPU tests passed; unknown source ranges stay exactly audited. No GPU or qualification claim."
+}

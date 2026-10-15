@@ -1,0 +1,90 @@
+{
+  "implementation_kind": "original mlx2 host arbitration, adapter plumbing and telemetry",
+  "source_repository": "mlx2",
+  "source_revision": "204046b44c8fabf386ceff408bb9d12bbe422fbc",
+  "license": "Apache-2.0; no upstream implementation copied",
+  "source_paths": [
+    "src/mlx2/runtime/proposal_pool.py",
+    "src/mlx2/runtime/proposal_providers.py",
+    "src/mlx2/runtime/drafter_portfolio.py",
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/adapters/proposal_path_sources.py",
+    "src/mlx2/adapters/standard_decoder.py",
+    "src/mlx2/drafter_metrics.py",
+    "src/mlx2/prometheus.py",
+    "src/mlx2/server.py",
+    "src/mlx2/serving.py"
+  ],
+  "conceptual_references": [
+    {
+      "path": "provenance/proposal-pool.json",
+      "implementation": "Reuses mlx2's existing target-authoritative complete-path ranking, deduplication and committed-prefix critic."
+    },
+    {
+      "path": "src/mlx2/runtime/drafters/fold.py",
+      "implementation": "FOLD remains a DFlash2 context-retention policy and is exposed as the distinct dflash2_fold provider identity; it is not presented as an independent proposal law."
+    },
+    {
+      "path": "src/mlx2/adapters/lfm25_vl.py",
+      "implementation": "The existing offline DSpark candidate informed a fail-closed complete-path provider bridge. The offline mlx-vlm cache protocol is not relabelled as an mlx2 live serving route."
+    }
+  ],
+  "modifications": [
+    "Added a revision-bound portfolio over one to 32 resident adapter-owned drafters with private flattened cache slices and a union of target layer taps.",
+    "Added a selectable draft_models policy for standard Qwen3 XPress and LiLiCorr artifacts; one or several entries use the same continuation-pool verifier.",
+    "Added lagged committed-evidence admission bounded by active providers, lane slots and target tile rows. Current private drafter scores never control whether their own work runs.",
+    "PLD is fallback-only while model drafters are useful; low-acceptance heads park and periodically re-probe. If parked heads and PLD both produce no path, one bounded resident re-probe preserves serving availability.",
+    "Target-selected identical paths retain all contributing providers. Runtime receipts count zero, partial and full acceptance, proposed and accepted depth, first rejection, selected rank, score observations, winning contributor combinations and admission pressure.",
+    "Added bounded tenant-owned terminal-receipt aggregation and Prometheus output. Authenticated tenant views contain only their drafter aggregates and static route identity; host, scheduler, HTTP, cache, eviction and other-tenant activity remain operator-only.",
+    "Made prompt lookup the implicit route for adapters that declare it and supplied the existing cost-aware PLD latch as the default policy. Explicit ordinary decode remains available.",
+    "Preserved single-drafter RNG behavior and supplied every later portfolio provider a clone of the same starting request RNG state, avoiding provider-order consumption."
+  ],
+  "boundaries": {
+    "teacher_authority": "The processed target law selects and verifies output. Provider scores rank complete candidate paths only.",
+    "fold": "Implemented provider identity and existing live DFlash2 FOLD mechanism; no standalone FOLD artifact is invented.",
+    "dspark": "The complete-path provider contract is implemented. The existing LFM2.5-VL artifact remains offline/unqualified until an adapter-owned mlx2 cache bridge is selected and exercised.",
+    "default": "Prompt lookup defaults on only for adapters declaring Capability.PROMPT_LOOKUP. Native MTP defaults remain native and external artifacts remain operator-selected.",
+    "qualification": "Focused CPU protocol evidence only. No real artifact, GPU, throughput, quality or route qualification is claimed.",
+    "privacy": "No request, session, API key, tenant name, model path or token text is used as a Prometheus label."
+  },
+  "validation": "391 focused CPU tests passed in the final post-review run across portfolio/continuation/metrics/default-route, FOLD/Qwen3.8, execution-policy, tenant-auth, usage and terminal-receipt suites. They exercise one/five provider facades, RNG isolation, lane/tile admission, enabled and disabled PLD fallback, low-acceptance park/re-probe, real tiny two-provider Qwen3 loading and generation, explicit FOLD/DSpark provider identities, private DSpark cache state, partial-acceptance accounting, monotonic operator telemetry, current latch-state transitions, tenant-isolated Prometheus output, existing complete-path serving/APCv2 behavior and default route resolution. Full preflight and GPU execution were explicitly excluded.",
+  "implemented": true,
+  "qualified": false,
+  "selected": true,
+  "observed_used": false,
+  "performance_claim": false,
+  "integration_repairs": [
+    {
+      "implementation_kind": "original mlx2 correctness repair",
+      "source_repository": "mlx2",
+      "source_revision": "588d537775c8a67c14f54fb4321dbea2dd073b80",
+      "license": "Apache-2.0; no external implementation copied",
+      "source_paths": [
+        "src/mlx2/runtime/drafter_portfolio.py",
+        "src/mlx2/runtime/proposal_providers.py",
+        "src/mlx2/runtime/external_speculative.py",
+        "tests/test_peer_portfolio_transactions_cpu.py",
+        "tests/test_external_dflash2_cpu.py"
+      ],
+      "modifications": [
+        "Reserve active-provider, lane-slot and tile-row budget before invoking runtime fallback or resident re-probes; respect pld_fallback=False and count attempted work even when a provider emits no complete path.",
+        "Snapshot bounded admission round, parking and request-LRU state at the outer external executor boundary; restore it after failed provider or target execution, including request eviction, before retry.",
+        "Preserve the existing target-authoritative verifier, ordinary fallback, and mandatory public draft-cache advance. Admission bounds additional complete-path provider work; no saved backbone compute is claimed.",
+        "Reconciled the external CLI fixture with main 9d2ec419cad2ecb7a3cc05e543e3307df513fc4a: policy drafters require explicit --external-draft. The test retains refusal without that flag, positive external-route selection with the flag, ordinary refusal and incompatible flag checks. No server behavior was changed by this repair.",
+        "Isolated the neutral-prior admission test fixtures with a temporary per-test ranking registry, restoring the original process registry afterward. No production learning state is cleared or behavior changed."
+      ],
+      "validation": {
+        "new_regressions": "All 9 reachable tiny-model wrapper/executor cases failed before repair and passed afterward: both lane/tile over-budget re-probes; disabled PLD; exhausted provider/lane/tile fallback budgets; successful fallback accounting; provider and later-B2-target rollback preserving parking, LRU owners, RNG and committed state with a successful retry.",
+        "integration": "258 passed, 1 optional Metal skip across 15 focused CPU modules covering portfolio policy/identity, real continuation and adaptive/external executor paths, state recovery, terminal receipts, checkpoint continuation and route selection.",
+        "lint": "New test and planner/provider modules pass Ruff; external_speculative.py has the same 15 baseline Ruff findings outside the repair hunk. git diff --check passes.",
+        "device": "CPU only, MLX2_PREFLIGHT_CPU_ONLY=1, primary virtualenv with PYTHONPATH bound to this worktree src.",
+        "shared_prior_negative_control": "On the rebased 63c1eb69be59ab322aaf39c3e7e965e92e122f11 integration, seeding 100 committed XPress rejections at both proposal positions reproduced exactly four order-dependent fixture failures: the three exhausted-budget PLD cases and successful-fallback accounting. Temporary per-test registry isolation made all 9 cases pass under the same seeded prior, while asserting the original registry object and learned counts remained unchanged.",
+        "post_rebase_integration": "337 passed, 1 optional Metal skip across 14 portfolio, FOLD identity, continuation, prefix-dedup, composition, route-default and external executor modules; 3 resolved-route refusal cases passed separately. Incoming explicit DSpark protocol/private-cache behavior, admission=None identity compatibility, disabled-PLD guard and existing numerical/transaction repairs remain intact. Ruff on the edited fixture and git diff --check pass. CPU only.",
+        "explicit_route_merge": "After integration of main 9d2ec419cad2ecb7a3cc05e543e3307df513fc4a, 133 passed and 1 optional Metal case skipped across external DFlash2, two-provider prefix dedup, portfolio transaction, FOLD identity and planner tests. The merged dedup fixture retains both admitted XPress contributors, exact cache/RNG checks and scoped/internal privacy assertions. CPU only; git diff --check and focused fixture Ruff checks pass."
+      },
+      "qualified": false,
+      "gpu_validation": false,
+      "performance_claim": false
+    }
+  ]
+}

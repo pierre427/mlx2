@@ -191,7 +191,12 @@ def test_adapter_default_falls_back_to_ordinary_for_artifact_without_mtp_head():
 
 
 def test_no_flag_uses_adapter_default_and_explicit_flags_win():
-    from mlx2.server import build_parser, resolve_route_selection
+    from mlx2.server import (
+        DEFAULT_PROMPT_LOOKUP_POLICY,
+        build_parser,
+        resolve_execution_policy_defaults,
+        resolve_route_selection,
+    )
 
     parser = build_parser()
     mtp = _resolution(Qwen3827BAdapter, QWEN38_27B)
@@ -204,7 +209,32 @@ def test_no_flag_uses_adapter_default_and_explicit_flags_win():
     selected = resolve_route_selection(
         parser.parse_args(["--model", "fixture"]), None, ordinary
     )
-    assert (selected.route, selected.source) == ("ordinary", "adapter_default")
+    assert (selected.route, selected.source) == (
+        "prompt_lookup",
+        "capability_default",
+    )
+    assert resolve_execution_policy_defaults(None, selected, ordinary)[
+        "prompt_lookup"
+    ] == DEFAULT_PROMPT_LOOKUP_POLICY
+
+    external_policy = {
+        "draft_models": [{"id": "one", "path": "fixture-draft"}]
+    }
+    with pytest.raises(ValueError, match=r"requires --external-draft"):
+        resolve_route_selection(
+            parser.parse_args(["--model", "fixture"]),
+            external_policy,
+            ordinary,
+        )
+
+    from mlx2.serving import ServingEngine
+
+    ServingEngine.validate_arguments(
+        "unused", route_selection_source="capability_default"
+    )
+    ServingEngine.validate_arguments(
+        "unused", route_selection_source="execution_policy_default"
+    )
 
     for flag, route in (
         ("--ordinary", "ordinary"),
@@ -226,6 +256,74 @@ def test_no_flag_uses_adapter_default_and_explicit_flags_win():
         "external_draft",
         "explicit_flag",
     )
+
+
+def test_external_drafters_are_invocation_selected_and_repeatable():
+    from mlx2.server import (
+        build_parser,
+        merge_invocation_draft_models,
+        resolve_route_selection,
+        validate_invocation_draft_adapter,
+    )
+    from mlx2.adapters.standard_decoder import StandardDecoderAdapter
+
+    parser = build_parser()
+    with pytest.raises(ValueError, match=r"requires --external-draft"):
+        merge_invocation_draft_models(
+            parser.parse_args(
+                ["--model", "fixture", "--draft-model", "/models/lilicorr"]
+            ),
+            None,
+        )
+
+    args = parser.parse_args(
+        [
+            "--model",
+            "fixture",
+            "--external-draft",
+            "--draft-model",
+            "lilicorr=/models/lilicorr",
+            "--draft-model",
+            "dspark=/models/dspark",
+        ]
+    )
+    policy = merge_invocation_draft_models(
+        args,
+        {"num_draft": 4, "continuation_pool": {"limit": 8}},
+    )
+    assert policy == {
+        "num_draft": 4,
+        "continuation_pool": {"limit": 8},
+        "draft_models": [
+            {"id": "lilicorr", "path": "/models/lilicorr"},
+            {"id": "dspark", "path": "/models/dspark"},
+        ],
+    }
+    selected = resolve_route_selection(args, policy)
+    assert (selected.route, selected.source) == ("external_draft", "explicit_flag")
+    validate_invocation_draft_adapter(
+        args, type("Resolution", (), {"adapter_type": StandardDecoderAdapter})()
+    )
+    with pytest.raises(ValueError, match="singular draft_model"):
+        validate_invocation_draft_adapter(
+            args, _resolution(MuseGlimmerAdapter, MUSE_GLIMMER)
+        )
+
+    with pytest.raises(ValueError, match=r"cannot be combined"):
+        merge_invocation_draft_models(args, {"draft_model": "/already/named"})
+    duplicate = parser.parse_args(
+        [
+            "--model",
+            "fixture",
+            "--external-draft",
+            "--draft-model",
+            "same=/one",
+            "--draft-model",
+            "same=/two",
+        ]
+    )
+    with pytest.raises(ValueError, match="unique"):
+        merge_invocation_draft_models(duplicate, None)
 
 
 def test_explicit_native_mtp_fails_clearly_for_non_mtp_adapter():
@@ -275,6 +373,22 @@ def test_qualification_matches_resolved_route_not_selection_spelling(tmp_path):
         name="ordinary",
     )
     assert route.profile.name == "ordinary"
+
+    with pytest.raises(ValueError, match=r"pass --ordinary"):
+        load_qualified_route(
+            path,
+            runtime=record["runtime"],
+            artifact=record["artifact"],
+            settings={
+                **defaulted,
+                "route": "prompt_lookup",
+                "speculation": "prompt_lookup",
+                "route_selection_source": "capability_default",
+                "prompt_lookup": {"cost_aware_admission": True},
+            },
+            descriptor=QWEN4_FLASH_NEXT,
+            name="prompt-lookup",
+        )
 
     with pytest.raises(ValueError, match="serving settings"):
         load_qualified_route(

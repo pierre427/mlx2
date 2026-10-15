@@ -143,6 +143,15 @@ def test_pld_enumerates_multiple_committed_matching_continuations():
     assert ctx.history == (1, 2, 3, 1, 4, 5, 1, 6, 7)
 
 
+def test_unconfigured_admission_does_not_change_v2_policy_identity():
+    policy = ContinuationPoolPolicy.from_value({"ngram_min": 1, "ngram_max": 1})
+    assert "admission" not in policy.as_dict()
+    configured = ContinuationPoolPolicy.from_value(
+        {"admission": {"pld_fallback": False}}
+    )
+    assert configured.as_dict()["admission"] == {"pld_fallback": False}
+
+
 def wrapped(model, draft, policy=None):
     return build_continuation_drafter(
         model,
@@ -230,6 +239,48 @@ def test_wrong_request_context_refused_before_backbone_cache_advance():
             ],
         )
     assert draft.stats["backbone_blocks"] == 0 and ctx.draft_cache[0].offset == 0
+
+
+def test_runtime_honors_disabled_pld_fallback():
+    from mlx2.runtime.external_speculative import DraftUnavailable
+
+    model, draft = pair("xpress")
+    wrapper = wrapped(
+        model,
+        draft,
+        {
+            "ngram_min": 1,
+            "ngram_max": 1,
+            "admission": {"pld_fallback": False},
+        },
+    )
+    wrapper.providers["external"] = lambda _context, _limit: []
+    history, anchor = [1, 2, 1, 3], 1
+    hidden = model.prefill_body(
+        mx.array([history]), model.make_cache(), draft.config.target_layer_ids
+    )
+    identity = {
+        "request_id": "pld-disabled",
+        "round_id": 0,
+        "context_revision": continuation_context_revision(
+            wrapper.session.session_revision, history, anchor
+        ),
+    }
+    pld_context = ContinuationContext(
+        tuple(history), anchor, 2, draft.make_cache(), hidden
+    )
+    assert wrapper.providers["prompt_lookup"](pld_context, 15)
+    with pytest.raises(DraftUnavailable, match="no valid paths"):
+        wrapper.draft_distributions(
+            [anchor],
+            hidden,
+            draft.make_cache(),
+            2,
+            [None],
+            [0],
+            processor_histories=[history],
+            proposal_contexts=[identity],
+        )
 
 
 def test_shared_adapter_pool_feedback_uses_final_binding_and_closes(tmp_path):

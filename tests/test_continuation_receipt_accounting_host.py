@@ -137,6 +137,45 @@ def test_pool_round_does_not_precommit_the_pruned_sibling_counter():
     assert len(scheduler_keys) == 1
 
 
+def test_provider_stats_use_verified_depth_and_credit_each_source_once():
+    record_method, _node = _generator_method("_record_continuation_round")
+    source = SimpleNamespace(mechanism="lilicorr")
+    generator = SimpleNamespace(
+        draft=SimpleNamespace(source_records={"resident": source})
+    )
+    contributor = SimpleNamespace(source_id="resident")
+    chosen = SimpleNamespace(
+        tokens=(1, 2, 3, 4, 5),
+        contributors=(contributor, contributor),
+        representative=contributor,
+        score=0.75,
+    )
+    selection = SimpleNamespace(paths=(chosen,))
+    block = SimpleNamespace(
+        continuation_admission={"admitted": ("resident",), "parked": ()},
+        continuation_slate=({"rank": 0},),
+    )
+    lane = SimpleNamespace()
+
+    record_method(
+        generator,
+        lane,
+        block,
+        selection,
+        admitted_width=1,
+        selected_index=0,
+        proposed_depth=3,
+        accepted=2,
+    )
+    stats = lane.continuation_provider_stats["resident"]
+    assert stats["contributed_rounds"] == 1
+    assert stats["proposed_tokens"] == 3
+    assert stats["accepted_tokens"] == 2
+    assert stats["partial_rounds"] == 1
+    assert stats["proposal_depths"] == {"3": 1}
+    assert stats["first_rejected_positions"] == {"2": 1}
+
+
 def test_permanent_ordinary_fallback_retains_continuation_history():
     """The final target-only receipt stays authoritative after pool execution."""
     generator = _generator_class()

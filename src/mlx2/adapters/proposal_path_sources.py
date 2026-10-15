@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import copy
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -80,12 +80,20 @@ class ExternalContinuationSource:
             raise ValueError(
                 "complete external continuations require deterministic or tree head"
             )
-        if hasattr(draft, "xpress_head"):
+        if getattr(draft, "continuation_protocol", None) == "dspark" and callable(
+            getattr(draft, "propose_complete_paths", None)
+        ):
+            self.mechanism = "dspark"
+        elif hasattr(draft, "xpress_head"):
             self.mechanism = "xpress"
         elif hasattr(draft, "lilicorr"):
             self.mechanism = "lilicorr"
         elif callable(getattr(draft, "propose_tree", None)):
-            self.mechanism = "dflash2"
+            self.mechanism = (
+                "dflash2_fold"
+                if getattr(draft, "fold_policy", None) is not None
+                else "dflash2"
+            )
         else:
             raise ValueError(
                 "loaded external head has no supported continuation protocol"
@@ -98,7 +106,7 @@ class ExternalContinuationSource:
             raise ValueError("continuation depth exceeds the loaded trained block")
         cache = copy.deepcopy(context.draft_cache)
         pending = context.pending_features
-        if self.mechanism == "dflash2":
+        if self.mechanism in {"dflash2", "dflash2_fold"}:
             from ..runtime.drafters.dflash_tree import tree_paths
 
             nodes = 15
@@ -129,6 +137,35 @@ class ExternalContinuationSource:
                 if len(result) >= limit:
                     break
             return result
+        if self.mechanism == "dspark":
+            private_context = replace(context, draft_cache=cache)
+            result = draft.propose_complete_paths(private_context, limit)
+            if not isinstance(result, (list, tuple)):
+                raise ValueError("DSpark complete-path provider returned invalid data")
+            normalized = []
+            for ordinal, item in enumerate(result[:limit]):
+                if isinstance(item, SourceContinuation):
+                    candidate = item
+                elif isinstance(item, dict):
+                    tokens = tuple(item.get("tokens") or ())
+                    candidate = SourceContinuation(
+                        tokens,
+                        tuple(item.get("confidence_features") or (None,) * len(tokens)),
+                        float(item.get("ranking_score", -ordinal)),
+                        str(
+                            item.get(
+                                "ranking_convention",
+                                "dspark_complete_path_private_proxy",
+                            )
+                        ),
+                    )
+                else:
+                    raise TypeError(
+                        "DSpark complete-path provider returned invalid candidate"
+                    )
+                if len(candidate.tokens) == context.depth:
+                    normalized.append(candidate)
+            return normalized
         import mlx.core as mx
 
         anchor = mx.array([context.anchor], mx.int32)
@@ -374,9 +411,19 @@ def build_continuation_drafter(
         PromptLookupContinuationSource,
     )
 
+    from ..runtime.drafter_portfolio import (
+        DrafterPortfolio,
+        PortfolioContinuationSource,
+    )
+
     policy = dict(policy)
     if "sources" not in policy:
-        policy["sources"] = ["external", "prompt_lookup"]
+        policy["sources"] = (
+            [item.provider_id for item in draft.providers]
+            if isinstance(draft, DrafterPortfolio)
+            else ["external"]
+        )
+        policy["sources"].append("prompt_lookup")
         if getattr(target, "mtp", None) is not None:
             policy["sources"].append("native_mtp")
     parsed = ContinuationPoolPolicy.from_value(policy)
@@ -384,18 +431,47 @@ def build_continuation_drafter(
         session_revision, target_revision, tokenizer_revision, draft.config.vocab_size
     )
     providers, records = {}, {}
+    portfolio_records = (
+        {item.provider_id: item for item in draft.providers}
+        if isinstance(draft, DrafterPortfolio)
+        else {}
+    )
     for name in parsed.sources:
-        if name == "external":
+        if name in portfolio_records:
+            resident = portfolio_records[name]
+            provider = PortfolioContinuationSource(
+                draft, name, ExternalContinuationSource(resident.draft)
+            )
+            revision = resident.revision
+            lane_cost = resident.lane_cost
+            tile_rows = resident.tile_rows
+            fallback = resident.fallback
+            max_depth = resident.draft.config.block_size - 1
+        elif name == "external":
             provider = ExternalContinuationSource(draft)
             revision = draft_revision
+            lane_cost = tile_rows = 1
+            fallback = False
+            max_depth = draft.config.block_size - 1
         elif name == "native_mtp":
             provider = NativeMTPContinuationSource(
                 target, max_history=parsed.mtp_max_history
             )
             revision = target_revision
+            lane_cost = tile_rows = 1
+            fallback = False
+            max_depth = draft.config.block_size - 1
         else:
+            if name != "prompt_lookup":
+                raise ValueError(
+                    f"continuation source {name!r} is unavailable because it is "
+                    "not resident in this route"
+                )
             provider = PromptLookupContinuationSource(parsed)
             revision = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+            lane_cost = tile_rows = 1
+            fallback = True
+            max_depth = draft.config.block_size - 1
         providers[name] = provider
         records[name] = ProposalSource(
             name,
@@ -407,7 +483,10 @@ def build_continuation_drafter(
             draft.config.vocab_size,
             loaded=True,
             token_path_support=True,
-            max_depth=draft.config.block_size - 1,
+            max_depth=max_depth,
+            lane_cost=lane_cost,
+            tile_rows=tile_rows,
+            fallback=fallback,
         )
     return ContinuationDraftModel(
         draft, policy, session=session, source_records=records, providers=providers

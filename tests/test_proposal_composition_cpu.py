@@ -26,6 +26,7 @@ from mlx2.adapters.external_draft_policy import (
 from mlx2.adapters.proposal_sources import native_mtp_source
 from mlx2.runtime.proposal_composition import (
     ComposedDraftModel,
+    PromptCopySourceRange,
     ProposalCompositionPolicy,
 )
 
@@ -62,6 +63,15 @@ def test_external_adapter_mix_in_selects_and_reports_progressive_policy():
     assert adapter.external_policy["proposal_composition"] is False
     assert settings["progressive_verification_tile"] == 2
     assert settings["progressive_multilane_draft_cap"] == 3
+
+
+def test_shared_external_policy_rejects_unconsumed_fold_key():
+    adapter = ExternalDraftAdapterMixin()
+    with pytest.raises(ValueError, match="no qualified overrides"):
+        adapter._parse_external_policy(
+            {"draft_model": "/unused/drafter", "fold": {"window": 4096}},
+            family="test",
+        )
 
 
 @pytest.mark.parametrize(
@@ -131,6 +141,31 @@ def test_composition_scores_are_lane_local_and_decay_by_proposed_token_mass():
     wrapper.observe_proposal_feedback(lane_a, "external", 2, 0, 0.5)
     assert lane_a["external"] == (2.0, 4.0)
     assert lane_b == {}
+
+
+def test_unselected_score_bucket_ages_and_changed_source_can_compete():
+    _model, draft = tiny()
+    wrapper = ComposedDraftModel(draft, {"ngram_min": 1, "ngram_max": 1})
+    scores = {"prompt_lookup:match_4": (100, 100), "external": (0, 100)}
+    stale_copy = ("prompt_lookup", [1, 2], "prompt_lookup:match_4")
+    external = ("external", None, "external")
+    assert wrapper._select_candidate([stale_copy, external], 2, scores)[0] == "prompt_lookup"
+    for _ in range(8):
+        wrapper.observe_proposal_feedback(scores, "external", 8, 8, 0.5)
+    assert scores["prompt_lookup:match_4"][1] < 1e-12
+    assert wrapper._select_candidate([stale_copy, external], 2, scores)[0] == "external"
+
+
+@pytest.mark.parametrize("counts", [(float("nan"), 1), (2, 1), (-1, 1), (True, 2), (1, float("inf"))])
+def test_invalid_score_evidence_cannot_change_source_selection(counts):
+    _model, draft = tiny()
+    wrapper = ComposedDraftModel(draft, {"ngram_min": 1, "ngram_max": 1})
+    scores = {"external": counts}
+    with pytest.raises(ValueError, match="score evidence"):
+        wrapper._proposal_score("external", scores)
+    with pytest.raises(ValueError, match="score evidence"):
+        wrapper.observe_proposal_feedback(scores, "external", 2, 2)
+    assert scores == {"external": counts}
 
 
 def test_composition_equal_score_and_span_has_stable_source_order():
@@ -212,6 +247,7 @@ def test_trusted_pld_calibrates_cold_bucket_then_returns_to_score_order():
             processor_histories=[history],
             proposal_score_states=[scores],
             proposal_trust_states=[trust],
+            proposal_source_ranges=[[PromptCopySourceRange("turn-A", "assistant", 0, len(history) + 1)]],
         )
 
     propose()
@@ -219,11 +255,12 @@ def test_trusted_pld_calibrates_cold_bucket_then_returns_to_score_order():
     assert wrapper.last_proposal_audits == (True,)
     assert wrapper.last_proposal_periodic_audits == (False,)
     trust_key = wrapper.last_proposal_trust_keys[0]
-    assert trust_key == "prompt_lookup:match_1:span_2"
+    assert trust_key.startswith("prompt_lookup:match_1:span_2:source_")
     wrapper.observe_proposal_feedback(scores, "prompt_lookup:match_1", 32, 32)
     wrapper.observe_trusted_pld(
         trust, trust_key, proposed=32, audited=True, accepted=32
     )
+    wrapper.observe_proposal_feedback(scores, "external", 100, 100)
     propose()
     assert wrapper.last_proposal_sources == ("external",)
     assert wrapper.last_proposal_audits == (False,)
@@ -240,6 +277,87 @@ def test_trusted_pld_requires_a_positive_periodic_audit_when_enabled():
                 "trusted_pld_audit_interval": 0,
             },
         )
+
+
+@pytest.mark.parametrize("role", [None, "user", "tool", "system", "assistant"])
+def test_trusted_copy_requires_declared_assistant_origin_and_cannot_transfer(role):
+    model, draft = tiny()
+    wrapper = ComposedDraftModel(draft, {
+        "ngram_min": 1, "ngram_max": 1, "min_context_match": 0,
+        "trusted_pld": True, "trusted_pld_min_match": 1,
+        "trusted_pld_min_verified_tokens": 1, "trusted_pld_min_score": 0.5,
+    })
+    history, anchor = [1, 2, 1], 2
+    hidden = model.prefill_body(mx.array([[1, 2]]), model.make_cache(), [0, 2])
+    trust = {}
+
+    def propose(origin="turn-A", tokens=history, ranges_override=None):
+        ranges = None if role is None else [PromptCopySourceRange(origin, role, 0, 4)]
+        wrapper.draft_distributions([anchor], hidden, wrapper.make_cache(), 2,
+            [None], [0], processor_histories=[tokens], proposal_trust_states=[trust],
+            proposal_source_ranges=[ranges if ranges_override is None else ranges_override])
+        return wrapper.last_proposal_trust_keys[0]
+
+    key = propose()
+    wrapper.observe_trusted_pld(trust, key, proposed=2, audited=True, accepted=2)
+    propose()
+    assert wrapper.last_proposal_trusted == (role == "assistant",)
+    assert wrapper.last_proposal_audits == (role != "assistant",)
+    if role == "assistant":
+        other = propose("turn-B")
+        assert other != key and wrapper.last_proposal_trusted == (False,)
+        assert wrapper.last_proposal_audits == (True,)
+        # Equal-sized but unrelated copied content does not inherit labels.
+        assert propose(tokens=[7, 2, 7]) != key
+        assert wrapper.last_proposal_trusted == (False,)
+        # A source range that covers only part of the continuation is excluded.
+        propose(ranges_override=[PromptCopySourceRange("turn-A", "assistant", 0, 2)])
+        assert wrapper.last_proposal_trusted == (False,)
+        # Overlapping declarations are ambiguous even if both say assistant.
+        propose(ranges_override=[PromptCopySourceRange("turn-A", "assistant", 0, 4)] * 2)
+        assert wrapper.last_proposal_trusted == (False,)
+        # Partial overlap must invalidate previously calibrated trust too.
+        for overlap_role in ("user", "tool", "system", "assistant"):
+            assert propose(ranges_override=[
+                PromptCopySourceRange("turn-A", "assistant", 0, 4),
+                PromptCopySourceRange("turn-B", overlap_role, 2, 3),
+            ]).endswith(":source_unknown")
+            assert wrapper.last_proposal_trusted == (False,)
+            assert wrapper.last_proposal_audits == (True,)
+
+
+@pytest.mark.parametrize("role", ["user", "tool", "system", "assistant"])
+@pytest.mark.parametrize("start,end", [(2, 3), (0, 2), (2, 4), (1, 3)])
+def test_trusted_copy_rejects_any_second_overlapping_declaration(role, start, end):
+    # Target lookup maps the copied continuation to full-history [1, 3).
+    lookup = SimpleNamespace(last_source=("target", 1, 0, 2), tokens=[1, 2, 1, 2])
+    ranges = [PromptCopySourceRange("assistant-turn", "assistant", 0, 4),
+              PromptCopySourceRange("another-turn", role, start, end)]
+    assert ComposedDraftModel._copy_trust_source(lookup, [2, 1], 3, ranges) is None
+
+
+def test_trusted_copy_half_open_adjacent_declarations_are_not_overlaps():
+    lookup = SimpleNamespace(last_source=("target", 1, 0, 2), tokens=[1, 2, 1, 2])
+    owner = PromptCopySourceRange("assistant-turn", "assistant", 1, 3)
+    key = ComposedDraftModel._copy_trust_source(lookup, [2, 1], 3, [owner])
+    assert key is not None
+    assert ComposedDraftModel._copy_trust_source(lookup, [2, 1], 3, [
+        PromptCopySourceRange("preceding", "user", 0, 1), owner,
+        PromptCopySourceRange("following", "tool", 3, 4),
+    ]) == key
+
+
+@pytest.mark.parametrize("field,value", [
+    ("exact_proposed_tokens", "32"), ("exact_accepted_tokens", 32.5),
+    ("exact_proposed_tokens", True), ("blind_since_audit", float("nan")),
+    ("revoked", 0),
+])
+def test_trusted_copy_corrupt_lane_evidence_forces_exact_audit(field, value):
+    _model, draft = tiny()
+    wrapper = ComposedDraftModel(draft, {"trusted_pld": True})
+    record = {"exact_proposed_tokens": 32, "exact_accepted_tokens": 32,
+              "blind_since_audit": 0, "revoked": False, field: value}
+    assert not wrapper._trusted_evidence_ready(record)
 
 
 def test_trusted_pld_cadence_and_revocation_are_lane_local():
@@ -337,6 +455,7 @@ def test_trusted_pld_periodic_audit_schedule_is_per_lane_and_source_bucket():
             processor_histories=[history],
             proposal_score_states=[dict(scores)],
             proposal_trust_states=[trust_state],
+            proposal_source_ranges=[[PromptCopySourceRange("turn-A", "assistant", 0, len(history) + 1)]],
         )
         return (
             wrapper.last_proposal_trusted,
@@ -344,7 +463,8 @@ def test_trusted_pld_periodic_audit_schedule_is_per_lane_and_source_bucket():
             wrapper.last_proposal_periodic_audits,
         )
 
-    key = "prompt_lookup:match_1:span_2"
+    propose({})
+    key = wrapper.last_proposal_trust_keys[0]
     lane_a, lane_b = {}, {}
     wrapper.observe_trusted_pld(
         lane_a, key, proposed=2, audited=True, accepted=2
@@ -656,6 +776,7 @@ def test_unsupported_sources_fail_closed_without_proposal():
 
 def test_dflash_exact_laws_compose_with_pld_without_draft_cache_desync():
     from test_external_dflash2_cpu import tiny as tiny_dflash
+
     from mlx2.runtime.speculative_sampling import RequestRNG
 
     model, draft = tiny_dflash()
@@ -694,7 +815,11 @@ def test_dflash_exact_laws_compose_with_pld_without_draft_cache_desync():
 def test_real_dflash_pld_serving_matches_greedy_reference():
     from test_external_dflash2_cpu import (
         drain as drain_dflash,
+    )
+    from test_external_dflash2_cpu import (
         generator as generator_dflash,
+    )
+    from test_external_dflash2_cpu import (
         tiny as tiny_dflash,
     )
 
@@ -932,7 +1057,7 @@ def _enable_tiny_trusted_pld(monkeypatch, model):
     monkeypatch.setattr(model, "forward_with_taps", forward)
 
 
-def test_trusted_pld_blindly_commits_copy_and_projects_only_bonus_row(monkeypatch):
+def test_trusted_pld_unknown_history_always_uses_exact_audit(monkeypatch):
     model, draft = tiny()
     _enable_tiny_trusted_pld(monkeypatch, model)
     wrapper = ComposedDraftModel(
@@ -953,16 +1078,17 @@ def test_trusted_pld_blindly_commits_copy_and_projects_only_bonus_row(monkeypatc
     uid = engine.insert([prompt], max_tokens=[8])[0]
     outputs, finishes = drain(engine)
     assert len(outputs[uid]) == 8 and finishes[uid].finish_reason == "length"
-    assert engine.scheduler_stats["external_composed_trusted_pld_rounds"] > 0
-    assert wrapper._trusted_stats["blind_rounds"] > 0
-    assert wrapper._trusted_stats["blind_tokens"] >= 2
+    assert engine.scheduler_stats.get("external_composed_trusted_pld_rounds", 0) == 0
+    assert wrapper._trusted_stats["blind_rounds"] == 0
+    assert wrapper._trusted_stats["audit_rounds"] > 0
+    assert outputs[uid] == reference(model, prompt, 8)
     receipt = finishes[uid].speculative_receipt["proposal_composition"]
     assert receipt["ranking"] == receipt["preselection_ranking"]
     assert receipt["postcommit_learning"] is not None
     trust = receipt["trusted_pld"]
     assert trust["scope"] == "request_lane"
     post_trust = receipt["postcommit_learning"]["trusted_pld"]
-    assert any(
+    assert not any(
         record["blind_rounds"] > 0
         for record in post_trust["sources"].values()
     )
@@ -999,7 +1125,7 @@ def test_trusted_pld_audit_uses_exact_verifier_and_updates_score():
     )
     postcommit = composition["postcommit_learning"]
     assert "periodic_audit" in postcommit
-    assert any(
+    assert not any(
         record["periodic_audit_rounds"] > 0
         for record in postcommit["trusted_pld"]["sources"].values()
     )
@@ -1159,7 +1285,7 @@ def test_trusted_pld_on_unsupported_target_is_verified_exactly():
     outputs, finishes = drain(engine)
     assert outputs[uid] == reference(model, prompt, 8)
     assert finishes[uid].finish_reason == "length"
-    assert engine.scheduler_stats["external_composed_trusted_pld_b1_guard_rounds"] > 0
+    assert engine.scheduler_stats.get("external_composed_trusted_pld_b1_guard_rounds", 0) == 0
     assert wrapper._trusted_stats["blind_rounds"] == 0
     assert wrapper._trusted_stats["audit_rounds"] > 0
 

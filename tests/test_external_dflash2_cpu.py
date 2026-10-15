@@ -2022,7 +2022,7 @@ def test_stop_inside_accepted_block_commits_only_prefix(monkeypatch):
 
 
 def test_cli_keeps_ordinary_reference_distinct_before_allocation():
-    from mlx2.server import build_parser, native_mtp_mode
+    from mlx2.server import build_parser, native_mtp_mode, resolve_route_selection
     p=build_parser();base=['--model','not-loaded']
     assert native_mtp_mode(p.parse_args(base),None)
     assert not native_mtp_mode(p.parse_args(base+['--ordinary']),None)
@@ -2030,7 +2030,11 @@ def test_cli_keeps_ordinary_reference_distinct_before_allocation():
     assert not native_mtp_mode(p.parse_args(base+['--external-draft']),external)
     with pytest.raises(ValueError,match='ordinary'):native_mtp_mode(p.parse_args(base+['--ordinary']),external)
     with pytest.raises(ValueError,match='requires'):native_mtp_mode(p.parse_args(base+['--external-draft']),None)
-    with pytest.raises(ValueError,match='requires'):native_mtp_mode(p.parse_args(base),external)
+    with pytest.raises(ValueError, match='requires --external-draft'):
+        native_mtp_mode(p.parse_args(base), external)
+    selected = resolve_route_selection(p.parse_args(base+['--external-draft']), external)
+    assert selected.route == 'external_draft'
+    assert selected.source == 'explicit_flag' and not selected.native_mtp
     with pytest.raises(SystemExit):p.parse_args(base+['--ordinary','--external-draft'])
 
 

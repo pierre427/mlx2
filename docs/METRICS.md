@@ -219,6 +219,27 @@ The deployable examples in `observability/` include a Grafana dashboard and
 Prometheus alert rules. Thresholds are conservative examples and should be
 tuned to the service's own SLOs; they are not performance claims.
 
+## Multi-drafter metrics and tenant scope
+
+Terminal continuation receipts feed a bounded in-memory aggregate. The
+families `mlx2_drafter_rounds_total`, `mlx2_drafter_tokens_total`,
+`mlx2_drafter_depth_observations_total`, `mlx2_drafter_acceptance_ratio`,
+`mlx2_drafter_average_accepted_depth`,
+`mlx2_drafter_average_selected_score`,
+`mlx2_multi_drafter_winning_paths_total`,
+`mlx2_multi_drafter_budget_units_total` and `mlx2_drafter_latch_state` expose
+provider admission/use, zero/partial/full acceptance, proposed and accepted
+depth, first rejection, selected rank, agreeing-provider combinations,
+lane/tile pressure and the current latch state. Provider labels are a bounded
+mechanism enum; no artifact path, token, request, session, API key or tenant ID
+is a label.
+
+The operator scrape aggregates all tenants. When tenant authentication binds
+an API key to a tenant, that tenant's scrape contains static route identity and
+only its own drafter aggregate; host, scheduler, cache, HTTP, metric-eviction
+and other-tenant activity are omitted. Unverified tenant headers do not select
+another tenant's metrics.
+
 ## Qualification boundary
 
 CPU qualification covers text-format structure, escaping, cumulative

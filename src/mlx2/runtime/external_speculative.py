@@ -365,6 +365,8 @@ class HostDraftRow:
     proposal_audit: bool = False
     proposal_periodic_audit: bool = False
     continuation_selection: object = None
+    continuation_admission: object = None
+    continuation_slate: object = None
     feedback_payload: object = None
 
     @property
@@ -1111,7 +1113,18 @@ class ExternalDraftBatchGenerator:
             )
         if any(value is not None for value in prefill_inputs):
             raise ValueError("multimodal prefill is unavailable on external draft routes")
-        uids = []
+        for name, rows in (
+            ("max_tokens", max_tokens), ("caches", caches), ("all_tokens", all_tokens),
+            ("cache_states", cache_states), ("lane_rngs", lane_rngs),
+            ("sampling_configs", sampling_configs), ("logits_processors", logits_processors),
+        ):
+            if rows is not None and len(rows) != len(prompts):
+                raise ValueError(f"{name} must have one entry per external request")
+        # Build the entire cohort privately. A later row can fail artifact,
+        # sidecar, or allocation checks; publishing earlier rows before that
+        # point strands live requests whose caller never received their UIDs.
+        pending_lanes = []
+        resumed = 0
         for i, prompt in enumerate(prompts):
             prefix = list((all_tokens or [[]]*len(prompts))[i]); todo = list(prompt)
             if not todo or max_tokens[i] <= 0:
@@ -1119,7 +1132,8 @@ class ExternalDraftBatchGenerator:
             state = (cache_states or [None]*len(prompts))[i]
             target = (caches or [None]*len(prompts))[i]
             seed_key = (lane_rngs or [None]*len(prompts))[i]
-            seed = np.asarray(seed_key.key).tolist() if seed_key is not None else self.next_uid
+            uid = self.next_uid + len(pending_lanes)
+            seed = np.asarray(seed_key.key).tolist() if seed_key is not None else uid
             rng = RequestRNG(seed)
             draft_cache = self.draft.make_cache(); tail = self._empty_hidden()
             if state is not None:
@@ -1136,7 +1150,7 @@ class ExternalDraftBatchGenerator:
                 )
                 state.validate(self.binding, len(prefix))
                 draft_cache, tail = state.state
-                self.scheduler_stats["paired_cache_resumes"] += 1
+                resumed += 1
                 if resume_rng and state.rng_key is not None:
                     rng = RequestRNG(state=json.loads(bytes(np.asarray(state.rng_key, dtype=np.uint8)).decode()))
             else:
@@ -1145,7 +1159,6 @@ class ExternalDraftBatchGenerator:
                 # This includes a zero-length hit: its branch still holds the
                 # APC's hooked cache objects, which the lane must not adopt.
                 todo = prefix + todo; prefix = []; target = None
-            uid = self.next_uid; self.next_uid += 1
             lane = Lane(uid, prefix, deque(todo), list(target) if target is not None else self.model.make_cache(), draft_cache, tail, rng, int(max_tokens[i]), (logits_processors or [[]]*len(prompts))[i] or [], dict((sampling_configs or [{}]*len(prompts))[i]))
             lane.proposal_request_id = self._generator_revision + ":" + str(uid)
             lane.session_scope_hash = ((session_keys or [None] * len(prompts))[i]
@@ -1158,13 +1171,23 @@ class ExternalDraftBatchGenerator:
                     lane_uid=uid,
                     owner_scope=(self.binding, lane.session_scope_hash),
                 )
-            self.lanes[uid] = lane; uids.append(uid)
-        return uids
+            pending_lanes.append(lane)
+        self.lanes.update((lane.uid, lane) for lane in pending_lanes)
+        self.next_uid += len(pending_lanes)
+        self.scheduler_stats["paired_cache_resumes"] += resumed
+        return [lane.uid for lane in pending_lanes]
 
     def _sidecar(self, lane):
         draft_cache, tail = self._snapshot_draft_state(
             lane.draft_cache, lane.tail
         )
+        # A durable row/tail view can pin a whole prefill/verify allocation,
+        # even when it has zero elements. Copy only its visible values and
+        # submit the copy now: an idle APC entry may never evaluate it again.
+        # contiguous() can alias an already contiguous row slice. Keep the
+        # recovery/prelaunch descriptor snapshots above zero-copy instead.
+        tail = self.mx.array(tail)
+        self.mx.async_eval(tail)
         state = ExternalDraftState((draft_cache, tail), len(lane.history), self.mx.array(list(json.dumps(lane.rng.snapshot(), sort_keys=True).encode()), dtype=self.mx.uint8), lane.rng.draws, binding=self.binding)
         state.validate(self.binding, len(lane.history)); return state
 
@@ -2230,9 +2253,15 @@ class ExternalDraftBatchGenerator:
                 self.draft, "last_proposal_periodic_audits", None
             )
             selections = getattr(self.draft, "last_continuation_selections", None) if self.continuation_policy is not None else None
+            admissions = getattr(self.draft, "last_continuation_admissions", None) if self.continuation_policy is not None else None
+            slates = getattr(self.draft, "last_continuation_slates", None) if self.continuation_policy is not None else None
             payloads = getattr(self.draft, "draft_feedback_payloads", None)
             if selections is not None and len(selections) != len(lanes):
                 raise ValueError("continuation selection rows mismatch")
+            if admissions is not None and len(admissions) != len(lanes):
+                raise ValueError("continuation admission rows mismatch")
+            if slates is not None and len(slates) != len(lanes):
+                raise ValueError("continuation slate rows mismatch")
             if selections is not None:
                 self._continuation_open_selections.extend(selection for selection in selections if selection is not None)
             if payloads is not None and len(payloads) != len(lanes):
@@ -2312,6 +2341,8 @@ class ExternalDraftBatchGenerator:
                     if not isinstance(blocks[row], HostDraftRow) or selections[j] is None:
                         raise ValueError("continuation requires host complete-path selections")
                     blocks[row].continuation_selection = selections[j]
+                    blocks[row].continuation_admission = admissions[j]
+                    blocks[row].continuation_slate = slates[j]
                 if payloads is not None and isinstance(blocks[row], HostDraftRow):
                     blocks[row].feedback_payload = payloads[j]
         return blocks
@@ -3445,9 +3476,144 @@ class ExternalDraftBatchGenerator:
                     "selected_path": getattr(lane, "continuation_selected_path", None),
                     "selected_physical_path": getattr(lane, "continuation_selected_physical_path", None),
                     "selected_sources": list(getattr(lane, "continuation_selected_sources", ())),
+                    "provider_stats": copy.deepcopy(
+                        getattr(lane, "continuation_provider_stats", {})
+                    ),
+                    "winning_combinations": copy.deepcopy(
+                        getattr(lane, "continuation_winning_combinations", {})
+                    ),
+                    "last_admission": copy.deepcopy(
+                        getattr(lane, "continuation_last_admission", None)
+                    ),
+                    "admission_totals": copy.deepcopy(
+                        getattr(lane, "continuation_admission_totals", {})
+                    ),
+                    "last_candidate_slate": copy.deepcopy(
+                        getattr(lane, "continuation_last_slate", ())
+                    ),
                     "session_scope_hash": lane.session_scope_hash,
                     "adaptive_cost_binding": "one_request_physical_path_width_and_depth_plus_bonus",
                     "coverage_calibration": "lagged_top_width_reached_prefix_beta_frequency"}}
+
+    def _record_continuation_round(
+        self,
+        lane,
+        block,
+        selection,
+        *,
+        admitted_width,
+        selected_index,
+        proposed_depth,
+        accepted,
+    ):
+        """Accumulate bounded host stats after target selection, before commit."""
+        admission = copy.deepcopy(block.continuation_admission or {})
+        slate = tuple(copy.deepcopy(block.continuation_slate or ()))
+        lane.continuation_last_admission = admission
+        admission_totals = getattr(lane, "continuation_admission_totals", {})
+        for budget_field in (
+            "lane_slots_used",
+            "lane_slots_available",
+            "tile_rows_used",
+            "tile_rows_available",
+        ):
+            admission_totals[budget_field] = admission_totals.get(
+                budget_field, 0
+            ) + max(
+                0, int(admission.get(budget_field, 0))
+            )
+        admission_totals["rounds"] = admission_totals.get("rounds", 0) + 1
+        lane.continuation_admission_totals = admission_totals
+        lane.continuation_last_slate = tuple(
+            {
+                **item,
+                "admitted": int(item.get("rank", -1)) < int(admitted_width),
+                "target_selected": int(item.get("rank", -1)) == int(selected_index),
+            }
+            for item in slate
+        )
+        stats = getattr(lane, "continuation_provider_stats", {})
+        admitted = set(admission.get("admitted") or ())
+        for source_id, source in self.draft.source_records.items():
+            row = stats.setdefault(
+                source_id,
+                {
+                    "mechanism": source.mechanism,
+                    "enabled_rounds": 0,
+                    "admitted_rounds": 0,
+                    "selected_rounds": 0,
+                    "contributed_rounds": 0,
+                    "candidate_paths": 0,
+                    "proposed_tokens": 0,
+                    "accepted_tokens": 0,
+                    "zero_rounds": 0,
+                    "partial_rounds": 0,
+                    "full_rounds": 0,
+                    "proposal_depths": {},
+                    "accepted_depths": {},
+                    "first_rejected_positions": {},
+                    "selected_ranks": {},
+                    "score_sum": 0.0,
+                    "score_observations": 0,
+                    "parked_rounds": 0,
+                    "fallback_rounds": 0,
+                },
+            )
+            row["enabled_rounds"] += 1
+            row["admitted_rounds"] += int(source_id in admitted)
+            row["parked_rounds"] += int(
+                any(
+                    item.get("source_id") == source_id
+                    for item in admission.get("parked", ())
+                )
+            )
+            row["fallback_rounds"] += int(
+                bool(
+                    admission.get("runtime_fallback") == source_id
+                    or (admission.get("fallback_only") and source_id in admitted)
+                )
+            )
+        for ranked in selection.paths:
+            for source_id in {item.source_id for item in ranked.contributors}:
+                stats[source_id]["candidate_paths"] += 1
+        chosen = selection.paths[selected_index]
+        proposed = max(1, min(int(proposed_depth), len(chosen.tokens)))
+        accepted = max(0, min(int(accepted), proposed))
+        mechanisms = []
+        contributor_ids = {
+            contributor.source_id for contributor in chosen.contributors
+        }
+        for source_id in contributor_ids:
+            row = stats[source_id]
+            mechanisms.append(row["mechanism"])
+            row["selected_rounds"] += int(
+                source_id == chosen.representative.source_id
+            )
+            row["contributed_rounds"] += 1
+            row["proposed_tokens"] += proposed
+            row["accepted_tokens"] += accepted
+            row["zero_rounds"] += int(accepted == 0)
+            row["partial_rounds"] += int(0 < accepted < proposed)
+            row["full_rounds"] += int(accepted == proposed)
+            for key, value in (
+                ("proposal_depths", proposed),
+                ("accepted_depths", accepted),
+                ("selected_ranks", selected_index),
+            ):
+                bucket = str(value)
+                row[key][bucket] = row[key].get(bucket, 0) + 1
+            if accepted < proposed:
+                bucket = str(accepted)
+                row["first_rejected_positions"][bucket] = (
+                    row["first_rejected_positions"].get(bucket, 0) + 1
+                )
+            row["score_sum"] += float(chosen.score)
+            row["score_observations"] += 1
+        combinations = getattr(lane, "continuation_winning_combinations", {})
+        key = "+".join(sorted(mechanisms)) or "none"
+        combinations[key] = combinations.get(key, 0) + 1
+        lane.continuation_winning_combinations = combinations
+        lane.continuation_provider_stats = stats
 
     def _mark(self, phase, since):
         """Accumulate host time for ``phase``; returns the new reference time."""
@@ -3823,6 +3989,11 @@ class ExternalDraftBatchGenerator:
 
     def _round(self, cohort, *, forced_depth=None):
         """Publish learning observations only after every request commits."""
+        planner = (
+            getattr(self.draft, "admission_planner", None)
+            if self.continuation_policy is not None else None
+        )
+        admission_snapshot = planner.snapshot() if planner is not None else None
         self._feedback_outbox = []
         self._continuation_open_selections = []
         try:
@@ -3835,6 +4006,8 @@ class ExternalDraftBatchGenerator:
             else:
                 self._run_round(cohort, forced_depth=forced_depth)
         except BaseException:
+            if planner is not None:
+                planner.restore(admission_snapshot)
             if self.continuation_policy is not None:
                 pool = self.draft.proposal_pool
                 selections = list(self._continuation_open_selections)
@@ -4287,9 +4460,21 @@ class ExternalDraftBatchGenerator:
                     ] = physical
                 chosen = selection.paths[semantic_index]
                 source = chosen.representative.source_id
+                self._record_continuation_round(
+                    lane,
+                    original_block,
+                    selection,
+                    admitted_width=width,
+                    selected_index=semantic_index,
+                    proposed_depth=depth,
+                    accepted=outcome.accepted,
+                )
                 selected = HostDraftRow(list(paths[outcome.selected_index]), [], original_block.width,
                     proposal_source=source if source in {"prompt_lookup", "native_mtp"} else "external",
-                    continuation_selection=selection, feedback_payload=original_block.feedback_payload)
+                    continuation_selection=selection,
+                    continuation_admission=original_block.continuation_admission,
+                    continuation_slate=original_block.continuation_slate,
+                    feedback_payload=original_block.feedback_payload)
                 decision = RoundDecision(outcome.accepted, list(outcome.emitted), laws,
                     response_logprobs=response_rows, verify_window=window, continuation_outcome=outcome,
                     continuation_semantic_index=semantic_index,
@@ -4937,6 +5122,8 @@ class ExternalDraftBatchGenerator:
         target_per_token = 2*target.num_key_value_heads*target.head_dim*4
         draft_per_token = 2*draft.num_key_value_heads*draft.head_dim*4
         required = 0
+        extra_required = 0
+        reserve_draft = getattr(self.draft, "extra_memory_reservation", None)
         for lane in lanes:
             lane_append = (
                 min(append, max(0, len(lane.remaining) - 1))
@@ -4948,6 +5135,15 @@ class ExternalDraftBatchGenerator:
             required += 4*target_bytes + 3*draft_bytes
             required += lane_append*(target.num_hidden_layers*target_per_token + draft.num_hidden_layers*draft_per_token)
             required += lane_append*target.hidden_size*len(self.layers)*8
+            if callable(reserve_draft):
+                extra = reserve_draft(
+                    lane.draft_cache, append=lane_append,
+                    pending_tokens=int(lane.tail.shape[1]), prefill=prefill,
+                )
+                if type(extra) is not int or extra < 0:
+                    raise ValueError("drafter memory reservation must be nonnegative bytes")
+                required += extra
+                extra_required += extra
             if prefill:
                 # Target prefill walks layers serially.  Only one layer's MLP
                 # scratch is live at once, and the draft model does not run;
@@ -4965,6 +5161,7 @@ class ExternalDraftBatchGenerator:
             # provider recomputation; it must not reserve as though B15 were B1.
             required *= self.continuation_policy.limit
         self.scheduler_stats["reservation_bytes"] = required
+        self.scheduler_stats["draft_extra_reservation_bytes"] = extra_required
         if required > self.memory_headroom():
             self.scheduler_stats["memory_deferred"] = self.scheduler_stats.get("memory_deferred",0)+1
             return False

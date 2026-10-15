@@ -1,0 +1,21 @@
+{
+  "component": "Copy-vs-head gate priced by a measured verify-row cost table (self_mtp_copy_draft.verify_row_costs)",
+  "source_repository": "https://github.com/ashhart/TensorFold",
+  "source_revision": "PR #788 (merged 2026-10-14, head b1a51eee6128cee1c5dc7cd32aa5fbcc8f334890), read from its description in the local PR index only",
+  "source_paths": [
+    "PR description, commit 3: drafts_cost.zig CostDepth (each depth's landing rate and each window width's measured round time; depth with the most expected tokens a millisecond)"
+  ],
+  "license": "Apache-2.0 at pinned b1a51eee6128cee1c5dc7cd32aa5fbcc8f334890, verified from LICENSE on 2026-10-15; idea only, no TensorFold code or text copied",
+  "notice": "No peer code copied. Historical MIT notice remains for separately mined older code; it is not the license evidence for this pinned source.",
+  "destination_paths": [
+    "src/mlx2/runtime/copy_draft.py",
+    "tests/test_copy_draft_measured_cost_cpu.py"
+  ],
+  "modifications": [
+    "Original mlx2 code. Only the idea of pricing a speculative round by the measured cost of its verify-window width is taken.",
+    "Applied to mlx2's existing copy-vs-head gate (tokens emitted per unit of round cost over a window of rounds), not to a depth selector: the measured table replaces the linear 1 + verify_row_cost * rows model; draft_step_cost still prices head drafting.",
+    "The table is operator-supplied (for example the verify-topology probe's row_cost_ms); linear between listed row counts, extended past the widest by its last slope, normalized by the one-row cost.",
+    "Default off (None); absent from as_dict and receipts when unset, so existing copy-draft identities are unchanged."
+  ],
+  "validation": "CPU: tests/test_copy_draft_measured_cost_cpu.py (default unchanged; a linear table reproduces the default model exactly; staircase interpolation/extrapolation; the gate copies under a tile-shaped table where the linear model declines; round trip and adapter clamp; malformed tables refused). GPU: not run; unqualified and unselected."
+}

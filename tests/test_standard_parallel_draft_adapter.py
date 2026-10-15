@@ -88,6 +88,57 @@ def test_tiny_standard_adapter_loads_xpress_and_forwards_adaptive_policy(pack):
     engine.close()
 
 
+def test_tiny_standard_adapter_loads_selectable_multi_drafter_portfolio(pack):
+    draft, target = pack
+    adapter = StandardDecoderAdapter(
+        str(target),
+        execution_policy={
+            "draft_models": [
+                {"id": "xpress-a", "path": str(draft), "tile_rows": 2},
+                {"id": "xpress-b", "path": str(draft), "lane_cost": 2},
+            ],
+            "num_draft": 2,
+            "continuation_pool": {
+                "admission": {
+                    "max_active_providers": 2,
+                    "lane_slots": 3,
+                    "tile_rows": 4,
+                }
+            },
+        },
+    )
+    assert adapter.descriptor.variant == "external-portfolio"
+    assert adapter.descriptor.metadata["multi_drafter"] == {
+        "implemented": True,
+        "qualified": False,
+        "selected": True,
+        "providers": [
+            {"provider_id": "xpress-a", "mechanism": "xpress"},
+            {"provider_id": "xpress-b", "mechanism": "xpress"},
+        ],
+    }
+    assert [
+        row["provider_id"]
+        for row in adapter.draft_model.backend.receipt_settings["providers"]
+    ] == ["xpress-a", "xpress-b"]
+    engine = adapter.create_external_batch(completion_batch_size=1)
+    engine.insert([[1, 2]], max_tokens=[2])
+    responses = []
+    for _ in range(10):
+        _, steps = engine.next()
+        responses.extend(steps)
+        if not engine.lanes:
+            break
+    assert len(responses) == 2
+    receipt = responses[-1].speculative_receipt["continuation_pool"]
+    assert set(receipt["provider_stats"]) == {
+        "xpress-a",
+        "xpress-b",
+        "prompt_lookup",
+    }
+    engine.close()
+
+
 @pytest.mark.parametrize(
     "settings,error",
     [

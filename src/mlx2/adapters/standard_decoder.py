@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -455,6 +456,9 @@ def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> 
 
 
 class StandardDecoderAdapter(ExternalDraftAdapterMixin):
+    # Adapter-owned declaration consumed by the server's generic invocation
+    # boundary. Other adapters keep their singular draft_model contracts.
+    supports_draft_portfolio = True
     default_route = "ordinary"
     descriptor = descriptor_for("qwen3")
     EXTERNAL_DEFAULT_NUM_DRAFT = 15
@@ -678,6 +682,7 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
         self.draft_model = None
         allowed = {
             "draft_model",
+            "draft_models",
             "num_draft",
             "xpress_num_passes",
             "draft_quantization",
@@ -695,6 +700,12 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
             raise ValueError("target_verify_row_exact must be a boolean")
         if not row_exact:
             self.external_policy.pop("target_verify_row_exact", None)
+        singular_draft = bool(self.external_policy.get("draft_model"))
+        plural_drafts = "draft_models" in self.external_policy
+        if singular_draft and plural_drafts:
+            raise ValueError("draft_model and draft_models are mutually exclusive")
+        if plural_drafts and "continuation_pool" not in self.external_policy:
+            self.external_policy["continuation_pool"] = {}
         continuation = self.external_policy.get("continuation_pool")
         if isinstance(continuation, dict):
             from ..runtime.proposal_providers import LONGEST_FIRST_EXACT_PREFIX
@@ -709,10 +720,10 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
                     "target_verify_row_exact"
                 )
         if set(self.external_policy) - allowed or (
-            self.external_policy and not self.external_policy.get("draft_model")
+            self.external_policy and not (singular_draft or plural_drafts)
         ):
             raise ValueError(
-                "standard decoder execution policy requires a supported draft_model"
+                "standard decoder execution policy requires draft_model or draft_models"
             )
         artifact = inspect_artifact(model_path)
         self.environment = {
@@ -746,60 +757,159 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
                     "target_verify_row_exact does not support MLX2_FP_DECODE_KERNEL"
                 )
         draft_record = None
+        draft_entries = []
+        portfolio_selected = plural_drafts
         if self.external_policy:
             if artifact["config"]["model_type"] != "qwen3":
                 raise ValueError("external drafting currently requires a Qwen3 target")
-            draft_path = (
-                Path(self.external_policy["draft_model"]).expanduser().resolve()
-            )
-            architecture = _json(draft_path / "config.json").get("architectures")
-            if architecture == ["Qwen3XPressModel"]:
-                from .xpress import content_revision, inspect_drafter, load_drafter
-
-                draft_kind = "xpress"
-            elif architecture == ["LiLiCorrDraftModel"]:
-                from .lilicorr import content_revision, inspect_drafter, load_drafter
-
-                draft_kind = "lilicorr"
-                if "xpress_num_passes" in self.external_policy:
-                    raise ValueError("xpress_num_passes requires an XPress drafter")
+            if portfolio_selected:
+                raw_entries = self.external_policy["draft_models"]
+                if not isinstance(raw_entries, (list, tuple)) or not 1 <= len(
+                    raw_entries
+                ) <= 32:
+                    raise ValueError("draft_models must contain 1..32 provider objects")
+                if "draft_revision" in self.external_policy:
+                    raise ValueError(
+                        "draft_revision is ambiguous with draft_models; pin each provider"
+                    )
             else:
-                raise ValueError(
-                    f"unsupported standard decoder draft architecture: {architecture!r}"
+                raw_entries = (
+                    {"id": "external", "path": self.external_policy["draft_model"]},
                 )
+            seen_ids = set()
+            for ordinal, raw_entry in enumerate(raw_entries):
+                if not isinstance(raw_entry, dict) or set(raw_entry) - {
+                    "id",
+                    "path",
+                    "revision",
+                    "lane_cost",
+                    "tile_rows",
+                }:
+                    raise ValueError(
+                        "each draft_models entry accepts id, path, revision, "
+                        "lane_cost and tile_rows"
+                    )
+                provider_id = raw_entry.get("id", f"draft-{ordinal}")
+                if (
+                    not isinstance(provider_id, str)
+                    or re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,63}", provider_id)
+                    is None
+                    or provider_id in seen_ids
+                ):
+                    raise ValueError("draft_models provider ids must be unique stable names")
+                seen_ids.add(provider_id)
+                if not isinstance(raw_entry.get("path"), (str, Path)):
+                    raise TypeError("draft_models provider path must be a filesystem path")
+                draft_path = Path(raw_entry["path"]).expanduser().resolve()
+                architecture = _json(draft_path / "config.json").get("architectures")
+                if architecture == ["Qwen3XPressModel"]:
+                    from .xpress import (
+                        content_revision as revision_fn,
+                        inspect_drafter as inspector,
+                        load_drafter as draft_loader,
+                    )
+
+                    kind = "xpress"
+                elif architecture == ["LiLiCorrDraftModel"]:
+                    from .lilicorr import (
+                        content_revision as revision_fn,
+                        inspect_drafter as inspector,
+                        load_drafter as draft_loader,
+                    )
+
+                    kind = "lilicorr"
+                else:
+                    raise ValueError(
+                        "unsupported standard decoder draft architecture: "
+                        f"{architecture!r}"
+                    )
+                record = inspector(draft_path, model_path)
+                from ..runtime.drafters.attention_windows import (
+                    validate_attention_windows,
+                )
+
+                validate_attention_windows(
+                    self.external_policy.get("draft_attention_windows"),
+                    record["args"].num_hidden_layers,
+                )
+                expected_revision = (
+                    raw_entry.get("revision")
+                    if portfolio_selected
+                    else self.external_policy.get("draft_revision")
+                )
+                if expected_revision is not None and expected_revision != revision_fn(
+                    record
+                ):
+                    raise ValueError("external drafter source revision mismatch")
+                for field in ("lane_cost", "tile_rows"):
+                    value = raw_entry.get(field, 1)
+                    if type(value) is not int or value < 1:
+                        raise ValueError(f"draft_models {field} must be positive")
+                draft_entries.append(
+                    {
+                        "provider_id": provider_id,
+                        "kind": kind,
+                        "record": record,
+                        "loader": draft_loader,
+                        "lane_cost": raw_entry.get("lane_cost", 1),
+                        "tile_rows": raw_entry.get("tile_rows", 1),
+                    }
+                )
+                self._check_num_draft(record)
+            kinds = {entry["kind"] for entry in draft_entries}
+            if "xpress_num_passes" in self.external_policy and "xpress" not in kinds:
+                raise ValueError("xpress_num_passes requires an XPress drafter")
+            draft_kind = "portfolio" if portfolio_selected else draft_entries[0]["kind"]
             self.EXTERNAL_ROUTE_TAG = f"external-{draft_kind}-qwen3-v1"
             self.EXTERNAL_PROFILE = f"qwen3-apcv2-{draft_kind}"
-            draft_record = inspect_drafter(draft_path, model_path)
-            from ..runtime.drafters.attention_windows import validate_attention_windows
-
-            validate_attention_windows(
-                self.external_policy.get("draft_attention_windows"),
-                draft_record["args"].num_hidden_layers,
-            )
-            if "draft_revision" in self.external_policy and self.external_policy[
-                "draft_revision"
-            ] != content_revision(draft_record):
-                raise ValueError("external drafter source revision mismatch")
+            if portfolio_selected:
+                aggregate = hashlib.sha256(
+                    json.dumps(
+                        [
+                            {
+                                "provider_id": entry["provider_id"],
+                                "kind": entry["kind"],
+                                "fingerprint": entry["record"]["fingerprint"],
+                                "lane_cost": entry["lane_cost"],
+                                "tile_rows": entry["tile_rows"],
+                            }
+                            for entry in draft_entries
+                        ],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                draft_record = {**draft_entries[0]["record"], "fingerprint": aggregate}
+            else:
+                draft_record = draft_entries[0]["record"]
             if (
                 "target_fingerprint" in self.external_policy
                 and self.external_policy["target_fingerprint"]
                 != artifact["identity"]["fingerprint"]
             ):
                 raise ValueError("external target artifact fingerprint mismatch")
-            self._check_num_draft(draft_record)
-            if draft_kind == "xpress":
+            if "xpress" in kinds:
                 passes = self.external_policy.get(
-                    "xpress_num_passes", draft_record["args"].xpress_num_passes
+                    "xpress_num_passes",
+                    next(
+                        entry["record"]["args"].xpress_num_passes
+                        for entry in draft_entries
+                        if entry["kind"] == "xpress"
+                    ),
                 )
                 if (
                     type(passes) is not int
-                    or not 1 <= passes <= draft_record["args"].block_size
+                    or any(
+                        not 1 <= passes <= entry["record"]["args"].block_size
+                        for entry in draft_entries
+                        if entry["kind"] == "xpress"
+                    )
                 ):
                     raise ValueError(
                         "xpress_num_passes must be a positive integer within the trained block"
                     )
             if self.external_policy.get("draft_quantization") is not None:
-                raise ValueError(f"{draft_kind} runtime quantization is not supported")
+                raise ValueError("portfolio runtime quantization is not supported")
             adaptive = self.external_policy.get("adaptive_verification")
             if adaptive is not None:
                 from ..runtime.acceptance_estimator import AdaptiveVerificationPolicy
@@ -906,19 +1016,43 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
         if draft_record is not None:
 
             def loader(record, target):
-                options = {
-                    "runtime_quantization": self.external_policy.get(
-                        "draft_quantization"
-                    ),
-                    "draft_attention_windows": self.external_policy.get(
-                        "draft_attention_windows"
-                    ),
-                }
-                if draft_kind == "xpress":
-                    options["num_passes"] = self.external_policy.get(
-                        "xpress_num_passes"
+                loaded = []
+                for entry in draft_entries:
+                    options = {
+                        "runtime_quantization": self.external_policy.get(
+                            "draft_quantization"
+                        ),
+                        "draft_attention_windows": self.external_policy.get(
+                            "draft_attention_windows"
+                        ),
+                    }
+                    if entry["kind"] == "xpress":
+                        options["num_passes"] = self.external_policy.get(
+                            "xpress_num_passes"
+                        )
+                    loaded.append(
+                        entry["loader"](entry["record"], target, **options)
                     )
-                return load_drafter(record, target, **options)
+                if not portfolio_selected:
+                    return loaded[0]
+                from ..runtime.drafter_portfolio import (
+                    DrafterPortfolio,
+                    PortfolioProvider,
+                )
+
+                return DrafterPortfolio(
+                    [
+                        PortfolioProvider(
+                            entry["provider_id"],
+                            entry["kind"],
+                            entry["record"]["fingerprint"],
+                            draft,
+                            lane_cost=entry["lane_cost"],
+                            tile_rows=entry["tile_rows"],
+                        )
+                        for entry, draft in zip(draft_entries, loaded, strict=True)
+                    ]
+                )
 
             self._bind_external_drafter(draft_record, loader, self.descriptor)
             # Runtime quantization changes stored draft context. Bind the
@@ -941,6 +1075,18 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
                     "qualification": "unqualified",
                     "scope": f"text-only {draft_kind} draft/verify",
                     "implemented": True,
+                    "multi_drafter": {
+                        "implemented": portfolio_selected,
+                        "qualified": False,
+                        "selected": portfolio_selected,
+                        "providers": [
+                            {
+                                "provider_id": entry["provider_id"],
+                                "mechanism": entry["kind"],
+                            }
+                            for entry in draft_entries
+                        ],
+                    },
                 },
             )
             if row_exact:

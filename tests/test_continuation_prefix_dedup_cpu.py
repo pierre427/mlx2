@@ -12,6 +12,7 @@ from test_standard_xpress_serving_cpu import tiny
 
 from mlx2.adapters.proposal_path_sources import SourceContinuation
 from mlx2.runtime.acceptance_estimator import AdaptiveVerificationPolicy
+from mlx2.runtime.drafter_portfolio import DrafterPortfolio, PortfolioProvider
 from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
 from mlx2.runtime.speculative_sampling import softmax
 
@@ -51,7 +52,8 @@ def oracle(model, prompt, prefix=()):
 
 
 def setup(
-    monkeypatch, *, dtype=mx.bfloat16, selected=True, prompts=None, sampling=None
+    monkeypatch, *, dtype=mx.bfloat16, selected=True, prompts=None, sampling=None,
+    portfolio=False,
 ):
     model, base = tiny()
     model.update(tree_map(lambda value: value.astype(dtype), model.parameters()))
@@ -63,7 +65,18 @@ def setup(
         good = int(mx.argmax(oracle(model, prompt)).item())
         bad = (good + 1) % 9
         paths_by_context[tuple(prompt)] = [(bad, 0), (bad, 1), (good, 0), (good, 1)]
-    draft = wrapped(model, base, {"sources": ["external", "prompt_lookup"], "limit": 4})
+    if portfolio:
+        # Shared-path credit requires two admitted model providers. PLD remains
+        # fallback-only and must not contribute while external paths exist.
+        backend = DrafterPortfolio([
+            PortfolioProvider("external", "xpress", "b" * 64, base),
+            PortfolioProvider("replica", "xpress", "d" * 64, copy.deepcopy(base)),
+        ])
+        sources = ["external", "replica"]
+    else:
+        backend = base
+        sources = ["external", "prompt_lookup"]
+    draft = wrapped(model, backend, {"sources": sources, "limit": 4})
 
     def provider(context, limit):
         return [
@@ -73,7 +86,7 @@ def setup(
             )
         ][:limit]
 
-    draft.providers = {"external": provider, "prompt_lookup": provider}
+    draft.providers = {source: provider for source in sources}
     engine = ExternalDraftBatchGenerator(
         model,
         draft_model=draft,
@@ -136,13 +149,16 @@ def test_stable_mapping_and_physical_cost_binding():
 def test_real_bf16_target_dedups_after_depth_choice_and_keeps_semantic_credit(
     monkeypatch,
 ):
-    model, _base, draft, engine, lanes, calls, _original = setup(monkeypatch)
+    model, _base, draft, engine, lanes, calls, _original = setup(
+        monkeypatch, portfolio=True
+    )
     lane = lanes[0]
     expected = int(mx.argmax(oracle(model, [1, 2, 3])).item())
     engine._round(lanes)
     assert calls == [(2, 2)]
     assert lane.ready[0].token == expected
     receipt = lane.ready[-1].speculative_receipt["continuation_pool"]
+    assert set(receipt["last_admission"]["admitted"]) == {"external", "replica"}
     assert (
         receipt["ranked_complete_sequences"]
         == receipt["admitted_complete_sequences"]
@@ -159,7 +175,7 @@ def test_real_bf16_target_dedups_after_depth_choice_and_keeps_semantic_credit(
     # Both source contributors survive sharing and receive reached-prefix labels.
     assert draft.proposal_pool.observation_counts(
         "external"
-    ) == draft.proposal_pool.observation_counts("prompt_lookup")
+    ) == draft.proposal_pool.observation_counts("replica")
     assert sum(draft.proposal_pool.observation_counts("external")[0]) > 0
     assert lane.rng.draws == len(lane.ready)
     fresh = model.make_cache()
@@ -174,10 +190,10 @@ def test_real_bf16_target_dedups_after_depth_choice_and_keeps_semantic_credit(
             )
     engine._sidecar(lane).validate(engine.binding, len(lane.history))
     ranking = draft.proposal_pool.receipt(lane.session_scope_hash)["ranking_registry"]
-    assert (
-        ranking["global_counts"]
-        and len(ranking["model_counts"]) == len(ranking["session_counts"]) == 2
-    )
+    assert len(ranking["session_counts"]) == 2
+    assert "global_counts" not in ranking and "model_counts" not in ranking
+    internal = draft.proposal_pool.receipt()["ranking_registry"]
+    assert internal["global_counts"] and len(internal["model_counts"]) == 2
 
 
 def test_stop_on_lower_ranked_proposal_credits_that_semantic_path(monkeypatch):
@@ -325,7 +341,8 @@ def test_later_cohort_failure_restores_maps_caches_rng_and_all_feedback(monkeypa
     assert not manager.submissions and manager.settled == 0
     assert not draft.proposal_pool.receipt(lanes[0].session_scope_hash)[
         "ranking_registry"
-    ]["global_counts"]
+    ]["session_counts"]
+    assert not draft.proposal_pool.receipt()["ranking_registry"]["global_counts"]
     assert (
         engine.scheduler_stats.get("external_continuation_deduplicated_sequences", 0)
         == 0

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 
 CONTINUATION_VERIFICATION_ALGORITHM = "stable-truncated-prefix-dedup-v2"
@@ -31,6 +32,7 @@ class ContinuationPoolPolicy:
     lookback: int = 4096
     mtp_max_history: int = 4096
     verification_algorithm: str = CONTINUATION_VERIFICATION_ALGORITHM
+    admission: dict | None = None
 
     def __post_init__(self):
         if (
@@ -38,6 +40,9 @@ class ContinuationPoolPolicy:
             or self.verification_algorithm not in CONTINUATION_VERIFICATION_ALGORITHMS
         ):
             raise ValueError("unsupported continuation_pool verification_algorithm")
+        from .drafter_portfolio import PortfolioAdmissionPolicy
+
+        PortfolioAdmissionPolicy.from_value(self.admission)
 
     @classmethod
     def from_value(cls, value):
@@ -55,7 +60,10 @@ class ContinuationPoolPolicy:
             not policy.sources
             or any(type(source) is not str for source in policy.sources)
             or len(set(policy.sources)) != len(policy.sources)
-            or set(policy.sources) - {"external", "prompt_lookup", "native_mtp"}
+            or any(
+                re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,63}", source) is None
+                for source in policy.sources
+            )
         ):
             raise ValueError(
                 "continuation_pool requested an unavailable or unknown source"
@@ -70,7 +78,16 @@ class ContinuationPoolPolicy:
         return policy
 
     def as_dict(self):
-        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+        result = {
+            name: copy.deepcopy(getattr(self, name))
+            for name in self.__dataclass_fields__
+        }
+        # Preserve the established v2 session identity for policies that do
+        # not opt into portfolio admission.  A configured admission policy is
+        # revision-bound because it changes which providers may run.
+        if result["admission"] is None:
+            del result["admission"]
+        return result
 
 
 @dataclass(frozen=True)
@@ -134,6 +151,7 @@ class ContinuationDraftModel:
     proposal_distribution = "deterministic_point_mass"
 
     def __init__(self, backend, policy, *, session, source_records, providers):
+        from .drafter_portfolio import DrafterAdmissionPlanner
         from .proposal_pool import ProposalPool, shared_ranking_registry
 
         self.backend = backend
@@ -167,8 +185,11 @@ class ContinuationDraftModel:
             ranking_registry=shared_ranking_registry(),
         )
         self.last_continuation_selections = ()
+        self.last_continuation_admissions = ()
+        self.last_continuation_slates = ()
         self.last_proposal_sources = ()
         self.adaptive_confidence_features = None
+        self.admission_planner = DrafterAdmissionPlanner(self.policy.admission)
 
     def __getattr__(self, name):
         return getattr(self.backend, name)
@@ -192,6 +213,7 @@ class ContinuationDraftModel:
                 },
                 "scores": "source_private_ranking_proxies_not_verification_q",
                 "cache": "private_provider_recompute_public_backbone_advanced_once",
+                "admission": self.admission_planner.policy.as_dict(),
                 "qualified": False,
             },
         }
@@ -224,6 +246,8 @@ class ContinuationDraftModel:
                 "continuation pool requires request-bound proposal contexts"
             )
         self.last_continuation_selections = ()
+        self.last_continuation_admissions = ()
+        self.last_continuation_slates = ()
         self.last_proposal_sources = ()
         # A batched cache exposes authoritative rows, while plain B1 cache does
         # not. Snapshot before the external context append changes its offset.
@@ -282,11 +306,13 @@ class ContinuationDraftModel:
         self.draft_feedback_payloads = copy.deepcopy(
             getattr(self.backend, "draft_feedback_payloads", None)
         )
-        selections, sources = [], []
+        selections, sources, admissions, slates = [], [], [], []
         for row, (context, identity) in enumerate(zip(contexts, proposal_contexts)):
             if not proposal_length:
                 selections.append(None)
                 sources.append("external")
+                admissions.append(None)
+                slates.append(())
                 continue
             round = PoolRound(
                 self.session.session_revision,
@@ -300,7 +326,30 @@ class ContinuationDraftModel:
                 ),
             )
             paths = []
-            for source_id, provider in self.providers.items():
+            scope = (
+                identity.get("session_scope_hash")
+                or hashlib.sha256(
+                    json.dumps(
+                        [self.session.session_revision, identity["request_id"]],
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+            )
+            predictions = [
+                self.proposal_pool.source_prediction(
+                    source_id,
+                    scope,
+                    min(proposal_length, record.max_depth),
+                )
+                for source_id, record in self.source_records.items()
+            ]
+            admission = self.admission_planner.choose(
+                identity["request_id"], predictions
+            )
+            predictions_by_source = {item["source_id"]: item for item in predictions}
+            admissions.append(admission)
+            for source_id in admission["admitted"]:
+                provider = self.providers[source_id]
                 record = self.source_records[source_id]
                 for ordinal, candidate in enumerate(
                     provider(context, self.policy.limit)
@@ -318,6 +367,82 @@ class ContinuationDraftModel:
                             ranking_convention=candidate.ranking_convention,
                         )
                     )
+            # PLD is the bounded last-resort provider when selected model
+            # drafters return no complete path.  This is decided after empty
+            # provider output, not by comparing current private scores.
+            fallback_id = next(
+                (
+                    source_id
+                    for source_id, record in self.source_records.items()
+                    if record.fallback and source_id not in admission["admitted"]
+                ),
+                None,
+            )
+            if (
+                not paths
+                and fallback_id is not None
+                and self.admission_planner.policy.pld_fallback
+            ):
+                record = self.source_records[fallback_id]
+                reserved = self.admission_planner.reserve_runtime_provider(
+                    admission, predictions_by_source[fallback_id],
+                    reason="runtime_fallback",
+                )
+                if reserved is not None:
+                    admission = reserved
+                    admissions[-1] = admission
+                    for ordinal, candidate in enumerate(
+                        self.providers[fallback_id](context, self.policy.limit)
+                    ):
+                        paths.append(
+                            ProposalPath(
+                                candidate_id=f"{fallback_id}:{row}:{ordinal}",
+                                source_id=record.source_id,
+                                source_revision=record.revision,
+                                session_revision=self.session.session_revision,
+                                context_revision=round.context_revision,
+                                tokens=candidate.tokens,
+                                confidence_features=candidate.confidence_features,
+                                ranking_score=candidate.ranking_score,
+                                ranking_convention=candidate.ranking_convention,
+                            )
+                        )
+            # A content latch must not make the route unavailable when PLD has
+            # no repeated span. Re-probe parked/non-admitted resident heads in
+            # the planner's stable inventory order until one produces a
+            # complete path. This is still bounded and the receipt names the
+            # provider whose work was actually used.
+            if not paths:
+                for source_id, record in self.source_records.items():
+                    if source_id in admission["admitted"] or record.fallback:
+                        continue
+                    reserved = self.admission_planner.reserve_runtime_provider(
+                        admission, predictions_by_source[source_id],
+                        reason="runtime_reprobe",
+                    )
+                    if reserved is None:
+                        continue
+                    admission = reserved
+                    admissions[-1] = admission
+                    candidates = tuple(
+                        self.providers[source_id](context, self.policy.limit)
+                    )
+                    for ordinal, candidate in enumerate(candidates):
+                        paths.append(
+                            ProposalPath(
+                                candidate_id=f"{source_id}:{row}:{ordinal}",
+                                source_id=record.source_id,
+                                source_revision=record.revision,
+                                session_revision=self.session.session_revision,
+                                context_revision=round.context_revision,
+                                tokens=candidate.tokens,
+                                confidence_features=candidate.confidence_features,
+                                ranking_score=candidate.ranking_score,
+                                ranking_convention=candidate.ranking_convention,
+                            )
+                        )
+                    if paths:
+                        break
             selection = self.proposal_pool.select(paths, round, limit=self.policy.limit)
             if not selection.paths:
                 from .external_speculative import DraftUnavailable
@@ -342,7 +467,47 @@ class ContinuationDraftModel:
             sources.append(
                 source if source in {"prompt_lookup", "native_mtp"} else "external"
             )
+            slates.append(
+                tuple(
+                    {
+                        "rank": rank,
+                        "path_id": ranked.path_id,
+                        "depth": len(ranked.tokens),
+                        "sources": tuple(
+                            sorted(
+                                {
+                                    contributor.source_id
+                                    for contributor in ranked.contributors
+                                }
+                            )
+                        ),
+                        "mechanisms": tuple(
+                            sorted(
+                                {
+                                    self.source_records[contributor.source_id].mechanism
+                                    for contributor in ranked.contributors
+                                }
+                            )
+                        ),
+                        "contributors": len(
+                            {
+                                contributor.source_id
+                                for contributor in ranked.contributors
+                            }
+                        ),
+                        "conditional_acceptance": ranked.conditional_acceptance,
+                        "expected_accepted_tokens": ranked.expected_accepted_tokens,
+                        "estimated_cost": ranked.estimated_cost,
+                        "score": ranked.score,
+                        "score_authority": ranked.score_authority,
+                        "provider_ordinal": ranked.source_ordinal,
+                    }
+                    for rank, ranked in enumerate(selection.paths)
+                )
+            )
         self.last_continuation_selections = tuple(selections)
+        self.last_continuation_admissions = tuple(admissions)
+        self.last_continuation_slates = tuple(slates)
         self.last_proposal_sources = tuple(sources)
         self.adaptive_confidence_features = [None for _ in anchors]
         return tokens, laws

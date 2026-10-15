@@ -10,12 +10,38 @@ accepted state.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import math
 from dataclasses import dataclass
 
 import numpy as np
 
 from .prompt_lookup import IndexedPromptLookup
+
+
+@dataclass(frozen=True)
+class PromptCopySourceRange:
+    """Executor-owned role/origin evidence for a committed token range.
+
+    Offsets refer to the full processor history plus the current anchor, not
+    the bounded lookup window. This is an internal contract, never inferred
+    from token contents or a client assertion. Only assistant-origin copies
+    can currently bypass exact target verification.
+    """
+
+    origin: str
+    role: str
+    start: int
+    end: int
+
+    def __post_init__(self):
+        if (not isinstance(self.origin, str) or not self.origin
+                or not isinstance(self.role, str)
+                or self.role not in {"assistant", "user", "tool", "system"}
+                or type(self.start) is not int or type(self.end) is not int
+                or not 0 <= self.start < self.end):
+            raise ValueError("invalid prompt-copy source range evidence")
 
 
 @dataclass(frozen=True)
@@ -195,10 +221,17 @@ class ComposedDraftModel:
 
     def _proposal_score(self, key, score_state):
         accepted, proposed = score_state.get(key, (0, 0))
+        self._validate_score_counts(accepted, proposed)
         strength = self._SCORE_PRIOR_STRENGTH
         return (
             accepted + self._SCORE_PRIOR_ACCEPTANCE * strength
         ) / (proposed + strength)
+
+    @staticmethod
+    def _validate_score_counts(accepted, proposed):
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               or not math.isfinite(value) for value in (accepted, proposed)) or not 0 <= accepted <= proposed:
+            raise ValueError("invalid committed proposal score evidence")
 
     def _select_candidate(self, candidates, external_span, score_state=None):
         """Rank by committed score, usable span, then stable source order."""
@@ -228,13 +261,27 @@ class ComposedDraftModel:
             raise ValueError("invalid committed proposal-composition feedback")
         if not isinstance(score_state, dict):
             raise ValueError("proposal feedback requires a lane-owned score state")
-        old_accepted, old_proposed = score_state.get(key, (0, 0))
+        if (isinstance(decay_per_token, bool)
+                or not isinstance(decay_per_token, (int, float))
+                or not math.isfinite(decay_per_token)
+                or not 0 <= decay_per_token < 1):
+            raise ValueError("invalid proposal score decay")
+        for counts in score_state.values():
+            if not isinstance(counts, (tuple, list)) or len(counts) != 2:
+                raise ValueError("invalid committed proposal score evidence")
+            ComposedDraftModel._validate_score_counts(*counts)
         # Decay by proposed-token mass so different K values have comparable
         # memory. Values are weighted effective token counts.
         decay = float(decay_per_token) ** proposed
+        # Time advances for every source in this lane, including a source the
+        # current ranking did not choose. Otherwise stale high-confidence
+        # buckets could permanently prevent a changed source from competing.
+        for source_key, (old_accepted, old_proposed) in list(score_state.items()):
+            score_state[source_key] = (old_accepted * decay, old_proposed * decay)
+        old_accepted, old_proposed = score_state.get(key, (0, 0))
         score_state[key] = (
-            min(1000.0, old_accepted * decay + accepted),
-            min(1000.0, old_proposed * decay + proposed),
+            min(1000.0, old_accepted + accepted),
+            min(1000.0, old_proposed + proposed),
         )
 
     def observe_trusted_pld(
@@ -276,6 +323,15 @@ class ComposedDraftModel:
             "exact_proposed_tokens": 0,
         }
         record = trust_state.setdefault(key, dict(defaults))
+        if not isinstance(record, dict) or any(
+            name != "revoked" and (type(record.get(name, value)) is not int
+                                  or record.get(name, value) < 0)
+            for name, value in defaults.items()
+        ) or type(record.get("revoked", False)) is not bool:
+            # Corrupted feedback cannot bootstrap blind eligibility. A fresh
+            # exact audit can rebuild evidence without affecting other lanes.
+            record = dict(defaults)
+            trust_state[key] = record
         for name, value in defaults.items():
             record.setdefault(name, value)
         if audited:
@@ -326,17 +382,42 @@ class ComposedDraftModel:
         """Bind trust to both source-match strength and copied span length."""
         return f"{score_key}:span_{int(copied_span)}"
 
+    @classmethod
+    def _copy_trust_source(cls, lookup, copied, history_length, ranges):
+        """Return a range/content-bound key, or None for unproven copies."""
+        source = lookup.last_source
+        if not source or source[0] != "target" or ranges is None:
+            return None
+        _, match, start, _continuation = source
+        begin = history_length + 1 - len(lookup.tokens) + start + match
+        end = begin + len(copied)
+        # A containing assistant declaration cannot override an overlapping
+        # user/tool/system declaration, nor a second partially covering owner.
+        # Trust requires exactly one declared owner of every copied token.
+        owners = [item for item in ranges if item.start < end and begin < item.end]
+        if (len(owners) != 1 or owners[0].role != "assistant"
+                or not (owners[0].start <= begin and end <= owners[0].end)):
+            return None
+        owner = owners[0]
+        digest = hashlib.sha256(json.dumps(
+            [owner.origin, owner.role, owner.start, owner.end, begin, end, list(copied)],
+            separators=(",", ":"),
+        ).encode()).hexdigest()
+        return f"{cls._trusted_pld_key(cls._prompt_lookup_score_key(lookup), len(copied))}:source_{digest}"
+
     def _trusted_evidence_sufficient(self, record):
         """Whether exact lane-owned evidence meets the configured thresholds."""
         if not isinstance(record, dict):
             return False
-        proposed = int(record.get("exact_proposed_tokens", 0))
-        accepted = int(record.get("exact_accepted_tokens", 0))
+        proposed = record.get("exact_proposed_tokens", 0)
+        accepted = record.get("exact_accepted_tokens", 0)
         # Even an explicit zero-token threshold cannot make a cold bucket
         # trusted: at least one exact target label is always required.
         required = max(1, self.policy.trusted_pld_min_verified_tokens)
         return (
-            proposed >= required
+            type(proposed) is int
+            and type(accepted) is int
+            and proposed >= required
             and 0 <= accepted <= proposed
             and accepted / proposed >= self.policy.trusted_pld_min_score
         )
@@ -344,7 +425,10 @@ class ComposedDraftModel:
     def _trusted_evidence_ready(self, record):
         """Whether exact evidence currently permits blind copying."""
         return (
-            not bool(record.get("revoked", False))
+            type(record.get("revoked", False)) is bool
+            and not record.get("revoked", False)
+            and type(record.get("blind_since_audit", 0)) is int
+            and record.get("blind_since_audit", 0) >= 0
             and self._trusted_evidence_sufficient(record)
         ) if isinstance(record, dict) else False
 
@@ -379,7 +463,10 @@ class ComposedDraftModel:
                     "min_match": self.policy.trusted_pld_min_match,
                     "max_span": self.policy.trusted_pld_max_span,
                     "audit_interval": self.policy.trusted_pld_audit_interval,
-                    "trust_state": "request_lane_source_bucket",
+                    "trust_state": "request_lane_origin_role_range_content",
+                    "source_eligibility": "executor_declared_assistant_range_only;unknown_user_tool_system_exact_audit",
+                    "source_contract": "PromptCopySourceRange;unplumbed_routes_exact_audit",
+                    "qualified": False,
                     "audit_failure": "revoke_until_fresh_exact_recovery",
                     "execution": "teacher_force_target_body_project_bonus_row_only",
                     "rng": "copied_rows_consume_no_target_draws",
@@ -424,6 +511,7 @@ class ComposedDraftModel:
         processor_histories=None,
         proposal_score_states=None,
         proposal_trust_states=None,
+        proposal_source_ranges=None,
         cohort_width=None,
         **kwargs,
     ):
@@ -450,7 +538,18 @@ class ComposedDraftModel:
             )
         if cohort_width is None:
             cohort_width = len(anchors)
+        if proposal_source_ranges is None:
+            proposal_source_ranges = [None for _ in anchors]
+        if len(proposal_source_ranges) != len(anchors) or any(
+            ranges is not None and (not isinstance(ranges, (list, tuple)) or any(
+                not isinstance(item, PromptCopySourceRange) for item in ranges
+            )) for ranges in proposal_source_ranges
+        ):
+            raise ValueError("proposal composition requires executor-owned source ranges per row")
         histories = [list(history) for history in processor_histories]
+        if any(ranges is not None and any(item.end > len(history) + 1 for item in ranges)
+               for history, ranges in zip(histories, proposal_source_ranges)):
+            raise ValueError("prompt-copy source range exceeds committed history")
         # Determine host copies before opening the backend call; indexes see
         # committed tokens and the current anchor exactly once.  ``propose``
         # only reads sources that start inside the last ``lookback`` tokens.
@@ -465,6 +564,7 @@ class ComposedDraftModel:
             self.policy.ngram_max, self.policy.min_context_match
         )
         candidates = []
+        copy_trust_keys = []
         for row_index, (history, anchor, score_state, trust_state) in enumerate(
             zip(
                 histories,
@@ -474,6 +574,7 @@ class ComposedDraftModel:
             )
         ):
             copied = []
+            copy_trust_key = None
             row = []
             if self.policy.prompt_lookup and proposal_length:
                 lookup = IndexedPromptLookup(
@@ -489,6 +590,9 @@ class ComposedDraftModel:
                     max_sources=self.policy.max_sources,
                 )
                 if copied:
+                    copy_trust_key = self._copy_trust_source(
+                        lookup, copied, len(history), proposal_source_ranges[row_index]
+                    )
                     row.append(
                         (
                             "prompt_lookup",
@@ -518,6 +622,7 @@ class ComposedDraftModel:
                     for candidate in row
                     if candidate[0] == "prompt_lookup"
                     and self.policy.trusted_pld
+                    and copy_trust_key is not None
                     and cohort_width == 1
                     and not (logits_processors or [[]])[row_index]
                     and int(candidate[2].rsplit("_", 1)[1])
@@ -525,7 +630,7 @@ class ComposedDraftModel:
                     and len(candidate[1]) <= self.policy.trusted_pld_max_span
                     and not self._trusted_evidence_ready(
                         trust_state.get(
-                            self._trusted_pld_key(candidate[2], len(candidate[1])),
+                            copy_trust_key,
                             {},
                         )
                     )
@@ -540,6 +645,7 @@ class ComposedDraftModel:
                 else ("external", None, "external")
             )
             candidates.append(selected)
+            copy_trust_keys.append(copy_trust_key)
         tokens, laws = self.backend.draft_distributions(
             anchors,
             hidden,
@@ -568,16 +674,21 @@ class ComposedDraftModel:
             trust_key = None
             if source == "prompt_lookup" and copied and self.policy.trusted_pld:
                 match = int(score_key.rsplit("_", 1)[1])
-                trust_key = self._trusted_pld_key(score_key, len(copied))
+                source_eligible = copy_trust_keys[row] is not None
+                trust_key = copy_trust_keys[row] or (
+                    self._trusted_pld_key(score_key, len(copied)) + ":source_unknown"
+                )
                 trust_record = trust_state.get(trust_key, {})
                 static_eligible = (
+                    source_eligible
+                    and
                     cohort_width == 1
                     and not (logits_processors or [[]])[row]
                     and match >= self.policy.trusted_pld_min_match
                     and len(copied) <= self.policy.trusted_pld_max_span
                 )
                 ready = self._trusted_evidence_ready(trust_record)
-                if static_eligible and not ready:
+                if not source_eligible or static_eligible and not ready:
                     # Cold and revoked buckets always take the exact target
                     # verifier. Ranking EWMA is intentionally irrelevant.
                     audited = True

@@ -223,11 +223,12 @@ def test_ranker_learns_global_model_session_without_raw_tenants():
         == 8
     )
     assert (
-        next(row for row in receipt["model_counts"] if row["mechanism"] == "xpress")[
+        next(row for row in registry.receipt(session())["model_counts"] if row["mechanism"] == "xpress")[
             "rejected"
         ]
         == 8
     )
+    assert "global_counts" not in receipt and "model_counts" not in receipt
     assert "tenant" not in json.dumps(receipt)
     assert receipt["paper_lattice"] is False
 
@@ -282,9 +283,10 @@ def test_aliases_identical_artifact_count_once_in_shared_registry():
     p = pool([source(), source("alias")])
     selected = p.select([path((1,)), path((1,), name="alias")], round_(scope=D))
     p.commit_feedback(selected, [1])
-    receipt = p.receipt(D)["ranking_registry"]
+    receipt = p.receipt()["ranking_registry"]
     assert receipt["global_counts"][0]["accepted"] == 1
     assert receipt["model_counts"][0]["accepted"] == 1
+    assert p.receipt(D)["ranking_registry"]["session_counts"][0]["accepted"] == 1
 
 
 def test_stream_candidate_budget_is_bounded_before_materialization():

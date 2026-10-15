@@ -1,0 +1,87 @@
+{
+  "mechanism": "scope-safe proposal receipts and explicit public metrics omission",
+  "decision": "original mlx2 integration repair; no external implementation copied",
+  "source": {
+    "repository": "mlx2",
+    "revision": "588d537775c8a67c14f54fb4321dbea2dd073b80",
+    "paths": [
+      "src/mlx2/runtime/proposal_pool.py",
+      "src/mlx2/runtime/external_speculative.py",
+      "src/mlx2/server.py",
+      "src/mlx2/prometheus.py"
+    ],
+    "license": "Apache-2.0; original local repair"
+  },
+  "modifications": [
+    "ProposalPool.receipt(scope) returns only the caller's session counts plus static contract metadata. Shared source health, global/model counts, aggregate revisions, retained-scope counts and evictions remain available only in unscoped internal/operator diagnostics.",
+    "Receipt reads share the critic lock with committed feedback. Shared critic predictions and admission learning remain intentionally unchanged; session privacy does not promise independent scheduling or independent learned priors.",
+    "With tenant authentication enabled, an unverified exempt metrics caller receives static metrics through explicit request-data omission, bypassing custom exporters. No caller-selectable tenant string stands in for an empty partition.",
+    "Verified tenants retain only their own request aggregates; authorized operators retain aggregate diagnostics. Without a tenant authenticator, legacy HTTP-gate-admitted scrapes intentionally retain aggregate metrics, while caller-chosen tenant headers are recorded in the default metrics namespace. This does not grant protected usage/admin authority. Existing loopback exemption and credential handling remain unchanged.",
+    "Real HTTP header/body drip tests allow five seconds for transport setup, then shorten the actual live budget to 150 milliseconds when the peer starts dripping. They still require transport interruption within one second and peer disconnect; aggregate operation budgeting remains covered separately by the deterministic shared-budget regression."
+  ],
+  "validation": {
+    "kind": "focused CPU tests with synthetic identities and local loopback HTTP only",
+    "negative_controls": [
+      "Before the fix, a committed teacher label in scope A changed scope B's public ranking receipt, including shared counts and revisions.",
+      "The initial legacy-header probe showed that a string sentinel can name populated request-metric state. The integrated policy now intentionally restores aggregate scrapes without tenant authentication; the omission regression instead verifies that a tenant-auth-enabled unverified caller cannot expose even retained legacy sentinel data."
+    ],
+    "focused_results": [
+      "199 passed in 32.39 seconds across proposal-pool, privacy, terminal-receipt, prefix-deduplication, MCP transport, tool backend, Responses, hosted output budgets, API contracts, HTTP security, tenant authentication, Prometheus, drafter metrics and host counters.",
+      "120 consecutive real TLS cancellation repetitions passed after the nonblocking-handshake repair; 20 real header/body drip repetitions passed after setup-budget separation."
+    ],
+    "initial_failures": [
+      "The initial combined run had 78 passes and two failures. The prefix-dedup fixture was corrected to use two actual non-fallback portfolio providers while preserving contributor and cache-state assertions. The TLS cancellation failure was subsequently reproduced on repetition 53 and traced to OpenSSL remaining blocked after the watchdog and peer had exited. The bounded nonblocking handshake and deterministic lost-wakeup regressions are documented in peer-survey-api-hardening-20261015.json."
+    ],
+    "lint": "Changed proposal helper and test modules pass Ruff. server.py and prometheus.py have existing whole-file findings outside these changes; no broad formatting changes made.",
+    "tests": [
+      "tests/test_peer_portfolio_tenant_privacy_cpu.py",
+      "tests/test_proposal_pool.py",
+      "tests/test_continuation_terminal_receipt_cpu.py",
+      "tests/test_continuation_prefix_dedup_cpu.py",
+      "tests/test_peer_mcp_bounds_cpu.py"
+    ],
+    "publication_gate": "Parent-owned final full gate remains separate; these are focused functional regressions, not qualification or performance evidence.",
+    "scoped_consumer_followup": {
+      "audit": "Repository-wide Python search for removed scoped count/health/revision fields found two stale numerical-binding test assertions and one HTTP qualification-validator expectation. Other consumers use internal registry diagnostics, internal selection attributes, deliberate operator receipts, or unrelated counters. Production HTTP publication passes the lane scope and does not consume the removed fields.",
+      "repairs": [
+        "tests/test_adapter_numerical_contract_cpu.py and tests/test_external_serving_numerical_binding_cpu.py retain exact token and sidecar checks, selected target revision and model key identity, real internal model counts, and matching public/internal session counts. They explicitly reject shared counts in the public receipt.",
+        "scripts/validate_parallel_serving_metal.py validates nonempty committed session counts and session telemetry scope in the HTTP pool receipt, and refuses shared diagnostics. A host-only CLI regression uses real committed ProposalPool labels and independently verifies internal model/global learning remains present."
+      ],
+      "result": "108 focused CPU numerical-binding, session-binding, proposal/privacy/receipt/deduplication and new validator tests passed in 5.85 seconds. The complete isolated CLI and host-accounting guard set passed 30 tests in 0.42 seconds with --noconftest.",
+      "lint": "Validator, CLI tests and external-serving binding test pass Ruff; git diff --check passes. The adapter numerical-contract test retains four existing PIE807 findings outside the changed assertion.",
+      "boundary": "No production runtime changes, no GPU initialization/use, no full preflight or qualification run. Historical qualification receipts are unchanged."
+    },
+    "legacy_metrics_policy_integration": {
+      "merged_authority": "The merged server keeps aggregate_metrics separate from operator_scope. No-tenant-auth HTTP-gate-admitted scrapes receive legacy aggregate metrics; verified tenants receive only their own metrics; tenant-auth-enabled unverified exempt callers receive static-only metrics through explicit omission. Usage/admin access remains bound to the original operator/verified-tenant authority.",
+      "regressions": [
+        "Real HTTP legacy collector: missing/wrong gate keys are refused, admitted caller receives aggregate drafter/host metrics, unverified X-Tenant-ID does not create a metric tenant partition, and private usage metrics remain absent.",
+        "Tenant-authenticated deployments: verified A/B isolation, mismatched tenant header refusal, unverified remote refusal, static-only exempt caller despite retained sentinel state, and authorized operator aggregate access.",
+        "Incoming monotonic aggregate counters across tenant eviction, latest latch state, malformed metric handling and non-fatal terminal telemetry tests remain passing."
+      ],
+      "results": [
+        "99 privacy, drafter-metrics, Prometheus, tenant-auth, terminal integration and usage tests passed in 15.46 seconds.",
+        "234 focused MCP, tool backend, Responses, hosted-output budget, API contract, HTTP security, proposal/receipt/deduplication, numerical/session binding, host-counter and default-route tests passed in 23.89 seconds."
+      ],
+      "lint": "Updated privacy tests pass Ruff; git diff --check passes.",
+      "scope": "Test/provenance reconciliation only; merged runtime source required no additional change. CPU-only validation, no GPU, full gate, qualification or performance claim."
+    }
+  },
+  "limitations": [
+    "Shared critic learning intentionally affects admission across scopes; detailed shared telemetry is withheld from request receipts, not the internal learned behavior.",
+    "Legacy header mode does not authenticate tenant identity. When no tenant authenticator is configured, metrics are an aggregate surface protected by the configured HTTP gate, not by tenant credentials or the separate admin bearer. Protected usage/admin data keeps its stronger authorization.",
+    "No GPU was initialized, claimed or used for this repair."
+  ],
+  "integration_source": {
+    "repository": "mlx2",
+    "revision": "63c1eb69be59ab322aaf39c3e7e965e92e122f11",
+    "paths": [
+      "src/mlx2/server.py",
+      "src/mlx2/drafter_metrics.py",
+      "src/mlx2/serving.py",
+      "tests/test_prometheus.py",
+      "tests/test_drafter_metrics.py"
+    ],
+    "license": "Apache-2.0",
+    "policy": "Retain legacy aggregate metrics after HTTP gate admission when no tenant authenticator is configured. Do not treat that metrics access as admin or tenant-usage authority."
+  }
+}
