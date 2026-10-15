@@ -950,14 +950,15 @@ def _park_and_resume(engine, session_id):
 
 def _resumed_turn(engine, session_id, seed, request):
     """Seed a session, park and resume it, then send ``request(output)``."""
-    first, _receipt, _job = _run_request_body(engine, seed(session_id))
+    first, seed_receipt, _job = _run_request_body(engine, seed(session_id))
     _park_and_resume(engine, session_id)
     disk = engine.apc.apc_stats["idle_disk"]
     restores_before = disk["restores"]
     body = request(first)
     out, receipt, job = _run_request_body(engine, dict(body, session_id=session_id))
     disk = engine.apc.apc_stats["idle_disk"]
-    return body, out, receipt, job, dict(disk), disk["restores"] - restores_before
+    return (body, out, receipt, job, dict(disk),
+            disk["restores"] - restores_before, seed_receipt)
 
 
 def _run_request_body(engine, body):
@@ -1000,7 +1001,7 @@ def test_resumed_session_request_is_served_from_the_prefetch(
 
     engine = _session_engine(adapter, mtp=mtp, cache_dir=tmp_path)
     try:
-        body, out, receipt, job, disk, restored_on_path = _resumed_turn(
+        body, out, receipt, job, disk, restored_on_path, seed_receipt = _resumed_turn(
             engine, "pf", seed, request
         )
     finally:
@@ -1014,7 +1015,17 @@ def test_resumed_session_request_is_served_from_the_prefetch(
         assert cached == len(prompt) - 1
         if mtp:
             assert receipt["cache_checkpoint_role"] == "committed_prompt_boundary"
+    elif mtp:
+        # The terminal verify span changed this seed's numerical schedule.
+        # Its generated checkpoint cannot enter the initial APC namespace;
+        # the exact prompt boundary still prefetches and serves the followup.
+        assert seed_receipt["mtp"]["numerical_schedule_changed"] is True
+        assert cached == len(prompt) - 1
+        assert receipt["cache_checkpoint_role"] == "committed_prompt_boundary"
     else:
+        # Independent unchanged-schedule continuation coverage: ordinary
+        # decode must retain and reuse its generated checkpoint.
+        assert not (seed_receipt.get("mtp") or {}).get("numerical_schedule_changed")
         assert cached >= len(prompt) + 5 - 1
     cold = _session_engine(adapter, mtp=mtp)
     try:
@@ -1089,7 +1100,7 @@ def test_resumed_next_turn_uses_the_prefetched_generation_prompt_boundary(
 
     engine = _session_engine(Adapter, mtp=mtp, cache_dir=tmp_path)
     try:
-        body, out, receipt, job, disk, restored_on_path = _resumed_turn(
+        body, out, receipt, job, disk, restored_on_path, _seed_receipt = _resumed_turn(
             engine, "pf-chat", seed, request
         )
     finally:

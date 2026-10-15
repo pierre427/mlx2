@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -29,6 +30,8 @@ def test_parked_session_can_have_multiple_disk_checkpoints():
 
 def test_phase_proof_accepts_optional_second_checkpoint_after_stamp():
     observed = {"materialize_block_file_1_before", "materialize_block_file_1_after",
+                "payload_read_1_before", "payload_read_1_after",
+                "payload_staging_1_before", "payload_staging_1_after",
                 "load_prompt_cache_1_before", "load_prompt_cache_2_after",
                 "mx_eval_1_before", "mx_eval_1_after",
                 "freeze_prompt_cache_1_before", "freeze_prompt_cache_1_after",
@@ -53,10 +56,55 @@ def test_live_owner_must_match_this_gpu_queue_session(tmp_path, monkeypatch):
 
 def test_phase_map_brackets_restore_operations_and_publication():
     labels = [label for values in phase_lines().values() for label in values]
-    for prefix in ("materialize_block_file_1", "load_prompt_cache_1",
+    for prefix in ("materialize_block_file_1", "payload_read_1", "payload_staging_1", "load_prompt_cache_1",
                    "mx_eval_1", "freeze_prompt_cache_1", "publication"):
         assert prefix + "_before" in labels
         assert prefix + "_after" in labels
+
+
+def test_phase_trace_observes_actual_worker_read_and_model_thread_publication(tmp_path):
+    from test_apcv2_sessions_persistence import _identity, _persistent, _state
+
+    apc = _persistent(tmp_path)
+    assert apc._cow_branching
+    key, tokens, tag = _identity(), list(range(16)), ("tenant-a", "trace")
+    seen = []
+    hit = None
+    try:
+        apc.store(key, tokens, [_state(16)], session_tag=tag)
+        apc.park_session(*tag, ttl_seconds=60)
+        codes = probe.restore_trace_codes(type(apc))
+        trace = probe.phase_tracer(codes, phase_lines(), lambda label:
+            seen.append((label, threading.get_ident())))
+        original_trace, original_thread_trace = sys.gettrace(), threading.gettrace()
+        threading.settrace_all_threads(trace)
+        try:
+            hit = apc.lookup(key, tokens + [99])
+        finally:
+            threading.settrace_all_threads(original_thread_trace)
+            sys.settrace(original_trace)
+        assert hit.hit
+        labels = {label for label, _thread in seen}
+        assert missing_restore_phases(labels) == []
+        model_thread = threading.get_ident()
+        assert all(thread != model_thread for label, thread in seen
+                   if label.startswith(("materialize_block_file", "payload_read")))
+        assert all(thread == model_thread for label, thread in seen
+                   if label.startswith(("load_prompt_cache", "mx_eval", "freeze_prompt_cache", "publication")))
+        ordered = [label for label, _thread in seen]
+        assert ordered.index("payload_read_1_after") < ordered.index("load_prompt_cache_1_before")
+        assert ordered.index("load_prompt_cache_1_after") < ordered.index("publication_before")
+    finally:
+        if hit is not None and hit.cache is not None:
+            hit.cache.close()
+        apc.close()
+
+
+def test_phase_map_refuses_when_staged_read_seam_changes(tmp_path):
+    source = tmp_path / "apc.py"
+    source.write_text(probe.APC_SOURCE.read_text().replace("handle.read(remaining + 1)", "handle.readall()"))
+    with pytest.raises(RuntimeError, match="instrumentation refused"):
+        phase_lines(source)
 
 
 def test_sampler_has_interval_and_immediate_phase_samples():

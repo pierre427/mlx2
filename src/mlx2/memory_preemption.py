@@ -9,19 +9,14 @@ client has already received, ``max_tokens`` reduced by the same count.  The
 detokenizer, output parser and stop state never leave the job, so the client
 stream simply continues.
 
-A lane is preemptible only when that replay is an exact continuation:
-
-* prefill-phase lanes (no token delivered yet) restart from scratch, which is
-  exactly what a fresh admission of the same request with the same seed does;
-* decode-phase lanes must be greedy (or ordinary-route sampled, whose
-  ``LaneRNG`` draws exactly one key per delivered token and is rebuilt from the
-  seed), and every logits processor must declare ``history_pure`` (its state is
-  a function of token history, contract P5).
-
-Everything else keeps today's behaviour.  The replayed continuation is the
-model's output for the extended prompt; it equals the uninterrupted stream up
-to prefill-vs-decode kernel numerics, the same caveat any exact prefix-cache
-restore carries.
+Only prefill-phase lanes may replay: decode-produced state is never rebuilt
+by prefilling its token history. The separate default-off
+``exact_decode_checkpoint`` policy permits an executor-owned ordinary B=1
+SDPA BatchKVCache lane to park its exact cache bytes while retaining pending
+output, RNG, processors and matcher in memory. Restore attaches that same
+control object to its originating executor without another prompt forward.
+This capability is implemented but unqualified, requires admitted staging
+headroom, and does not enable replay or other cache/route families.
 
 Design reference: Splash ``Engine::suspendForGrowth`` / ``admitQueued``
 (rev f58d36dd, Apache-2.0); see ``provenance/splash-08-suspend-replay.json``.
@@ -33,7 +28,8 @@ import math
 
 MAX_REPLAYS_PER_JOB = 2
 
-_DEFAULTS = {"enabled": False, "stall_seconds": 60.0, "on_pressure": True}
+_DEFAULTS = {"enabled": False, "stall_seconds": 60.0, "on_pressure": True,
+             "exact_decode_checkpoint": False}
 
 
 def memory_preemption_policy(value) -> dict:
@@ -46,7 +42,7 @@ def memory_preemption_policy(value) -> dict:
     if unknown:
         raise ValueError(f"unknown memory_preemption settings: {sorted(unknown)}")
     policy = {**_DEFAULTS, **value}
-    for name in ("enabled", "on_pressure"):
+    for name in ("enabled", "on_pressure", "exact_decode_checkpoint"):
         if type(policy[name]) is not bool:
             raise ValueError(f"memory_preemption {name} must be boolean")
     stall = policy["stall_seconds"]
@@ -68,7 +64,7 @@ DECODE_REPLAY_BLOCK = "decode_state_not_reconstructible"
 
 
 def decode_replay_block() -> str:
-    """Why no decode-phase lane may be preempted, on any route.
+    """Why no decode-phase lane may be replayed, on any route.
 
     Replay rebuilds a preempted lane by looking the prompt plus its delivered
     tokens up in APCv2 and *prefilling* whatever the lookup does not cover.
@@ -98,7 +94,7 @@ def decode_replay_block() -> str:
     return DECODE_REPLAY_BLOCK
 
 
-def preemption_block(job) -> str | None:
+def preemption_block(job, *, exact_decode_checkpoint=False) -> str | None:
     """Why ``job`` must not be preempted now, or None when it may be."""
     request = job.request
     if job.preemption_prompt is None:
@@ -119,14 +115,14 @@ def preemption_block(job) -> str | None:
         "status"
     ) == "applied":
         return "approximate"
-    if job.completion_tokens:
+    if job.completion_tokens and not exact_decode_checkpoint:
         # Decode has started, so replay would have to rebuild decode-produced
         # state by prefilling.  Refuse rather than replay inexactly.
         return job.decode_replay_block or DECODE_REPLAY_BLOCK
     return None
 
 
-def choose_preemption_victim(active, stalled=()):
+def choose_preemption_victim(active, stalled=(), *, checkpoint_available=None):
     """The youngest preemptible lane uid, or None.
 
     Age is the request's first admission time, so a replayed request keeps its
@@ -137,7 +133,9 @@ def choose_preemption_victim(active, stalled=()):
     floor = min((active[uid].started for uid in stalled), default=None)
     victim = None
     for uid, job in active.items():
-        if preemption_block(job) is not None:
+        if preemption_block(job, exact_decode_checkpoint=bool(
+            checkpoint_available is not None and checkpoint_available(uid)
+        )) is not None:
             continue
         if floor is not None and job.started < floor:
             continue

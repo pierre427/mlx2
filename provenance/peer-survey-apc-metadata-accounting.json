@@ -1,0 +1,46 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "Bounded APC metadata transactions and immutable session accounting",
+  "recorded_at": "2026-10-15",
+  "source": "Original implementation following local I/O ownership cross-review; no external code mined",
+  "implementation_paths": [
+    "src/mlx2/runtime/apc_v2.py",
+    "tests/test_peer_apc_metadata_cpu.py",
+    "src/mlx2/runtime/persistent_blocks.py",
+    "src/mlx2/server.py",
+    "tests/test_peer_apc_metadata_review_cpu.py",
+    "tests/test_peer_api_contracts_cpu.py"
+  ],
+  "modifications": [
+    "Retain the physical payload byte total measured by the bounded spill worker or startup rescan in the entry's disk receipt.",
+    "Use that immutable size for session status and pin admission without path discovery or stat under the APC lock.",
+    "Do not silently free disk reservations when an external actor removes a payload; exact-byte restore validation detects corruption and ordinary entry removal releases ownership.",
+    "Move manifest write/fsync/replace/temporary cleanup, payload deletion/discovery/fsync and failed-spill cleanup to one bounded pure-I/O worker over immutable host snapshots. Never evaluate MLX or take the APC lock on this worker.",
+    "Expose typed apc_persistence_indeterminate timeout and apc_persistence_incomplete deletion failures with readable metadata transaction receipts. Poison the owner, prohibit further cache/session/prefetch mutation and require reload; do not claim the durable operation was cancelled.",
+    "Retain payload paths, physical byte charge and persistent directory lock until actual syscall/worker completion. Late durable publication is explicitly ambiguous, never credited to the current request.",
+    "Close device state on the caller/model thread; register detached writers before waiting and release the persistent lock only after every metadata/spill worker drains. Repeated/concurrent close is safe.",
+    "Preserve unvisited spill jobs when manifest publication fails and reject queued prefetch mutation after poisoning.",
+    "Count freed bytes only after successful unlink and refuse successful deletion receipts if files remain or absence cannot be established."
+  ],
+  "validation": {
+    "focused_cpu_tests_passed": 211,
+    "seconds": 18.43,
+    "new_regressions": "Metadata, actual HTTP park/delete, concurrent close, pending prefetch and failed-unlink accounting",
+    "covers": [
+      "ephemeral payload",
+      "persistent payload",
+      "restart inventory",
+      "external removal",
+      "manifest and deletion deadlines",
+      "actual HTTP park/delete typed failures",
+      "concurrent and repeated close ownership",
+      "queued prefetch refusal after poisoning",
+      "failed unlink accounting and incomplete deletion receipts",
+      "APC lifecycle, persistence, spill publication and I/O deadlines"
+    ],
+    "no_gpu": true,
+    "qualified": false,
+    "performance_claim": false
+  },
+  "remaining_boundary": "Startup directory/security inventory, quarantine cleanup and lock acquisition remain synchronous; ordinary close lock unlock/descriptor close is outside the serving I/O deadline. In-progress syscalls are never claimed to be cancelled."
+}

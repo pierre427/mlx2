@@ -341,7 +341,7 @@ def test_cancelled_in_flight_payloads_count_against_the_cap(tmp_path, monkeypatc
     real = apc_v2._write_spill_job
 
     def write(job):
-        if threading.current_thread().name == "apcv2-spill-writer":
+        if job.background:
             started.set()
             assert gate.wait(10), "test never released the writer"
         real(job)
@@ -392,7 +392,7 @@ def test_cancelled_spills_keep_memory_within_budget_and_cap(tmp_path, monkeypatc
     real = apc_v2._write_spill_job
 
     def write(job):
-        if threading.current_thread().name == "apcv2-spill-writer":
+        if job.background:
             started.set()
             assert gate.wait(10), "test never released the writer"
         real(job)
@@ -495,7 +495,7 @@ def test_a_cancelled_child_spill_charges_the_shared_checkpoints_it_keeps(
     real = apc_v2._write_spill_job
 
     def write(job):
-        if threading.current_thread().name == "apcv2-spill-writer":
+        if job.background:
             started.set()
             assert gate.wait(10), "test never released the writer"
         real(job)

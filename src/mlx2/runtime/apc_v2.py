@@ -4,9 +4,9 @@ from __future__ import annotations
 import ast
 import copy
 from bisect import bisect_left
-from contextlib import ExitStack
 import fcntl
 import hashlib
+import io
 import json
 import logging
 import os
@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Hashable, Iterable, List, Optional
 import mlx.core as mx
 from .rolling_counter import RollingCounter
+from .io_ownership import CloseAction, ReadPool, ReadTimeout
+from concurrent.futures import TimeoutError as FutureTimeout
 from . import loop_trace as _loop_trace
 from .cache_capsule import CacheCapsuleGeneration, CacheCapsulePool
 from .cache_operations import cache_operations
@@ -209,6 +211,18 @@ class APCSessionCapacityError(RuntimeError):
 
 class APCSessionUnavailable(RuntimeError):
     """The APC session service can no longer accept asynchronous work."""
+
+
+class APCMetadataIndeterminate(APCSessionUnavailable):
+    """A durable mutation exceeded its deadline; its disk outcome is unknown."""
+
+    code = "apc_persistence_indeterminate"
+
+
+class APCMetadataIncomplete(APCMetadataIndeterminate):
+    """A finished deletion left files behind; reload must reconcile ownership."""
+
+    code = "apc_persistence_incomplete"
 
 
 class _PersistedPinCapacityError(RuntimeError):
@@ -583,9 +597,8 @@ class _SpillFile:
     kind: str  # target, draft or aux
     path: Path
     signature: str
-    # A synchronous spill saves ``cache`` (target/draft) or ``arrays`` (aux)
-    # through the job's save callables.  A background spill first converts
-    # ``cache`` to an evaluated ``arrays`` + ``metadata`` payload.
+    # Preparation holds caches briefly; every submitted spill converts them
+    # to evaluated immutable arrays and metadata on the owning thread.
     cache: Any = None
     arrays: Any = None
     metadata: Optional[dict] = None
@@ -611,8 +624,11 @@ class _SpillJob:
     created: list = None
     file_records: dict = None
     written: int = 0
+    physical_paths: tuple = ()
     error: Optional[BaseException] = None
     cancelled: bool = False
+    timed_out: bool = False
+    background: bool = False
     # Set (with cancelled) when the APC stops waiting for this job; the
     # writer then removes whatever it wrote.
     abandoned: bool = False
@@ -688,6 +704,53 @@ def _atomic_save_payload(path: Path, arrays, metadata) -> None:
             pass
 
 
+def _write_manifest_payload(manifest, temporary, payload, directory, fsync_directory):
+    """Pure filesystem work over immutable host bytes; never takes APC locks."""
+    try:
+        with temporary.open("xb") as handle:
+            os.chmod(temporary, 0o600)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, manifest)
+        os.chmod(manifest, 0o600)
+        fsync_directory(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _remove_disk_payloads(roots, manifest, directory, fsync_directory):
+    """Delete one immutable generation; late completion is explicitly ambiguous."""
+    removed = failures = 0
+    paths = []
+    for root in roots:
+        try:
+            paths.extend(block_file_paths(Path(root)))
+        except (OSError, ValueError):
+            paths.append(Path(root))
+        try:
+            removed += remove_block_file(Path(root))
+        except OSError:
+            failures += 1
+    if manifest:
+        paths.append(Path(manifest))
+        try:
+            Path(manifest).unlink(missing_ok=True)
+            if directory is not None:
+                fsync_directory(directory)
+        except OSError:
+            failures += 1
+    for path in paths:
+        try:
+            path.stat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            pass  # Absence could not be established.
+        failures += 1
+    return removed, failures
+
+
 def _write_spill_job(job: _SpillJob) -> None:
     """Write a spill's files.  Touches no APCv2 state, so it may run on the
     writer thread; the payload arrays must already be evaluated there."""
@@ -705,11 +768,14 @@ def _write_spill_job(job: _SpillJob) -> None:
             encode_block_file(
                 spill.path, block_bytes=job.block_bytes, signature=spill.signature
             )
+    job.physical_paths = tuple(
+        str(path) for root in job.created for path in block_file_paths(root)
+    )
     job.written = (
         sum(int(record["size"]) for record in job.file_records.values())
         if job.persist
         else sum(
-            path.stat().st_size for root in job.created for path in block_file_paths(root)
+            Path(path).stat().st_size for path in job.physical_paths
         )
     )
 
@@ -717,6 +783,24 @@ def _write_spill_job(job: _SpillJob) -> None:
 # How long clear()/close() wait (outside the APC lock) for in-flight spill
 # writes before abandoning them to the writer, which removes their files.
 _SPILL_DRAIN_SECONDS = 30.0
+# A serving operation must not hold the APC lock indefinitely waiting for a
+# background writer. Unlike shutdown draining, this bounds one whole batch.
+_SPILL_SETTLE_SECONDS = 5.0
+_MANIFEST_WRITE_SECONDS = 5.0
+_SPILL_WRITE_SECONDS = 60.0
+_RESTORE_READ_SECONDS = 60.0
+_CONTROL_IO_SECONDS = 60.0
+# Serialized metadata has a separate, finite allowance beyond resident tensors.
+_RESTORE_HEADER_BYTES = 16 << 20
+_SPILL_QUARANTINE_LOCK = threading.Lock()
+_SPILL_QUARANTINES = {}
+
+
+def _spill_writes_blocked() -> bool:
+    # Retain this guard across clear()/unload: otherwise each new APC could
+    # allocate another writer window behind the same uninterruptible disk.
+    with _SPILL_QUARANTINE_LOCK:
+        return bool(_SPILL_QUARANTINES)
 
 
 class _SpillWriter:
@@ -754,7 +838,10 @@ class _SpillWriter:
                 if job.started:
                     _write_spill_job(job)
             except BaseException as exc:  # noqa: BLE001 - reported at publication
-                job.error = exc
+                # A traceback owns the serializer frames and their arrays.
+                # Keep diagnostic type/text without retaining failed payloads
+                # after the job's accounted ownership has ended.
+                job.error = RuntimeError(f"{type(exc).__name__}: {exc}")
             finally:
                 for spill in job.files:
                     spill.arrays = spill.cache = None  # release once written
@@ -770,6 +857,16 @@ class _SpillWriter:
                         except OSError:
                             pass
                 job.done.set()
+                with _SPILL_QUARANTINE_LOCK:
+                    pending = _SPILL_QUARANTINES.get(self)
+                    if pending is not None:
+                        pending[:] = [item for item in pending if not item.done.is_set()]
+                        if not pending:
+                            del _SPILL_QUARANTINES[self]
+                # queue.get() may block for the rest of this server's life.
+                # Do not keep the previous entry or payload in worker locals.
+                spill = None
+                del spill, job
 
 
 class APCv2(PrefixIndex):
@@ -794,6 +891,18 @@ class APCv2(PrefixIndex):
     _background_spill_max_bytes = 0
     _spill_jobs = ()
     _spill_writer = None
+    _restore_pool = None
+    _restore_staging_bytes = 0
+    _metadata_pool = None
+    _metadata_future = None
+    _metadata_failure = None
+    _metadata_payload_bytes = 0
+    _metadata_lock_retained = False
+    _metadata_other_owner_pending = False
+    _metadata_retained_writers = ()
+    _metadata_release_waiter = None
+    _metadata_operation = None
+    _metadata_completion = "ready"
     _turn_supersessions = {}
     # Windowed spill/restore activity (rolling_counter); created on first use
     # so instances built with object.__new__ still report it.
@@ -807,6 +916,7 @@ class APCv2(PrefixIndex):
         "background_spills_kept_hot",
         "background_spills_discarded",
         "background_spill_failures",
+        "background_spill_timeouts",
         "background_spill_sync_fallbacks",
         "restores",
         "restore_failures",
@@ -933,6 +1043,8 @@ class APCv2(PrefixIndex):
         self._background_spill_max_bytes = int(background_spill_max_bytes)
         self._spill_jobs = []
         self._spill_writer = None
+        self._restore_pool = None
+        self._restore_staging_bytes = 0
         # (key, prompt-boundary tokens) -> {finished-turn tokens: weak ref to
         # the entry}.  Value retention only; a turn that leaves the trie must
         # not stay alive (its frozen KV outside the byte count) through it.
@@ -1016,20 +1128,19 @@ class APCv2(PrefixIndex):
             "reserved_bytes_peak": 0,
         }
         self._idle_disk_seconds = max(0.0, float(idle_disk_seconds))
-        if persist_dir and idle_disk_dir and Path(persist_dir).expanduser().resolve() != Path(idle_disk_dir).expanduser().resolve():
-            raise ValueError("persist_dir and idle_disk_dir must name the same disk tier")
+        self._requested_disk_dirs = (persist_dir, idle_disk_dir)
         disk_dir = persist_dir or idle_disk_dir
         if self._idle_disk_seconds > 0 and (not disk_dir):
             raise ValueError(
                 "idle_disk_dir is required when idle_disk_seconds is enabled"
             )
         self._idle_disk_dir = (
-            Path(disk_dir).expanduser().resolve()
+            Path(disk_dir).expanduser()
             if disk_dir and self._idle_disk_seconds > 0
             else None
         )
         self._persist_dir = (
-            Path(persist_dir).expanduser().resolve() if persist_dir else None
+            Path(persist_dir).expanduser() if persist_dir else None
         )
         if self._persist_dir is not None and self._idle_disk_dir is None:
             raise ValueError("persist_dir requires a positive idle_disk_seconds")
@@ -1096,6 +1207,20 @@ class APCv2(PrefixIndex):
             "elapsed_seconds": 0.0,
         }
         self._persist_lock_file = None
+        self._persist_lock_descriptor = None
+        self._persist_release_lock = threading.RLock()
+        self._control_pool = None
+        self._control_close_owner = CloseAction(self._release_persist_lock_raw)
+        self._metadata_pool = None
+        self._metadata_future = None
+        self._metadata_failure = None
+        self._metadata_payload_bytes = 0
+        self._metadata_lock_retained = False
+        self._metadata_other_owner_pending = False
+        self._metadata_retained_writers = []
+        self._metadata_release_waiter = None
+        self._metadata_operation = None
+        self._metadata_completion = "ready"
         self._prefetch_slot = threading.BoundedSemaphore(1)
         self._pending_prefetch = None
         # Pin-cap message of the most recent spill that wrote a snapshot and
@@ -1107,16 +1232,33 @@ class APCv2(PrefixIndex):
         self._layer_segments = True
         self.layout_name = str(layout_name)
         if self._idle_disk_dir is not None:
+            self._control_pool = ReadPool(1, "apcv2-control", timeout=_CONTROL_IO_SECONDS,
+                                          max_pending=1)
+            try:
+                self._control_pool.call(self._initialize_disk)
+                # Startup registration is host-only. Budget enforcement and
+                # any cache release remain on the owning model thread.
+                self._enforce_entry_limits_locked()
+            except BaseException:
+                self._closed = True
+                self._release_persist_lock()
+                raise
+
+    def _initialize_disk(self):
+        """Exclusive unpublished startup inventory; no device operations."""
+        persist_dir, idle_disk_dir = self._requested_disk_dirs
+        if persist_dir and idle_disk_dir and Path(persist_dir).expanduser().resolve() != Path(idle_disk_dir).expanduser().resolve():
+            raise ValueError("persist_dir and idle_disk_dir must name the same disk tier")
+        self._idle_disk_dir = self._idle_disk_dir.resolve()
+        if self._persist_dir is not None:
+            self._persist_dir = self._persist_dir.resolve()
+        if self._idle_disk_dir is not None:
             self._idle_disk_dir.mkdir(parents=True, exist_ok=True)
             self._secure_owned_path(self._idle_disk_dir, 0o700, directory=True)
         if self._persist_dir is not None:
             self._acquire_persist_lock()
-            try:
-                self._secure_persist_tree()
-                self._rescan_persisted_entries()
-            except BaseException:
-                self._release_persist_lock()
-                raise
+            self._secure_persist_tree()
+            self._rescan_persisted_entries()
         elif self._idle_disk_dir is not None:
             # Snapshots are process-local scratch.  Also sweep the dot-prefixed
             # temporaries ``_atomic_save_*`` leave behind if the process died
@@ -1197,33 +1339,103 @@ class APCv2(PrefixIndex):
         flags |= getattr(os, "O_NOFOLLOW", 0)
         try:
             descriptor = os.open(lock_path, flags, 0o600)
+            self._persist_lock_descriptor = descriptor
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-                os.close(descriptor)
                 raise RuntimeError(
                     "APCv2 persistence lock must be a process-owned regular file"
                 )
             os.fchmod(descriptor, 0o600)
             handle = os.fdopen(descriptor, "a+b")
+            self._persist_lock_file = handle
+            self._persist_lock_descriptor = None
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (BlockingIOError, OSError) as error:
-            try:
-                handle.close()
-            except (NameError, OSError):
-                pass
+        except BaseException as error:
+            # The constructor's control finalizer closes exactly once after
+            # this worker returns, including partial open/fstat/fdopen errors.
+            if not isinstance(error, OSError):
+                raise
             raise RuntimeError(
                 "APCv2 persistence lock is already owned or is not a safe file"
             ) from error
-        self._persist_lock_file = handle
 
     def _release_persist_lock(self) -> None:
+        with self._persist_release_lock:
+            self._release_persist_lock_once()
+
+    def _release_persist_lock_once(self) -> None:
+        if self._control_pool is None:
+            return
+        future = self._metadata_future
+        writers = tuple(self._metadata_retained_writers)
+        if ((future is not None and not future.done())
+                or any(writer._thread.is_alive() for writer in writers)):
+            # The operation can still replace/fsync its manifest. Keep the
+            # exact directory owner alive after close until that syscall ends.
+            self._metadata_lock_retained = True
+            if self._metadata_release_waiter is None:
+                def release_after_drain():
+                    if future is not None:
+                        try:
+                            future.result()
+                        except BaseException:  # noqa: BLE001, S110 - late outcome remains indeterminate
+                            pass  # Completion remains indeterminate to the caller.
+                    for writer in writers:
+                        writer.close()
+                    self._metadata_other_owner_pending = False
+                    self._release_persist_lock()
+
+                self._metadata_release_waiter = threading.Thread(
+                    target=release_after_drain, name="apcv2-metadata-drain", daemon=True,
+                )
+                self._metadata_release_waiter.start()
+            return
+        self._metadata_lock_retained = not self._control_pool.close(self._control_close_owner)
+
+    def _release_persist_lock_raw(self):
+        """Only the control finalizer calls this after every writer drains."""
+        if self._persist_lock_descriptor is not None:
+            os.close(self._persist_lock_descriptor)
+            self._persist_lock_descriptor = None
         if self._persist_lock_file is None:
+            self._metadata_lock_retained = False
             return
         try:
             fcntl.flock(self._persist_lock_file.fileno(), fcntl.LOCK_UN)
         finally:
             self._persist_lock_file.close()
             self._persist_lock_file = None
+            self._metadata_lock_retained = False
+
+    def _ensure_metadata_available(self) -> None:
+        if self._metadata_failure is not None:
+            error = (APCMetadataIncomplete if self._metadata_completion == "incomplete"
+                     else APCMetadataIndeterminate)
+            raise error(self._metadata_failure)
+
+    def _incomplete_metadata_delete(self, operation) -> None:
+        self._metadata_operation = operation
+        self._metadata_completion = "incomplete"
+        self._metadata_failure = (
+            "APCv2 persistence deletion did not complete; reload is required "
+            "to reconcile retained files and disk ownership"
+        )
+        self._metadata_lock_retained = self._persist_lock_file is not None
+        self._metadata_pool.close()
+        self._capsule_generation.advance()
+        raise APCMetadataIncomplete(self._metadata_failure)
+
+    def _metadata_receipt(self) -> dict:
+        future = self._metadata_future
+        return {
+            "completion": self._metadata_completion,
+            "reload_required": self._metadata_failure is not None,
+            "worker_pending": future is not None and not future.done(),
+            "payload_bytes": self._metadata_payload_bytes if future is not None and not future.done() else 0,
+            "directory_lock_retained": self._metadata_lock_retained,
+            "deadline_seconds": _MANIFEST_WRITE_SECONDS,
+            "operation": self._metadata_operation,
+        }
 
     def _identity_matches(self, key: APCKey) -> bool:
         expected = self._persist_identity
@@ -1314,38 +1526,63 @@ class APCv2(PrefixIndex):
             "hit_count": int(getattr(entry, "_apc_hit_count", 0)),
         }
 
+    def _run_metadata_mutation_locked(self, operation, function, *args, payload_bytes=0):
+        self._ensure_metadata_available()
+        if self._metadata_pool is None:
+            self._metadata_pool = ReadPool(1, "apcv2-metadata", max_pending=1,
+                                          timeout=_MANIFEST_WRITE_SECONDS)
+        future = self._metadata_pool.submit(function, *args)
+        self._metadata_future = future
+        self._metadata_operation = operation
+        self._metadata_payload_bytes = payload_bytes
+        try:
+            result = future.result(timeout=_MANIFEST_WRITE_SECONDS)
+            self._metadata_future = None
+            self._metadata_payload_bytes = 0
+            self._metadata_operation = None
+            return result
+        except (FutureTimeout, ReadTimeout) as error:
+            self._metadata_completion = "indeterminate"
+            self._metadata_failure = (
+                "APCv2 persistence completion is indeterminate after its deadline; "
+                "reload is required after the filesystem worker drains"
+            )
+            self._metadata_lock_retained = self._persist_lock_file is not None
+            self._metadata_pool.fail(ReadTimeout(self._metadata_failure))
+            self._disk_stats["persistence_io_failures"] += 1
+            self._capsule_generation.advance()
+            raise APCMetadataIndeterminate(self._metadata_failure) from error
+        except Exception:
+            self._metadata_future = None
+            self._metadata_payload_bytes = 0
+            self._metadata_operation = None
+            raise
+
     def _write_manifest_locked(self, key, tokens, entry) -> bool:
+        self._ensure_metadata_available()
         if self._persist_dir is None or not getattr(entry, "_apc_disk", None):
             return True
         disk = entry._apc_disk
         manifest = Path(disk.get("manifest") or Path(disk["target"]).with_suffix(".manifest.json"))
         disk["manifest"] = str(manifest)
         temporary = manifest.with_name(f".{manifest.name}.{uuid.uuid4().hex}.tmp")
+        payload = json.dumps(
+            self._manifest_for_entry(key, tokens, entry),
+            sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
         try:
-            payload = json.dumps(
-                self._manifest_for_entry(key, tokens, entry),
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            with temporary.open("xb") as handle:
-                os.chmod(temporary, 0o600)
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, manifest)
-            os.chmod(manifest, 0o600)
-            self._fsync_directory(self._persist_dir)
+            self._run_metadata_mutation_locked(
+                "manifest_write", _write_manifest_payload, manifest, temporary,
+                payload, self._persist_dir, self._fsync_directory, payload_bytes=len(payload),
+            )
             self._disk_stats["persisted_writes"] += 1
             return True
+        except APCMetadataIndeterminate:
+            raise
         except Exception:
             self._disk_stats["persistence_io_failures"] += 1
             log.exception("APCv2 manifest update failed")
             return False
-        finally:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                self._disk_stats["persistence_io_failures"] += 1
 
     def _verify_persisted_files(self, disk: dict) -> None:
         if self._persist_dir is None or not disk.get("manifest"):
@@ -1505,6 +1742,8 @@ class APCv2(PrefixIndex):
                     draft_signature=value.get("draft_signature"),
                     manifest=str(manifest),
                     files=files,
+                    physical_bytes=disk_bytes,
+                    physical_paths=tuple(disk.values()),
                 )
                 entry = PrefixIndex.CacheEntry([], 0, cache_type, None)
                 entry._apc_disk = disk
@@ -1581,7 +1820,6 @@ class APCv2(PrefixIndex):
             for path in self._persist_dir.glob("apc-idle-*.safetensors"):
                 if path.name not in referenced:
                     path.unlink(missing_ok=True)
-        self._enforce_entry_limits_locked()
         self._rescan["elapsed_seconds"] = time.monotonic() - started
         log.info(
             "APCv2 persistence rescan registered=%d bytes=%d discarded=%s elapsed=%.6fs",
@@ -1625,6 +1863,7 @@ class APCv2(PrefixIndex):
         """
         required = int(nbytes)
         with self._apc_lock:
+            self._ensure_metadata_available()
             if getattr(self, "_closed", False):
                 return None
             authority = getattr(self, "_capsule_generation", None)
@@ -1724,6 +1963,8 @@ class APCv2(PrefixIndex):
         return int(getattr(cache.cow_owner, "pin_count", 0) or 0) > 0
 
     def _expire_entry_pins_locked(self, key, tokens, entry, *, now=None) -> None:
+        if self._metadata_failure is not None:
+            return  # Status remains readable without another durable mutation.
         now = self._wall_time() if now is None else float(now)
         changed = False
         for attr in ("_apc_disk_pin_expiries", "_apc_resident_pin_expiries"):
@@ -2159,35 +2400,22 @@ class APCv2(PrefixIndex):
     @staticmethod
     def _disk_paths(entry) -> tuple[Path, ...]:
         disk = getattr(entry, "_apc_disk", None) or {}
-        paths = []
-        for raw in (disk.get("target"), disk.get("draft"), disk.get("aux")):
-            if raw:
-                paths.extend(block_file_paths(Path(raw)))
-        return tuple(paths)
+        return tuple(Path(raw) for raw in disk.get("physical_paths", ()))
 
     def _remove_disk_files_locked(self, entry) -> None:
+        self._ensure_metadata_available()
         disk = getattr(entry, "_apc_disk", None) or {}
-        for raw in (disk.get("target"), disk.get("draft"), disk.get("aux")):
-            if raw:
-                try:
-                    removed = remove_block_file(Path(raw))
-                except OSError:
-                    self._disk_stats["persistence_io_failures"] += 1
-                    log.exception("APCv2 payload removal failed")
-                else:
-                    self._disk_bytes = max(0, self._disk_bytes - removed)
-        manifest = disk.get("manifest")
-        if manifest:
-            try:
-                Path(manifest).unlink(missing_ok=True)
-            except OSError:
-                self._disk_stats["persistence_io_failures"] += 1
-                log.exception("APCv2 manifest removal failed")
-            if self._persist_dir is not None:
-                try:
-                    self._fsync_directory(self._persist_dir)
-                except OSError:
-                    self._disk_stats["persistence_io_failures"] += 1
+        if not disk:
+            return
+        roots = tuple(disk[kind] for kind in ("target", "draft", "aux") if disk.get(kind))
+        removed, failures = self._run_metadata_mutation_locked(
+            "payload_delete", _remove_disk_payloads, roots, disk.get("manifest"),
+            self._persist_dir, self._fsync_directory,
+        )
+        self._disk_bytes = max(0, self._disk_bytes - removed)
+        self._disk_stats["persistence_io_failures"] += failures
+        if failures:
+            self._incomplete_metadata_delete("payload_delete")
         entry._apc_disk = None
 
     def _persistent_signature(self, key, tokens, cache_type, plane: str) -> str:
@@ -2282,6 +2510,7 @@ class APCv2(PrefixIndex):
     def _drop_entry_locked(
         self, key, tokens, entry, *, reason: str = "drop", loses_pins: bool = True
     ) -> None:
+        self._ensure_metadata_available()
         try:
             current = self._trie.pop(key, tokens)
         except KeyError:
@@ -2363,9 +2592,14 @@ class APCv2(PrefixIndex):
         self, key, tokens, entry, *, reason: str, hard_cap: Optional[int] = None,
         keep_resident: bool = False, background: bool = False,
     ) -> bool:
-        if self._spill_job_of(entry) is not None and not self._spill_job_of(entry).cancelled:
+        if _spill_writes_blocked():
+            # The writer still owns evaluated payloads. Do not turn a timeout
+            # into a second synchronous write (or another growing queue).
+            return False
+        if self._spill_job_of(entry) is not None:
             # Already being written in the background: finish that first.
-            self._settle_spill_locked(entry)
+            if not self._settle_spill_locked(entry):
+                return False
             if not entry.prompt_cache:
                 return True
         self._spill_capacity_violation = None
@@ -2415,9 +2649,26 @@ class APCv2(PrefixIndex):
             ):
                 return True
             try:
-                _write_spill_job(job)
+                if self._spill_jobs:
+                    # A synchronous fallback shares the single writer. Do
+                    # not enqueue an extra ownership window behind a stalled
+                    # background job that already filled the payload cap.
+                    self._collect_spills_locked(wait=True, reenforce=False)
+                    if _spill_writes_blocked():
+                        return False
+                self._evaluate_spill_payload_locked(job)
+                self._queue_spill_locked(job)
+                if not job.done.wait(_SPILL_WRITE_SECONDS):
+                    self._timeout_spill_locked(job)
+                    return False
+                self._spill_jobs.remove(job)
+                entry._apc_spill_job = None
+                if job.error is not None:
+                    raise job.error
                 self._commit_spill_job_locked(job)
-            except Exception as exc:  # noqa: BLE001 - a lost spill keeps the entry
+            except Exception as exc:  # A lost spill keeps the entry.
+                if isinstance(exc, APCMetadataIndeterminate):
+                    raise  # Its manifest may still publish; retain every payload.
                 self._abort_spill_job_locked(job, exc, reason=reason)
                 return False
         return self._finish_spill_locked(
@@ -2515,6 +2766,8 @@ class APCv2(PrefixIndex):
                 draft.signature if draft and draft.path in created else None
             ),
             "files": job.file_records if job.persist else None,
+            "physical_bytes": int(job.written),
+            "physical_paths": job.physical_paths,
             # Target, draft and aux were replaced by MAC'd block manifests;
             # restore must refuse anything else there.
             "block_encoded": not job.persist and job.block_bytes > 0,
@@ -2549,11 +2802,14 @@ class APCv2(PrefixIndex):
             self._remove_job_files_locked(job)
 
     def _remove_job_files_locked(self, job: _SpillJob) -> None:
-        for path in job.created:
-            try:
-                remove_block_file(path)
-            except OSError:
-                self._disk_stats["persistence_io_failures"] += 1
+        if job.created:
+            _removed, failures = self._run_metadata_mutation_locked(
+                "spill_cleanup", _remove_disk_payloads, tuple(map(str, job.created)),
+                None, None, self._fsync_directory,
+            )
+            self._disk_stats["persistence_io_failures"] += failures
+            if failures:
+                self._incomplete_metadata_delete("spill_cleanup")
 
     def _finish_spill_locked(
         self, key, tokens, entry, *, reason: str, keep_resident: bool
@@ -2610,17 +2866,27 @@ class APCv2(PrefixIndex):
             self._disk_stats["background_spill_sync_fallbacks"] += 1
             return False
         try:
-            # The writer thread cannot evaluate arrays another thread's stream
-            # owns; build and evaluate the whole payload here, on the owning
-            # thread.
-            for spill in job.files:
-                if spill.cache is not None:
-                    spill.arrays, spill.metadata = prompt_cache_payload(spill.cache)
-                    spill.cache = None
-            mx.eval([a for spill in job.files for a in spill.arrays.values()])
+            self._evaluate_spill_payload_locked(job)
         except Exception:  # noqa: BLE001 - any failure here: write synchronously
             self._disk_stats["background_spill_sync_fallbacks"] += 1
             return False
+        job.background = True
+        self._queue_spill_locked(job)
+        self._disk_stats["background_spills_submitted"] += 1
+        return True
+
+    @staticmethod
+    def _evaluate_spill_payload_locked(job: _SpillJob) -> None:
+        # Capture and evaluate on the owning/model thread. The writer only
+        # serializes these immutable, already evaluated arrays.
+        for spill in job.files:
+            if spill.cache is not None:
+                spill.arrays, spill.metadata = prompt_cache_payload(spill.cache)
+                spill.cache = None
+        mx.eval([a for spill in job.files for a in spill.arrays.values()])
+
+    def _queue_spill_locked(self, job: _SpillJob) -> None:
+        entry = job.entry
         job.snapshot_buffers = {
             token: self._shared_buffers[token][0]
             for token in getattr(entry, "_apc_buffer_keys", ())
@@ -2628,11 +2894,9 @@ class APCv2(PrefixIndex):
         }
         entry._apc_spill_job = job
         self._spill_jobs.append(job)
-        self._disk_stats["background_spills_submitted"] += 1
         if self._spill_writer is None:
             self._spill_writer = _SpillWriter()
         self._spill_writer.submit(job)
-        return True
 
     @staticmethod
     def _spill_job_of(entry) -> Optional[_SpillJob]:
@@ -2695,16 +2959,27 @@ class APCv2(PrefixIndex):
         enforcement must keep; ``reenforce=False`` leaves replacing a victim
         that stayed resident to the caller.
         """
+        self._ensure_metadata_available()
         if not self._spill_jobs:
             return False
         jobs, self._spill_jobs = self._spill_jobs, []
+        deadline = time.monotonic() + _SPILL_SETTLE_SECONDS
         pending = []
         unmet = False
-        for job in jobs:
-            if wait:
-                job.done.wait()
+        for index, job in enumerate(jobs):
+            if job.timed_out and not job.done.is_set():
+                unmet = True
+            elif wait and not job.done.wait(max(0.0, deadline - time.monotonic())):
+                self._timeout_spill_locked(job)
+                unmet = True
             if job.done.is_set():
-                unmet |= self._publish_spill_job_locked(job, exclude=exclude)
+                try:
+                    unmet |= self._publish_spill_job_locked(job, exclude=exclude)
+                except APCMetadataIndeterminate:
+                    # The ambiguous manifest owns this job's files. Retain
+                    # every other writer job for close and byte accounting.
+                    self._spill_jobs = pending + jobs[index + 1:] + self._spill_jobs
+                    raise
             else:
                 pending.append(job)
         self._spill_jobs = pending + self._spill_jobs
@@ -2715,13 +2990,32 @@ class APCv2(PrefixIndex):
             self._enforce_entry_limits_locked()
         return unmet
 
-    def _settle_spill_locked(self, entry) -> None:
-        """Wait for an entry's in-flight spill and publish it."""
+    def _timeout_spill_locked(self, job: _SpillJob) -> None:
+        """Revoke publication, retaining ownership until the writer returns."""
+        if not job.timed_out:
+            job.timed_out = True
+            job.cancel()
+            if self._spill_writer is not None:
+                with _SPILL_QUARANTINE_LOCK:
+                    # Completion may race the deadline. Check under the same
+                    # lock the writer uses to retire its quarantine.
+                    if not job.done.is_set():
+                        _SPILL_QUARANTINES.setdefault(self._spill_writer, []).append(job)
+            self._disk_stats["background_spill_timeouts"] += 1
+            log.warning("APCv2 spill exceeded the serving wait budget")
+
+    def _settle_spill_locked(self, entry) -> bool:
+        """Bound the wait; a late result is discarded, never published."""
         job = self._spill_job_of(entry)
         if job is None:
-            return
-        job.done.wait()
+            return True
+        if job.timed_out and not job.done.is_set():
+            return False
+        if not job.done.wait(_SPILL_SETTLE_SECONDS):
+            self._timeout_spill_locked(job)
+            return False
         self._collect_spills_locked()
+        return True
 
     def _publish_spill_job_locked(self, job: _SpillJob, *, exclude=None) -> bool:
         """Publish one finished job; True if its victim is still resident."""
@@ -2746,7 +3040,9 @@ class APCv2(PrefixIndex):
             return False
         try:
             self._commit_spill_job_locked(job)
-        except Exception as exc:  # noqa: BLE001 - same handling as a sync spill
+        except Exception as exc:  # Same handling as a synchronous spill.
+            if isinstance(exc, APCMetadataIndeterminate):
+                raise
             self._abort_spill_job_locked(job, exc, reason="pressure")
             self._disk_stats["background_spill_failures"] += 1
             entry._apc_background_spill_failed = True
@@ -2803,6 +3099,7 @@ class APCv2(PrefixIndex):
         return self._n_bytes <= temporary_limit - self._capsule_reserved_bytes
 
     def _restore_entry_locked(self, key, tokens, entry) -> bool:
+        self._ensure_metadata_available()
         traced = _loop_trace.enabled()
         start = _loop_trace.now() if traced else None
         began = time.perf_counter()
@@ -2818,6 +3115,66 @@ class APCv2(PrefixIndex):
                 restored=bool(restored),
             )
         return restored
+
+    def _read_restore_payload(self, disk, aux_signature, limit):
+        """Pure file I/O; no MLX deserialization or APC publication here."""
+        payloads = {}
+        remaining = limit
+        disk_bytes = 0
+        for kind in ("target", "draft", "aux"):
+            if not disk.get(kind):
+                continue
+            root = Path(disk[kind])
+            signature = (aux_signature if kind == "aux"
+                         else disk.get(f"{kind}_signature", ""))
+            with materialize_block_file(
+                root, expected_signature=signature,
+                require_manifest=bool(disk.get("block_encoded")),
+            ) as path:
+                with path.open("rb") as handle:
+                    payload = handle.read(remaining + 1)
+                if len(payload) > remaining:
+                    raise ValueError("APCv2 serialized snapshot exceeds staging byte cap")
+                if self._persist_dir is not None and disk.get("manifest"):
+                    record = (disk.get("files") or {}).get(kind, {})
+                    # Bind exactly the bytes the model thread will decode.
+                    # Hashing a path and reopening it permits replacement
+                    # between verification and deserialization.
+                    if (len(payload) != int(record.get("size", -1))
+                            or hashlib.sha256(payload).hexdigest() != record.get("sha256")):
+                        raise _RestoreDigestFailure("persisted APCv2 staged payload digest mismatch")
+                remaining -= len(payload)
+                payloads[kind] = payload
+            disk_bytes += sum(path.stat().st_size for path in block_file_paths(root))
+        return payloads, disk_bytes
+
+    def _load_restore_payload_locked(self, disk, aux_signature, expected):
+        # One staged snapshot per APC, bounded separately from resident state.
+        # A timeout poisons this pool permanently; replacement APC ownership is
+        # refused by ReadPool until the old syscall has actually returned.
+        if self._restore_pool is None:
+            self._restore_pool = ReadPool(1, "apcv2-restore", max_pending=1)
+        pool = self._restore_pool
+        limit = min(expected, int(self.max_bytes)) + _RESTORE_HEADER_BYTES
+        future = pool.submit(self._read_restore_payload, dict(disk), aux_signature, limit)
+        self._restore_staging_bytes = limit
+        try:
+            return future.result(timeout=_RESTORE_READ_SECONDS)
+        except FutureTimeout as error:
+            failure = ReadTimeout("APCv2 payload read exceeded its deadline")
+            pool.fail(failure)
+            # Ownership and its accounting survive the caller. No late result
+            # can reach the model thread or publish a restored cache.
+            future.add_done_callback(lambda _future: setattr(self, "_restore_staging_bytes", 0))
+            raise failure from error
+        except FileNotFoundError as error:
+            self._restore_staging_bytes = 0
+            if self._persist_dir is not None and disk.get("manifest"):
+                raise _RestoreDigestFailure("persisted APCv2 file is missing") from error
+            raise
+        except BaseException:
+            self._restore_staging_bytes = 0
+            raise
 
     def _restore_entry_untraced_locked(self, key, tokens, entry) -> bool:
         disk = getattr(entry, "_apc_disk", None) or {}
@@ -2847,14 +3204,11 @@ class APCv2(PrefixIndex):
             # Digest the payload only once there is room for it: a restore the
             # budget defers must not read and hash gigabytes under the APC
             # lock just to learn that (09-22 audit C5).
-            self._verify_persisted_files(disk)
-            with ExitStack() as stack:
-                target_path = stack.enter_context(materialize_block_file(
-                    Path(target),
-                    expected_signature=disk.get("target_signature", ""),
-                    require_manifest=bool(disk.get("block_encoded")),
-                ))
-                cache = load_prompt_cache(str(target_path))
+            payloads, restored_disk_bytes = self._load_restore_payload_locked(
+                disk, self._persistent_signature(key, tokens, entry.cache_type, "aux"), expected
+            )
+            try:
+                cache = load_prompt_cache(io.BytesIO(payloads["target"]))
                 # Fail closed on a codec this server does not serve, an exact
                 # leaf in a codec namespace (or the reverse), or a corrupt
                 # payload; ValueError drops the snapshot below.
@@ -2863,22 +3217,10 @@ class APCv2(PrefixIndex):
                 sidecar = None
                 sidecar_info = disk.get("sidecar")
                 if sidecar_info is not None:
-                    draft_path = stack.enter_context(materialize_block_file(
-                        Path(disk["draft"]),
-                        expected_signature=disk.get("draft_signature", ""),
-                        require_manifest=bool(disk.get("block_encoded")),
-                    ))
-                    draft = load_prompt_cache(str(draft_path))
+                    draft = load_prompt_cache(io.BytesIO(payloads["draft"]))
                     arrays = {}
                     if disk.get("aux"):
-                        aux_path = stack.enter_context(materialize_block_file(
-                            Path(disk["aux"]),
-                            expected_signature=self._persistent_signature(
-                                key, tokens, entry.cache_type, "aux"
-                            ),
-                            require_manifest=bool(disk.get("block_encoded")),
-                        ))
-                        arrays = mx.load(str(aux_path))
+                        arrays = mx.load(io.BytesIO(payloads["aux"]), format="safetensors")
                     _check_aux_array_layout(
                         arrays,
                         sidecar_info.get("aux_arrays"),
@@ -2899,6 +3241,9 @@ class APCv2(PrefixIndex):
                         rng_draws=int(sidecar_info.get("rng_draws", 0)),
                         **sidecar_extra,
                     )
+            finally:
+                payloads.clear()
+                self._restore_staging_bytes = 0
             mx.eval([item.state for item in cache])
             if sidecar is not None:
                 mx.eval(
@@ -2939,9 +3284,6 @@ class APCv2(PrefixIndex):
             if not attached:
                 # Never charge _n_bytes for an entry no lookup can reach.
                 raise FileNotFoundError("APCv2 placeholder left the trie during its restore")
-            restored_disk_bytes = sum(
-                (path.stat().st_size for path in self._disk_paths(entry))
-            )
             entry.prompt_cache = cache
             entry.sidecar = sidecar
             entry.nbytes = published_nbytes
@@ -2957,6 +3299,11 @@ class APCv2(PrefixIndex):
             entry._apc_last_access_at = self._now()
             entry._apc_restore_transient_failures = 0
             return True
+        except ReadTimeout:
+            # A timeout is not evidence of corruption. Keep the placeholder;
+            # its old worker still owns filesystem and staging resources.
+            self._disk_stats["restore_transient_deferrals"] += 1
+            return None
         except _RestoreBudgetUnavailable:
             # Healthy snapshot, no room: leased residents pin the budget.  Keep
             # the placeholder and its files; the caller reports a miss.
@@ -3130,7 +3477,8 @@ class APCv2(PrefixIndex):
             seen.add(id(entry))
             if (
                 entry.prompt_cache
-                and self._spill_job_of(entry) is None
+                and (self._spill_job_of(entry) is None
+                     or self._spill_job_of(entry).cancelled)
                 and (interior is None or self._is_interior_entry(entry) == interior)
             ):
                 count += 1
@@ -3283,13 +3631,13 @@ class APCv2(PrefixIndex):
         ]
 
     def _entry_disk_bytes(self, entry) -> int:
-        total = 0
-        for path in self._disk_paths(entry):
-            try:
-                total += path.stat().st_size
-            except OSError:
-                continue
-        return total
+        # The payload writer (or startup inventory) already measured this
+        # immutable snapshot. Session status and pin admission must not issue
+        # filesystem calls while holding the APC lock. Retain the reservation
+        # until removal even if an external process truncates/unlinks a file;
+        # exact-byte validation owns detecting that corruption on restore.
+        disk = getattr(entry, "_apc_disk", None) or {}
+        return int(disk.get("physical_bytes", 0))
 
     def _entry_projected_disk_bytes(self, entry) -> int:
         actual = self._entry_disk_bytes(entry)
@@ -3387,6 +3735,7 @@ class APCv2(PrefixIndex):
 
     def session_state(self, tenant, session_id: str) -> dict:
         with self._apc_lock:
+            self._ensure_metadata_available()
             return self._session_state_locked((tenant, session_id))
 
     def list_sessions(self, tenant, *, limit: int = 50, cursor: int = 0) -> dict:
@@ -3395,6 +3744,7 @@ class APCv2(PrefixIndex):
         if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
             raise ValueError("cursor must be a non-negative integer")
         with self._apc_lock:
+            self._ensure_metadata_available()
             session_ids = sorted(
                 {
                     tag[1]
@@ -3415,6 +3765,7 @@ class APCv2(PrefixIndex):
         ttl = self._validate_session_ttl(ttl_seconds)
         tag = (tenant, session_id)
         with self._apc_lock:
+            self._ensure_metadata_available()
             records = self._session_entries_locked(tag)
             if not records:
                 raise APCSessionNotFound(session_id)
@@ -3509,6 +3860,7 @@ class APCv2(PrefixIndex):
 
     def _prefetch_entry_locked(self, tag, key, tokens, entry, expiry) -> bool:
         """Make one session entry resident and pin it until ``expiry``."""
+        self._ensure_metadata_available()
         if entry.prompt_cache:
             restored = True
         else:
@@ -3609,6 +3961,7 @@ class APCv2(PrefixIndex):
     def _prefetch_session(self, tag, key, tokens, entry, expiry) -> None:
         try:
             with self._apc_lock:
+                self._ensure_metadata_available()
                 if (
                     tag not in getattr(entry, "_apc_session_tags", set())
                     or entry is not self._trie.get(key, tokens)
@@ -3656,6 +4009,7 @@ class APCv2(PrefixIndex):
     def service_pending_prefetch(self) -> bool:
         """Run one queued restore on the model worker's idle boundary."""
         with self._apc_lock:
+            self._ensure_metadata_available()
             pending = self._pending_prefetch
             self._pending_prefetch = None
         if pending is None:
@@ -3691,6 +4045,7 @@ class APCv2(PrefixIndex):
         ttl = self._validate_session_ttl(ttl_seconds, optional=True)
         tag = (tenant, session_id)
         with self._apc_lock:
+            self._ensure_metadata_available()
             if self._closed:
                 raise APCSessionUnavailable("APCv2 session service is closed")
             records = self._session_entries_locked(tag)
@@ -3725,6 +4080,7 @@ class APCv2(PrefixIndex):
     def delete_session(self, tenant, session_id: str) -> dict:
         tag = (tenant, session_id)
         with self._apc_lock:
+            self._ensure_metadata_available()
             records = self._session_entries_locked(tag)
             if not records:
                 raise APCSessionNotFound(session_id)
@@ -3778,6 +4134,7 @@ class APCv2(PrefixIndex):
         spilled = skipped = unpersisted = pinned_skipped = 0
         lost_sessions = set()
         with self._apc_lock:
+            self._ensure_metadata_available()
             records = [
                 record
                 for record in self._entry_records_locked()
@@ -3845,6 +4202,7 @@ class APCv2(PrefixIndex):
         """
         started = time.monotonic()
         with self._apc_lock:
+            self._ensure_metadata_available()
             if self._idle_disk_dir is None:
                 raise ValueError("APCv2 suspension requires a configured disk tier")
             self._sweep_retirements_locked()
@@ -3906,6 +4264,7 @@ class APCv2(PrefixIndex):
         now = self._now() if now is None else float(now)
         scan_interval = 1.0
         with self._apc_lock:
+            self._ensure_metadata_available()
             self._collect_spills_locked()
             if now - self._last_idle_scan < scan_interval:
                 return 0
@@ -3999,6 +4358,7 @@ class APCv2(PrefixIndex):
         hit at any depth and passes False.
         """
         with self._apc_lock:
+            self._ensure_metadata_available()
             self._sweep_retirements_locked()
             before = dict(self._apc_stats)
             self._credited_entries = []
@@ -4193,6 +4553,7 @@ class APCv2(PrefixIndex):
         allow_target_only_plain: bool = True,
         drop_stale: bool = False,
     ) -> APCLookup:
+        self._ensure_metadata_available()
         if self._closed:
             raise RuntimeError("APCv2 is closed")
         tokens = [int(token) for token in tokens]
@@ -4846,6 +5207,7 @@ class APCv2(PrefixIndex):
         if retention_role not in self._RETENTION_ROLES:
             raise ValueError(f"unknown APCv2 retention role: {retention_role!r}")
         with self._apc_lock:
+            self._ensure_metadata_available()
             self._sweep_retirements_locked()
             return self._store_locked(
                 key,
@@ -4878,6 +5240,7 @@ class APCv2(PrefixIndex):
         session_tag: Optional[tuple] = None,
         next_turn_boundary: bool = False,
     ) -> APCCapabilities:
+        self._ensure_metadata_available()
         if self._closed:
             raise RuntimeError("APCv2 is closed")
         tokens = [int(token) for token in tokens]
@@ -5226,6 +5589,7 @@ class APCv2(PrefixIndex):
             raise ValueError(f"unknown APCv2 retention role: {role!r}")
         tokens = tuple(int(token) for token in tokens)
         with self._apc_lock:
+            self._ensure_metadata_available()
             self._sweep_retirements_locked()
             return self._retire_locked(key, tokens, role)
 
@@ -5257,6 +5621,7 @@ class APCv2(PrefixIndex):
     def sweep_retirements(self) -> None:
         """Complete retirements whose deferring leases have been released."""
         with self._apc_lock:
+            self._ensure_metadata_available()
             self._sweep_retirements_locked()
 
     def _sweep_retirements_locked(self) -> None:
@@ -5287,6 +5652,7 @@ class APCv2(PrefixIndex):
         """
         self._wait_spill_jobs(_SPILL_DRAIN_SECONDS)
         with self._apc_lock:
+            self._ensure_metadata_available()
             return self._clear_locked(release_memory=release_memory)
 
     def _wait_spill_jobs(self, timeout: float) -> None:
@@ -5300,6 +5666,8 @@ class APCv2(PrefixIndex):
         """Publish finished spills; the writer cleans up the rest itself."""
         self._collect_spills_locked()
         for job in self._spill_jobs:
+            if not job.done.is_set():
+                self._timeout_spill_locked(job)
             if job.abandon():
                 self._remove_job_files_locked(job)
             job.entry._apc_spill_job = None
@@ -5317,6 +5685,7 @@ class APCv2(PrefixIndex):
         """``report_pinned_losses=False`` is for the non-persistent ``close()``:
         without a persistent directory every park ends with the process by
         contract, so that clear is not a loss to count."""
+        self._ensure_metadata_available()
         self._abandon_spill_jobs_locked()
         self._turn_supersessions = {}
         entries = list(_iter_trie_entries(self._trie))
@@ -5436,6 +5805,13 @@ class APCv2(PrefixIndex):
                 "background_spill": self._background_spill,
                 "background_spill_inflight": len(self._spill_jobs),
                 "background_spill_inflight_bytes": self._inflight_spill_nbytes_locked(),
+                "background_spill_retained_bytes": self._queued_spill_nbytes_locked(),
+                "background_spill_settle_seconds": _SPILL_SETTLE_SECONDS,
+                "spill_write_seconds": _SPILL_WRITE_SECONDS,
+                "restore_read_seconds": _RESTORE_READ_SECONDS,
+                "restore_staging_reserved_bytes": self._restore_staging_bytes,
+                "restore_read_failed": bool(self._restore_pool and self._restore_pool.failure),
+                "background_spill_writes_blocked": _spill_writes_blocked(),
                 "background_spill_max_bytes": self._background_spill_max_bytes,
                 # Spills and restores over the last 10 s, 1 min, 5 min and
                 # 30 min: count, bytes, seconds blocked, and per-reason counts.
@@ -5454,6 +5830,7 @@ class APCv2(PrefixIndex):
             }
             stats["persistence"] = {
                 "enabled": self._persist_dir is not None,
+                "metadata_transaction": self._metadata_receipt(),
                 "rescan": {
                     **self._rescan,
                     "discarded": dict(self._rescan.get("discarded", {})),
@@ -5511,6 +5888,65 @@ class APCv2(PrefixIndex):
         persist_resident: bool = False,
         time_budget_seconds: float = 0.0,
         release_memory: bool = True,
+    ) -> dict | None:
+        if self._metadata_failure is not None:
+            return self._close_indeterminate(release_memory=release_memory)
+        try:
+            return self._close_normal(
+                persist_resident=persist_resident,
+                time_budget_seconds=time_budget_seconds,
+                release_memory=release_memory,
+            )
+        except APCMetadataIndeterminate:
+            return self._close_indeterminate(release_memory=release_memory)
+
+    def _close_indeterminate(self, *, release_memory: bool) -> dict:
+        # Never collect/retry/delete a transaction with an unknown durable
+        # outcome. Only the caller releases device state; the metadata worker
+        # owns immutable bytes and paths and may only finish its existing I/O.
+        with self._apc_lock:
+            self._closed = True
+            self._cancel_pending_prefetch_locked()
+            if self._restore_pool is not None:
+                self._restore_pool.close()
+            for job in self._spill_jobs:
+                if not job.done.is_set():
+                    self._timeout_spill_locked(job)
+                job.abandon()
+                job.entry._apc_spill_job = None
+            self._spill_jobs = []
+            writer, self._spill_writer = self._spill_writer, None
+            if writer is not None and writer not in self._metadata_retained_writers:
+                self._metadata_retained_writers.append(writer)
+        writer_stopped = writer is None or writer.close(timeout=_SPILL_DRAIN_SECONDS)
+        self._metadata_other_owner_pending |= not writer_stopped
+        if not writer_stopped and writer not in self._metadata_retained_writers:
+            self._metadata_retained_writers.append(writer)
+        with self._apc_lock:
+            for _key, _tokens, entry in self._entry_records_locked():
+                if isinstance(entry.prompt_cache, COWFrozenPromptCache):
+                    entry.prompt_cache.close()
+                entry.prompt_cache = []
+                entry.sidecar = None
+                entry.nbytes = 0
+            self._trie = PromptTrie()
+            self._lru = PrefixIndex.CacheOrder()
+            self._n_bytes = 0
+            self._n_bytes_by_type = {key: 0 for key in self._lru._ordering}
+            self._shared_buffers = {}
+            if release_memory:
+                mx.clear_cache()
+            if self._metadata_pool is not None:
+                self._metadata_pool.close()
+            self._release_persist_lock()
+            return {"metadata_transaction": self._metadata_receipt()}
+
+    def _close_normal(
+        self,
+        *,
+        persist_resident: bool = False,
+        time_budget_seconds: float = 0.0,
+        release_memory: bool = True,
     ) -> Optional[dict]:
         """Close APC ownership and release the persistent directory lock.
 
@@ -5525,6 +5961,8 @@ class APCv2(PrefixIndex):
             if self._closed:
                 return None
             self._closed = True
+            if self._restore_pool is not None:
+                self._restore_pool.close()
             self._capsule_generation.advance()
             self._cancel_pending_prefetch_locked()
         self._wait_spill_jobs(
@@ -5533,7 +5971,12 @@ class APCv2(PrefixIndex):
         with self._apc_lock:
             self._abandon_spill_jobs_locked()
             writer, self._spill_writer = self._spill_writer, None
+            if writer is not None and writer not in self._metadata_retained_writers:
+                self._metadata_retained_writers.append(writer)
         writer_stopped = writer is None or writer.close(timeout=_SPILL_DRAIN_SECONDS)
+        self._metadata_other_owner_pending = not writer_stopped
+        if not writer_stopped and writer not in self._metadata_retained_writers:
+            self._metadata_retained_writers.append(writer)
         if not writer_stopped:
             log.error(
                 "APCv2 spill writer still blocked in a disk write after %.0f s; "
@@ -5546,6 +5989,19 @@ class APCv2(PrefixIndex):
                 time_budget_seconds=time_budget_seconds,
                 pinned_only=not persist_resident,
             )
+        # Shutdown parking uses the same bounded writer as serving. Close a
+        # writer it created after the initial drain, retaining the directory
+        # lock if that writer remains inside a syscall.
+        with self._apc_lock:
+            self._abandon_spill_jobs_locked()
+            parking_writer, self._spill_writer = self._spill_writer, None
+            if parking_writer is not None and parking_writer not in self._metadata_retained_writers:
+                self._metadata_retained_writers.append(parking_writer)
+        if parking_writer is not None:
+            writer_stopped = parking_writer.close(timeout=_SPILL_DRAIN_SECONDS) and writer_stopped
+            self._metadata_other_owner_pending = not writer_stopped
+            if not writer_stopped and parking_writer not in self._metadata_retained_writers:
+                self._metadata_retained_writers.append(parking_writer)
         with self._apc_lock:
             if self._persist_dir is None:
                 self._clear_locked(
@@ -5570,8 +6026,9 @@ class APCv2(PrefixIndex):
                 self._shared_buffers = {}
                 if release_memory:
                     mx.clear_cache()
-            if writer_stopped:
-                self._release_persist_lock()
+            self._release_persist_lock()
+            if self._metadata_pool is not None:
+                self._metadata_pool.close()
         return report
 
     def resident_nbytes(self) -> int:
@@ -5613,6 +6070,7 @@ class APCv2(PrefixIndex):
         to destructive resident eviction so memory pressure can make progress.
         """
         with self._apc_lock:
+            self._ensure_metadata_available()
             records = self._pressure_candidates_locked()
             for _rank, _last_access, key, tokens, entry in records:
                 if self._idle_disk_dir is not None and self._spill_entry_locked(
@@ -5634,11 +6092,13 @@ class APCv2(PrefixIndex):
         self, *, n_sequences: Optional[int] = None, n_bytes: Optional[int] = None
     ):
         with self._apc_lock:
+            self._ensure_metadata_available()
             return self._trim_to_locked(n_sequences=n_sequences, n_bytes=n_bytes)
 
     def _trim_to_locked(
         self, *, n_sequences: Optional[int] = None, n_bytes: Optional[int] = None
     ):
+        self._ensure_metadata_available()
         sequence_limit = max(0, n_sequences) if n_sequences is not None else 1 << 63
         byte_limit = max(0, n_bytes) if n_bytes is not None else 1 << 63
         while (

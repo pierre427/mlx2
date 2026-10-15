@@ -19,11 +19,13 @@ import resource
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from statistics import mean
+from types import SimpleNamespace
 from unittest import mock
 
 import mlx.core as mx
@@ -31,9 +33,9 @@ import mlx.core as mx
 # This benchmark is intentionally incapable of allocating on Metal.
 mx.set_default_device(mx.cpu)
 
+from mlx2.runtime import apc_v2
 from mlx2.runtime.apc_v2 import APCKey, APCv2, MTPAPCSidecar
 from mlx2.runtime.models.cache import ArraysCache, KVCache
-
 
 GIB = 1 << 30
 MIN_FREE_BYTES = 24 * GIB
@@ -282,6 +284,7 @@ class SpillInstrumentation:
         self.digest_calls = 0
         self.manifest_calls = 0
         self.payload_files = 0
+        save_payload = apc_v2._atomic_save_payload
 
         save_cache = apc._atomic_save_cache
         save_arrays = apc._atomic_save_arrays
@@ -300,6 +303,16 @@ class SpillInstrumentation:
             started = time.perf_counter()
             try:
                 return save_arrays(*args, **kwargs)
+            finally:
+                self.payload_write_seconds += time.perf_counter() - started
+                self.payload_files += 1
+
+        def timed_save_payload(path, *args, **kwargs):
+            if path.parent != apc._idle_disk_dir:
+                return save_payload(path, *args, **kwargs)
+            started = time.perf_counter()
+            try:
+                return save_payload(path, *args, **kwargs)
             finally:
                 self.payload_write_seconds += time.perf_counter() - started
                 self.payload_files += 1
@@ -324,6 +337,11 @@ class SpillInstrumentation:
         apc._atomic_save_arrays = timed_save_arrays
         apc._payload_file_record = timed_payload_record
         apc._write_manifest_locked = timed_manifest
+        self._payload_patch = mock.patch.object(apc_v2, "_atomic_save_payload", timed_save_payload)
+        self._payload_patch.start()
+
+    def close(self):
+        self._payload_patch.stop()
 
 
 @contextmanager
@@ -366,26 +384,35 @@ def restore_arm(
     total_bytes: int,
     verify_sha256: bool,
 ) -> dict:
+    if not verify_sha256:
+        return {"executed": False, "sha256_verification": None,
+                "reason": "Production verifies exact staged bytes during the bounded read; "
+                          "the former separate-file verification bypass is no longer supported"}
     apc = make_apc(directory, entries=entries, total_bytes=total_bytes)
     timings = []
     hashed = {"calls": 0, "bytes": 0, "seconds": 0.0}
-    if verify_sha256:
-        original_sha = apc._sha256_file
+    worker = threading.local()
+    read_payload = apc._read_restore_payload
 
-        def timed_sha(path):
-            started = time.perf_counter()
-            try:
-                hashed["calls"] += 1
-                hashed["bytes"] += Path(path).stat().st_size
-                return original_sha(path)
-            finally:
-                hashed["seconds"] += time.perf_counter() - started
+    def measured_read(*args):
+        worker.reading = True
+        try:
+            return read_payload(*args)
+        finally:
+            worker.reading = False
 
-        apc._sha256_file = timed_sha
-    else:
-        # Qualification-only counterfactual: production always verifies. This
-        # bypass isolates the extra full-file SHA-256 pass from deserialize.
-        apc._verify_persisted_files = lambda _disk: None
+    def timed_sha(data=b"", **kwargs):
+        started = time.perf_counter()
+        result = hashlib.sha256(data, **kwargs)
+        if getattr(worker, "reading", False):
+            hashed["calls"] += 1
+            hashed["bytes"] += len(data)
+            hashed["seconds"] += time.perf_counter() - started
+        return result
+
+    apc._read_restore_payload = measured_read
+    hash_patch = mock.patch.object(apc_v2, "hashlib", SimpleNamespace(sha256=timed_sha))
+    hash_patch.start()
     try:
         for index in range(entries):
             tokens = token_path(index)
@@ -400,8 +427,12 @@ def restore_arm(
             mx.clear_cache()
     finally:
         stats = apc.apc_stats["idle_disk"]
-        apc.close()
+        try:
+            apc.close()
+        finally:
+            hash_patch.stop()
     return {
+        "executed": True,
         "sha256_verification": verify_sha256,
         "timing_seconds": summarize(timings),
         "per_entry_seconds": timings,
@@ -501,6 +532,7 @@ def run(args) -> dict:
     work = scratch / f"mlx2-apc-persistence-{os.getpid()}-{uuid.uuid4().hex}"
     work.mkdir(mode=0o700)
     apc = None
+    instrumentation = None
     try:
         report = {
             "schema": SCHEMA,
@@ -554,7 +586,7 @@ def run(args) -> dict:
             original_clear_cache = mx.clear_cache
             clear_cache_seconds = 0.0
 
-            def timed_clear_cache():
+            def timed_clear_cache(original_clear_cache=original_clear_cache):
                 nonlocal clear_cache_seconds
                 clear_started = time.perf_counter()
                 try:
@@ -598,6 +630,7 @@ def run(args) -> dict:
         disk_bytes = int(disk_stats["disk_bytes"])
         apc.close()
         apc = None
+        instrumentation.close()
 
         expected_payload_files = args.entries * 3
         report["synthetic"] = {
@@ -664,9 +697,13 @@ def run(args) -> dict:
         report["completed_at_unix"] = time.time()
         return report
     finally:
-        if apc is not None:
-            apc.close()
-        shutil.rmtree(work, ignore_errors=True)
+        try:
+            if apc is not None:
+                apc.close()
+        finally:
+            if instrumentation is not None:
+                instrumentation.close()
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def main(argv: list[str] | None = None) -> int:

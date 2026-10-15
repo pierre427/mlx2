@@ -152,7 +152,8 @@ def test_benchmark_guards_total_size_and_repository_directory(tmp_path):
         script.validate_args(args)
 
 
-def test_benchmark_vm_stat_parser_and_small_rescan_cleanup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("rescan_only", [False, True])
+def test_benchmark_vm_stat_parser_and_small_rescan_cleanup(tmp_path, monkeypatch, rescan_only):
     script = load_script("benchmark_apc_persistence")
     parsed = script.parse_vm_stat(
         "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
@@ -172,13 +173,22 @@ def test_benchmark_vm_stat_parser_and_small_rescan_cleanup(tmp_path, monkeypatch
         entries=1,
         max_total_gib=8.0,
         output=None,
-        rescan_only=True,
+        rescan_only=rescan_only,
     )
     report = script.run(args)
     assert report["device"] == "cpu"
     assert report["startup_rescan"]["entries"] == 1
     assert report["startup_rescan"]["metadata_only_confirmed"] is True
     assert report["spill"]["digest_computed_once_per_payload"] is True
+    assert report["spill"]["payload_files"] == report["spill"]["payload_digest_calls"] == 3
+    if not rescan_only:
+        assert report["restore_without_sha256"]["executed"] is False
+        assert report["restore_without_sha256"]["sha256_verification"] is None
+        verified = report["restore_with_sha256"]
+        assert verified["executed"] is True and verified["sha256_verification"] is True
+        assert verified["sha256_calls"] == 3
+        assert verified["sha256_bytes"] == report["synthetic"]["persisted_total_bytes"]
+        assert verified["restore_digest_failures"] == verified["restore_failures"] == 0
     assert list(tmp_path.iterdir()) == []
 
 

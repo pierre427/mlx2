@@ -57,10 +57,9 @@ def writer_gates(monkeypatch):
     gates = [threading.Event(), threading.Event(), threading.Event()]
     calls = [0]
     real = apc_v2._write_spill_job
-    caller = threading.current_thread()
 
     def write(job):
-        if threading.current_thread() is caller:
+        if not job.background:
             return real(job)
         gate = gates[min(calls[0], len(gates) - 1)]
         calls[0] += 1

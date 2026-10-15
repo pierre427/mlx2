@@ -26,6 +26,7 @@ APC_SOURCE = ROOT / "src/mlx2/runtime/apc_v2.py"
 LOCKS = (Path("/Users/Shared/mlxuag/gpu.lock/owner.json"), Path("/tmp/gpu.lock/owner.json"))
 # The method holding the restore body (runtime/loop_trace wraps the public one).
 RESTORE_METHOD = "_restore_entry_untraced_locked"
+RESTORE_IO_METHOD = "_read_restore_payload"
 COUNTERS = ("restores", "bytes_read", "restore_budget_deferrals",
             "restore_transient_deferrals", "restore_failures", "resident_bytes")
 
@@ -41,23 +42,40 @@ def phase_lines(source: Path = APC_SOURCE) -> dict[int, list[str]]:
     methods = {node.name: node for node in cls.body if isinstance(node, ast.FunctionDef)}
     # The opt-in loop trace wraps the restore; its body lives in the untraced method.
     method = methods.get(RESTORE_METHOD) or methods["_restore_entry_locked"]
+    reader = methods.get(RESTORE_IO_METHOD)
+    if reader is None:
+        raise RuntimeError("APCv2 restore reader changed; phase instrumentation refused")
+    traced_methods = (method, reader)
     phases: dict[int, list[str]] = {}
 
     def add(line: int, label: str) -> None:
         phases.setdefault(line, []).append(label)
 
-    wanted = {"materialize_block_file", "load_prompt_cache", "mx.eval", "freeze_prompt_cache"}
+    wanted = {"materialize_block_file": "materialize_block_file",
+              "load_prompt_cache": "load_prompt_cache", "mx.eval": "mx_eval",
+              "freeze_prompt_cache": "freeze_prompt_cache",
+              "handle.read": "payload_read",
+              "self._load_restore_payload_locked": "payload_staging"}
     counts: dict[str, int] = {}
-    calls = sorted((node for node in ast.walk(method) if isinstance(node, ast.Call)),
+    calls = sorted((node for body in traced_methods for node in ast.walk(body)
+                    if isinstance(node, ast.Call)),
                    key=lambda node: (node.lineno, node.col_offset))
     for node in calls:
         name = ast.unparse(node.func)
         if name not in wanted:
             continue
         counts[name] = counts.get(name, 0) + 1
-        label = name.replace(".", "_") + f"_{counts[name]}"
+        label = wanted[name] + f"_{counts[name]}"
         add(node.lineno, label + "_before")
-        add(node.end_lineno + 1, label + "_after")
+        body = next(body for body in traced_methods
+                    if body.lineno <= node.lineno <= body.end_lineno)
+        # Comments/blank lines do not produce line events. Bracket the next
+        # executable statement, including the body entered by a with-call.
+        following = [statement.lineno for statement in ast.walk(body)
+                     if isinstance(statement, ast.stmt) and statement.lineno > node.end_lineno]
+        if not following:
+            raise RuntimeError("APCv2 restore call has no observable completion boundary")
+        add(min(following), label + "_after")
     for node in ast.walk(method):
         if isinstance(node, ast.Assign) and any(
             isinstance(target, ast.Attribute) and ast.unparse(target) == "entry.prompt_cache"
@@ -66,12 +84,27 @@ def phase_lines(source: Path = APC_SOURCE) -> dict[int, list[str]]:
             add(node.lineno, "publication_before")
         if isinstance(node, ast.Return) and isinstance(node.value, ast.Constant) and node.value.value is True:
             add(node.lineno, "publication_after")
-    required = {"materialize_block_file", "load_prompt_cache", "mx.eval", "freeze_prompt_cache"}
+    required = set(wanted)
     if set(counts) != required or not any("publication_before" in labels for labels in phases.values()) or not any(
         "publication_after" in labels for labels in phases.values()
     ):
         raise RuntimeError("APCv2 restore source changed; phase instrumentation refused")
     return phases
+
+
+def restore_trace_codes(apc_type):
+    """Trace both the model-thread restore and its pure-I/O worker body."""
+    return {getattr(apc_type, name).__code__
+            for name in (RESTORE_METHOD, RESTORE_IO_METHOD)}
+
+
+def phase_tracer(codes, phases, sample):
+    def trace(frame, event, _arg):
+        if frame.f_code in codes and event == "line":
+            for label in phases.get(frame.f_lineno, ()):
+                sample(label)
+        return trace
+    return trace
 
 
 def gpu_owner() -> dict:
@@ -90,7 +123,7 @@ def parked_on_disk(state: dict) -> bool:
 
 
 def missing_restore_phases(observed: set[str]) -> list[str]:
-    bases = ("materialize_block_file", "load_prompt_cache", "mx_eval",
+    bases = ("materialize_block_file", "payload_read", "payload_staging", "load_prompt_cache", "mx_eval",
              "freeze_prompt_cache", "publication")
     return [f"{base}{suffix}" for base in bases
             for suffix in ("_before", "_after")
@@ -256,13 +289,7 @@ def run(args, plan: dict) -> dict:
         # the Qwen adapter pins its import-time GDN profile loads models.base
         # too early and causes a guarded startup refusal.
         apc_type = type(engine.apc)
-        restore_code = getattr(apc_type, RESTORE_METHOD, apc_type._restore_entry_locked).__code__
-
-        def trace(frame, event, _arg):
-            if frame.f_code is restore_code and event == "line":
-                for label in phases.get(frame.f_lineno, ()):
-                    sampler.sample(label)
-            return trace
+        trace = phase_tracer(restore_trace_codes(apc_type), phases, sampler.sample)
 
         sampler.start()
         threading.settrace_all_threads(trace)

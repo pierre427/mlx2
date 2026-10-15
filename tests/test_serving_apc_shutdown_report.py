@@ -3,9 +3,9 @@ discarding it: parked sessions left without a disk copy are counted and
 logged by the service."""
 
 import logging
-from collections import Counter
 
 from mlx2 import serving as serving_mod
+from mlx2.host_counters import HostCounters
 from mlx2.serving import ServingEngine
 
 
@@ -23,7 +23,7 @@ def _engine():
     engine = ServingEngine.__new__(ServingEngine)
     engine.apc_persist_on_shutdown = True
     engine.apc_persist_shutdown_seconds = 7
-    engine.counts = Counter()
+    engine.counts = HostCounters()
     return engine
 
 
@@ -67,7 +67,7 @@ def test_apc_shutdown_counters_are_declared_before_any_shutdown():
 
 
 def _declared_counts():
-    """The ``Counter({...})`` literal the engine constructor declares."""
+    """The ``HostCounters({...})`` literal the engine constructor declares."""
     import ast
     import inspect
 
@@ -82,7 +82,7 @@ def _declared_counts():
                 for t in node.targets
             )
             and isinstance(node.value, ast.Call)
-            and getattr(node.value.func, "id", None) == "Counter"
+            and getattr(node.value.func, "id", None) == "HostCounters"
             and node.value.args
             and isinstance(node.value.args[0], ast.Dict)
         ):

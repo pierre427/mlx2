@@ -114,6 +114,15 @@ def _make_wrapper_class():
         def output_dims(self):
             return self.lora_b.shape[2]
 
+        def compiled_trace_dependencies(self):
+            """Non-parameter inputs captured by an outer compiled chain.
+
+            A base-only trace excludes the delta branch; an adapted trace
+            captures this exact row-id array. A trace owner must include it
+            beside module/parameter identities or pass it as an explicit input.
+            """
+            return (self._rows.ids,)
+
         def __call__(self, x):
             y = self.base(x)
             rows = self._rows

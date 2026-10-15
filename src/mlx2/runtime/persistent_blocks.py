@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import secrets
 import json
 import os
+import secrets
 import shutil
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-
 
 _FORMAT = "mlx2-apcv2-blocks-v1"
 
@@ -28,7 +27,7 @@ _MANIFEST_KEY = secrets.token_bytes(32)
 
 
 def _manifest_mac(signature: str, size: int, sha256: str) -> str:
-    message = f"{signature}|{int(size)}|{sha256}".encode("utf-8")
+    message = f"{signature}|{int(size)}|{sha256}".encode()
     return hmac.new(_MANIFEST_KEY, message, hashlib.sha256).hexdigest()
 
 
@@ -145,8 +144,10 @@ def remove_block_file(path: Path) -> int:
     removed = 0
     for item in reversed(paths):
         try:
-            removed += item.stat().st_size
+            nbytes = item.stat().st_size
             item.unlink()
+            # A failed unlink still occupies disk and must retain its charge.
+            removed += nbytes
         except OSError:
             pass
     directory = Path(path).with_suffix(Path(path).suffix + ".blocks")

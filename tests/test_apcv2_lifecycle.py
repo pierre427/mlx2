@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import mlx.core as mx
 import pytest
+from mlx2.runtime import apc_v2
 from mlx2.runtime.apc_v2 import APCKey, APCv2, MTPAPCSidecar
 from mlx2.runtime.cache_planes import (
     CachePlaneKind,
@@ -493,12 +494,12 @@ def test_apcv2_idle_scan_backs_off_a_snapshot_that_fails_to_spill(
     )
     key = APCKey("backoff")
     apc.store(key, [1, 2, 3], [_state(KVCache(), 3)])
-    save = APCv2._atomic_save_cache
+    save = apc_v2._atomic_save_payload
 
-    def failing_save(path, cache):
+    def failing_save(path, arrays, metadata):
         raise RuntimeError("injected spill failure")
 
-    monkeypatch.setattr(APCv2, "_atomic_save_cache", staticmethod(failing_save))
+    monkeypatch.setattr(apc_v2, "_atomic_save_payload", failing_save)
     for second in range(1, 121):
         now[0] = float(second)
         assert apc.spill_idle_entries() == 0
@@ -508,7 +509,7 @@ def test_apcv2_idle_scan_backs_off_a_snapshot_that_fails_to_spill(
     assert apc.apc_stats["idle_disk"]["spill_failures"] == 6
     assert apc._trie.get(key, [1, 2, 3]).prompt_cache
 
-    monkeypatch.setattr(APCv2, "_atomic_save_cache", staticmethod(save))
+    monkeypatch.setattr(apc_v2, "_atomic_save_payload", save)
     now[0] = 127.0
     assert apc.spill_idle_entries() == 1
     assert apc.apc_stats["idle_disk"]["disk_entries"] == 1
@@ -1464,7 +1465,7 @@ def test_explicit_pressure_spill_failure_drops_and_progresses(tmp_path, monkeypa
     def fail_spill(*_args, **_kwargs):
         raise OSError("simulated full disk")
 
-    monkeypatch.setattr(apc, "_atomic_save_cache", fail_spill)
+    monkeypatch.setattr(apc_v2, "_atomic_save_payload", fail_spill)
     assert apc.evict_oldest_unleased()
     assert apc.nbytes == 0
     assert len(apc) == 0
