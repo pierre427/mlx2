@@ -87,7 +87,7 @@ from .api_resources import (
     ResponseStore,
     decode_request_json,
 )
-from .tool_backend import HostedToolError
+from .tool_backend import ConfiguredToolBackend, HostedToolError
 from .agent_compat import (
     AgentCompatError,
     AgentCompatPolicy,
@@ -1564,12 +1564,15 @@ def embeddings_payload(
     prompt_tokens = int(prompt_tokens)
     if prompt_tokens < 0:
         raise RuntimeError("embedding adapter returned invalid usage")
-    return {
+    payload = {
         "object": "list",
         "data": data,
         "model": model,
         "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
     }
+    if (status.get("route_receipt") or {}).get("route") == "embeddings":
+        payload["mlx2"] = engine.status()["route_receipt"]
+    return payload
 
 
 def rerank_payload(engine, body):
@@ -1633,6 +1636,8 @@ def rerank_payload(engine, body):
     if prompt_tokens is not None:
         prompt_tokens = int(prompt_tokens)
         payload["usage"] = {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens}
+    if (status.get("route_receipt") or {}).get("route") == "rerank":
+        payload["mlx2"] = engine.status()["route_receipt"]
     return payload
 
 
@@ -2085,6 +2090,9 @@ def handler_for(
         raise ValueError(TENANT_AUTH_GATE_KEY_CONFLICT)
     compat_policy = AgentCompatPolicy.coerce(agent_compat)
     engine.agent_compat = compat_policy
+    # The serving worker uses this bit to decide whether a job's tenant id was
+    # verified or merely supplied through the legacy X-Tenant-ID header.
+    engine.tenant_metrics_scoped = tenant_authenticator is not None
     if tenant_authenticator is not None:
         engine.tenant_authenticator = tenant_authenticator
     engine.usage_ledger = usage_ledger
@@ -2779,7 +2787,7 @@ def handler_for(
             elif isinstance(error, AdmissionClosed):
                 self.api_error(503, str(error), retry_after=True)
             elif isinstance(error, APCSessionUnavailable):
-                self.error(503, str(error))
+                self.error(503, str(error), code=getattr(error, "code", None))
             elif isinstance(error, APCSessionCapacityError):
                 self.error(429 if "queue" in str(error) else 409, str(error))
             elif isinstance(error, (ValueError, json.JSONDecodeError)):
@@ -3094,11 +3102,45 @@ def handler_for(
                 from .prometheus import CONTENT_TYPE, render_engine_metrics
 
                 try:
-                    payload = (
-                        engine.prometheus_metrics()
-                        if hasattr(engine, "prometheus_metrics")
-                        else render_engine_metrics(engine)
-                    )
+                    operator_scope = authorize_admin(
+                        self.client_address[0],
+                        self.headers.get("Authorization"),
+                        admin_token,
+                    ) is None
+                    aggregate_metrics = tenant_authenticator is None or operator_scope
+                    metric_tenant = None if aggregate_metrics else self._tenant_id
+                    exporter = getattr(engine, "prometheus_metrics", None)
+                    if not aggregate_metrics and self._tenant_auth_method is None:
+                        # An unverified exempt caller has no request scope.
+                        # Omit request telemetry explicitly; no caller-selectable
+                        # tenant string can stand in for an empty partition.
+                        payload = render_engine_metrics(
+                            engine, include_request_metrics=False
+                        )
+                    elif not callable(exporter):
+                        payload = render_engine_metrics(
+                            engine, tenant_id=metric_tenant
+                        )
+                    elif metric_tenant is None:
+                        # Preserve the long-standing engine exporter protocol
+                        # for operator scrapes and embedded test engines.
+                        payload = exporter()
+                    else:
+                        import inspect
+
+                        parameters = inspect.signature(exporter).parameters.values()
+                        tenant_aware = any(
+                            parameter.name == "tenant_id"
+                            or parameter.kind == parameter.VAR_KEYWORD
+                            for parameter in parameters
+                        )
+                        payload = (
+                            exporter(tenant_id=metric_tenant)
+                            if tenant_aware
+                            else render_engine_metrics(
+                                engine, tenant_id=metric_tenant
+                            )
+                        )
                 except Exception:  # exporter failure must not take down serving
                     logging.getLogger("mlx2.metrics").exception(
                         "Prometheus exposition failed"
@@ -3126,17 +3168,16 @@ def handler_for(
                     self.send_text(503, payload, content_type=CONTENT_TYPE)
                     return
                 if tenant_authenticator is not None:
+                    # These are bounded authentication outcome counters with
+                    # no tenant label or request identity, not tenant-owned
+                    # inference statistics.
                     payload += tenant_authenticator.prometheus()
                 if usage_ledger is not None:
                     # Every tenant only for the operator (loopback, plus the
                     # admin bearer when one is configured); a verified tenant
                     # credential sees only its own families.  Unverified
                     # X-Tenant-ID callers see none.
-                    if authorize_admin(
-                        self.client_address[0],
-                        self.headers.get("Authorization"),
-                        admin_token,
-                    ) is None:
+                    if operator_scope:
                         payload += usage_ledger.prometheus()
                     elif self._tenant_auth_method is not None:
                         payload += usage_ledger.prometheus(self._tenant_id)
@@ -3222,6 +3263,12 @@ def handler_for(
                         if usage_ledger is not None
                         else {"enabled": False},
                         "agent_compat": compat_policy.status(),
+                        "reasoning_replay": engine.reasoning_signer.status()
+                        if callable(getattr(getattr(engine, "reasoning_signer", None), "status", None))
+                        else {"enabled": False},
+                        "hosted_tools": tool_backend.status()
+                        if tool_backend is not None and callable(getattr(tool_backend, "status", None))
+                        else {"configured": False},
                         "semantic_memory": semantic_middleware.status()
                         if semantic_middleware is not None
                         else {"enabled": False},
@@ -3942,28 +3989,45 @@ def handler_for(
                     self._last_stream_write = time.monotonic()
 
                 def with_keepalive(call):
-                    """Run a blocking ``call`` (a hosted tool) keeping the stream alive."""
-                    if not (body.get("stream") and sse_keepalive_seconds):
-                        return call()
+                    """Watch the client while a cancellable hosted call runs.
+
+                    Non-streaming requests need the same disconnect handling:
+                    otherwise a departed client retains an outbound MCP call.
+                    Cancellation closes local I/O; it cannot undo remote effects.
+                    """
                     outcome = {}
+                    cancelled = threading.Event()
 
                     def run():
                         try:
-                            outcome["value"] = call()
+                            outcome["value"] = call(cancelled)
                         except BaseException as error:  # noqa: BLE001 - re-raised below
                             outcome["error"] = error
 
                     worker = threading.Thread(target=run, daemon=True)
                     worker.start()
                     next_attempt = 0.0
-                    while worker.is_alive():
-                        due = max(
-                            self._last_stream_write + sse_keepalive_seconds, next_attempt
-                        )
-                        worker.join(max(0.0, min(0.5, due - time.monotonic())))
-                        if worker.is_alive() and time.monotonic() >= due:
-                            keepalive()
-                            next_attempt = time.monotonic() + sse_keepalive_seconds
+                    watching = body.get("stream") and sse_keepalive_seconds
+                    try:
+                        while worker.is_alive():
+                            due = max(
+                                self._last_stream_write + (sse_keepalive_seconds or 0),
+                                next_attempt,
+                            )
+                            worker.join(
+                                max(0.0, min(0.1, due - time.monotonic())) if watching else 0.1
+                            )
+                            if client_disconnected(self.connection):
+                                raise ClientGone("client disconnected during hosted tool execution")
+                            if watching and worker.is_alive() and time.monotonic() >= due:
+                                keepalive()
+                                next_attempt = time.monotonic() + sse_keepalive_seconds
+                    finally:
+                        cancelled.set()
+                        # The configured backend aborts active sockets promptly.
+                        # A foreign backend or blocked OS resolver must not hold
+                        # this HTTP handler indefinitely during teardown.
+                        worker.join(0.2)
                     if "error" in outcome:
                         raise outcome["error"]
                     return outcome["value"]
@@ -4339,8 +4403,11 @@ def handler_for(
                                         "hosted tool arguments must be a JSON object"
                                     )
                                 result = with_keepalive(
-                                    lambda: tool_backend.execute(
-                                        executors[function["name"]], arguments
+                                    lambda cancelled, binding=executors[function["name"]], arguments=arguments: tool_backend.execute(
+                                        binding, arguments,
+                                        **({"cancel_event": cancelled} if isinstance(
+                                            tool_backend, ConfiguredToolBackend
+                                        ) else {}),
                                     )
                                 )
                                 outputs.append(
@@ -4961,9 +5028,9 @@ def handler_for(
             except HostedToolError as exc:
                 # The MCP server failed, not the request: a bad gateway.
                 if streaming:
-                    stream_failure(502, str(exc))
+                    stream_failure(exc.status, str(exc), code=exc.code)
                 else:
-                    self.api_error(502, str(exc), anthropic=anthropic)
+                    self.api_error(exc.status, str(exc), anthropic=anthropic, code=exc.code)
             except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 error_code = getattr(exc, "code", None)
                 if getattr(exc, "schema_reference_error", False):
@@ -5458,6 +5525,18 @@ def build_parser():
         ),
     )
     parser.add_argument("--execution-policy", type=Path, help="JSON file with adapter execution choices; included in qualification identity")
+    parser.add_argument(
+        "--draft-model",
+        action="append",
+        default=[],
+        metavar="[ID=]PATH",
+        help=(
+            "external drafter artifact selected for this invocation; repeat for "
+            "a coordinated portfolio and use --external-draft (advanced policy "
+            "still comes from --execution-policy; no artifact is discovered or "
+            "downloaded automatically)"
+        ),
+    )
     # The geometry every handoff qualification ran at (settings in
     # qualification/runs/mtp-handoff-20260920/*-qualification.json).  The
     # MTP->ordinary handoff fires only above max_mtp_width 4, so the old
@@ -5785,7 +5864,14 @@ def build_parser():
         action="store_true",
         help="native self-MTP route; fails if the resolved artifact has no MTP head",
     )
-    execution.add_argument("--external-draft", action="store_true", help="external draft/verify; requires draft_model execution policy")
+    execution.add_argument(
+        "--external-draft",
+        action="store_true",
+        help=(
+            "external draft/verify; requires --draft-model or a draft_model(s) "
+            "execution policy"
+        ),
+    )
     execution.add_argument(
         "--prompt-lookup",
         action="store_true",
@@ -6011,7 +6097,7 @@ def build_parser():
     return parser
 
 
-def approximate_kv_mode(args, native_mtp):
+def approximate_kv_mode(args, native_mtp, *, route_selection=None):
     """Parse ``--approximate-kv`` and refuse unqualified or speculative use."""
     raw = getattr(args, "approximate_kv", None)
     if raw is None:
@@ -6029,7 +6115,13 @@ def approximate_kv_mode(args, native_mtp):
                 "--approximate-kv requires --qualification-mode or a "
                 "--qualification record carrying its evidence"
             )
-        if args.external_draft or getattr(args, "prompt_lookup", False):
+        if (
+            args.external_draft or getattr(args, "prompt_lookup", False)
+            or (
+                route_selection is not None
+                and route_selection.route not in {"ordinary", "native_mtp"}
+            )
+        ):
             raise ValueError(
                 "--approximate-kv requires the --ordinary route or native MTP "
                 "with compose_mtp"
@@ -6054,19 +6146,92 @@ class RouteSelection:
         return self.route == "native_mtp"
 
 
+_DRAFT_PROVIDER_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
+
+
+def merge_invocation_draft_models(args, policy):
+    """Bind repeatable CLI drafter paths into the adapter policy.
+
+    Artifact drafters are deliberately invocation-selected.  The server never
+    scans beside the target model, resolves a hub name, or downloads a missing
+    head.  Even one CLI drafter is represented as ``draft_models`` so adapters
+    that implement the portfolio contract use the same coordinator for one
+    provider and for many.  Adapter validation remains the authority on which
+    target/drafter combinations are implemented.
+    """
+    values = tuple(getattr(args, "draft_model", ()) or ())
+    if not values:
+        return policy
+    if not getattr(args, "external_draft", False):
+        raise ValueError("--draft-model requires --external-draft")
+    resolved = {} if policy is None else dict(policy)
+    if "draft_model" in resolved or "draft_models" in resolved:
+        raise ValueError(
+            "--draft-model cannot be combined with draft_model(s) in "
+            "--execution-policy"
+        )
+    providers = []
+    seen = set()
+    for ordinal, value in enumerate(values):
+        if not isinstance(value, str) or not value:
+            raise ValueError("--draft-model must name a nonempty filesystem path")
+        provider_id = f"draft-{ordinal}"
+        path = value
+        prefix, separator, suffix = value.partition("=")
+        if separator and _DRAFT_PROVIDER_ID.fullmatch(prefix) and suffix:
+            provider_id, path = prefix, suffix
+        if provider_id in seen:
+            raise ValueError("--draft-model provider ids must be unique")
+        seen.add(provider_id)
+        providers.append({"id": provider_id, "path": path})
+    resolved["draft_models"] = providers
+    return resolved
+
+
+def validate_invocation_draft_adapter(args, adapter_resolution):
+    """Fail clearly when the CLI portfolio shorthand cannot bind this adapter."""
+    if not (getattr(args, "draft_model", ()) or ()):
+        return
+    adapter_type = getattr(adapter_resolution, "adapter_type", None)
+    if not bool(getattr(adapter_type, "supports_draft_portfolio", False)):
+        raise ValueError(
+            "--draft-model selects the multi-drafter portfolio, which this "
+            "adapter does not implement; use --execution-policy with its "
+            "singular draft_model contract"
+        )
+
+
 def resolve_route_selection(args, policy, adapter_resolution=None):
     """Resolve explicit intent or an adapter default before weights are loaded."""
-    external_policy = bool((policy or {}).get("draft_model"))
+    execution_kind = getattr(getattr(adapter_resolution, "descriptor", None), "metadata", {}).get("execution_kind")
+    if execution_kind in {"embeddings", "rerank"}:
+        if adapter_resolution.default_route != execution_kind:
+            raise ValueError("representation-only execution requires its declared default route")
+        if any(bool(getattr(args, name, False)) for name in (
+            "ordinary", "native_mtp", "external_draft", "prompt_lookup",
+        )) or policy:
+            raise ValueError("an embedding-only or rerank-only adapter cannot select a generation route or policy")
+        return RouteSelection(execution_kind, "adapter_default")
+    external_policy = bool(
+        (policy or {}).get("draft_model") or (policy or {}).get("draft_models")
+    )
     if args.ordinary and external_policy:
         raise ValueError("--ordinary cannot select an external draft policy")
-    if args.external_draft and not external_policy:
-        raise ValueError("--external-draft requires an execution policy with draft_model")
     if external_policy and not args.external_draft:
-        raise ValueError("External draft policy requires --external-draft")
+        raise ValueError(
+            "an execution policy with draft_model(s) requires --external-draft"
+        )
+    if args.external_draft and not external_policy:
+        raise ValueError(
+            "--external-draft requires an execution policy with draft_model or draft_models"
+        )
     prompt_lookup = bool(getattr(args, "prompt_lookup", False))
     if prompt_lookup and external_policy:
         raise ValueError("--prompt-lookup cannot select an external draft policy")
     native_mtp = bool(getattr(args, "native_mtp", False))
+    if native_mtp and external_policy:
+        raise ValueError("--native-mtp cannot select an external draft policy")
+    capability_default = False
     if args.ordinary:
         route = "ordinary"
     elif args.external_draft:
@@ -6076,14 +6241,18 @@ def resolve_route_selection(args, policy, adapter_resolution=None):
     elif native_mtp:
         route = "native_mtp"
     else:
-        route = (
-            adapter_resolution.default_route
-            if adapter_resolution is not None
-            else "native_mtp"
-        )
+        route = adapter_resolution.default_route if adapter_resolution is not None else "native_mtp"
+        if adapter_resolution is not None and route == "ordinary":
+            from .contracts import Capability
+
+            if Capability.PROMPT_LOOKUP in adapter_resolution.descriptor.capabilities:
+                route = "prompt_lookup"
+                capability_default = True
     source = (
         "explicit_flag"
         if args.ordinary or args.external_draft or prompt_lookup or native_mtp
+        else "capability_default"
+        if capability_default
         else "adapter_default"
     )
     if route == "native_mtp" and adapter_resolution is not None:
@@ -6118,6 +6287,24 @@ NATIVE_MTP_COPY_DRAFT_DEFAULT = {
     "min_match": 4,
     # The existing cross-model safety gate: do not widen a physical cohort.
     "batched_max_span": 0,
+}
+
+# Safe universal fallback for adapters that declare prompt-lookup support.
+# It begins parked, shadows ordinary output, briefly explores only after
+# multi-token matches, and parks again when its own committed-token cost or
+# acceptance is poor.  This is the content-neutral prose/low-acceptance latch:
+# no scheduler branch guesses workload semantics from model names or tokens.
+DEFAULT_PROMPT_LOOKUP_POLICY = {
+    "cost_aware_admission": True,
+    "cost_shadow_span": 4,
+    "cost_probe_stride": 4,
+    "cost_shadow_window": 2,
+    "cost_shadow_gate": 0.75,
+    "cost_plain_rounds": 8,
+    "cost_explore_rounds": 2,
+    "cost_margin": 0.05,
+    "cost_reprobe_interval": 32,
+    "cost_park_rounds": 4,
 }
 
 
@@ -6217,6 +6404,11 @@ def resolve_execution_policy_defaults(
                 f"{NATIVE_MTP_PREFILL_SCHEDULING['max_bypass']}: SRPT needs a "
                 "wider admission window"
             )
+    if (
+        route_selection.route == "prompt_lookup"
+        and "prompt_lookup" not in resolved
+    ):
+        resolved["prompt_lookup"] = dict(DEFAULT_PROMPT_LOOKUP_POLICY)
     return resolved or None
 
 
@@ -6514,6 +6706,7 @@ def main():
         if not isinstance(policy, dict):
             parser.error("--execution-policy must be a JSON object")
     try:
+        policy = merge_invocation_draft_models(args, policy)
         from .adapters.registry import inspect_model
 
         try:
@@ -6523,8 +6716,13 @@ def main():
             # config.json is an operator mistake, not a fault: report it like
             # any other flag (OSError and TypeError used to be tracebacks).
             parser.error(f"cannot inspect --model {args.model}: {error}")
+        validate_invocation_draft_adapter(args, adapter_resolution)
         route_selection = resolve_route_selection(args, policy, adapter_resolution)
         native_mtp = route_selection.native_mtp
+        # Route resolution, rather than only the spelling of the CLI, is the
+        # authority.  In particular a capability-default prompt-lookup route
+        # must reach the prompt-lookup generator just like --prompt-lookup.
+        args.prompt_lookup = route_selection.route == "prompt_lookup"
         skipped_route_defaults = {}
         policy = resolve_execution_policy_defaults(
             policy,
@@ -6574,7 +6772,9 @@ def main():
     if args.mtp_acceptance_log is not None and not native_mtp:
         parser.error("--mtp-acceptance-log requires the native self-MTP route")
     try:
-        approximate_kv = approximate_kv_mode(args, native_mtp)
+        approximate_kv = approximate_kv_mode(
+            args, native_mtp, route_selection=route_selection,
+        )
     except ValueError as error:
         parser.error(str(error))
     if args.power_telemetry:

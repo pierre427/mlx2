@@ -28,6 +28,10 @@ class AdapterResolution:
     def default_route(self) -> str:
         """Resolve the adapter preference against this artifact's capabilities."""
         route = getattr(self.adapter_type, "default_route", None)
+        if route in {"embeddings", "rerank"}:
+            if self.descriptor.capabilities != frozenset({Capability(route)}):
+                raise ValueError(f"{route} default requires an embedding-only or rerank-only adapter")
+            return route
         if route not in {"ordinary", "native_mtp"}:
             raise ValueError(
                 f"{self.adapter_type.__name__} must declare default_route as "
@@ -314,6 +318,12 @@ def _nemotron_h(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.Nemotron3SuperAdapter, module.DESCRIPTOR, artifact)
 
 
+def _nemotron_h_omni(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".nemotron35_super_vl", __package__)
+    return AdapterResolution(module.Nemotron35SuperVLAdapter, module.DESCRIPTOR,
+                             module.inspect_artifact(path))
+
+
 def _gemma3n(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".mlx_vlm", __package__)
     artifact = module.inspect_artifact(path, expected="gemma3n")
@@ -341,6 +351,16 @@ def _standard_decoder(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(
         module.StandardDecoderAdapter, module.descriptor_for(model_type), artifact
     )
+
+
+def _minilm(path: Path, config: dict) -> AdapterResolution:
+    if config.get("architectures") == ["BertForSequenceClassification"]:
+        module = importlib.import_module(".minilm_reranker", __package__)
+        artifact = module.inspect_artifact(path)
+        return AdapterResolution(module.MiniLMRerankerAdapter, module.DESCRIPTOR, artifact)
+    module = importlib.import_module(".minilm", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.MiniLMAdapter, module.DESCRIPTOR, artifact)
 
 
 def _mellum(path: Path, config: dict) -> AdapterResolution:
@@ -406,6 +426,7 @@ def _qwen25_vl(path: Path, config: dict) -> AdapterResolution:
 
 
 _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
+    "bert": _minilm,
     "qwen4_exp": _flash_next,
     "qwen3_5": _qwen3_5_dense,
     "qwen3_5_moe": _qwen36_35b,
@@ -415,6 +436,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "laguna": _laguna_xs21,
     "xing4_0": _xing4_0,
     "nemotron_h": _nemotron_h,
+    "nemotron_h_omni": _nemotron_h_omni,
     "gemma3n": _gemma3n,
     "gemma4": _gemma4,
     "minicpmo": _minicpmo,

@@ -269,6 +269,7 @@ def test_gemma3n_adapter_reports_real_frame_batches(monkeypatch):
     )
 
     class Processor:
+        chat_template = "x"  # Gemma 3n ships one; chat fails closed without
         tokenizer = type(
             "Tokenizer", (), {"image_token": "<image>", "audio_token": "<audio>",
                               "image_token_id": 2, "audio_token_id": 4}
@@ -323,6 +324,7 @@ def test_gemma3n_refuses_wav_audio_at_a_rate_its_extractor_does_not_use():
     processed = []
 
     class Processor:
+        chat_template = "x"  # Gemma 3n ships one; chat fails closed without
         tokenizer = type(
             "Tokenizer", (), {"image_token": "<image>", "audio_token": "<audio>",
                               "image_token_id": 2, "audio_token_id": 4}

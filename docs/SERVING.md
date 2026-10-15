@@ -37,14 +37,18 @@ file names, sizes and modification timestamps. This is a **local artifact
 identity**, not a digest of every weight byte. Editing weights while preserving
 size and timestamps is outside that identity guarantee.
 
-The tested MLX build comes from local revision
-`2a817ad94fd574810f0e69b66d698a35ed2d93e9`, installed as
-`0.32.2.dev20260915+2a817ad94`. mlx2 does not import that source checkout.
-`requirements-qualified.txt` pins the other Python packages. To reproduce:
+MLX `0.32.4` is the pinned serving dependency. Its indexed-QSA and copied
+GDN, routed-MoE and hyperconnection arithmetic passed the dependency/kernel
+gates recorded in `provenance/mlx-0.32.4-repin.json`. This does not rebind model
+route receipts from earlier builds. The `serve` extra admits only
+`>=0.32.4,<0.32.5`; `requirements-qualified.txt` pins the exact wheel and the
+other Python packages. Controlled performance measurement remains separate.
+
+To reproduce:
 
 1. Create a Python 3.12 environment.
-2. Build that exact MLX revision or use its retained wheel. The development
-   build is not assumed to be available on PyPI.
+2. Install the MLX wheel named in the matching receipt. New environments use
+   the exact `0.32.4` pin; historical receipts may name a retained wheel.
 3. Install `requirements-qualified.txt`, then `pip install --no-deps -e .`.
 4. Acquire the same artifact independently and qualify the new environment.
 
@@ -55,24 +59,31 @@ dependency versions. Qualification on another host produces a new local receipt.
 
 When no execution-route flag is present, metadata-only adapter resolution picks
 the adapter's default before any weights are loaded. Complete embedded-head
-Qwen4 Flash-Next, Qwen3.8 and Xing artifacts default to `native_mtp`;
-the same adapter families fall back to `ordinary` when the resolved artifact
-has no MTP capability. Muse Glimmer, North Mini Code, Laguna XS 2.1, Gemma 3n
-and MiniCPM-o default to `ordinary`. Qwen3.6-35B-A3B also defaults to `ordinary`
-even with an MTP head: measured on GPU, native MTP matched ordinary single-stream
-(102.0 vs 102.7 tok/s) and lost 25-34% batched; pass `--native-mtp` to opt in.
+Qwen4 Flash-Next, Qwen3.8, Xing and Qwen3.6-35B-A3B artifacts default to
+`native_mtp`; the same adapter families fall back to `ordinary` when the
+resolved artifact has no MTP capability. For an ordinary-default adapter that
+declares prompt lookup, the server selects the cost-aware prompt-lookup latch
+as `capability_default`. Ordinary remains the reference route and is available
+with `--ordinary`. Gemma 3n and MiniCPM-o remain ordinary by default because
+they do not declare prompt lookup.
 
 The mutually exclusive `--native-mtp`, `--ordinary`, `--external-draft` and
-`--prompt-lookup` flags always override an adapter default. `--native-mtp`
-fails before listener binding or weight loading when the resolved artifact has
-no implemented MTP route; external draft still requires an explicit flag and a
-matching draft policy. Startup logs the resolved route and whether its source
-was `adapter_default` or `explicit_flag`.
+`--prompt-lookup` flags override adapter and capability defaults. An unsupported
+native-MTP request fails before listener binding or weight loading. A policy
+with `draft_model` or `draft_models` requires explicit `--external-draft`;
+locally present auxiliary artifacts are never selected implicitly.
+`--draft-model [ID=]PATH` is repeatable shorthand for a resident portfolio on
+adapters implementing that contract. Depth, lane/tile admission and
+continuation-pool choices remain in `--execution-policy`; artifacts are local
+and are never downloaded by route selection. Startup reports
+`adapter_default`, `capability_default` or `explicit_flag`.
 
 `/v1/status.settings.route` and `route_selection_source` expose the decision,
 and terminal response receipts repeat both fields. Qualification identity binds
 the resolved `route`; selection provenance is observational, so a record made
-with explicit `--ordinary` also matches the same adapter-default ordinary route.
+with explicit `--ordinary` also matches the same adapter-default ordinary route. An
+older ordinary receipt on an adapter now receiving a prompt-lookup capability
+default must be started with `--ordinary`; the startup mismatch names the flag.
 
 ## Request API and Hermes controls
 
@@ -668,7 +679,7 @@ mode:
   `X-Tenant-ID` the server resolves today) to
   `{"agent_compat": "on"|"off", "custom_tool_grammar": "validate"|"off"}`,
   where the grammar key is optional. Once rm11 (tenant auth, branch
-  `claude/rm11-tenant-auth-20260919`) merges, this should become key-bound
+  the reviewed implementation) merges, this should become key-bound
   through an `agent_compat` field in its keys file, so that a tenant's mode
   follows its authenticated key rather than a self-asserted header. This
   branch doesn't depend on rm11's code.
@@ -772,6 +783,13 @@ labelled `tokenize` / `apply_template` in HTTP metrics.
 
 ## Cache, scheduling and memory
 
+Projection workspace is a separate live admission reserve. Int8 prefill
+reserves missing cached weight/metadata copies, per-call copies and maximum
+rotation-build scratch; resident copies already reflected in measured
+headroom are subtracted. The HTTP guards, lane controller and automatic APC
+budget use the same term. Startup checks headroom before warming copies.
+This is memory accounting, not Hadamard fidelity or performance qualification.
+
 **APCv2 is the sole prefix cache**, including the ordinary reference route.
 Its radix index is an internal data structure. Layered frozen segments and
 copy-on-write branches preserve ownership. Target, recurrent, sparse/QSA and
@@ -838,7 +856,9 @@ refuses any arm whose interior-hit counter is zero. Admission performs one final
 eviction/rejection and charges each admitted allocation once.
 
 With `--apc-persist-dir`, exact APCv2 entries use immutable digests and native
-runtime identity, bounded corruption quarantine and startup rescan. A validated
+runtime identity, capacity-bounded corruption quarantine and a synchronous
+startup rescan. Startup checks and final descriptor close have no caller
+deadline. A validated
 `session_id` (or matching `X-mlx2-Session-ID`) tags tenant-owned entries;
 `/v1/apc/sessions` exposes list/state plus park, resume and delete. Pin TTL,
 resident/disk budgets and shutdown spill are independently bounded by the
@@ -1155,7 +1175,7 @@ on the 27B diverge from 1 lane
 
 `--verify-bitexact` turns on the fork's batch-invariant mode,
 `mx.metal.set_qmv_bitexact` (fork branch
-`claude/rm09-bitexact-verify-20260919`). Every transposed quantized matmul
+the reviewed implementation). Every transposed quantized matmul
 with M <= `qmv_bitexact_max_m` (64) computes each row with exactly the
 single-row `qmv_fast` arithmetic, through a multi-row kernel that only shares
 weight loads between rows. Larger M uses the non-split `qmm`. MoE gathers use
@@ -2373,3 +2393,16 @@ draft layers keep exactly the last `sliding_window - 1` of them.
 (greedy and sampled) against an ordinary-target reference and reports decode
 tok/s, acceptance length (tokens per verify round), accept rate, the
 per-round accepted histogram, and greedy token exactness.
+
+### Experimental factorized native-MTP depth
+
+`adaptive_mtp_depth.cost_model: "factorized"` combines conditional acceptance
+at each verified prefix position with measured whole-round time by physical
+verify-row count. It interpolates only within observed geometry, censors
+rejected tails, separates exact physical widths, and bounds and expires cost
+owners. Copied spans, terminal rounds, padded/mixed cohorts and failed commits
+do not train it. The default remains `"goodput"`; this option is CPU-tested,
+default-off and unqualified, with no model speedup claim. Greedy pinning and
+the single-lane anchor still apply. A depth/backend change prevents publishing
+generated APCv2 state under the original numerical schedule; prompt-only
+checkpoints remain eligible.

@@ -1,0 +1,60 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "Final publication contract and integration repairs after the October 15 peer survey",
+  "recorded_at": "2026-10-15",
+  "origin": "Original MLX2 maintenance; no external source copied.",
+  "license": "Apache-2.0",
+  "integration_base": "204046b44c8fabf386ceff408bb9d12bbe422fbc",
+  "modifications": [
+    "Refresh the reviewed cache dispatcher digest after the bounded file-like restore path; dispatch targets and selection remain unchanged.",
+    "Refresh native media producer adapter pins for trusted tenant feature keys and opt-in MiniCPM-o per-item reuse. Earlier companions do not qualify changed sources and require fresh evidence.",
+    "Refresh the host-only North inspector pin after adding metadata-only adapter planning; verify the seven allowlisted artifact-inspector function ASTs remain identical.",
+    "Replace two unit-test dependencies on a removed host model directory with deliberate inline architecture/metadata fixtures; preserve real artifact inspection and existing accounting/request assertions.",
+    "Narrow checkpoint documentation to bounded caller waits for payload I/O and worker draining; final descriptor close remains synchronous.",
+    "Align shutdown and extracted publication fixtures with the real HostCounters/count_add contract.",
+    "Retarget payload fault injection to the evaluated serializer and require the injected failure to fire.",
+    "Measure actual bounded-writer payloads and exact staged-byte SHA-256 work; mark the obsolete unverified restore counterfactual unexecuted.",
+    "Trace both worker read/materialization and model-thread staged load/freeze/publication, with an actual CPU restore ordering oracle.",
+    "Align handoff fixture state and APC/fanout assertions with the real numerical-schedule publication rules; preserve exact prompt-state reuse and unchanged target output.",
+    "Repair FOLD policy identity and explicit disabled-policy binding; detailed provenance and negative controls are recorded in fold-long-context-drafter.json."
+  ],
+  "validation": {
+    "focused_modules": [
+      "tests/test_media_qualification.py",
+      "tests/test_route_source_identity.py"
+    ],
+    "focused_result": "passed",
+    "isolated_import_modules": [
+      "tests/test_packed_prefill_long_contract_cpu.py",
+      "tests/test_qwen35_vlm_candidate_cpu.py",
+      "tests/test_ragged_pld_north_identity_cpu.py"
+    ],
+    "isolated_import_result": "3/3 modules passed; optional external artifact test skipped",
+    "integrated_mlx0324_cpu_regression": {
+      "passed": 228,
+      "skipped": 13,
+      "result": "passed"
+    },
+    "full_preflight": "The initial gate exposed failures and is not a publication pass. Final integrated evidence is recorded in docs/audits/2026-10-15-peer-survey-repairs/validation.json.",
+    "api_counter_followup": {
+      "passed": 59,
+      "import_guard_passed": 3,
+      "import_guard_skipped": 1
+    },
+    "mcp_header_drip": {
+      "cpu_load_repetitions_passed": 50,
+      "initial_full_gate_failure_cause": "Not reproduced; unchanged production transport and deadline assertions. Diagnostic context added for recurrence."
+    },
+    "io_instrumentation_followup": {
+      "passed": 66,
+      "result": "passed"
+    },
+    "numerical_lifecycle_fold": {
+      "passed": 283,
+      "skipped": 1,
+      "direct_lifecycle_checks_passed": 41
+    }
+  },
+  "qualified": false,
+  "performance_qualified": false
+}

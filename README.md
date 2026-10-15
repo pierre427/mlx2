@@ -20,14 +20,23 @@ Contact: Pierre Lamy, [pierre@userid.org](mailto:pierre@userid.org)
 - Responses API text/function items with bounded process-local storage,
   retrieval, deletion and `previous_response_id` continuation; typed text and
   function-call SSE, required/named tools, strict schemas and single-call
-  enforcement. UTF-8 files are accepted through the Files API; image/audio,
-  hosted tools and MCP tools fail as unavailable on the text-only routes.
+  enforcement. UTF-8 files are accepted through the Files API. Media inputs
+  require a capable adapter. Responses MCP tools execute only through an
+  operator-allowlisted backend, with bounded transport and model/tool rounds.
 - Anthropic-compatible `/v1/messages` and `/v1/messages/count_tokens` reuse the
   same validated chat pipeline, including typed SSE, tools, signed thinking,
   cache-aware usage and fail-closed model tool JSON.
 - OpenAI-shaped embeddings plus Cohere/Jina-shaped reranking are exposed only
-  through adapter-owned representation hooks. The shipped generation adapters
-  return 501 instead of fabricated vectors or scores. Standard Files and JSONL
+  through adapter-owned representation hooks. The pinned all-MiniLM-L6-v2
+  adapter executes a trained BERT sentence encoder with the exact WordPiece,
+  256-token, masked-mean and L2 recipe; its 384-dimensional CPU reference parity
+  is tested. A separate pinned MS MARCO MiniLM cross-encoder executes its
+  trained pairwise relevance head and returns raw relevance logits. Both
+  routes remain unqualified. A reproducible SciFact CPU evaluation script is included; neither route is
+  promoted to a default. Eligible generation adapters
+  expose normalized mean-pooled input embeddings and cosine reranking; these
+  are not trained contextual embedders or cross-encoders. Unsupported adapters
+  return 501. Standard Files and JSONL
   Batch lifecycles and vLLM-compatible LoRA control endpoints are bounded and
   tenant-scoped; LoRA activation likewise requires an engine implementation.
 - Nonstreaming `n=1..8` sampling reserves the whole cohort before publishing
@@ -71,11 +80,17 @@ Granite SWA, Agnes, Hy-V3, LFM2.5-VL and the SmolVLM2/Qwen2.5-VL vision candidat
 Each declares its default route and per-model defaults; see
 [SERVING.md](docs/SERVING.md) for what each selects.
 
-Qualification is bound to the exact source (`runtime_identity()`), artifact,
-host and settings, so any change under `src/` invalidates earlier receipts
+Qualification is bound to the recorded source identity/scope, artifact,
+host and settings; a source change outside a route's recorded scope does not
+by itself establish a change to that route
 (see [QUALIFICATION.md](docs/QUALIFICATION.md)). Read a model's qualification
 state from its `/v1/status` and route receipts, not from this file: a model
 without a matching receipt still serves and is labelled `unqualified`.
+
+`mlx2-fit /path/to/model --context 32768 --lanes 1 --host-gib 36 --apc-gib 4`
+produces a metadata-only deployment estimate without loading weights. It
+reports storage, adapter-owned cache geometry and explicit unknown workspace
+costs. Its result is planning advice, not a live admission or qualification.
 
 The initial 16K Flash-Next measurements are retained as
 [historical results](docs/RESULTS.md). Their four concurrent HTTP requests do
@@ -138,8 +153,8 @@ credentials and never prompts from the monitor.
 
 ## Development and reproduction
 
-The tested environment uses Python 3.12 and local MLX build
-`0.32.2.dev20260915+2a817ad94`. Qualification binds source, native binaries,
+The serving dependency is pinned to MLX `0.32.4`;
+`requirements-qualified.txt` records the reproducible Python environment. Qualification binds source, native binaries,
 dependency versions, local artifact identity and serving settings. Changes
 require new evidence; normal serving rejects a mismatched receipt.
 

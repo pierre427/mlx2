@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from .host_counters import HostCounters, count_add, count_max, counter_snapshot
+
 from collections import Counter, OrderedDict, deque
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field
 from functools import partial
 import hashlib
@@ -23,7 +25,7 @@ import threading
 import time
 import uuid
 
-from .logprobs import token_logprob, wants_logprobs, wants_logprobs_at
+from .logprobs import distribution_contract, token_logprob, wants_logprobs, wants_logprobs_at
 from .generation_trace import GeneratedTokenTrace
 from .request_limits import (
     DEFAULT_OUTPUT_TOKENS,
@@ -130,9 +132,22 @@ def _preemption_receipt(job):
     if job.preemptions:
         receipt = {
             "schema": "mlx2.memory-preemption.v1",
-            "replays": job.preemptions,
+            "replays": sum(event.get("mechanism") != "exact_decode_checkpoint"
+                           for event in job.preemption_events),
             "events": list(job.preemption_events),
         }
+        checkpoints = [event for event in job.preemption_events
+                       if event.get("mechanism") == "exact_decode_checkpoint"]
+        if checkpoints:
+            receipt["exact_decode_checkpoints"] = len(checkpoints)
+            receipt["exact_decode_resumes"] = sum(bool(event.get("restored_without_prefill"))
+                                                  for event in checkpoints)
+            receipt["exact_decode_qualified"] = False
+            receipt["exact_decode_route"] = {
+                "implemented": True, "selected": True, "qualified": False,
+                "observed_used": bool(receipt["exact_decode_resumes"]),
+                "scope": "same_executor_ordinary_b1_sdpa_capability_cache_v2",
+            }
         if job.fault is not None and not job.fault_fired:
             receipt["fault_unfired"] = job.fault_declined or "never_reached"
         return receipt
@@ -311,17 +326,14 @@ def reconcile_ingress_cohort_prompts(prompts, active, counts) -> None:
             continue
         newly_observed = execution["observed_uids"] - state["observed_uids"]
         if not state["observed_used"]:
-            counts["ingress_cohort_observed_used"] += 1
+            count_add(counts, "ingress_cohort_observed_used", 1)
             state["observed_used"] = True
-        counts["ingress_cohort_executed_lanes"] += len(newly_observed)
+        count_add(counts, "ingress_cohort_executed_lanes", len(newly_observed))
         state["observed_uids"].update(newly_observed)
         if execution["target_reached"] and not state["target_reached"]:
-            counts["ingress_cohort_target_reached"] += 1
+            count_add(counts, "ingress_cohort_target_reached", 1)
             state["target_reached"] = True
-        counts["ingress_cohort_max_execution_width"] = max(
-            counts["ingress_cohort_max_execution_width"],
-            execution["execution_width"],
-        )
+        count_max(counts, "ingress_cohort_max_execution_width", execution["execution_width"])
 
         widths = {
             response.uid: response.external_prefill_width
@@ -732,7 +744,7 @@ def weight_streaming_refusals(
     if multi_lora or lora_root is not None:
         reasons.append("LoRA")
     policy = execution_policy or {}
-    if "draft_model" in policy:
+    if "draft_model" in policy or "draft_models" in policy:
         reasons.append("external draft")
     for key in ("tensorfold_prefill", "tensorfold_qmv_rows", "row_exact_verify",
                 "mtp_draft_vocab", "moe_routed_candidate", "invariant_prefill"):
@@ -1707,13 +1719,13 @@ def _observe_semantic_receipt(receipt, job, counts, *, uid, gates, source, prefi
         receipt.get("prepared_for_uid") != uid
         or receipt.get("prepared_request_id") != job.id
     ):
-        counts[f"{prefix}_forward_identity_mismatches"] += 1
+        count_add(counts, f"{prefix}_forward_identity_mismatches", 1)
         return receipt
     if source not in gates:
         # Prompt completion proves only that the request advanced.  It does
         # not prove that the prepared semantic input crossed the model
         # boundary (fallback/requeue paths may also terminate a prompt).
-        counts[f"{prefix}_forward_completed"] += 1
+        count_add(counts, f"{prefix}_forward_completed", 1)
         return {
             **receipt,
             "status": "forward_completed",
@@ -1725,10 +1737,10 @@ def _observe_semantic_receipt(receipt, job, counts, *, uid, gates, source, prefi
     # prompt-tail forward; that row is read by every later layer and by the
     # head that produced the first token.  A zero gate is an exact bypass.
     engaged = gates[source] > 0.0
-    counts[f"{prefix}_forward_validated"] += 1
+    count_add(counts, f"{prefix}_forward_validated", 1)
     if engaged:
-        counts[f"{prefix}_engagements"] += 1
-        counts[f"{prefix}_observed_used"] += 1
+        count_add(counts, f"{prefix}_engagements", 1)
+        count_add(counts, f"{prefix}_observed_used", 1)
     return {
         **receipt,
         "status": "applied" if engaged else "identity",
@@ -1966,12 +1978,16 @@ def thinking_release_token_ids(adapter):
     the user's answer: it declares that switch as ``thinking_release_token_ids``.
     Only the thinking guard and the history-mode budget read it.
     """
-    close = thinking_close_token_ids(adapter)
-    if close is not None:
-        return close
+    # An adapter's explicit release sequence is generation-template input and
+    # takes precedence over the parser/grammar close marker.  Qwen templates,
+    # for example, require the surrounding newlines rather than a bare
+    # ``</think>``.  Falling back to the marker is retained for adapters whose
+    # template declares no distinct release sequence.
     accessor = getattr(adapter, "thinking_release_token_ids", None)
-    ids = accessor() if callable(accessor) else None
-    return tuple(int(token) for token in ids) if ids else None
+    if callable(accessor):
+        ids = accessor()
+        return tuple(int(token) for token in ids) if ids else None
+    return thinking_close_token_ids(adapter)
 
 
 def thinking_message_ids(adapter):
@@ -3016,6 +3032,25 @@ def install_explicit_native_hybrid_b2_cohort(
 
 
 
+def checkpoint_schedule_changed(batch, owner, tokens, *, checkpoint=None, response=None):
+    """Generated state cannot enter exact APC under an unbound numerical law.
+
+    Prompt-only state precedes verification. Capture-time evidence wins over
+    later live transitions so an earlier valid snapshot stays publishable.
+    """
+    if tokens is not None and owner is not None and len(tokens) <= int(getattr(owner, "prompt_tokens", 0) or 0):
+        return False
+    if checkpoint is not None and "numerical_schedule_changed" in checkpoint:
+        return bool(checkpoint["numerical_schedule_changed"])
+    receipt = getattr(response, "mtp_receipt", None) or {}
+    if receipt.get("numerical_schedule_changed"):
+        return True
+    generation = getattr(batch, "_generation_batch", batch)
+    observe = getattr(generation, "numerical_schedule_for_uid", None)
+    schedule = observe(getattr(owner, "uid", None)) if callable(observe) else None
+    return bool((schedule or {}).get("numerical_schedule_changed"))
+
+
 def record_native_bootstrap_progress(jobs,lifecycle_lock,*,clock=time.monotonic):
     """Advance only after complete successful atomic native attachment."""
     with lifecycle_lock:
@@ -3434,6 +3469,8 @@ class Job:
     preempt_blockers: tuple = ()
     fault_declined: str | None = None
     preemption_events: list = field(default_factory=list)
+    exact_decode_checkpoint: object | None = None
+    exact_decode_checkpoint_unavailable: str | None = None
     # return_progress: at most one queued prompt_progress event per job; the
     # producer rewrites a still-queued event's payload instead of queueing more.
     prompt_progress_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -3598,6 +3635,10 @@ class ServingEngine:
             raise ValueError("invalid cache_bytes source")
         if route_selection_source not in {
             "adapter_default",
+            "capability_default",
+            # Kept for existing route receipts/direct engine callers. The
+            # server now requires --external-draft and emits explicit_flag.
+            "execution_policy_default",
             "explicit_flag",
             "engine_argument",
         }:
@@ -4180,7 +4221,7 @@ class ServingEngine:
         self.fanout_waiting = {}
         self.fanout_capsules = {}
         self.queued_jobs = 0
-        self.counts = Counter(
+        self.counts = HostCounters(
             {
                 "thinking_budget_forced_closes": 0,
                 "apc_shutdown_parks_skipped": 0,
@@ -4255,6 +4296,9 @@ class ServingEngine:
         # and sampling controls, so views must be able to scope them.
         self.receipt_log = deque(maxlen=128)
         self.batch_metrics = BatchRuntimeMetrics()
+        from .drafter_metrics import DrafterRuntimeMetrics
+
+        self.drafter_metrics = DrafterRuntimeMetrics()
         self.http_metrics = HttpRuntimeMetrics()
         if self.power_telemetry_policy.enabled:
             self.power_telemetry = PowerTelemetry(
@@ -4359,6 +4403,8 @@ class ServingEngine:
         deadline = self._drain_deadline
         return {
             "state": self._service_state,
+            "terminal_cleanup_pending": len(getattr(self, "_terminal_cleanup_pending", ()))
+                + getattr(self, "_terminal_cleanup_in_progress", 0),
             "since": self._service_state_since,
             "timestamps": dict(self._service_timestamps),
             "drain_deadline": (
@@ -4402,11 +4448,14 @@ class ServingEngine:
             # exercise queue mechanics in isolation.  They predate the service
             # lifecycle and represent an ordinary serving engine.
             state = getattr(self, "_service_state", "serving")
+            if (getattr(self, "_terminal_cleanup_pending", ())
+                    or getattr(self, "_terminal_cleanup_in_progress", 0)):
+                state = "cleanup_pending"
             if state == "serving" or (
                 admitted and state == "draining" and not self._quiesce_worker_owned
             ):
                 return
-            self.counts[f"admissions_rejected_{endpoint_class}"] += 1
+            count_add(self.counts, f"admissions_rejected_{endpoint_class}", 1)
         raise AdmissionClosed(state, endpoint_class)
 
     def power_governor_state(self):
@@ -4453,7 +4502,7 @@ class ServingEngine:
                 if isinstance(apc_report, dict) else 0
             )
             if lost:
-                self.counts["apc_admin_clear_pinned_parks_lost"] += lost
+                count_add(self.counts, "apc_admin_clear_pinned_parks_lost", lost)
                 log.error(
                     "APCv2 admin clear (%s) destroyed %d pinned session "
                     "checkpoint(s) (sessions %s)",
@@ -4468,7 +4517,7 @@ class ServingEngine:
             mx.clear_cache()
         except ImportError:
             report["mlx_cache_bytes_released"] = 0
-        self.counts["apc_admin_clears"] += 1
+        count_add(self.counts, "apc_admin_clears", 1)
         return report
 
     def quiesce(self, *, drain_timeout_seconds=600.0, suspend=True):
@@ -4485,7 +4534,7 @@ class ServingEngine:
             raise ValueError("suspend must be boolean")
         with self._admission_section():
             with self.lock:
-                self.counts["quiesce_requests"] += 1
+                count_add(self.counts, "quiesce_requests", 1)
                 if self._service_state != "serving":
                     return self._service_state_locked()
                 if suspend and not (self.apc_persist_dir or self.cache_dir):
@@ -4537,7 +4586,7 @@ class ServingEngine:
                         wait_for_worker = True
                     else:
                         if previous != "serving":
-                            self.counts["resumes"] += 1
+                            count_add(self.counts, "resumes", 1)
                             self._drain_deadline = None
                             self._drain_started_monotonic = None
                             self._drain_suspend = False
@@ -4553,7 +4602,7 @@ class ServingEngine:
                             )
                             self._quiesce_complete.set()
                         self._admin_prefetch_queue.extend(prefetch_sessions)
-                        self.counts["prefetches_queued"] += len(prefetch_sessions)
+                        count_add(self.counts, "prefetches_queued", len(prefetch_sessions))
                         return self._service_state_locked()
             if wait_for_worker:
                 self._quiesce_complete.wait()
@@ -4600,11 +4649,14 @@ class ServingEngine:
             cancelled += 1
         if cancelled:
             with self.lock:
-                self.counts["prefetches_cancelled"] += cancelled
+                count_add(self.counts, "prefetches_cancelled", cancelled)
         return cancelled
 
     def _worker_quiesce_action(self):
         with self.lock:
+            if (getattr(self, "_terminal_cleanup_pending", ())
+                    or getattr(self, "_terminal_cleanup_in_progress", 0)):
+                return None
             if self._service_state != "draining":
                 return None
             if self._quiesce_worker_owned:
@@ -4644,9 +4696,9 @@ class ServingEngine:
                     - (self._drain_started_monotonic or time.monotonic()),
                 )
                 if timed_out:
-                    self.counts["drain_timeouts"] += 1
+                    count_add(self.counts, "drain_timeouts", 1)
                 else:
-                    self.counts["drains_completed"] += 1
+                    count_add(self.counts, "drains_completed", 1)
                 target = "suspended" if self._drain_suspend else "quiesced"
                 self._quiesce_worker_owned = True
                 action = {
@@ -4705,11 +4757,21 @@ class ServingEngine:
                 record = None
             if isinstance(record, dict) and isinstance(record.get("settings"), dict):
                 qualified_settings = record["settings"]
+        # The largest prefill projection call: every lane prefilling a full
+        # step together, or a cold media request's whole uncached tail in one
+        # forward (bounded by the context).  Generous on purpose: auto only
+        # steps aside when int8 prefill could never run.
+        max_prefill_rows = (
+            int(self.max_context)
+            if callable(getattr(adapter, "prepare_multimodal_request", None))
+            else int(self.prefill_step) * int(self.max_lanes)
+        )
         policy, self.int8_prefill_auto = resolve_auto(
             adapter,
             qualification_mode=bool(self.qualification_mode),
             qualified_settings=qualified_settings,
             conflicts=conflicts,
+            max_prefill_rows=max_prefill_rows,
         )
         if policy is not None:
             self.int8_prefill_policy = policy
@@ -4854,7 +4916,7 @@ class ServingEngine:
         if status is None:
             # Not this request's terminal (it already finished): only make
             # sure no hold outlives it.
-            ledger.release(reservation)
+            self._finish_cleanup(job, "usage_reservation_release", lambda: ledger.release(reservation))
             return
         started = getattr(job, "started", 0) or 0
         request = getattr(job, "request", None) or {}
@@ -4872,13 +4934,15 @@ class ServingEngine:
             )
         except Exception:  # accounting must never fail a request's terminal
             log.exception("usage accounting failed for %s", getattr(job, "id", "?"))
-            ledger.release(reservation)
+            self._finish_cleanup(job, "usage_reservation_release", lambda: ledger.release(reservation))
 
     def recent_receipts(self, tenant_id=None):
         """Recent request receipts, only ``tenant_id``'s when one is given."""
+        with getattr(self, "lock", nullcontext()):
+            receipts = list(self.receipt_log)
         return [
             receipt
-            for owner, receipt in list(self.receipt_log)
+            for owner, receipt in receipts
             if tenant_id is None or owner == str(tenant_id)
         ]
 
@@ -4931,6 +4995,16 @@ class ServingEngine:
             adapter = self.adapter
             if adapter is None:
                 raise RuntimeError("model adapter is not ready")
+            if getattr(adapter, "descriptor", None) is not None:
+                from .contracts import Capability
+
+                if (
+                    bool({Capability.EMBEDDINGS, Capability.RERANK} & adapter.descriptor.capabilities)
+                    and Capability.TEXT not in adapter.descriptor.capabilities
+                ):
+                    from .api_resources import CapabilityUnavailable
+
+                    raise CapabilityUnavailable("the selected adapter has no generation prompt tokenizer")
             return [
                 int(token)
                 for token in render_prompt_tokens(adapter, engine_request(request))
@@ -4958,6 +5032,14 @@ class ServingEngine:
         from .output import constrained_tool_choice
         from .runtime.verify_bitexact import check_request as check_verify_bitexact
 
+        if getattr(getattr(self, "adapter", None), "descriptor", None) is not None:
+            if (
+                bool({Capability.EMBEDDINGS, Capability.RERANK} & self.adapter.descriptor.capabilities)
+                and Capability.TEXT not in self.adapter.descriptor.capabilities
+            ):
+                from .api_resources import CapabilityUnavailable
+
+                raise CapabilityUnavailable("the selected adapter does not implement generation")
         request = engine_request(request)
         handle = getattr(self, "verify_bitexact_handle", None)
         check_verify_bitexact(request, handle)
@@ -4998,6 +5080,9 @@ class ServingEngine:
         # ``engine_request`` already flattened all-text part arrays, so they
         # never reach a media hook's own join.
         public_request = {key: value for key, value in request.items() if key != "mlx_fault"}
+        # Encoder feature reuse is a separate state plane from APCv2. Only the
+        # authenticated engine context may select its tenant partition.
+        public_request["_mlx2_feature_cache_tenant"] = str(tenant_id or "default")
         activation = activation_capsule_request(public_request)
         has_media = any(
             isinstance(message.get("content"), list)
@@ -5038,7 +5123,7 @@ class ServingEngine:
             # prompt tail. It may restore an exact ordinary prefix but never
             # publishes state into exact APCv2.
             public_request["skip_writing_prefix_cache"] = True
-            self.counts["activation_capsule_requests"] += 1
+            count_add(self.counts, "activation_capsule_requests", 1)
         if has_media:
             prepare = getattr(self.adapter, "prepare_multimodal_request", None)
             if not callable(prepare):
@@ -5071,15 +5156,15 @@ class ServingEngine:
                     and isinstance(value, int)
                     and value >= 0
                 ):
-                    self.counts[name] += value
+                    count_add(self.counts, name, value)
         fault = BatchFaultSpec.parse(
             request.get("mlx_fault"), enabled=self.qualification_mode
         )
         if self.apc_reuse_disabled_reason is not None:
             public_request["skip_writing_prefix_cache"] = True
-            self.counts["apcv2_route_disabled_requests"] += 1
+            count_add(self.counts, "apcv2_route_disabled_requests", 1)
         if public_request.get("skip_writing_prefix_cache", False):
-            self.counts["apcv2_write_suppressed_requests"] += 1
+            count_add(self.counts, "apcv2_write_suppressed_requests", 1)
         interior_policy = getattr(
             self,
             "apc_interior_checkpoint_policy",
@@ -5088,7 +5173,7 @@ class ServingEngine:
         if interior_policy["count"] and not getattr(
             self, "apc_interior_route_supported", False
         ):
-            self.counts["apc_interior_checkpoints_skipped_route"] += 1
+            count_add(self.counts, "apc_interior_checkpoints_skipped_route", 1)
         lora = None
         manager = getattr(self, "multi_lora", None)
         if manager is not None:
@@ -5106,9 +5191,11 @@ class ServingEngine:
                     **public_request,
                     "_mlx2_lora_fingerprint": lora[1],
                 }
-                self.counts["multi_lora_requests"] += 1
+                count_add(self.counts, "multi_lora_requests", 1)
             else:
-                self.counts["multi_lora_base_requests"] += 1
+                count_add(self.counts, "multi_lora_base_requests", 1)
+        # Adapter preparation may rebuild the request; restore trusted scope.
+        public_request["_mlx2_feature_cache_tenant"] = str(tenant_id or "default")
         job = Job(
             public_request, tenant_id=str(tenant_id or "default"), fault=fault
         )
@@ -5421,7 +5508,7 @@ class ServingEngine:
         mx.clear_cache()
         counts = getattr(self, "counts", None)
         if counts is not None:
-            counts["memory_cache_reclaims_before_reject"] += 1
+            count_add(counts, "memory_cache_reclaims_before_reject", 1)
         if settle:
             self._settle_footprint_before_reject()
         return True
@@ -5447,12 +5534,12 @@ class ServingEngine:
         report = settler.settle(timeout)
         counts = getattr(self, "counts", None)
         if counts is not None:
-            counts["memory_footprint_settles"] += 1
-            counts["memory_footprint_settle_" + report["exit"]] += 1
-            counts["memory_footprint_settle_wait_ms"] += int(report["waited"] * 1000)
-            counts["memory_footprint_settle_released_bytes"] += int(
+            count_add(counts, "memory_footprint_settles", 1)
+            count_add(counts, "memory_footprint_settle_" + report["exit"], 1)
+            count_add(counts, "memory_footprint_settle_wait_ms", int(report["waited"] * 1000))
+            count_add(counts, "memory_footprint_settle_released_bytes", int(
                 report["released_bytes"]
-            )
+            ))
         return report
 
     def _permit_allocator_reclaim_after_eviction(self):
@@ -5484,13 +5571,13 @@ class ServingEngine:
             with self.lock:
                 self.jobs[job.id] = job
             pending["jobs"].append(job)
-            self.counts["batch_cohort_jobs_staged"] += 1
+            count_add(self.counts, "batch_cohort_jobs_staged", 1)
             if len(pending["jobs"]) < target:
                 return
             jobs = pending["jobs"]
             del self.pending_cohorts[cohort_key]
-            self.counts["batch_cohort_releases"] += 1
-            self.counts["batch_cohort_jobs_released"] += len(jobs)
+            count_add(self.counts, "batch_cohort_releases", 1)
+            count_add(self.counts, "batch_cohort_jobs_released", len(jobs))
             self._publish_jobs(jobs, already_registered=True)
             return
         self._publish_jobs([job])
@@ -5543,8 +5630,8 @@ class ServingEngine:
                     expired.append((cohort_key, pending))
                     del self.pending_cohorts[cohort_key]
         for (_, cohort_id), pending in abandoned:
-            self.counts["batch_cohort_staged_cancellations"] += 1
-            self.counts["batch_cohort_jobs_failed_closed"] += len(pending["jobs"])
+            count_add(self.counts, "batch_cohort_staged_cancellations", 1)
+            count_add(self.counts, "batch_cohort_jobs_failed_closed", len(pending["jobs"]))
             for job in pending["jobs"]:
                 self._finish(
                     job,
@@ -5557,8 +5644,8 @@ class ServingEngine:
                     },
                 )
         for (_, cohort_id), pending in expired:
-            self.counts["batch_cohort_timeouts"] += 1
-            self.counts["batch_cohort_jobs_timed_out"] += len(pending["jobs"])
+            count_add(self.counts, "batch_cohort_timeouts", 1)
+            count_add(self.counts, "batch_cohort_jobs_timed_out", len(pending["jobs"]))
             for job in pending["jobs"]:
                 self._finish(
                     job,
@@ -5667,13 +5754,13 @@ class ServingEngine:
                 if independent:
                     self._publish_jobs(jobs, already_registered=True, atomic=False)
                     if write_suppressed:
-                        self.counts["apcv2_fanout_write_suppressed"] += 1
+                        count_add(self.counts, "apcv2_fanout_write_suppressed", 1)
                     else:
-                        self.counts["approximate_kv_fanout_bypassed"] += 1
+                        count_add(self.counts, "approximate_kv_fanout_bypassed", 1)
                 else:
                     self._publish_jobs([jobs[0]], already_registered=True)
-                    self.counts["apcv2_fanout_groups"] += 1
-                    self.counts["apcv2_fanout_lanes"] += len(jobs)
+                    count_add(self.counts, "apcv2_fanout_groups", 1)
+                    count_add(self.counts, "apcv2_fanout_lanes", len(jobs))
             except BaseException:
                 with self.lock:
                     self.fanout_waiting.pop(fanout_group, None)
@@ -5763,6 +5850,7 @@ class ServingEngine:
             admission_limit_bytes=limit,
             resident_bytes=resident_device_bytes(),
             stream_reserve_bytes=int(self.stream_unfilled_reserve_gib() * (1 << 30)),
+            workspace_reserve_bytes=int(self.projection_workspace_reserve_gib() * (1 << 30)),
             lane_need_bytes=lane_need,
             lanes=max(1, min(self.max_lanes, CACHE_CLAMP_LANES)),
         )
@@ -5823,6 +5911,20 @@ class ServingEngine:
         if callable(unfilled):
             return unfilled() / float(1 << 30)
         return self.expert_stream_reserve_gib()
+
+    def projection_workspace_reserve_gib(self) -> float:
+        """Unfilled projection copies and build scratch, charged once per engine."""
+        handle = getattr(self, "int8_prefill_handle", None)
+        if handle is None:
+            return 0.0
+        reserve = getattr(handle, "unfilled_reserve_bytes", None)
+        if not callable(reserve):
+            raise ValueError("projection workspace reserve provider is unavailable")  # noqa: TRY004 - admission validation contract
+        value = reserve()
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            raise ValueError("projection workspace reserve must be finite and non-negative")
+        return value / float(1 << 30)
 
     def expert_stream_counters(self) -> dict:
         stream = self.expert_stream
@@ -5941,10 +6043,13 @@ class ServingEngine:
     def status(self):
         from .runtime.models import qsdpa_verify_metal as qvm
 
+        receipts = self.recent_receipts()
         with self.lock:
             quiesce = self._service_state_locked()
+            counts = Counter(counter_snapshot(self.counts))
             return {
                 **self.snapshot,
+                **self._representation_route_state(self.adapter),
                 "healthy": self.ready.is_set()
                 and self.thread.is_alive()
                 and not self.error,
@@ -5958,7 +6063,7 @@ class ServingEngine:
                              "serving_qualified": False},
                 )(),
                 "queue_depth": self.queued_jobs,
-                "counts": {**dict(self.counts), **self.expert_stream_counters()},
+                "counts": {**counts, **self.expert_stream_counters()},
                 **(
                     {"gpu_keep_warm": self.gpu_keep_warm.status()}
                     if self.gpu_keep_warm_policy.enabled
@@ -5980,18 +6085,18 @@ class ServingEngine:
                 ),
                 "quiesce": quiesce,
                 "admissions_rejected": {
-                    endpoint: self.counts[f"admissions_rejected_{endpoint}"]
+                    endpoint: counts[f"admissions_rejected_{endpoint}"]
                     for endpoint in sorted(self._ADMISSION_CLASSES)
                 },
                 "approximate_kv": {
                     **(self.snapshot.get("approximate_kv") or {}),
-                    "applied": self.counts["approximate_kv_applied"],
-                    "declined": self.counts["approximate_kv_declined"],
-                    "mtp_lanes": self.counts["approximate_kv_mtp_lanes"],
-                    "requantized_prefix_hits": self.counts[
+                    "applied": counts["approximate_kv_applied"],
+                    "declined": counts["approximate_kv_declined"],
+                    "mtp_lanes": counts["approximate_kv_mtp_lanes"],
+                    "requantized_prefix_hits": counts[
                         "approximate_kv_requantized_prefix_hits"
                     ],
-                    "apcv2_store_skipped_approximate": self.counts[
+                    "apcv2_store_skipped_approximate": counts[
                         "apcv2_store_skipped_approximate"
                     ],
                 },
@@ -6015,7 +6120,7 @@ class ServingEngine:
                     "counts": dict(qvm.STATS),
                     "by_rows": dict(qvm.STATS_BY_ROWS),
                 },
-                "recent_receipts": self.recent_receipts(),
+                "recent_receipts": receipts,
                 "recent_operation_receipts": list(self.operation_receipts),
                 "model_revision": self.model_revision,
                 "lora": {
@@ -6053,6 +6158,21 @@ class ServingEngine:
                 ),
             }
 
+    def _representation_route_state(self, adapter):
+        """Refresh host-only execution facts, including an in-progress forward."""
+        route = self.snapshot.get("route_receipt")
+        contract = getattr(adapter, "representation_contract", None)
+        if not isinstance(route, dict) or route.get("route") not in {"embeddings", "rerank"} or not callable(contract):
+            return {}
+        representation = contract()
+        state = {key: representation[key] for key in (
+            "implemented", "qualified", "selected", "observed_used"
+        ) if key in representation}
+        return {
+            "representation": representation,
+            "route_receipt": {**route, **state, "representation": representation},
+        }
+
     def _exclusive_adapter_operation(
         self,
         operation,
@@ -6075,11 +6195,13 @@ class ServingEngine:
         try:
             while True:
                 with self.lock:
-                    inflight = len(self.jobs) + self._admissions_preparing
+                    inflight = (len(self.jobs) + self._admissions_preparing
+                                + len(getattr(self, "_terminal_cleanup_pending", ()))
+                                + getattr(self, "_terminal_cleanup_in_progress", 0))
                 if not inflight:
                     break
                 if time.monotonic() - started >= timeout:
-                    self.counts[f"{operation}_drain_timeouts"] += 1
+                    count_add(self.counts, f"{operation}_drain_timeouts", 1)
                     self.operation_receipts.append(
                         {
                             "operation": operation,
@@ -6095,19 +6217,43 @@ class ServingEngine:
             # The callback itself still runs under submission_lock, which keeps
             # the idle worker's prefetch and cohort work out of its way.
             with self.submission_lock:
+                if getattr(self, "stop_event", None) is not None and self.stop_event.is_set():
+                    raise RuntimeError("server stopped")
                 adapter = self.adapter
                 if adapter is None:
                     raise RuntimeError("model adapter is not ready")
+                contract = getattr(adapter, "representation_contract", None)
+                execution_count = getattr(adapter, "representation_execution_count", None)
+                before = execution_count() if operation in {"embeddings", "rerank"} and callable(execution_count) else None
+
+                def representation_receipt():
+                    if operation not in {"embeddings", "rerank"} or not callable(contract):
+                        return {}
+                    representation = contract()
+                    if before is not None:
+                        representation = {
+                            **representation,
+                            "observed_used": execution_count() > before,
+                        }
+                    return {
+                        "representation": representation,
+                        "artifact": adapter.identity["fingerprint"],
+                        **{key: representation[key] for key in (
+                            "implemented", "qualified", "selected", "observed_used"
+                        ) if key in representation},
+                    }
+
                 try:
                     result = callback(adapter)
                 except BaseException:
-                    self.counts[f"{operation}_failed"] += 1
+                    count_add(self.counts, f"{operation}_failed", 1)
                     self.operation_receipts.append(
                         {
                             "operation": operation,
                             "status": "failed",
                             "drain_seconds": time.monotonic() - started,
                             "model_revision": self.model_revision,
+                            **representation_receipt(),
                         }
                     )
                     raise
@@ -6117,8 +6263,9 @@ class ServingEngine:
                     "drain_seconds": time.monotonic() - started,
                     "model_revision": getattr(self, "model_revision", 0),
                 }
+                receipt.update(representation_receipt())
                 self.operation_receipts.append(receipt)
-                self.counts[f"{operation}_completed"] += 1
+                count_add(self.counts, f"{operation}_completed", 1)
                 return result
         finally:
             with self.submission_lock:
@@ -6137,15 +6284,22 @@ class ServingEngine:
 
         def execute(adapter):
             try:
-                result = decoder_input_representations(
-                    adapter, inputs, dimensions=dimensions
-                )
+                provider = getattr(adapter, "embed", None)
+                if callable(provider):
+                    result = provider(inputs, dimensions=dimensions)
+                else:
+                    result = decoder_input_representations(
+                        adapter, inputs, dimensions=dimensions
+                    )
             except NotImplementedError as error:
                 from .api_resources import CapabilityUnavailable
 
                 raise CapabilityUnavailable(str(error)) from error
-            self.counts["embeddings_prompt_tokens"] += result[1]
-            self.counts["embeddings_vectors"] += len(result[0])
+            finally:
+                with self.lock:
+                    self.snapshot = {**self.snapshot, **self._representation_route_state(adapter)}
+            count_add(self.counts, "embeddings_prompt_tokens", result[1])
+            count_add(self.counts, "embeddings_vectors", len(result[0]))
             return result
 
         return self._exclusive_adapter_operation(
@@ -6185,8 +6339,8 @@ class ServingEngine:
             )
             if not isinstance(result, AudioOutput):
                 raise RuntimeError("audio adapter must return AudioOutput")
-            self.counts["output_audio_requests"] += 1
-            self.counts["output_audio_bytes"] += len(result.data)
+            count_add(self.counts, "output_audio_requests", 1)
+            count_add(self.counts, "output_audio_bytes", len(result.data))
             return result
 
         return self._exclusive_adapter_operation(
@@ -6200,20 +6354,23 @@ class ServingEngine:
             from .adapters.base import decoder_input_representations
 
             try:
-                vectors, prompt_tokens = decoder_input_representations(
-                    adapter, [query, *documents]
-                )
+                provider = getattr(adapter, "rerank", None)
+                if callable(provider):
+                    scores, prompt_tokens = provider(query, documents)
+                else:
+                    vectors, prompt_tokens = decoder_input_representations(adapter, [query, *documents])
+                    query_vector = vectors[0]
+                    scores = [sum(left * right for left, right in zip(query_vector, vector))
+                              for vector in vectors[1:]]
             except NotImplementedError as error:
                 from .api_resources import CapabilityUnavailable
 
                 raise CapabilityUnavailable(str(error)) from error
-            query_vector = vectors[0]
-            scores = [
-                sum(left * right for left, right in zip(query_vector, vector))
-                for vector in vectors[1:]
-            ]
-            self.counts["rerank_prompt_tokens"] += prompt_tokens
-            self.counts["rerank_documents"] += len(documents)
+            finally:
+                with self.lock:
+                    self.snapshot = {**self.snapshot, **self._representation_route_state(adapter)}
+            count_add(self.counts, "rerank_prompt_tokens", prompt_tokens)
+            count_add(self.counts, "rerank_documents", len(documents))
             return (scores, int(prompt_tokens)) if with_usage else scores
 
         return self._exclusive_adapter_operation(
@@ -6258,7 +6415,7 @@ class ServingEngine:
                 if isinstance(report, dict) else 0
             )
             if lost:
-                self.counts["apc_invalidation_pinned_parks_lost"] += lost
+                count_add(self.counts, "apc_invalidation_pinned_parks_lost", lost)
                 log.error(
                     "APCv2 invalidation (%s) destroyed %d pinned session "
                     "checkpoint(s) (sessions %s); those parked sessions are gone",
@@ -6302,7 +6459,7 @@ class ServingEngine:
             described = self._exclusive_adapter_operation("lora_wrap", wrap)
         else:
             described = manager.commit(adapter)
-            self.counts["lora_load_completed"] += 1
+            count_add(self.counts, "lora_load_completed", 1)
         self.operation_receipts.append(
             {
                 "operation": "multi_lora_register",
@@ -6361,7 +6518,7 @@ class ServingEngine:
             raise ValueError("lora_int_id must be an integer")
         if self.multi_lora is not None:
             self.multi_lora.unregister(name)
-            self.counts["lora_unload_completed"] += 1
+            count_add(self.counts, "lora_unload_completed", 1)
             return {"status": "unloaded", "mode": "concurrent", "model_revision": self.model_revision}
 
         def remove(adapter):
@@ -6396,12 +6553,12 @@ class ServingEngine:
             queue_depth=queue_depth, memory=memory, tenant_id=tenant_id
         )
 
-    def prometheus_metrics(self):
+    def prometheus_metrics(self, tenant_id=None):
         """Return a non-destructive host-only Prometheus scrape."""
 
         from .prometheus import render_engine_metrics
 
-        return render_engine_metrics(self)
+        return render_engine_metrics(self, tenant_id=tenant_id)
 
     @property
     def apc_sessions_enabled(self):
@@ -6543,8 +6700,8 @@ class ServingEngine:
         # The unfilled streaming reservation is live, never cached: it is the
         # same term lane admission subtracts (zero without streaming).
         if getattr(self, "moe_expert_streaming_policy", None) is not None:
-            return cached + self.stream_unfilled_reserve_gib()
-        return cached
+            return cached + self.stream_unfilled_reserve_gib() + self.projection_workspace_reserve_gib()
+        return cached + self.projection_workspace_reserve_gib()
 
     def admission_headroom_fn(self):
         """``execution_headroom`` shaped by the host-memory signals policy.
@@ -6718,8 +6875,15 @@ class ServingEngine:
             job.prompt_progress_event = event
 
     def _finish(self, job, event):
+        # Shutdown and request cancellation can meet at this boundary. Claim
+        # cleanup and terminal publication once, before any resource is moved.
+        with self.lock:
+            if getattr(job, "terminal_claimed", False):
+                return False
+            job.terminal_claimed = True
         try:
             self._finish_terminal(job, event)
+            return True
         except BaseException:
             # Terminal handling that raised before the usage record must not
             # leave the job's usage-limit hold behind (release is idempotent).
@@ -6738,7 +6902,7 @@ class ServingEngine:
             # Loud, not silent: a requested fault that never fired means the
             # run observed nothing, and any exactness claim resting on it is
             # vacuous rather than passed.
-            self.counts["memory_preemption_fault_unfired"] += 1
+            count_add(self.counts, "memory_preemption_fault_unfired", 1)
             log.warning(
                 "qualification memory_preempt fault on request %s never fired "
                 "(after_tokens=%d, completion_tokens=%d): %s",
@@ -6752,6 +6916,10 @@ class ServingEngine:
         branch = job.cache_branch
         job.cache_branch = None
         job.admission_hit = job.admission_tokens = None
+        checkpoint = getattr(job, "exact_decode_checkpoint", None)
+        if checkpoint is not None:
+            job.exact_decode_checkpoint = None
+            self._finish_cleanup(job, "exact_decode_checkpoint_close", checkpoint.close)
         # Grants are summed over attached lanes only, so a finished job no
         # longer counts once it leaves ``active``; clearing here as well keeps
         # a job object that some path forgot to detach from pinning memory.
@@ -6775,15 +6943,23 @@ class ServingEngine:
         if lora_slot is not None:
             job.lora_slot = None
             manager = self.multi_lora
+            unbound = [job.uid is None]
+
+            def unbind():
+                manager.unbind_uid(job.uid)
+                unbound[0] = True
+
+            def release():
+                if not unbound[0]:
+                    raise RuntimeError("LoRA slot is still bound to its request")
+                manager.release(lora_slot)
+
             if job.uid is not None:
-                self._finish_cleanup(
-                    job, "lora_unbind", lambda: manager.unbind_uid(job.uid)
-                )
-            self._finish_cleanup(
-                job, "lora_release", lambda: manager.release(lora_slot)
-            )
+                self._finish_cleanup(job, "lora_unbind", unbind)
+            self._finish_cleanup(job, "lora_release", release)
         overflowed = self._claim_output_overflow(job, event)
         waiting_siblings = ()
+        prepared = None
         usage_status = None
         with self.lock:
             fanout_role = getattr(job, "fanout_role", None)
@@ -6791,6 +6967,8 @@ class ServingEngine:
             fanout_waiting = getattr(self, "fanout_waiting", {})
             if fanout_role == "prefill_leader" and fanout_group:
                 waiting_siblings = fanout_waiting.pop(fanout_group, ())
+                if waiting_siblings:
+                    prepared = self.fanout_capsules.pop(fanout_group, None)
             elif fanout_role == "apcv2_sibling" and fanout_group:
                 waiting = fanout_waiting.get(fanout_group)
                 if waiting is not None:
@@ -6799,12 +6977,18 @@ class ServingEngine:
                         fanout_waiting[fanout_group] = remaining
                     else:
                         fanout_waiting.pop(fanout_group, None)
+        # Keep the leader registered until its last fanout owner is released
+        # or retained as pending cleanup. Exclusive adapter drains must not
+        # observe an empty request set in between those ownership states.
+        if prepared is not None:
+            self._finish_cleanup(job, "fanout_capsule_close", prepared.close)
+        with self.lock:
             if self.jobs.pop(job.id, None) is not None:
                 if (
                     getattr(self, "_service_state", "serving") == "draining"
                     and event.get("error") != "drain timeout"
                 ):
-                    self.counts["jobs_drained"] += 1
+                    count_add(self.counts, "jobs_drained", 1)
                 self.slots.release()
                 status = (
                     "failed"
@@ -6819,13 +7003,21 @@ class ServingEngine:
                 if status == "cancelled":
                     # Every terminal passes here once, wherever the request
                     # was waiting (active, deferred, queued, or dequeued).
-                    self.counts["cancelled"] += 1
-                metrics = getattr(self, "batch_metrics", None)
-                if metrics is not None:
-                    finishing = getattr(metrics, "finishing", None)
-                    if callable(finishing):
-                        finishing(job.id, event.get("finish_reason"))
-                    metrics.terminal(job.id, status)
+                    count_add(self.counts, "cancelled", 1)
+        metrics = getattr(self, "batch_metrics", None)
+        if usage_status is not None and metrics is not None:
+            finishing = getattr(metrics, "finishing", None)
+            if callable(finishing):
+                try:
+                    finishing(job.id, event.get("finish_reason"))
+                except Exception:
+                    count_add(self.counts, "finish_observation_failures")
+                    log.exception("finish observation failed for %s", job.id)
+            try:
+                metrics.terminal(job.id, usage_status)
+            except Exception:
+                count_add(self.counts, "finish_observation_failures")
+                log.exception("terminal observation failed for %s", job.id)
         # Before the terminal is emitted, so a client that reads its usage
         # right after a response sees that response counted.
         self._record_usage(job, usage_status)
@@ -6834,10 +7026,6 @@ class ServingEngine:
         else:
             self._emit(job, event)
         if waiting_siblings:
-            prepared = self.fanout_capsules.pop(fanout_group, None)
-            if prepared is not None:
-                # The waiting siblings still need their own terminals.
-                self._finish_cleanup(job, "fanout_capsule_close", prepared.close)
             sibling_event = {
                 "error": "parallel prefill leader ended before APCv2 fanout",
                 "status": event.get("status", 503),
@@ -6846,22 +7034,76 @@ class ServingEngine:
                 self._finish(sibling, sibling_event)
 
     def _finish_cleanup(self, job, step, cleanup):
-        """Run one ``_finish`` cleanup step; log and count it if it raises.
-
-        Returns whether the step completed.
-        """
+        """Retain a failed resource release until a safe worker retry succeeds."""
         try:
             cleanup()
         except Exception:
             key = f"finish_cleanup_failures_{step}"
-            self.counts[key] = self.counts.get(key, 0) + 1
+            count_add(self.counts, key)
             log.exception(
                 "request %s: %s failed while finishing; still releasing the "
                 "request and publishing its terminal event",
                 getattr(job, "id", None), step,
             )
+            # Some resource types set closed before releasing the owner pin.
+            # Retrying their no-op close cannot establish a successful release.
+            resource = getattr(cleanup, "__self__", None)
+            if getattr(resource, "closed", False):
+                retained = cleanup
+
+                def cleanup():
+                    # Keep the original bound resource alive until recovery.
+                    _ = retained
+                    raise RuntimeError("resource closed after failed release; recovery required")
+
+            with self.lock:
+                if not hasattr(self, "_terminal_cleanup_pending"):
+                    self._terminal_cleanup_pending = []
+                self._terminal_cleanup_pending.append((getattr(job, "id", None), step, cleanup))
+                message = "terminal resource cleanup is pending"
+                self._terminal_cleanup_error = message
+                if not getattr(self, "error", None):
+                    self.error = message
             return False
         return True
+
+    def _retry_terminal_cleanup(self):
+        """Retry on the model worker; retain failures and back off up to 30s."""
+        with self.lock:
+            if (getattr(self, "_terminal_cleanup_in_progress", 0)
+                    or time.monotonic() < getattr(self, "_terminal_cleanup_retry_at", 0.0)):
+                return False
+            pending = list(getattr(self, "_terminal_cleanup_pending", ()))
+            self._terminal_cleanup_pending = []
+            self._terminal_cleanup_in_progress = len(pending)
+        remaining = []
+        index = 0
+        try:
+            for index, item in enumerate(pending):
+                try:
+                    item[2]()
+                except Exception:
+                    log.exception("retained terminal cleanup failed: %s %s", *item[:2])
+                    remaining.append(item)
+        except BaseException:
+            remaining.extend(pending[index:])
+            raise
+        finally:
+            with self.lock:
+                self._terminal_cleanup_in_progress = 0
+                self._terminal_cleanup_pending.extend(remaining)
+                if remaining:
+                    delay = min(30.0, max(1.0, getattr(self, "_terminal_cleanup_retry_delay", 0.5) * 2))
+                    self._terminal_cleanup_retry_delay = delay
+                    self._terminal_cleanup_retry_at = time.monotonic() + delay
+                if not self._terminal_cleanup_pending:
+                    self._terminal_cleanup_retry_at = 0.0
+                    self._terminal_cleanup_retry_delay = 0.5
+                    message = getattr(self, "_terminal_cleanup_error", None)
+                    if message is not None and getattr(self, "error", None) == message:
+                        self.error = None
+                    self._terminal_cleanup_error = None
+        return not remaining
 
     def _release_fanout_siblings(self, leader, reason):
         """Admit a fanout leader's waiting siblings as independent samples.
@@ -6876,7 +7118,7 @@ class ServingEngine:
         leader.fanout_reason = reason
         for sibling in siblings:
             sibling.fanout_reason = reason
-        self.counts["apcv2_fanout_independent_prefills"] += 1
+        count_add(self.counts, "apcv2_fanout_independent_prefills", 1)
         self._publish_jobs(siblings, already_registered=True, atomic=False)
 
     def _observe_thinking_budget(self, job, *, final=False):
@@ -6892,7 +7134,7 @@ class ServingEngine:
         )
         job.thinking_budget_resolved = True
         if job.thinking_budget_fired and not job.thinking_budget_counted:
-            self.counts["thinking_budget_forced_closes"] += 1
+            count_add(self.counts, "thinking_budget_forced_closes", 1)
             job.thinking_budget_counted = True
 
     def _cancel_pending_cache_capsule(self, batch, job, reason):
@@ -6953,7 +7195,7 @@ class ServingEngine:
         command buffer); both are recovered the same way.
         """
         (prefix, reason) = self._DEVICE_FAULTS[fault]
-        self.counts[f"{prefix}_events"] += 1
+        count_add(self.counts, f"{prefix}_events", 1)
         log.error(
             "Metal %s in a generation step; failing %d in-flight "
             "request(s) and rebuilding the generator: %s",
@@ -6969,7 +7211,7 @@ class ServingEngine:
             batch.close()
         except Exception:  # noqa: BLE001 - its state is already abandoned
             log.exception("closing the failed generator raised")
-        self.counts[f"{prefix}_failed_requests"] += len(failed)
+        count_add(self.counts, f"{prefix}_failed_requests", len(failed))
 
     def _inject_device_fault(self, active):
         """Qualification ``gpu_timeout`` fault: fail this step as Metal would.
@@ -7032,7 +7274,7 @@ class ServingEngine:
             mx.clear_cache()
             active_bytes = int(mx.get_active_memory())
         except Exception:
-            self.counts[f"{prefix}_unrecoverable"] += 1
+            count_add(self.counts, f"{prefix}_unrecoverable", 1)
             log.exception("device did not recover after %s", what)
             raise exc
         baseline = getattr(self, "_device_resident_baseline", None)
@@ -7066,7 +7308,7 @@ class ServingEngine:
                 resident_apc / float(1 << 30),
             )
             if active_bytes > allowed:
-                self.counts[f"{prefix}_memory_not_released"] += 1
+                count_add(self.counts, f"{prefix}_memory_not_released", 1)
                 log.error(
                     "device memory not released after %s: %.4g GiB "
                     "active, %.4g GiB expected; stopping the worker (restart "
@@ -7079,10 +7321,10 @@ class ServingEngine:
         try:
             rebuilt = build_batch()
         except Exception:
-            self.counts[f"{prefix}_unrecoverable"] += 1
+            count_add(self.counts, f"{prefix}_unrecoverable", 1)
             log.exception("generator could not be rebuilt after %s", what)
             raise exc
-        self.counts[f"{prefix}_recoveries"] += 1
+        count_add(self.counts, f"{prefix}_recoveries", 1)
         return rebuilt
 
     def _fail_deferred_admission_timeout(self, batch, job):
@@ -7093,13 +7335,13 @@ class ServingEngine:
             "error": "host memory admission did not recover before deadline",
             "status": 429,
         })
-        self.counts["memory_admission_timeouts"] += 1
+        count_add(self.counts, "memory_admission_timeouts", 1)
 
     def _cache_capsule_fanout_fits(self, active, siblings):
         """Require one scheduler boundary to attach the complete capsule."""
         if len(active) + len(siblings) <= self.max_lanes:
             return True
-        self.counts["cache_capsule_width_fallbacks"] += 1
+        count_add(self.counts, "cache_capsule_width_fallbacks", 1)
         receipt = {
             "schema": "mlx2.cache-capsule.v1",
             "status": "fallback",
@@ -7221,7 +7463,7 @@ class ServingEngine:
             candidates.append((shared, leader))
         for shared, leader in sorted(candidates, key=lambda item: item[0], reverse=True):
             if not callable(cache_projection):
-                self.counts["apc_inflight_prefix_waits_skipped_projection"] += 1
+                count_add(self.counts, "apc_inflight_prefix_waits_skipped_projection", 1)
                 continue
             from .runtime.state_boundaries import BoundaryPurpose, StateBoundary
 
@@ -7238,14 +7480,14 @@ class ServingEngine:
                 for lane in active.values()
             )
             if pending + projected > int(available_checkpoint_bytes):
-                self.counts["apc_inflight_prefix_waits_skipped_headroom"] += 1
+                count_add(self.counts, "apc_inflight_prefix_waits_skipped_headroom", 1)
                 continue
             if not batch.add_state_boundary(
                 leader.uid,
                 StateBoundary(shared, BoundaryPurpose.INFLIGHT),
                 len(leader.apc_sequence_key[1]),
             ):
-                self.counts["apc_inflight_prefix_waits_skipped_frontier"] += 1
+                count_add(self.counts, "apc_inflight_prefix_waits_skipped_frontier", 1)
                 continue
             if prior is None or prior.purpose in (
                 BoundaryPurpose.INTERIOR,
@@ -7261,9 +7503,9 @@ class ServingEngine:
                         for position in leader.apc_interior_positions
                         if position != shared
                     )
-                self.counts["apc_inflight_checkpoints_planned"] += 1
+                count_add(self.counts, "apc_inflight_checkpoints_planned", 1)
             else:
-                self.counts["apc_inflight_checkpoints_existing_plan"] += 1
+                count_add(self.counts, "apc_inflight_checkpoints_existing_plan", 1)
             leader.apc_inflight_planned_bytes.setdefault(shared, projected)
             follower.apc_prefix_wait_done = True
             follower.apc_prefix_wait_leader_uid = leader.uid
@@ -7275,8 +7517,8 @@ class ServingEngine:
             if waiters is None:
                 self.apc_inflight_waiters = waiters = Counter()
             waiters[resolution_key] += 1
-            self.counts["apc_inflight_prefix_waits"] += 1
-            self.counts["apc_inflight_prefix_wait_tokens"] += shared
+            count_add(self.counts, "apc_inflight_prefix_waits", 1)
+            count_add(self.counts, "apc_inflight_prefix_wait_tokens", shared)
             return leader
         return None
 
@@ -7314,7 +7556,7 @@ class ServingEngine:
             name = purpose.name.lower()
             owner = active.get(uid)
             if owner is None or owner.request.get("skip_writing_prefix_cache", False):
-                self.counts[f"apc_{name}_checkpoints_skipped_write_suppressed"] += 1
+                count_add(self.counts, f"apc_{name}_checkpoints_skipped_write_suppressed", 1)
                 continue
             sidecar = (
                 sidecar_type(
@@ -7339,13 +7581,14 @@ class ServingEngine:
                 sidecar=sidecar,
                 retention_role=RETENTION_ROLE[purpose],
                 approximate=owner.approximate_kv_applied,
+                numerical_schedule_changed=checkpoint_schedule_changed(
+                    batch, owner, tokens, checkpoint=checkpoint
+                ),
                 session_tag=session_tag_for(owner),
             )
-            self.counts[
-                f"apc_{name}_checkpoints_published"
+            count_add(self.counts, f"apc_{name}_checkpoints_published"
                 if stored
-                else f"apc_{name}_checkpoints_skipped_publish_failed"
-            ] += 1
+                else f"apc_{name}_checkpoints_skipped_publish_failed", 1)
             if stored:
                 owner.state_boundaries_published[name] = (
                     owner.state_boundaries_published.get(name, 0) + 1
@@ -7365,11 +7608,9 @@ class ServingEngine:
                     )
                 owner.apc_inflight_planned_bytes.pop(len(tokens), None)
                 if purpose != BoundaryPurpose.INFLIGHT:
-                    self.counts[
-                        "apc_inflight_checkpoints_published"
+                    count_add(self.counts, "apc_inflight_checkpoints_published"
                         if stored
-                        else "apc_inflight_checkpoints_skipped_publish_failed"
-                    ] += 1
+                        else "apc_inflight_checkpoints_skipped_publish_failed", 1)
             if stored and purpose == BoundaryPurpose.ROLLING:
                 self._retire_rolling_checkpoint(apc, active, owner)
                 owner.rolling_checkpoint = (key, tokens)
@@ -7421,11 +7662,9 @@ class ServingEngine:
                 approximate=job.approximate_kv_applied,
                 session_tag=session_tag_for(job),
             )
-            self.counts[
-                "apc_rolling_checkpoints_cancel_published"
+            count_add(self.counts, "apc_rolling_checkpoints_cancel_published"
                 if stored
-                else "apc_rolling_checkpoints_skipped_publish_failed"
-            ] += 1
+                else "apc_rolling_checkpoints_skipped_publish_failed", 1)
             if stored:
                 # A retry that resumed from an earlier progress point owns it:
                 # retire it once its successor is published, as the hybrid
@@ -7451,7 +7690,7 @@ class ServingEngine:
             peer is not job and peer.rolling_checkpoint == point
             for peer in active.values()
         ):
-            self.counts["apc_rolling_checkpoints_retire_shared"] += 1
+            count_add(self.counts, "apc_rolling_checkpoints_retire_shared", 1)
             return
         key, tokens = point
         try:
@@ -7459,14 +7698,13 @@ class ServingEngine:
         except Exception:  # noqa: BLE001 - a lost retirement only costs cache bytes
             log.exception("APCv2 rolling checkpoint retirement failed")
             retired = False
-        self.counts[
-            "apc_rolling_checkpoints_retired"
+        count_add(self.counts, "apc_rolling_checkpoints_retired"
             if retired
-            else "apc_rolling_checkpoints_retire_deferred"
-        ] += 1
+            else "apc_rolling_checkpoints_retire_deferred", 1)
 
     def _publish_checkpoint(
-        self, apc, key, tokens, prompt_cache, *, approximate=False, **kwargs
+        self, apc, key, tokens, prompt_cache, *, approximate=False,
+        numerical_schedule_changed=False, **kwargs
     ):
         """Store a committed checkpoint; a publish failure costs the checkpoint.
 
@@ -7484,10 +7722,13 @@ class ServingEngine:
         from .runtime.approximate_kv import prompt_cache_is_approximate
 
         if self.apc_reuse_disabled_reason is not None:
-            self.counts["apcv2_store_skipped_route"] += 1
+            count_add(self.counts, "apcv2_store_skipped_route", 1)
             return False
         if approximate or prompt_cache_is_approximate(prompt_cache):
-            self.counts["apcv2_store_skipped_approximate"] += 1
+            count_add(self.counts, "apcv2_store_skipped_approximate", 1)
+            return False
+        if numerical_schedule_changed:
+            count_add(self.counts, "apcv2_store_skipped_numerical_schedule", 1)
             return False
         try:
             # APCv2 charges what the arrays hold, so they must own their
@@ -7496,7 +7737,7 @@ class ServingEngine:
             capabilities = apc.store(key, tokens, prompt_cache, **kwargs)
             return getattr(capabilities, "stored", None) is not False
         except Exception:  # noqa: BLE001 - the worker must outlive one bad checkpoint
-            self.counts["apcv2_store_failures"] += 1
+            count_add(self.counts, "apcv2_store_failures", 1)
             log.exception("APCv2 checkpoint publication failed")
             return False
 
@@ -7524,8 +7765,8 @@ class ServingEngine:
             published.extend(published_copy)
             with self.lock:
                 self.queued_jobs -= len(remaining)
-        self.counts["batch_cohort_attachment_failures"] += 1
-        self.counts["batch_cohort_jobs_failed_closed"] += len(cohort.jobs)
+        count_add(self.counts, "batch_cohort_attachment_failures", 1)
+        count_add(self.counts, "batch_cohort_jobs_failed_closed", len(cohort.jobs))
         for member in cohort.jobs:
             self._finish(member, dict(event))
 
@@ -7592,8 +7833,8 @@ class ServingEngine:
             self._cancel_pending_cache_capsule(batch, job, "queued_member_cancelled")
             self._finish(job, {"error": "cancelled"})
         for cohort in failed_cohorts:
-            self.counts["batch_cohort_attachment_failures"] += 1
-            self.counts["batch_cohort_jobs_failed_closed"] += len(cohort.jobs)
+            count_add(self.counts, "batch_cohort_attachment_failures", 1)
+            count_add(self.counts, "batch_cohort_jobs_failed_closed", len(cohort.jobs))
             for member in cohort.jobs:
                 self.batch_metrics.dequeued(member.id, queue_depth)
                 self._finish(
@@ -7667,10 +7908,10 @@ class ServingEngine:
                     ttl_seconds=None,
                 )
             except Exception:  # noqa: BLE001 - one requested prefetch is fail-soft
-                self.counts["prefetch_failures"] += 1
+                count_add(self.counts, "prefetch_failures", 1)
                 log.exception("admin APCv2 session prefetch failed")
                 return False
-        self.counts["prefetches_started"] += 1
+        count_add(self.counts, "prefetches_started", 1)
         return True
 
     def _service_pending_prefetch(self, apc):
@@ -7850,9 +8091,9 @@ class ServingEngine:
             skipped = int(report.get("skipped", 0) or 0)
             lost = int(report.get("pinned_skipped", 0) or 0)
             if skipped:
-                self.counts["apc_shutdown_parks_skipped"] += skipped
+                count_add(self.counts, "apc_shutdown_parks_skipped", skipped)
             if lost:
-                self.counts["apc_shutdown_pinned_parks_lost"] += lost
+                count_add(self.counts, "apc_shutdown_pinned_parks_lost", lost)
                 log.error(
                     "APCv2 shutdown parking left %d pinned session checkpoint(s) "
                     "without a disk copy (spilled %d, skipped %d); those parked "
@@ -7860,6 +8101,74 @@ class ServingEngine:
                     lost, int(report.get("spilled", 0) or 0), skipped,
                 )
         return report
+
+    def _run_representation_adapter(self, adapter):
+        """A non-generative adapter uses exclusive operations, with no KV/APC."""
+        from .contracts import Capability
+
+        route = adapter.descriptor.metadata["execution_kind"]
+        if route not in {"embeddings", "rerank"} or adapter.descriptor.capabilities != frozenset({Capability(route)}):
+            raise ValueError("representation execution requires an embedding-only or rerank-only descriptor")
+        operation = "embed" if route == "embeddings" else "rerank"
+        if not callable(getattr(adapter, operation, None)):
+            raise TypeError("representation adapter has no declared operation")
+        if (
+            self.mtp or self.prompt_lookup or self.execution_policy
+            or self.approximate_kv_policy.enabled or self.spomin_policy.enabled
+            or self.lora_root or self.multi_lora_policy
+            or self.cache_dir or self.apc_persist_dir
+            or self.gpu_keep_warm_policy.enabled
+            or self.weight_streaming_enabled()
+            or self.lane_matmul not in ("auto", "off")
+            or self.int8_prefill_policy.enabled or self.sp_qmm_enabled
+            or self.verify_bitexact_policy.enabled
+            or self.recurrent_state_codec_policy.enabled
+            or self.cache_capsule_policy["enabled"] or self.persistent_block_bytes
+            or self.apc_persist_on_shutdown
+            or self.qualification
+        ):
+            raise ValueError("embedding-only or rerank-only execution does not support generation/cache policies or generation qualification")
+        if self.max_context < adapter.max_context:
+            raise ValueError("embedding/rerank max_context must permit the adapter's complete tokenization recipe")
+        self.max_context = adapter.max_context
+        self.qualification_state = "unqualified"
+        contract = adapter.representation_contract()
+        receipt = {
+            "route": route, "implemented": True, "selected": True,
+            "qualified": False, "observed_used": False,
+            "artifact": adapter.identity["fingerprint"], "representation": contract,
+        }
+        with self.lock:
+            self.route_capabilities = adapter.descriptor.capabilities
+            self.snapshot = {
+                "state": "ready", "model": Path(self.model_path).name,
+                "artifact": adapter.identity["fingerprint"],
+                "runtime": runtime_identity(), "profile": route,
+                "settings": {"route": route, "representation": {
+                    key: value for key, value in contract.items()
+                    if key not in {"selected", "observed_used"}
+                }},
+                "route_receipt": receipt,
+                "capabilities": [route],
+                "implemented_capabilities": [route],
+                "selected_capabilities": [route],
+                "qualified_capabilities": [], "qualification": "unqualified",
+                "representation": {**contract, "observed_used": False},
+                "max_context": adapter.max_context, "max_lanes": 1,
+                "execution": _execution_diagnostics(adapter),
+                "apcv2": {"applicable": False},
+                "scheduler": {"kind": "exclusive_adapter_operation"},
+                "http": {"max_request_bytes": self.max_request_bytes},
+            }
+        self.ready.set()
+        while not self.stop_event.wait(0.05):
+            action = self._worker_quiesce_action()
+            if action is not None:
+                self._complete_worker_quiesce(action)
+        # Close may overlap a request already inside the exclusive operation.
+        # Wait for its owner before _run's finally releases model storage.
+        with self.submission_lock:
+            pass
 
     def _run(self):
         adapter = batch = apc = capsule_pool = None
@@ -7891,7 +8200,7 @@ class ServingEngine:
             )
             settle_prefix_wait(waiting)
             waiting.apc_prefix_wait_leader_uid = None
-            self.counts["apc_inflight_prefix_waits_cancelled"] += 1
+            count_add(self.counts, "apc_inflight_prefix_waits_cancelled", 1)
 
         def prefix_wait_ready(waiting):
             leader_uid = waiting.apc_prefix_wait_leader_uid
@@ -7924,9 +8233,7 @@ class ServingEngine:
             waiting.apc_prefix_wait_ms = elapsed_ms
             settle_prefix_wait(waiting)
             waiting.apc_prefix_wait_leader_uid = None
-            self.counts[
-                "apc_inflight_prefix_waits_" + waiting.apc_prefix_wait_release
-            ] += 1
+            count_add(self.counts, "apc_inflight_prefix_waits_" + waiting.apc_prefix_wait_release, 1)
             return True
 
         held_cohort = None
@@ -7965,6 +8272,11 @@ class ServingEngine:
             # Publish only after the tokenizer lifecycle has atomically bound
             # its immutable snapshots (or established that the route is off).
             self.adapter = adapter
+            if getattr(getattr(adapter, "descriptor", None), "metadata", {}).get(
+                "execution_kind"
+            ) in {"embeddings", "rerank"}:
+                self._run_representation_adapter(adapter)
+                return
             if getattr(self, "weight_streaming_route", None) == "early":
                 self._bind_adapter_stream(adapter)
             prefill_execution_identity = getattr(
@@ -8699,7 +9011,7 @@ class ServingEngine:
                     markers = detect_turn_marker_ids(adapter.tokenizer)
                 self.apc_interior_turn_markers = markers
                 if not markers:
-                    self.counts["apc_interior_turn_marker_missing"] += 1
+                    count_add(self.counts, "apc_interior_turn_marker_missing", 1)
             # A template that re-renders a finished turn without its
             # generation-prompt suffix leaves the next turn no reusable entry
             # on a hybrid cache; every such chat request then gets one exact
@@ -8877,6 +9189,8 @@ class ServingEngine:
                         speculation=settings["speculation"],
                         prompt_lookup_policy=prompt_lookup_policy,
                         copy_draft_policy=self.copy_draft_policy,
+                        memory_headroom=self.admission_headroom_fn(),
+                        hard_reserve_bytes=int(self.hard_reserve_gib * (1 << 30)),
                     )
                 except (Int8PrefillError, ValueError, RuntimeError) as error:
                     refusal = isinstance(error, (Int8PrefillError, ValueError))
@@ -9171,7 +9485,7 @@ class ServingEngine:
             def lookup_apc(key, tokens, **kwargs):
                 """APCv2 lookup, or an explicit cold miss for unsafe routes."""
                 if self.apc_reuse_disabled_reason is not None:
-                    self.counts["apcv2_lookup_bypassed_route"] += 1
+                    count_add(self.counts, "apcv2_lookup_bypassed_route", 1)
                     return APCLookup(
                         None,
                         list(tokens),
@@ -9270,6 +9584,7 @@ class ServingEngine:
                     if self.weight_streaming_enabled()
                     else 0.0
                 ),
+                workspace_reserve_gib=self.projection_workspace_reserve_gib,
             )
             # One line, once per server, naming every term of the admission
             # budget. The reserve is derived from two host readings now, and
@@ -9412,7 +9727,7 @@ class ServingEngine:
                             "snapshot": snapshot,
                         }
                     except Exception:  # noqa: BLE001 - reuse optimization only
-                        self.counts["spomin_exact_boundary_snapshot_failures"] += 1
+                        count_add(self.counts, "spomin_exact_boundary_snapshot_failures", 1)
                         log.exception("Could not preserve exact pre-Spomin boundary")
                     try:
                         receipt = transaction.apply(
@@ -9453,7 +9768,7 @@ class ServingEngine:
             def evict_unused_checkpoint():
                 evicted = apc.evict_oldest_unleased()
                 if evicted:
-                    self.counts["memory_pressure_evictions"] += 1
+                    count_add(self.counts, "memory_pressure_evictions", 1)
                     self._permit_allocator_reclaim_after_eviction()
                 return evicted
 
@@ -9477,13 +9792,13 @@ class ServingEngine:
                 ):
                     if int(hit.cached_tokens) == len(tokens) - 1:
                         hit.target_only_plain_fallback = True
-                        self.counts["mtp_sidecar_missing_plain_fallbacks"] += 1
+                        count_add(self.counts, "mtp_sidecar_missing_plain_fallbacks", 1)
                         return hit
                     branch = hit.cache
                     if hasattr(branch, "close"):
                         branch.close()
                     discard_lookup(hit, "mtp_sidecar_missing")
-                    self.counts["mtp_sidecar_missing_misses"] += 1
+                    count_add(self.counts, "mtp_sidecar_missing_misses", 1)
                     return APCLookup(
                         None, list(tokens), 0, False, None, "mtp_sidecar_missing",
                         branch_tokens=max(
@@ -9507,7 +9822,7 @@ class ServingEngine:
                     if hasattr(branch, "close"):
                         branch.close()
                     discard_lookup(hit, "external_draft_sidecar_missing")
-                    self.counts["external_draft_sidecar_missing_misses"] += 1
+                    count_add(self.counts, "external_draft_sidecar_missing_misses", 1)
                     return APCLookup(
                         None, list(tokens), 0, False, None,
                         "external_draft_sidecar_missing",
@@ -9521,6 +9836,34 @@ class ServingEngine:
                     )
                 return hit
 
+            def exact_checkpoint_binding(job):
+                return (cache_key_for(job.tenant_id, request_apc_scope(job.request)),
+                        job.id, "ordinary-b1-sdpa-capability-cache-v2")
+
+            def record_lane_attached(job, route):
+                try:
+                    self.batch_metrics.lane_attached(job.id, len(active), route)
+                except Exception:
+                    # Observation cannot revoke state already attached to the
+                    # executor or finish a lane while that state still runs.
+                    count_add(self.counts, "lane_attached_metric_failures", 1)
+                    log.exception("Lane attachment metric failed")
+
+            def exact_checkpoint_available(uid):
+                job = active[uid]
+                return bool(
+                    self.memory_preemption_policy.get("exact_decode_checkpoint")
+                    and self.max_lanes == 1 and not self.mtp
+                    and not external_draft and not prompt_lookup
+                    and job.completion_tokens and job.lora_name is None
+                    and job.exact_decode_checkpoint_unavailable is None
+                    and job.lora_slot is None
+                    and not job.request.get("_mlx2_activation_capsule")
+                    and not job.request.get("_mlx2_neural_concepts")
+                    and callable(getattr(batch, "ordinary_checkpoint_block", None))
+                    and batch.ordinary_checkpoint_block(uid) is None
+                )
+
             def preempt_lane(uid, *, trigger, blockers=()):
                 """Park one lane for replay at the head of ``deferred``.
 
@@ -9530,7 +9873,37 @@ class ServingEngine:
                 exist) is never unpinned in between and pressure eviction
                 cannot take it while the job waits.
                 """
-                job = active.pop(uid)
+                job = active[uid]
+                exact = exact_checkpoint_available(uid)
+                if exact:
+                    required = (batch.ordinary_checkpoint_staging_bytes()
+                                + int(controller.hard_reserve_gib * (1 << 30)))
+                    if not ensure_admission_headroom(
+                        required, headroom=execution_headroom, reclaim=reclaim_allocator,
+                        evict=evict_unused_checkpoint,
+                        evictable=getattr(apc, "unleased_resident_nbytes", None),
+                        settle=settle_footprint,
+                    ):
+                        job.fault_fired = False
+                        job.fault_declined = "exact_checkpoint_staging_unavailable"
+                        return False
+                    try:
+                        job.exact_decode_checkpoint = batch.suspend_ordinary_checkpoint(
+                            uid, exact_checkpoint_binding(job)
+                        )
+                    except Exception as error:  # noqa: BLE001 - preserve or retire owned checkpoint
+                        # Capture failure preserves the original running KV.
+                        if uid not in getattr(batch._generation_batch, "uids", ()):
+                            active.pop(uid)
+                            self._finish(job, {"error": "exact checkpoint detach failed", "status": 503})
+                            return False
+                        job.fault_fired = False
+                        job.fault_declined = "exact_checkpoint_capture_failed"
+                        job.exact_decode_checkpoint_unavailable = job.fault_declined
+                        count_add(self.counts, "exact_decode_checkpoint_failures", 1)
+                        log.warning("Exact decode checkpoint declined: %s", error)
+                        return False
+                active.pop(uid)
                 if getattr(job, "native_paged_receipt", None) is not None:
                     # A native KV branch cannot be replayed through the
                     # ordinary APCv2 cache contract. End this explicit lane
@@ -9540,16 +9913,17 @@ class ServingEngine:
                         "error": "native paged Qwen3 lane cannot be preempted and replayed",
                         "status": 503,
                     })
-                    self.counts["native_paged_preemptions_refused"] += 1
+                    count_add(self.counts, "native_paged_preemptions_refused", 1)
                     return
-                batch.remove([uid])
+                if not exact:
+                    batch.remove([uid])
                 phase = "decode" if job.completion_tokens else "prefill"
                 replay_tokens = list(job.preemption_prompt)
                 if job.completion_tokens:
                     replay_tokens.extend(job.generated_token_ids)
                 hit = None
                 try:
-                    hit = route_usable_hit(
+                    hit = None if exact else route_usable_hit(
                         lookup_apc(
                             cache_key_for(
                                 job.tenant_id,
@@ -9562,7 +9936,8 @@ class ServingEngine:
                         replay_tokens,
                     )
                     # The request's first admission already counted its lookup.
-                    discard_lookup(hit, "preemption_replay")
+                    if hit is not None:
+                        discard_lookup(hit, "preemption_replay")
                 except Exception:  # noqa: BLE001 - admission looks up again
                     log.exception("APCv2 replay lease failed; replay will look up")
                 branch = job.cache_branch
@@ -9585,6 +9960,7 @@ class ServingEngine:
                     {
                         "trigger": trigger,
                         "phase": phase,
+                        "mechanism": "exact_decode_checkpoint" if exact else "prefill_replay",
                         "committed_tokens": job.completion_tokens,
                         "leased_prefix_tokens": (
                             int(hit.cached_tokens) if hit is not None else 0
@@ -9592,8 +9968,11 @@ class ServingEngine:
                     }
                 )
                 deferred.appendleft(job)
-                self.counts["memory_preemptions"] += 1
-                self.counts["memory_preemptions_" + trigger] += 1
+                count_add(self.counts, "memory_preemptions", 1)
+                count_add(self.counts, "memory_preemptions_" + trigger, 1)
+                if exact:
+                    count_add(self.counts, "exact_decode_checkpoints", 1)
+                return True
 
             def replay_ready(job):
                 """Replay once pressure is below CRITICAL and every lane the
@@ -9837,9 +10216,7 @@ class ServingEngine:
                 if owner is not None and owner.request.get(
                     "skip_writing_prefix_cache", False
                 ):
-                    self.counts[
-                        counter + "_skipped_write_suppressed"
-                    ] += 1
+                    count_add(self.counts, counter + "_skipped_write_suppressed", 1)
                     return
                 if (
                     owner is not None
@@ -9848,9 +10225,7 @@ class ServingEngine:
                     surgery_receipt is not None
                     and surgery_receipt.get("status") == "applied"
                 ):
-                    self.counts[
-                        counter + "_skipped_approximate"
-                    ] += 1
+                    count_add(self.counts, counter + "_skipped_approximate", 1)
                     return
                 checkpoint_sidecar = (
                     MTPAPCSidecar(
@@ -9885,16 +10260,17 @@ class ServingEngine:
                     checkpoint["target_cache"],
                     sidecar=checkpoint_sidecar,
                     retention_role=RETENTION_ROLE[purpose],
+                    numerical_schedule_changed=checkpoint_schedule_changed(
+                        batch, owner, checkpoint["tokens"], checkpoint=checkpoint, response=response
+                    ),
                     session_tag=session_tag_for(owner),
                     **({"next_turn_boundary": True} if next_turn else {}),
                 ):
-                    self.counts[counter + "_published"] += 1
+                    count_add(self.counts, counter + "_published", 1)
                     if next_turn:
-                        self.counts["apc_next_turn_boundaries_published"] += 1
+                        count_add(self.counts, "apc_next_turn_boundaries_published", 1)
                 else:
-                    self.counts[
-                        counter + "_skipped_publish_failed"
-                    ] += 1
+                    count_add(self.counts, counter + "_skipped_publish_failed", 1)
 
             def publish_prompt_boundary(response, owner, surgery_receipt):
                 """Store a request's committed prompt boundary; fanout siblings follow."""
@@ -9909,7 +10285,7 @@ class ServingEngine:
                     # history's influence: this is approximate
                     # state and must never enter the exact prefix
                     # cache under the retained-token key.
-                    self.counts["apcv2_store_skipped_approximate"] += 1
+                    count_add(self.counts, "apcv2_store_skipped_approximate", 1)
                     boundary = None
                 if (
                     boundary
@@ -9956,11 +10332,9 @@ class ServingEngine:
                         session_tag=session_tag_for(boundary_job),
                     )
                     if boundary.get("pre_transform_exact", False):
-                        self.counts[
-                            "spomin_exact_boundary_stores"
+                        count_add(self.counts, "spomin_exact_boundary_stores"
                             if stored
-                            else "spomin_exact_boundary_store_failures"
-                        ] += 1
+                            else "spomin_exact_boundary_store_failures", 1)
                     if (
                         stored
                         and boundary_job is not None
@@ -10052,9 +10426,7 @@ class ServingEngine:
                                     sibling.fanout_one_prefill = False
                                     sibling.fanout_reason = reason
                                 leader.fanout_reason = reason
-                                self.counts[
-                                    "apcv2_fanout_boundary_misses"
-                                ] += 1
+                                count_add(self.counts, "apcv2_fanout_boundary_misses", 1)
                                 for sibling in siblings:
                                     self._finish(
                                         sibling,
@@ -10066,9 +10438,7 @@ class ServingEngine:
                                 siblings = ()
                         elif siblings:
                             leader.fanout_reason = "checkpoint_not_stored"
-                            self.counts[
-                                "apcv2_fanout_store_failures"
-                            ] += 1
+                            count_add(self.counts, "apcv2_fanout_store_failures", 1)
                             for sibling in siblings:
                                 sibling.fanout_reason = "checkpoint_not_stored"
                                 self._finish(
@@ -10122,9 +10492,7 @@ class ServingEngine:
                                         capsule_hit, expected, len(siblings)
                                     )
                                     if failure is not None and failure["reason"] == "boundary_mismatch":
-                                        self.counts[
-                                            "cache_capsule_boundary_mismatch_fallbacks"
-                                        ] += 1
+                                        count_add(self.counts, "cache_capsule_boundary_mismatch_fallbacks", 1)
                                     compatible = failure is None
                                     if compatible:
                                         prepared = prepare_prompt_cache_capsules(
@@ -10145,13 +10513,9 @@ class ServingEngine:
                                         if elapsed_ms > self.cache_capsule_policy["deadline_ms"]:
                                             prepared.close()
                                             prepared = None
-                                            self.counts[
-                                                "cache_capsule_deadline_fallbacks"
-                                            ] += 1
+                                            count_add(self.counts, "cache_capsule_deadline_fallbacks", 1)
                                     else:
-                                        self.counts[
-                                            "cache_capsule_incompatible_fallbacks"
-                                        ] += 1
+                                        count_add(self.counts, "cache_capsule_incompatible_fallbacks", 1)
                                         receipt = {
                                             "schema": "mlx2.cache-capsule.v1",
                                             "status": "fallback",
@@ -10165,9 +10529,7 @@ class ServingEngine:
                                     if prepared is not None:
                                         prepared.close()
                                     prepared = None
-                                    self.counts[
-                                        "cache_capsule_prepare_fallbacks"
-                                    ] += 1
+                                    count_add(self.counts, "cache_capsule_prepare_fallbacks", 1)
                                     log.exception(
                                         "cache capsule preparation declined"
                                     )
@@ -10186,9 +10548,7 @@ class ServingEngine:
                                         sibling.cache_capsule_rows = len(
                                             siblings
                                         )
-                                    self.counts[
-                                        "cache_capsule_prepared"
-                                    ] += 1
+                                    count_add(self.counts, "cache_capsule_prepared", 1)
                             leader.fanout_boundary_tokens = expected
                             leader.fanout_one_prefill = True
                             leader.fanout_reason = "boundary_reused"
@@ -10200,9 +10560,7 @@ class ServingEngine:
                                 already_registered=True,
                                 atomic=False,
                             )
-                            self.counts[
-                                "apcv2_fanout_boundaries"
-                            ] += 1
+                            count_add(self.counts, "apcv2_fanout_boundaries", 1)
 
             # Prompt-end interior snapshots queued for paced publication.  Each
             # belongs to its owner's lifecycle: the owner's remaining snapshots
@@ -10226,7 +10584,7 @@ class ServingEngine:
                     ]
                 dropped = len(pending_interiors) - len(kept)
                 if dropped:
-                    self.counts["apc_interior_publications_dropped"] += dropped
+                    count_add(self.counts, "apc_interior_publications_dropped", dropped)
                     pending_interiors.clear()
                     pending_interiors.extend(kept)
 
@@ -10242,6 +10600,7 @@ class ServingEngine:
                     publish_interior(*item)
 
             while not self.stop_event.is_set():
+                self._retry_terminal_cleanup()
                 if _loop_trace.enabled():
                     _loop_trace.flush(trace_iteration)
                     trace_iteration = {
@@ -10290,22 +10649,22 @@ class ServingEngine:
                                 "active_bytes": int(mx.get_active_memory()),
                                 "cached_bytes": int(get_cached()),
                             }
-                            self.counts["suspends"] += 1
-                            self.counts["suspended_entries"] += int(
+                            count_add(self.counts, "suspends", 1)
+                            count_add(self.counts, "suspended_entries", int(
                                 suspend_report["entries"]
-                            )
-                            self.counts["suspended_bytes"] += int(
+                            ))
+                            count_add(self.counts, "suspended_bytes", int(
                                 suspend_report["bytes"]
-                            )
-                            self.counts["suspend_failures"] += int(
+                            ))
+                            count_add(self.counts, "suspend_failures", int(
                                 suspend_report["failures"]
-                            )
+                            ))
                             lost = int(suspend_report.get("pinned_lost", 0))
                             if lost:
                                 # A suspend that dropped a live-pinned park:
                                 # the loss is counted like the shutdown and
                                 # invalidation losses, not read and dropped.
-                                self.counts["apc_suspend_pinned_parks_lost"] += lost
+                                count_add(self.counts, "apc_suspend_pinned_parks_lost", lost)
                                 log.error(
                                     "apc suspend dropped %d pinned parked checkpoint(s)",
                                     lost,
@@ -10320,7 +10679,7 @@ class ServingEngine:
                                 )
                         except Exception as error:  # noqa: BLE001 - stay live, fail soft
                             log.exception("cache suspension failed")
-                            self.counts["suspend_failures"] += 1
+                            count_add(self.counts, "suspend_failures", 1)
                             suspend_report = {
                                 "status": "failed",
                                 "error": f"{type(error).__name__}: {error}",
@@ -10348,7 +10707,7 @@ class ServingEngine:
                                 "status": 503,
                             },
                         )
-                        self.counts["memory_preemption_drain_cancellations"] += 1
+                        count_add(self.counts, "memory_preemption_drain_cancellations", 1)
                     recovering = any(lane.replaying for lane in active.values())
                 # Pending requests own their warm leases, but no execution
                 # lane. Cancellation/deadlines must progress even at full width.
@@ -10508,7 +10867,7 @@ class ServingEngine:
                                 # fresh first-deferral count and retry delay.
                                 job.admission_retry_at = 0
                             else:
-                                self.counts["memory_admission_retries"] += 1
+                                count_add(self.counts, "memory_admission_retries", 1)
                             job.admission_defer_reason = None
                         else:
                             item = self.incoming.get(timeout=timeout)
@@ -10562,7 +10921,7 @@ class ServingEngine:
                         now=time.monotonic(),
                         admission_timeout=self.MEMORY_ADMISSION_TIMEOUT,
                     ):
-                        self.counts["ingress_cohort_deadline_deferrals"] += 1
+                        count_add(self.counts, "ingress_cohort_deadline_deferrals", 1)
                         break
                     try:
                         if not job.started:
@@ -10592,6 +10951,43 @@ class ServingEngine:
                                 raise Overloaded(
                                     "host memory admission did not recover before deadline"
                                 )
+                        checkpoint = job.exact_decode_checkpoint
+                        if checkpoint is not None:
+                            required = (checkpoint.staging_bytes
+                                        + int(controller.hard_reserve_gib * (1 << 30)))
+                            if not ensure_admission_headroom(
+                                required, headroom=execution_headroom, reclaim=reclaim_allocator,
+                                evict=evict_unused_checkpoint,
+                                evictable=getattr(apc, "unleased_resident_nbytes", None),
+                                settle=settle_footprint,
+                            ):
+                                job.admission_retry_at = time.monotonic() + 0.01
+                                deferred.appendleft(job)
+                                break
+                            try:
+                                uid = batch.resume_ordinary_checkpoint(
+                                    checkpoint, exact_checkpoint_binding(job)
+                                )
+                            except Exception:
+                                # Private checkpoint integrity/revision/I/O
+                                # failures belong to the server, not input
+                                # validation. Terminal cleanup closes its owner.
+                                log.exception("Exact decode checkpoint restore failed")
+                                self._finish(job, {
+                                    "error": "exact decode checkpoint restore failed",
+                                    "status": 503,
+                                })
+                                continue
+                            job.exact_decode_checkpoint = None
+                            job.uid = uid
+                            active[uid] = job
+                            job.preempted = job.replaying = False
+                            job.admission_tokens = job.admission_hit = None
+                            job.last_progress = time.monotonic()
+                            job.preemption_events[-1]["restored_without_prefill"] = True
+                            count_add(self.counts, "exact_decode_resumes", 1)
+                            record_lane_attached(job, "ordinary")
+                            continue
                         tokens = job.admission_tokens
                         if tokens is None:
                             tokens, receipt = self._tokenize_prompt(job.request)
@@ -10604,7 +11000,7 @@ class ServingEngine:
                             now=time.monotonic(),
                             admission_timeout=self.MEMORY_ADMISSION_TIMEOUT,
                         ):
-                            self.counts["ingress_cohort_deadline_deferrals"] += 1
+                            count_add(self.counts, "ingress_cohort_deadline_deferrals", 1)
                             break
                         # A decode-phase replay prefills prompt + delivered
                         # tokens but is still the same request: processors,
@@ -10665,7 +11061,7 @@ class ServingEngine:
                                 if branch is not None and hasattr(branch, "close"):
                                     branch.close()
                                 prefix_waiting.append(job)
-                                self.counts["apcv2_same_prefix_sequenced"] += 1
+                                count_add(self.counts, "apcv2_same_prefix_sequenced", 1)
                                 continue
                         if job.effective_max_tokens is None:
                             maximum, defaulted = resolve_output_limit(
@@ -10721,7 +11117,7 @@ class ServingEngine:
                                         getattr(hit, "deeper_disk_tokens", 0) or 0
                                     ),
                                 )
-                                self.counts["multimodal_apcv2_boundary_misses"] += 1
+                                count_add(self.counts, "multimodal_apcv2_boundary_misses", 1)
                             job.admission_hit = hit
                             job.cache_branch = hit.cache
                         if (
@@ -10730,7 +11126,7 @@ class ServingEngine:
                         ):
                             # Exact ordinary prefix; the capsule conditions
                             # only the uncached prompt tail.
-                            self.counts["activation_capsule_exact_prefix_hits"] += 1
+                            count_add(self.counts, "activation_capsule_exact_prefix_hits", 1)
                         target_only_plain = bool(
                             getattr(hit, "target_only_plain_fallback", False)
                         )
@@ -10819,7 +11215,7 @@ class ServingEngine:
                             depth_floor = False
                             if admitted and span < batch.max_proposal_span:
                                 job.prompt_lookup_span = span
-                                self.counts["prompt_lookup_admission_span_capped"] += 1
+                                count_add(self.counts, "prompt_lookup_admission_span_capped", 1)
                         else:
                             arrival_depth = (
                                 config["num_draft"]
@@ -10852,16 +11248,16 @@ class ServingEngine:
                                 evictable=getattr(apc, "unleased_resident_nbytes", None),
                             )
                         if depth_floor:
-                            self.counts["memory_admission_depth_floor_admits"] += 1
+                            count_add(self.counts, "memory_admission_depth_floor_admits", 1)
                         if granted and not admitted:
-                            self.counts["memory_admission_deferred_behind_grants"] += 1
+                            count_add(self.counts, "memory_admission_deferred_behind_grants", 1)
                         if not admitted:
                             if attaching_cohort is not None:
                                 raise Overloaded(
                                     "declared batch cohort could not atomically admit every member"
                                 )
                             if not job.admission_retry_at:
-                                self.counts["memory_admission_deferred"] += 1
+                                count_add(self.counts, "memory_admission_deferred", 1)
                             job.admission_retry_at = time.monotonic() + self.MEMORY_ADMISSION_RETRY
                             if job.preempted:
                                 deferred.appendleft(job)
@@ -10911,7 +11307,7 @@ class ServingEngine:
                                         "declared batch cohort could not pin every LoRA adapter slot"
                                     ) from None
                                 if not job.admission_retry_at:
-                                    self.counts["multi_lora_slot_deferred"] += 1
+                                    count_add(self.counts, "multi_lora_slot_deferred", 1)
                                 job.admission_retry_at = time.monotonic() + self.MEMORY_ADMISSION_RETRY
                                 deferred.append(job)
                                 continue
@@ -10929,7 +11325,7 @@ class ServingEngine:
                             < interior_uncached_floor
                         )
                         if interior_continuation:
-                            self.counts["apc_interior_requests_skipped_continuation"] += 1
+                            count_add(self.counts, "apc_interior_requests_skipped_continuation", 1)
                         # The next turn's only exact reuse point when the
                         # template drops the generation prompt from history,
                         # so it is exempt from the continuation skip.
@@ -11033,9 +11429,7 @@ class ServingEngine:
                                     # Admission rejects any hit short of the
                                     # media end, so such a checkpoint is dead
                                     # weight; never capture it.
-                                    self.counts[
-                                        "apc_interior_positions_skipped_media"
-                                    ] += inside_media
+                                    count_add(self.counts, "apc_interior_positions_skipped_media", inside_media)
                                     checkpoint_candidates, planned_sources = (
                                         plan_interior_positions(
                                             tokens,
@@ -11050,9 +11444,7 @@ class ServingEngine:
                                         )
                                     )
                             for source, planned in planned_sources.items():
-                                self.counts[
-                                    "apc_interior_positions_planned_" + source
-                                ] += planned
+                                count_add(self.counts, "apc_interior_positions_planned_" + source, planned)
                         if (
                             planning_target
                             and turn_end_boundary is not None
@@ -11061,9 +11453,7 @@ class ServingEngine:
                             checkpoint_candidates = tuple(
                                 sorted((*checkpoint_candidates, turn_end_boundary))
                             )
-                            self.counts[
-                                "apc_interior_positions_planned_generation_prompt"
-                            ] += 1
+                            count_add(self.counts, "apc_interior_positions_planned_generation_prompt", 1)
                         if (
                             planning_target
                             and media_checkpoint_position is not None
@@ -11072,9 +11462,7 @@ class ServingEngine:
                             checkpoint_candidates = tuple(sorted((
                                 *checkpoint_candidates, media_checkpoint_position
                             )))
-                            self.counts[
-                                "apc_interior_positions_planned_media_boundary"
-                            ] += 1
+                            count_add(self.counts, "apc_interior_positions_planned_media_boundary", 1)
                         if int(hit.cached_tokens) and job.prefill_cold_cuts:
                             # A warm plan respaces its tail above the cached
                             # offset; capturing there would cut where a cold
@@ -11084,9 +11472,7 @@ class ServingEngine:
                                 for position in checkpoint_candidates
                                 if position in job.prefill_cold_cuts
                             )
-                            self.counts[
-                                "apc_interior_positions_dropped_unaligned"
-                            ] += len(checkpoint_candidates) - len(aligned)
+                            count_add(self.counts, "apc_interior_positions_dropped_unaligned", len(checkpoint_candidates) - len(aligned))
                             checkpoint_candidates = aligned
                         if planning_target and self.apc_junction_checkpoints:
                             branch = int(getattr(hit, "branch_tokens", 0) or 0)
@@ -11159,28 +11545,26 @@ class ServingEngine:
                                 for bound in job.state_boundaries
                                 if bound.purpose == BoundaryPurpose.INTERIOR
                             )
-                            self.counts["apc_rolling_checkpoints_planned"] += sum(
+                            count_add(self.counts, "apc_rolling_checkpoints_planned", sum(
                                 bound.purpose == BoundaryPurpose.ROLLING
                                 for bound in job.state_boundaries
-                            )
-                            self.counts["apc_rolling_checkpoints_degraded"] += sum(
+                            ))
+                            count_add(self.counts, "apc_rolling_checkpoints_degraded", sum(
                                 bound.purpose == BoundaryPurpose.ROLLING
                                 for bound in planned
                             ) - sum(
                                 bound.purpose == BoundaryPurpose.ROLLING
                                 for bound in job.state_boundaries
-                            )
+                            ))
                             kept = {
                                 bound.position for bound in job.state_boundaries
                             }
                             for bound in planned:
                                 if bound.purpose != BoundaryPurpose.JUNCTION:
                                     continue
-                                self.counts[
-                                    "apc_junction_checkpoints_planned"
+                                count_add(self.counts, "apc_junction_checkpoints_planned"
                                     if bound.position in kept
-                                    else "apc_junction_checkpoints_degraded"
-                                ] += 1
+                                    else "apc_junction_checkpoints_degraded", 1)
                         else:
                             job.apc_interior_positions, _checkpoint_bytes = (
                                 budget_interior_checkpoint_positions(
@@ -11221,17 +11605,15 @@ class ServingEngine:
                                     available_bytes=available_checkpoint_bytes,
                                     cache_projection=checkpoint_projection,
                                 )
-                            self.counts["apc_interior_positions_headroom_capped"] += (
-                                len(uncapped) - len(job.apc_interior_positions)
-                            )
+                            count_add(self.counts, "apc_interior_positions_headroom_capped", len(uncapped) - len(job.apc_interior_positions))
                         planned_positions = {
                             bound.position for bound in job.state_boundaries
                         } or set(job.apc_interior_positions)
-                        self.counts["apc_interior_checkpoints_degraded"] += sum(
+                        count_add(self.counts, "apc_interior_checkpoints_degraded", sum(
                             1
                             for position in checkpoint_candidates
                             if position not in planned_positions
-                        )
+                        ))
                         deeper_on_disk = int(
                             getattr(hit, "deeper_disk_tokens", 0) or 0
                         ) > int(hit.cached_tokens or 0)
@@ -11245,7 +11627,7 @@ class ServingEngine:
                             # until the new lookup returns, so a restore that
                             # cannot fit still finds the resident prefix.
                             if deeper_on_disk:
-                                self.counts["apc_deeper_disk_restore_retries"] += 1
+                                count_add(self.counts, "apc_deeper_disk_restore_retries", 1)
                             shallow = hit
                             discard_lookup(hit, "disk_restore_admission")
                             hit = route_usable_hit(
@@ -11294,16 +11676,16 @@ class ServingEngine:
                                     and cached == job.apc_prefix_wait_tokens
                                 ):
                                     job.apc_prefix_wait_reuse = "checkpoint_reused"
-                                    self.counts["apc_inflight_prefix_hits"] += 1
+                                    count_add(self.counts, "apc_inflight_prefix_hits", 1)
                                 else:
                                     job.apc_prefix_wait_reuse = "not_reused"
-                                    self.counts["apc_inflight_prefix_misses"] += 1
+                                    count_add(self.counts, "apc_inflight_prefix_misses", 1)
                             job.slice_aligned = (
                                 cached in (0, len(tokens) - 1)
                                 or cached in job.prefill_cold_cuts
                             )
                             if not job.slice_aligned:
-                                self.counts["apc_warm_slices_unaligned"] += 1
+                                count_add(self.counts, "apc_warm_slices_unaligned", 1)
                             job.cache_retention_role = getattr(
                                 hit, "retention_role", None
                             )
@@ -11313,17 +11695,17 @@ class ServingEngine:
                             ):
                                 # Engine-side interior reuse evidence (APCv2 also
                                 # counts ``interior_hits``); host integers only.
-                                self.counts["apc_interior_hits"] += 1
-                                self.counts["apc_interior_hit_tokens"] += int(
+                                count_add(self.counts, "apc_interior_hits", 1)
+                                count_add(self.counts, "apc_interior_hit_tokens", int(
                                     job.cached_tokens
-                                )
+                                ))
                                 markers = self.apc_interior_turn_markers
                                 if (
                                     markers
                                     and int(job.cached_tokens) < len(tokens)
                                     and int(tokens[int(job.cached_tokens)]) in markers
                                 ):
-                                    self.counts["apc_interior_hits_turn_boundary"] += 1
+                                    count_add(self.counts, "apc_interior_hits_turn_boundary", 1)
                             if (
                                 self.apc_rolling_route is not None
                                 and job.cache_retention_role == "prefill_rolling"
@@ -11360,7 +11742,7 @@ class ServingEngine:
                                     "_tolerant_tool_markers": True,
                                 }
                                 if job.request.get("tools"):
-                                    self.counts["tolerant_tool_marker_requests"] += 1
+                                    count_add(self.counts, "tolerant_tool_marker_requests", 1)
                             job.output_parser = adapter.output_parser(parser_request)
                         seed = (
                             job.request.get("seed", secrets.randbits(32))
@@ -11564,16 +11946,14 @@ class ServingEngine:
                             job.tool_grammar_receipt,
                         ) = self._tool_grammar_plan(adapter, job.request, defer_until)
                         if job.tool_grammar_status == "engaged":
-                            self.counts["constrained_tool_grammar_engagements"] += 1
+                            count_add(self.counts, "constrained_tool_grammar_engagements", 1)
                             if (
                                 server_tool_grammar is not None
                                 and job.tool_grammar_receipt["shape"] != "calls"
                             ):
-                                self.counts[
-                                    "constrained_tool_grammar_auto_engagements"
-                                ] += 1
+                                count_add(self.counts, "constrained_tool_grammar_auto_engagements", 1)
                         elif job.tool_grammar_status != "disabled":
-                            self.counts["constrained_tool_grammar_skips"] += 1
+                            count_add(self.counts, "constrained_tool_grammar_skips", 1)
                         budget = think_budget
                         budget_processor = None
                         if (
@@ -11742,7 +12122,7 @@ class ServingEngine:
                                     "prompt_tokens": len(tokens),
                                     "quantized_layers": 0,
                                 }
-                                self.counts["approximate_kv_declined"] += 1
+                                count_add(self.counts, "approximate_kv_declined", 1)
                             else:
                                 # A warm hit is a per-lookup COW branch.  Its
                                 # exact planes are only read: the staged tuple
@@ -11781,13 +12161,11 @@ class ServingEngine:
                                     route="mtp" if self.mtp else "ordinary",
                                     draft_cache="exact" if self.mtp else None,
                                 )
-                                self.counts["approximate_kv_applied"] += 1
-                                self.counts["approximate_kv_mtp_lanes"] += int(
+                                count_add(self.counts, "approximate_kv_applied", 1)
+                                count_add(self.counts, "approximate_kv_mtp_lanes", int(
                                     bool(self.mtp)
-                                )
-                                self.counts[
-                                    "approximate_kv_requantized_prefix_hits"
-                                ] += int(requantized)
+                                ))
+                                count_add(self.counts, "approximate_kv_requantized_prefix_hits", int(requantized))
                         if preemption:
                             if job.preemption_prompt is None:
                                 job.preemption_prompt = list(tokens)
@@ -11826,7 +12204,7 @@ class ServingEngine:
                                 "engaged": False,
                                 "observed_used": False,
                             }
-                            self.counts["neural_concept_bridge_prepared"] += 1
+                            count_add(self.counts, "neural_concept_bridge_prepared", 1)
                         if activation_receipt is not None:
                             job.activation_capsule_receipt = {
                                 **activation_receipt,
@@ -11835,7 +12213,7 @@ class ServingEngine:
                                 "engaged": False,
                                 "observed_used": False,
                             }
-                            self.counts["activation_capsule_bridge_prepared"] += 1
+                            count_add(self.counts, "activation_capsule_bridge_prepared", 1)
                         if defer_expired_ingress_follower(
                             coalescer,
                             job,
@@ -11843,7 +12221,7 @@ class ServingEngine:
                             now=time.monotonic(),
                             admission_timeout=self.MEMORY_ADMISSION_TIMEOUT,
                         ):
-                            self.counts["ingress_cohort_deadline_deferrals"] += 1
+                            count_add(self.counts, "ingress_cohort_deadline_deferrals", 1)
                             break
                         job.admission_reserved_gib = (float(required) if shared_bound is not None else max(
                             0.0, float(required) - float(controller.hard_reserve_gib)
@@ -11962,12 +12340,11 @@ class ServingEngine:
                         if job.preempted:
                             job.preempted = False
                             job.replaying = True
-                            self.counts["preempted_replays"] += 1
+                            count_add(self.counts, "preempted_replays", 1)
                         else:
-                            self.counts["admitted"] += 1
-                        self.batch_metrics.lane_attached(
-                            job.id,
-                            len(active),
+                            count_add(self.counts, "admitted", 1)
+                        record_lane_attached(
+                            job,
                             "external_draft"
                             if external_draft
                             else "prompt_lookup"
@@ -12104,7 +12481,9 @@ class ServingEngine:
                             or lane.completion_tokens < lane.fault.after_tokens
                         ):
                             continue
-                        blocked = preemption_block(lane)
+                        blocked = preemption_block(
+                            lane, exact_decode_checkpoint=exact_checkpoint_available(uid)
+                        )
                         if blocked is not None:
                             # The eligibility rule is doing its job -- this
                             # lane could not replay exactly -- but an injected
@@ -12113,9 +12492,7 @@ class ServingEngine:
                             # the first time it is seen for this lane.
                             if lane.fault_declined is None:
                                 lane.fault_declined = blocked
-                                self.counts[
-                                    "memory_preemption_fault_declined"
-                                ] += 1
+                                count_add(self.counts, "memory_preemption_fault_declined", 1)
                                 log.warning(
                                     "qualification memory_preempt fault on request "
                                     "%s declined at %d completion tokens: %s",
@@ -12129,7 +12506,9 @@ class ServingEngine:
                         lane.fault_declined = None
                         self.batch_metrics.fault(lane.id, "memory_preempt")
                         break
-                    if trigger is None and len(active) > 1:
+                    if trigger is None and (len(active) > 1 or any(
+                        exact_checkpoint_available(uid) for uid in active
+                    )):
                         if stalled:
                             trigger = "stall"
                         elif (
@@ -12139,19 +12518,27 @@ class ServingEngine:
                         ):
                             trigger = "pressure"
                         if trigger is not None:
-                            victim = choose_preemption_victim(active, stalled)
+                            victim = choose_preemption_victim(
+                                active, stalled, checkpoint_available=exact_checkpoint_available
+                            )
                     if victim is not None:
                         blockers = [uid for uid in stalled if uid != victim]
                         for uid in blockers:
                             # A fresh stall window; the replay waits for these
                             # lanes to progress past this instant.
                             active[uid].last_progress = now
-                        preempt_lane(
+                        did_preempt = preempt_lane(
                             victim,
                             trigger=trigger,
                             blockers=tuple(active[uid].id for uid in blockers),
                         )
-                        stalled = []
+                        if did_preempt:
+                            stalled = []
+                        else:
+                            # A failed detach can terminate its lane if exact
+                            # rollback itself failed. It must not be finished
+                            # again by the subsequent stall cleanup.
+                            stalled = [uid for uid in stalled if uid in active]
                 expired_atomic = getattr(
                     batch, "expire_atomic_memory_waits", lambda *args, **kwargs: ()
                 )(stalled, now=now, timeout=stall_seconds)
@@ -12221,24 +12608,22 @@ class ServingEngine:
                     bind_ingress_cohort_observation(
                         cohort_jobs, cohort_receipt
                     )
-                    self.counts["ingress_cohort_attempts"] += 1
-                    self.counts["ingress_cohort_lanes"] += width
-                    self.counts["ingress_cohort_expirations"] += int(
+                    count_add(self.counts, "ingress_cohort_attempts", 1)
+                    count_add(self.counts, "ingress_cohort_lanes", width)
+                    count_add(self.counts, "ingress_cohort_expirations", int(
                         width < coalescer.target_lanes
-                    )
-                    self.counts["ingress_cohort_max_width"] = max(
-                        self.counts["ingress_cohort_max_width"], width
-                    )
-                    self.counts["ingress_cohort_wait_us"] += int(waited_ms * 1000)
+                    ))
+                    count_max(self.counts, "ingress_cohort_max_width", width)
+                    count_add(self.counts, "ingress_cohort_wait_us", int(waited_ms * 1000))
                 if active:
                     self.gpu_keep_warm.note_work()
-                    self.counts["cycles"] += 1
+                    count_add(self.counts, "cycles", 1)
                     if self.counts["cycles"] % 64 == 0:
                         _reap_native_admission_orphans()
                         from .runtime.paged_apcv2_native_restore import reap_failed_native_restores
 
                         reap_failed_native_restores()
-                    self.counts["multi_request_cycles"] += int(len(active) > 1)
+                    count_add(self.counts, "multi_request_cycles", int(len(active) > 1))
                     self.batch_metrics.batch_cycle(len(active), len(deferred))
                     try:
                         self._inject_device_fault(active)
@@ -12263,10 +12648,10 @@ class ServingEngine:
                         if not failed_uids:
                             raise
                         batch.remove(failed_uids)
-                        self.counts["prefill_output_corruption_events"] += 1
-                        self.counts["prefill_output_corruption_failed_requests"] += len(
+                        count_add(self.counts, "prefill_output_corruption_events", 1)
+                        count_add(self.counts, "prefill_output_corruption_failed_requests", len(
                             failed_uids
-                        )
+                        ))
                         for uid in failed_uids:
                             failed_job = active.pop(uid, None)
                             if failed_job is not None:
@@ -12322,10 +12707,10 @@ class ServingEngine:
                             for uid in failed_uids
                             if uid in active
                         ]
-                        self.counts["batch_cohort_scheduler_failures"] += 1
-                        self.counts["batch_cohort_jobs_failed_closed"] += len(
+                        count_add(self.counts, "batch_cohort_scheduler_failures", 1)
+                        count_add(self.counts, "batch_cohort_jobs_failed_closed", len(
                             failed_jobs
-                        )
+                        ))
                         # Bind the failed decision before another request
                         # updates the global admission status. Error envelopes
                         # already preserve mlx2 for streaming and nonstreaming
@@ -12360,7 +12745,7 @@ class ServingEngine:
                         batch, "take_mtp_prefill_failures", lambda: ()
                     )():
                         batch.remove([failure["uid"]])
-                        self.counts["mtp_prefill_bound_failures"] += 1
+                        count_add(self.counts, "mtp_prefill_bound_failures", 1)
                         failed_job = active.pop(failure["uid"], None)
                         if failed_job is not None:
                             self._finish(
@@ -12373,7 +12758,7 @@ class ServingEngine:
                         # The executor already dropped this lane; only its
                         # request fails, the worker and other lanes go on.
                         batch.remove([failure["uid"]])
-                        self.counts["executor_lane_failures"] += 1
+                        count_add(self.counts, "executor_lane_failures", 1)
                         failed_job = active.pop(failure["uid"], None)
                         if failed_job is not None:
                             self._finish(
@@ -12385,7 +12770,7 @@ class ServingEngine:
                         now = time.monotonic()
                         if now - last_reclaim > 0.25:
                             if reclaim_deferred_cache(apc, admission, mx.clear_cache):
-                                self.counts["memory_pressure_evictions"] += 1
+                                count_add(self.counts, "memory_pressure_evictions", 1)
                             last_reclaim = now
                         self.stop_event.wait(0.01)
                     finishing_uids = {
@@ -12430,9 +12815,7 @@ class ServingEngine:
                                 )
                             if owner is not None and surgery_receipt is not None:
                                 owner.spomin_receipt = surgery_receipt
-                                self.counts[
-                                    "spomin_" + surgery_receipt.get("status", "unknown")
-                                ] += 1
+                                count_add(self.counts, "spomin_" + surgery_receipt.get("status", "unknown"), 1)
                             pop_chunk_trace = getattr(
                                 batch, "pop_prefill_chunk_trace", None
                             )
@@ -12444,7 +12827,7 @@ class ServingEngine:
                             if owner is not None and chunk_trace is not None:
                                 owner.prefill_chunk_receipt = chunk_trace
                                 if chunk_trace.get("varied"):
-                                    self.counts["prefill_chunk_varied_requests"] += 1
+                                    count_add(self.counts, "prefill_chunk_varied_requests", 1)
                             pop_interiors = getattr(
                                 batch, "pop_interior_checkpoints", None
                             )
@@ -12459,13 +12842,9 @@ class ServingEngine:
                                 if checkpoint.get("purpose")
                                 == BoundaryPurpose.JUNCTION
                             )
-                            self.counts["apc_interior_checkpoints_captured"] += (
-                                len(interiors) - junctions
-                            )
+                            count_add(self.counts, "apc_interior_checkpoints_captured", len(interiors) - junctions)
                             if junctions:
-                                self.counts[
-                                    "apc_junction_checkpoints_captured"
-                                ] += junctions
+                                count_add(self.counts, "apc_junction_checkpoints_captured", junctions)
                             if (
                                 owner is not None
                                 and owner.fanout_role != "prefill_leader"
@@ -12523,14 +12902,14 @@ class ServingEngine:
                             # it is delivered, so a client stop it completes
                             # still ends the request normally.
                             batch.remove([response.uid])
-                            self.counts["structured_output_failures"] += 1
+                            count_add(self.counts, "structured_output_failures", 1)
                             from .structured_automaton import NO_CONTINUATION
 
                             failure_context = getattr(
                                 job.structured, "failure_context", None
                             )
                             if failure == NO_CONTINUATION:
-                                self.counts["structured_output_dead_ends"] += 1
+                                count_add(self.counts, "structured_output_dead_ends", 1)
                             event = {
                                 "error": f"structured output failed closed: {failure}",
                                 "status": 502,
@@ -12641,7 +13020,7 @@ class ServingEngine:
                         except Exception as exc:  # noqa: BLE001 - one lane, not the worker
                             batch.remove([response.uid])
                             if getattr(exc, "tool_call_constraint_error", False):
-                                self.counts["tool_call_constraint_failures"] += 1
+                                count_add(self.counts, "tool_call_constraint_failures", 1)
                             self._finish(job, {"error": str(exc), "status": 502})
                             del active[response.uid]
                             continue
@@ -12662,9 +13041,7 @@ class ServingEngine:
                             )
                         )
                         if parse_fallbacks > job.tool_parse_fallbacks_seen:
-                            self.counts["tool_call_parse_fallbacks"] += (
-                                parse_fallbacks - job.tool_parse_fallbacks_seen
-                            )
+                            count_add(self.counts, "tool_call_parse_fallbacks", parse_fallbacks - job.tool_parse_fallbacks_seen)
                             job.tool_parse_fallbacks_seen = parse_fallbacks
                         truncations = int(
                             getattr(
@@ -12674,17 +13051,13 @@ class ServingEngine:
                             )
                         )
                         if truncations > job.tool_constraint_truncations_seen:
-                            self.counts["tool_call_constraint_truncations"] += (
-                                truncations - job.tool_constraint_truncations_seen
-                            )
+                            count_add(self.counts, "tool_call_constraint_truncations", truncations - job.tool_constraint_truncations_seen)
                             job.tool_constraint_truncations_seen = truncations
                         replaced_ids = int(
                             getattr(job.output_parser, "tool_call_id_replacements", 0)
                         )
                         if replaced_ids > job.tool_call_id_replacements_seen:
-                            self.counts["tool_call_id_replacements"] += (
-                                replaced_ids - job.tool_call_id_replacements_seen
-                            )
+                            count_add(self.counts, "tool_call_id_replacements", replaced_ids - job.tool_call_id_replacements_seen)
                             job.tool_call_id_replacements_seen = replaced_ids
                         stopped = job.output_parser.stopped
                         if stopped and not response.finish_reason:
@@ -12730,9 +13103,7 @@ class ServingEngine:
                                         segment_id=f"response:{job.id}",
                                     )
                                 except Exception:  # noqa: BLE001 - optional reuse
-                                    self.counts[
-                                        "pld_recent_segment_publish_failures"
-                                    ] += 1
+                                    count_add(self.counts, "pld_recent_segment_publish_failures", 1)
                                     log.exception(
                                         "PLD recent segment publication failed"
                                     )
@@ -12753,13 +13124,13 @@ class ServingEngine:
                                 getattr(job.thinking_guard, "steered_steps", 0)
                             )
                             if response.finish_reason and approximate_state:
-                                self.counts["apcv2_store_skipped_approximate"] += 1
+                                count_add(self.counts, "apcv2_store_skipped_approximate", 1)
                             elif (
                                 response.finish_reason and
                                 (getattr(response, "mtp_receipt", None) or {}).get("route")
                                 in ("native_qwen3_paged", "native_qwen3_paged_b2", "native_hybrid_paged_b2", "native_hybrid_packed_n20_research")
                             ):
-                                self.counts["apcv2_store_skipped_native"] += 1
+                                count_add(self.counts, "apcv2_store_skipped_native", 1)
                             elif response.finish_reason and not job.request.get(
                                 "skip_writing_prefix_cache", False
                             ):
@@ -12809,31 +13180,30 @@ class ServingEngine:
                                     sidecar=sidecar,
                                     transcript_ledger=transcript_ledger,
                                     approximate=job.approximate_kv_applied,
+                                    numerical_schedule_changed=checkpoint_schedule_changed(
+                                        batch, job, response.all_tokens, response=response
+                                    ),
                                     session_tag=session_tag_for(job),
                                 )
                             # Sanity telemetry: always-on host integers, no
                             # device sync.  Enough to tell from /v1/status alone
                             # how a batch of requests ended and how wide it ran.
                             reason = response.finish_reason or ("stop" if stopped else "unknown")
-                            self.counts["finish_" + str(reason)] += 1
-                            self.counts["completion_tokens"] += int(job.completion_tokens or 0)
-                            self.counts["prompt_tokens"] += int(job.prompt_tokens or 0)
-                            self.counts["cached_prompt_tokens"] += int(job.cached_tokens or 0)
-                            self.counts["peak_observed_width"] = max(
-                                self.counts["peak_observed_width"], int(job.observed_width or 0)
-                            )
+                            count_add(self.counts, "finish_" + str(reason), 1)
+                            count_add(self.counts, "completion_tokens", int(job.completion_tokens or 0))
+                            count_add(self.counts, "prompt_tokens", int(job.prompt_tokens or 0))
+                            count_add(self.counts, "cached_prompt_tokens", int(job.cached_tokens or 0))
+                            count_max(self.counts, "peak_observed_width", int(job.observed_width or 0))
                             if job.structured is not None:
-                                self.counts[
-                                    "structured_engine_" + getattr(job.structured, "engine", "scanner")
-                                ] += 1
+                                count_add(self.counts, "structured_engine_" + getattr(job.structured, "engine", "scanner"), 1)
                                 if getattr(job.structured, "deferred", False):
-                                    self.counts["structured_deferred"] += 1
+                                    count_add(self.counts, "structured_deferred", 1)
                                     if not getattr(job.structured, "constraining", True):
-                                        self.counts["structured_reasoning_unclosed"] += 1
+                                        count_add(self.counts, "structured_reasoning_unclosed", 1)
                                 if job.force_close is not None and job.force_close.receipt()[
                                     "reasoning_force_closed"
                                 ]:
-                                    self.counts["structured_reasoning_force_closed"] += 1
+                                    count_add(self.counts, "structured_reasoning_force_closed", 1)
                             budget_fired = bool(job.thinking_budget_fired)
                             native_route = (
                                 getattr(response, "mtp_receipt", None)
@@ -12954,6 +13324,10 @@ class ServingEngine:
                                         "return_token_trace": job.request.get("return_token_trace", False),
                                         "logprob_semantics": (
                                             ("execution_target: external=transformed_target_verifier" if external_draft else "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier")
+                                            if wants_logprobs(job.request) else None
+                                        ),
+                                        "logprob_distribution_contract": (
+                                            distribution_contract()
                                             if wants_logprobs(job.request) else None
                                         ),
                                         "thinking": thinking_enabled(adapter, job.request),
@@ -13181,7 +13555,7 @@ class ServingEngine:
                                 log.exception(
                                     "terminal receipt failed for request %s", job.id
                                 )
-                                self.counts["terminal_receipt_failures"] += 1
+                                count_add(self.counts, "terminal_receipt_failures", 1)
                                 self._finish(
                                     job,
                                     {
@@ -13198,12 +13572,28 @@ class ServingEngine:
                                 self._finish(job, dict(OUTPUT_OVERFLOW_EVENT))
                                 del active[response.uid]
                                 continue
-                            self.receipt_log.append(
-                                (str(job.tenant_id or "default"), receipt)
-                            )
-                            self.counts["completed"] += 1
+                            with self.lock:
+                                self.receipt_log.append(
+                                    (str(job.tenant_id or "default"), receipt)
+                                )
+                            try:
+                                metric_tenant = (
+                                    job.tenant_id
+                                    if getattr(self, "tenant_metrics_scoped", False)
+                                    else "default"
+                                )
+                                self.drafter_metrics.observe_receipt(
+                                    metric_tenant, receipt
+                                )
+                            except Exception:  # noqa: BLE001 - telemetry is non-fatal
+                                log.exception(
+                                    "drafter metric aggregation failed for request %s",
+                                    job.id,
+                                )
+                                count_add(self.counts, "drafter_metric_failures", 1)
+                            count_add(self.counts, "completed", 1)
                             if job.structured is not None:
-                                self.counts["structured_output_completed"] += 1
+                                count_add(self.counts, "structured_output_completed", 1)
                             # max_tokens outranks tool_calls: a call that
                             # completed before the budget ran out is kept, but
                             # the client must learn the turn was truncated
@@ -13250,7 +13640,7 @@ class ServingEngine:
                             # Failed or removed while its first tokens were
                             # delivered: its batch row may already be gone.
                             batch.pop_prompt_boundary(prompt_end.uid)
-                            self.counts["apc_prompt_end_publications_dropped"] += 1
+                            count_add(self.counts, "apc_prompt_end_publications_dropped", 1)
                             continue
                         publish_prompt_boundary(prompt_end, owner, surgery_receipt)
                         pending_interiors.extend(
@@ -13265,7 +13655,7 @@ class ServingEngine:
                     while pending_interiors:
                         publish_interior(*pending_interiors.popleft())
                         if len(active) >= 2:
-                            self.counts["apc_interior_publications_paced"] += 1
+                            count_add(self.counts, "apc_interior_publications_paced", 1)
                             break
                     response = sidecar = None
                     prompt_end = owner = surgery_receipt = interiors = None

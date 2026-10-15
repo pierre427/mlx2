@@ -27,7 +27,7 @@ retain their native OpenAI- or Anthropic-shaped 503 errors and include
 
 ## Token probabilities
 
-`logprobs: true` and `top_logprobs: 0..11` now return per-token
+`logprobs: true` and `top_logprobs: 0..20` now return per-token
 `choices[0].logprobs.content`. A positive top count also requests probabilities.
 Each entry identifies the **actual emitted token**, with optional sorted
 alternatives. Negative infinity is represented as -9999 for valid JSON.
@@ -61,8 +61,13 @@ reads; requests without them do no additional probability serialization.
 
 These are the execution route's target distributions. Ordinary decoding reports
 normalized post-processor logits before the sampler's temperature/top filters.
-Native MTP reports target verifier probabilities **after** its temperature/top
-filters. Accepted draft tokens use the corresponding target row; rejected-draft
+Sampled native MTP and external-draft routes report target verifier
+probabilities **after** their temperature/top filters. At temperature zero,
+they report processed log-softmax rather than the one-hot greedy verification
+law. The machine-readable `request_controls.logprob_distribution_contract`
+in the terminal route receipt declares these laws; it does not imply all
+tokens used one producing route, since MTP may hand off to ordinary decode.
+Accepted draft tokens use the corresponding target row; rejected-draft
 replacement/bonus tokens use the target row at the accepted-prefix boundary,
 never the draft or residual sampling distribution. These are existing unified
 runtime semantics, not a promise of equal numerical values across differently
@@ -71,6 +76,27 @@ expression for zero, one and two accepted draft tokens.
 
 ## Other controls
 
+APCv2 persistent session mutations have a bounded filesystem wait. A manifest
+or deletion deadline returns HTTP 503 with `apc_persistence_indeterminate`:
+the filesystem operation may still finish, so this is not cancellation or a
+successful park/delete. A completed deletion that leaves files behind returns
+`apc_persistence_incomplete`. Both disable further operations on that APC
+instance and require reload. `persistence.metadata_transaction` reports the
+completion state, operation, worker ownership and reload requirement. Close
+retains the directory lock until all filesystem workers actually drain; a
+replacement owner then inventories the durable result. Session byte/file
+accounting uses immutable payload receipts and performs no filesystem reads.
+Startup inventory/security checks and ordinary-close lock release remain
+outside this serving deadline contract.
+
+- A recognised top-level Chat, Completions or Responses field (or Hermes
+  `options` member) sent as JSON `null` is treated exactly as an absent field,
+  as the OpenAI schema's nullable fields and openai-python's `None` keywords
+  mean: `{"stop": null, "max_tokens": null}` gets the defaults, not a 400. An
+  unsupported field is still a 400 whatever its value, `null` included.
+  Required fields still fail (`messages`, `prompt`, `input`), and Anthropic
+  `/v1/messages` still requires a non-null `max_tokens`. Chat and Completions
+  validate `user` as text and ignore it, as Responses does.
 - `max_tokens`, its Chat alias `max_completion_tokens`, Responses
   `max_output_tokens`, and Hermes `options.num_predict` accept 1 through
   2,097,152 tokens; `min_tokens` accepts 0 through the same ceiling. When an
@@ -145,6 +171,13 @@ expression for zero, one and two accepted draft tokens.
   emitted only for that include value; only those explicitly requested items
   are retained in stored continuation context. Streaming and non-streaming
   terminal payloads are identical for requested reasoning and logprobs.
+  `/v1/status.reasoning_replay` exposes the v1 authentication, plaintext
+  payload encoding, lack of confidentiality, and key-persistence contract.
+  Treat these tokens as readable sensitive content despite the compatibility
+  field name; the v1 format and existing replay behavior remain unchanged.
+  A stateless `input += response.output` replay accepts the empty assistant
+  message item of a turn that produced no answer text (it only reasoned, or
+  stopped at once); empty user, system and developer text is still rejected.
   `message.output_text.logprobs` serializes token bytes only when requested,
   using typed Responses text-delta events rather than Chat chunks.
   Common client fields are validated and ignored when they do not alter local
@@ -182,9 +215,58 @@ expression for zero, one and two accepted draft tokens.
   The JSONL Batch API supports chat, completions, Responses and embeddings with
   standard request/result rows, cursor listing and a `24h` completion-window
   contract. Restored active batches fail explicitly with `server_restarted`.
-- Embeddings execute a mean-pooled, L2-normalized decoder input representation;
-  reranking uses cosine similarity over it. This is implemented for decoder
-  adapters but is not represented as retrieval-model qualification.
+- The pinned `sentence-transformers/all-MiniLM-L6-v2` revision
+  `1110a243fdf4706b3f48f1d95db1a4f5529b4d41` has an embedding-only serving
+  adapter. It executes all six bidirectional BERT layers in float32, uses the
+  artifact's uncased WordPiece tokenizer with right truncation at 256 tokens
+  including `[CLS]`/`[SEP]`, averages attention-mask-selected contextual rows
+  including special tokens, and L2-normalizes the resulting 384-dimensional
+  vector. All execution-relevant artifact files are content-bound; the exact tensor schema
+  and full weight hash are verified before loading. No download or remote code
+  is used. `dimensions` may be omitted or exactly 384; dimension truncation is
+  refused. Multi-input requests execute independent width-one forwards, with
+  at most 2048 inputs and 1 MiB total UTF-8 text. Usage counts retained tokens,
+  including special tokens. Status and operation receipts identify the trained
+  recipe, artifact and observed execution. The route remains unqualified:
+  CPU reference parity and the bounded public retrieval evaluation below are not
+  broad retrieval-quality or GPU qualification.
+  Generation, reranking, APCv2/KV caching, streaming and generation policies are
+  unsupported on this route. Start it with `mlx2-serve --model /local/snapshot`
+  and no generation route flag; use `/v1/embeddings`.
+- The pinned `cross-encoder/ms-marco-MiniLM-L6-v2` revision
+  `233902d25c440f23af6f7d6e94d2946bac0bee0a` serves `/v1/rerank` through
+  a distinct relevance-trained BERT cross-encoder. It jointly encodes each
+  query/document pair using uncased WordPiece, longest-first right truncation
+  to 512 tokens including special tokens, the trained CLS dense/tanh pooler,
+  and the trained scalar classifier. `relevance_score` is a raw logit with
+  higher values indicating greater relevance; it is neither a calibrated
+  probability nor constrained to 0–1. The artifact specifies identity activation.
+  The exact metadata, tokenizer and full checkpoint bytes are verified; no
+  download or remote code runs at serving startup. Up to 1000 documents and
+  1 MiB total UTF-8 input are admitted, with independent width-one forwards.
+  Usage sums retained tokens for every pair, including the repeated query.
+  Embedding and generation routes return 501. Both trained representation
+  routes return an `mlx2` recipe/artifact/use receipt and remain unqualified.
+- A deterministic CPU diagnostic on 24 public SciFact test queries and 360
+  candidate abstracts measured embedding nDCG@10 0.7674 versus TF-IDF 0.6901;
+  recall@10 was 0.8333 versus 0.7500. MS MARCO reranking of the embedding top
+  ten reduced nDCG@10 to 0.7450. This is a reduced-corpus diagnostic, with gold
+  documents explicitly retained alongside lexical hard negatives and fixed
+  background documents, not a full BEIR result. It supports neither broad
+  quality qualification nor default reranking for scientific retrieval.
+  See `provenance/minilm-retrieval-evaluation.json` and
+  `scripts/evaluate_minilm_retrieval_cpu.py`; raw public dataset and evaluation
+  rows stay outside the repository.
+- Eligible decoder adapters retain their mean-pooled, L2-normalized input
+  representation and cosine reranking. This is not represented as trained
+  retrieval-model qualification. Running
+  a decoder backbone could expose contextual hidden representations as a
+  separate explicit adapter operation; it would still use generation-trained
+  weights. Additional trained embedding models need their own checkpoint,
+  tokenizer, pooling/projection and normalization contract. Task-trained
+  reranking requires the appropriate query/document input and
+  scoring head or documented scoring procedure. Neither is supplied by
+  relabelling decoder mean pooling or cosine similarity.
 - Dynamic LoRA supports explicit Linear/QuantizedLinear keys, exact tensor
   coverage, zero serving dropout, one active adapter, inflight drain, reversible
   unload, cache invalidation and revision receipts. It is disabled until
@@ -194,8 +276,18 @@ expression for zero, one and two accepted draft tokens.
   video sampling are available. Optional mlx-vlm adapters now implement Gemma
   3n image/audio plus ordered native-video requests (uniform frames, explicit
   timestamps and media-bound APCv2 identity) and MiniCPM-o image/audio. The
-  MiniCPM-o route honors artifact slicing, bounded shape-coherent vision
-  batches and exact-rate audio chunks. The real downloaded processors are
+  MiniCPM-o route honors artifact slicing and exact-rate audio chunks, with
+  sequential vision as its default. Explicit operator vision batching and
+  `minicpm_o_media.per_item_feature_reuse:true` are separate, incompatible
+  opt-ins. Per-item reuse retains the source's width-one encoder calls and
+  hashes exact processor pixel bytes, dtype, shape and target geometry under
+  model/source/policy, authenticated tenant and LoRA identities. It is bounded
+  in-memory reuse (256 items, 2 GiB); unsupported representations or inputs
+  exceeding the 512 MiB hashing budget retain whole-request reuse. It is
+  CPU-tested, default-off and unqualified; no disk persistence or performance
+  claim is implied. Gemma 3n keeps its original grouping. All adapter vision
+  feature cache keys include the trusted tenant scope independently of APCv2.
+  The real downloaded processors are
   host-qualified in
   `qualification/runs/multimodal-processors-20260918/receipt.json`, without
   importing MLX or weights. Production receipts must additionally prove image,
@@ -215,7 +307,28 @@ expression for zero, one and two accepted draft tokens.
 - Responses MCP tools execute through an optional operator-allowlisted
   Streamable HTTP backend (`--tool-backend-config`). OpenAI-shaped server and
   tool filters are honored, approval must be `"never"`, and model/tool loops
-  are capped at eight. Other hosted tools remain unavailable.
+  are capped at eight. `max_output_tokens` bounds every round together, not
+  each round; a loop that spends it ends `incomplete`. Other hosted tools
+  remain unavailable.
+  Each configured server can set `timeout_seconds` (default 30),
+  `max_response_bytes` (8 MiB), `max_sse_events` (1024), and `max_json_depth`
+  (128). Time, bytes and event budgets span one complete operation, including
+  session initialization/retry and discovery pagination; time also covers
+  waiting for the session lock. The transport refuses redirects and interrupts
+  active sockets on timeout or caller cancellation. HTTP disconnects cancel
+  hosted execution for streaming and nonstreaming responses. Cancellation
+  cannot undo an already-issued remote tool side effect. OS DNS lookups use
+  at most four bounded background helpers; a cancelled or timed-out lookup
+  cannot subsequently send a request, even if the OS resolver remains blocked.
+  `/v1/status.hosted_tools` reports configured
+  limits without credentials or URLs.
+
+The generic output parser retains unfinished tool bodies in chunks and searches
+only newly received text plus the marker overlap. Grammar-identified quoted
+closers are not retried on every later token. Distinct ambiguous closers share
+a 64 Mi-character cumulative grammar-input budget; exhaustion fails closed,
+including under tolerant marker handling. This bounds pathological parsing
+work without changing well-formed calls or terminal truncation semantics.
 
 ## Coding-agent clients (`--agent-compat`)
 
