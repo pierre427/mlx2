@@ -1,0 +1,62 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "feature": "two-rank distributed serving ownership contract",
+  "date": "2026-10-15",
+  "sources": [
+    {
+      "repository": "sgl-project/sglang",
+      "revision": "PR-44453-merged-2026-10-15",
+      "paths": [
+        "python/sglang/srt/model_executor/pipeline_parallel.py"
+      ],
+      "license": "Apache-2.0",
+      "use": "Failure-mode review: peer output exchange can hang when rank send/receive ordering is not explicit. mlx2 instead specifies ordered envelopes and treats transport ordering as an implementation obligation. No source copied."
+    },
+    {
+      "repository": "mlx",
+      "revision": "installed-0.32.2.dev20260919+39400a0d4",
+      "paths": [
+        "mlx.core.distributed"
+      ],
+      "license": "MIT",
+      "use": "Runtime capability basis for a future ring transport. No source copied and no interaction with the upstream repository."
+    }
+  ],
+  "modifications": "Original route-independent cluster, request, admission, admitted-token bound, state-revision, cancellation, abort and two-rank agreement contracts with CPU fault tests, plus a bounded two-rank MLX ring diagnostic. Any identity, revision, ordering or phase fault now terminally poisons the transaction before raising, so a rejected stale cancel cannot be followed by publishable work.",
+  "validation": {
+    "state": "implemented_cpu_tested_and_same_host_two_rank_ring_observed_transport_not_integrated",
+    "qualified": false,
+    "selected": false,
+    "observed_used": false,
+    "limitations": [
+      "No scheduler or HTTP route uses this contract yet.",
+      "The ring diagnostic used two ranks on one M3 host; no cross-host model-parity evidence exists.",
+      "The diagnostic used a fixed projection and fault exchange rather than sharded model layers.",
+      "The initial contract is deliberately fixed at two ranks."
+    ],
+    "ring_diagnostic": {
+      "device": "Apple M3 Pro",
+      "mlx_version": "0.32.2.dev20260919+39400a0d4",
+      "ownership": "CPG task 0c6670e4bfe94448b4d6fd3b8082eae3 generation 39 with paired locks; released cleanly",
+      "world_size": 2,
+      "backend": "ring",
+      "same_host": true,
+      "modes": [
+        "normal",
+        "identity_mismatch",
+        "output_divergence",
+        "cancel"
+      ],
+      "rank_receipts": 8,
+      "all_expected_outcomes_detected": true,
+      "normal_state_publishable": true,
+      "fault_state_publishable": false,
+      "evidence": "private validation evidence",
+      "transport_observed_used": true,
+      "serving_route_observed_used": false,
+      "qualified": false,
+      "performance_qualified": false
+    },
+    "protocol_fault_regression": "CPU tests prove stale cancellation and every rejected identity/revision/sequence fault leave the transaction terminal and refuse later STEP/COMMIT."
+  }
+}
