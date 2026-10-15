@@ -144,6 +144,11 @@ from mlx2.runtime.models import qwen4_fused_gdn_verify as V
 from mlx2.runtime.models import qwen4_moe_window as W
 from mlx2.runtime.models.qwen_gdn_contracts import QWEN4_GDN_CONTRACT as C
 from mlx2.runtime.models.qwen_moe_contracts import QWEN4_E512_K10_ROUTING, QWEN36_E256_K8_ROUTING
+# This fixture checks API contracts and shapes. Zero-filled fake Metal
+# outputs cannot establish served-SiLU equivalence; supply that dependency
+# explicitly while retaining the real selector and kernel-header builder.
+# test_fused_gdn_served_silu.py covers the numerical oracle and refusals.
+F._probe_served_silu = lambda: {F.KERNEL_SILU_EXP: True}
 F.fused_gdn_runtime_supported = lambda: True
 V.fused_gdn_runtime_supported = lambda: True
 W.RD.runtime_supported = lambda: True

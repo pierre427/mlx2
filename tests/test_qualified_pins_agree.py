@@ -1,4 +1,4 @@
-"""The three places that name the qualified substrate name the same revisions."""
+"""The places that name the qualified substrates name the same revisions."""
 
 import re
 from pathlib import Path
@@ -20,8 +20,7 @@ def _pinned_requirements():
     """The private pinned requirements, or skip on the public mirror.
 
     The public mirror carries an unpinned requirements-qualified.txt (no git+
-    lines: the lab MLX fork is not reachable from there). A private file with
-    git+ pins is always checked.
+    source pin for mlx-vlm). A private file with source pins is always checked.
     """
     path = ROOT / "requirements-qualified.txt"
     text = path.read_text() if path.is_file() else ""
@@ -38,8 +37,19 @@ def test_requirements_and_pyproject_pin_the_adapter_revision():
     assert _mlx_vlm_rev(requirements) == MLX_VLM_REVISION
 
 
-def test_requirements_pin_the_lab_mlx_fork():
+def test_requirements_pin_the_verified_mlx_release():
     requirements = _pinned_requirements()
-    m = re.search(r"^mlx @ git\+ssh://\S+@([0-9a-f]{9,40})$", requirements, re.M)
-    assert m, "mlx must be pinned to a fork revision, not left to PyPI"
-    assert m.group(1) in requirements.split("mlx @")[0], "the header must name the same revision"
+    m = re.search(r"^mlx==([0-9]+\.[0-9]+\.[0-9]+)$", requirements, re.M)
+    assert m, "mlx must be pinned to one exact verified release"
+    version = m.group(1)
+
+    pyproject = (ROOT / "pyproject.toml").read_text()
+    serve = re.search(r'^serve = \["mlx>=([^,]+),<([^\"]+)"', pyproject, re.M)
+    assert serve
+    assert version == serve.group(1)
+    major, minor, patch = map(int, version.split("."))
+    assert serve.group(2) == f"{major}.{minor}.{patch + 1}"
+
+    from mlx2.runtime.mlx_build import VERIFIED_MLX_BUILDS
+
+    assert version in VERIFIED_MLX_BUILDS

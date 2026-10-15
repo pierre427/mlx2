@@ -1,0 +1,37 @@
+{
+  "source_repository": "https://github.com/ashhart/TensorFold",
+  "source_revision": "0cec94543185706fada406202538b3eba8125698",
+  "source_paths": [
+    "PR #821 numerical-underflow analysis and integer-code design"
+  ],
+  "license": "Apache-2.0 at pinned source revision; idea/test precedent only, no new peer code copied",
+  "relationship": "Failure mode and test design informed this original repair of the previously mined SIMD backend; no new peer source copied.",
+  "destination_paths": [
+    "src/mlx2/runtime/lane/simd.py",
+    "src/mlx2/runtime/lane/installer.py",
+    "tests/test_peer_survey_simd_cpu.py",
+    "scripts/probe_simd_q4_exponents.py"
+  ],
+  "modifications": [
+    "Extract integer q4 nibbles in scalar, direct MMA, and prepared-fragment paths; leave BF16 activations unscaled to avoid loss before the FMA.",
+    "Change the numerical law to lane-simd-v2 so APCv2 cannot reuse v1 state under the new arithmetic.",
+    "Check selected fragment widths at installation and disable a differing fragment path per weight shape.",
+    "Add an independent sparse dyadic oracle with a prescaling negative control and a bounded Metal diagnostic."
+  ],
+  "validation": {
+    "cpu": "70 focused SIMD/lane/policy CPU tests passed; independent dyadic oracle detects the former prescaling loss.",
+    "gpu": {
+      "classification": "component_diagnostic",
+      "device": "Apple M3 Pro / applegpu_g15s",
+      "mlx_version": "0.32.2.dev20260919+39400a0d4",
+      "cases_passed": 123,
+      "max_abs_error": 0.0,
+      "case_accounting": "54 selected + 54 direct MMA + 15 supported explicit scalar arms; unsupported scalar shapes are not fabricated as exercised arms.",
+      "source_sha256": "2bc062d06569d60b853dd8d0f25993131547e65a179f850e2cd45dc82eedcfdc",
+      "ownership": "Root-coordinated trusted CPG generation 1949 and paired locks; GPU released after bounded run.",
+      "evidence_directory": "private validation evidence"
+    },
+    "qualification": "Unqualified new numerical law; component diagnostic is not artifact/route qualification or performance evidence."
+  },
+  "license_evidence": "https://raw.githubusercontent.com/ashhart/TensorFold/0cec94543185706fada406202538b3eba8125698/LICENSE"
+}

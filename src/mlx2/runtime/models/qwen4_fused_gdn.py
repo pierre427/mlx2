@@ -435,8 +435,13 @@ _SOURCE_BATCH_ST16 = (
 
 @lru_cache(maxsize=None)
 def _kernel(st16: bool = False):
+    spelling = served_silu_exp()
+    if spelling is None:
+        raise RuntimeError("served SiLU matches no kernel form")
+    header = _served_silu_header(spelling)
+    suffix = "_precise" if "precise" in spelling else "_fast"
     return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_decode" + ("_st16" if st16 else ""),
+        name="qwen4_fused_gdn_decode" + ("_st16" if st16 else "") + suffix,
         input_names=[
             "qkv",
             "z",
@@ -451,7 +456,7 @@ def _kernel(st16: bool = False):
             "norm_eps",
         ],
         output_names=["output", "conv_state_out", "recurrent_state_out"],
-        header=_HEADER,
+        header=header,
         source=_SOURCE_ST16 if st16 else _SOURCE,
         ensure_row_contiguous=True,
     )
@@ -459,8 +464,13 @@ def _kernel(st16: bool = False):
 
 @lru_cache(maxsize=None)
 def _kernel_batch(st16: bool = False):
+    spelling = served_silu_exp()
+    if spelling is None:
+        raise RuntimeError("served SiLU matches no kernel form")
+    header = _served_silu_header(spelling)
+    suffix = "_precise" if "precise" in spelling else "_fast"
     return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_batch_decode" + ("_st16" if st16 else ""),
+        name="qwen4_fused_gdn_batch_decode" + ("_st16" if st16 else "") + suffix,
         input_names=[
             "qkv",
             "z",
@@ -475,7 +485,7 @@ def _kernel_batch(st16: bool = False):
             "norm_eps",
         ],
         output_names=["output", "conv_state_out", "recurrent_state_out"],
-        header=_HEADER,
+        header=header,
         source=_SOURCE_BATCH_ST16 if st16 else _SOURCE_BATCH,
         ensure_row_contiguous=True,
     )
@@ -883,15 +893,25 @@ def served_silu_refusal() -> Optional[str]:
     """Why the fused GDN kernels may not run under this MLX build, or None.
 
     Callers check ``fused_gdn_runtime_supported()`` first: the probe needs
-    Metal.  The kernels are never rewritten to the other spelling here; that
-    arithmetic would need its own GPU qualification.
+    Metal.  Either known spelling is compiled into the kernel source.
     """
     spelling = served_silu_exp()
-    if spelling == KERNEL_SILU_EXP:
-        return None
     if spelling is None:
         return "served SiLU matches no kernel form"
-    return f"served SiLU uses {spelling}"
+    return None
+
+
+def _served_silu_header(spelling: str) -> str:
+    """Compile only the copied SiLU helper with the served spelling.
+
+    Other ``exp`` calls in the header implement softplus and the eager sigmoid
+    spans and must retain their independently qualified arithmetic.
+    """
+    from .served_exp import metal_helper, respell
+
+    helper = metal_helper(_HEADER, "mlx_sigmoid_fast")
+    adapted = respell(helper, KERNEL_SILU_EXP, spelling)
+    return _HEADER.replace(helper, adapted)
 
 
 _PROBED_THREADGROUP_Y: Optional[int] = None

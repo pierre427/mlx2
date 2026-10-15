@@ -81,7 +81,7 @@ def probe(monkeypatch):
         ({"metal::exp": True, "metal::precise::exp": False}, None),
         (
             {"metal::exp": False, "metal::precise::exp": True},
-            "served SiLU uses metal::precise::exp",
+            None,
         ),
         ({"metal::exp": False, "metal::precise::exp": False},
          "served SiLU matches no kernel form"),

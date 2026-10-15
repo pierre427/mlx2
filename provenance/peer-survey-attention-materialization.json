@@ -1,0 +1,55 @@
+{
+  "source_repository": "mlx2 local runtime review",
+  "source_revision": "f7076a6ee53f46a37373b77dd2dbd341f7908366",
+  "source_paths": [
+    "src/mlx2/runtime/models/qwen4_exp.py::_gather_qsa_attention"
+  ],
+  "license": "Original mlx2 repair; existing file license notices preserved",
+  "relationship": "Original repair found by source audit; no peer implementation copied.",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "tests/test_peer_attention_materialization_cpu.py",
+    "scripts/probe_qsa_gather_tiles.py"
+  ],
+  "modifications": [
+    "Honor tile_rows before selected K/V gather rather than gathering all batch/query rows first.",
+    "Retain per-batch source views without taking/copying the whole historical KV for each query row.",
+    "Materialize each completed tile before building the next when tiling is needed, so lazy graph retention does not defeat the bound.",
+    "Preserve selection, causal and padding masks, all-masked zero rows, and unchanged route defaults."
+  ],
+  "validation": {
+    "cpu": "89 QSA focused tests passed, 8 device-dependent tests skipped, 50 subtests passed; subsequent 47-test tile/fallback/LoRA/PLE-worker focused run passed, including one new actual indexed-decline-to-gather integration test. Dispatch guards assert selected K/V and SDPA tile rows never exceed the requested bound; evaluation-order guards detect lazy retention; independent float64 masked attention oracle passes.",
+    "gpu": {
+      "classification": "component-diagnostic",
+      "passed": 24,
+      "total": 24,
+      "mlx_version": "0.32.2.dev20260919+39400a0d4",
+      "device": "Apple M3 Pro",
+      "source_sha256": "533dc3a7ad493ec77ccf991f13c3cb8743facd837256a01057d037fed177cbea",
+      "ownership": "Root-coordinated trusted CPG task 0c6670e4bfe94448b4d6fd3b8082eae3 generation 3 and matching paired locks; released after run.",
+      "evidence_directory": "private validation evidence",
+      "limits": "Bounded arithmetic component diagnostic; no artifact/serving qualification or controlled performance claim.",
+      "post_probe_change": "Host PLE helper annotation Optional[tuple] changed to tuple | None during final lint cleanup. The tested _gather_qsa_attention AST is unchanged; no GPU arithmetic changed.",
+      "final_source_sha256": "a995c76f6eee579390db734d86d4dd7953444ab2d8318537c6f2e6af7ce23358"
+    },
+    "bound": "Selected K/V gather and SDPA intermediates only. Compact indices, optional full-cache dequantization, authoritative cache, and final output are separate costs."
+  },
+  "audit_other_seams": [
+    {
+      "path": "src/mlx2/runtime/models/base.py::_contiguous_quant",
+      "finding": "Returns strided quantized views directly on the supported MLX build; no obsolete defensive contiguous copy remains."
+    },
+    {
+      "path": "src/mlx2/runtime/models/base.py::_composed_qsdpa",
+      "finding": "GQA query groups fold into rows to avoid repeated key reads; opt-in composed score tiling already evaluates each output tile before constructing the next."
+    },
+    {
+      "path": "src/mlx2/runtime/segmented_plain_kv.py::SegmentedBatchKVCache",
+      "finding": "Independent historical KV stays in per-row owners; contiguous copies occur only on new append slices, with per-row SDPA and concatenated outputs."
+    },
+    {
+      "path": "src/mlx2/runtime/models/qwen4_exp.py::_gather_qsa_quantized_attention",
+      "finding": "Optional quantized gather still dequantizes authoritative K/V before selected gather. That full-cache transient is explicitly outside the repaired selected-gather bound; no unsupported performance or device residency claim is made."
+    }
+  ]
+}

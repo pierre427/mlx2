@@ -2946,10 +2946,15 @@ class NGramEmbedding(nn.Module):
         mask: Optional[mx.array] = None,
         previous: Optional[np.ndarray] = None,
         record_sync: bool = True,
+        host_constants: tuple | None = None,
     ) -> np.ndarray:
-        if record_sync:
-            record_verify_sync("qwen4.ple.ids_eval")
-        mx.eval(input_ids, mask)
+        if host_constants is not None:
+            if cache is not None or mask is not None or not isinstance(input_ids, np.ndarray):
+                raise ValueError("host PLE hashing requires host tokens and no mutable cache")
+        else:
+            if record_sync:
+                record_verify_sync("qwen4.ple.ids_eval")
+            mx.eval(input_ids, mask)
         tokens = np.asarray(input_ids, dtype=np.int64)
         (batch, seq_len) = tokens.shape
         if previous is not None:
@@ -2998,7 +3003,9 @@ class NGramEmbedding(nn.Module):
                             if history[b, pos] == self.eos_token_id:
                                 segment_start = pos + 1
                 shifted.append(out)
-        (multipliers, sizes, offsets) = self._hash_constants_numpy()
+        (multipliers, sizes, offsets) = (
+            self._hash_constants_numpy() if host_constants is None else host_constants
+        )
         blocks = []
         for ngram in range(2, self.ngram_size + 1):
             with np.errstate(over="ignore"):
@@ -3112,9 +3119,11 @@ class NGramEmbedding(nn.Module):
             prev = prev[None]
         if chunk.size == 0:
             return
+        constants = self._hash_constants_numpy()
 
         def hash_and_warm():
-            ids = self._ngram_ids_numpy(mx.array(chunk), None, previous=prev)
+            ids = self._ngram_ids_numpy(chunk, None, previous=prev, record_sync=False,
+                                       host_constants=constants)
             self.ngram_embedding.prefetch_rows(ids)
 
         self.ngram_embedding.submit_prefetch(hash_and_warm)
@@ -3135,10 +3144,11 @@ class NGramEmbedding(nn.Module):
         prev = np.asarray(previous_tokens, dtype=np.int64).reshape(1, -1)
         if toks.size == 0:
             return False
+        constants = self._hash_constants_numpy()
 
         def hash_and_dequant():
             ids = self._ngram_ids_numpy(
-                mx.array(toks), None, previous=prev, record_sync=False
+                toks, None, previous=prev, record_sync=False, host_constants=constants
             )
             prefetch(ids)
 
@@ -3318,7 +3328,7 @@ class PLELayer(nn.Module):
         return [out, normed, self._conv_state_tail(conv_input, mask)]
 
     def _chain_params(self):
-        """Strong references to every weight the traced chain closes over.
+        """Strong references to modules and dependencies the trace closes over.
 
         ``mx.compile`` bakes a captured array into the graph as a CONSTANT and
         does not notice when the attribute is later rebound -- measured: after
@@ -3326,9 +3336,13 @@ class PLELayer(nn.Module):
         gain, and disagreed with eager.  Frozen inference never does that, but
         ``set_dtype``, quantization, a LoRA merge and training all do, so the
         entry is keyed on the identity of these objects rather than trusted.
-        Holding them keeps the ids from being recycled under us; the graph
-        holds them anyway, so this costs no memory.
+        Wrappers can hide base weights and add LoRA arrays beneath a child
+        module. Their call type and nested parameters belong to the identity
+        too, along with explicit non-parameter trace dependencies (for example
+        a concurrent LoRA row map). Holding references prevents id recycling.
         """
+        from mlx.utils import tree_flatten
+
         params = []
         for module in (
             self.key_proj,
@@ -3338,10 +3352,12 @@ class PLELayer(nn.Module):
             self.norm_query,
             self.norm_conv,
         ):
-            for name in ("weight", "scales", "biases"):
-                value = getattr(module, name, None)
-                if value is not None:
-                    params.append(value)
+            for _name, child in module.named_modules():
+                params.extend((child, type(child)))
+                dependencies = getattr(child, "compiled_trace_dependencies", None)
+                if callable(dependencies):
+                    params.extend(dependencies())
+            params.extend(value for _name, value in tree_flatten(module.parameters()))
         return tuple(params)
 
     def _compiled_chain(
@@ -5381,37 +5397,57 @@ def _gather_qsa_attention(
         raise ValueError("QSA gather tensors do not match compact selection")
     if compact.block_ids.shape[:2] != (batch, length):
         raise ValueError("QSA gather selection must match [batch, query]")
-    if tile_rows < 1:
-        raise ValueError("QSA gather tile_rows must be positive")
+    if type(tile_rows) is not int or tile_rows < 1:
+        raise ValueError("QSA gather tile_rows must be a positive integer")
     (_, _, _, _, _, _, _, physical, valid) = compact_token_validity(compact)
     physical = physical.reshape(batch, length, -1)
     valid = valid.reshape(batch, length, -1)
     width = physical.shape[-1]
     total = k.shape[2]
     hkv = k.shape[1]
-    rows = batch * length
-    gather_index = mx.broadcast_to(
-        physical[:, None, :, :, None], (batch, hkv, length, width, dim)
-    ).astype(mx.uint32)
-    gathered_k = mx.take_along_axis(
-        mx.broadcast_to(k[:, :, None, :, :], (batch, hkv, length, total, dim)),
-        gather_index,
-        axis=3,
-    )
-    gathered_v = mx.take_along_axis(
-        mx.broadcast_to(v[:, :, None, :, :], (batch, hkv, length, total, dim)),
-        gather_index,
-        axis=3,
-    )
-    gathered_k = gathered_k.transpose(0, 2, 1, 3, 4).reshape(rows, hkv, width, dim)
-    gathered_v = gathered_v.transpose(0, 2, 1, 3, 4).reshape(rows, hkv, width, dim)
-    q_rows = q.transpose(0, 2, 1, 3).reshape(rows, heads, 1, dim)
-    row_valid = valid.reshape(rows, width)
-    out = mx.fast.scaled_dot_product_attention(
-        q_rows, gathered_k, gathered_v, scale=scale, mask=row_valid[:, None, None, :]
-    )[:, :, 0]
-    out = mx.where(mx.any(row_valid, axis=-1)[:, None, None], out, mx.zeros_like(out))
-    return out.reshape(batch, length, heads, dim).transpose(0, 2, 1, 3)
+    outputs = []
+    # Keep source histories as views. Taking a repeated batch index for each
+    # flattened query row would copy the entire history before this gather.
+    # Split within each batch row, then concatenate in batch/query order.
+    tiled = batch > 1 or length > tile_rows
+    for batch_index in range(batch):
+        source_k = k[batch_index : batch_index + 1, :, None]
+        source_v = v[batch_index : batch_index + 1, :, None]
+        for start in range(0, length, tile_rows):
+            stop = min(start + tile_rows, length)
+            count = stop - start
+            gather_index = mx.broadcast_to(
+                physical[batch_index : batch_index + 1, None, start:stop, :, None],
+                (1, hkv, count, width, dim),
+            ).astype(mx.uint32)
+            gathered_k = mx.take_along_axis(
+                mx.broadcast_to(source_k, (1, hkv, count, total, dim)),
+                gather_index, axis=3,
+            ).transpose(0, 2, 1, 3, 4).reshape(count, hkv, width, dim)
+            gathered_v = mx.take_along_axis(
+                mx.broadcast_to(source_v, (1, hkv, count, total, dim)),
+                gather_index, axis=3,
+            ).transpose(0, 2, 1, 3, 4).reshape(count, hkv, width, dim)
+            q_rows = q[batch_index : batch_index + 1, :, start:stop].transpose(
+                0, 2, 1, 3
+            ).reshape(count, heads, 1, dim)
+            row_valid = valid[batch_index, start:stop]
+            out = mx.fast.scaled_dot_product_attention(
+                q_rows, gathered_k, gathered_v, scale=scale,
+                mask=row_valid[:, None, None, :],
+            )[:, :, 0]
+            out = mx.where(
+                mx.any(row_valid, axis=-1)[:, None, None], out, mx.zeros_like(out)
+            )
+            if tiled:
+                # A graph containing every lazy tile retains every gathered
+                # slab at final evaluation. Retire each slab before the next.
+                mx.eval(out)
+            outputs.append(out)
+    return mx.concatenate(outputs, axis=0).reshape(
+        batch, length, heads, dim
+    ).transpose(0, 2, 1, 3)
+
 
 
 def qsa_dense_attention_from_selection(

@@ -13,6 +13,7 @@ from typing import Any
 import mlx.core as mx
 import numpy as np
 from .qwen4_qsa_indexed_merge import (
+    OUTPUT_GATE_GATE,
     combine_indexed_partials,
     fused_gate_refusal,
     fused_merge_enabled,
@@ -59,9 +60,16 @@ _HPT_ALLOWED = (12, 6, 4, 3, 2, 1)
 # The list itself lives in runtime/mlx_build.py, shared with the serving
 # status report; this module keeps its own name so tests can patch it.
 _EXACT_MLX_BUILDS = VERIFIED_MLX_BUILDS
-_SDPA_VECTOR_HEADER_SHA256 = (
+_OLD_SDPA_VECTOR_HEADER_SHA256 = (
     "2100a4d1eaa8a524c5147c82c771cad75197495c72daffa03e7ea4c259aebf10"
 )
+_SDPA_VECTOR_HEADER_SHA256_BY_BUILD = {
+    "0.32.2.dev20260829+334084ce9": _OLD_SDPA_VECTOR_HEADER_SHA256,
+    "0.32.2.dev20260911+a0d69e543": _OLD_SDPA_VECTOR_HEADER_SHA256,
+    "0.32.2.dev20260915+2a817ad94": _OLD_SDPA_VECTOR_HEADER_SHA256,
+    "0.32.2.dev20260919+39400a0d4": _OLD_SDPA_VECTOR_HEADER_SHA256,
+    "0.32.4": "32146cdd4b9982723ee696da1ad8d146682d84d2ee40098a4063a25b8a1ec322",
+}
 _QUANTIZED_BITS = frozenset({4, 8})
 _QUANTIZED_GROUP_SIZES = frozenset({32, 64, 128})
 
@@ -165,7 +173,10 @@ def _sdpa_header_state() -> tuple[bool, str | None, str | None]:
     observed = _sdpa_vector_header_sha256()
     if observed is None:
         return (False, None, "sdpa_header_missing")
-    if observed != _SDPA_VECTOR_HEADER_SHA256:
+    expected = _SDPA_VECTOR_HEADER_SHA256_BY_BUILD.get(
+        str(getattr(mx, "__version__", "unknown"))
+    )
+    if observed != expected:
         return (False, observed, "sdpa_header_mismatch")
     return (True, observed, None)
 
@@ -895,9 +906,17 @@ def _quantized_partition_kernel():
 
 
 @lru_cache(maxsize=None)
-def _combine_kernel(gated: bool = False):
+def _combine_kernel(gated: bool = False, gate_dtype=None):
+    source = _COMBINE_SOURCE_GATED if gated else _COMBINE_SOURCE
+    suffix = ""
+    if gated and gate_dtype is not None:
+        spelling = OUTPUT_GATE_GATE.spelling(gate_dtype)
+        if spelling is None:
+            raise RuntimeError("served eager sigmoid matches no kernel form")
+        source = OUTPUT_GATE_GATE.adapt(source, gate_dtype)
+        suffix = "_precise" if "precise" in spelling else "_fast"
     return mx.fast.metal_kernel(
-        name="qwen4_qsa_indexed_sdpa_pass2_gate_v1"
+        name="qwen4_qsa_indexed_sdpa_pass2_gate_v1" + suffix
         if gated
         else "qwen4_qsa_indexed_sdpa_pass2_v3",
         input_names=["part_m", "part_l", "part_o", "dims", "output_gate"]
@@ -905,7 +924,7 @@ def _combine_kernel(gated: bool = False):
         else ["part_m", "part_l", "part_o", "dims"],
         output_names=["out"],
         header=_HEADER,
-        source=_COMBINE_SOURCE_GATED if gated else _COMBINE_SOURCE,
+        source=source,
         ensure_row_contiguous=True,
     )
 
@@ -1436,7 +1455,7 @@ def _combine_sdpa_partials(m, l, o, engaged, *, output_dtype, output_gate=None):
             )
         inputs.append(mx.contiguous(output_gate))
         record_native_gate_engaged()
-    output = _combine_kernel(gated)(
+    output = _combine_kernel(gated, output_dtype if gated else None)(
         inputs=inputs,
         template=[
             ("T", output_dtype),

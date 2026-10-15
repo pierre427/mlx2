@@ -58,6 +58,12 @@ def served_exp_forms_match(monkeypatch):
     from mlx2.runtime.models.served_exp import ServedExpGate
 
     monkeypatch.setattr(ServedExpGate, "refusal", lambda self, dtype=None: None)
+    monkeypatch.setattr(
+        ServedExpGate, "adaptation_refusal", lambda self, dtype=None: None
+    )
+    monkeypatch.setattr(
+        ServedExpGate, "spelling", lambda self, dtype=None: self.kernel_exp
+    )
 
 
 # Test modules that read private material at import time and whose own bytes

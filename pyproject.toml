@@ -23,7 +23,7 @@ hysparse2-data = ["numpy>=2", "tokenizers>=0.22", "pyarrow>=25"]
 # transformers is not capped tighter: a tokenizer class that rebuilds a pack's
 # pipeline (transformers#49579, 5.18) fails the load-time parity check in
 # runtime/tokenizer_integrity.py instead of changing token ids silently.
-serve = ["mlx>=0.32.2.dev20260829,<0.32.3", "transformers>=5.12,<6", "numpy>=2", "psutil>=7", "jinja2>=3.1", "regex>=2024.11"]
+serve = ["mlx>=0.32.4,<0.32.5", "transformers>=5.12,<6", "numpy>=2", "psutil>=7", "jinja2>=3.1", "regex>=2024.11"]
 observability = [
     "opentelemetry-api>=1.29",
     "opentelemetry-sdk>=1.29",
@@ -45,7 +45,6 @@ multimodal = [
 radio = ["mlx>=0.32", "numpy>=2", "pillow>=10"]
 image-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
 gguf-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
-image-mcp = ["fastmcp>=2.2,<3", "pillow>=10.4,<13"]
 
 [project.scripts]
 mlx2-serve = "mlx2.server:main"
@@ -54,7 +53,6 @@ mlx2-decisions = "mlx2.decisions.server:main"
 mlx2-diarize = "mlx2.diarize_cli:main"
 mlx2-radio = "mlx2.radio_cli:main"
 mlx2-top = "mlx2.top:main"
-mlx2-image-mcp = "mlx2.image_mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,4 +1,13 @@
-# Python3.12.13; MLX0.32.2.dev20260915+2a817ad94 is provisioned separately.
+# Python 3.12.13.
+#
+# MLX 0.32.4 is the exact serving substrate.  Its indexed-QSA and copied-
+# arithmetic Metal gates passed on the M5 Max; later 0.32.x releases remain
+# excluded until their source headers and exact kernels are requalified.  Keep
+# this exact pin inside the pyproject serve range.  Keep the mlx-vlm revision
+# equal to adapters/mlx_vlm_pin.py and pyproject.toml
+# (tests/test_qualified_pins_agree.py checks).
+mlx==0.32.4
+mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@67599f2e8ec31bf35cbb7b02794114f20844f0bb
 annotated-doc==0.0.5
 anyio==4.15.1
 certifi==2026.7.22
@@ -28,8 +37,8 @@ rich==15.0.0
 ruff==0.16.7
 safetensors==0.8.0
 shellingham==1.5.4
-tokenizers==0.22.2
+tokenizers==0.23.2
 tqdm==4.70.1
-transformers==5.12.1
+transformers==5.17.0
 typer==0.27.2
 typing_extensions==4.16.0

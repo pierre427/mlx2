@@ -466,7 +466,7 @@ class TestQSAIndexedReference(unittest.TestCase):
         header = Path(mx.__file__).resolve().parent / 'include' / 'mlx' / 'backend' / 'metal' / 'kernels' / 'sdpa_vector.h'
         self.assertTrue(header.is_file(), f'MLX wheel does not ship {header}')
         digest = hashlib.sha256(header.read_bytes()).hexdigest()
-        self.assertEqual(digest, indexed._SDPA_VECTOR_HEADER_SHA256)
+        self.assertEqual(digest, indexed._SDPA_VECTOR_HEADER_SHA256_BY_BUILD[str(mx.__version__)])
 
     @unittest.skipUnless(os.environ.get('MLX_QWEN4_QSA_INDEXED_TEST_METAL') == '1', 'set MLX_QWEN4_QSA_INDEXED_TEST_METAL=1 for the real Metal fixture')
     def test_real_capture_fixture_is_bit_exact_on_metal(self):
@@ -836,11 +836,12 @@ class TestQSAIndexedAdmission(unittest.TestCase):
         compact = _compact(1, 3)
         (q, k, v) = _arrays(1, 3)
         indexed.qsa_indexed_status(reset=True)
-        with self._current_build_allowlist(), self._header_digest(indexed._SDPA_VECTOR_HEADER_SHA256), self._no_escape_hatch():
+        expected_digest = indexed._SDPA_VECTOR_HEADER_SHA256_BY_BUILD[str(mx.__version__)]
+        with self._current_build_allowlist(), self._header_digest(expected_digest), self._no_escape_hatch():
             status = indexed.qsa_indexed_status()
             self.assertTrue(status['mlx_build_verified'])
             self.assertTrue(status['sdpa_header_verified'])
-            self.assertEqual(status['sdpa_header_sha256_prefix'], indexed._SDPA_VECTOR_HEADER_SHA256[:12])
+            self.assertEqual(status['sdpa_header_sha256_prefix'], expected_digest[:12])
             qwen4_exp._indexed_qsa_attention_or_gather(q, k, v, compact, scale=8 ** (-0.5), splits=4, tile_rows=1)
         counts = indexed.qsa_indexed_status()['counts']
         self.assertNotIn('mlx_build_unverified', counts)

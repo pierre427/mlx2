@@ -189,8 +189,9 @@ _SOURCE_GATED = _SOURCE.replace(
 
 # Served-graph gate (omlx #4122 follow-up; served_exp). Both gated epilogues
 # (this merge and qwen4_qsa_indexed's native pass 2) copy the eager
-# ``mx.sigmoid`` unary as ``metal::exp`` plus one patched bf16 edge; they run
-# only while that copy reproduces the served sigmoid for the output dtype.
+# ``mx.sigmoid`` unary plus one patched bf16 edge.  The source is compiled with
+# whichever supported exp spelling reproduces the served sigmoid for the
+# output dtype; unsupported dtypes keep the composed MLX gate.
 OUTPUT_GATE_PROBE_BODY = (
     "        const T gate_x = x;\n"
     "        const T gate_y = T(1) / (T(1) + metal::exp(metal::abs(gate_x)));\n"
@@ -214,7 +215,7 @@ def fused_gate_refusal(dtype) -> str | None:
     """Why the fused output-gate epilogue may not run for ``dtype``, or None
     (recorded in the status). Callers have already chosen a Metal path."""
     global _STATUS_GATE_REFUSAL, _STATUS_GATE_REFUSALS
-    refusal = OUTPUT_GATE_GATE.refusal(dtype)
+    refusal = OUTPUT_GATE_GATE.adaptation_refusal(dtype)
     if refusal is not None:
         with _STATUS_LOCK:
             _STATUS_GATE_REFUSAL = refusal
@@ -223,9 +224,17 @@ def fused_gate_refusal(dtype) -> str | None:
 
 
 @lru_cache(maxsize=None)
-def _fused_merge_kernel(gated: bool = False):
+def _fused_merge_kernel(gated: bool = False, gate_dtype=None):
+    source = _SOURCE_GATED if gated else _SOURCE
+    suffix = ""
+    if gated and gate_dtype is not None:
+        spelling = OUTPUT_GATE_GATE.spelling(gate_dtype)
+        if spelling is None:
+            raise RuntimeError("served eager sigmoid matches no kernel form")
+        source = OUTPUT_GATE_GATE.adapt(source, gate_dtype)
+        suffix = "_precise" if "precise" in spelling else "_fast"
     return mx.fast.metal_kernel(
-        name="qwen4_qsa_indexed_fused_merge_gate_v1"
+        name="qwen4_qsa_indexed_fused_merge_gate_v1" + suffix
         if gated
         else "qwen4_qsa_indexed_fused_merge_v1",
         input_names=["part_m", "part_l", "part_o", "output_gate"]
@@ -233,7 +242,7 @@ def _fused_merge_kernel(gated: bool = False):
         else ["part_m", "part_l", "part_o"],
         output_names=["out"],
         header=_HEADER,
-        source=_SOURCE_GATED if gated else _SOURCE,
+        source=source,
         ensure_row_contiguous=True,
     )
 
@@ -250,7 +259,7 @@ def _dispatch_candidate(m, l, o, *, output_dtype, threads: int, output_gate=None
                 f"QSA output gate must be {expected} with dtype {output_dtype}"
             )
         inputs.append(mx.contiguous(output_gate))
-    return _fused_merge_kernel(gated)(
+    return _fused_merge_kernel(gated, output_dtype if gated else None)(
         inputs=inputs,
         template=[
             ("O", o.dtype),

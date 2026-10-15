@@ -968,8 +968,8 @@ UP_MIX_SOURCE = r"""
 """
 
 # Served-graph gates (omlx #4122 follow-up; served_exp): each helper above
-# runs only while its spelling still reproduces its eager counterpart on this
-# build (bf16, the only admitted dtype).
+# compiles with the supported spelling that reproduces its eager counterpart
+# on this build (bf16, the only admitted dtype).
 SILU_GATE = ServedExpGate(
     "hc_silu",
     served_name="compiled nn.silu",
@@ -989,24 +989,45 @@ SIGMOID_GATE = ServedExpGate(
 
 def served_exp_refusal() -> str | None:
     """Why the HC kernels' SiLU or sigmoid may not run on this build, or None."""
-    return SILU_GATE.refusal(mx.bfloat16) or SIGMOID_GATE.refusal(mx.bfloat16)
+    return SILU_GATE.adaptation_refusal(
+        mx.bfloat16
+    ) or SIGMOID_GATE.adaptation_refusal(mx.bfloat16)
 
 
 _KERNELS: dict = {}
 
 
+def _served_header() -> tuple[str, str]:
+    """Return the HC header and a cache suffix for this MLX build."""
+    header = HEADER
+    spellings = []
+    for gate, helper_name in (
+        (SILU_GATE, "hcd_sigmoid_jit"),
+        (SIGMOID_GATE, "hcd_sigmoid_unary"),
+    ):
+        spelling = gate.spelling(mx.bfloat16)
+        if spelling is None:
+            raise RuntimeError(f"served {gate.served_name} matches no kernel form")
+        helper = metal_helper(header, helper_name)
+        header = header.replace(helper, gate.adapt(helper, mx.bfloat16))
+        spellings.append("precise" if "precise" in spelling else "fast")
+    return header, "_" + "_".join(spellings)
+
+
 def _kernel(name: str, inputs, outputs, source: str):
-    kernel = _KERNELS.get(name)
+    header, suffix = _served_header()
+    key = (name, suffix)
+    kernel = _KERNELS.get(key)
     if kernel is None:
         kernel = mx.fast.metal_kernel(
-            name=name,
+            name=name + suffix,
             input_names=inputs,
             output_names=outputs,
-            header=HEADER,
+            header=header,
             source=source,
             ensure_row_contiguous=True,
         )
-        _KERNELS[name] = kernel
+        _KERNELS[key] = kernel
     return kernel
 
 

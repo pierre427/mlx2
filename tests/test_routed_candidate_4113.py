@@ -193,17 +193,13 @@ def test_cpu_decline_is_counted_and_bit_equal_to_the_reference():
     assert sw.routed_candidate_fallback_reasons == {"Metal runtime unavailable": 1}
 
 
-def test_served_swiglu_refusal_blocks_the_candidate(monkeypatch):
-    refusal = "served compiled SwiGLU uses metal::precise::exp"
+def test_served_swiglu_alternate_form_is_admitted(monkeypatch):
     monkeypatch.setattr(RD, "runtime_supported", lambda: True)
     monkeypatch.setattr(RD.SWIGLU_GATE, "probe", lambda dtype: {"metal::exp": False, "metal::precise::exp": True})
     RD.SWIGLU_GATE.reset()
     try:
-        assert RD.candidate_runtime_refusal() == refusal
-        sw = _switch()
-        sw.routed_candidate_mode = "two_launch"
-        sw(_x(5), *_route(5), variant="stock")
-        assert sw.routed_candidate_last_fallback == refusal
+        assert RD.candidate_runtime_refusal() is None
+        assert "metal::precise::exp" in RD.SWIGLU_GATE.adapt(RD.SIGMOID)
     finally:
         RD.SWIGLU_GATE.reset()
 

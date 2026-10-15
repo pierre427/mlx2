@@ -10,7 +10,6 @@ import os
 import re
 
 import mlx.core as mx
-import mlx.nn as nn
 import numpy as np
 import pytest
 
@@ -235,15 +234,9 @@ def test_routed_decode_declines_and_counts(monkeypatch):
     monkeypatch.setattr(RD, "admit_split_routed_decode",
                         lambda *a: RD.RoutedDecodeAdmission(True, "eligible"))
     monkeypatch.setattr(RD, "runtime_supported", lambda: True)
-    monkeypatch.setattr(RD, "split_gate_up_swiglu", _never)
     _inject(monkeypatch, RD.SWIGLU_GATE, PRECISE_ONLY)
-    x = mx.zeros((1, 1, 1, 1, 32), dtype=mx.bfloat16)
-    inds = mx.zeros((1, 1, 10), dtype=mx.uint32)
-    assert QN._try_routed_decode(sw, x, inds, None, False) is None
-    reason = "served compiled SwiGLU uses metal::precise::exp"
-    assert sw.routed_decode_fallbacks == 1
-    assert sw.routed_decode_last_fallback == reason
-    assert sw.routed_decode_calls == 0
+    assert RD.served_swiglu_refusal() is None
+    assert "metal::precise::exp" in RD.SWIGLU_GATE.adapt(RD.SIGMOID)
 
 
 class _Block(dict):
@@ -269,13 +262,13 @@ def _switch_split():
 
 
 @pytest.mark.parametrize(
-    ("gate", "reason"),
+    "gate",
     [
-        ("SWIGLU_GATE", "served compiled SwiGLU uses metal::precise::exp"),
-        ("SHARED_GATE_GATE", "served eager sigmoid uses metal::exp"),
+        "SWIGLU_GATE",
+        "SHARED_GATE_GATE",
     ],
 )
-def test_shared_fold_declines(monkeypatch, gate, reason):
+def test_shared_fold_adapts_supported_spellings(monkeypatch, gate):
     block = _Block(_switch_split())
     monkeypatch.setattr(QN, "_COMPILE_GLUE", False)
     monkeypatch.setattr(RD, "runtime_supported", lambda: True)
@@ -288,12 +281,10 @@ def test_shared_fold_declines(monkeypatch, gate, reason):
     outcome = PRECISE_ONLY if gate == "SWIGLU_GATE" else {FAST: True, PRECISE: False}
     _inject(monkeypatch, getattr(RD, gate), outcome)
     x = mx.zeros((1, 1, 32), dtype=mx.bfloat16)
-    assert QN._shared_fold_refusal(block, x, None, None) == reason
-    if gate == "SHARED_GATE_GATE":
-        assert not QN._shared_fold_ok(block, x)
+    assert QN._shared_fold_refusal(block, x, None, None) is None
 
 
-def test_window_rows_decline(monkeypatch):
+def test_window_rows_accepts_alternate_swiglu_form(monkeypatch):
     block = _Block(_switch_split())
     monkeypatch.setattr(QN, "_COMPILE_GLUE", False)
     monkeypatch.setattr(QN, "_MOE_GATE_COMPILE", False)
@@ -304,20 +295,18 @@ def test_window_rows_decline(monkeypatch):
     monkeypatch.setattr(W, "admit_router_topk", lambda *a: None)
     _inject(monkeypatch, RD.SWIGLU_GATE, PRECISE_ONLY)
     x = mx.zeros((3, 1, 32), dtype=mx.bfloat16)
-    assert QN._moe_rows_refusal(block, x, 3) == "served compiled SwiGLU uses metal::precise::exp"
+    assert QN._moe_rows_refusal(block, x, 3) is None
 
 
 def test_routed_candidate_uses_the_routed_gate(monkeypatch):
     monkeypatch.setattr(RD, "runtime_supported", lambda: True)
     _inject(monkeypatch, RD.SWIGLU_GATE, PRECISE_ONLY)
-    assert RD.candidate_runtime_refusal() == "served compiled SwiGLU uses metal::precise::exp"
+    assert RD.candidate_runtime_refusal() is None
 
 
 @pytest.mark.parametrize(
     ("silu", "sigmoid", "reason"),
     [
-        (PRECISE_ONLY, {FAST: False, PRECISE: True}, "served compiled nn.silu uses metal::precise::exp"),
-        ({FAST: True, PRECISE: False}, {FAST: True, PRECISE: False}, "served eager sigmoid uses metal::exp"),
         ({FAST: True, PRECISE: False}, RuntimeError("x"), "served eager sigmoid matches no kernel form"),
     ],
 )
@@ -352,13 +341,16 @@ def _partials():
     return m, l, o, gate
 
 
-def test_qsa_fused_merge_declines_the_gate_epilogue(monkeypatch):
+def test_qsa_fused_merge_adapts_the_gate_epilogue(monkeypatch):
     m, l, o, gate = _partials()
     seen = []
 
     def fused(m, l, o, *, output_dtype, output_gate=None):
         seen.append(output_gate)
-        return merge.mlx_sequential_merge(m, l, o, output_dtype=output_dtype)
+        out = merge.mlx_sequential_merge(m, l, o, output_dtype=output_dtype)
+        if output_gate is not None:
+            out = merge.mlx_apply_output_gate(out, output_gate)
+        return out
 
     monkeypatch.setenv("MLX_QWEN4_QSA_INDEXED_FUSED_MERGE", "1")
     monkeypatch.setenv("MLX_QWEN4_QSA_INDEXED_FUSED_GATE", "1")
@@ -370,19 +362,18 @@ def test_qsa_fused_merge_declines_the_gate_epilogue(monkeypatch):
     want = merge.mlx_apply_output_gate(
         merge.mlx_sequential_merge(m, l, o, output_dtype=mx.bfloat16), gate
     )
-    assert seen == [None]
+    assert seen == [gate]
     assert mx.array_equal(got, want).item()
     status = merge.fused_merge_status(reset=True)
-    assert status["gate_refusals"] == 1
-    assert status["gate_last_refusal"] == "served eager sigmoid uses metal::precise::exp"
+    assert status["gate_refusals"] == 0
 
 
-def test_qsa_native_pass2_declines_the_gate_epilogue(monkeypatch):
+def test_qsa_native_pass2_adapts_the_gate_epilogue(monkeypatch):
     m, l, o, gate = _partials()
     gated_flags = []
     sentinel = mx.ones((1, 1, 2, 32), dtype=mx.bfloat16)
 
-    def combine_kernel(gated=False):
+    def combine_kernel(gated=False, gate_dtype=None):
         gated_flags.append(gated)
         return lambda **kw: [sentinel]
 
@@ -395,10 +386,28 @@ def test_qsa_native_pass2_declines_the_gate_epilogue(monkeypatch):
         m, l, o, counter, output_dtype=mx.bfloat16, output_gate=gate
     )
     assert returned is counter
-    assert gated_flags == [False]
-    assert mx.array_equal(got, merge.mlx_apply_output_gate(sentinel, gate)).item()
+    assert gated_flags == [True]
+    assert got is sentinel
     status = merge.fused_merge_status(reset=True)
-    assert status["gate_refusals"] == 1 and not status["gate_engaged"]
+    assert status["gate_refusals"] == 0 and status["gate_engaged"]
+
+
+def test_qsa_native_builder_adapts_the_gate_source(monkeypatch):
+    built = {}
+
+    def metal_kernel(**kwargs):
+        built.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(indexed.mx.fast, "metal_kernel", metal_kernel)
+    _inject(monkeypatch, indexed.OUTPUT_GATE_GATE, PRECISE_ONLY)
+    indexed._combine_kernel.cache_clear()
+    try:
+        indexed._combine_kernel(True, mx.bfloat16)
+    finally:
+        indexed._combine_kernel.cache_clear()
+    assert built["name"].endswith("_precise")
+    assert "metal::precise::exp" in built["source"]
 
 
 def test_qsa_gate_accepted_keeps_the_gated_kernel(monkeypatch):
@@ -406,7 +415,7 @@ def test_qsa_gate_accepted_keeps_the_gated_kernel(monkeypatch):
     gated_flags = []
     sentinel = mx.ones((1, 1, 2, 32), dtype=mx.bfloat16)
 
-    def combine_kernel(gated=False):
+    def combine_kernel(gated=False, gate_dtype=None):
         gated_flags.append(gated)
         return lambda **kw: [sentinel]
 
@@ -427,20 +436,22 @@ def test_qsa_gate_accepted_keeps_the_gated_kernel(monkeypatch):
     reason="set MLX2_RUN_METAL_TESTS=1 (under the GPU lock) for the real-Metal probes",
 )
 @pytest.mark.parametrize(
-    ("gate", "dtype"),
+    ("gate", "dtype", "adaptable"),
     [
-        (RD.SWIGLU_GATE, mx.bfloat16),
-        (RD.SHARED_GATE_GATE, mx.bfloat16),
-        (HCD.SILU_GATE, mx.bfloat16),
-        (HCD.SIGMOID_GATE, mx.bfloat16),
-        (merge.OUTPUT_GATE_GATE, mx.bfloat16),
-        (merge.OUTPUT_GATE_GATE, mx.float16),
-        (merge.OUTPUT_GATE_GATE, mx.float32),
+        (RD.SWIGLU_GATE, mx.bfloat16, True),
+        (RD.SHARED_GATE_GATE, mx.bfloat16, True),
+        (HCD.SILU_GATE, mx.bfloat16, True),
+        (HCD.SIGMOID_GATE, mx.bfloat16, True),
+        (merge.OUTPUT_GATE_GATE, mx.bfloat16, True),
+        (merge.OUTPUT_GATE_GATE, mx.float16, False),
+        (merge.OUTPUT_GATE_GATE, mx.float32, True),
     ],
     ids=lambda v: getattr(v, "name", str(v)),
 )
-def test_metal_probe_accepts_the_kernel_form_on_the_pinned_build(gate, dtype):
+def test_metal_probe_finds_an_adaptable_form_or_fails_closed(gate, dtype, adaptable):
     with mx.stream(mx.gpu):
-        matches = gate.probe(dtype)
-    print(f"{gate.name} {dtype}: {matches}")
-    assert matches[gate.kernel_exp], matches
+        spelling = gate.spelling(dtype)
+        refusal = gate.adaptation_refusal(dtype)
+    print(f"{gate.name} {dtype}: {spelling}")
+    assert (spelling is not None) is adaptable, spelling
+    assert (refusal is None) is adaptable

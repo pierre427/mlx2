@@ -681,7 +681,7 @@ def test_shared_fold_serves_an_8bit_shared_expert(monkeypatch, fold_reference):
     assert block.shared_fold_calls == 1 and block.shared_fold_fallbacks == 0
 
 
-def test_shared_kernel_sources_per_format():
+def test_shared_kernel_sources_per_format(served_exp_forms_match):
     # 4/4 is the original source; other formats re-point exactly the shared
     # rows' qmv_rows call at their own namespace.
     assert RD.shared_gate_up_source(RD.SHARED_GATE_UP_SOURCE, 4) is RD.SHARED_GATE_UP_SOURCE

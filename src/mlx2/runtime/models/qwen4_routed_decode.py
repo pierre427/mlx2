@@ -824,7 +824,7 @@ def _header(fast: bool) -> str:
         QMV_HEADER.replace("__BITS__", str(BITS))
         .replace("__GS__", str(GROUP_SIZE))
         .replace("__FAST__", "1" if fast else "0")
-        + SIGMOID
+        + SWIGLU_GATE.adapt(SIGMOID, mx.bfloat16)
     )
 
 
@@ -834,8 +834,12 @@ _KERNELS = None
 def _kernels():
     global _KERNELS
     if _KERNELS is None:
+        spelling = SWIGLU_GATE.spelling(mx.bfloat16)
+        if spelling is None:
+            raise RuntimeError("served compiled SwiGLU matches no kernel form")
+        suffix = "_precise" if "precise" in spelling else "_fast"
         gate_up = mx.fast.metal_kernel(
-            name="mlx2_qwen4_moe_gate_up_swiglu_decode",
+            name="mlx2_qwen4_moe_gate_up_swiglu_decode" + suffix,
             input_names=["x", "w", "scales", "biases", "rhs"],
             output_names=["y"],
             header=_header(fast=True),
@@ -849,7 +853,7 @@ def _kernels():
             source=DOWN_SOURCE,
         )
         split_gate_up = mx.fast.metal_kernel(
-            name="mlx2_qwen4_moe_split_gate_up_swiglu_decode",
+            name="mlx2_qwen4_moe_split_gate_up_swiglu_decode" + suffix,
             input_names=["x", "wg", "sg", "bg", "wu", "su", "bu", "rhs"],
             output_names=["y"],
             header=_header(fast=True),
@@ -1210,7 +1214,8 @@ def shared_gate_up_source(src: str, gate_up_bits: int) -> str:
 
 
 def shared_gate_up_header(gate_up_bits: int) -> str:
-    header = SHARED_COMMON + _format_header("q4f", 4, True)
+    common = SHARED_COMMON.replace(SIGMOID, SWIGLU_GATE.adapt(SIGMOID, mx.bfloat16))
+    header = common + _format_header("q4f", 4, True)
     if gate_up_bits != BITS:
         header += _format_header(f"q{gate_up_bits}f", gate_up_bits, True)
     return header
@@ -1239,10 +1244,16 @@ _SHARED_KERNELS: dict = {}
 
 
 def _shared_kernels(gate_up_bits: int = BITS, down_bits: int = BITS):
-    key = (gate_up_bits, down_bits)
+    swiglu_spelling = SWIGLU_GATE.spelling(mx.bfloat16)
+    gate_spelling = SHARED_GATE_GATE.spelling(mx.bfloat16)
+    if swiglu_spelling is None or gate_spelling is None:
+        raise RuntimeError("served shared-expert activation matches no kernel form")
+    key = (gate_up_bits, down_bits, swiglu_spelling, gate_spelling)
     kernels = _SHARED_KERNELS.get(key)
     if kernels is None:
         suffix = shared_kernel_suffix(gate_up_bits, down_bits)
+        suffix += "_sp" if "precise" in swiglu_spelling else "_sf"
+        suffix += "_gp" if "precise" in gate_spelling else "_gf"
         gate_up = mx.fast.metal_kernel(
             name="mlx2_qwen4_moe_gate_up_shared_decode" + suffix,
             input_names=["x", "wg", "sg", "bg", "wu", "su", "bu", "rhs",
@@ -1256,7 +1267,9 @@ def _shared_kernels(gate_up_bits: int = BITS, down_bits: int = BITS):
             input_names=["hidden", "w", "scales", "biases", "rhs", "scores", "sdw", "sds", "sdb", "gate"],
             output_names=["out"],
             header=shared_down_header(down_bits),
-            source=shared_down_source(SHARED_DOWN_SOURCE, down_bits),
+            source=SHARED_GATE_GATE.adapt(
+                shared_down_source(SHARED_DOWN_SOURCE, down_bits), mx.bfloat16
+            ),
         )
         kernels = _SHARED_KERNELS[key] = (gate_up, down)
     return kernels
@@ -1589,7 +1602,10 @@ _CANDIDATE_KERNELS: dict = {}
 
 
 def _candidate_kernel(kind: str, fast: bool):
-    key = (kind, fast)
+    spelling = SWIGLU_GATE.spelling(mx.bfloat16)
+    if spelling is None:
+        raise RuntimeError("served compiled SwiGLU matches no kernel form")
+    key = (kind, fast, spelling)
     if key not in _CANDIDATE_KERNELS:
         if kind == "gate_up":
             inputs = ["x", "wg", "sg", "bg", "wu", "su", "bu", "rhs"]
@@ -1598,7 +1614,10 @@ def _candidate_kernel(kind: str, fast: bool):
             inputs = ["x", "w", "scales", "biases", "rhs", "scores"]
             source = CANDIDATE_DOWN_SOURCE
         _CANDIDATE_KERNELS[key] = mx.fast.metal_kernel(
-            name=f"mlx2_routed_candidate_{kind}_{'fast' if fast else 'qmv'}",
+            name=(
+                f"mlx2_routed_candidate_{kind}_{'fast' if fast else 'qmv'}_"
+                + ("precise" if "precise" in spelling else "fast")
+            ),
             input_names=inputs,
             output_names=["y"],
             header=_header(fast=fast),
@@ -1658,8 +1677,9 @@ def candidate_down_combine(h, indices, scores, down, *, views=False):
 # here (gate_up, split, shared fold, window rows, candidate) copies the
 # compiled ``swiglu`` with SIGMOID's ``metal::exp``; the shared fold's gate
 # copies the eager ``mx.sigmoid`` unary in ``metal::precise::exp``. Each runs
-# only while its spelling reproduces the served op on this build (bf16, the
-# only admitted dtype). Callers check ``runtime_supported()`` first.
+# compiles with whichever supported spelling reproduces the served operation
+# on this build (bf16, the only admitted dtype). Callers check
+# ``runtime_supported()`` first.
 SWIGLU_PROBE_BODY = "    T t = x * omlx_mlx_sigmoid<T>(x);\n    y = t * T(1);"
 SHARED_GATE_PROBE_BODY = (
     "    const float g = float(x);\n"
@@ -1693,19 +1713,19 @@ SHARED_GATE_GATE = ServedExpGate(
 
 def served_swiglu_refusal() -> str | None:
     """Why the SwiGLU epilogues may not run under this MLX build, or None."""
-    return SWIGLU_GATE.refusal(mx.bfloat16)
+    return SWIGLU_GATE.adaptation_refusal(mx.bfloat16)
 
 
 def served_shared_gate_refusal() -> str | None:
     """Why the folded shared-expert gate may not run here, or None."""
-    return SHARED_GATE_GATE.refusal(mx.bfloat16)
+    return SHARED_GATE_GATE.adaptation_refusal(mx.bfloat16)
 
 
 def candidate_runtime_refusal() -> str | None:
     """Why the candidate may not run in this process, or None.
 
-    The kernels spell sigmoid with ``metal::exp``; they run only while the
-    served SwiGLU is probed to use that form on this build.
+    The kernels compile sigmoid with the probed form that reproduces served
+    SwiGLU on this build.
     """
     if not runtime_supported():
         return "Metal runtime unavailable"

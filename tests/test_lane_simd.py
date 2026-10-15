@@ -26,9 +26,11 @@ def _quantized(k, n, bits, gs, seed=0, dtype=mx.bfloat16):
 @pytest.fixture(autouse=True)
 def _clean_simd_state():
     simd.mma_one_row.clear()
+    simd.mma_no_fragments.clear()
     simd.bits_fallback.clear()
     yield
     simd.mma_one_row.clear()
+    simd.mma_no_fragments.clear()
     simd.bits_fallback.clear()
     lm.force_backend(None)
 
@@ -140,7 +142,7 @@ def test_install_under_the_simd_law(monkeypatch):
     weights = {name: model[name]["weight"] for name in ("q_proj", "k_proj", "v_proj")}
     receipt = lane.install(model, min_rows=1)
     assert receipt["backend"] == "simd"
-    assert receipt["law_id"] == "lane-simd-v1+grouped"
+    assert receipt["law_id"] == "lane-simd-v2+grouped"
     assert receipt["covered"] == {"affine-q4-g64": 4}
     assert receipt["refused"] == {"unquantized weights need the M5 tensor units": 1}
     group = inst._group(model.q_proj)
@@ -153,7 +155,7 @@ def test_install_under_the_simd_law(monkeypatch):
     # (128) and o_proj (256).
     assert sorted(n for n, _gs, _bits in checked) == [32, 64, 128, 256]
     assert receipt["simd_twins"] == {"shapes": 4, "rerouted": 0}
-    assert inst.law_id(4, "simd") == "lane-simd-v1+stock-below-4"
+    assert inst.law_id(4, "simd") == "lane-simd-v2+stock-below-4"
     assert inst.law_id(1, "mpp") == lane.LAW_ID
     assert lane.uninstall(model) == 4
 
@@ -219,7 +221,7 @@ def test_a_4bit_one_row_reroute_is_reported_without_changing_the_law(monkeypatch
     receipt = lane.install(model, min_rows=1, groups=())
     # q (64), k and v (32, one shape) and o (256): three shapes, all 4-bit.
     assert receipt["simd_twins"]["rerouted"] == 3 and "affine" not in receipt["simd_twins"]
-    assert receipt["law_id"] == "lane-simd-v1"
+    assert receipt["law_id"] == "lane-simd-v2"
     lane.uninstall(model)
 
 

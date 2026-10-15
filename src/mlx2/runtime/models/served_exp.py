@@ -13,12 +13,10 @@ sigmoid source to ``metal::precise::exp``; the prebuilt unary library is built
 with -fno-fast-math), so a different build can silently break bit-exactness.
 
 A :class:`ServedExpGate` compiles the kernel's own sigmoid expression once per
-process and dtype in both spellings, compares each with the served op bit for
-bit over every 16-bit encoding (float32: a widened-bf16 plus random-bits
-sample; NaN matches NaN), and refuses the kernel
-unless its own spelling reproduced the served op. The kernels are never
-rewritten to the other spelling; that would need its own GPU qualification.
-A failing probe only turns a fused path off.
+process and dtype in both spellings and compares each with the served op bit
+for bit over every 16-bit encoding (float32: a widened-bf16 plus random-bits
+sample; NaN matches NaN).  Callers may then compile their source with the
+matching spelling.  A failing probe still turns the optional fused path off.
 """
 
 from __future__ import annotations
@@ -111,7 +109,7 @@ def metal_helper(text: str, name: str) -> str:
 
 
 class ServedExpGate:
-    """Refuses a fused kernel whose sigmoid spelling the served op does not use.
+    """Select the sigmoid spelling that reproduces a served operation.
 
     ``header``/``body`` are the kernel's own Metal text (``body`` reads ``x``
     of type ``T`` and assigns ``y``); ``served`` is the op the kernel stands in
@@ -200,13 +198,28 @@ class ServedExpGate:
             return self._spellings[key]
 
     def refusal(self, dtype=mx.bfloat16) -> Optional[str]:
-        """Why the kernel may not stand in for the served op, or None."""
+        """Why the kernel's original form may not stand in for the served op."""
         spelling = self.spelling(dtype)
         if spelling == self.kernel_exp:
             return None
         if spelling is None:
             return f"served {self.served_name} matches no kernel form"
         return f"served {self.served_name} uses {spelling}"
+
+    def adaptation_refusal(self, dtype=mx.bfloat16) -> Optional[str]:
+        """Why no supported source form can stand in for the served op."""
+        if self.spelling(dtype) is None:
+            return f"served {self.served_name} matches no kernel form"
+        return None
+
+    def adapt(self, text: str, dtype=mx.bfloat16) -> str:
+        """Rewrite this gate's expression to the probed served spelling."""
+        spelling = self.spelling(dtype)
+        if spelling is None:
+            raise RuntimeError(f"served {self.served_name} matches no kernel form")
+        if spelling == self.kernel_exp:
+            return text
+        return respell(text, self.kernel_exp, spelling)
 
     def reset(self) -> None:
         with self._lock:

@@ -15,7 +15,8 @@ row count:
   same fp32 FMA chain in both, so their bits agree.  ``check()`` proves that
   per weight shape on this GPU at install, and a shape that differs sends its
   1-4-row calls to the matrix kernel instead.  2-8-row calls in groups of 64
-  read pre-scaled input fragments (same bits, less input work).
+  read prepared input fragments (same bits, less input work). Integer nibble
+  extraction keeps activations unscaled, including at tiny exponents.
 * 5/6/8-bit, groups of 64, bf16 scales: ``simd_bits``.  The same chain with
   integer codes; a scalar twin for one row, checked the same way (a shape
   that differs takes ``affine_rows``).
@@ -29,8 +30,9 @@ and unquantized weights raise ``LaneUnsupported`` and stay on stock kernels.
 Mined from TensorFold ``9cd52ab`` (MIT License, Copyright (c) 2026 TensorFold
 contributors): ``kernels/qwen/dense/v1/simd_qmm.py``, ``simd_qmm_bits.py``,
 ``affine_rows.py``, ``row_matmul.py`` (the backend dispatch) and
-``kernels/threads.py``.  The Metal sources are unchanged; the fused input
-prologues and dependency inputs are dropped.  Full notice in the repository's
+``kernels/threads.py``. The q4 sources now decode integer nibbles instead of
+pre-scaling activations (lane-simd-v2); the fused input prologues and dependency
+inputs are dropped. Full notice in the repository's
 NOTICE file; provenance in provenance/lane-simd.json.
 """
 
@@ -58,6 +60,7 @@ AFFINE_SG = 8        # simdgroups a threadgroup: 256 threads, within every M1/M2
 
 # Per-GPU outcomes of the install-time twin checks, keyed by weight shape.
 mma_one_row: set[tuple[int, int, int]] = set()          # (n, k, group): 4-bit 1-4-row calls use the MMA kernel
+mma_no_fragments: set[tuple[int, int, int]] = set()     # prepared inputs did not match the direct MMA kernel
 bits_fallback: set[tuple[int, int, int]] = set()        # (n, k, bits): 5/6/8-bit shapes that take affine_rows
 
 
@@ -140,8 +143,6 @@ inline float sum8(uint4 v, float one) {
   for (int e = 1; e < 8; e++) t = fma(bf8(v, e), one, t);
   return t;
 }
-// 2^-4s
-inline float pre(int s) { return as_type<float>(uint(127 - 4 * s) << 23); }
 """
 
 _LOAD8 = "(((const device uint4*)X)[size_t(r) * (K / 8) + (j)])"
@@ -149,7 +150,7 @@ _LOAD8 = "(((const device uint4*)X)[size_t(r) * (K / 8) + (j)])"
 _SCALAR = r"""
   // RS rows (1 to 4). Lane (chunk c = lane % S, slot j = lane / S) runs chunk c of NR outputs n0 + j + (32 / S) u,
   // a whole group (WPG words) of each in registers, once a row; the threadgroup stages XB groups of each row's
-  // inputs pre-scaled in chain order. A row's chain is the same at any RS.
+  // inputs in chain order. A row's chain is the same at any RS.
   constexpr int WPG = GS / 8, NS = 8 / WPG;     // words a group; nibble stride of an MMA step
   constexpr int XP = GS == 64 ? 76 : 44;        // floats a staged group: GS inputs, WPG sums, pad (bank spread)
   threadgroup float xs[RS * XB * XP];
@@ -186,7 +187,7 @@ _SCALAR = r"""
       const uint4 v = LOAD8(r, WPG * (b0 + gl) + j);
       threadgroup float* xr = xs + r * (XB * XP) + gl * XP;
       PRAGMA_UNROLL
-      for (int e = 0; e < 8; e++) xr[8 * (e / NS) + NS * j + e % NS] = bf8(v, e) * pre(e);
+      for (int e = 0; e < 8; e++) xr[8 * (e / NS) + NS * j + e % NS] = bf8(v, e);
       xr[GS + j] = sum8(v, one);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -226,7 +227,7 @@ _SCALAR = r"""
         for (int u = 0; u < NR; u++)
           PRAGMA_UNROLL
           for (int i = 0; i < 8; i++) {
-            const float q = float(wv[u][i / NS / 4][(i / NS) % 4] & (0xFu << (4 * (NS * s + i % NS))));
+            const float q = float((wv[u][i / NS / 4][(i / NS) % 4] >> (4 * (NS * s + i % NS))) & 0xFu);
             PRAGMA_UNROLL
             for (int r = 0; r < RS; r++) P[u][r] = fma(xq[r][i], q, P[u][r]);
           }
@@ -303,19 +304,17 @@ _MMA = r"""
       PRAGMA_UNROLL
       for (int s = 0; s < WPG; s++) {
         const int e = NS * s + fm % NS;          // this lane's input of the step (its MMA-k is fm)
-        const float ps = pre(e);
-        const uint mask = 0xFu << (4 * NS * s), mask1 = 0xFu << (4 * (NS * s + NS - 1));
         simdgroup_matrix<float, 8, 8> bm[RT];
         PRAGMA_UNROLL
         for (int rt = 0; rt < RT; rt++) {
-          bm[rt].thread_elements()[0] = bf8(xa[rt], e) * ps;
-          bm[rt].thread_elements()[1] = bf8(xb[rt], e) * ps;
+          bm[rt].thread_elements()[0] = bf8(xa[rt], e);
+          bm[rt].thread_elements()[1] = bf8(xb[rt], e);
         }
         PRAGMA_UNROLL
         for (int t = 0; t < NT; t++) {
           simdgroup_matrix<float, 8, 8> am;
-          am.thread_elements()[0] = float(wv[t].x & mask);
-          am.thread_elements()[1] = float(wv[t].y & mask1);
+          am.thread_elements()[0] = float((wv[t].x >> (4 * NS * s)) & 0xFu);
+          am.thread_elements()[1] = float((wv[t].y >> (4 * (NS * s + NS - 1))) & 0xFu);
           PRAGMA_UNROLL
           for (int rt = 0; rt < RT; rt++) simdgroup_multiply_accumulate(P[rt][t], am, bm[rt], P[rt][t]);
         }
@@ -358,8 +357,8 @@ _MMA = r"""
 """
 
 _PREP = r"""
-  // one simdgroup a (row tile, group): writes the MMA kernel's input fragments, pre-scaled
-  // (XF[tile][g][s][lane] = x[8 tile + fn + 0 / 1][64 g + 8 fm + s] * 2^-4s, rows past R copy row R - 1), and each
+  // one simdgroup a (row tile, group): writes the MMA kernel's unscaled input fragments
+  // (XF[tile][g][s][lane] = x[8 tile + fn + 0 / 1][64 g + 8 fm + s], rows past R copy row R - 1), and each
   // row's x-sum of the group by the kernels' tree (XS[r][g])
   const uint lane = thread_index_in_simdgroup;
   const int unit = int(threadgroup_position_in_grid.x) * 4 + int(simdgroup_index_in_threadgroup);
@@ -376,7 +375,7 @@ _PREP = r"""
   const uint4 xa = LOAD8(r0, 8 * g + fm), xb = LOAD8(r1, 8 * g + fm);
   device float2* xf = (device float2*)XF + (size_t(tile) * G + g) * 256 + lane;
   PRAGMA_UNROLL
-  for (int s = 0; s < 8; s++) xf[32 * s] = float2(bf8(xa, s) * pre(s), bf8(xb, s) * pre(s));
+  for (int s = 0; s < 8; s++) xf[32 * s] = float2(bf8(xa, s), bf8(xb, s));
   float v = sum8(xa, one), u = sum8(xb, one);
   v = fma(simd_shuffle_xor(v, ushort(2)), one, v); u = fma(simd_shuffle_xor(u, ushort(2)), one, u);
   v = fma(simd_shuffle_xor(v, ushort(4)), one, v); u = fma(simd_shuffle_xor(u, ushort(4)), one, u);
@@ -389,7 +388,7 @@ _PREP = r"""
 
 
 def _fragment_source(mma: str) -> str:
-    """The MMA kernel reading pre-scaled fragments and input sums (the same values and bits)."""
+    """The MMA kernel reading prepared fragments and input sums (the same values and bits)."""
     x_block = mma[mma.index("      uint4 xa[RT], xb[RT];"):mma.index("      simdgroup_matrix<float, 8, 8> P[RT][NT];")]
     out = mma.replace("  const int R = X_shape[0];", "  const int R = XS_shape[0];\n  const int T8 = (R + 7) / 8;\n"
                       "  const device float2* XF2 = (const device float2*)XF;")
@@ -397,8 +396,8 @@ def _fragment_source(mma: str) -> str:
       PRAGMA_UNROLL
       for (int rt = 0; rt < RT; rt++) { xs0[rt] = XS[size_t(xr0[rt]) * G + g]; xs1[rt] = XS[size_t(xr1[rt]) * G + g]; }
 """)
-    old_bm = """          bm[rt].thread_elements()[0] = bf8(xa[rt], e) * ps;
-          bm[rt].thread_elements()[1] = bf8(xb[rt], e) * ps;"""
+    old_bm = """          bm[rt].thread_elements()[0] = bf8(xa[rt], e);
+          bm[rt].thread_elements()[1] = bf8(xb[rt], e);"""
     if old_bm not in out:
         raise AssertionError("simd fragment kernel anchor changed")
     out = out.replace(old_bm, """          const float2 f = XF2[(size_t(min(rb / 8 + rt, T8 - 1)) * G + g) * 256 + 32 * s + lane];
@@ -902,7 +901,8 @@ def qmm(x2: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, grou
     family = path(bits, group_size, n, k, scales.dtype, biases.dtype)
     x2 = mx.contiguous(x2)
     if family == "simd4":
-        if kind is None and 2 <= rows <= FRAGMENT_ROWS and group_size == GROUP:
+        if (kind is None and 2 <= rows <= FRAGMENT_ROWS and group_size == GROUP
+                and (n, k, group_size) not in mma_no_fragments):
             # Same bits as the matrix kernel (and, checked, the scalar twin).
             xf, xs = _fragments(x2)
             return _run("mmaf", rows, n, k, group_size, bits, [xf, xs, weight, scales, biases, _one()])
@@ -926,10 +926,11 @@ def qmm(x2: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, grou
 
 def check(weight: mx.array, scales: mx.array, biases: mx.array, group_size: int, bits: int,
           *, seed: int = 0) -> bool:
-    """The scalar twin's 1-4-row calls against the matrix kernel's rows, bit for bit, on this GPU.
+    """Check scalar and selected fragment calls against the direct matrix kernel.
 
     Records the outcome: a 4-bit shape that differs sends its 1-4-row calls to
     the matrix kernel; a 5/6/8-bit shape that differs takes ``affine_rows``.
+    A differing prepared-fragment path is disabled for that weight shape.
     """
     n = int(weight.shape[0])
     k = int(weight.shape[1]) * 32 // bits
@@ -948,6 +949,15 @@ def check(weight: mx.array, scales: mx.array, biases: mx.array, group_size: int,
     if not same:
         (mma_one_row.add((n, k, group_size)) if family == "simd4"
          else bits_fallback.add((n, k, bits)))
+    if family == "simd4" and group_size == GROUP:
+        # This is the selected route at widths 2..8, so scalar-vs-MMA alone
+        # cannot establish its parity. Check every partial fragment tile.
+        fragments_same = all(bool(mx.array_equal(
+            qmm(x[:m], weight, scales, biases, group_size, bits), full[:m]).item())
+            for m in range(2, FRAGMENT_ROWS + 1))
+        if not fragments_same:
+            mma_no_fragments.add((n, k, group_size))
+        same = same and fragments_same
     return same
 
 
@@ -960,7 +970,8 @@ def rerouted(n: int, k: int, group_size: int, bits: int) -> str | None:
     """
     if (n, k, bits) in bits_fallback:
         return "affine"
-    if bits == 4 and (n, k, group_size) in mma_one_row:
+    if bits == 4 and ((n, k, group_size) in mma_one_row
+                      or (n, k, group_size) in mma_no_fragments):
         return "mma"
     return None
 

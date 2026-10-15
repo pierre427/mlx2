@@ -1,0 +1,60 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "MLX 0.32.4 serving dependency and requalification boundary",
+  "recorded_at": "2026-10-15",
+  "state": "selected_serving_pin_kernel_boundary_verified_routes_require_requalification",
+  "source_repository": "https://github.com/ml-explore/mlx",
+  "source_revision": "v0.32.4",
+  "source_release": "https://github.com/ml-explore/mlx/releases/tag/v0.32.4",
+  "license": "MIT",
+  "source_changes": [
+    {
+      "pull_request": "https://github.com/ml-explore/mlx/pull/4516",
+      "scope": "fast qmv for output dimensions not divisible by eight and affine precision correction"
+    },
+    {
+      "pull_request": "https://github.com/ml-explore/mlx/pull/4640",
+      "scope": "thin-N GEMM dispatch"
+    },
+    {
+      "pull_request": "https://github.com/ml-explore/mlx/pull/4641",
+      "scope": "fp32 split-K quantized-matmul partials"
+    },
+    {
+      "pull_request": "https://github.com/ml-explore/mlx/pull/4654",
+      "scope": "thin-M GEMM dispatch"
+    },
+    {
+      "pull_request": "https://github.com/ml-explore/mlx/pull/4673",
+      "scope": "batched qvm leading-dimension correctness"
+    },
+    {
+      "pull_request": "https://github.com/ml-explore/mlx/pull/4689",
+      "scope": "fast-synchronization fence deadlock fix; production mlx2 does not enable MLX_METAL_FAST_SYNCH"
+    }
+  ],
+  "mlx2_paths": [
+    "src/mlx2/runtime/mlx_build.py",
+    "src/mlx2/runtime/models/served_exp.py",
+    "src/mlx2/runtime/models/qwen4_fused_gdn.py",
+    "src/mlx2/runtime/models/qwen4_hc_decode.py",
+    "src/mlx2/runtime/models/qwen4_qsa_indexed.py",
+    "src/mlx2/runtime/models/qwen4_qsa_indexed_merge.py",
+    "src/mlx2/runtime/models/qwen4_routed_decode.py",
+    "requirements-qualified.txt",
+    "pyproject.toml",
+    "tests/test_qwen4_qsa_indexed.py",
+    "tests/test_served_exp_gates.py",
+    "docs/SERVING.md"
+  ],
+  "validation": {
+    "static": "Reviewed sdpa_vector.h sha256 32146cdd4b9982723ee696da1ad8d146682d84d2ee40098a4063a25b8a1ec322; the exact 0.32.4 wheel is now the serving pin and the serve extra excludes later 0.32.x builds.",
+    "cpu": "Focused pin, source-adaptation, QSA, GDN, routed-MoE, hyperconnection and dependency-contract suites passed in both the prior environment and an isolated exact-0.32.4 environment; pip check passed.",
+    "metal": "M5 Max GPU-lock run passed 628/628 checks on exact mlx 0.32.4. The five initially refusing GDN-state, routed-MoE and hyperconnection cases pass after compiling copied helpers with the exp spelling that reproduces the served MLX operation. Indexed QSA and its output-gate probes pass; float16 QSA output gating matches no supported form and explicitly retains the composed fail-closed fallback.",
+    "kernel_boundary_verified": true,
+    "selected": true,
+    "existing_route_receipts_rebound": false,
+    "qualified": false,
+    "performance_qualified": false
+  }
+}

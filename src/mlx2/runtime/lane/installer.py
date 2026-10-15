@@ -42,7 +42,7 @@ from .matmul import (
 LAW_ID = "lane-matmul-v1"
 # One numerical law per backend: the M5 tensor-unit kernels and the M1-M4
 # simdgroup kernels compute different bits for the same row.
-LAW_IDS = {"mpp": LAW_ID, "simd": "lane-simd-v1"}
+LAW_IDS = {"mpp": LAW_ID, "simd": "lane-simd-v2"}
 
 
 # Lane state lives on each module (outside its parameter tree), never in

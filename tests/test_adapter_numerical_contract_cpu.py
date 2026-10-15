@@ -135,7 +135,16 @@ def test_selected_law_sidecar_and_source_ranking_follow_execution_pin():
             "ranking_registry"
         ]
         assert ranking["target_revision"] == adapter._external_target_revision
-        assert ranking["model_counts"] and ranking["session_counts"]
+        assert ranking["session_counts"]
+        assert "model_counts" not in ranking and "global_counts" not in ranking
+        pool = adapter.draft_model.proposal_pool
+        internal = pool.ranking_registry.receipt(
+            pool.session, ranking["session_scope_hash"]
+        )
+        assert internal["target_revision"] == ranking["target_revision"]
+        assert internal["model_key"] == ranking["model_key"]
+        assert internal["model_counts"]
+        assert internal["session_counts"] == ranking["session_counts"]
     finally:
         batch.close()
 

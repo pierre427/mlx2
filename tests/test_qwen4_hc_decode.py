@@ -142,7 +142,9 @@ def test_admission_refuses_other_layouts(kwargs, needle):
         ({"bits": 4, "inject_bits": 8}, "b8"),
     ],
 )
-def test_admission_accepts_8bit_and_mixed_formats(kwargs, inject):
+def test_admission_accepts_8bit_and_mixed_formats(
+    kwargs, inject, served_exp_forms_match
+):
     m = _module(hidden=2560, lowrank=320, **kwargs)
     assert HCD.static_admission(m) is None
     plan = HCD._build_plan(m, 0)

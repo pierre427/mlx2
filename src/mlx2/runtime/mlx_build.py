@@ -20,6 +20,13 @@ admitting a new build here, rerun the header-digest test, the
 ``*_is_bit_exact_on_metal`` fixtures and the row-exact references, and check
 the custom-kernel ABI (oMLX #4311: nanobind 2.15 builds reject ``mx.array``).
 
+Upstream 0.32.4 was admitted on 2026-10-15 after its changed
+``sdpa_vector.h`` was reviewed, indexed QSA passed its focused numeric
+fixtures, and the copied-arithmetic GDN, routed-MoE and hyperconnection kernels
+were made source-spelling aware and passed their Metal exactness gates.  The
+release adds thin-M/thin-N GEMM and wider qmv routes, changes split-K partials
+to fp32, and fixes a batched qvm leading-dimension corruption.
+
 "Verified" here is a kernel-exactness statement about the installed MLX; it is
 not route qualification (docs/QUALIFICATION.md).
 """
@@ -34,6 +41,7 @@ VERIFIED_MLX_BUILDS = frozenset(
         "0.32.2.dev20260911+a0d69e543",
         "0.32.2.dev20260915+2a817ad94",
         "0.32.2.dev20260919+39400a0d4",
+        "0.32.4",
     }
 )
 
