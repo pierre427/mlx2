@@ -472,6 +472,8 @@ def request_body_limit(max_context: int, configured: int | None = None) -> int:
 
 
 DEFAULT_MAX_CONNECTIONS = 32
+# CLI default for --gpu-keep-warm-seconds on generation routes (2026-10-07).
+GPU_KEEP_WARM_DEFAULT_SECONDS = 60.0
 
 
 def _connection_limit_response(head):
@@ -5563,13 +5565,14 @@ def build_parser():
     parser.add_argument(
         "--gpu-keep-warm-seconds",
         type=float,
-        default=60.0,
+        default=None,
         metavar="SECONDS",
         help=(
             "after a request, keep the GPU out of its idle power state for "
             "this long by submitting a one-element kernel from the idle "
             "worker loop, so the next request skips the wake-up stall "
-            "(default: %(default)s; 0 disables)"
+            f"(default: {GPU_KEEP_WARM_DEFAULT_SECONDS:g} on generation "
+            "routes, off on embedding/rerank routes; 0 disables)"
         ),
     )
     parser.add_argument(
@@ -6423,10 +6426,19 @@ def serving_engine_kwargs(
     *,
     native_mtp,
     route_selection_source="engine_argument",
+    route=None,
     approximate_kv,
     max_request_bytes,
 ):
     """Map a parsed server namespace to the production engine constructor."""
+    keep_warm_seconds = getattr(args, "gpu_keep_warm_seconds", None)
+    if keep_warm_seconds is None:
+        # Representation routes refuse generation policies, and a Core ML
+        # embeddings route must not tick the GPU at all; only an explicit
+        # flag reaches (and is refused by) those routes.
+        keep_warm_seconds = (
+            0.0 if route in {"embeddings", "rerank"} else GPU_KEEP_WARM_DEFAULT_SECONDS
+        )
     return {
         "max_inflight": args.max_inflight,
         "max_lanes": args.max_lanes,
@@ -6517,10 +6529,10 @@ def serving_engine_kwargs(
         "recurrent_state_codec": getattr(args, "recurrent_state_codec", "off"),
         "gpu_keep_warm": (
             {
-                "window_seconds": args.gpu_keep_warm_seconds,
+                "window_seconds": keep_warm_seconds,
                 "interval_seconds": getattr(args, "gpu_keep_warm_interval", 0.5),
             }
-            if getattr(args, "gpu_keep_warm_seconds", 0)
+            if keep_warm_seconds
             else None
         ),
         "power_telemetry": (
@@ -6822,6 +6834,7 @@ def main():
         policy,
         native_mtp=native_mtp,
         route_selection_source=route_selection.source,
+        route=route_selection.route,
         approximate_kv=approximate_kv,
         max_request_bytes=max_request_bytes,
     )

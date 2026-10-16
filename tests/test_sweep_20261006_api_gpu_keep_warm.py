@@ -155,6 +155,26 @@ def test_cli_maps_to_engine_policy_and_is_provenance_only():
         )
 
 
+@pytest.mark.parametrize("route", ["embeddings", "rerank"])
+def test_cli_default_is_off_on_representation_routes(route):
+    # The 60 s default made every embedding/rerank server refuse to start
+    # (representation routes reject generation policies) and would tick the
+    # GPU from a Core ML embeddings process.  Only an explicit flag survives,
+    # and the representation route then refuses it.
+    from mlx2.server import build_parser, serving_engine_kwargs
+
+    parser = build_parser()
+    default = parser.parse_args(["--model", "m"])
+    explicit = parser.parse_args(["--model", "m", "--gpu-keep-warm-seconds", "30"])
+    kw = {"native_mtp": False, "approximate_kv": None, "max_request_bytes": 1 << 20}
+    assert serving_engine_kwargs(default, None, route=route, **kw)["gpu_keep_warm"] is None
+    assert serving_engine_kwargs(explicit, None, route=route, **kw)["gpu_keep_warm"] == {
+        "window_seconds": 30.0, "interval_seconds": 0.5,
+    }
+    generation = serving_engine_kwargs(default, None, route="ordinary", **kw)
+    assert generation["gpu_keep_warm"]["window_seconds"] == 60.0
+
+
 def test_metrics_series_exist_only_when_enabled():
     from mlx2.prometheus import render_engine_metrics
     from test_prometheus import FakeEngine

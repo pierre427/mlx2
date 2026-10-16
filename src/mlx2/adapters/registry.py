@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import importlib
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -458,8 +459,21 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
 
 
 
+def _minilm_coreml(path: Path) -> AdapterResolution:
+    module = importlib.import_module(".minilm_coreml", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(
+        module.MiniLMCoreMLAdapter, module.descriptor_for(artifact["buckets"]), artifact
+    )
+
+
 def inspect_model(model_path: str | Path) -> AdapterResolution:
     path = Path(model_path).expanduser().resolve()
+    coreml = importlib.import_module("..runtime.coreml_encoder", __package__)
+    # A Core ML encoder bundle is identified by its manifest alone. An invalid
+    # manifest fails closed; it never falls back to a config.json dispatch.
+    if os.path.lexists(path / coreml.MANIFEST_NAME):
+        return _minilm_coreml(path)
     config = json.loads((path / "config.json").read_text())
     if not isinstance(config, dict):
         raise TypeError("Model config must be a JSON object")

@@ -622,3 +622,11 @@ The EXL3 synthetic converter oracle in tests/fixtures is retained from the
 same Sushi revision under MIT; it is test data, not a trained model pack.
 Fixture SHA256: 5a651adc9cb67f065d2786b548b3a0a010ae482b80c4e269a6701f745840be08.
 The Metal header has trailing whitespace normalized; kernel arithmetic is unchanged.
+
+------------------------------------------------------------------------------
+
+src/mlx2/runtime/coreml_encoder.py runs Core ML in a persistent spawned worker
+process. The mechanism (a worker that owns Core ML behind pipes so Core ML's
+Python predict cannot hold the serving process's GIL) is re-expressed from
+mlx-lm-unified revision 2df98e9c7c969b828820d7ce3f37a607d090b3a1
+(mlx_lm/ane_verifier.py, MIT License, as above). No code was copied.

@@ -43,6 +43,8 @@ multimodal = [
     "mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@67599f2e8ec31bf35cbb7b02794114f20844f0bb",
 ]
 radio = ["mlx>=0.32", "numpy>=2", "pillow>=10"]
+# Core ML encoder bundles (runtime/coreml_encoder.py); the route itself never imports MLX.
+coreml = ["coremltools>=8.0", "numpy>=2", "tokenizers>=0.22"]
 image-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
 gguf-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
 flux3-image = [
