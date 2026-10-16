@@ -27,7 +27,9 @@ from typing import Any
 
 _SAMPLE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{(.*)\})?\s+(\S+)")
 _LABEL = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="((?:[^"\\]|\\.)*)"')
-_SERVER_ARGS = re.compile(r"(?:-m\s+mlx2\.server\b|/mlx2-serve(?:\s|$))")
+_SERVER_ARGS = re.compile(
+    r"(?:-m\s+mlx2\.(?:server|image_mcp\.server)\b|/mlx2-(?:serve|image-mcp)(?:\s|$))"
+)
 _MODEL_ARG = re.compile(r"--model[=\s]+(\S+)")
 
 # Counter families whose per-event rates make up the "hot paths" list.  Each
@@ -322,7 +324,7 @@ def _dig(document: Any, *keys: str) -> Any:
 
 
 def discover_servers(timeout: float = 2.0) -> tuple[ServerEndpoint, ...]:
-    """Find listening ``mlx2.server`` processes on this host."""
+    """Find listening mlx2 inference and image control-plane processes."""
     try:
         listing = subprocess.run(
             ["/bin/ps", "-axo", "pid=,args="],

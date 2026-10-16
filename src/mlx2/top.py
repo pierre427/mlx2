@@ -145,7 +145,8 @@ def render_server(server: ServerReading, *, width: int = 100) -> list[str]:
     """Render one inference server's panel."""
     endpoint = server.endpoint
     where = endpoint.url.removeprefix("http://")
-    title = f"── LLM  {server.model or endpoint.model_path or 'unknown model'}  ·  {where}"
+    workload = "IMAGE" if server.profile == "image-mcp" else "LLM"
+    title = f"── {workload}  {server.model or endpoint.model_path or 'unknown model'}  ·  {where}"
     if endpoint.pid is not None:
         title += f"  pid {endpoint.pid}"
     lines = [(title + " ").ljust(min(width, 120), "─")]
