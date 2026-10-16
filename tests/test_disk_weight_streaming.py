@@ -16,7 +16,7 @@ import json
 import os
 import resource
 import sys
-import time
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +29,7 @@ from mlx.utils import tree_flatten  # noqa: E402
 from mlx2.runtime import weight_stream  # noqa: E402
 from mlx2.runtime.streamed_load import (  # noqa: E402
     WeightStreamRequest,
+    declared_router_hints,
     declared_stream_modes,
     force_stock_expert_arithmetic,
     load_streamed,
@@ -542,21 +543,11 @@ def test_aliased_shard_spellings_fail_closed_without_leaking(tmp_path, monkeypat
         return fd
 
     monkeypatch.setattr(os, "open", tracked)
-    bound = BoundShards.__new__(BoundShards)
     try:
         with pytest.raises(StreamingUnavailable):
-            BoundShards.__init__(bound, tmp_path, names, records=records)
+            BoundShards(tmp_path, names, records=records)
     finally:
         monkeypatch.undo()
-        # A failed startup can publish its exception before the worker's done
-        # callback hands descriptors to the finalizer. Observe that original
-        # cleanup completing; do not close its fd underneath the owner.
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            finalizer = bound._control_pool._finalizer
-            if finalizer is not None and finalizer.done():
-                break
-            time.sleep(0.005)
         leaked = []
         for (fd, identity) in opened:
             try:
@@ -625,6 +616,65 @@ def test_mutation_truncation_and_rename_replace_are_all_refused(tmp_path, monkey
         bound.close()
 
 
+def test_bound_source_control_queues_demand_behind_one_hint_check(tmp_path):
+    """Optional hint validation must not deny the authoritative demand path."""
+    shard = tmp_path / "s.safetensors"
+    _write_one_byte_shard(shard)
+    bound = BoundShards(tmp_path, [shard.name])
+    started = threading.Event()
+    release = threading.Event()
+    second_queued = threading.Event()
+    errors = []
+    original_check = bound._check
+    original_submit = bound._control_pool.submit
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def blocking_check(path):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            ordinal = calls
+        if ordinal == 1:
+            started.set()
+            if not release.wait(2):
+                raise AssertionError("test did not release the first source check")
+        original_check(path)
+
+    def tracked_submit(function, *args):
+        future = original_submit(function, *args)
+        with bound._control_pool._lock:
+            if len(bound._control_pool._pending) == 2:
+                second_queued.set()
+        return future
+
+    def check():
+        try:
+            bound.check(shard)
+        except BaseException as error:  # noqa: BLE001 - retain worker failure
+            errors.append(error)
+
+    bound._check = blocking_check
+    bound._control_pool.submit = tracked_submit
+    hint = threading.Thread(target=check)
+    demand = threading.Thread(target=check)
+    try:
+        hint.start()
+        assert started.wait(1)
+        demand.start()
+        assert second_queued.wait(1)
+        release.set()
+        hint.join(2)
+        demand.join(2)
+        assert not hint.is_alive() and not demand.is_alive()
+        assert errors == []
+    finally:
+        release.set()
+        hint.join(2)
+        demand.join(2)
+        bound.close()
+
+
 def test_origins_accept_renames_and_ledgered_output_axis_concat_only(tmp_path):
     a = mx.zeros((4, 6, 8), dtype=mx.uint32)
     b = mx.ones((4, 6, 8), dtype=mx.uint32)
@@ -668,6 +718,8 @@ def test_declarations_are_never_inherited():
 
     assert declared_stream_modes(Qwen3827BAdapter) == {"dense_mlp"}
     assert declared_stream_modes(Qwen3635BA3BAdapter) == {"moe_experts"}
+    assert declared_router_hints(Qwen3635BA3BAdapter) == {"next_layer_reuse"}
+    assert declared_router_hints(Qwen35122BA10BAdapter) == frozenset()
     assert declared_stream_modes(Qwen35122BA10BAdapter) == {"moe_experts"}
     for undeclared in (Qwen359BAdapter, FlashNextAdapter, Nemotron3SuperAdapter):
         assert declared_stream_modes(undeclared) == frozenset()
@@ -679,6 +731,13 @@ def test_declarations_are_never_inherited():
         Qwen359BAdapter("/missing/artifact", weight_streaming=dense)
     with pytest.raises(ValueError, match="does not declare"):
         Qwen3635BA3BAdapter("/missing/artifact", weight_streaming=dense)
+    hinted = WeightStreamRequest(
+        mode="moe_experts", budget_bytes=1 << 20,
+        router_hint="next_layer_reuse",
+    )
+    assert require_declared(Qwen3635BA3BAdapter, hinted) is hinted
+    with pytest.raises(ValueError, match="router hints"):
+        require_declared(Qwen35122BA10BAdapter, hinted)
 
 
 @pytest.mark.parametrize(
@@ -691,6 +750,10 @@ def test_declarations_are_never_inherited():
         dict(mode="moe_experts", budget_bytes=1, read_workers=0),
         dict(mode="moe_experts", budget_bytes=1, mtp_resident=1),
         dict(mode="moe_experts", budget_bytes=1, admission_limit_bytes=-1),
+        dict(mode="moe_experts", budget_bytes=1, prefill_admission="scan"),
+        dict(mode="dense_mlp", budget_bytes=1, prefill_admission="terminal_hot"),
+        dict(mode="moe_experts", budget_bytes=1, router_hint="oracle"),
+        dict(mode="dense_mlp", budget_bytes=1, router_hint="next_layer_reuse"),
     ],
 )
 def test_stream_request_validation(bad):
@@ -993,7 +1056,14 @@ def _artifact(root, weight_map, records, text):
     }
 
 
-def test_qwen36_adapter_streams_before_materializing(tmp_path, monkeypatch, bound_shards):
+@pytest.mark.parametrize(
+    "stream_options",
+    ({}, {"prefill_admission": "terminal_hot", "router_hint": "next_layer_reuse"}),
+    ids=("stock-policies", "slotstream-generalized"),
+)
+def test_qwen36_adapter_streams_before_materializing(
+    tmp_path, monkeypatch, bound_shards, stream_options
+):
     from mlx2.adapters import qwen36_35b as adapter_module
 
     (root, weight_map, records) = _moe_checkpoint(tmp_path, monkeypatch)
@@ -1007,7 +1077,7 @@ def test_qwen36_adapter_streams_before_materializing(tmp_path, monkeypatch, boun
     _stub_tokenizer(monkeypatch, adapter_module)
     spy = _EvalSpy(monkeypatch, _is_expert)
     adapter = adapter_module.Qwen3635BA3BAdapter(
-        str(root), weight_streaming=_moe_request(1 << 30)
+        str(root), weight_streaming=_moe_request(1 << 30, **stream_options)
     )
     manager = adapter.weight_stream
     try:
@@ -1017,11 +1087,20 @@ def test_qwen36_adapter_streams_before_materializing(tmp_path, monkeypatch, boun
         assert receipt["load_phase"] == "pre_materialization"
         assert receipt["forced_stock"]["fused_expert_kernel"] == TINY_MOE["num_hidden_layers"]
         assert receipt["qualification"] == "unqualified"
+        assert receipt["prefill_admission"]["policy"] == stream_options.get(
+            "prefill_admission", "lru"
+        )
+        assert receipt["router_hint"]["policy"] == stream_options.get(
+            "router_hint", "off"
+        )
         # The dtype probe ran on the streamed model: load evidence only.
         assert manager.stats.load_page_ins > 0 and manager.stats.page_ins == 0
         assert manager.stats.phase == "serve"
         _logits(adapter.model, PROMPT)
         assert manager.stats.page_ins > 0
+        if stream_options:
+            assert receipt["router_hint"]["configured"] is True
+            assert manager.counters()["stream_router_hint_issued_total"] > 0
     finally:
         adapter.close()
     adapter.close()  # idempotent

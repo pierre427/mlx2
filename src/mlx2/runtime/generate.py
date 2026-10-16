@@ -50,6 +50,7 @@ from .sample_utils import LaneRNG, draw_key
 from .speculative_sampling import count_delivered_relaxed_accepts
 from .state_boundaries import BoundaryPurpose, StateBoundary
 from .round_phases import drive_round as _drive_round, publish_round
+from .weight_stream import expert_prefill_admission
 
 DEFAULT_MAX_TOKENS = 100
 MTP_STARVED_BOUNDARIES_BEFORE_PLAIN = 8
@@ -1024,7 +1025,13 @@ class PromptProcessingBatch:
                         if callable(row_context)
                         else contextlib.nullcontext()
                     )
-                    with context, prefill_checkpoint_rows(
+                    terminal = all(
+                        processed + n_to_process >= length for length in lengths
+                    )
+                    stream_context = expert_prefill_admission(
+                        "terminal" if terminal else "intermediate", self.uids
+                    )
+                    with context, stream_context, prefill_checkpoint_rows(
                         chunk_lengths, width=n_to_process
                     ) as checkpoint_rows:
                         checkpoint_output = forward(

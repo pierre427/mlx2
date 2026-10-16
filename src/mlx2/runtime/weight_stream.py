@@ -59,7 +59,7 @@ import stat as stat_module
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -98,6 +98,22 @@ READ_TIMEOUT_SECONDS = 60.0
 MECHANISM_REVISION = "weight-stream-v2"
 
 STREAM_MODES = ("moe_experts", "dense_mlp")
+PREFILL_ADMISSION_POLICIES = ("lru", "terminal_hot")
+ROUTER_HINT_POLICIES = ("off", "next_layer_reuse")
+
+_EXPERT_PREFILL = contextvars.ContextVar("mlx2_expert_prefill", default=None)
+
+
+@contextmanager
+def expert_prefill_admission(phase: str, request_key):
+    """Name an intermediate or terminal pure-prefill forward to expert caches."""
+    if phase not in ("intermediate", "terminal"):
+        raise ValueError(f"unknown expert prefill phase {phase!r}")
+    token = _EXPERT_PREFILL.set((phase, tuple(request_key)))
+    try:
+        yield
+    finally:
+        _EXPERT_PREFILL.reset(token)
 
 _SAFETENSORS_DTYPES = {
     "BOOL": ("u1", "bool_"),
@@ -447,8 +463,12 @@ class BoundShards:
         self._pins: Dict[Path, Tuple[int, int, int, int, int]] = {}
         self._names: Dict[Path, str] = {}
         self.weight_map = dict(weight_map) if weight_map else None
+        # One optional router-hint check may overlap the authoritative model
+        # thread.  Keep exactly one bounded queue slot so demand waits behind
+        # that check instead of failing with ReadQueueFull.  The single worker
+        # still serializes descriptor ownership and all source validation.
         self._control_pool = _ReadPool(1, "weight-source-control", timeout=READ_TIMEOUT_SECONDS,
-                                      max_pending=1)
+                                      max_pending=2)
         self._close_owner = CloseAction(self._close_fds)
         try:
             self._control_pool.call(self._open, tuple(names), records)
@@ -1078,6 +1098,10 @@ class StreamStats:
     peak_staging_bytes: int = 0
     phase: str = "serve"
     capture_reuses: int = 0
+    prefill_intermediate_calls: int = 0
+    prefill_terminal_calls: int = 0
+    prefill_ephemeral_page_ins: int = 0
+    prefill_request_resets: int = 0
     _group: object = field(default=None, repr=False)
     _group_transient: int = field(default=0, repr=False)
     _group_members: set = field(default_factory=set, repr=False)
@@ -1141,6 +1165,10 @@ class StreamStats:
             "stream_peak_tracked_bytes": self.peak_tracked_bytes,
             "stream_peak_transient_bytes": self.peak_transient_bytes,
             "stream_peak_staging_bytes": self.peak_staging_bytes,
+            "stream_prefill_intermediate_calls_total": self.prefill_intermediate_calls,
+            "stream_prefill_terminal_calls_total": self.prefill_terminal_calls,
+            "stream_prefill_ephemeral_page_ins_total": self.prefill_ephemeral_page_ins,
+            "stream_prefill_request_resets_total": self.prefill_request_resets,
         }
 
 
@@ -1160,14 +1188,22 @@ class ExpertLRU:
     """
 
     def __init__(self, reader: ExpertSliceReader, *, capacity_experts: int,
-                 stats: StreamStats, group=None):
+                 stats: StreamStats, group=None, path=None,
+                 prefill_admission: str = "lru"):
         if capacity_experts < 1:
             raise WorkingSetTooSmall("expert cache capacity must be at least 1")
         self.reader = reader
         self.capacity = int(min(capacity_experts, reader.num_experts))
         self.stats = stats
         self.group = group
+        self.path = path
+        self.prefill_admission = prefill_admission
         self._entries: "OrderedDict[int, Tuple[object, ...]]" = OrderedDict()
+        self._prefill_key = None
+        self._prefill_counts: Dict[int, int] = {}
+        self._last_ephemeral = 0
+        self._router_hints = None
+        self._router_hint_target = None
 
     @property
     def resident(self) -> int:
@@ -1178,6 +1214,51 @@ class ExpertLRU:
         self.stats.remove_resident(self.reader.expert_bytes)
         self.stats.bump("evictions")
 
+    def _reset_prefill(self, *, count: bool) -> None:
+        if self._prefill_key is not None and count:
+            self.stats.prefill_request_resets += 1
+        self._prefill_key = None
+        self._prefill_counts.clear()
+
+    def _prefill_mode(self, wanted):
+        if self.prefill_admission != "terminal_hot":
+            return None
+        context = _EXPERT_PREFILL.get()
+        if context is None:
+            self._reset_prefill(count=True)
+            return None
+        (phase, request_key) = context
+        if self._prefill_key != request_key:
+            self._reset_prefill(count=self._prefill_key is not None)
+            self._prefill_key = request_key
+        for expert in wanted:
+            self._prefill_counts[expert] = self._prefill_counts.get(expert, 0) + 1
+        return phase
+
+    def _acquire_intermediate(self, wanted):
+        self.stats.prefill_intermediate_calls += 1
+        entries = {}
+        missing = []
+        for expert in wanted:
+            if expert in self._entries:
+                entries[expert] = self._entries[expert]
+                self.stats.bump("hits")
+            else:
+                self.stats.bump("misses")
+                missing.append(expert)
+        if missing:
+            self.reader.check_sources()
+            for (expert, payload) in self.reader.iter_many(missing):
+                self.stats.note_staging(self.reader.outstanding_bytes())
+                entries[expert] = self.reader.materialize(payload)
+                self.stats.bump("page_ins")
+                self.stats.bump("page_in_bytes", self.reader.expert_bytes)
+                self.stats.prefill_ephemeral_page_ins += 1
+                del payload
+            self.reader.check_sources()
+        self._last_ephemeral = len(missing)
+        return entries
+
     def acquire(self, experts: Sequence[int]) -> Dict[int, Tuple["object", ...]]:
         """Resident rows for every id in ``experts``, fetching what is missing.
 
@@ -1185,6 +1266,18 @@ class ExpertLRU:
         only ever considers entries outside it.
         """
         wanted = list(dict.fromkeys(int(expert) for expert in experts))
+        phase = self._prefill_mode(wanted)
+        self._last_ephemeral = 0
+        if phase == "intermediate":
+            return self._acquire_intermediate(wanted)
+        if phase == "terminal":
+            self.stats.prefill_terminal_calls += 1
+            # Insert cold-to-hot so the request's hottest terminal experts
+            # finish most-recently-used. Ties preserve router order.
+            wanted = sorted(
+                wanted, key=lambda expert: self._prefill_counts.get(expert, 0)
+            )
+            self._reset_prefill(count=False)
         # A wide batch can route to more experts in one call than the steady
         # ceiling holds.  Every index must resolve before the gather runs, so
         # the only correct answers are "fetch them all" or "fail the request".
@@ -1193,6 +1286,9 @@ class ExpertLRU:
         overflow = len(wanted) > self.capacity
         if overflow:
             self.stats.bump("overflows")
+        prefetched = {}
+        if self._router_hints is not None:
+            prefetched = self._router_hints.consume(self.group, self.path, wanted)
         missing = []
         for expert in wanted:
             if expert in self._entries:
@@ -1208,7 +1304,15 @@ class ExpertLRU:
                 self._evict_for(len(missing), keep=set(wanted))
                 self.reader.check_sources()
                 fetched = {}
-                for (expert, payload) in self.reader.iter_many(missing):
+                for expert in list(missing):
+                    payload = prefetched.pop(expert, None)
+                    if payload is None:
+                        continue
+                    fetched[expert] = self.reader.materialize(payload)
+                    self._router_hints.note_adopted(self.reader.expert_bytes)
+                    del payload
+                ordinary_missing = [expert for expert in missing if expert not in fetched]
+                for (expert, payload) in self.reader.iter_many(ordinary_missing):
                     self.stats.note_staging(self.reader.outstanding_bytes())
                     fetched[expert] = self.reader.materialize(payload)
                     del payload
@@ -1222,16 +1326,23 @@ class ExpertLRU:
                     self.stats.add_resident(self.reader.expert_bytes)
                     self.stats.bump("page_ins")
                     self.stats.bump("page_in_bytes", self.reader.expert_bytes)
-            return {expert: self._entries[expert] for expert in wanted}
+            result = {expert: self._entries[expert] for expert in wanted}
         finally:
             # An OOM/read/materialization error must not leave an oversized
             # bank resident after the request has failed.
             self._trim_to_capacity()
+        if self._router_hints is not None and self._router_hint_target is not None:
+            self._router_hints.schedule(self._router_hint_target, wanted)
+        return result
 
     def note_gather(self, unique: int) -> None:
         """Account one call's gather copy plus any over-capacity rows it holds."""
         expert_bytes = self.reader.expert_bytes
-        transient = unique * expert_bytes + max(0, unique - self.capacity) * expert_bytes
+        transient = (
+            unique * expert_bytes
+            + self._last_ephemeral * expert_bytes
+            + max(0, unique - self.capacity) * expert_bytes
+        )
         self.stats.note_transient(self.group, transient, member=id(self))
 
     def _evict_for(self, incoming: int, *, keep) -> None:
@@ -1250,6 +1361,7 @@ class ExpertLRU:
             self._drop(next(iter(self._entries)))
 
     def clear(self) -> None:
+        self._reset_prefill(count=False)
         while self._entries:
             expert = next(iter(self._entries))
             self._entries.pop(expert)
@@ -1263,6 +1375,141 @@ class ExpertLRU:
         """
         for expert in experts:
             self.acquire([expert])
+
+
+class _RouterHintPrefetcher:
+    """One bounded raw-byte +1 hint lane; demand materializes on its thread."""
+
+    def __init__(self, caches: Dict[str, ExpertLRU], *, top_k: int):
+        self._caches = caches
+        self._top_k = int(top_k)
+        self._groups: Dict[str, Tuple[str, ...]] = {}
+        for path, cache in caches.items():
+            self._groups.setdefault(cache.group, []).append(path)
+        self._groups = {key: tuple(value) for key, value in self._groups.items()}
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="expert-hint")
+        # A just-completed future may run its done callback synchronously from
+        # schedule(); reentrancy keeps retirement from deadlocking that path.
+        self._lock = threading.RLock()
+        self._future = None
+        self._future_group = None
+        self._ticket = 0
+        self._ready = None
+        self._ready_group = None
+        self._retired = set()
+        self._counts = {
+            "issued": 0,
+            "stale_cancelled": 0,
+            "stale_dropped": 0,
+            "declined_busy": 0,
+            "ready_bytes": 0,
+            "adopted_bytes": 0,
+        }
+
+    def _read_group(self, group, experts):
+        payloads = {}
+        for path in self._groups[group]:
+            reader = self._caches[path].reader
+            reader.check_sources()
+            payloads[path] = {expert: reader.read_bytes(expert) for expert in experts}
+            reader.check_sources()
+        return payloads
+
+    def _release_retired(self, future):
+        # Fetching the result in the callback releases any exception traceback;
+        # dropping the final future reference releases stale payload bytes.
+        try:
+            future.result()
+        except BaseException:
+            pass
+        with self._lock:
+            self._retired.discard(future)
+
+    def schedule(self, group, experts) -> None:
+        experts = tuple(dict.fromkeys(int(expert) for expert in experts))
+        if group not in self._groups or not 0 < len(experts) <= self._top_k:
+            return
+        with self._lock:
+            if self._ready is not None:
+                self._ready = self._ready_group = None
+                self._counts["stale_dropped"] += 1
+            if self._future is not None:
+                old = self._future
+                if old.cancel():
+                    self._counts["stale_cancelled"] += 1
+                elif not old.done():
+                    self._ticket += 1
+                    self._future = self._future_group = None
+                    self._retired.add(old)
+                    old.add_done_callback(self._release_retired)
+                    self._counts["declined_busy"] += 1
+                    return
+                else:
+                    try:
+                        old.result()
+                    except BaseException:
+                        pass
+                    self._counts["stale_dropped"] += 1
+                self._future = self._future_group = None
+            self._ticket += 1
+            ticket = self._ticket
+            self._future_group = group
+            self._future = self._pool.submit(self._read_group, group, experts)
+            self._future._mlx2_hint_ticket = ticket
+            self._counts["issued"] += 1
+
+    def consume(self, group, path, wanted):
+        with self._lock:
+            if self._ready_group == group and self._ready is not None:
+                payloads = self._ready.pop(path, {})
+                if not self._ready:
+                    self._ready = self._ready_group = None
+                return {expert: payloads[expert] for expert in wanted if expert in payloads}
+            if self._future_group != group or self._future is None:
+                return {}
+            future = self._future
+            ticket = getattr(future, "_mlx2_hint_ticket", None)
+            self._future = self._future_group = None
+        try:
+            ready = future.result(timeout=READ_TIMEOUT_SECONDS)
+        except TimeoutError as exc:
+            future.cancel()
+            raise WeightReadTimeout("router hint read exceeded its I/O deadline") from exc
+        with self._lock:
+            if ticket != self._ticket:
+                self._counts["stale_dropped"] += 1
+                return {}
+            self._ready = ready
+            self._ready_group = group
+            self._counts["ready_bytes"] += sum(
+                self._caches[p].reader.expert_bytes * len(rows)
+                for p, rows in ready.items()
+            )
+            payloads = self._ready.pop(path, {})
+            if not self._ready:
+                self._ready = self._ready_group = None
+            return {expert: payloads[expert] for expert in wanted if expert in payloads}
+
+    def note_adopted(self, nbytes: int) -> None:
+        with self._lock:
+            self._counts["adopted_bytes"] += int(nbytes)
+
+    def counters(self):
+        with self._lock:
+            return {
+                f"stream_router_hint_{key}_total": int(value)
+                for key, value in self._counts.items()
+            }
+
+    def close(self) -> None:
+        with self._lock:
+            self._ticket += 1
+            future = self._future
+            self._future = self._future_group = None
+            self._ready = self._ready_group = None
+            if future is not None:
+                future.cancel()
+        self._pool.shutdown(wait=True, cancel_futures=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1621,6 +1868,8 @@ class ExpertStreamManager(_ManagerBase):
         handles=None,
         streamed_keys: Sequence[str] = (),
         overlaps=(),
+        prefill_admission: str = "lru",
+        router_hint: str = "off",
     ):
         self.overlaps = tuple(overlaps)
         self.plan = plan
@@ -1629,9 +1878,50 @@ class ExpertStreamManager(_ManagerBase):
         self.collector = collector
         self.streamed_keys = tuple(streamed_keys)
         self.forced_stock: Dict[str, int] = {}
+        self.prefill_admission = prefill_admission
+        self.router_hint = router_hint
+        self._router_hint_configured = router_hint == "off"
+        self._router_hints = None
+        if router_hint == "next_layer_reuse":
+            self._router_hints = _RouterHintPrefetcher(caches, top_k=plan.top_k)
+            for cache in caches.values():
+                cache._router_hints = self._router_hints
         self._pool = pool
         self._handles = handles
         self._closed = False
+
+    def configure_router_hint_order(
+        self, groups: Sequence[str], *, trigger_paths: Sequence[str]
+    ) -> None:
+        """Bind adapter-declared forward layer order to the generic hint lane."""
+        if self.router_hint == "off":
+            if groups:
+                raise ValueError("router hint order supplied while hints are off")
+            return
+        groups = tuple(groups)
+        known = {cache.group for cache in self.caches.values()}
+        if len(groups) != len(known) or set(groups) != known:
+            raise ValueError("router hint order must name every streamed expert group once")
+        trigger_paths = tuple(trigger_paths)
+        if len(trigger_paths) != len(groups):
+            raise ValueError("router hint order needs one adapter trigger per group")
+        if any(path not in self.caches for path in trigger_paths):
+            raise ValueError("router hint trigger is not a streamed expert projection")
+        if any(self.caches[path].group != group
+               for group, path in zip(groups, trigger_paths)):
+            raise ValueError("router hint trigger does not belong to its expert group")
+        for cache in self.caches.values():
+            cache._router_hint_target = None
+        for trigger, target in zip(trigger_paths, groups[1:]):
+            self.caches[trigger]._router_hint_target = target
+        self._router_hint_configured = True
+
+    def begin_serving(self) -> None:
+        if not self._router_hint_configured:
+            raise StreamingUnavailable(
+                "selected router hint has no adapter-declared forward group order"
+            )
+        super().begin_serving()
 
     def reserved_bytes(self) -> int:
         return int(self.plan.ceiling_bytes) + int(self.plan.transient_bound_bytes)
@@ -1648,6 +1938,8 @@ class ExpertStreamManager(_ManagerBase):
             counters.update(self._pool.counters())
         if self.collector is not None:
             counters.update(self.collector.counters())
+        if self._router_hints is not None:
+            counters.update(self._router_hints.counters())
         if self.overlaps:
             for key in ("attempts", "accepted", "rebuilds", "declined"):
                 counters[f"stream_overlap_{key}_total"] = sum(o.counts[key] for o in self.overlaps)
@@ -1655,6 +1947,19 @@ class ExpertStreamManager(_ManagerBase):
 
     def receipt(self):
         receipt = super().receipt()
+        receipt["prefill_admission"] = {
+            "policy": self.prefill_admission,
+            "qualification": "unqualified" if self.prefill_admission != "lru" else "stock",
+            "default": self.prefill_admission == "lru",
+        }
+        receipt["router_hint"] = {
+            "policy": self.router_hint,
+            "qualification": "unqualified" if self.router_hint != "off" else "stock",
+            "default": self.router_hint == "off",
+            "demand_priority": True,
+            "materialization": "model_thread",
+            "configured": self._router_hint_configured,
+        }
         if self.overlaps:
             receipt["overlap"] = {"revision": "gated-immutable-bank-v1", "enabled": True,
                                   "qualification": "unqualified", "default": False,
@@ -1662,9 +1967,17 @@ class ExpertStreamManager(_ManagerBase):
         return receipt
 
     def apc_revision(self):
-        return super().apc_revision() + (":gated-immutable-bank-v1" if self.overlaps else "")
+        revision = super().apc_revision()
+        if self.prefill_admission != "lru":
+            revision += f":prefill-{self.prefill_admission}"
+        if self.router_hint != "off":
+            revision += f":hint-{self.router_hint}"
+        return revision + (":gated-immutable-bank-v1" if self.overlaps else "")
 
     def close(self) -> None:
+        if self._router_hints is not None:
+            self._router_hints.close()
+            self._router_hints = None
         _close_read_pool(self._pool, self._handles)
         self._pool = self._handles = None
         if not self._closed:
@@ -1780,6 +2093,8 @@ def install_expert_streaming(
     collector=None,
     mtp_resident: bool = False,
     overlap: bool = False,
+    prefill_admission: str = "lru",
+    router_hint: str = "off",
     shards: Optional[BoundShards] = None,
     resolver: Optional[Callable] = None,
 ) -> ExpertStreamManager:
@@ -1812,6 +2127,10 @@ def install_expert_streaming(
 
     if type(overlap) is not bool:
         raise ValueError("expert overlap must be boolean")
+    if prefill_admission not in PREFILL_ADMISSION_POLICIES:
+        raise ValueError(f"unknown expert prefill admission {prefill_admission!r}")
+    if router_hint not in ROUTER_HINT_POLICIES:
+        raise ValueError(f"unknown expert router hint {router_hint!r}")
     early = shards is not None
     if early and resolver is None:
         raise ValueError("early-load expert streaming needs a source resolver")
@@ -1903,6 +2222,13 @@ def install_expert_streaming(
         # that one immutable bank explicitly; subsequent calls have synced.
         if overlap:
             transient += capacity * expert_bytes
+        if router_hint != "off":
+            # One raw host-byte bundle: at most top_k rows for all projections
+            # of one target layer. It is separate from the demand staging pool.
+            transient += max(
+                int(top_k) * sum(row_bytes for _, row_bytes in members)
+                for members in groups.values()
+            )
         manifest = _manifest(
             [
                 [
@@ -1929,7 +2255,8 @@ def install_expert_streaming(
             reader = ExpertSliceReader(specs, handles=handles, pool=pool, window=window)
             cache = ExpertLRU(
                 reader, capacity_experts=capacity, stats=stats,
-                group=path.rpartition(".")[0],
+                group=path.rpartition(".")[0], path=path,
+                prefill_admission=prefill_admission,
             )
             caches[path] = cache
             replacements.append((path, _streamed_switch_linear(
@@ -1987,6 +2314,8 @@ def install_expert_streaming(
             handles=handles,
             streamed_keys=streamed_keys,
             overlaps=overlaps,
+            prefill_admission=prefill_admission,
+            router_hint=router_hint,
         )
     except BaseException:
         _close_read_pool(pool, handles)

@@ -630,6 +630,8 @@ def moe_expert_streaming_policy(value) -> dict:
         # omlx #3935: keep an embedded MTP head's experts resident. Opt-in;
         # appears in the resolved policy only when true.
         "mtp_resident": False,
+        "prefill_admission": "lru",
+        "router_hint": "off",
     }
     if value is None:
         return {k: v for (k, v) in defaults.items() if k != "mtp_resident"}
@@ -660,6 +662,14 @@ def moe_expert_streaming_policy(value) -> dict:
     for key in ("atlas_path", "trace_path"):
         if policy[key] is not None and not isinstance(policy[key], str):
             raise ValueError(f"moe_expert_streaming.{key} must be a string or null")
+    if policy["prefill_admission"] not in ("lru", "terminal_hot"):
+        raise ValueError(
+            "moe_expert_streaming.prefill_admission must be lru or terminal_hot"
+        )
+    if policy["router_hint"] not in ("off", "next_layer_reuse"):
+        raise ValueError(
+            "moe_expert_streaming.router_hint must be off or next_layer_reuse"
+        )
     if policy["enabled"] and cache_gib <= 0:
         raise ValueError(
             "moe_expert_streaming.cache_gib must be positive when enabled: the "
@@ -674,6 +684,8 @@ def moe_expert_streaming_policy(value) -> dict:
         "atlas": policy["atlas"],
         "atlas_path": policy["atlas_path"],
         "trace_path": policy["trace_path"],
+        "prefill_admission": policy["prefill_admission"],
+        "router_hint": policy["router_hint"],
     }
     if policy["mtp_resident"]:
         resolved["mtp_resident"] = True
@@ -6028,6 +6040,8 @@ class ServingEngine:
             mtp_resident=bool(policy.get("mtp_resident", False)),
             collector=self.expert_stream_collector,
             admission_limit_bytes=limit,
+            prefill_admission=policy["prefill_admission"],
+            router_hint=policy["router_hint"],
         )
 
     def _bind_adapter_stream(self, adapter) -> None:

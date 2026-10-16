@@ -111,6 +111,21 @@ def _run(model, x, indices):
     return np.array(out)
 
 
+def test_ordered_v2_trace_preserves_projection_interleaving(tmp_path):
+    trace = tmp_path / "ordered.trace"
+    collector = expert_atlas.AtlasCollector(trace_path=trace)
+    collector.bind(num_layers=3, num_units=16)
+    collector.observe(2, [7, 1])
+    collector.observe(0, [4])
+    collector.observe(2, [8])
+    collector.close()
+
+    layers, units, sequence, info = expert_atlas.load_trace_sequence(trace)
+    assert (layers, units) == (3, 16)
+    assert sequence == [(2, [7, 1]), (0, [4]), (2, [8])]
+    assert info["baseline"] == "exact"
+
+
 # ---------------------------------------------------------------------------
 # byte-range addressing
 # ---------------------------------------------------------------------------
@@ -1016,6 +1031,7 @@ class _CountingReader:
 
     def __init__(self, num_experts):
         self.num_experts = num_experts
+        self.reads = []
 
     def check_sources(self):
         pass
@@ -1025,10 +1041,90 @@ class _CountingReader:
 
     def iter_many(self, experts):
         for expert in experts:
+            self.reads.append(expert)
             yield (expert, (expert,))
+
+    def read_bytes(self, expert):
+        self.reads.append(expert)
+        return (expert,)
 
     def materialize(self, payload):
         return payload
+
+
+def test_terminal_hot_prefill_is_scan_resistant_and_admits_hot_terminal_rows():
+    stats = weight_stream.StreamStats()
+    cache = weight_stream.ExpertLRU(
+        _CountingReader(16), capacity_experts=2, stats=stats,
+        prefill_admission="terminal_hot",
+    )
+    cache.acquire([8, 9])
+    with weight_stream.expert_prefill_admission("intermediate", ("request",)):
+        cache.acquire([1, 2])
+        cache.acquire([2, 3])
+    assert list(cache._entries) == [8, 9]
+    assert cache.resident == 2
+
+    with weight_stream.expert_prefill_admission("terminal", ("request",)):
+        cache.acquire([2, 4])
+    assert list(cache._entries) == [4, 2]
+    cache.acquire([5])
+    assert list(cache._entries) == [2, 5]
+    assert stats.prefill_intermediate_calls == 2
+    assert stats.prefill_terminal_calls == 1
+    assert stats.prefill_ephemeral_page_ins == 4
+
+
+def test_prompt_batch_marks_only_the_last_pure_prefill_chunk_terminal():
+    from mlx2.runtime.generate import PromptProcessingBatch
+
+    phases = []
+
+    class Model:
+        _test_only_allow_unvalidated_prefill_checkpoint = True
+
+        def __call__(self, tokens, *, cache):
+            phases.append(weight_stream._EXPERT_PREFILL.get())
+            return None
+
+    batch = PromptProcessingBatch(
+        Model(), [17], [[]], tokens=[[]], prefill_step_size=2
+    )
+    batch.prompt([[1, 2, 3]])
+    assert phases == [("intermediate", (17,)), ("terminal", (17,))]
+
+
+def test_next_layer_router_hint_preserves_output_and_adopts_raw_rows(checkpoint):
+    path, weights = checkpoint
+    x, indices = _inputs(tokens=1)
+    expected = _run(_reference(weights), x, indices)
+    model = _reference(weights)
+    manager = install_expert_streaming(
+        model,
+        path,
+        ceiling_bytes=_ceiling_for(path, TOP_K),
+        top_k=TOP_K,
+        read_workers=2,
+        router_hint="next_layer_reuse",
+    )
+    manager.configure_router_hint_order(
+        [f"layers.{layer}" for layer in range(LAYERS)],
+        trigger_paths=[f"layers.{layer}.down_proj" for layer in range(LAYERS)],
+    )
+    manager.begin_serving()
+    try:
+        actual = _run(model, x, indices)
+        assert np.array_equal(actual, expected)
+        counters = manager.counters()
+        assert counters["stream_router_hint_issued_total"] > 0
+        assert counters["stream_router_hint_adopted_bytes_total"] > 0, (
+            counters,
+            [(path, cache.group, cache._router_hint_target)
+             for path, cache in manager.caches.items()],
+        )
+        assert manager.receipt()["router_hint"]["qualification"] == "unqualified"
+    finally:
+        manager.close()
 
 
 def test_counterfactual_lru_row_reproduces_the_lru_that_ran(tmp_path):
@@ -1216,6 +1312,8 @@ def test_policy_defaults_and_validation():
         "atlas": False,
         "atlas_path": None,
         "trace_path": None,
+        "prefill_admission": "lru",
+        "router_hint": "off",
     }
     for bad in (
         [],
@@ -1228,6 +1326,8 @@ def test_policy_defaults_and_validation():
         {"read_workers": True},
         {"atlas_path": 5},
         {"trace_path": "t.bin"},  # needs atlas
+        {"prefill_admission": "scan"},
+        {"router_hint": "oracle"},
     ):
         with pytest.raises(ValueError):
             moe_expert_streaming_policy(bad)

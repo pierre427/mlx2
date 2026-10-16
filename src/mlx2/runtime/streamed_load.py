@@ -31,6 +31,8 @@ from typing import Callable, Dict, Mapping, Optional, Protocol, Sequence, runtim
 
 from .weight_stream import (
     DEFAULT_READ_WORKERS,
+    PREFILL_ADMISSION_POLICIES,
+    ROUTER_HINT_POLICIES,
     STREAM_MODES,
     BoundShards,
     StreamingUnavailable,
@@ -43,6 +45,7 @@ from .weight_stream import (
 )
 
 DECLARATION = "weight_streaming_modes"
+ROUTER_HINT_DECLARATION = "weight_stream_router_hints"
 # A lane needs at least this much beside the weights and the streaming
 # reservation before the pre-load budget admits a streamed model.  A floor,
 # not a measurement: real lanes are costed by admission after load.
@@ -61,6 +64,8 @@ class WeightStreamRequest:
     admission_limit_bytes: Optional[int] = None
     headroom_bytes: int = MIN_LANE_HEADROOM_BYTES
     expert_overlap: bool = False
+    prefill_admission: str = "lru"
+    router_hint: str = "off"
 
     def __post_init__(self):
         if self.mode not in STREAM_MODES:
@@ -76,6 +81,14 @@ class WeightStreamRequest:
             raise ValueError("weight streaming mtp_resident must be boolean")
         if type(self.expert_overlap) is not bool or (self.expert_overlap and self.mode != "moe_experts"):
             raise ValueError("expert_overlap is a boolean MoE-only option")
+        if self.prefill_admission not in PREFILL_ADMISSION_POLICIES:
+            raise ValueError(f"unknown expert prefill admission {self.prefill_admission!r}")
+        if self.prefill_admission != "lru" and self.mode != "moe_experts":
+            raise ValueError("prefill_admission is a MoE-only option")
+        if self.router_hint not in ROUTER_HINT_POLICIES:
+            raise ValueError(f"unknown expert router hint {self.router_hint!r}")
+        if self.router_hint != "off" and self.mode != "moe_experts":
+            raise ValueError("router_hint is a MoE-only option")
         limit = self.admission_limit_bytes
         if limit is not None and (
             isinstance(limit, bool) or not isinstance(limit, int) or limit < 0
@@ -93,6 +106,16 @@ def declared_stream_modes(adapter_class) -> frozenset:
     return frozenset(value) & frozenset(STREAM_MODES)
 
 
+def declared_router_hints(adapter_class) -> frozenset:
+    """Router hints the class itself declares -- never a parent's declaration."""
+    try:
+        own = vars(adapter_class)
+    except TypeError:
+        return frozenset()
+    value = own.get(ROUTER_HINT_DECLARATION, ())
+    return frozenset(value) & frozenset(ROUTER_HINT_POLICIES)
+
+
 def require_declared(adapter_class, request: Optional[WeightStreamRequest]):
     """Validate a request against the adapter's own declaration, pre-load."""
     if request is None:
@@ -104,6 +127,13 @@ def require_declared(adapter_class, request: Optional[WeightStreamRequest]):
             f"{adapter_class.__name__} does not declare {request.mode} weight "
             "streaming; refusing before any weight is loaded"
         )
+    if request.router_hint != "off":
+        hints = declared_router_hints(adapter_class)
+        if request.router_hint not in hints:
+            raise ValueError(
+                f"{adapter_class.__name__} does not declare {request.router_hint} "
+                "weight-stream router hints"
+            )
     return request
 
 
@@ -178,6 +208,8 @@ def load_streamed(
                 collector=request.collector,
                 mtp_resident=request.mtp_resident,
                 overlap=request.expert_overlap,
+                prefill_admission=request.prefill_admission,
+                router_hint=request.router_hint,
                 shards=shards,
                 resolver=origins.resolve_expert,
             )

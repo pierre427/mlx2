@@ -216,6 +216,7 @@ class AtlasCollector:
     def counters(self) -> Dict[str, int]:
         return {
             "atlas_observations_total": self.observations,
+            "atlas_calls_total": self._steps,
             "atlas_trace_records_total": self._trace_written,
             "atlas_trace_dropped_total": self._dropped,
             "atlas_io_failed": int(self._io_failure is not None or
@@ -595,6 +596,56 @@ def load_trace_calls(path) -> Tuple[int, int, List[List[List[int]]], dict]:
             info["baseline"] = "exact_prefix"
     info["version"] = version
     return (layers, units, calls, info)
+
+
+def load_trace_sequence(path) -> Tuple[int, int, List[Tuple[int, List[int]]], dict]:
+    """Return a v2 trace's calls in execution order.
+
+    Cache-policy experiments need the interleaving between projections.  The
+    older :func:`load_trace_calls` deliberately groups calls by layer for the
+    independent per-layer LRU replay, which loses that ordering.  Refuse v1
+    rather than inventing cross-layer order from its ambiguous boundaries.
+    """
+    (version, layers, units, records) = _read_rows(path)
+    if version != 2:
+        raise ValueError("ordered expert replay requires a v2 trace")
+    sequence: List[Tuple[int, List[int]]] = []
+    info = {"calls": 0, "closed": False, "dropped_calls": 0, "lost_calls": 0,
+            "torn": False, "version": version}
+    (pos, rows) = (0, len(records))
+    while pos < rows:
+        if info["closed"]:
+            raise ValueError("expert access trace has rows after its end row")
+        (kind, value) = (int(records[pos, 0]), int(records[pos, 1]))
+        if kind == _TRACE_CALL:
+            stop = pos + 1 + value
+            if stop > rows:
+                info["torn"] = True
+                break
+            block = records[pos + 1 : stop]
+            if value == 0 or (block[:, 0] != block[0, 0]).any() or block[0, 0] >= _TRACE_END:
+                raise ValueError("malformed call in expert access trace")
+            layer = int(block[0, 0])
+            if layer < layers:
+                sequence.append((layer, block[:, 1].astype(int).tolist()))
+            info["calls"] += 1
+            pos = stop
+        elif kind == _TRACE_LOST:
+            info["lost_calls"] += 1
+            pos += 1
+        elif kind == _TRACE_END:
+            info["closed"] = True
+            info["dropped_calls"] = value
+            pos += 1
+        else:
+            raise ValueError("expert access trace row outside a call")
+    if info["lost_calls"]:
+        info["baseline"] = "approximate"
+    elif info["closed"] and not info["dropped_calls"]:
+        info["baseline"] = "exact"
+    else:
+        info["baseline"] = "exact_prefix"
+    return (layers, units, sequence, info)
 
 
 def _lru_hit_rate(calls, capacity: int, pinned=frozenset()) -> Tuple[int, int]:

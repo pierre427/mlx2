@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
@@ -497,6 +498,10 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
     # Early-load MoE expert streaming (runtime/streamed_load.py).  Read from
     # this class's own __dict__: subclasses must declare it themselves.
     weight_streaming_modes = frozenset({"moe_experts"})
+    # Adapter-owned claim: adjacent routed layers use the current layer's
+    # selected expert set only as a bounded +1 I/O hint. The scheduler and
+    # cache remain unaware of model names or router tensor math.
+    weight_stream_router_hints = frozenset({"next_layer_reuse"})
 
     def attention_topology(self):
         """Qwen3.6 35B full-KV/GDN state geometry, revision bound."""
@@ -934,6 +939,32 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         def installed(manager):
             # Explicit stock expert arithmetic, recorded in the receipt.
             manager.forced_stock = force_stock_expert_arithmetic(self.model)
+            if stream_request.router_hint == "next_layer_reuse":
+                groups = {cache.group for cache in manager.caches.values()}
+
+                def layer_index(group):
+                    match = re.search(r"(?:^|\.)layers\.(\d+)(?:\.|$)", group)
+                    if match is None:
+                        raise ValueError(
+                            f"Qwen3.6 router hint cannot order expert group {group!r}"
+                        )
+                    return int(match.group(1))
+
+                groups = sorted(groups, key=layer_index)
+                triggers = []
+                for group in groups:
+                    candidates = [
+                        path for path, cache in manager.caches.items()
+                        if cache.group == group and path.endswith(".down_proj")
+                    ]
+                    if len(candidates) != 1:
+                        raise ValueError(
+                            f"Qwen3.6 router hint needs one down projection in {group!r}"
+                        )
+                    triggers.append(candidates[0])
+                manager.configure_router_hint_order(
+                    groups, trigger_paths=triggers
+                )
 
         loaded = load_streamed(
             self.model,
