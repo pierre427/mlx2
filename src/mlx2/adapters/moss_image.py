@@ -178,7 +178,11 @@ class MOSSImageSFTAdapter:
                     "seed": seed,
                     "guidance_scale": guidance_scale,
                     "negative_prompt": negative_prompt,
-                    "uncond_skip_layers": list(uncond_skip_layers),
+                    "uncond_skip_layers": (
+                        list(uncond_skip_layers)
+                        if isinstance(uncond_skip_layers, (list, tuple))
+                        else repr(uncond_skip_layers)
+                    ),
                 },
             }
             self.last_route_receipt = receipt
@@ -210,13 +214,15 @@ class MOSSImageSFTAdapter:
                     raise ValueError("guidance_scale must be finite in 0..20")
                 if not isinstance(negative_prompt, str):
                     raise TypeError("negative_prompt must be a string")
-                layers = tuple(uncond_skip_layers)
+                # The publisher documents None as "disable negative-branch skipping".
+                layers = () if uncond_skip_layers is None else tuple(uncond_skip_layers)
                 if any(
                     type(index) is not int or not 0 <= index < 42 for index in layers
                 ):
                     raise ValueError(
                         "uncond_skip_layers must contain block indices in 0..41"
                     )
+                receipt["parameters"]["uncond_skip_layers"] = list(layers)
                 self._verify_inputs()
                 if self._backend is None:
                     if self._backend_factory is None:

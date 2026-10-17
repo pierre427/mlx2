@@ -5,6 +5,7 @@ to run the complete small-shape transformer and autoencoder CPU controls.
 """
 
 import importlib.util
+import math
 import os
 import subprocess
 import sys
@@ -273,3 +274,51 @@ def test_nonfinite_values_fail_before_png_conversion(failure):
     )
     with pytest.raises(FloatingPointError, match="nonfinite FLUX 3"):
         pipeline.generate("a teapot", [], width=64, height=64, steps=1, seed=0)
+
+
+def _noise_image(width, height, seed=0):
+    from PIL import Image
+
+    rng = np.random.default_rng(seed)
+    return Image.fromarray(rng.integers(0, 256, (height, width, 3), dtype=np.uint8))
+
+
+def test_single_reference_reflect_pads_like_the_reference():
+    from mlx2.adapters.flux3_pipeline import prepare_reference
+
+    image = _noise_image(70, 100)
+    padding = ((6, 6), (5, 5), (0, 0))  # centred on the 80x112 canvas
+    np.testing.assert_array_equal(
+        np.asarray(prepare_reference(image, multiple=False)),
+        np.pad(np.asarray(image), padding, mode="reflect"),
+    )
+    # The reference falls back to symmetric only when a side is too short.
+    tiny = _noise_image(10, 12)
+    np.testing.assert_array_equal(
+        np.asarray(prepare_reference(tiny, multiple=False)),
+        np.pad(np.asarray(tiny), ((26, 26), (27, 27), (0, 0)), mode="symmetric"),
+    )
+
+
+def test_multi_reference_floors_and_centre_crops_like_the_reference():
+    from PIL import Image
+
+    from mlx2.adapters.flux3_pipeline import prepare_reference
+
+    image = _noise_image(70, 100)
+    np.testing.assert_array_equal(
+        np.asarray(prepare_reference(image, multiple=True)),
+        np.asarray(image)[2:98, 3:67],
+    )
+    large = _noise_image(1500, 1000, seed=1)
+    scale = math.sqrt(1024 * 1024 / (1500 * 1000))
+    fitted = large.resize(
+        (int(1500 * scale), int(1000 * scale)), Image.Resampling.LANCZOS
+    )
+    assert fitted.size == (1254, 836)
+    np.testing.assert_array_equal(
+        np.asarray(prepare_reference(large, multiple=True)),
+        np.asarray(fitted)[2:834, 3:1251],
+    )
+    with pytest.raises(ValueError, match="reference"):
+        prepare_reference(_noise_image(15, 40), multiple=True)

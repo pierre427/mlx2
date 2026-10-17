@@ -484,6 +484,12 @@ NATIVE_CONTINUOUS_BATCH_PROMPTS = (
     "What is two plus two? Answer with one word.",
     "What is three plus three? Answer with one word.",
 )
+# Functional oracle per batch prompt: a near-tie row passes only when both
+# continuations still answer correctly (AGENTS.md near_tie_equivalent rule).
+NATIVE_CONTINUOUS_BATCH_ANSWERS = {
+    NATIVE_CONTINUOUS_BATCH_PROMPTS[0]: ("four", "4"),
+    NATIVE_CONTINUOUS_BATCH_PROMPTS[1]: ("six", "6"),
+}
 CONTINUOUS_BATCH_EQUIVALENCE_SCHEMA = "mlx2.continuous-batch-equivalence.v1"
 # A batched-versus-single first divergence is accepted only at a near tie
 # (Pierre 2026-10-15: "we always accept near flips"). Same ceiling and
@@ -549,7 +555,14 @@ def _continuous_batch_token_trace(row):
     return trace
 
 
-def _classify_continuous_batch_row(reference, batched):
+def _continuous_batch_answer_ok(prompt, text):
+    # The prompt asks for one word: the whole answer must be that word (an
+    # accepted token inside "Four is wrong; it is five" is not a pass).
+    words = re.findall(r"[a-z0-9]+", text.casefold())
+    return len(words) == 1 and words[0] in NATIVE_CONTINUOUS_BATCH_ANSWERS[prompt]
+
+
+def _classify_continuous_batch_row(prompt, reference, batched):
     if (
         reference["text"] == batched["text"]
         and reference["finish_reason"] == batched["finish_reason"]
@@ -599,6 +612,13 @@ def _classify_continuous_batch_row(reference, batched):
         return failed("a selected token is below its recorded alternative", **evidence)
     if any(margin > CONTINUOUS_BATCH_NEAR_TIE_NATS for margin in margins.values()):
         return failed("first divergence is not a near tie", **evidence)
+    if not (
+        _continuous_batch_answer_ok(prompt, reference["text"])
+        and _continuous_batch_answer_ok(prompt, batched["text"])
+    ):
+        return failed(
+            "near-tie continuation fails the functional oracle", **evidence
+        )
     return {"classification": "near_tie", **evidence}
 
 
@@ -667,7 +687,7 @@ def _classify_continuous_batch_trace_unchecked(batch):
         return {**result, "reason": "reference and batched request ids overlap"}
     rows = {
         prompt: _classify_continuous_batch_row(
-            reference_rows[prompt], concurrent_rows[prompt]
+            prompt, reference_rows[prompt], concurrent_rows[prompt]
         )
         for prompt in NATIVE_CONTINUOUS_BATCH_PROMPTS
     }
@@ -686,8 +706,8 @@ def classify_continuous_batch_trace(batch):
     are present and cover the receipt's completion tokens, the generated ids
     agree before the first differing token, the two selected tokens are
     exactly each side's recorded top-2, and both selected-minus-alternate
-    margins are within ``CONTINUOUS_BATCH_NEAR_TIE_NATS``. Anything else fails
-    closed. Never trusts a producer-written classification.
+    margins are within ``CONTINUOUS_BATCH_NEAR_TIE_NATS``, and both texts
+    pass the prompt's answer oracle. Anything else fails closed. Never trusts a producer-written classification.
     """
     try:
         return _classify_continuous_batch_trace_unchecked(batch)

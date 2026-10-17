@@ -13,7 +13,7 @@ import json
 import math
 from pathlib import Path
 
-from ..runtime.io_ownership import call_io
+from ..runtime.io_ownership import call_io, storage_owner
 from .dflash2 import _decode_unique_json, _read_safetensors_header, _source_binding
 from .lilicorr import LiLiCorrConfig, _file_sha256, expected_weight_shapes
 from .nemotron35_super_vl import _metadata_bytes, inspect_artifact, runtime_config
@@ -265,7 +265,8 @@ def inspect_export_plan(draft_path, target_path):
     """Inspect both exact artifacts without importing MLX or reading tensors."""
     target = inspect_artifact(target_path)
     return call_io(
-        "nemotron-lilicorr-export-plan", _inspect_export, str(draft_path), target
+        "nemotron-lilicorr-export-plan", _inspect_export, str(draft_path), target,
+        owner=storage_owner("weights", draft_path),
     )
 
 
@@ -315,7 +316,8 @@ def inspect_drafter(path, *, target_path=None, target_artifact=None):
         target["load_plan"] = {
             "resident_weight_bytes": int(target["conversion"]["tensor_bytes"]),
         }
-    return call_io("nemotron-lilicorr-drafter", _inspect_drafter, str(path), target)
+    return call_io("nemotron-lilicorr-drafter", _inspect_drafter, str(path), target,
+                   owner=storage_owner("weights", path))
 
 
 def content_revision(record):

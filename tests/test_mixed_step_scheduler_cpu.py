@@ -31,10 +31,10 @@ def _run(monkeypatch, *, mixed, model_override=None):
     chunks = live.setdefault("chunks", [])
     original_prompt = generate.PromptProcessingBatch.prompt
 
-    def prompt_spy(self, tokens, *, forward_fn=None):
+    def prompt_spy(self, tokens, *, forward_fn=None, **kwargs):
         if any(len(t) for t in tokens):  # empty calls slice nothing
             chunks.append(("mixed" if forward_fn else "plain", bool(getattr(self, "decode_active", False))))
-        return original_prompt(self, tokens, forward_fn=forward_fn)
+        return original_prompt(self, tokens, forward_fn=forward_fn, **kwargs)
 
     monkeypatch.setattr(generate.PromptProcessingBatch, "prompt", prompt_spy)
     model, vocab = rh.tiny_qwen38_mtp()

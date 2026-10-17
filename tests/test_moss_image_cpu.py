@@ -95,6 +95,7 @@ def test_changed_artifact_fails_before_backend_load(artifact):
         {"seed": -1},
         {"guidance_scale": float("nan")},
         {"uncond_skip_layers": (42,)},
+        {"uncond_skip_layers": 22},
     ],
 )
 def test_invalid_request_fails_before_backend_load(artifact, kwargs):
@@ -106,6 +107,26 @@ def test_invalid_request_fails_before_backend_load(artifact, kwargs):
         adapter.generate_image("a teapot", **kwargs)
     assert adapter.last_route_receipt["success"] is False
     assert adapter.last_route_receipt["observed_used"] is False
+
+
+def test_none_uncond_skip_layers_disables_skipping(artifact):
+    # The publisher documents None (or an empty sequence) as "disable".
+    seen = {}
+
+    class Backend:
+        def generate(self, prompt, **kwargs):
+            seen.update(kwargs)
+            return Image.new("RGB", (kwargs["width"], kwargs["height"]), "blue")
+
+    adapter = module.MOSSImageSFTAdapter(
+        artifact, backend_factory=lambda _root: Backend()
+    )
+    adapter.generate_image(
+        "a teapot", width=256, height=256, steps=2, uncond_skip_layers=None
+    )
+    assert seen["uncond_skip_layers"] == ()
+    assert adapter.last_route_receipt["success"] is True
+    assert adapter.last_route_receipt["parameters"]["uncond_skip_layers"] == []
 
 
 def test_q8_receipt_is_separate_and_unqualified(tmp_path):
@@ -222,3 +243,108 @@ def test_native_activation_rotary_and_schedule_match_reference():
         )
     finally:
         mx.set_default_device(previous)
+
+
+def test_text_encoder_offsets_only_centred_norms(tmp_path, monkeypatch):
+    # HF Qwen3.5 stores Qwen3_5RMSNorm weights centred on zero (it computes
+    # 1 + weight), but the GDN gated norm linear_attn.norm is a plain-weight
+    # Qwen3_5RMSNormGated and must load unchanged.
+    mx = pytest.importorskip("mlx.core")
+    from mlx.utils import tree_flatten
+    from mlx_vlm.models.qwen3_5.config import TextConfig
+    from mlx_vlm.models.qwen3_5.language import Qwen3_5Model
+    from transformers import AutoTokenizer
+
+    from mlx2.adapters.moss_image_pipeline import TextEncoder
+
+    text_config = {
+        "model_type": "qwen3_5_text",
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "linear_num_value_heads": 2,
+        "linear_num_key_heads": 2,
+        "linear_key_head_dim": 16,
+        "linear_value_head_dim": 16,
+        "linear_conv_kernel_dim": 4,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 2,
+        "rms_norm_eps": 1e-6,
+        "vocab_size": 128,
+        "num_key_value_heads": 1,
+        "max_position_embeddings": 512,
+        "head_dim": 32,
+        "full_attention_interval": 4,
+        "rope_parameters": {
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 0.25,
+            "mrope_section": [2, 1, 1],
+            "rope_type": "default",
+        },
+    }
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        model = Qwen3_5Model(TextConfig.from_dict(text_config))
+        rng = np.random.default_rng(5)
+        checkpoint = {}
+        for name, value in tree_flatten(model.parameters()):
+            value = mx.array(rng.standard_normal(value.shape).astype(np.float32))
+            if "conv1d.weight" in name:
+                value = value.moveaxis(1, 2)  # HF (C, 1, K) layout
+            checkpoint["language_model." + name] = value
+        mx.save_safetensors(str(tmp_path / "m.safetensors"), checkpoint)
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": dict.fromkeys(checkpoint, "m.safetensors")})
+        )
+        (tmp_path / "config.json").write_text(json.dumps({"text_config": text_config}))
+        monkeypatch.setattr(
+            AutoTokenizer, "from_pretrained", staticmethod(lambda *a, **k: None)
+        )
+        loaded = dict(tree_flatten(TextEncoder(tmp_path, tmp_path).model.parameters()))
+        for name, offset in (
+            ("layers.0.linear_attn.norm.weight", 0),
+            ("layers.0.input_layernorm.weight", 1),
+            ("layers.0.post_attention_layernorm.weight", 1),
+            ("layers.3.self_attn.q_norm.weight", 1),
+            ("layers.3.self_attn.k_norm.weight", 1),
+            ("norm.weight", 1),
+        ):
+            np.testing.assert_array_equal(
+                np.array(loaded[name]),
+                np.array(checkpoint["language_model." + name]) + offset,
+                err_msg=name,
+            )
+    finally:
+        mx.set_default_device(previous)
+
+
+def test_pixels_round_like_the_publisher_postprocess():
+    mx = pytest.importorskip("mlx.core")
+    pytest.importorskip("torch")
+    from types import SimpleNamespace
+
+    from mlx2.adapters.moss_image_pipeline import MOSSImagePipeline
+
+    # Each decoded value maps to k + 0.75: Diffusers' numpy_to_pil rounds it
+    # up to k + 1, a truncating cast would give k.
+    levels = np.arange(16 * 16 * 3, dtype=np.float64) % 255
+    decoded = ((levels + 0.75) / 127.5 - 1).astype(np.float32).reshape(1, 16, 16, 3)
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        pipeline = object.__new__(MOSSImagePipeline)
+        pipeline.text_encoder = SimpleNamespace(
+            encode=lambda _prompt: mx.zeros((1, 4, 8), dtype=mx.bfloat16)
+        )
+        pipeline.transformer = lambda latents, *_args, **_kwargs: mx.zeros_like(
+            latents
+        )
+        pipeline.vae = SimpleNamespace(decode=lambda _latents: mx.array(decoded))
+        image = pipeline.generate(
+            "a teapot", width=16, height=16, steps=1, seed=0, guidance_scale=1.0
+        )
+    finally:
+        mx.set_default_device(previous)
+    np.testing.assert_array_equal(
+        np.asarray(image), (levels + 1).astype(np.uint8).reshape(16, 16, 3)
+    )

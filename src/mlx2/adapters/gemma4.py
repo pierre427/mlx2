@@ -274,7 +274,11 @@ class _Gemma4Adapter(_MLXVLMAdapter):
                     else "sparse_router_and_experts_are_not_dense_projections"
                 ),
                 "qualified": False,
-                "selected": False,
+                # Serving binds int8 prefill (and its row-bound auto-off), so
+                # the adapter defers like ordinary_b1 rather than claiming
+                # "not selected" on a route where it is bound.
+                "selected": None,
+                "selection_authority": "serving_route_receipt",
             },
             "sparse_moe_prefill": {
                 "eligible": False,

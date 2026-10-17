@@ -291,7 +291,8 @@ def validate_result(
         and all(type(token) is int for token in canvas),
         "no_mask_tokens": isinstance(canvas, list) and mask_token_id not in canvas,
         "semantic_needle": needle is None
-        or (isinstance(text, str) and needle.casefold() in text.casefold()),
+        # Identifiers are case-sensitive (AGENTS.md oracle rule).
+        or (isinstance(text, str) and needle in text),
         "active_block_receipt": isinstance(stats, dict)
         and stats.get("active_block_postprocess") is active_block_postprocess
         and (

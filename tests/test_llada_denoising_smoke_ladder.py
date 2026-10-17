@@ -233,6 +233,8 @@ def test_parity_only_receipt_can_retain_empty_output_for_canvas_comparison():
         (("canvas_token_ids",), [1, 126336], "no_mask_tokens"),
         (("text",), "  ", "visible_output"),
         (("text",), "wrong answer", "semantic_needle"),
+        # Sweep 2026-10-16: identifier oracles are case-sensitive.
+        (("text",), "the code is llada-abc123", "semantic_needle"),
     ],
 )
 def test_result_gate_fails_closed(path, value, failure):

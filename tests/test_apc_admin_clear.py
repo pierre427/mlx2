@@ -64,6 +64,28 @@ def test_clear_on_an_engine_without_prefix_caches_is_a_conflict():
     assert status == 409
 
 
+class FailingClearEngine(AdminEngine):
+    def clear_prefix_caches(self, *, reason="admin"):
+        from mlx2.runtime.apc_v2 import APCMetadataIncomplete
+
+        raise APCMetadataIncomplete("APCv2 persistence deletion did not complete")
+
+
+def test_clear_whose_persistence_fails_answers_503(monkeypatch):
+    # Sweep 2026-10-16: the error escaped the handler and the client got a
+    # dropped connection instead of a status.
+    import test_http_security
+
+    monkeypatch.setattr(test_http_security, "AdminEngine", FailingClearEngine)
+    with _server(policy_for_bind("127.0.0.1"), admin_token="admin") as port:
+        status, _, body = _request(
+            port, "POST", "/v1/admin/apc/clear",
+            headers={"Authorization": "Bearer admin"}, body=b"",
+        )
+    assert status == 503
+    assert body["error"]["code"] == "apc_persistence_incomplete"
+
+
 def test_clear_body_validation():
     assert validate_apc_clear_body(None) == "admin"
     assert validate_apc_clear_body({}) == "admin"

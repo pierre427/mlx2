@@ -29,6 +29,7 @@ from .logprobs import distribution_contract, token_logprob, wants_logprobs, want
 from .generation_trace import GeneratedTokenTrace
 from .request_limits import (
     DEFAULT_OUTPUT_TOKENS,
+    ContextLengthExceeded,
     resolve_output_limit,
     validate_default_max_tokens,
 )
@@ -4791,21 +4792,18 @@ class ServingEngine:
                 record = None
             if isinstance(record, dict) and isinstance(record.get("settings"), dict):
                 qualified_settings = record["settings"]
-        # The largest prefill projection call: every lane prefilling a full
-        # step together, or a cold media request's whole uncached tail in one
-        # forward (bounded by the context).  Generous on purpose: auto only
-        # steps aside when int8 prefill could never run.
-        max_prefill_rows = (
-            int(self.max_context)
-            if callable(getattr(adapter, "prepare_multimodal_request", None))
-            else int(self.prefill_step) * int(self.max_lanes)
-        )
+        # The largest ordinary prefill projection call: every lane prefilling
+        # a full step together (generous on purpose).  A cold media request's
+        # one-chunk tail is not counted: bounding media routes by the context
+        # kept auto on for Gemma 4 31B at prefill_step 256, where only such a
+        # tail could ever reach the threshold (sweep 2026-10-16 APC-10).
         policy, self.int8_prefill_auto = resolve_auto(
             adapter,
             qualification_mode=bool(self.qualification_mode),
             qualified_settings=qualified_settings,
             conflicts=conflicts,
-            max_prefill_rows=max_prefill_rows,
+            max_prefill_rows=int(self.prefill_step) * int(self.max_lanes),
+            media_prefill=callable(getattr(adapter, "prepare_multimodal_request", None)),
         )
         if policy is not None:
             self.int8_prefill_policy = policy
@@ -4952,6 +4950,15 @@ class ServingEngine:
             # sure no hold outlives it.
             self._finish_cleanup(job, "usage_reservation_release", lambda: ledger.release(reservation))
             return
+        # A worker-side refusal before any prefill (memory admission, a full
+        # cohort) is a refusal like the submit-time ones: only released.  A
+        # request that failed before prefill (context too long) still counts,
+        # but charges no prompt work it never did.
+        before_prefill = getattr(job, "usage_before_prefill", None)
+        if before_prefill == "refused":
+            self._finish_cleanup(job, "usage_reservation_release", lambda: ledger.release(reservation))
+            return
+        prefilled = before_prefill is None
         started = getattr(job, "started", 0) or 0
         request = getattr(job, "request", None) or {}
         try:
@@ -4959,8 +4966,8 @@ class ServingEngine:
                 getattr(job, "tenant_id", "default"),
                 request.get("session_id"),
                 status=status,
-                prompt_tokens=getattr(job, "prompt_tokens", 0),
-                cached_tokens=getattr(job, "cached_tokens", 0),
+                prompt_tokens=getattr(job, "prompt_tokens", 0) if prefilled else 0,
+                cached_tokens=getattr(job, "cached_tokens", 0) if prefilled else 0,
                 completion_tokens=getattr(job, "completion_tokens", 0),
                 reasoning_tokens=getattr(job, "reasoning_tokens", 0),
                 service_ms=(time.monotonic() - started) * 1000 if started else 0,
@@ -7516,6 +7523,7 @@ class ServingEngine:
         self._cancel_pending_cache_capsule(
             batch, job, "memory_admission_timeout"
         )
+        job.usage_before_prefill = "refused"
         self._finish(job, {
             "error": "host memory admission did not recover before deadline",
             "status": 429,
@@ -7926,14 +7934,18 @@ class ServingEngine:
             log.exception("APCv2 checkpoint publication failed")
             return False
 
-    def _fail_attaching_cohort(self, batch, active, published, cohort, event):
+    def _fail_attaching_cohort(
+        self, batch, active, published, cohort, event, usage_before_prefill=None
+    ):
         """Roll back a declared cohort before any member can decode.
 
         Members already inserted into ``BatchGenerator`` are removed together;
         members still in the local publication deque stop counting as queued.
         Every reserved request receives the same terminal failure and releases
         its slot.  The caller invokes this only while the cohort owns the idle
-        attachment boundary, before ``batch.next``.
+        attachment boundary, before ``batch.next``, so no member has
+        prefilled: ``usage_before_prefill`` ("refused" or "failed") is how
+        ``_record_usage`` accounts each member.
         """
         member_ids = {job.id for job in cohort.jobs}
         attached_uids = [
@@ -7953,6 +7965,8 @@ class ServingEngine:
         count_add(self.counts, "batch_cohort_attachment_failures", 1)
         count_add(self.counts, "batch_cohort_jobs_failed_closed", len(cohort.jobs))
         for member in cohort.jobs:
+            if usage_before_prefill is not None:
+                member.usage_before_prefill = usage_before_prefill
             self._finish(member, dict(event))
 
     def _finish_cancelled_queued(self, batch, published, held_cohort, attaching_cohort):
@@ -11106,6 +11120,7 @@ class ServingEngine:
                                     "error": "declared batch cohort member cancelled before atomic attachment",
                                     "status": 429,
                                 },
+                                usage_before_prefill="refused",
                             )
                             attaching_cohort = None
                         else:
@@ -12621,12 +12636,21 @@ class ServingEngine:
                         code = getattr(exc, "code", None)
                         if code is not None:
                             event["code"] = code
+                        # A request (or cohort) refused by admission, or
+                        # whose prompt cannot fit, never prefilled.
+                        before_prefill = (
+                            "refused" if isinstance(exc, Overloaded)
+                            else "failed" if isinstance(exc, ContextLengthExceeded)
+                            else None
+                        )
                         if attaching_cohort is not None:
                             self._fail_attaching_cohort(
-                                batch, active, published, attaching_cohort, event
+                                batch, active, published, attaching_cohort, event,
+                                usage_before_prefill=before_prefill,
                             )
                             attaching_cohort = None
                         else:
+                            job.usage_before_prefill = before_prefill
                             self._finish(job, event)
                     finally:
                         # The scheduler/APC own admitted cache state. Locals in

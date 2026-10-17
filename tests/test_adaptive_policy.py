@@ -499,7 +499,7 @@ def test_batch_scheduler_turns_defer_prefill_until_decode_repays_debt(monkeypatc
         def __len__(self):
             return 0
 
-        def prompt(self, prompts):
+        def prompt(self, prompts, *, final_rows=None):
             self.calls.append(prompts)
 
     class Scheduler(generate.BatchGenerator):

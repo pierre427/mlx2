@@ -412,3 +412,74 @@ def test_constrained_target_outside_lili_candidates_falls_back_ordinary_without_
     assert batch.scheduler_stats["draft_fallbacks"] == 1
     assert final[0].speculative_receipt["ordinary_fallback"]
     assert wrapper.proposal_pool.feedback_revision == revision
+
+
+def test_empty_model_drafter_round_is_charged_to_the_fallback_only(monkeypatch):
+    # Sweep 2026-10-16 SPEC-1: the admitted xpress head returned no path and
+    # prompt lookup served as the runtime fallback; only the fallback provider
+    # has a fallback round.
+    from mlx2.runtime import proposal_pool
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    monkeypatch.setattr(
+        proposal_pool, "_SHARED_RANKING_REGISTRY", proposal_pool.ProposalRankingRegistry()
+    )
+    model, base = pair("xpress")
+    draft = wrapped(
+        model, base, {"sources": ["external", "prompt_lookup"], "ngram_min": 1, "ngram_max": 1}
+    )
+    batch = ExternalDraftBatchGenerator(
+        model, draft_model=draft, binding="sweep1016-fallback", num_draft=2,
+        prefill_step_size=64, ready_drain="all",
+    )
+    draft.providers["external"] = lambda _context, _limit: []
+    lane = batch.lanes[batch.insert([[1, 2, 1, 2, 1, 2]], max_tokens=[8])[0]]
+    while lane.anchor is None:
+        batch._prefill(lane)
+    batch._round([lane])
+    assert lane.continuation_last_admission["runtime_fallback"] == "prompt_lookup"
+    stats = lane.continuation_provider_stats
+    assert stats["external"]["fallback_rounds"] == 0
+    assert stats["prompt_lookup"]["fallback_rounds"] == 1
+
+
+def test_scoped_continuation_receipt_hides_shared_critic_slate_numbers(monkeypatch):
+    # Sweep 2026-10-16 SPEC-2: the slate's acceptance predictions blend the
+    # shared ranking critic, which every tenant's committed labels move; a
+    # tenant-scoped receipt keeps the slate's shape but not those numbers.
+    from mlx2.runtime import proposal_pool
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    monkeypatch.setattr(
+        proposal_pool, "_SHARED_RANKING_REGISTRY", proposal_pool.ProposalRankingRegistry()
+    )
+    model, base = pair("xpress")
+    draft = wrapped(model, base, {"sources": ["external"]})
+    batch = ExternalDraftBatchGenerator(
+        model, draft_model=draft, binding="sweep1016-slate", num_draft=2,
+        prefill_step_size=64, ready_drain="all",
+    )
+    scoped, public = batch.insert(
+        [[1, 2, 3, 4], [1, 2, 3, 4]], max_tokens=[8, 8], session_keys=["b" * 64, None]
+    )
+    for uid in (scoped, public):
+        lane = batch.lanes[uid]
+        while lane.anchor is None:
+            batch._prefill(lane)
+    batch._round([batch.lanes[scoped], batch.lanes[public]])
+
+    def slate(uid):
+        receipt = batch._continuation_receipt(batch.lanes[uid])
+        pool = receipt.get("continuation_pool") or receipt["speculation"]["continuation_pool"]
+        return pool["last_candidate_slate"]
+
+    hidden = {"conditional_acceptance", "expected_accepted_tokens", "score"}
+    for uid in (scoped, public):  # an unkeyed request gets a private scope
+        assert slate(uid) and not hidden & set(slate(uid)[0])
+        assert {"rank", "depth", "sources", "admitted", "target_selected"} <= set(slate(uid)[0])
+        receipt = batch._continuation_receipt(batch.lanes[uid])
+        pool = receipt.get("continuation_pool") or receipt["speculation"]["continuation_pool"]
+        for row in pool["provider_stats"].values():
+            assert not {"score_sum", "score_observations"} & set(row)
+        # Internal stats keep the score for ranking diagnostics.
+        assert "score_sum" in next(iter(batch.lanes[uid].continuation_provider_stats.values()))

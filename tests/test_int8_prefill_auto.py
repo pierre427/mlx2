@@ -138,8 +138,11 @@ def test_auto_steps_aside_when_prefill_never_reaches_the_threshold(device_ok):
     policy, receipt = _resolve(adapter, qualification_mode=True, max_prefill_rows=threshold - 1)
     assert policy is None and receipt["resolved"] == "off"
     assert "could never run" in receipt["reason"]
+    assert receipt["stepped_aside"] == "row_bound"
+    assert receipt["row_bound"] == {"max_prefill_rows": threshold - 1, "row_threshold": threshold}
     policy, receipt = _resolve(adapter, qualification_mode=True, max_prefill_rows=threshold)
     assert policy == AUTO_POLICY and receipt["resolved"] == "on"
+    assert "stepped_aside" not in receipt and "row_bound" not in receipt
 
 
 def test_auto_follows_the_qualification_record(device_ok):
@@ -353,6 +356,102 @@ def test_engine_auto_is_off_when_lanes_times_step_stay_below_the_threshold(
         assert "int8_prefill" not in status["settings"]
         auto = status["int8_prefill"]["auto"]
         assert auto["resolved"] == "off" and "could never run" in auto["reason"]
+    finally:
+        engine.close()
+
+
+def _media_engine(**kwargs):
+    # The Gemma 4 31B shape: a media-capable adapter (it inherits a callable
+    # ``prepare_multimodal_request``) that declares int8 prefill, with a
+    # context well past the row threshold.
+    from test_approximate_kv_serving import make_adapter
+
+    from mlx2.serving import ServingEngine
+
+    adapter = make_adapter(_q8_serving_model(), operations=None)
+    adapter.int8_prefill_supported = lambda self: ("mlp", "all")
+    adapter.prepare_multimodal_request = lambda self, request, **_kw: request
+    adapter.max_context = 4096
+    return ServingEngine(
+        "tiny", adapter_factory=adapter, mtp=False, qualification_mode=True,
+        int8_prefill="auto", **kwargs,
+    )
+
+
+def test_gemma4_31b_route_is_media_capable_and_declares_int8_prefill():
+    # The shape _media_engine stands in for (APC-10).
+    from mlx2.adapters.gemma4 import Gemma431BAdapter
+
+    assert callable(getattr(Gemma431BAdapter, "prepare_multimodal_request", None))
+    assert Gemma431BAdapter.int8_prefill_supported() == ("mlp", "all")
+
+
+def test_engine_auto_steps_aside_on_a_media_route_at_a_small_step(serving_host, device_ok):
+    # Sweep 2026-10-16 APC-10: the media branch bounded the rows by the
+    # context, so auto stayed on for Gemma 4 31B at prefill_step 256 although
+    # only a cold media tail could ever reach the threshold.
+    from mlx2.prometheus import PrometheusBuilder, _add_int8_prefill
+
+    engine = _media_engine(prefill_step=256, max_lanes=1, max_inflight=1)
+    try:
+        assert engine.ready.wait(60), engine.error
+        assert engine.max_context >= AUTO_POLICY.row_threshold
+        status = engine.status()
+        assert "int8_prefill" not in status["settings"]
+        block = status["int8_prefill"]
+        assert block["selected"] is False and block["observed_used"] is False
+        auto = block["auto"]
+        assert auto["resolved"] == "off" and auto["stepped_aside"] == "row_bound"
+        assert auto["row_bound"] == {
+            "max_prefill_rows": 256,
+            "row_threshold": AUTO_POLICY.row_threshold,
+            "cold_media_tail_counted": False,
+        }
+        assert "cold media" in auto["reason"]
+        builder = PrometheusBuilder()
+        _add_int8_prefill(builder, engine)
+        text = builder.render()
+        assert 'mlx2_int8_prefill_auto_step_asides_total{rule="row_bound"} 1' in text
+        assert 'mlx2_int8_prefill_enabled{scope="off"} 0' in text
+    finally:
+        engine.close()
+
+
+def test_engine_auto_stays_on_for_a_media_route_whose_lanes_reach_the_threshold(
+    serving_host, device_ok
+):
+    # Two lanes of 256 rows can prefill together: the rule must not fire.
+    from mlx2.prometheus import PrometheusBuilder, _add_int8_prefill
+
+    engine = _media_engine(prefill_step=256, max_lanes=2, max_inflight=2)
+    try:
+        assert engine.ready.wait(60), engine.error
+        status = engine.status()
+        assert status["settings"]["int8_prefill"]["revision"] == AUTO_POLICY.revision
+        block = status["int8_prefill"]
+        assert block["selected"] is True and block["observed_used"] is False
+        auto = block["auto"]
+        assert auto["resolved"] == "on" and "stepped_aside" not in auto
+        builder = PrometheusBuilder()
+        _add_int8_prefill(builder, engine)
+        text = builder.render()
+        assert 'mlx2_int8_prefill_auto_step_asides_total{rule="row_bound"} 0' in text
+    finally:
+        engine.close()
+
+
+def test_engine_auto_is_unchanged_on_a_text_route_at_one_lane(serving_host, device_ok):
+    # Another int8 route (no media): one lane at a 512-row step stays on.
+    engine = _engine(
+        _q8_serving_model(), qualification_mode=True, int8_prefill="auto",
+        prefill_step=512, max_lanes=1, max_inflight=1,
+    )
+    try:
+        assert engine.ready.wait(60), engine.error
+        status = engine.status()
+        assert status["settings"]["int8_prefill"]["revision"] == AUTO_POLICY.revision
+        assert status["int8_prefill"]["selected"] is True
+        assert status["int8_prefill"]["auto"]["resolved"] == "on"
     finally:
         engine.close()
 

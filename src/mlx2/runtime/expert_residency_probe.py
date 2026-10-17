@@ -5,7 +5,9 @@ compares the current independent per-projection LRU with a hybrid design:
 every projection retains a minimum floor while unused bytes form one shared
 overflow LRU.  The scan-resistant variant observes intermediate prefill calls
 without allowing them to displace durable decode residency, then admits the
-terminal pass in whole-prompt frequency order.
+terminal pass in whole-prompt frequency order, as the live ``terminal_hot``
+admission does: counts cover only the request's prefill calls, and ties keep
+router order.
 """
 
 from __future__ import annotations
@@ -141,8 +143,9 @@ def replay_hybrid(
             trim(transition=True)
         phase = _phase(index, decode_start=decode_start, terminal_start=terminal_start, serving_start=serving_start)
         wanted = list(dict.fromkeys(int(value) for value in values))
-        for value in wanted:
-            frequencies[layer][value] += 1
+        if phase in ("intermediate_prefill", "terminal_prefill"):
+            for value in wanted:
+                frequencies[layer][value] += 1
         hits = 0
         missing = []
         for value in wanted:
@@ -156,11 +159,12 @@ def replay_hybrid(
             continue
         # Terminal admission uses whole-prompt frequency while retaining only
         # rows this terminal call actually materialized. Admit cold-to-hot so
-        # the hottest rows finish at the MRU end of both tiers.
+        # the hottest rows finish at the MRU end of both tiers. The stable
+        # sort keeps router order on ties, as ExpertLRU does.
         admission_order = wanted
         if scan_resistant and phase == "terminal_prefill":
             admission_order = sorted(
-                wanted, key=lambda value: (frequencies[layer][value], value)
+                wanted, key=lambda value: frequencies[layer][value]
             )
         # Every admitted access refreshes the projection's protected floor.
         # A shared hit is promoted and the local LRU is demoted, so the floor

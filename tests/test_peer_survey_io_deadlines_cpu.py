@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
@@ -12,6 +13,7 @@ import pytest
 from mlx2.runtime import apc_v2
 from mlx2.runtime import weight_stream as ws
 from mlx2.runtime.apc_v2 import APCKey, APCv2
+from mlx2.runtime.io_ownership import storage_owner
 from mlx2.runtime.models.cache import KVCache
 
 
@@ -24,7 +26,7 @@ def _state(seed):
 
 
 @pytest.mark.parametrize("collect", [False, True])
-def test_spill_timeout_revokes_publication_retains_payload_and_does_not_retry(
+def test_spill_timeout_retains_payload_publishes_late_write_and_does_not_retry(
     tmp_path, monkeypatch, collect
 ):
     gate, started = threading.Event(), threading.Event()
@@ -68,9 +70,15 @@ def test_spill_timeout_revokes_publication_retains_payload_and_does_not_retry(
         assert job.done.wait(2)
         with apc._apc_lock:
             apc._collect_spills_locked()
-        assert not getattr(entry, "_apc_disk", None)
-        assert not list(tmp_path.glob("apc-idle-*"))
-        hit = apc.lookup(key, tokens + [11], allow_disk_restore=False)
+        # The timeout only stopped the wait: the one finished write is
+        # published (Sweep 2026-10-16 APC-1), never redone or discarded.
+        assert getattr(entry, "_apc_disk", None) and not entry.prompt_cache
+        assert len(writes) == 1
+        stats = apc.apc_stats["idle_disk"]
+        assert stats["late_spills_published"] == 1
+        assert stats["background_spills_discarded"] == 0
+        assert not stats["background_spill_writes_blocked"]
+        hit = apc.lookup(key, tokens + [11])
         assert hit.hit
         hit.cache.close()
     finally:
@@ -105,8 +113,11 @@ class _BlockedHandles:
         self.closed.set()
 
 
-def _pool():
-    return ws._ReadPool(max_workers=2, thread_name_prefix="deadline-test")
+_POOL_OWNER = storage_owner("weights", "deadline-test")
+
+
+def _pool(owner=_POOL_OWNER):
+    return ws._ReadPool(max_workers=2, thread_name_prefix="deadline-test", owner=owner)
 
 
 def test_single_expert_read_times_out_and_manager_close_defers_handles(monkeypatch):
@@ -131,6 +142,7 @@ def test_single_expert_read_times_out_and_manager_close_defers_handles(monkeypat
         assert not handles.closed.is_set()
         with pytest.raises(ws.WeightReadTimeout, match="not drained"):
             _pool()
+        _pool(owner=storage_owner("weights", "unrelated")).close()
         handles.gate.set()
         assert handles.closed.wait(2)
         assert pool.close(handles)
@@ -142,7 +154,44 @@ def test_single_expert_read_times_out_and_manager_close_defers_handles(monkeypat
         pool.close(handles)
 
 
-def test_spill_quarantine_survives_clear_and_refuses_a_new_writer(tmp_path, monkeypatch):
+def test_router_hint_timeout_fails_the_route_and_close_does_not_block(monkeypatch):
+    # The hint lane read on a private executor: a hung hint read neither
+    # failed the route nor counted a timeout, the next decode queued behind
+    # it, and close() joined the hung syscall (sweep 2026-10-16 APC-14).
+    monkeypatch.setattr(ws, "READ_TIMEOUT_SECONDS", 0.05)
+    handles, pool = _BlockedHandles(), ws._ReadPool(2, "hint-test", timeout=0.05)
+    location = ws.TensorLocation(Path("shard"), "F32", (8, 4), 0, 128)
+    reader = ws.ExpertSliceReader([ws.ExpertSliceSpec.single("weight", location)],
+                                 handles=handles, pool=pool, window=2)
+    stats = ws.StreamStats()
+    cache = ws.ExpertLRU(reader, capacity_experts=4, stats=stats,
+                         group="layers.0", path="layers.0.down_proj")
+    manager = ws.ExpertStreamManager(
+        plan=SimpleNamespace(top_k=2), stats=stats, pool=pool,
+        caches={cache.path: cache}, handles=handles, router_hint="next_layer_reuse",
+    )
+    try:
+        manager._router_hints.schedule("layers.0", [3])
+        assert handles.started.wait(1)
+        with pytest.raises(ws.WeightReadTimeout):
+            manager._router_hints.consume("layers.0", cache.path, [3])
+        counters = pool.counters()
+        assert counters["weight_read_failed"] == 1
+        assert counters["weight_read_timeouts_total"] == 1
+        began = time.monotonic()
+        with pytest.raises(ws.WeightReadTimeout):
+            cache.acquire([5])
+        manager.close()
+        assert time.monotonic() - began < 0.5
+        assert not handles.closed.is_set()
+        handles.gate.set()
+        assert handles.closed.wait(2)
+    finally:
+        handles.gate.set()
+        pool.close(handles)
+
+
+def test_spill_quarantine_survives_clear_and_is_scoped_to_its_directory(tmp_path, monkeypatch):
     gate, started = threading.Event(), threading.Event()
     real_write = apc_v2._write_spill_job
 
@@ -174,13 +223,26 @@ def test_spill_quarantine_survives_clear_and_refuses_a_new_writer(tmp_path, monk
             assert not first._settle_spill_locked(entry)
         first.clear(release_memory=False)
         assert job.abandoned and job.payload_held()
+        # Same directory: the quarantine survives clear(), so no second write
+        # queues behind the stuck one, and a replacement owner is refused.
+        first.store(key, tokens, _state(0))
+        with first._apc_lock:
+            assert not first._spill_entry_locked(
+                key, tokens, first._trie.get(key, tokens), reason="pressure",
+                background=True,
+            )
+        assert first.apc_stats["idle_disk"]["background_spill_writes_blocked"]
+        with pytest.raises(ws.WeightReadTimeout, match="not drained"):
+            APCv2(max_size=8, max_bytes=1 << 20, layout_name="quarantine",
+                  idle_disk_dir=str(tmp_path / "first"), idle_disk_seconds=3600)
+        # Another directory keeps spilling (Sweep 2026-10-16 APC-1).
         second.store(key, tokens, _state(0))
         with second._apc_lock:
-            assert not second._spill_entry_locked(
+            assert second._spill_entry_locked(
                 key, tokens, second._trie.get(key, tokens), reason="pressure",
                 background=True,
             )
-        assert second._spill_writer is None
+        assert not second.apc_stats["idle_disk"]["background_spill_writes_blocked"]
         gate.set()
         assert job.done.wait(2)
         assert not list((tmp_path / "first").glob("apc-idle-*"))
@@ -230,7 +292,9 @@ def test_abandoned_expert_iterator_accounts_running_reads_until_drain():
         assert handles.started.wait(1)
         iterator.close()
         assert reader.outstanding_bytes() == 16
-        assert pool.counters()["weight_read_failed"] == 1
+        # Abandonment is not an I/O failure: the pool still owns the running
+        # read under its deadline (sweep 2026-10-16 APC-13).
+        assert pool.counters()["weight_read_failed"] == 0
         pool.close(handles)
         assert not handles.closed.is_set()
         handles.gate.set()
@@ -239,6 +303,52 @@ def test_abandoned_expert_iterator_accounts_running_reads_until_drain():
     finally:
         handles.gate.set()
         iterator.close()
+        pool.close(handles)
+
+
+def test_materialize_error_fails_only_the_request_not_the_shared_pool():
+    # A model-thread error (e.g. a device OOM) while a sibling read ran used
+    # to fail the pool every layer shares, so every later page-in raised
+    # until reload though no I/O deadline was hit (sweep 2026-10-16 APC-13).
+    handles, pool = _BlockedHandles(), _pool()
+    location = ws.TensorLocation(Path("shard"), "F32", (4, 4), 0, 64)
+    readers = [
+        ws.ExpertSliceReader([ws.ExpertSliceSpec.single("weight", location)],
+                             handles=handles, pool=pool, window=2)
+        for _ in range(2)
+    ]
+    real = readers[0].read_bytes
+
+    def read_bytes(expert):
+        if expert == 0:  # return once the sibling read is running
+            assert handles.started.wait(1)
+            return ((bytes(16),),)
+        return real(expert)
+
+    readers[0].read_bytes = read_bytes
+    readers[0].materialize = lambda payload: (_ for _ in ()).throw(MemoryError("oom"))
+    for reader in readers[1:]:
+        reader.materialize = lambda payload: payload
+    stats = ws.StreamStats()
+    (first, other) = [ws.ExpertLRU(reader, capacity_experts=4, stats=stats)
+                      for reader in readers]
+    try:
+        with pytest.raises(MemoryError):
+            first.acquire([0, 1])
+        assert handles.started.wait(1)
+        assert readers[0].outstanding_bytes() == 16
+        assert pool.counters()["weight_read_failed"] == 0
+        handles.gate.set()
+        assert handles.finished.wait(1)
+        deadline = time.monotonic() + 2
+        while readers[0].outstanding_bytes() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert readers[0].outstanding_bytes() == 0
+        assert other.acquire([2])[2] is not None
+        readers[0].materialize = lambda payload: payload
+        assert first.acquire([3])[3] is not None
+    finally:
+        handles.gate.set()
         pool.close(handles)
 
 
@@ -273,7 +383,7 @@ def test_pool_failure_cancels_queued_work_and_closes_owner_exactly_once():
             closed.set()
 
     owner = Owner()
-    pool = ws._ReadPool(1, "idempotent-close")
+    pool = ws._ReadPool(1, "idempotent-close", owner=_POOL_OWNER)
 
     def running():
         started.set()
@@ -301,7 +411,7 @@ def test_pool_failure_cancels_queued_work_and_closes_owner_exactly_once():
         pool.close(owner)
 
 
-def test_initial_spill_uses_evaluated_worker_payload_and_discards_late_write(tmp_path, monkeypatch):
+def test_initial_spill_uses_evaluated_worker_payload_and_publishes_late_write(tmp_path, monkeypatch):
     gate, started = threading.Event(), threading.Event()
     real = apc_v2._write_spill_job
     jobs = []
@@ -334,8 +444,9 @@ def test_initial_spill_uses_evaluated_worker_payload_and_discards_late_write(tmp
         assert jobs[0].done.wait(2)
         with apc._apc_lock:
             apc._collect_spills_locked()
-        assert not getattr(entry, "_apc_disk", None)
-        assert not list(tmp_path.glob("apc-idle-*"))
+        # Published once it returned, still the stored entry (APC-1).
+        assert getattr(entry, "_apc_disk", None) and not entry.prompt_cache
+        assert len(jobs) == 1
     finally:
         gate.set()
         apc.close()
@@ -374,7 +485,7 @@ def test_refault_deadline_retains_staging_and_never_decodes_late_payload(tmp_pat
         assert not apc.lookup(key, tokens + [5]).hit
         assert len(reads) == 1
         with pytest.raises(ws.WeightReadTimeout):
-            ws._ReadPool(1, "replacement-during-refault")
+            ws._ReadPool(1, "replacement-during-refault", owner=apc._disk_owner)
         gate.set()
         deadline = time.monotonic() + 2
         while apc._restore_staging_bytes and time.monotonic() < deadline:

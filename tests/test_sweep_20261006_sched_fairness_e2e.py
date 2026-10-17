@@ -52,10 +52,10 @@ def clock(monkeypatch):
     real_prompt = G.PromptProcessingBatch.prompt
     real_next = G.GenerationBatch.next
 
-    def prompt(self, tokens, *, forward_fn=None):
+    def prompt(self, tokens, *, forward_fn=None, **kwargs):
         rows = sum(1 for t in tokens if len(t))
         width = max((len(t) for t in tokens), default=0)
-        out = real_prompt(self, tokens, forward_fn=forward_fn)
+        out = real_prompt(self, tokens, forward_fn=forward_fn, **kwargs)
         seconds = len(tokens) * width * clock.cost_per_row_token
         clock.t += seconds
         if width > 1:

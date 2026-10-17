@@ -838,3 +838,20 @@ def test_external_cost_per_commit_handoff_counters_are_exported():
     text = builder.render()
     assert 'event="external_cost_handoff_events"' in text
     assert 'event="external_cost_handoff_lanes"' in text
+
+
+def test_every_isolated_finish_cleanup_step_is_exported():
+    # Sweep 2026-10-16: exact_decode_checkpoint_close failures were counted
+    # but never exported; keep the step list in step with serving.py.
+    import re
+    from pathlib import Path
+
+    from mlx2 import prometheus
+
+    source = (Path(prometheus.__file__).parent / "serving.py").read_text()
+    steps = set(re.findall(r'_finish_cleanup\(\s*job,\s*"([a-z_]+)"', source))
+    assert "exact_decode_checkpoint_close" in steps
+    for step in steps:
+        assert f"finish_cleanup_failures_{step}" in {
+            **prometheus._ENGINE_EVENTS, **prometheus._OPTIONAL_ENGINE_EVENTS
+        }

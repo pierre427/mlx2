@@ -62,7 +62,8 @@ def test_ple_foreground_timeout_retains_descriptor_through_close(tmp_path, monke
         assert time.monotonic() - began < 0.5
         os.fstat(fds[0])
         with pytest.raises(ReadTimeout, match="not drained"):
-            ReadPool(1, "replacement")
+            ReadPool(1, "replacement", owner=table._io_owner)
+        ReadPool(1, "unrelated-owner", owner=("ple", str(tmp_path / "other.bin"))).close()
         gate.set()
         assert finished.wait(2)
     finally:
@@ -110,6 +111,29 @@ def test_adaptive_warm_timeout_does_not_trap_close_or_publish_completion(tmp_pat
         assert table._warm_state == "stopped"
     finally:
         gate.set()
+        table.close()
+
+
+def test_adaptive_warm_deadline_applies_to_each_chunk_not_the_whole_table(tmp_path, monkeypatch):
+    table = _table(tmp_path, monkeypatch, "adaptive")
+    monkeypatch.setattr(ple, "READ_TIMEOUT_SECONDS", 0.15)
+    monkeypatch.setattr(ple, "READ_POLICY_WARM_CHUNK_BYTES", 4096)
+    real = os.pread
+    reads = []
+
+    def slow(fd, length, offset):
+        reads.append(length)
+        time.sleep(0.06)  # within one chunk's deadline, not the table's
+        return real(fd, length, offset)
+
+    monkeypatch.setattr(ple.os, "pread", slow)
+    try:
+        assert table.start_adaptive_warm()
+        assert table.wait_for_adaptive_warm(5)
+        assert len(reads) * 0.06 > ple.READ_TIMEOUT_SECONDS
+        assert table._warm_pool.failure is None
+        assert table._warm_state == "completed"
+    finally:
         table.close()
 
 

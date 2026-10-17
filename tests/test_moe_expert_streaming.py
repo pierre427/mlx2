@@ -1075,6 +1075,36 @@ def test_terminal_hot_prefill_is_scan_resistant_and_admits_hot_terminal_rows():
     assert stats.prefill_ephemeral_page_ins == 4
 
 
+def test_terminal_hot_intermediate_gather_stays_within_the_transient_bound():
+    # An intermediate call's misses are both its ephemeral rows and its
+    # over-capacity rows; charging both terms overshot the plan's reserved
+    # bound (sweep 2026-10-16 NEMO-MAIN-2 / APC-15).
+    bound = weight_stream.expert_transient_bound(
+        {"layer": [(8, 1)]}, capacity=2, staging_bytes=0
+    )
+    caches = {}
+    for policy in ("lru", "terminal_hot"):
+        cache = weight_stream.ExpertLRU(
+            _CountingReader(8), capacity_experts=2,
+            stats=weight_stream.StreamStats(), group="layer",
+            prefill_admission=policy,
+        )
+        cache.acquire([0, 1])
+        with weight_stream.expert_prefill_admission("intermediate", ("request",)):
+            cache.acquire(range(8))
+        cache.note_gather(8)
+        caches[policy] = cache
+    peaks = {policy: c.stats.peak_transient_bytes for policy, c in caches.items()}
+    assert peaks == {"lru": bound, "terminal_hot": bound}
+    # An overlap bank of resident rows is charged before its acquire: the
+    # previous call's ephemeral rows are not part of it.
+    cache = caches["terminal_hot"]
+    cache.stats.peak_transient_bytes = 0
+    cache.group = "next"
+    cache.note_gather(2, ephemeral=0)
+    assert cache.stats.peak_transient_bytes == 2
+
+
 def test_prompt_batch_marks_only_the_last_pure_prefill_chunk_terminal():
     from mlx2.runtime.generate import PromptProcessingBatch
 
@@ -1092,6 +1122,124 @@ def test_prompt_batch_marks_only_the_last_pure_prefill_chunk_terminal():
     )
     batch.prompt([[1, 2, 3]])
     assert phases == [("intermediate", (17,)), ("terminal", (17,))]
+
+
+def test_serving_scheduler_marks_only_the_request_final_slice_terminal(monkeypatch):
+    # The scheduler calls prompt() once per round with one slice. Judging
+    # "terminal" per call labelled every slice terminal, so terminal_hot
+    # never kept a pure-prefill row out of residency in serving (sweep
+    # 2026-10-16 NEMO-MAIN-1).
+    import contextlib
+
+    from test_standard_xpress_serving_cpu import tiny
+
+    from mlx2.runtime import generate as gen
+
+    phases = []
+    real = gen.expert_prefill_admission
+
+    @contextlib.contextmanager
+    def spy(phase, key):
+        phases.append(phase)
+        with real(phase, key):
+            yield
+
+    monkeypatch.setattr(gen, "expert_prefill_admission", spy)
+    (model, _) = tiny()
+    generator = gen.BatchGenerator(model, max_tokens=3, prefill_step_size=8)
+    try:
+        # A decoding request runs rounds between the long prompt's slices.
+        generator.insert([[1, 2]], max_tokens=[12])
+        generator.next()
+        generator.insert([[1 + (i * 5) % 8 for i in range(40)]], max_tokens=[2])
+        for _ in range(50):
+            generator.next()
+            if not generator._currently_processing and phases[-1] == "terminal":
+                break
+    finally:
+        generator.close()
+    # 39 pure-prefill tokens in slices of 8: four intermediate, one terminal.
+    assert phases[-5:] == ["intermediate"] * 4 + ["terminal"]
+    assert phases.count("terminal") == 2  # the short prompt's one slice too
+
+
+def test_ragged_prefill_labels_a_shared_ending_chunk_mixed(monkeypatch):
+    # Codex review of NEMO-MAIN-1: a ragged chunk that ends one request while
+    # another continues was labelled intermediate (the short request got no
+    # admission), then terminal for both (polluting it and resetting the long
+    # request's counts). It is neither.
+    import contextlib
+
+    from test_standard_xpress_serving_cpu import tiny
+
+    from mlx2.runtime import generate as gen
+
+    phases = []
+    real = gen.expert_prefill_admission
+
+    @contextlib.contextmanager
+    def spy(phase, key):
+        phases.append(phase)
+        with real(phase, key):
+            yield
+
+    monkeypatch.setattr(gen, "expert_prefill_admission", spy)
+    (model, _) = tiny()
+    generator = gen.BatchGenerator(model, max_tokens=2, prefill_step_size=4)
+    try:
+        generator.insert([[1, 2, 3, 4, 5], [1 + (i * 3) % 7 for i in range(13)]], max_tokens=[2, 2])
+        for _ in range(20):
+            generator.next()
+            if not generator._currently_processing and phases.count("terminal") >= 1:
+                break
+    finally:
+        generator.close()
+    # Rows of 4 and 12 pure-prefill tokens in chunks of 4: the first chunk
+    # ends the short request while the long one continues (one gather cannot
+    # be both: mixed, plain admission), the third ends the long one.
+    assert phases[-3:] == ["mixed", "intermediate", "terminal"]
+
+
+def test_mixed_prefill_gather_is_plain_admission_and_keeps_request_counts():
+    stats = weight_stream.StreamStats()
+    cache = weight_stream.ExpertLRU(
+        _CountingReader(16), capacity_experts=4, stats=stats,
+        prefill_admission="terminal_hot",
+    )
+    with weight_stream.expert_prefill_admission("intermediate", ("long",)):
+        cache.acquire([3, 4])
+    with weight_stream.expert_prefill_admission("mixed", ("long",)):
+        cache.acquire([5])
+    assert stats.prefill_mixed_calls == 1
+    assert list(cache._entries) == [5]  # admitted like plain LRU
+    assert cache._prefill_counts == {3: 1, 4: 1}  # the request's history stays
+    assert stats.prefill_request_resets == 0
+
+
+def test_terminal_hot_keeps_request_counts_across_unlabelled_decode_calls():
+    stats = weight_stream.StreamStats()
+    cache = weight_stream.ExpertLRU(
+        _CountingReader(16), capacity_experts=2, stats=stats,
+        prefill_admission="terminal_hot",
+    )
+    with weight_stream.expert_prefill_admission("intermediate", ("request",)):
+        for other in (4, 6, 8):
+            cache.acquire([3, other])
+    cache.acquire([9])  # another lane's decode round between slices
+    with weight_stream.expert_prefill_admission("intermediate", ("request",)):
+        cache.acquire([1, 5])
+    with weight_stream.expert_prefill_admission("terminal", ("request",)):
+        cache.acquire([1, 3])
+    # Over the whole prompt 3 was routed four times, 1 twice: 3 must finish
+    # most-recently-used. Dropping the counts at the decode call reversed it.
+    assert list(cache._entries) == [1, 3]
+    assert stats.prefill_request_resets == 0
+    # A different request starting over an unfinished one is a reset.
+    with weight_stream.expert_prefill_admission("intermediate", ("abandoned",)):
+        cache.acquire([6])
+    with weight_stream.expert_prefill_admission("intermediate", ("next",)):
+        cache.acquire([7])
+    assert stats.prefill_request_resets == 1
 
 
 def test_next_layer_router_hint_preserves_output_and_adopts_raw_rows(checkpoint):
@@ -1180,6 +1328,40 @@ def test_counterfactual_lru_row_matches_a_streamed_run(checkpoint, tmp_path):
     lru = report["rows"][0]
     assert (lru["page_ins"], lru["hits"]) == (page_ins, hits)
     assert report["baseline"] == "exact"
+
+
+def test_counterfactual_does_not_call_a_terminal_hot_trace_exact(checkpoint, tmp_path):
+    # The replay models plain LRU. A trace collected under terminal_hot was
+    # labelled the exact LRU that ran though the engine admitted differently
+    # (sweep 2026-10-16 APC-16).
+    (path, weights) = checkpoint
+    reports = {}
+    for policy in ("lru", "terminal_hot"):
+        trace = tmp_path / f"{policy}.bin"
+        collector = expert_atlas.AtlasCollector(path, trace_path=trace)
+        model = _reference(weights)
+        manager = install_expert_streaming(
+            model, path, ceiling_bytes=_ceiling_for(path, 6), top_k=TOP_K,
+            collector=collector, prefill_admission=policy,
+        )
+        try:
+            with weight_stream.expert_prefill_admission("intermediate", ("r",)):
+                _run(model, *_inputs(tokens=4, seed=950))
+            with weight_stream.expert_prefill_admission("terminal", ("r",)):
+                _run(model, *_inputs(tokens=4, seed=951))
+            _run(model, *_inputs(tokens=1, seed=952))
+            collector.close()
+            capacity = manager.plan.capacity_experts
+        finally:
+            manager.close()
+        reports[policy] = expert_atlas.replay_counterfactual(
+            trace, capacity=capacity, pin_fractions=(0.0,)
+        )
+    assert reports["lru"]["baseline"] == "exact"
+    assert reports["terminal_hot"]["baseline"] == "approximate"
+    for policy in reports:
+        info = expert_atlas.load_trace_sequence(tmp_path / f"{policy}.bin")[3]
+        assert info["prefill_admission"] == policy
 
 
 def _serve(collector, caches, schedule):

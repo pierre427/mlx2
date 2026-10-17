@@ -66,10 +66,12 @@ class TextEncoder:
             include_prefix="language_model.",
         )
         sanitized = {}
+        # Qwen3_5RMSNorm weights are stored centred on zero.  The GDN gated
+        # norm (linear_attn.norm) is a plain-weight norm, so match the final
+        # norm by its exact key rather than a bare "norm.weight" suffix.
         norm_suffixes = (
             ".input_layernorm.weight",
             ".post_attention_layernorm.weight",
-            "norm.weight",
             ".q_norm.weight",
             ".k_norm.weight",
         )
@@ -77,7 +79,7 @@ class TextEncoder:
             name = name.removeprefix("language_model.")
             if "conv1d.weight" in name and value.ndim == 3 and value.shape[-1] != 1:
                 value = value.moveaxis(2, 1)
-            if name.endswith(norm_suffixes) and value.ndim == 1:
+            if (name == "norm.weight" or name.endswith(norm_suffixes)) and value.ndim == 1:
                 value = value + 1
             sanitized[name] = value
         self.model.load_weights(list(sanitized.items()), strict=True)
@@ -212,6 +214,8 @@ class MOSSImagePipeline:
         image = self.vae.decode(latents)
         if not mx.all(mx.isfinite(image)).item():
             raise FloatingPointError("nonfinite MOSS-Image decoded image")
-        pixels = ((mx.clip(image[0], -1, 1) + 1) * 127.5).astype(mx.uint8)
+        # Diffusers' numpy_to_pil rounds to the nearest level; a bare cast
+        # would truncate and bias every channel half a level low.
+        pixels = mx.round((mx.clip(image[0], -1, 1) + 1) * 127.5).astype(mx.uint8)
         mx.eval(pixels)
         return Image.fromarray(np.array(pixels))

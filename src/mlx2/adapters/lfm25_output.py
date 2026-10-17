@@ -48,11 +48,13 @@ import json
 from ..output import (
     THINKING_CLOSE_MARKER,
     OutputParser,
+    StopSequenceMatcher,
     callable_tools,
     constrained_tool_choice,
 )
 from ..runtime.tool_parsers.lfm_pythonic import (
     constrained_tool_grammar,
+    parse_forced_tool_call,
     parse_tool_call,
     representable_name,
 )
@@ -171,13 +173,20 @@ def make_output_parser(request: dict, *, thinking=None):
     ends with ``<think>``.
     """
     chat = "messages" in request
+    constrained = constrained_tool_choice(request)
     return LfmOutputParser(
         chat=chat,
         thinking=chat if thinking is None else bool(thinking),
         tools=callable_tools(request),
-        parse_tool=parse_tool_call,
+        # A forced call follows make_tool_constraint's grammar, which admits a
+        # repeated free argument name; parse what that grammar admits.
+        parse_tool=(
+            parse_forced_tool_call
+            if constrained
+            else parse_tool_call
+        ),
         stops=request.get("stop", ()),
-        constrained_tools=constrained_tool_choice(request),
+        constrained_tools=constrained,
         parallel_tool_calls=request.get("parallel_tool_calls", True),
         tolerant_tool_markers=request.get("_tolerant_tool_markers", False),
         # The model writes ``</think>\n\n`` before its answer; the template
@@ -210,6 +219,9 @@ class LfmOutputParser(OutputParser):
     ``hold_late_reasoning`` holds the output back until one of the two
     (Pierre, 2026-10-15): a marker turns the held text into reasoning and the
     rest streams as the answer; the end of output releases it as the answer.
+    A client stop string that matches in the held text before any marker also
+    releases it as the answer and stops there (Pierre, 2026-10-16), so the
+    lane does not decode on to EOS or ``max_tokens``.
     """
 
     tool_open = TOOL_CALL_START
@@ -218,18 +230,43 @@ class LfmOutputParser(OutputParser):
     def __init__(self, *args, hold_late_reasoning=False, **kwargs):
         super().__init__(*args, **kwargs)
         self._holding = bool(hold_late_reasoning) and self.channel == "content"
-        self._held = ""
+        # Held chunks plus the last few held characters: each push scans only
+        # the carried tail and the new text, so a long held answer costs
+        # linear, not quadratic, parser time.
+        self._held = []
+        self._held_length = 0
+        self._held_tail = ""
+        # Characters the marker search has examined (bounded linear work).
+        self.held_scan_chars = 0
         self.late_reasoning_chars = 0
+        # A client stop string in held text that no ``</think>`` preceded ends
+        # the generation there (Pierre, 2026-10-16): the held text is released
+        # as the answer instead of decoding on to EOS or max_tokens in case it
+        # later turns out to have been reasoning.
+        self._held_stops = (
+            StopSequenceMatcher(self.stop_matcher.stops)
+            if self._holding and self.stop_matcher.stops
+            else None
+        )
+        self.late_reasoning_stop_releases = 0
 
     def push(self, text, *, final=False):
         if not self._holding:
             return super().push(text, final=final)
-        self._held += text
-        index = self._held.find(THINKING_CLOSE_MARKER)
+        window = self._held_tail + text
+        self.held_scan_chars += len(window)
+        local = window.find(THINKING_CLOSE_MARKER)
+        index = -1 if local < 0 else self._held_length - len(self._held_tail) + local
+        self._held.append(text)
+        self._held_length += len(text)
+        self._held_tail = window[-(len(THINKING_CLOSE_MARKER) - 1):]
         if index < 0 and not final:
-            return []
+            if self._held_stops is None or not self._held_stops.push(text)[1]:
+                return []
+            self.late_reasoning_stop_releases += 1
         self._holding = False
-        held, self._held = self._held, ""
+        held = "".join(self._held)
+        self._held, self._held_length, self._held_tail = [], 0, ""
         if index < 0:
             return super().push(held, final=final)
         reasoning = held[:index]

@@ -396,7 +396,7 @@ APPROVED_MEDIA_PRODUCERS = {
             # Re-pinned 2026-10-15: native SETUP prefill_step 256 -> 512 so
             # int8 prefill (row threshold 512) engages on the Gemma 4 31B.
             "sha256": "0ddb47b12b384cbfc7115a14b1e8518c9a3358f792e9ace6a49c718ec12b9f55",
-            "evaluator_sha256": "bc0b592481184c82a9f1e8013f21ccc9b9fd9332906efbcacf3976ef3c204b22",  # 2026-10-15: near-tie flips; chat batch prompts
+            "evaluator_sha256": "8aec3672a5485347364d809da47aeee2cdbb1c2a99772d59fefa82745e375088",  # 2026-10-16 sweep QUAL-1: near-tie rows need the answer oracle (bc0b5924... companions: all rows exact, regenerate)
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "ac58a0734eb7fc536ab3414186b66d30e8e1352f0eab09f6496871310262f58c",
             # Re-pinned 2026-10-14: debd7c639 made the mlx-vlm chat render
@@ -424,7 +424,7 @@ APPROVED_MEDIA_PRODUCERS = {
             # Re-pinned 2026-10-15: native SETUP prefill_step 256 -> 512 so
             # int8 prefill (row threshold 512) engages on the Gemma 4 31B.
             "sha256": "0ddb47b12b384cbfc7115a14b1e8518c9a3358f792e9ace6a49c718ec12b9f55",
-            "evaluator_sha256": "bc0b592481184c82a9f1e8013f21ccc9b9fd9332906efbcacf3976ef3c204b22",  # 2026-10-15: near-tie flips; chat batch prompts
+            "evaluator_sha256": "8aec3672a5485347364d809da47aeee2cdbb1c2a99772d59fefa82745e375088",  # 2026-10-16 sweep QUAL-1: near-tie rows need the answer oracle (bc0b5924... companions: all rows exact, regenerate)
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "ac58a0734eb7fc536ab3414186b66d30e8e1352f0eab09f6496871310262f58c",
             # Re-pinned 2026-10-12 (sweep 10-12 L5-03): e3c19168e changed
@@ -438,7 +438,10 @@ APPROVED_MEDIA_PRODUCERS = {
             # Re-pinned 2026-10-14: pinned prequantized downloads
             # (mlx-community 26B-A4B 8-bit).  Companions from 05838caa... must
             # be regenerated.
-            "adapter_contract_sha256": "43fae4adce82eeca7128205ee0f2977cf7c0550c44a06580eaf47052843b766a",
+            # Re-pinned 2026-10-16 (sweep APC-10): dense_int8_prefill defers
+            # selection to the serving route receipt instead of claiming
+            # False.  Companions from 43fae4ad... must be regenerated.
+            "adapter_contract_sha256": "72bdaed84be3763c025fa1d1bfe6d57a4769b4feaf1ea44d35979a2b1d7bc3f1",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["gemma4"],
@@ -460,7 +463,7 @@ APPROVED_MEDIA_PRODUCERS = {
             # Re-pinned 2026-10-15: native SETUP prefill_step 256 -> 512 so
             # int8 prefill (row threshold 512) engages on the Gemma 4 31B.
             "sha256": "0ddb47b12b384cbfc7115a14b1e8518c9a3358f792e9ace6a49c718ec12b9f55",
-            "evaluator_sha256": "bc0b592481184c82a9f1e8013f21ccc9b9fd9332906efbcacf3976ef3c204b22",  # 2026-10-15: near-tie flips; chat batch prompts
+            "evaluator_sha256": "8aec3672a5485347364d809da47aeee2cdbb1c2a99772d59fefa82745e375088",  # 2026-10-16 sweep QUAL-1: near-tie rows need the answer oracle (bc0b5924... companions: all rows exact, regenerate)
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "ac58a0734eb7fc536ab3414186b66d30e8e1352f0eab09f6496871310262f58c",
             # Re-pinned 2026-10-14 with gemma3n (debd7c639, adapters/mlx_vlm.py).

@@ -180,7 +180,39 @@ def _file_reference(model_path, reference=None):
         fixed = _retarget(json.loads(reference.pre_tokenizer.__getstate__()), want)
         if fixed is not None:
             reference.pre_tokenizer = _materialize_pre_tokenizer(fixed)
+    _apply_declared_added_tokens(reference, model_path)
     return reference
+
+
+_ADDED_TOKEN_FLAGS = ("single_word", "lstrip", "rstrip", "normalized", "special")
+
+
+def _apply_declared_added_tokens(reference, model_path) -> None:
+    """Add or re-flag the config's ``added_tokens_decoder`` tokens on ``reference``.
+
+    transformers applies these on purpose (a token the file lacks, or
+    ``rstrip`` on ``<|im_end|>``), so they belong to the reference.  Only
+    added-token matching changes; the file's normalizer, pre-tokenizer and
+    decoder stay the reference, and a token at another id than declared
+    still fails the parity check.
+    """
+    config = Path(model_path) / "tokenizer_config.json"
+    if not config.is_file():
+        return
+    declared = json.loads(config.read_text()).get("added_tokens_decoder")
+    if not isinstance(declared, dict):
+        return
+    from tokenizers import AddedToken
+
+    have = reference.get_added_tokens_decoder()
+    for token_id, spec in sorted(declared.items(), key=lambda item: int(item[0])):
+        if not isinstance(spec, dict) or not isinstance(spec.get("content"), str):
+            continue
+        token = AddedToken(
+            spec["content"], **{k: bool(spec[k]) for k in _ADDED_TOKEN_FLAGS if k in spec}
+        )
+        if repr(have.get(int(token_id))) != repr(token):
+            reference.add_tokens([token])
 
 
 def _outcome(encode, text):

@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
-from ..runtime.io_ownership import call_io
+from ..runtime.io_ownership import call_io, storage_owner
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from .artifact_paths import shard_within_artifact
 from .dflash2 import _decode_unique_json, _read_safetensors_header, _source_binding
@@ -351,7 +351,8 @@ def _inspect(path):
 
 
 def inspect_artifact(model_path):
-    return call_io("nemotron35-super-vl-inspect", _inspect, str(model_path))
+    return call_io("nemotron35-super-vl-inspect", _inspect, str(model_path),
+                   owner=storage_owner("weights", model_path))
 
 
 def text_weights(weights):

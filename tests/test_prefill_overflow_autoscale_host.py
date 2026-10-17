@@ -240,7 +240,7 @@ def test_execution_checkpoint_clamp_follows_prefill_input_override(
     host._prompt_batch.uids = [1]
     host._prompt_batch.prefill_inputs = [prefill_input]
     forwards = []
-    host._prompt_batch.prompt = lambda rows: forwards.append(rows)
+    host._prompt_batch.prompt = lambda rows, **_kwargs: forwards.append(rows)
     host._mixed_round_ready = lambda: False
     host._should_defer_prefill = lambda: False
     host._adaptive_prefill_decision = lambda *args, **kwargs: (False, 8, None)

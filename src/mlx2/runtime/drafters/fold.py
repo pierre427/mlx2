@@ -48,6 +48,10 @@ class FOLDKVCache(KVCache):
 
     def append_raw_keys(self, keys):
         previous = self.offset
+        # As append_context_kv: an empty serializable seed (float32) must not
+        # promote the first real keys' dtype for the life of the plane.
+        if previous == 0 and self.raw_keys is not None and self.raw_keys.shape[2] == 0:
+            self.raw_keys = None
         if self.raw_keys is None or previous + keys.shape[2] > self.raw_keys.shape[2]:
             batch, heads, _, dim = keys.shape
             steps = (self.step + keys.shape[2] - 1) // self.step
@@ -203,6 +207,10 @@ def configure(model, value):
         return installed
     if policy is None:
         return None
+    # The sliding attention layers alone are not enough: the drafter must
+    # build the three-plane cache, append raw keys and reserve for them.
+    if getattr(model, "supports_fold", False) is not True:
+        raise ValueError(f"{type(model).__name__} does not support FOLD")
     if getattr(model, "draft_attention_windows", None) is not None:
         raise ValueError("FOLD conflicts with draft_attention_windows")
     selected = []

@@ -1,5 +1,7 @@
 """Hot session accounting uses the immutable payload writer's receipt."""
 
+import fcntl
+import os
 import threading
 import time
 from pathlib import Path
@@ -9,6 +11,25 @@ from test_peer_survey_persistence_cpu import _cache, _fixture, _persistent
 
 from mlx2.runtime import apc_v2
 from mlx2.runtime.apc_v2 import APCMetadataIndeterminate, APCv2
+from mlx2.runtime.io_ownership import ReadTimeout
+
+
+def _assert_directory_owner_retained(path, key):
+    # The retained flock is the directory guarantee. A replacement manager for
+    # the same directory is refused before it reaches that lock: ReadPool
+    # builds no new worker for an owner whose timed-out worker (metadata pool
+    # or spill writer) stays quarantined. Quarantine is scoped to that
+    # directory, so an APC on an unrelated directory still starts.
+    descriptor = os.open(path / ".mlx2-apcv2.lock", os.O_RDWR)
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(descriptor)
+    with pytest.raises(ReadTimeout, match="not drained"):
+        _persistent(path, key)
+    unrelated = _persistent(path.parent / f"{path.name}-unrelated", key)
+    unrelated.close()
 
 
 @pytest.mark.parametrize("mode", ["ephemeral", "persistent", "restart"])
@@ -135,13 +156,7 @@ def test_manifest_deadline_is_indeterminate_retains_payload_and_directory_owner(
         assert report["metadata_transaction"]["completion"] == "indeterminate"
         assert report["metadata_transaction"]["directory_lock_retained"]
         assert payload.is_file()
-        # The global read quarantine may refuse replacement before the
-        # retained directory lock is probed; both are truthful ownership gates.
-        with pytest.raises(
-            RuntimeError,
-            match="lock is already owned|previous I/O reads have not drained",
-        ):
-            _persistent(tmp_path, key)
+        _assert_directory_owner_retained(tmp_path, key)
         assert len(calls) == 1
         gate.set()
         deadline = time.monotonic() + 2
@@ -209,8 +224,7 @@ def test_repeated_close_retains_both_metadata_and_other_spill_writer_owners(tmp_
             time.sleep(0.005)
         apc.close()
         assert apc._persist_lock_file is not None
-        with pytest.raises(RuntimeError, match="lock is already owned"):
-            _persistent(tmp_path, key)
+        _assert_directory_owner_retained(tmp_path, key)
         payload_gate.set()
         deadline = time.monotonic() + 2
         while apc._persist_lock_file is not None:
@@ -250,8 +264,7 @@ def test_plain_spill_timeout_releases_directory_only_after_late_writer_drains(tm
         apc.close()
         apc.close()
         assert apc._persist_lock_file is not None
-        with pytest.raises(RuntimeError, match="lock is already owned"):
-            _persistent(tmp_path, key)
+        _assert_directory_owner_retained(tmp_path, key)
         gate.set()
         deadline = time.monotonic() + 2
         while apc._persist_lock_file is not None:
@@ -319,13 +332,7 @@ def test_delete_deadline_never_acknowledges_or_releases_charge_before_completion
         assert apc.apc_stats["idle_disk"]["session_deletes"] == 0
         assert apc.apc_stats["persistence"]["metadata_transaction"]["operation"] == "payload_delete"
         apc.close()
-        # The global read quarantine may refuse replacement before the
-        # retained directory lock is probed; both are truthful ownership gates.
-        with pytest.raises(
-            RuntimeError,
-            match="lock is already owned|previous I/O reads have not drained",
-        ):
-            _persistent(tmp_path, key)
+        _assert_directory_owner_retained(tmp_path, key)
         gate.set()
         deadline = time.monotonic() + 2
         while apc._persist_lock_file is not None:
@@ -335,3 +342,49 @@ def test_delete_deadline_never_acknowledges_or_releases_charge_before_completion
     finally:
         gate.set()
         apc.close()
+
+
+def test_unrelated_quarantined_pool_cannot_interrupt_restore_or_clear(tmp_path):
+    # A different subsystem's timed-out read pool no longer refuses this
+    # directory's pools (quarantine is owner-scoped), and APC owns its
+    # metadata and restore workers from construction anyway, so a later
+    # restore or clear never meets a refusal mid-mutation.
+    from mlx2.runtime import io_ownership
+    from mlx2.runtime.io_ownership import ReadPool
+
+    key, raw, _draft, _hidden, _sidecar = _fixture()
+    apc = APCv2(max_size=8, max_bytes=1 << 20, layout_name="sidecar-refault",
+                idle_disk_seconds=3600, idle_disk_dir=str(tmp_path))
+    first, second = list(range(8)), list(range(10, 18))
+    stuck = ReadPool(1, "unrelated-stuck", timeout=0.02, owner=("unrelated", "storage"))
+    release = threading.Event()
+    try:
+        for tokens in (first, second):
+            apc.store(key, tokens, [_cache(raw, raw)])
+            with apc._apc_lock:
+                assert apc._spill_entry_locked(
+                    key, tokens, apc._trie.get(key, tokens), reason="idle")
+        assert apc._disk_bytes > 0
+        stuck.submit(release.wait, 5)
+        deadline = time.monotonic() + 2
+        while stuck not in io_ownership._QUARANTINED_READ_POOLS:
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        hit = apc.lookup(key, first + [99])
+        assert hit.hit
+        hit.cache.close()
+        # A new APC on another directory starts while that pool is stuck.
+        APCv2(max_size=8, max_bytes=1 << 20, layout_name="sidecar-refault",
+              idle_disk_seconds=3600, idle_disk_dir=str(tmp_path / "other")).close()
+        report = apc.clear()
+        assert report["entries"] == 2
+        assert apc._disk_bytes == 0
+        assert not list(tmp_path.glob("apc-idle-*"))
+        assert apc.apc_stats["persistence"]["metadata_transaction"]["completion"] == "ready"
+    finally:
+        release.set()
+        apc.close()
+    deadline = time.monotonic() + 2
+    while stuck in io_ownership._QUARANTINED_READ_POOLS:
+        assert time.monotonic() < deadline
+        time.sleep(0.005)

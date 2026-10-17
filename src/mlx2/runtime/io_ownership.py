@@ -1,8 +1,11 @@
 """Bounded worker ownership for filesystem reads; no device operations.
 
 A deadline revokes consumption, not the underlying syscall. Fixed daemon
-workers keep their buffers and descriptor owner until they return; replacement
-pools are refused while abandoned work remains. See peer-survey I/O provenance.
+workers keep their buffers and descriptor owner until they return. Quarantine
+is scoped to an owner key (the storage a pool serves): a new pool for the same
+owner is refused while abandoned work remains, and a process-wide cap bounds
+the hung workers of all owners together. See peer-survey I/O provenance and
+provenance/sweep-20261016-readpool-owner-scope.json.
 """
 
 from __future__ import annotations
@@ -18,6 +21,9 @@ from concurrent.futures import TimeoutError as FutureTimeout
 
 CONTROL_TIMEOUT_SECONDS = 60.0
 FINALIZE_TIMEOUT_SECONDS = 2.0
+# Hung workers quarantine may retain across every owner in the process. Once
+# reached, no owner may build a new pool until some of that work drains.
+MAX_QUARANTINED_WORKERS = 64
 log = logging.getLogger(__name__)
 
 
@@ -36,14 +42,54 @@ class ReadQueueFull(RuntimeError):
     """An optional I/O queue has reached its bounded ownership window."""
 
 
-_QUARANTINED_READ_POOLS = set()
+class QuarantineCapReached(ReadTimeout):
+    """The process-wide hung-worker cap refuses new pools for every owner."""
+
+
+# Quarantined worker token (a ReadPool, or a writer an owner registered with
+# quarantine_worker) -> (owner key, hung workers it may retain).
+_QUARANTINED_READ_POOLS = {}
 _READ_POOLS_LOCK = threading.Lock()
 
 
 def _after_fork():
     global _QUARANTINED_READ_POOLS, _READ_POOLS_LOCK
-    _QUARANTINED_READ_POOLS = set()
+    _QUARANTINED_READ_POOLS = {}
     _READ_POOLS_LOCK = threading.Lock()
+
+
+def storage_owner(kind, path):
+    """Quarantine owner key for one storage resource; string work only, no I/O."""
+    return (str(kind), os.path.abspath(os.path.expanduser(os.fspath(path))))
+
+
+def quarantine_worker(token, owner, workers=1):
+    """Retain a non-pool worker (e.g. a spill writer) in owner quarantine."""
+    with _READ_POOLS_LOCK:
+        _QUARANTINED_READ_POOLS[token] = (owner, max(1, int(workers)))
+
+
+def release_worker(token):
+    with _READ_POOLS_LOCK:
+        _QUARANTINED_READ_POOLS.pop(token, None)
+
+
+def quarantined_workers():
+    with _READ_POOLS_LOCK:
+        return sum(workers for _owner, workers in _QUARANTINED_READ_POOLS.values())
+
+
+def _refuse_new_pool_locked(owner):
+    hung = sum(workers for _owner, workers in _QUARANTINED_READ_POOLS.values())
+    if hung >= MAX_QUARANTINED_WORKERS:
+        raise QuarantineCapReached(
+            f"{hung} hung I/O workers reached the process cap "
+            f"MAX_QUARANTINED_WORKERS={MAX_QUARANTINED_WORKERS}; no new I/O pool "
+            "for any owner until some drain")
+    # owner=None is anonymous: its quarantine counts toward the cap only.
+    if owner is not None and any(item == owner for item, _workers
+                                 in _QUARANTINED_READ_POOLS.values()):
+        raise ReadTimeout(f"previous I/O reads have not drained for owner {owner!r}")
 
 
 if hasattr(os, "register_at_fork"):
@@ -57,19 +103,25 @@ class ReadPool:
     shutdown(wait=False). An uninterruptible read would therefore undo the
     serving timeout during shutdown. These workers are daemon threads, retain
     their arguments until the call returns, and never run MLX operations.
-    A timed-out pool refuses further submissions. While any such pool still
-    owns reads, creating another pool is refused, bounding quarantine across
-    unload/reload attempts as well as within a single model.
+    A timed-out pool refuses further submissions. While such a pool still
+    owns reads (or an uncertain close), creating another pool for the same
+    ``owner`` is refused, so an unload/reload never overlaps new work with a
+    hung worker on the same storage. Other owners are unaffected until the
+    hung workers of all owners reach ``MAX_QUARANTINED_WORKERS``; then every
+    new pool is refused with :class:`QuarantineCapReached`. ``owner`` is a
+    hashable key supplied by the creator, normally ``storage_owner(...)``;
+    ``None`` is anonymous and only counts toward the cap.
     """
 
-    def __init__(self, max_workers, thread_name_prefix, *, timeout=None, max_pending=None):
+    def __init__(self, max_workers, thread_name_prefix, *, timeout=None, max_pending=None,
+                 owner=None):
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError("I/O timeout must be finite and positive")
         if max_pending is not None and max_pending <= 0:
             raise ValueError("I/O pending limit must be positive")
         with _READ_POOLS_LOCK:
-            if _QUARANTINED_READ_POOLS:
-                raise ReadTimeout("previous I/O reads have not drained")
+            _refuse_new_pool_locked(owner)
+        self.owner = owner
         self._lock = threading.Lock()
         self._owner_pid = os.getpid()
         self._timeout = timeout
@@ -97,7 +149,10 @@ class ReadPool:
                 raise ReadTimeout(self._failure)
             if self._closed:
                 raise RuntimeError("I/O reader is closed")
-            if self._max_pending is not None and len(self._pending) >= self._max_pending:
+            # A finished future stays in _pending until its done-callback
+            # runs, which can be after result() has already woken the caller.
+            if (self._max_pending is not None
+                    and sum(not item.done() for item in self._pending) >= self._max_pending):
                 raise ReadQueueFull("I/O queue ownership window is full")
             future = Future()
             self._pending.add(future)
@@ -127,7 +182,13 @@ class ReadPool:
                     self._start_finalizer_locked()
                 elif self._finalizer is None:
                     with _READ_POOLS_LOCK:
-                        _QUARANTINED_READ_POOLS.discard(self)
+                        _QUARANTINED_READ_POOLS.pop(self, None)
+
+    def _quarantine_locked(self):
+        # Caller holds self._lock. Bound, not exact: any busy worker may hang.
+        workers = min(len(self._pending), len(self._threads))
+        workers += int(self._finalizer is not None and not self._finalizer.done())
+        quarantine_worker(self, self.owner, workers)
 
     def call(self, function, *args):
         """Run pure host I/O with a bounded caller wait and revoked late result."""
@@ -151,8 +212,7 @@ class ReadPool:
             except BaseException as error:  # noqa: BLE001 - uncertain close must retain ownership
                 with self._lock:
                     self._failure = self._failure or f"I/O finalizer failed: {error}"
-                    with _READ_POOLS_LOCK:
-                        _QUARANTINED_READ_POOLS.add(self)
+                    self._quarantine_locked()
                 self._finalizer.set_exception(error.with_traceback(None))
                 log.error("I/O finalizer failed; owner remains quarantined: %s", error)
             else:
@@ -160,7 +220,7 @@ class ReadPool:
                 # In particular, a timed-out os.close must never be retried on
                 # a descriptor number the kernel could already have reused.
                 with self._lock, _READ_POOLS_LOCK:
-                    _QUARANTINED_READ_POOLS.discard(self)
+                    _QUARANTINED_READ_POOLS.pop(self, None)
                 self._finalizer.set_result(None)
 
         threading.Thread(target=finalize, daemon=True,
@@ -238,8 +298,7 @@ class ReadPool:
             self._failure = self._failure or str(reason)
             self._timeouts += int(first and isinstance(reason, ReadTimeout))
             if self._pending:
-                with _READ_POOLS_LOCK:
-                    _QUARANTINED_READ_POOLS.add(self)
+                self._quarantine_locked()
         self.close()
 
     def counters(self):
@@ -255,7 +314,8 @@ class ReadPool:
         """Revoke work and finalize descriptors once, with bounded caller wait.
 
         Running reads and the finalizer retain their exact owners. A late or
-        failed close blocks replacement pools; no retry can close a reused fd.
+        failed close blocks replacement pools for the same owner; no retry can
+        close a reused fd.
         The callback must perform only host I/O, never device cleanup.
         """
         with self._lock:
@@ -272,8 +332,7 @@ class ReadPool:
             pending = tuple(self._pending)
             if pending:
                 self._failure = self._failure or "I/O reader closed with reads in flight"
-                with _READ_POOLS_LOCK:
-                    _QUARANTINED_READ_POOLS.add(self)
+                self._quarantine_locked()
             if not pending and self._close_handles is not None:
                 self._start_finalizer_locked()
             finalizer = self._finalizer
@@ -288,8 +347,7 @@ class ReadPool:
                 with self._lock:
                     if not finalizer.done():
                         self._failure = self._failure or "I/O finalizer exceeded its deadline"
-                        with _READ_POOLS_LOCK:
-                            _QUARANTINED_READ_POOLS.add(self)
+                        self._quarantine_locked()
                 log.warning("I/O finalizer deadline exceeded; owner remains quarantined")
                 return False
             except BaseException:  # noqa: BLE001 - reported by finalizer, never retry uncertain close
@@ -309,15 +367,15 @@ def close_read_pool(pool, handles):
             handles.close()
 
 
-def call_io(name, function, *args, timeout=None):
+def call_io(name, function, *args, timeout=None, owner=None):
     """One bounded host-only inventory operation with locally owned handles.
 
     The function must close its own files before returning and must not return
-    an unowned descriptor. Timed-out workers stay quarantined until that scope
-    actually exits; this helper never performs device work.
+    an unowned descriptor. Timed-out workers stay quarantined (for ``owner``)
+    until that scope actually exits; this helper never performs device work.
     """
     pool = ReadPool(1, name, timeout=CONTROL_TIMEOUT_SECONDS if timeout is None else timeout,
-                    max_pending=1)
+                    max_pending=1, owner=owner)
     try:
         return pool.call(function, *args)
     finally:

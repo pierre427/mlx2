@@ -4568,9 +4568,19 @@ class ExternalDraftBatchGenerator:
                     "selected_path": getattr(lane, "continuation_selected_path", None),
                     "selected_physical_path": getattr(lane, "continuation_selected_physical_path", None),
                     "selected_sources": list(getattr(lane, "continuation_selected_sources", ())),
-                    "provider_stats": copy.deepcopy(
-                        getattr(lane, "continuation_provider_stats", {})
-                    ),
+                    # Scores and slate predictions come from the shared
+                    # ranking critic, which every tenant's committed labels
+                    # move; every lane's receipt is scoped (an unkeyed request
+                    # gets a private scope), so they stay internal, as
+                    # ProposalPool.receipt drops the shared counts.
+                    "provider_stats": {
+                        source: {
+                            key: copy.deepcopy(value)
+                            for key, value in row.items()
+                            if key not in ("score_sum", "score_observations")
+                        }
+                        for source, row in getattr(lane, "continuation_provider_stats", {}).items()
+                    },
                     "winning_combinations": copy.deepcopy(
                         getattr(lane, "continuation_winning_combinations", {})
                     ),
@@ -4580,8 +4590,13 @@ class ExternalDraftBatchGenerator:
                     "admission_totals": copy.deepcopy(
                         getattr(lane, "continuation_admission_totals", {})
                     ),
-                    "last_candidate_slate": copy.deepcopy(
-                        getattr(lane, "continuation_last_slate", ())
+                    "last_candidate_slate": tuple(
+                        {
+                            key: copy.deepcopy(value)
+                            for key, value in item.items()
+                            if key not in ("conditional_acceptance", "expected_accepted_tokens", "score")
+                        }
+                        for item in getattr(lane, "continuation_last_slate", ())
                     ),
                     "session_scope_hash": lane.session_scope_hash,
                     "adaptive_cost_binding": "one_request_physical_path_width_and_depth_plus_bonus",
@@ -4659,11 +4674,13 @@ class ExternalDraftBatchGenerator:
                     for item in admission.get("parked", ())
                 )
             )
+            # A runtime fallback is charged to the fallback provider alone; the
+            # admitted model drafter that came back empty did not serve as one.
+            runtime_fallback = admission.get("runtime_fallback")
             row["fallback_rounds"] += int(
-                bool(
-                    admission.get("runtime_fallback") == source_id
-                    or (admission.get("fallback_only") and source_id in admitted)
-                )
+                runtime_fallback == source_id
+                if runtime_fallback is not None
+                else bool(admission.get("fallback_only") and source_id in admitted)
             )
         for ranked in selection.paths:
             for source_id in {item.source_id for item in ranked.contributors}:

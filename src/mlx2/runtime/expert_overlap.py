@@ -67,7 +67,9 @@ class GatedOverlap:
             candidate = candidate + mx.expand_dims(m["bias"][bounded_ids], -2)
         stats = cache.stats
         prior = stats._group_transient if cache.group != stats._group else 0
-        cache.note_gather(len(hot))
+        # The bank is resident rows only; this runs before acquire, so the
+        # previous call's ephemeral count does not apply.
+        cache.note_gather(len(hot), ephemeral=0)
         # Before the host index read, the preceding layer may still retain its
         # copies. This extra bank is reserved by install_expert_streaming.
         if prior:

@@ -218,6 +218,18 @@ class SemanticMemory:
         cls._set_edge_status(result, result["status"])
         return result
 
+    @classmethod
+    def _retry_identity(cls, record: Mapping[str, Any]) -> tuple:
+        # One piece of evidence for one fact binding. Confidence and margin
+        # are re-scored per attempt, so they do not make a retry new evidence.
+        # Pre-tier records were only ever written at the default tier.
+        return (
+            cls._edge_id(record),
+            record.get("authority_tier", "session_committed"),
+            record.get("conflict_key_digest"),
+            tuple(record.get("supersedes", ())),
+        )
+
     @staticmethod
     def _set_edge_status(edge: dict[str, Any], status: str) -> None:
         edge["status"] = status
@@ -300,13 +312,18 @@ class SemanticMemory:
             graph, parent, current_revision = self.load(session_context)
             if expected_revision is not None and expected_revision != current_revision:
                 raise ValueError("semantic memory revision changed during request")
-            previous_graph = graph
-            graph = {
-                "schema": SEMANTIC_SCHEMA,
-                "concepts": {key: dict(value) for key, value in graph["concepts"].items()},
-                "edges": [self._normalize_edge(value) for value in graph["edges"]],
-                "proposals": [dict(value) for value in graph.get("proposals", [])],
-            }
+            def working_copy() -> dict:
+                return {
+                    "schema": SEMANTIC_SCHEMA,
+                    "concepts": {key: dict(value) for key, value in graph["concepts"].items()},
+                    "edges": [self._normalize_edge(value) for value in graph["edges"]],
+                    "proposals": [dict(value) for value in graph.get("proposals", [])],
+                }
+
+            # Compare against the normalized graph: normalization alone must
+            # not turn a retry on a legacy graph into a new revision.
+            previous_graph = working_copy()
+            graph = working_copy()
             committed = 0
             deferred = 0
             for proposal in proposals:
@@ -356,9 +373,8 @@ class SemanticMemory:
                     ]
                     # Status is derived from all competing facts. Retrying
                     # the same evidence must not reactivate a retired edge.
-                    if any(all(edge.get(key) == value for key, value in record.items()
-                               if key not in {"status", "authority"})
-                           for edge in same_identity):
+                    retry = self._retry_identity(record)
+                    if any(self._retry_identity(edge) == retry for edge in same_identity):
                         continue
                     authority = AUTHORITY_TIERS[record["authority_tier"]]
                     if any(AUTHORITY_TIERS[edge["authority_tier"]] > authority
@@ -408,7 +424,8 @@ class SemanticMemory:
                     graph["edges"].append(record)
                     committed += 1
                 else:
-                    if record in graph["proposals"]:
+                    retry = self._retry_identity(record)
+                    if any(self._retry_identity(item) == retry for item in graph["proposals"]):
                         continue
                     graph["proposals"].append(record)
                     deferred += 1

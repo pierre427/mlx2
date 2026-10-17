@@ -9,14 +9,21 @@ import threading
 import time
 import warnings
 from collections import OrderedDict
-from concurrent.futures import TimeoutError as FutureTimeout, wait
+from concurrent.futures import Future, TimeoutError as FutureTimeout, wait
 from dataclasses import dataclass
 from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from .. import round_levers as _lv
-from ..io_ownership import CloseAction, ReadPool, ReadQueueFull, ReadTimeout, call_io
+from ..io_ownership import (
+    CloseAction,
+    ReadPool,
+    ReadQueueFull,
+    ReadTimeout,
+    call_io,
+    storage_owner,
+)
 from .ngram_table_keys import check_ngram_table_tensors
 
 MANIFEST_FORMAT = "qwen4-ple-rows"
@@ -41,6 +48,11 @@ def _after_fork():
 
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_after_fork)
+
+
+def _pread_length(fd, amount, offset) -> int:
+    # Warming only faults pages in; never hand the chunk back to the caller.
+    return len(os.pread(fd, amount, offset))
 
 
 class _DescriptorLease:
@@ -395,7 +407,8 @@ def verify_sidecar_content(sidecar_path: str, model_path, manifest: dict) -> str
     spot check, which refuses it.
     """
     return call_io("ple-content-inventory", _verify_sidecar_content,
-                   sidecar_path, model_path, manifest, timeout=READ_TIMEOUT_SECONDS)
+                   sidecar_path, model_path, manifest, timeout=READ_TIMEOUT_SECONDS,
+                   owner=storage_owner("ple", sidecar_path))
 
 
 def _verify_sidecar_content(sidecar_path, model_path, manifest):
@@ -424,7 +437,8 @@ def verify_sidecar_against_artifact(sidecar_path: str, model_path) -> dict:
     parsed manifest.
     """
     return call_io("ple-manifest-inventory", _verify_sidecar_against_artifact,
-                   sidecar_path, model_path, timeout=READ_TIMEOUT_SECONDS)
+                   sidecar_path, model_path, timeout=READ_TIMEOUT_SECONDS,
+                   owner=storage_owner("ple", sidecar_path))
 
 
 def _verify_sidecar_against_artifact(sidecar_path, model_path):
@@ -598,6 +612,12 @@ class FileBackedShardedEmbedding(nn.Module):
                 self.close()
                 raise
 
+    @property
+    def _io_owner(self):
+        # Quarantine scope: a stuck read of this table blocks only new pools
+        # for the same sidecar (and the process-wide hung-worker cap).
+        return storage_owner("ple", self.sidecar_path)
+
     def _open_resources(self):
         pool = None
         try:
@@ -605,10 +625,12 @@ class FileBackedShardedEmbedding(nn.Module):
                 max_workers=max(self.decode_workers, self.prefill_workers),
                 thread_name_prefix="ple-nvme",
                 timeout=READ_TIMEOUT_SECONDS,
+                owner=self._io_owner,
             )
             prefetch_pool = ReadPool(
                 max_workers=PREFETCH_WORKERS, thread_name_prefix="ple-nvme-prefetch",
                 timeout=READ_TIMEOUT_SECONDS, max_pending=2 * PREFETCH_WORKERS,
+                owner=self._io_owner,
             )
         except BaseException:
             if pool is not None:
@@ -661,7 +683,8 @@ class FileBackedShardedEmbedding(nn.Module):
             with _FORK_RESOURCE_LOCK:
                 if os.getpid() != self._owner_pid:
                     inherited_fd = self._fd
-                    inherited_close_pool = ReadPool(1, "ple-inherited-close")
+                    inherited_close_pool = ReadPool(1, "ple-inherited-close",
+                                                    owner=self._io_owner)
                     self._lifecycle_lock = threading.Lock()
                     self._lru_lock = threading.Lock()
                     self._dq_lock = threading.Lock()
@@ -966,38 +989,60 @@ class FileBackedShardedEmbedding(nn.Module):
                 return False
             self._warm_state = "running"
 
+        pool = ReadPool(1, "ple-nvme-adaptive-warm", timeout=READ_TIMEOUT_SECONDS,
+                        owner=self._io_owner)
+        done = Future()
+
         def warm() -> None:
-            fd = None
+            # One pool call per chunk: the read deadline bounds a single
+            # pread, not the whole multi-GB table on slower storage. This
+            # driver does no I/O itself; the pool owns the descriptor until
+            # any late chunk read returns.
+            opened = []
+
+            def open_sidecar():
+                # Owned by the pool's finalizer even if this call times out.
+                opened.append(os.open(self.sidecar_path, os.O_RDONLY))
+                return opened[-1]
+
+            def close_opened():
+                for descriptor in opened:
+                    os.close(descriptor)
+
             try:
-                fd = os.open(self.sidecar_path, os.O_RDONLY)
+                fd = pool.call(open_sidecar)
                 remaining = self.vocab_size * self.row_bytes
                 offset = self.data_offset
-                while (remaining and not self._warm_stop.is_set()
-                       and not self._warm_pool.failure):
+                while remaining and not self._warm_stop.is_set():
                     amount = min(READ_POLICY_WARM_CHUNK_BYTES, remaining)
-                    data = os.pread(fd, amount, offset)
-                    if len(data) != amount:
+                    read = pool.call(_pread_length, fd, amount, offset)
+                    if read != amount:
                         raise OSError(
-                            f"short adaptive PLE warm read ({len(data)}/{amount} bytes)"
+                            f"short adaptive PLE warm read ({read}/{amount} bytes)"
                         )
                     offset += amount
                     remaining -= amount
                 with self._read_policy_lock:
-                    if self._warm_stop.is_set() or self._warm_pool.failure:
+                    if self._warm_stop.is_set() or pool.failure:
                         self._warm_state = "stopped"
                         return
                     self._warm_state = "completed"
                 self.notify_adaptive_warm_complete()
             except Exception as exc:  # surfaced in the exact policy receipt
                 with self._read_policy_lock:
-                    self._warm_state = "failed"
-                    self._warm_error = f"{type(exc).__name__}: {exc}"
+                    if self._warm_stop.is_set() or pool.failure:
+                        self._warm_state = "stopped"
+                    else:
+                        self._warm_state = "failed"
+                        self._warm_error = f"{type(exc).__name__}: {exc}"
             finally:
-                if fd is not None:
-                    os.close(fd)
+                pool.close(CloseAction(close_opened))
+                done.set_result(None)
 
-        self._warm_pool = ReadPool(1, "ple-nvme-adaptive-warm", timeout=READ_TIMEOUT_SECONDS)
-        self._warm_future = self._warm_pool.submit(warm)
+        self._warm_pool = pool
+        self._warm_future = done
+        threading.Thread(target=warm, daemon=True,
+                         name="ple-nvme-adaptive-warm-driver").start()
         return True
 
     def wait_for_adaptive_warm(self, timeout: float | None = None) -> bool:
@@ -1433,7 +1478,7 @@ def install_file_backed_ple(
     else:
         expected_manifest, expected_stat = preverified
         stat = call_io("ple-source-identity", os.stat, sidecar_path,
-                       timeout=READ_TIMEOUT_SECONDS)
+                       timeout=READ_TIMEOUT_SECONDS, owner=storage_owner("ple", sidecar_path))
         current_stat = (stat.st_dev, stat.st_ino, stat.st_size,
                         stat.st_mtime_ns, stat.st_ctime_ns)
         if manifest != expected_manifest or current_stat != expected_stat:

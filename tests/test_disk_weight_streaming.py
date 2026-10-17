@@ -539,7 +539,12 @@ def test_aliased_shard_spellings_fail_closed_without_leaking(tmp_path, monkeypat
     def tracked(path, flags, *args, **kwargs):
         fd = original(path, flags, *args, **kwargs)
         stat = os.fstat(fd)
-        opened.append((fd, (stat.st_dev, stat.st_ino)))
+        identity = (stat.st_dev, stat.st_ino)
+        # Other suites may still have an owner-scoped late I/O worker. This
+        # test owns only aliases of its shard and must not adopt an unrelated
+        # descriptor merely because that worker called the process-wide API.
+        if identity == (info.st_dev, info.st_ino):
+            opened.append((fd, identity))
         return fd
 
     monkeypatch.setattr(os, "open", tracked)

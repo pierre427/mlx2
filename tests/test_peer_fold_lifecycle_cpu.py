@@ -376,3 +376,38 @@ def test_fold_live_reconfiguration_is_refused_without_stale_layer_selection(
     assert draft.layers[0].self_attn.fold_calls == 17
     assert configure(draft, policy.as_dict()) is policy
     assert draft.layers[0].self_attn.fold_calls == 17
+
+
+def test_fold_raw_key_plane_keeps_the_first_real_key_dtype():
+    # Sweep 2026-10-16: the empty serializable seed is float32; the first
+    # append must not promote a bf16 plane (2x its planned bytes).
+    from mlx2.runtime.drafters.dflash_base import append_context_kv
+
+    cache = FOLDKVCache()
+    cache.keys = mx.zeros((1, 2, 0, 8))
+    cache.values = mx.zeros_like(cache.keys)
+    cache.raw_keys = mx.zeros_like(cache.keys)
+    keys = mx.ones((1, 2, 5, 8), dtype=mx.bfloat16)
+    cache.append_raw_keys(keys)
+    append_context_kv(cache, keys, keys)
+    assert cache.raw_keys.dtype == mx.bfloat16
+    raw, _values = cache.raw_keys_and_values()
+    assert raw.shape == (1, 2, 5, 8)
+
+
+def test_fold_is_refused_on_drafters_without_the_fold_pieces():
+    # XPress (and LiLiCoRR, its subclass) share the DFlash attention layers
+    # but have no three-plane cache, raw-key append or FOLD reservation, so
+    # every draft round would raise. Refuse at configuration, untouched.
+    from test_xpress_cpu import tiny_config
+
+    from mlx2.runtime.drafters.xpress import XPressDraftModel
+
+    draft = XPressDraftModel(tiny_config())
+    with pytest.raises(ValueError, match="does not support FOLD"):
+        configure(draft, {"window": 3, "alpha": 2, "sliding_layers": "fold"})
+    assert not any(
+        getattr(layer.self_attn, "fold_policy", None) for layer in draft.layers
+    )
+    assert getattr(draft, "fold_policy", None) is None
+    assert configure(draft, None) is None

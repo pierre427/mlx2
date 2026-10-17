@@ -2,6 +2,7 @@
 """APCv2 model opt-in, layer segmentation, and atomic restore contracts."""
 
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import mlx.core as mx
@@ -629,6 +630,103 @@ def test_apcv2_suspend_drops_one_failed_entry_and_continues(tmp_path, monkeypatc
     assert restored.hit
     restored.cache.close()
     apc.close()
+
+
+def test_apcv2_suspend_waits_out_one_slow_write_instead_of_dropping_the_rest(
+    tmp_path, monkeypatch
+):
+    # Sweep 2026-10-16 APC-1: one write past its deadline used to block every
+    # later spill, so suspend dropped every remaining resident checkpoint.
+    real_write = apc_v2._write_spill_job
+    writes = []
+
+    def first_slow(job):
+        writes.append(job)
+        if len(writes) == 1:
+            threading.Event().wait(0.3)
+        real_write(job)
+
+    monkeypatch.setattr(apc_v2, "_write_spill_job", first_slow)
+    monkeypatch.setattr(apc_v2, "_SPILL_WRITE_SECONDS", 0.05)
+    apc = APCv2(max_size=8, layout_name="suspend-slow-v1",
+                idle_disk_seconds=180, idle_disk_dir=str(tmp_path))
+    key = APCKey("slow")
+    for index in range(4):
+        apc.store(key, [index + 1] * 4, [_state(KVCache(), 4, seed=10 * index)],
+                  session_tag=("tenant", f"s{index}"))
+    report = apc.suspend_resident()
+    assert report["entries"] == 4
+    assert report["failures"] == report["dropped"] == report["deferred"] == 0
+    assert report["resident_entries_after"] == 0
+    assert len(writes) == 4  # the slow write was published late, not redone
+    stats = apc.apc_stats["idle_disk"]
+    assert stats["late_spills_published"] == 1
+    assert stats["disk_entries"] == 4
+    for index in range(4):
+        assert apc.session_state("tenant", f"s{index}")["state"] == "disk"
+    apc.close()
+
+
+def test_apcv2_suspend_keeps_finished_background_writes_and_defers_stuck_ones(
+    tmp_path, monkeypatch
+):
+    # Sweep 2026-10-16 APC-1: settle finished background writes first; a
+    # write stuck behind this directory's writer keeps its entry resident
+    # (reported as deferred) instead of dropping it.
+    gate, first_gate, stuck_started = (threading.Event() for _ in range(3))
+    real_write = apc_v2._write_spill_job
+    finished, stuck, idle = [1] * 4, [2] * 4, [3] * 4
+
+    def write(job):
+        # Hold the first write until both are queued, so it finishes
+        # unpublished and only suspend's settle can publish it.
+        assert (first_gate if job.tokens == finished else gate).wait(5)
+        if job.tokens == stuck:
+            stuck_started.set()
+            assert gate.wait(5)
+        real_write(job)
+
+    monkeypatch.setattr(apc_v2, "_write_spill_job", write)
+    monkeypatch.setattr(apc_v2, "_SPILL_SETTLE_SECONDS", 0.05)
+    apc = APCv2(max_size=8, layout_name="suspend-settle-v1", idle_disk_seconds=180,
+                idle_disk_dir=str(tmp_path), background_spill=True,
+                background_spill_max_bytes=1 << 30)
+    key = APCKey("settle")
+    for seed, tokens in enumerate((finished, stuck, idle)):
+        apc.store(key, tokens, [_state(KVCache(), 4, seed=10 * seed)],
+                  session_tag=("tenant", str(seed)))
+    try:
+        with apc._apc_lock:
+            for tokens in (finished, stuck):
+                assert apc._spill_entry_locked(
+                    key, tokens, apc._trie.get(key, tokens), reason="pressure",
+                    background=True,
+                )
+        first_gate.set()
+        assert apc._spill_jobs[0].done.wait(2)
+        assert apc._trie.get(key, finished).prompt_cache  # finished, unpublished
+        report = apc.suspend_resident()
+        assert report["entries"] == 0 and report["settled_background_writes"] == 1
+        assert report["dropped"] == 0 and report["deferred"] == 2
+        assert report["failures"] == 2 and report["pinned_lost"] == 0
+        assert report["resident_entries_after"] == 2
+        assert apc.session_state("tenant", "0")["state"] == "disk"
+        for tokens in (stuck, idle):
+            assert apc._trie.get(key, tokens).prompt_cache
+        gate.set()
+        assert apc._spill_jobs[0].done.wait(2)
+        # Once the stuck write returns, a later suspend publishes it (not
+        # redone) and writes the deferred idle entry.
+        report = apc.suspend_resident()
+        assert report["settled_background_writes"] == 1
+        assert report["entries"] == 1 and report["failures"] == 0
+        stats = apc.apc_stats["idle_disk"]
+        assert stats["disk_entries"] == 3 and stats["late_spills_published"] == 1
+        assert report["resident_entries_after"] == 0
+    finally:
+        first_gate.set()
+        gate.set()
+        apc.close()
 
 
 def test_apcv2_suspend_refuses_active_lease_without_partial_spill(tmp_path):

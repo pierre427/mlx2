@@ -217,3 +217,40 @@ def test_retired_edges_are_not_expanded_or_rendered(memory, context, status):
 def test_supersession_references_are_bounded_digests(bad):
     with pytest.raises(ValueError):
         fact("alpha", supersedes=bad)
+
+
+@pytest.mark.parametrize("tier", ["session_committed", "user_confirmed"])
+def test_rescored_retry_of_a_superseded_fact_does_not_reactivate_it(memory, context, tier):
+    commit(memory, context, fact("alpha"))
+    target = memory.load(context)[0]["edges"][0]["edge_id"]
+    commit(memory, context, fact("beta", tier=tier, supersedes=(target,)))
+    before = memory.load(context)
+    # Same evidence, same edge id: a re-scored confidence is not new evidence.
+    retry = replace(fact("alpha"), confidence=.98, margin=.7)
+    assert commit(memory, context, retry)["reason"] == "unchanged"
+    assert memory.load(context) == before
+    by_object = edges(memory, context)
+    assert by_object[concept_token("alpha")]["status"] == "superseded"
+    assert by_object[concept_token("beta")]["status"] == "active"
+    assert "Conflicting semantic memory" not in memory.retrieve(context, "gate code").preamble()
+
+
+def test_exact_retry_on_a_legacy_graph_publishes_no_revision(memory, context):
+    deferred = replace(fact("beta", key=None), confidence=.5)
+    commit(memory, context, fact("alpha", key=None), deferred)
+    graph, _, revision = memory.load(context)
+    assert len(graph["edges"]) == len(graph["proposals"]) == 1
+    legacy = copy.deepcopy(graph)
+    for record in legacy["edges"] + legacy["proposals"]:
+        for key in ("status", "authority_tier", "conflict_key_digest", "supersedes", "edge_id"):
+            record.pop(key)
+    capsule = memory.capsules.put(kind="semantic_base", data=legacy,
+                                  provenance={"fixture": "legacy graph"}, **memory.bindings)
+    memory.directory.update(Scope.SESSION, context, expected_revision=revision,
+                            handles={"semantic-memory": capsule.digest})
+    before = memory.load(context)
+    result = commit(memory, context, fact("alpha", key=None), deferred,
+                    expected_revision=before[2])
+    assert result["reason"] == "unchanged"
+    assert result["revision"] == before[2]
+    assert memory.load(context) == before

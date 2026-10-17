@@ -36,3 +36,63 @@ def test_elastic_shrink_records_transition_eviction():
         decode_start=3, terminal_start=2, budget_schedule=[(3, 20)],
     )
     assert report["transition_evictions"] >= 1
+
+
+class _HostReader:
+    num_experts = 16
+    expert_bytes = 1
+
+    def check_sources(self):
+        pass
+
+    def outstanding_bytes(self):
+        return 0
+
+    def iter_many(self, experts):
+        for expert in experts:
+            yield (expert, expert)
+
+    def materialize(self, payload):
+        return (payload,)
+
+
+def _live_terminal_hot(sequence, *, serving_start, terminal_start, decode_start, capacity):
+    from mlx2.runtime import weight_stream as ws
+
+    stats = ws.StreamStats()
+    cache = ws.ExpertLRU(_HostReader(), capacity_experts=capacity, stats=stats,
+                         prefill_admission="terminal_hot")
+    decode_misses = 0
+    for index, (_, values) in enumerate(sequence):
+        before = stats.misses
+        if serving_start <= index < decode_start:
+            phase = "terminal" if index >= terminal_start else "intermediate"
+            with ws.expert_prefill_admission(phase, ("request",)):
+                cache.acquire(values)
+        else:
+            cache.acquire(values)
+        if index >= decode_start:
+            decode_misses += stats.misses - before
+    return decode_misses
+
+
+def test_scan_resistant_replay_matches_live_terminal_hot_admission():
+    # The replay broke frequency ties by expert id and counted load-phase
+    # calls; the live policy keeps router order on ties and counts only the
+    # request's prefill calls (sweep 2026-10-16 NEMO-MAIN-3).
+    cases = [
+        # (sequence, serving_start, terminal_start, decode_start)
+        ([(0, [2]), (0, [2]), (0, [5]), (0, [5, 2]), (0, [5])], 2, 3, 4),
+        ([(0, [3, 1]), (0, [1])], 0, 0, 1),
+    ]
+    for (sequence, serving_start, terminal_start, decode_start) in cases:
+        replay = replay_hybrid(
+            sequence, row_bytes={0: 1}, total_budget_bytes=1, floor_entries=1,
+            decode_start=decode_start, terminal_start=terminal_start,
+            serving_start=serving_start, scan_resistant=True,
+        )
+        live = _live_terminal_hot(
+            sequence, serving_start=serving_start, terminal_start=terminal_start,
+            decode_start=decode_start, capacity=1,
+        )
+        assert replay["phase"]["decode"]["misses"] == live, sequence

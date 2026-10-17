@@ -279,3 +279,44 @@ def test_parity_is_skipped_where_the_load_changes_the_file_on_purpose(tmp_path):
     pack2 = _byte_level_pack(tmp_path / "b", DIGITS, "PreTrainedTokenizerFast")
     tok2 = transformers.PreTrainedTokenizerFast(tokenizer_file=str(pack2 / "tokenizer.json"))
     assert repair_loaded_tokenizer(tok2, pack2, file_authoritative=False)["parity"]["status"] == "skipped"
+
+
+def _chat_token_pack(tmp_path, file_tokens, config_tokens):
+    """Byte-level pack with ``file_tokens`` in tokenizer.json and the config's
+    ``added_tokens_decoder`` built from ``config_tokens`` ({content: rstrip})."""
+    from tokenizers import pre_tokenizers
+
+    pack = _byte_level_pack(tmp_path, DIGITS, "PreTrainedTokenizerFast")
+    first = len(pre_tokenizers.ByteLevel.alphabet())
+    tok = json.loads((pack / "tokenizer.json").read_text())
+    flags = {"single_word": False, "lstrip": False, "normalized": False, "special": True}
+    tok["added_tokens"] = [
+        {"id": first + i, "content": c, "rstrip": False, **flags} for i, c in enumerate(file_tokens)
+    ]
+    tok["model"]["vocab"].update({c: first + i for i, c in enumerate(file_tokens)})
+    (pack / "tokenizer.json").write_text(json.dumps(tok))
+    config = json.loads((pack / "tokenizer_config.json").read_text())
+    config["added_tokens_decoder"] = {
+        str(first + i): {"content": c, "rstrip": rstrip, **flags}
+        for i, (c, rstrip) in enumerate(config_tokens.items())
+    }
+    (pack / "tokenizer_config.json").write_text(json.dumps(config))
+    return pack
+
+
+@pytest.mark.parametrize(
+    "file_tokens",
+    [["<|im_start|>", "<|im_end|>"], []],
+    ids=["config-reflags-a-file-token", "config-only-tokens"],
+)
+def test_config_added_tokens_are_part_of_the_reference(tmp_path, file_tokens):
+    # transformers applies the config's added_tokens_decoder on purpose; a
+    # pack that declares its chat tokens there is not a rebuilt backend.
+    pack = _chat_token_pack(
+        tmp_path, file_tokens, {"<|im_start|>": False, "<|im_end|>": True}
+    )
+    tok = transformers.AutoTokenizer.from_pretrained(str(pack), local_files_only=True)
+    assert repair_loaded_tokenizer(tok, pack)["parity"]["status"] == "consistent"
+    tok.add_tokens(["hello"])  # still refused: neither file nor config has it
+    with pytest.raises(TokenizerParityError, match="hello"):
+        repair_loaded_tokenizer(tok, pack)

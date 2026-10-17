@@ -774,3 +774,76 @@ def test_reasoning_on_and_completions_do_not_hold_back():
     assert on.push("plan</think>\n\nanswer") != []
     completion = make_output_parser({"prompt": "x"}, thinking=False)
     assert completion.push("raw text") == [{"content": "raw text"}]
+
+
+@pytest.mark.parametrize("split", [1, 2, 3, 5, 7, 11])
+def test_late_reasoning_hold_finds_the_close_at_any_chunk_boundary(split):
+    # Sweep 2026-10-16: the hold now scans only a carried tail plus the new
+    # chunk; a marker straddling any boundary must still be found once.
+    text = "We need to read it" + THINKING_CLOSE_MARKER + "\n\nNEEDLE-7D13C8-3</think> tail"
+    chunks = [text[i:i + split] for i in range(0, len(text), split)]
+    parser = make_output_parser({"messages": [{"role": "user", "content": "x"}]}, thinking=False)
+    channels = _channels(_run(parser, chunks))
+    assert channels == {
+        "reasoning_content": "We need to read it",
+        "content": "NEEDLE-7D13C8-3</think> tail",
+    }
+    assert parser.late_reasoning_chars == len("We need to read it")
+
+
+def test_late_reasoning_hold_releases_unmarked_text_at_the_end():
+    parser = make_output_parser({"messages": [{"role": "user", "content": "x"}]}, thinking=False)
+    assert _channels(_run(parser, list("plain answer </thin"))) == {"content": "plain answer </thin"}
+
+
+@pytest.mark.parametrize("tool", [
+    {"type": "function", "function": {"name": "f"}},
+    {"type": "function", "function": {"name": "f", "parameters": {"type": "object", "required": ["a"]}}},
+])
+def test_forced_free_arguments_admitted_by_the_grammar_parse(tool):
+    # Sweep 2026-10-16: the grammar's free-argument tail admits a repeated
+    # name; the parser used to reject it, failing a grammar-valid forced call.
+    request = {"messages": [{"role": "user", "content": "x"}], "tools": [tool], "tool_choice": "required"}
+    text = f"{TOOL_CALL_START}[f(a=1, a=2)]{TOOL_CALL_END}"
+    assert regex.fullmatch(make_tool_constraint(request), text)
+    parser = make_output_parser(request, thinking=False)
+    calls = [e for e in parser.push(text) + parser.finish("", "stop") if "tool_calls" in e]
+    assert json.loads(calls[0]["tool_calls"][0]["function"]["arguments"]) == {"a": 2}
+
+
+def test_late_reasoning_hold_scans_only_a_bounded_tail_per_push():
+    # Codex review of ADAPTERS-2: the hold must not recopy or rescan the
+    # whole held answer on every token; the marker search's examined
+    # characters stay linear in the input.
+    parser = make_output_parser({"messages": [{"role": "user", "content": "x"}]}, thinking=False)
+    total = 0
+    for index in range(2000):
+        chunk = f"t{index} "
+        total += len(chunk)
+        assert parser.push(chunk) == []
+    assert parser.held_scan_chars <= total + 2000 * (len(THINKING_CLOSE_MARKER) - 1)
+    assert _channels(parser.finish("", "stop"))["content"].startswith("t0 t1 ")
+
+
+def test_reasoning_off_hold_stops_at_a_client_stop_string():
+    # Sweep 2026-10-16 ADAPTERS-1 (Pierre's decision): the hold kept decoding
+    # past a client stop string until EOS/max_tokens; it now stops there.
+    request = {"messages": [{"role": "user", "content": "x"}], "stop": ["\n"]}
+    parser = make_output_parser(request, thinking=False)
+    events = []
+    for index, token in enumerate(["Answer", " one", "\n", "Answer two"]):
+        events += parser.push(token)
+        if parser.stopped:
+            break
+    assert index == 2 and parser.stopped and parser.stop_sequence == "\n"
+    assert _channels(events) == {"content": "Answer one"}
+    assert parser.late_reasoning_stop_releases == 1
+
+
+def test_reasoning_off_hold_still_splits_reasoning_closed_before_a_stop():
+    request = {"messages": [{"role": "user", "content": "x"}], "stop": ["\n"]}
+    parser = make_output_parser(request, thinking=False)
+    events = parser.push("read it</think>") + parser.push("NEEDLE-1\nmore")
+    assert parser.stopped
+    assert _channels(events) == {"reasoning_content": "read it", "content": "NEEDLE-1"}
+    assert parser.late_reasoning_stop_releases == 0

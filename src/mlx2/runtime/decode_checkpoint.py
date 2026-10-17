@@ -20,6 +20,8 @@ from .io_ownership import ReadPool, ReadTimeout
 from .models.cache import load_prompt_cache, save_prompt_cache
 
 CHECKPOINT_IO_SECONDS = 60.0
+# Quarantine scope of every capture: they all use private temporary files.
+CHECKPOINT_IO_OWNER = ("ordinary-checkpoint", "private-temporary-files")
 HEADER_ALLOWANCE = 16 << 20
 
 
@@ -135,7 +137,7 @@ class OrdinaryDecodeCheckpoint:
         owner.control = None
         owner.file = None
         owner.pool = ReadPool(1, "ordinary-checkpoint", timeout=CHECKPOINT_IO_SECONDS,
-                              max_pending=1)
+                              max_pending=1, owner=CHECKPOINT_IO_OWNER)
         owner.binding = binding
         owner.model = batch.model
         owner.uid = uid

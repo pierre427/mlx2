@@ -163,6 +163,8 @@ class DFlash2DraftModel(DFlashDraftModel):
     dflash_initial_block_size = 3
     dflash_min_block_size = 3
     minimum_proposal_length = 3
+    # FOLDKVCache in make_cache, raw-key append and extra_memory_reservation.
+    supports_fold = True
 
     def __init__(self, config: DFlash2Config):
         super().__init__(config)

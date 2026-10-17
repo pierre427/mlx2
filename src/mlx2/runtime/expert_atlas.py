@@ -47,6 +47,12 @@ TRACE_MAGIC_V1 = b"MLX2XTR1"
 _TRACE_CALL = 0xFFFFFFFF  # (CALL, n): the next n rows are one call
 _TRACE_LOST = 0xFFFFFFFE  # (LOST, layer): an acquire that failed, unrecorded
 _TRACE_END = 0xFFFFFFFD  # (END, dropped calls): written once, at close
+# (ADMISSION, code): written after the header when the expert caches ran a
+# prefill admission other than plain LRU, which the replay does not model.
+# Plain-LRU traces carry no such row and are unchanged.
+_TRACE_ADMISSION = 0xFFFFFFFC
+_TRACE_MARKER_MIN = _TRACE_ADMISSION
+_ADMISSION_CODES = {"terminal_hot": 1}
 ATLAS_MAGIC = b"MLX2ATL1"
 ATLAS_SENTINEL = b"ENDATLAS"
 
@@ -123,10 +129,11 @@ class AtlasCollector:
         self._steps = 0
         self._dropped = 0
         self._closed = False
-        from .io_ownership import CloseAction, ReadPool
+        from .io_ownership import CloseAction, ReadPool, storage_owner
 
         self._io_pool = (
-            ReadPool(1, "expert-atlas", timeout=ATLAS_IO_SECONDS, max_pending=1)
+            ReadPool(1, "expert-atlas", timeout=ATLAS_IO_SECONDS, max_pending=1,
+                     owner=storage_owner("expert-atlas", self.sink or self.trace_path))
             if self.sink is not None or self.trace_path is not None else None
         )
         self._close_owner = CloseAction(self._close_trace)
@@ -144,9 +151,13 @@ class AtlasCollector:
             self._io_pool.close(self._close_owner)
             raise
 
-    def bind(self, *, num_layers: int, num_units: int) -> None:
+    def bind(self, *, num_layers: int, num_units: int,
+             prefill_admission: str = "lru") -> None:
         import numpy as np
 
+        if prefill_admission != "lru" and prefill_admission not in _ADMISSION_CODES:
+            raise ValueError(f"unknown expert prefill admission {prefill_admission!r}")
+        self.prefill_admission = prefill_admission
         self.num_layers = int(num_layers)
         self.num_units = int(num_units)
         self.counts = np.zeros((self.num_layers, self.num_units), dtype=np.uint64)
@@ -170,6 +181,11 @@ class AtlasCollector:
                 TRACE_MAGIC
                 + struct.pack("<II", self.num_layers, self.num_units)
             )
+            admission = getattr(self, "prefill_admission", "lru")
+            if admission != "lru":
+                self._trace.write(
+                    struct.pack("<II", _TRACE_ADMISSION, _ADMISSION_CODES[admission])
+                )
         return prior
 
     def observe(self, layer: int, units) -> None:
@@ -501,7 +517,7 @@ def read_trace(path) -> Tuple[int, int, object]:
     access, in order (a v2 trace's marker rows removed)."""
     (version, layers, units, records) = _read_rows(path)
     if version == 2:
-        records = records[records[:, 0] < _TRACE_END]
+        records = records[records[:, 0] < _TRACE_MARKER_MIN]
     return (layers, units, records)
 
 
@@ -538,7 +554,7 @@ def _trace_calls_v2(records, layers: int) -> Tuple[List[List[List[int]]], dict]:
     """A v2 trace's recorded calls, per layer, and what the trace covers."""
     calls: List[List[List[int]]] = [[] for _ in range(layers)]
     info = {"calls": 0, "closed": False, "dropped_calls": 0, "lost_calls": 0,
-            "torn": False}
+            "torn": False, "prefill_admission": "lru"}
     (pos, rows) = (0, len(records))
     while pos < rows:
         if info["closed"]:
@@ -551,7 +567,7 @@ def _trace_calls_v2(records, layers: int) -> Tuple[List[List[List[int]]], dict]:
                 info["torn"] = True
                 break
             block = records[pos + 1 : stop]
-            if value == 0 or (block[:, 0] != block[0, 0]).any() or block[0, 0] >= _TRACE_END:
+            if value == 0 or (block[:, 0] != block[0, 0]).any() or block[0, 0] >= _TRACE_MARKER_MIN:
                 raise ValueError("malformed call in expert access trace")
             layer = int(block[0, 0])
             if layer < layers:
@@ -560,6 +576,12 @@ def _trace_calls_v2(records, layers: int) -> Tuple[List[List[List[int]]], dict]:
             pos = stop
         elif kind == _TRACE_LOST:
             info["lost_calls"] += 1
+            pos += 1
+        elif kind == _TRACE_ADMISSION and pos == 0:
+            names = {code: name for name, code in _ADMISSION_CODES.items()}
+            if value not in names:
+                raise ValueError("unknown prefill admission in expert access trace")
+            info["prefill_admission"] = names[value]
             pos += 1
         elif kind == _TRACE_END:
             info["closed"] = True
@@ -577,18 +599,19 @@ def load_trace_calls(path) -> Tuple[int, int, List[List[List[int]]], dict]:
     reproduces: ``"exact"`` -- a complete v2 trace (closed, nothing dropped or
     lost), the LRU that ran; ``"exact_prefix"`` -- a v2 trace cut short by its
     record limit or by the process ending, the LRU that ran up to its last
-    recorded call; ``"approximate"`` -- a legacy v1 trace (calls inferred) or
-    one with a failed acquire it could not record.
+    recorded call; ``"approximate"`` -- a legacy v1 trace (calls inferred),
+    one with a failed acquire it could not record, or one collected under a
+    prefill admission other than plain LRU (``info["prefill_admission"]``).
     """
     (version, layers, units, records) = _read_rows(path)
     if version == 1:
         calls = _trace_calls(records, int(layers))
         info = {"calls": sum(len(layer) for layer in calls), "closed": None,
                 "dropped_calls": None, "lost_calls": None, "torn": None,
-                "baseline": "approximate"}
+                "baseline": "approximate", "prefill_admission": "lru"}
     else:
         (calls, info) = _trace_calls_v2(records, int(layers))
-        if info["lost_calls"]:
+        if info["lost_calls"] or info["prefill_admission"] != "lru":
             info["baseline"] = "approximate"
         elif info["closed"] and not info["dropped_calls"]:
             info["baseline"] = "exact"
@@ -611,7 +634,7 @@ def load_trace_sequence(path) -> Tuple[int, int, List[Tuple[int, List[int]]], di
         raise ValueError("ordered expert replay requires a v2 trace")
     sequence: List[Tuple[int, List[int]]] = []
     info = {"calls": 0, "closed": False, "dropped_calls": 0, "lost_calls": 0,
-            "torn": False, "version": version}
+            "torn": False, "version": version, "prefill_admission": "lru"}
     (pos, rows) = (0, len(records))
     while pos < rows:
         if info["closed"]:
@@ -623,7 +646,7 @@ def load_trace_sequence(path) -> Tuple[int, int, List[Tuple[int, List[int]]], di
                 info["torn"] = True
                 break
             block = records[pos + 1 : stop]
-            if value == 0 or (block[:, 0] != block[0, 0]).any() or block[0, 0] >= _TRACE_END:
+            if value == 0 or (block[:, 0] != block[0, 0]).any() or block[0, 0] >= _TRACE_MARKER_MIN:
                 raise ValueError("malformed call in expert access trace")
             layer = int(block[0, 0])
             if layer < layers:
@@ -633,13 +656,19 @@ def load_trace_sequence(path) -> Tuple[int, int, List[Tuple[int, List[int]]], di
         elif kind == _TRACE_LOST:
             info["lost_calls"] += 1
             pos += 1
+        elif kind == _TRACE_ADMISSION and pos == 0:
+            names = {code: name for name, code in _ADMISSION_CODES.items()}
+            if value not in names:
+                raise ValueError("unknown prefill admission in expert access trace")
+            info["prefill_admission"] = names[value]
+            pos += 1
         elif kind == _TRACE_END:
             info["closed"] = True
             info["dropped_calls"] = value
             pos += 1
         else:
             raise ValueError("expert access trace row outside a call")
-    if info["lost_calls"]:
+    if info["lost_calls"] or info["prefill_admission"] != "lru":
         info["baseline"] = "approximate"
     elif info["closed"] and not info["dropped_calls"]:
         info["baseline"] = "exact"
@@ -781,13 +810,14 @@ def replay_counterfactual(
         ),
         "approximate": (
             "The pin_fraction 0 row is approximate: a legacy trace without "
-            "call boundaries, or a failed acquire the trace could not record."
+            "call boundaries, a failed acquire the trace could not record, or "
+            "a run whose prefill admission was not the plain LRU replayed here."
         ),
     }[trace_info["baseline"]]
     return {
         "schema": "mlx2.expert-atlas-counterfactual.v1",
         "note": (
-            "Counterfactual replay only. The serving path runs plain LRU; the "
+            "Counterfactual replay only. The replay models plain LRU; the "
             "atlas is collect-only and never influenced residency. Wall-clock "
             "numbers from a streamed run are not benchmarks. " + baseline_note
         ),
@@ -800,7 +830,7 @@ def replay_counterfactual(
         "requested_capacity_experts": capacity,
         "layers": layers,
         "units_per_layer": units,
-        "actual_policy": "lru",
+        "actual_policy": trace_info["prefill_admission"],
         "rows": rows,
         "verdict": _verdict(rows),
     }

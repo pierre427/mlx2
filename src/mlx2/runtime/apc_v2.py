@@ -23,7 +23,14 @@ from pathlib import Path
 from typing import Any, Hashable, Iterable, List, Optional
 import mlx.core as mx
 from .rolling_counter import RollingCounter
-from .io_ownership import CloseAction, ReadPool, ReadTimeout
+from .io_ownership import (
+    CloseAction,
+    ReadPool,
+    ReadTimeout,
+    quarantine_worker,
+    release_worker,
+    storage_owner,
+)
 from concurrent.futures import TimeoutError as FutureTimeout
 from . import loop_trace as _loop_trace
 from .cache_capsule import CacheCapsuleGeneration, CacheCapsulePool
@@ -793,14 +800,22 @@ _CONTROL_IO_SECONDS = 60.0
 # Serialized metadata has a separate, finite allowance beyond resident tensors.
 _RESTORE_HEADER_BYTES = 16 << 20
 _SPILL_QUARANTINE_LOCK = threading.Lock()
+# Truthy result of a spill call that only published an earlier background
+# write; that write's window event was recorded when it was handed off.
+_SPILL_SETTLED = "settled"
+# Writer -> its timed-out jobs that have not returned yet.
 _SPILL_QUARANTINES = {}
 
 
-def _spill_writes_blocked() -> bool:
-    # Retain this guard across clear()/unload: otherwise each new APC could
-    # allocate another writer window behind the same uninterruptible disk.
+def _spill_writes_blocked(owner) -> bool:
+    # Scoped to one disk tier and retained across clear()/unload: otherwise
+    # each new APC could allocate another writer window behind the same
+    # uninterruptible disk. A stuck write never blocks other directories.
     with _SPILL_QUARANTINE_LOCK:
-        return bool(_SPILL_QUARANTINES)
+        return any(
+            writer.owner == owner and any(not job.done.is_set() for job in jobs)
+            for writer, jobs in _SPILL_QUARANTINES.items()
+        )
 
 
 class _SpillWriter:
@@ -811,7 +826,10 @@ class _SpillWriter:
     cannot deadlock.
     """
 
-    def __init__(self):
+    def __init__(self, owner=None):
+        # The disk tier's I/O owner key; a hung writer counts toward the
+        # process-wide hung-worker cap and blocks new pools for that owner.
+        self.owner = owner
         self._queue = queue.SimpleQueue()
         self._thread = threading.Thread(
             target=self._run, name="apcv2-spill-writer", daemon=True
@@ -863,6 +881,7 @@ class _SpillWriter:
                         pending[:] = [item for item in pending if not item.done.is_set()]
                         if not pending:
                             del _SPILL_QUARANTINES[self]
+                            release_worker(self)
                 # queue.get() may block for the rest of this server's life.
                 # Do not keep the previous entry or payload in worker locals.
                 spill = None
@@ -891,6 +910,7 @@ class APCv2(PrefixIndex):
     _background_spill_max_bytes = 0
     _spill_jobs = ()
     _spill_writer = None
+    _disk_owner = None
     _restore_pool = None
     _restore_staging_bytes = 0
     _metadata_pool = None
@@ -917,6 +937,8 @@ class APCv2(PrefixIndex):
         "background_spills_discarded",
         "background_spill_failures",
         "background_spill_timeouts",
+        # Timed-out writes that finished later and were published, not redone.
+        "late_spills_published",
         "background_spill_sync_fallbacks",
         "restores",
         "restore_failures",
@@ -1144,6 +1166,12 @@ class APCv2(PrefixIndex):
         )
         if self._persist_dir is not None and self._idle_disk_dir is None:
             raise ValueError("persist_dir requires a positive idle_disk_seconds")
+        # Quarantine scope of every disk worker this APC owns (string-only:
+        # path resolution is startup I/O and runs on the control worker).
+        self._disk_owner = (
+            storage_owner("apcv2", self._idle_disk_dir)
+            if self._idle_disk_dir is not None else None
+        )
         if persist_corruption_action not in {"quarantine", "delete"}:
             raise ValueError("persist_corruption_action must be quarantine or delete")
         self._persist_corruption_action = persist_corruption_action
@@ -1233,8 +1261,17 @@ class APCv2(PrefixIndex):
         self.layout_name = str(layout_name)
         if self._idle_disk_dir is not None:
             self._control_pool = ReadPool(1, "apcv2-control", timeout=_CONTROL_IO_SECONDS,
-                                          max_pending=1)
+                                          max_pending=1, owner=self._disk_owner)
             try:
+                # Own every disk worker now. ReadPool refuses construction
+                # while this directory's earlier work is quarantined (or the
+                # process hung-worker cap is reached); a lazy pool would meet
+                # that refusal halfway through a drop or clear.
+                self._metadata_pool = ReadPool(1, "apcv2-metadata", max_pending=1,
+                                               timeout=_MANIFEST_WRITE_SECONDS,
+                                               owner=self._disk_owner)
+                self._restore_pool = ReadPool(1, "apcv2-restore", max_pending=1,
+                                              owner=self._disk_owner)
                 self._control_pool.call(self._initialize_disk)
                 # Startup registration is host-only. Budget enforcement and
                 # any cache release remain on the owning model thread.
@@ -1530,7 +1567,8 @@ class APCv2(PrefixIndex):
         self._ensure_metadata_available()
         if self._metadata_pool is None:
             self._metadata_pool = ReadPool(1, "apcv2-metadata", max_pending=1,
-                                          timeout=_MANIFEST_WRITE_SECONDS)
+                                          timeout=_MANIFEST_WRITE_SECONDS,
+                                          owner=self._disk_owner)
         future = self._metadata_pool.submit(function, *args)
         self._metadata_future = future
         self._metadata_operation = operation
@@ -2575,7 +2613,9 @@ class APCv2(PrefixIndex):
         # whole write: on the idle path that is the model thread).
         blocked = time.perf_counter() - began
         queued = self._spill_job_of(entry) is not None
-        if spilled:
+        settled = spilled is _SPILL_SETTLED
+        spilled = bool(spilled)
+        if spilled and not settled:
             self._disk_window("spills").add(
                 bytes=nbytes, seconds=blocked, background=int(queued),
                 **{reason: 1},
@@ -2591,17 +2631,21 @@ class APCv2(PrefixIndex):
     def _spill_entry_untraced_locked(
         self, key, tokens, entry, *, reason: str, hard_cap: Optional[int] = None,
         keep_resident: bool = False, background: bool = False,
-    ) -> bool:
-        if _spill_writes_blocked():
+    ) -> bool | str:
+        if _spill_writes_blocked(self._disk_owner) and (
+            self._spill_job_of(entry) is not None
+            or not getattr(entry, "_apc_disk", None)
+        ):
             # The writer still owns evaluated payloads. Do not turn a timeout
-            # into a second synchronous write (or another growing queue).
+            # into a second synchronous write (or another growing queue). An
+            # entry whose disk copy already exists needs no write at all.
             return False
         if self._spill_job_of(entry) is not None:
             # Already being written in the background: finish that first.
             if not self._settle_spill_locked(entry):
                 return False
             if not entry.prompt_cache:
-                return True
+                return _SPILL_SETTLED
         self._spill_capacity_violation = None
         if self._idle_disk_dir is None or not entry.prompt_cache:
             return False
@@ -2654,7 +2698,7 @@ class APCv2(PrefixIndex):
                     # not enqueue an extra ownership window behind a stalled
                     # background job that already filled the payload cap.
                     self._collect_spills_locked(wait=True, reenforce=False)
-                    if _spill_writes_blocked():
+                    if _spill_writes_blocked(self._disk_owner):
                         return False
                 self._evaluate_spill_payload_locked(job)
                 self._queue_spill_locked(job)
@@ -2895,7 +2939,7 @@ class APCv2(PrefixIndex):
         entry._apc_spill_job = job
         self._spill_jobs.append(job)
         if self._spill_writer is None:
-            self._spill_writer = _SpillWriter()
+            self._spill_writer = _SpillWriter(self._disk_owner)
         self._spill_writer.submit(job)
 
     @staticmethod
@@ -3001,11 +3045,12 @@ class APCv2(PrefixIndex):
                     # lock the writer uses to retire its quarantine.
                     if not job.done.is_set():
                         _SPILL_QUARANTINES.setdefault(self._spill_writer, []).append(job)
+                        quarantine_worker(self._spill_writer, self._spill_writer.owner)
             self._disk_stats["background_spill_timeouts"] += 1
             log.warning("APCv2 spill exceeded the serving wait budget")
 
     def _settle_spill_locked(self, entry) -> bool:
-        """Bound the wait; a late result is discarded, never published."""
+        """Bound the wait; a late result is published only by a later collect."""
         job = self._spill_job_of(entry)
         if job is None:
             return True
@@ -3021,8 +3066,17 @@ class APCv2(PrefixIndex):
         """Publish one finished job; True if its victim is still resident."""
         entry = job.entry
         entry._apc_spill_job = None
+        # A timeout only stopped the wait. A write the writer had started
+        # completes whole files, so it is published like an on-time one
+        # while its victim is still the stored entry (a drop or replacement
+        # fails the identity check below); one revoked before it started,
+        # or abandoned by clear/close, never wrote anything to keep.
+        late = job.timed_out and job.started and not job.abandoned
         try:
-            present = (not job.cancelled) and self._trie.get(job.key, job.tokens) is entry
+            present = (
+                (not job.cancelled or late)
+                and self._trie.get(job.key, job.tokens) is entry
+            )
         except KeyError:
             present = False
         if job.error is not None or not present:
@@ -3062,6 +3116,7 @@ class APCv2(PrefixIndex):
             job.key, job.tokens, entry, reason="pressure", keep_resident=False
         )
         self._disk_stats["background_spills_published"] += 1
+        self._disk_stats["late_spills_published"] += int(late)
         self._enforce_disk_limit_locked(exclude=exclude)
         return False
 
@@ -3150,10 +3205,11 @@ class APCv2(PrefixIndex):
 
     def _load_restore_payload_locked(self, disk, aux_signature, expected):
         # One staged snapshot per APC, bounded separately from resident state.
-        # A timeout poisons this pool permanently; replacement APC ownership is
-        # refused by ReadPool until the old syscall has actually returned.
+        # A timeout poisons this pool permanently; replacement APC ownership of
+        # this directory is refused by ReadPool until the old syscall returns.
         if self._restore_pool is None:
-            self._restore_pool = ReadPool(1, "apcv2-restore", max_pending=1)
+            self._restore_pool = ReadPool(1, "apcv2-restore", max_pending=1,
+                                          owner=self._disk_owner)
         pool = self._restore_pool
         limit = min(expected, int(self.max_bytes)) + _RESTORE_HEADER_BYTES
         future = pool.submit(self._read_restore_payload, dict(disk), aux_signature, limit)
@@ -4193,18 +4249,25 @@ class APCv2(PrefixIndex):
         """Spill every exact resident entry, dropping only individual failures.
 
         The serving worker calls this after admission has closed and every
-        request lease has drained.  Unlike shutdown parking there is no time
-        budget: a suspend is complete only after each resident checkpoint has
-        become a disk placeholder or has been dropped.  Session tags, disk and
-        resident pin expiries, retention roles, speculative sidecars, and
-        interior checkpoints are entry metadata handled by the ordinary spill
-        format.  Approximate state never reaches APCv2's exact store path.
+        request lease has drained. Finished background writes are published
+        first. A checkpoint whose write is blocked behind this directory's
+        stuck writer gets one bounded settle wait (``_SPILL_SETTLE_SECONDS``
+        for the whole suspend, under the APC lock) and then stays resident,
+        reported as ``deferred``; a stuck write is never a reason to drop.
+        Only a checkpoint whose own write failed is dropped (``dropped``).
+        ``failures`` counts both, the entries that did not reach disk.
+        Session tags, disk and resident pin expiries, retention roles,
+        speculative sidecars, and interior checkpoints are entry metadata
+        handled by the ordinary spill format. Approximate state never reaches
+        APCv2's exact store path.
         """
         started = time.monotonic()
         with self._apc_lock:
             self._ensure_metadata_available()
             if self._idle_disk_dir is None:
                 raise ValueError("APCv2 suspension requires a configured disk tier")
+            # The sweep publishes background writes that already finished.
+            published_before = self._disk_stats["background_spills_published"]
             self._sweep_retirements_locked()
             records = tuple(self._entry_records_locked())
             active_leases = sum(
@@ -4222,13 +4285,41 @@ class APCv2(PrefixIndex):
                 if entry.prompt_cache
             ]
             resident_bytes_before = sum(int(entry.nbytes) for _, _, entry in resident)
-            spilled = failures = suspended_bytes = 0
             pinned_lost_before = self._disk_stats["pinned_parks_lost"]
+            settle_deadline = time.monotonic() + _SPILL_SETTLE_SECONDS
+            # Give writes still in flight one bounded wait before choosing
+            # what still needs a write.
+            self._collect_spills_locked(wait=True, reenforce=False)
+            settled = self._disk_stats["background_spills_published"] - published_before
+            spilled = dropped = deferred = 0
+            suspended_bytes = 0
             for key, tokens, entry in resident:
                 entry_bytes = int(entry.nbytes)
-                if self._spill_entry_locked(key, tokens, entry, reason="suspend"):
+                if not entry.prompt_cache:
+                    if getattr(entry, "_apc_disk", None):
+                        # Its finished background write was just published.
+                        spilled += 1
+                        suspended_bytes += entry_bytes
+                    continue
+                written = self._spill_entry_locked(key, tokens, entry, reason="suspend")
+                if (
+                    not written
+                    and self._suspend_spill_blocked_locked(entry)
+                    and self._await_spill_quarantine_locked(settle_deadline)
+                ):
+                    # The stuck write returned and was published (late) or
+                    # the writer is free again: write this entry now.
+                    written = (
+                        not entry.prompt_cache and getattr(entry, "_apc_disk", None)
+                    ) or self._spill_entry_locked(key, tokens, entry, reason="suspend")
+                if written:
                     spilled += 1
                     suspended_bytes += entry_bytes
+                    continue
+                if self._suspend_spill_blocked_locked(entry):
+                    # The write is stuck, not failed: keep the checkpoint
+                    # resident (and its parked session) rather than drop it.
+                    deferred += 1
                     continue
                 # One malformed/unserializable entry must not abort the
                 # service-level transition.  No live generation lease should
@@ -4237,9 +4328,14 @@ class APCv2(PrefixIndex):
                 # service reports suspended.  A drop that takes a parked
                 # session's only state with it is counted and named by
                 # _drop_entry_locked and reported here as pinned_lost.
-                failures += 1
+                dropped += 1
                 self._drop_entry_locked(
                     key, tokens, entry, reason="suspend spill failure"
+                )
+            if deferred:
+                log.warning(
+                    "APCv2 suspend kept %d checkpoint(s) resident behind a "
+                    "stuck spill write", deferred,
                 )
             pinned_lost = self._disk_stats["pinned_parks_lost"] - pinned_lost_before
             self._enforce_disk_limit_locked()
@@ -4248,7 +4344,10 @@ class APCv2(PrefixIndex):
         return {
             "entries": spilled,
             "bytes": suspended_bytes,
-            "failures": failures,
+            "failures": dropped + deferred,
+            "dropped": dropped,
+            "deferred": deferred,
+            "settled_background_writes": settled,
             "pinned_lost": pinned_lost,
             "resident_entries_before": len(resident),
             "resident_bytes_before": resident_bytes_before,
@@ -4256,6 +4355,29 @@ class APCv2(PrefixIndex):
             "resident_bytes_after": resident_bytes_after,
             "duration_seconds": max(0.0, time.monotonic() - started),
         }
+
+    def _suspend_spill_blocked_locked(self, entry) -> bool:
+        """True when the entry's write is stuck behind a timed-out write."""
+        job = self._spill_job_of(entry)
+        if job is not None and job.timed_out and not job.done.is_set():
+            return True
+        return _spill_writes_blocked(self._disk_owner)
+
+    def _await_spill_quarantine_locked(self, deadline: float) -> bool:
+        """Wait until ``deadline`` for this directory's stuck writes, then
+        publish what finished. True when spill writes are unblocked again."""
+        with _SPILL_QUARANTINE_LOCK:
+            stuck = [
+                job
+                for writer, jobs in _SPILL_QUARANTINES.items()
+                if writer.owner == self._disk_owner
+                for job in jobs
+            ]
+        for job in stuck:
+            if not job.done.wait(max(0.0, deadline - time.monotonic())):
+                return False
+        self._collect_spills_locked(reenforce=False)
+        return not _spill_writes_blocked(self._disk_owner)
 
     def spill_idle_entries(self, *, now: Optional[float] = None) -> int:
         """Move unpinned APC entries idle past the configured age to disk."""
@@ -5811,7 +5933,7 @@ class APCv2(PrefixIndex):
                 "restore_read_seconds": _RESTORE_READ_SECONDS,
                 "restore_staging_reserved_bytes": self._restore_staging_bytes,
                 "restore_read_failed": bool(self._restore_pool and self._restore_pool.failure),
-                "background_spill_writes_blocked": _spill_writes_blocked(),
+                "background_spill_writes_blocked": _spill_writes_blocked(self._disk_owner),
                 "background_spill_max_bytes": self._background_spill_max_bytes,
                 # Spills and restores over the last 10 s, 1 min, 5 min and
                 # 30 min: count, bytes, seconds blocked, and per-reason counts.

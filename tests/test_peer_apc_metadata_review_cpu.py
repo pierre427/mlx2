@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import pytest
+from test_peer_apc_metadata_cpu import _assert_directory_owner_retained
 from test_peer_survey_persistence_cpu import _cache, _fixture, _persistent
 
 from mlx2.runtime import apc_v2
@@ -80,8 +81,7 @@ def test_concurrent_close_cannot_unlock_before_detached_writer_is_registered(tmp
             waiter.join(.1)
         assert writer._thread.is_alive()
         assert apc._persist_lock_file is not None
-        with pytest.raises(RuntimeError, match="lock is already owned"):
-            _persistent(tmp_path, key)
+        _assert_directory_owner_retained(tmp_path, key)
     finally:
         manifest_gate.set()
         payload_gate.set()

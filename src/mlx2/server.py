@@ -42,6 +42,7 @@ from .serving import (
 )
 from .power_governor import PowerSignalUnavailable
 from .usage import UsageLimitExceeded, UsageReloadBusy, metered_pooled
+from .host_counters import count_add
 from .batch_metrics import http_metric_route
 from .runtime.int8_prefill import cli_value as int8_prefill_cli_value
 # The --cache-bytes default and its post-load clamp live in cache_sizing: pure
@@ -1354,6 +1355,17 @@ class ClientGone(RuntimeError):
     """The HTTP client closed its connection while a response was pending."""
 
 
+def _readable_now(connection) -> bool:
+    """Whether ``connection`` has input or EOF pending, without blocking.
+
+    ``poll`` has no FD_SETSIZE ceiling: ``select.select`` raises ValueError for
+    descriptors >= 1024, which a long-running server can reach.
+    """
+    poller = select.poll()
+    poller.register(connection, select.POLLIN)
+    return bool(poller.poll(0))
+
+
 def client_disconnected(connection) -> bool:
     """Whether ``connection`` has been closed by the peer (EOF), without blocking.
 
@@ -1364,11 +1376,10 @@ def client_disconnected(connection) -> bool:
     if connection is None:
         return False
     try:
-        readable, _, _ = select.select([connection], [], [], 0)
-        if not readable:
+        if not _readable_now(connection):
             return False
         return connection.recv(1, socket.MSG_PEEK) == b""
-    except (OSError, ValueError):
+    except OSError:
         return True
 
 
@@ -1712,12 +1723,12 @@ def tensorfold_owned_client_disconnected(connection):
     """Observe an HTTP peer FIN without consuming a pipelined request byte."""
 
     try:
-        if not select.select([connection], [], [], 0)[0]:
+        if not _readable_now(connection):
             return False
         return connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
     except BlockingIOError:
         return False
-    except (OSError, ValueError):
+    except OSError:
         return True
 
 
@@ -2190,7 +2201,7 @@ def handler_for(
         if stored_enabled is not None and stored_enabled != agent_compat.enabled:
             engine_counts = getattr(engine, "counts", None)
             if engine_counts is not None:
-                engine_counts["agent_compat_mode_conflicts"] += 1
+                count_add(engine_counts, "agent_compat_mode_conflicts", 1)
             raise AgentCompatError(
                 f"previous_response_id {previous_id!r} was created with "
                 f"agent-compat {'on' if stored_enabled else 'off'}, but this "
@@ -2213,7 +2224,7 @@ def handler_for(
         if rejections:
             engine_counts = getattr(engine, "counts", None)
             if engine_counts is not None:
-                engine_counts["reasoning_signature_rejections"] += rejections
+                count_add(engine_counts, "reasoning_signature_rejections", rejections)
         previous_context = []
         if options["previous_response_id"] is not None:
             previous_context = response_store.context(
@@ -2715,10 +2726,16 @@ def handler_for(
                 self.api_error(400, str(error))
                 return
             tenant = self._tenant_id
-            if action == "clear":
-                value = usage_ledger.clear(tenant, ledger="view")
-            else:
-                value = usage_ledger.set_paused(action == "pause", tenant, ledger="view")
+            try:
+                if action == "clear":
+                    value = usage_ledger.clear(tenant, ledger="view")
+                else:
+                    value = usage_ledger.set_paused(
+                        action == "pause", tenant, ledger="view"
+                    )
+            except sqlite3.Error as error:
+                self.api_error(503, f"usage ledger unavailable: {error}")
+                return
             self.send_json(200, value)
 
         def _admin_usage_get(self):
@@ -2760,6 +2777,9 @@ def handler_for(
                         )
             except UsageReloadBusy as error:
                 self.api_error(409, str(error))
+                return
+            except sqlite3.Error as error:
+                self.api_error(503, f"usage ledger unavailable: {error}")
                 return
             except (OSError, ValueError, json.JSONDecodeError) as error:
                 self.api_error(400, str(error))
@@ -3152,11 +3172,11 @@ def handler_for(
                     if counts is not None:
                         lock = getattr(engine, "lock", None)
                         if lock is None:
-                            counts["telemetry_export_errors"] += 1
+                            count_add(counts, "telemetry_export_errors", 1)
                             failures = counts["telemetry_export_errors"]
                         else:
                             with lock:
-                                counts["telemetry_export_errors"] += 1
+                                count_add(counts, "telemetry_export_errors", 1)
                                 failures = counts["telemetry_export_errors"]
                     else:
                         failures = 1
@@ -3405,6 +3425,15 @@ def handler_for(
                     self.api_error(409, str(error))
                 except (ValueError, json.JSONDecodeError) as error:
                     self.api_error(400, str(error))
+                except RuntimeError as error:
+                    # Persistence metadata failed or a spill delete did not
+                    # complete: answer, so a ladder harness can tell a failed
+                    # clear from a dropped connection.
+                    from .runtime.apc_v2 import APCSessionUnavailable
+
+                    if not isinstance(error, APCSessionUnavailable):
+                        raise
+                    self.error(503, str(error), code=getattr(error, "code", None))
                 return
             if path == "/v1/admin/power":
                 if not self._authorize_admin():
@@ -3662,18 +3691,26 @@ def handler_for(
                     model = engine.status().get("model")
                     if speech["model"] is not None and speech["model"] != model:
                         raise ResourceNotFound("unknown model")
-                    output = engine.synthesize_speech(
-                        speech["input"],
-                        voice=speech["voice"],
-                        instructions=speech["instructions"],
-                        response_format=speech["response_format"],
-                        speed=speech["speed"],
-                    )
-                    expected = _AUDIO_RESPONSE_TYPES[speech["response_format"]]
-                    if output.media_type != expected:
-                        raise RuntimeError(
-                            "audio adapter returned a MIME type inconsistent with response_format"
+
+                    def synthesize():
+                        output = engine.synthesize_speech(
+                            speech["input"],
+                            voice=speech["voice"],
+                            instructions=speech["instructions"],
+                            response_format=speech["response_format"],
+                            speed=speech["speed"],
                         )
+                        expected = _AUDIO_RESPONSE_TYPES[speech["response_format"]]
+                        if output.media_type != expected:
+                            raise RuntimeError(
+                                "audio adapter returned a MIME type inconsistent "
+                                "with response_format"
+                            )
+                        return output
+
+                    # Speech is inference like embeddings: the tenant's limits
+                    # apply and the request is recorded (no token counts).
+                    output = metered_pooled(usage_ledger, tenant_id, synthesize)
                     self.send_bytes(200, output.data, content_type=output.media_type)
                     return
                 if path == "/v1/batches":
@@ -3748,7 +3785,7 @@ def handler_for(
                     if rejections:
                         engine_counts = getattr(engine, "counts", None)
                         if engine_counts is not None:
-                            engine_counts["reasoning_signature_rejections"] += rejections
+                            count_add(engine_counts, "reasoning_signature_rejections", rejections)
                 if responses_api:
                     with wrongly_typed_request_is_invalid():
                         body, response_options = prepare_responses_request(
@@ -3801,7 +3838,7 @@ def handler_for(
                 ):
                     counts = getattr(engine, "counts", None)
                     if counts is not None:
-                        counts["multimodal_rejected"] += 1
+                        count_add(counts, "multimodal_rejected", 1)
                     raise CapabilityUnavailable(
                         "the loaded adapter has no qualified image, video, or audio encoder"
                     )
@@ -4137,7 +4174,7 @@ def handler_for(
                         engine_counts = getattr(engine, "counts", None)
                         if engine_counts is not None:
                             with getattr(engine, "lock", None) or contextlib.nullcontext():
-                                engine_counts["constrained_tool_grammar_streams"] += 1
+                                count_add(engine_counts, "constrained_tool_grammar_streams", 1)
                     if (
                         body.get("stream")
                         and not streaming
@@ -5046,10 +5083,10 @@ def handler_for(
                     if engine_counts is not None:
                         engine_lock = getattr(engine, "lock", None)
                         if engine_lock is None:
-                            engine_counts["schema_ref_failures"] += 1
+                            count_add(engine_counts, "schema_ref_failures", 1)
                         else:
                             with engine_lock:
-                                engine_counts["schema_ref_failures"] += 1
+                                count_add(engine_counts, "schema_ref_failures", 1)
                 if streaming and anthropic and anthropic_translator is not None:
                     for failure in anthropic_translator.failure(str(exc), 400):
                         self._anthropic_sse(failure)
@@ -5147,7 +5184,7 @@ def handler_for(
             except ClientGone:
                 engine_counts = getattr(engine, "counts", None)
                 if engine_counts is not None:
-                    engine_counts["client_disconnects"] += 1
+                    count_add(engine_counts, "client_disconnects", 1)
                 self.close_connection = True
                 self._record_http(499)
             except (BrokenPipeError, ConnectionResetError):
@@ -5155,7 +5192,7 @@ def handler_for(
                 # disconnect as ClientGone and is counted like it.
                 engine_counts = getattr(engine, "counts", None)
                 if engine_counts is not None:
-                    engine_counts["client_disconnects"] += 1
+                    count_add(engine_counts, "client_disconnects", 1)
                 self._record_http(499)
             except (RuntimeError, TimeoutError) as exc:
                 if streaming:

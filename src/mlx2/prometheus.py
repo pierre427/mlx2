@@ -480,6 +480,7 @@ _ENGINE_EVENTS = {
             "lora_release",
             "fanout_capsule_close",
             "usage_reservation_release",
+            "exact_decode_checkpoint_close",
         )
     },
     "finish_observation_failures": ("request_finish", "observation_failed"),
@@ -1677,6 +1678,16 @@ def _add_int8_prefill(builder: PrometheusBuilder, engine: Any) -> None:
         "Activation rows (tokens x lanes) computed by the int8 prefill GEMM.",
         int(counts.get("engaged_rows", 0)),
     )
+    auto = getattr(engine, "int8_prefill_auto", None)
+    if auto is not None:
+        # Only when auto was requested, so explicit-mode scrapes are unchanged.
+        builder.counter(
+            "mlx2_int8_prefill_auto_step_asides_total",
+            "Times int8 prefill auto resolved off because ordinary prefill "
+            "calls could not reach the row threshold.",
+            int(auto.get("stepped_aside") == "row_bound"),
+            {"rule": "row_bound"},
+        )
     builder.gauge(
         "mlx2_int8_prefill_weight_bytes",
         "Bytes held by cached int8 weight copies.",

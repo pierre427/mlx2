@@ -75,7 +75,7 @@ from .io_ownership import (
 from .io_ownership import (
     close_read_pool as _close_read_pool,
 )
-from .io_ownership import call_io
+from .io_ownership import call_io, storage_owner
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +106,13 @@ _EXPERT_PREFILL = contextvars.ContextVar("mlx2_expert_prefill", default=None)
 
 @contextmanager
 def expert_prefill_admission(phase: str, request_key):
-    """Name an intermediate or terminal pure-prefill forward to expert caches."""
-    if phase not in ("intermediate", "terminal"):
+    """Name an intermediate, terminal or mixed pure-prefill forward to expert caches.
+
+    ``mixed`` is a ragged forward in which one request's prompt ends while
+    another's continues: one gather cannot be both, so it takes plain LRU
+    admission and leaves the request counts alone.
+    """
+    if phase not in ("intermediate", "terminal", "mixed"):
         raise ValueError(f"unknown expert prefill phase {phase!r}")
     token = _EXPERT_PREFILL.set((phase, tuple(request_key)))
     try:
@@ -268,7 +273,7 @@ class SafetensorsIndex:
     @classmethod
     def from_model_path(cls, model_path) -> "SafetensorsIndex":
         return call_io("weight-header-inventory", cls._from_model_path, model_path,
-                       timeout=READ_TIMEOUT_SECONDS)
+                       timeout=READ_TIMEOUT_SECONDS, owner=storage_owner("weights", model_path))
 
     @classmethod
     def _from_model_path(cls, model_path) -> "SafetensorsIndex":
@@ -388,12 +393,12 @@ class _FileHandles:
     is reused by the next ``open`` and a late ``pread`` would read that file.
     """
 
-    def __init__(self):
+    def __init__(self, owner=None):
         self._lock = threading.Lock()
         self._table: Dict[Path, int] = {}
         self._owner = os.getpid()
         self._closed = False
-        self._close_pool = _ReadPool(1, "weight-file-close")
+        self._close_pool = _ReadPool(1, "weight-file-close", owner=owner)
         self._close_owner = CloseAction(self._close_fds)
 
     def get(self, path: Path) -> int:
@@ -468,7 +473,7 @@ class BoundShards:
         # that check instead of failing with ReadQueueFull.  The single worker
         # still serializes descriptor ownership and all source validation.
         self._control_pool = _ReadPool(1, "weight-source-control", timeout=READ_TIMEOUT_SECONDS,
-                                      max_pending=2)
+                                      max_pending=2, owner=storage_owner("weights", self.root))
         self._close_owner = CloseAction(self._close_fds)
         try:
             self._control_pool.call(self._open, tuple(names), records)
@@ -1018,13 +1023,15 @@ class ExpertSliceReader:
                 future.cancel()
             # A running read still owns its staging. Keep it visible until
             # completion, including when a consumer abandons the iterator.
+            # Abandonment (e.g. a materialize OOM) is not an I/O failure: the
+            # shared pool keeps owning the read under its deadline, and this
+            # reader refuses new reads until it drains.  A deadline already
+            # failed the pool above.
             with self._late_lock:
                 late = [future for future in pending if not future.done()]
                 self._late_reads.update(late)
             for future in late:
                 future.add_done_callback(self._release_late_read)
-            if late and isinstance(self._pool, _ReadPool):
-                self._pool.fail("expert read window ended with I/O still in flight")
             pending.clear()
             self._outstanding = 0
 
@@ -1100,6 +1107,7 @@ class StreamStats:
     capture_reuses: int = 0
     prefill_intermediate_calls: int = 0
     prefill_terminal_calls: int = 0
+    prefill_mixed_calls: int = 0
     prefill_ephemeral_page_ins: int = 0
     prefill_request_resets: int = 0
     _group: object = field(default=None, repr=False)
@@ -1167,6 +1175,7 @@ class StreamStats:
             "stream_peak_staging_bytes": self.peak_staging_bytes,
             "stream_prefill_intermediate_calls_total": self.prefill_intermediate_calls,
             "stream_prefill_terminal_calls_total": self.prefill_terminal_calls,
+            "stream_prefill_mixed_calls_total": self.prefill_mixed_calls,
             "stream_prefill_ephemeral_page_ins_total": self.prefill_ephemeral_page_ins,
             "stream_prefill_request_resets_total": self.prefill_request_resets,
         }
@@ -1225,9 +1234,15 @@ class ExpertLRU:
             return None
         context = _EXPERT_PREFILL.get()
         if context is None:
-            self._reset_prefill(count=True)
+            # A decode-only call (another lane's round, or this request's
+            # first token) between slices keeps the request's counts; they
+            # are dropped by its terminal call or when another request's
+            # prefill starts over an unfinished one.
             return None
         (phase, request_key) = context
+        if phase == "mixed":
+            self.stats.prefill_mixed_calls += 1
+            return None
         if self._prefill_key != request_key:
             self._reset_prefill(count=self._prefill_key is not None)
             self._prefill_key = request_key
@@ -1335,14 +1350,20 @@ class ExpertLRU:
             self._router_hints.schedule(self._router_hint_target, wanted)
         return result
 
-    def note_gather(self, unique: int) -> None:
-        """Account one call's gather copy plus any over-capacity rows it holds."""
+    def note_gather(self, unique: int, *, ephemeral: int | None = None) -> None:
+        """Account one call's gather copy plus the rows it holds outside the cache.
+
+        Those are its intermediate-prefill ephemeral rows or, otherwise, its
+        over-capacity rows -- the same rows, never both.  ``ephemeral``
+        defaults to what the last :meth:`acquire` held; a caller accounting
+        before its acquire passes it explicitly.
+        """
+        if ephemeral is None:
+            ephemeral = self._last_ephemeral
         expert_bytes = self.reader.expert_bytes
         transient = (
-            unique * expert_bytes
-            + self._last_ephemeral * expert_bytes
-            + max(0, unique - self.capacity) * expert_bytes
-        )
+            unique + max(int(ephemeral), unique - self.capacity, 0)
+        ) * expert_bytes
         self.stats.note_transient(self.group, transient, member=id(self))
 
     def _evict_for(self, incoming: int, *, keep) -> None:
@@ -1378,16 +1399,21 @@ class ExpertLRU:
 
 
 class _RouterHintPrefetcher:
-    """One bounded raw-byte +1 hint lane; demand materializes on its thread."""
+    """One bounded raw-byte +1 hint lane; demand materializes on its thread.
 
-    def __init__(self, caches: Dict[str, ExpertLRU], *, top_k: int):
+    At most one hint read is in flight, on the route's own deadline-bounded
+    read pool: a hung hint read fails the route like a demand read, and the
+    pool's deferred close keeps the shared descriptors open until it returns.
+    """
+
+    def __init__(self, caches: Dict[str, ExpertLRU], *, top_k: int, pool):
         self._caches = caches
         self._top_k = int(top_k)
         self._groups: Dict[str, Tuple[str, ...]] = {}
         for path, cache in caches.items():
             self._groups.setdefault(cache.group, []).append(path)
         self._groups = {key: tuple(value) for key, value in self._groups.items()}
-        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="expert-hint")
+        self._pool = pool
         # A just-completed future may run its done callback synchronously from
         # schedule(); reentrancy keeps retirement from deadlocking that path.
         self._lock = threading.RLock()
@@ -1474,7 +1500,7 @@ class _RouterHintPrefetcher:
             ready = future.result(timeout=READ_TIMEOUT_SECONDS)
         except TimeoutError as exc:
             future.cancel()
-            raise WeightReadTimeout("router hint read exceeded its I/O deadline") from exc
+            raise _read_timeout(self._pool) from exc
         with self._lock:
             if ticket != self._ticket:
                 self._counts["stale_dropped"] += 1
@@ -1509,7 +1535,8 @@ class _RouterHintPrefetcher:
             self._ready = self._ready_group = None
             if future is not None:
                 future.cancel()
-        self._pool.shutdown(wait=True, cancel_futures=True)
+        # The route's pool owns any running hint read; its close defers the
+        # descriptors until that read returns instead of blocking here.
 
 
 # ---------------------------------------------------------------------------
@@ -1883,7 +1910,7 @@ class ExpertStreamManager(_ManagerBase):
         self._router_hint_configured = router_hint == "off"
         self._router_hints = None
         if router_hint == "next_layer_reuse":
-            self._router_hints = _RouterHintPrefetcher(caches, top_k=plan.top_k)
+            self._router_hints = _RouterHintPrefetcher(caches, top_k=plan.top_k, pool=pool)
             for cache in caches.values():
                 cache._router_hints = self._router_hints
         self._pool = pool
@@ -2141,7 +2168,7 @@ def install_expert_streaming(
             index = shards.index
         else:
             index = SafetensorsIndex.from_model_path(model_path)
-            handles = _FileHandles()
+            handles = _FileHandles(owner=storage_owner("weights", model_path))
 
         targets: List[Tuple[str, object, List[ExpertSliceSpec]]] = []
         resident_paths: List[str] = []
@@ -2245,7 +2272,8 @@ def install_expert_streaming(
         )
 
         pool = _ReadPool(max_workers=workers, thread_name_prefix="expert-stream",
-                         timeout=READ_TIMEOUT_SECONDS)
+                         timeout=READ_TIMEOUT_SECONDS,
+                         owner=storage_owner("weights", shards.root if early else model_path))
         stats = StreamStats(phase="load" if early else "serve")
         caches: Dict[str, ExpertLRU] = {}
         replacements = []
@@ -2304,7 +2332,8 @@ def install_expert_streaming(
             manifest_sha256=manifest,
         )
         if collector is not None:
-            collector.bind(num_layers=plan.layers, num_units=plan.experts_per_layer)
+            collector.bind(num_layers=plan.layers, num_units=plan.experts_per_layer,
+                           prefill_admission=prefill_admission)
         return ExpertStreamManager(
             plan=plan,
             stats=stats,
@@ -2648,7 +2677,7 @@ def install_dense_streaming(
         )
         workers = max(1, int(read_workers))
         pool = _ReadPool(max_workers=workers, thread_name_prefix="dense-stream",
-                         timeout=READ_TIMEOUT_SECONDS)
+                         timeout=READ_TIMEOUT_SECONDS, owner=storage_owner("weights", shards.root))
         stats = StreamStats(phase="load")
         cls = _dense_class()
         replacements = []

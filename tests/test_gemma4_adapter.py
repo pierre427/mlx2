@@ -245,6 +245,9 @@ def test_route_contract_separates_dense_and_sparse_optimization_surfaces():
     assert dense_opt["topology_kind"] == "dense"
     assert dense_opt["dense_int8_prefill"]["eligible"] is True
     assert dense_opt["dense_int8_prefill"]["scopes"] == ("mlp", "all")
+    # Sweep 2026-10-16: selection belongs to the serving route receipt.
+    assert dense_opt["dense_int8_prefill"]["selected"] is None
+    assert dense_opt["dense_int8_prefill"]["selection_authority"] == "serving_route_receipt"
     assert dense_opt["sparse_moe_prefill"]["eligible"] is False
     assert sparse_opt["speculative_decode"]["eligible"] is False
     assert dense_opt["speculative_decode"]["eligible"] is False

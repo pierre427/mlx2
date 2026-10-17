@@ -449,6 +449,12 @@ class UsageEngine:
     def prometheus_metrics(self):
         return "# HELP mlx2_up up\n# TYPE mlx2_up gauge\nmlx2_up 1\n"
 
+    def synthesize_speech(self, text, **_kwargs):
+        from mlx2.adapters.base import AudioOutput
+
+        self.speech_calls = getattr(self, "speech_calls", 0) + 1
+        return AudioOutput(data=b"RIFF....", media_type="audio/wav")
+
     def submit(self, request, *, tenant_id="default", **_kwargs):
         # The real engine's admission hook, reduced to its observable effect.
         self.usage_ledger.admit(tenant_id, request.get("session_id"))
@@ -575,6 +581,38 @@ def test_operator_admin_usage_and_metrics(served, ledgers):
     assert _call(base, "POST", "/v1/admin/usage/explode", {}, key="admin-secret")[0] == 404
     status, _, raw = _call(base, "POST", "/v1/admin/usage/reload-limits", key="admin-secret")
     assert status == 400 and b"no --usage-limits-file" in raw
+
+
+def test_speech_is_admitted_and_recorded_like_other_inference(served, ledgers, tmp_path):
+    # Sweep 2026-10-16: /v1/audio/speech bypassed the limits and the ledger.
+    speech = {"input": "hello", "voice": "default", "response_format": "wav"}
+    ledger = ledgers()
+    base = served(ledger, _authenticator())
+    assert _call(base, "POST", "/v1/audio/speech", speech, key=KEY_A)[0] == 200
+    assert ledger.windows("accounting", "tenant-a")["today"]["requests"] == 1
+    refusing = ledgers(tmp_path / "refusing", limits=_limits(today={"requests": 0}))
+    base = served(refusing, _authenticator())
+    status, _, raw = _call(base, "POST", "/v1/audio/speech", speech, key=KEY_A)
+    assert status == 429 and b"insufficient_quota" in raw
+
+
+def test_usage_store_errors_answer_503(served, ledgers, monkeypatch):
+    # Sweep 2026-10-16: sqlite3.Error escaped the admin and tenant usage POSTs
+    # and the client got a dropped connection instead of a status.
+    import sqlite3
+
+    ledger = ledgers()
+
+    def broken(*_args, **_kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(ledger, "clear", broken)
+    base = served(ledger, _authenticator(), admin_token="admin-secret")
+    status, _, raw = _call(base, "POST", "/v1/admin/usage/clear",
+                           {"tenant": "tenant-b", "ledger": "all"}, key="admin-secret")
+    assert status == 503 and b"usage ledger unavailable" in raw
+    status, _, raw = _call(base, "POST", "/v1/usage/clear", key=KEY_A_ADMIN)
+    assert status == 503 and b"usage ledger unavailable" in raw
 
 
 def test_limit_refusal_is_a_429_with_reset_and_receipt(served, ledgers):
@@ -801,3 +839,71 @@ def test_non_resetting_limits_send_no_retry_after(served, ledgers):
     status, headers, raw = _call(base, "POST", "/v1/chat/completions", chat, key=KEY_A)
     assert status == 429 and "Retry-After" not in headers
     assert json.loads(raw)["mlx2"]["usage_limit"]["retry_after_seconds"] is None
+
+
+def _bare_usage_engine(ledger):
+    from types import SimpleNamespace as NS
+
+    from mlx2.serving import ServingEngine
+
+    engine = ServingEngine.__new__(ServingEngine)
+    engine.lock = threading.Lock()
+    engine.jobs = {}
+    engine.slots = NS(release=lambda: None)
+    engine.batch_metrics = NS(terminal=lambda job_id, status: None)
+    engine.counts = {"cancelled": 0}
+    engine._emit = lambda job, event: None
+    engine.usage_ledger = ledger
+    engine.default_max_tokens = 4096
+    return engine
+
+
+@pytest.mark.parametrize("refusal", ["memory_timeout", "context"])
+def test_worker_refusals_before_prefill_charge_no_prompt(ledgers, refusal):
+    # Sweep 2026-10-16: a worker-side memory-admission 429 was recorded as a
+    # failed request charged its whole prompt (retries burned quota), and a
+    # prompt that cannot fit was charged prefill work it never did.
+    ledger = ledgers(limits=_limits(today={"total_tokens": 40000}))
+    engine = _bare_usage_engine(ledger)
+    (hold,) = engine._usage_admit([{"max_tokens": 16}], "tenant-a")
+    job = Job({"max_tokens": 16}, tenant_id="tenant-a")
+    engine._usage_attach(job, hold)
+    engine.jobs[job.id] = job
+    job.prompt_tokens = 50_000
+    if refusal == "memory_timeout":
+        engine._fail_deferred_admission_timeout(None, job)
+    else:
+        job.usage_before_prefill = "failed"
+        engine._finish(job, {"error": "too long", "status": 400})
+    today = ledger.windows("accounting", "tenant-a")["today"]
+    assert today["prompt_tokens"] == today["prefill_tokens"] == 0
+    assert today["requests"] == (0 if refusal == "memory_timeout" else 1)
+    ledger.admit("tenant-a")  # the next request is not refused for quota
+
+
+def test_cohort_refused_before_prefill_charges_no_member(ledgers):
+    # Codex review of SERVING-1: a declared cohort refused at attachment
+    # (admission 429) finished every member through _fail_attaching_cohort
+    # without a disposition, so each member was charged its whole prompt.
+    from collections import deque
+    from types import SimpleNamespace as NS
+
+    ledger = ledgers(limits=_limits(today={"total_tokens": 40000}))
+    engine = _bare_usage_engine(ledger)
+    engine.queued_jobs = 0
+    holds = engine._usage_admit([{"max_tokens": 16}, {"max_tokens": 16}], "tenant-a")
+    members = []
+    for hold in holds:
+        job = Job({"max_tokens": 16}, tenant_id="tenant-a")
+        engine._usage_attach(job, hold)
+        engine.jobs[job.id] = job
+        job.prompt_tokens = 30_000
+        members.append(job)
+    engine._fail_attaching_cohort(
+        None, {}, deque(), NS(jobs=members),
+        {"error": "declared batch cohort could not atomically admit every member", "status": 429},
+        usage_before_prefill="refused",
+    )
+    today = ledger.windows("accounting", "tenant-a")["today"]
+    assert today["requests"] == today["prompt_tokens"] == today["total_tokens"] == 0
+    ledger.admit("tenant-a")

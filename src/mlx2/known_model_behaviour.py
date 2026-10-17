@@ -61,6 +61,10 @@ class KnownModelBehaviour:
     evidence: str
     declared: str
     limit: float | None = None
+    # Where the behaviour was observed: only these (context, width) cells
+    # and at most ``max_count`` instances are excused (None: unrestricted).
+    cells: tuple[tuple[int, int], ...] | None = None
+    max_count: int | None = None
 
     def artifact_label(self, artifact):
         return dict(self.artifacts).get(artifact)
@@ -75,7 +79,9 @@ class KnownModelBehaviour:
             "reason": self.reason,
             "evidence": self.evidence,
             "declared": self.declared,
-        } | ({"limit": self.limit} if self.limit is not None else {})
+        } | ({"limit": self.limit} if self.limit is not None else {}) | (
+            {"cells": [list(cell) for cell in self.cells]} if self.cells is not None else {}
+        ) | ({"max_count": self.max_count} if self.max_count is not None else {})
 
 
 KNOWN_MODEL_BEHAVIOURS: tuple[KnownModelBehaviour, ...] = (
@@ -156,6 +162,10 @@ KNOWN_MODEL_BEHAVIOURS: tuple[KnownModelBehaviour, ...] = (
         evidence="qualification/runs/qualify-ce017ce9-lfm25-q36int8/README.md",
         declared="2026-10-14",
         limit=0.10,
+        # Narrowed 2026-10-16 (sweep ADAPTERS-4, Pierre): only the observed
+        # cells and count, so a width-4 serving fault elsewhere still fails.
+        cells=((1024, 4), (16384, 4)),
+        max_count=3,
     ),
 )
 

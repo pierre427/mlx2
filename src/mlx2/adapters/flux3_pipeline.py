@@ -78,9 +78,25 @@ class TextEncoder:
 
 
 def prepare_reference(image, *, multiple):
-    """Bound reference area and side lengths, preserving aspect ratio on a 16px grid."""
+    """Prepare one reference as the pinned BFL pipeline does.
+
+    A single reference is fitted under 4 MP and padded, centred, onto its
+    16px-grid canvas. Each reference of a multi-reference edit is fitted
+    under 1 MP with floored sides and centre-cropped to the 16px grid.
+    """
     image = ImageOps.exif_transpose(image).convert("RGB")
-    limit = 1024 * 1024 if multiple else 4 * 1024 * 1024
+    if multiple:
+        width, height = image.size
+        if width * height > 1024 * 1024:
+            scale = math.sqrt(1024 * 1024 / (width * height))
+            width, height = int(width * scale), int(height * scale)
+            image = image.resize((width, height), Image.Resampling.LANCZOS)
+        w, h = width // 16 * 16, height // 16 * 16
+        if not w or not h:
+            raise ValueError("multi-reference image is smaller than 16px on a side")
+        left, top = (width - w) // 2, (height - h) // 2
+        return image.crop((left, top, left + w, top + h))
+    limit = 4 * 1024 * 1024
     scale = min(
         1, math.sqrt(limit / (image.width * image.height)), 4096 / max(image.size)
     )
@@ -98,7 +114,10 @@ def prepare_reference(image, *, multiple):
         (left, canvas[0] - image.width - left),
         (0, 0),
     )
-    return Image.fromarray(np.pad(np.asarray(image), padding, mode="symmetric"))
+    # Reflect needs a pad shorter than the side; the reference falls back to
+    # symmetric for images 16px or smaller.
+    mode = "reflect" if min(image.size) > 16 else "symmetric"
+    return Image.fromarray(np.pad(np.asarray(image), padding, mode=mode))
 
 
 class Flux3Pipeline:

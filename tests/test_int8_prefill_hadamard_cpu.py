@@ -107,3 +107,17 @@ def test_rotated_weight_and_activation_builds_are_paired(monkeypatch):
         )
     finally:
         ip.remove(handle)
+
+
+@pytest.mark.parametrize("cache", ["auto", "none", "ttl"])
+def test_rotation_width_is_refused_at_install_not_mid_request(monkeypatch, cache):
+    # 768 is a multiple of 256 but not of the 512 down_proj block. Under
+    # cache="none" warmup builds nothing, so only install can refuse it
+    # before a request reaches the first eligible prefill.
+    monkeypatch.setattr(ip, "require_supported_device", lambda: "fake-M5")
+    model = _Model(hidden=512, inter=768, bits=8)
+    with pytest.raises(ip.Int8PrefillError, match="down_proj.*512.*768"):
+        ip.apply(model, policy(cache=cache))
+    assert not any(
+        ip._STATE_ATTR in module.__dict__ for _, module in model.named_modules()
+    )

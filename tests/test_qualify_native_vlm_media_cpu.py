@@ -744,7 +744,7 @@ def _flip_report(*, margin=0.2, batched_margin=None, batched_top=None):
         batched["tokens"][1]["top"] = batched_top
     for row in (reference, batched):
         row["receipt"]["completion_tokens"] = len(row["tokens"])
-    batched["text"] = "5"
+    batched["text"] = "Four."
     return report, expected
 
 
@@ -754,6 +754,19 @@ def test_native_continuous_batch_exact_rows_pass_without_token_evidence():
     assert classified["passed"] is True
     assert {row["classification"] for row in classified["rows"].values()} == {"exact"}
     assert _eval(report, expected)["continuous_batch"] is True
+
+
+@pytest.mark.parametrize("wrong", ["Five.", "Four is wrong; the answer is five.", "4 or 5"])
+def test_native_continuous_batch_refuses_a_near_tie_flip_to_a_wrong_answer(wrong):
+    # Sweep 2026-10-16: a near tie passes only when both continuations still
+    # pass the functional oracle, which takes the requested one-word answer.
+    report, expected = _flip_report(margin=0.2)
+    report["batch"]["rows"][0]["text"] = wrong
+    classified = classify_continuous_batch_trace(report["batch"])
+    row = classified["rows"][report["batch"]["rows"][0]["prompt"]]
+    assert row["classification"] == "failed"
+    assert row["reason"] == "near-tie continuation fails the functional oracle"
+    assert _eval(report, expected)["continuous_batch"] is False
 
 
 def test_native_continuous_batch_accepts_a_recorded_near_tie_flip():

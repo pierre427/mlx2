@@ -12,8 +12,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,6 +82,7 @@ def collect(engine, request: dict, timeout: float) -> dict:
     receipt = terminal.get("receipt") or {}
     return {
         "finish_reason": terminal["finish_reason"],
+        "prompt_tokens": int(job.prompt_tokens),
         "cached_tokens": int(job.cached_tokens),
         "deltas": deltas,
         "token_trace": (receipt.get("token_trace") or {}).get("token_ids") or [],
@@ -114,8 +117,11 @@ def run_lfm(engine, timeout: float) -> dict:
     }
     followup_cold = collect(engine, followup, timeout)
     followup_warm = collect(engine, followup, timeout)
+    # A warm hit reuses (nearly) the whole identical follow-up, not just the
+    # template preamble or the first turn (the ladders' 0.90 floor).
     passed = (
-        followup_warm["cached_tokens"] > 0
+        followup_warm["prompt_tokens"] > 0
+        and followup_warm["cached_tokens"] >= 0.90 * followup_warm["prompt_tokens"]
         and followup_cold["token_trace"] == followup_warm["token_trace"]
         and followup_cold["deltas"] == followup_warm["deltas"]
     )
@@ -174,6 +180,29 @@ def run_qwen(engine, timeout: float) -> dict:
     }
 
 
+def write_new_evidence(output: Path, payload: dict) -> None:
+    """Publish ``payload`` at ``output`` atomically, never over earlier evidence.
+
+    A private temporary is hard-linked to a destination that must not exist
+    yet, so a concurrent writer can neither swap bodies nor overwrite; the
+    directory is synced so a reported success survives a crash.
+    """
+    handle, partial = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
+    try:
+        with os.fdopen(handle, "w") as stream:
+            stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(partial, output)
+    finally:
+        os.unlink(partial)
+    directory = os.open(output.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
@@ -184,6 +213,8 @@ def main() -> None:
     args = parser.parse_args()
     if not args.i_own_the_gpu:
         parser.error("explicit GPU ownership is required")
+    if args.output.exists():
+        parser.error(f"refusing to overwrite existing evidence {args.output}")
 
     import mlx.core as mx
 
@@ -234,7 +265,7 @@ def main() -> None:
             "gate": gate,
         }
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        write_new_evidence(args.output, payload)
         print(
             json.dumps(
                 {

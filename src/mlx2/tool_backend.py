@@ -256,6 +256,17 @@ def _resolve_addresses(host, port, budget):
     return outcome["value"]
 
 
+def _wait_ready(sock, events, remaining):
+    """Wait up to 50 ms (and the budget) for ``events`` on ``sock``.
+
+    ``poll``, not ``select.select``: the latter raises ValueError for
+    descriptors >= 1024, which failed every handshake on a busy server.
+    """
+    poller = select.poll()
+    poller.register(sock, events)
+    poller.poll(max(0, int(min(0.05, remaining) * 1000)))
+
+
 class _BudgetConnection:
     """Register sockets before writes and response-header reads can block."""
 
@@ -325,13 +336,9 @@ class _HTTPSBudgetConnection(_BudgetConnection, HTTPSConnection):
                 try:
                     self.sock.do_handshake()
                 except ssl.SSLWantReadError:
-                    select.select(
-                        [self.sock], [], [], min(0.05, self.budget.remaining())
-                    )
+                    _wait_ready(self.sock, select.POLLIN, self.budget.remaining())
                 except ssl.SSLWantWriteError:
-                    select.select(
-                        [], [self.sock], [], min(0.05, self.budget.remaining())
-                    )
+                    _wait_ready(self.sock, select.POLLOUT, self.budget.remaining())
                 else:
                     break
             # HTTP writes/header reads retain ordinary timeout semantics,

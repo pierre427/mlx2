@@ -448,3 +448,24 @@ def test_a_continuation_failure_on_an_open_hosted_stream_is_an_sse_failure(varia
     assert engine.http_metrics.prometheus_snapshot()["requests"] == {
         ("POST", "responses", "2xx"): 1,
     }
+
+
+def test_client_disconnected_reports_a_live_peer_on_a_high_descriptor():
+    # Sweep 2026-10-16: select.select raised ValueError for fds >= 1024, which
+    # client_disconnected mapped to "gone" and cancelled live requests.
+    import os
+    import socket
+
+    from mlx2.server import client_disconnected
+
+    held = [os.open("/dev/null", os.O_RDONLY) for _ in range(1100)]
+    left, right = socket.socketpair()
+    try:
+        assert left.fileno() >= 1024
+        assert client_disconnected(left) is False
+        right.close()
+        assert client_disconnected(left) is True
+    finally:
+        left.close()
+        for fd in held:
+            os.close(fd)

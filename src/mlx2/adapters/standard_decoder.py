@@ -1076,7 +1076,7 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
                     "scope": f"text-only {draft_kind} draft/verify",
                     "implemented": True,
                     "multi_drafter": {
-                        "implemented": portfolio_selected,
+                        "implemented": True,
                         "qualified": False,
                         "selected": portfolio_selected,
                         "providers": [

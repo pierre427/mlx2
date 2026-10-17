@@ -155,6 +155,14 @@ def _wait(predicate):
     assert predicate()
 
 
+def _checkpoint_io_drained():
+    with io_ownership._READ_POOLS_LOCK:
+        return all(
+            owner != dc.CHECKPOINT_IO_OWNER
+            for owner, _workers in io_ownership._QUARANTINED_READ_POOLS.values()
+        )
+
+
 def test_write_timeout_retains_original_kv_and_late_file_closes(monkeypatch):
     model = _model()
     batch, uid = _batch(model)
@@ -178,12 +186,12 @@ def test_write_timeout_retains_original_kv_and_late_file_closes(monkeypatch):
         assert entered.is_set() and batch._generation_batch is control
         assert control.prompt_cache is cache
         with pytest.raises(dc.ReadTimeout, match="have not drained"):
-            dc.ReadPool(1, "replacement")
+            dc.ReadPool(1, "replacement", owner=dc.CHECKPOINT_IO_OWNER)
         _next_output(batch)
     finally:
         release.set()
         _wait(lambda: bool(late_handles) and late_handles[0].closed)
-        _wait(lambda: not io_ownership._QUARANTINED_READ_POOLS)
+        _wait(_checkpoint_io_drained)
         batch.close()
 
 
@@ -212,7 +220,7 @@ def test_restore_timeout_close_retains_descriptor_until_worker_returns(monkeypat
     finally:
         release.set()
         _wait(lambda: handle.closed)
-        _wait(lambda: not io_ownership._QUARANTINED_READ_POOLS)
+        _wait(_checkpoint_io_drained)
         batch.close()
 
 

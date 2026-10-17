@@ -954,7 +954,7 @@ class PromptProcessingBatch:
         }
         self._restart_prompt_rollback()
 
-    def prompt(self, tokens: List[List[int]], *, forward_fn=None):
+    def prompt(self, tokens: List[List[int]], *, forward_fn=None, final_rows=None):
         """
         Process prompt tokens through the model.
 
@@ -964,9 +964,17 @@ class PromptProcessingBatch:
                 chunk's forward in place of the model (the mixed
                 prefill-and-decode step).  Only a single chunk may use it;
                 everything around the forward is unchanged.
+            final_rows: optional per-row flags, true when this call's tokens
+                end that request's pure-prefill span (only the final token,
+                which decode consumes, remains).  ``None`` means every row
+                ends here, as for a whole-prompt call.  A scheduler that
+                slices a prompt across rounds must pass them, or every slice
+                is labelled terminal to the expert caches.
         """
         if len(self.uids) != len(tokens):
             raise ValueError("The batch length doesn't match the number of inputs")
+        if final_rows is not None and len(final_rows) != len(tokens):
+            raise ValueError("final_rows must name one flag per input")
         if not tokens:
             return
         for sti, ti in zip(self.tokens, tokens):
@@ -1025,12 +1033,27 @@ class PromptProcessingBatch:
                         if callable(row_context)
                         else contextlib.nullcontext()
                     )
-                    terminal = all(
-                        processed + n_to_process >= length for length in lengths
+                    # A chunk is terminal when it ends every live row's
+                    # request prompt (not merely this call's slice of it).
+                    # The expert cache admits per forward, so a ragged chunk
+                    # that ends one request while another continues is
+                    # "mixed": plain admission, counted, never a false
+                    # terminal or intermediate label for either request.
+                    live = [
+                        row for (row, length) in enumerate(lengths)
+                        if length > processed
+                    ]
+                    ending = [
+                        row for row in live
+                        if (final_rows is None or final_rows[row])
+                        and lengths[row] <= processed + n_to_process
+                    ]
+                    phase = (
+                        "intermediate" if not ending
+                        else "terminal" if len(ending) == len(live)
+                        else "mixed"
                     )
-                    stream_context = expert_prefill_admission(
-                        "terminal" if terminal else "intermediate", self.uids
-                    )
+                    stream_context = expert_prefill_admission(phase, self.uids)
                     with context, stream_context, prefill_checkpoint_rows(
                         chunk_lengths, width=n_to_process
                     ) as checkpoint_rows:
@@ -9507,7 +9530,13 @@ class BatchGenerator:
                 self.scheduler_stats["decode_priority_release_rounds"] += 1
         tic = time.perf_counter()
         self._prompt_batch.decode_active = self._has_active_decode()
-        self._prompt_batch.prompt(prompts)
+        # A row's slice is final when only the last prompt token, which
+        # promotion hands to decode, is left (as ``_promote_ready_prompts``).
+        final_rows = [
+            not seq[0] or (len(seq[0]) == 1 and len(seq[0][0]) == 1)
+            for seq in self._currently_processing
+        ]
+        self._prompt_batch.prompt(prompts, final_rows=final_rows)
         self._capture_plain_interior_checkpoints()
         for index, sequence in enumerate(self._currently_processing):
             if (

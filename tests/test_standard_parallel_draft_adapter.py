@@ -67,6 +67,9 @@ def test_tiny_standard_adapter_loads_xpress_and_forwards_adaptive_policy(pack):
     assert Capability.EXTERNAL_DRAFT in adapter.descriptor.capabilities
     assert StatePlane.DRAFT in adapter.descriptor.state_planes
     assert adapter.descriptor.variant == "external-xpress"
+    # The portfolio mechanism exists whether or not this route selected it.
+    assert adapter.descriptor.metadata["multi_drafter"]["implemented"] is True
+    assert adapter.descriptor.metadata["multi_drafter"]["selected"] is False
     assert adapter.diagnostics()["qualification"] == "unqualified"
     assert adapter.profile_name(False) == "qwen3-apcv2-xpress"
     assert (

@@ -11,7 +11,13 @@ import pytest
 from test_peer_survey_persistence_cpu import _fixture, _persistent
 
 from mlx2.runtime import apc_v2, expert_atlas, io_ownership, weight_stream
-from mlx2.runtime.io_ownership import CloseAction, ReadPool, ReadTimeout
+from mlx2.runtime.io_ownership import (
+    CloseAction,
+    QuarantineCapReached,
+    ReadPool,
+    ReadTimeout,
+    storage_owner,
+)
 from mlx2.runtime.models import qwen4_ple_nvme as ple
 
 
@@ -47,7 +53,7 @@ def test_late_final_close_is_never_retried_or_replaced(tmp_path, monkeypatch):
         entered.set()
         assert release.wait(3)
 
-    pool = ReadPool(1, "close-deadline")
+    pool = ReadPool(1, "close-deadline", owner=("close", "deadline"))
     owner = CloseAction(close)
     try:
         began = time.monotonic()
@@ -61,13 +67,56 @@ def test_late_final_close_is_never_retried_or_replaced(tmp_path, monkeypatch):
             os.fstat(replacement_fd)
             assert calls == [fd]
             with pytest.raises(ReadTimeout, match="not drained"):
-                ReadPool(1, "forbidden-replacement")
+                ReadPool(1, "forbidden-replacement", owner=("close", "deadline"))
+            ReadPool(1, "unrelated-owner", owner=("close", "other")).close()
         finally:
             os.close(replacement_fd)
     finally:
         release.set()
         assert pool.close(owner)
         _eventually(_drained)
+
+
+def _stuck_pool(owner, release, workers=1):
+    pool = ReadPool(workers, f"stuck-{owner}", timeout=0.02, owner=owner)
+    for _ in range(workers):
+        pool.submit(release.wait, 5)
+    _eventually(lambda: pool.failure is not None)
+    return pool
+
+
+def test_stuck_pool_blocks_only_its_own_owner():
+    # Sweep 2026-10-16 APC-1/APC-3 (Pierre's decision): quarantine is scoped
+    # to the storage owner, not the process.
+    release = threading.Event()
+    try:
+        _stuck_pool("storage-a", release)
+        with pytest.raises(ReadTimeout, match="not drained for owner 'storage-a'"):
+            ReadPool(1, "same-owner", owner="storage-a")
+        ReadPool(1, "unrelated-owner", owner="storage-b").close()
+        ReadPool(1, "anonymous").close()
+    finally:
+        release.set()
+        _eventually(_drained)
+    ReadPool(1, "after-drain", owner="storage-a").close()
+
+
+def test_hung_worker_cap_refuses_every_owner(monkeypatch):
+    monkeypatch.setattr(io_ownership, "MAX_QUARANTINED_WORKERS", 3)
+    release = threading.Event()
+    try:
+        _stuck_pool("storage-a", release, workers=2)
+        ReadPool(1, "below-cap", owner="storage-c").close()
+        _stuck_pool("storage-b", release)
+        assert io_ownership.quarantined_workers() == 3
+        with pytest.raises(QuarantineCapReached, match="MAX_QUARANTINED_WORKERS=3"):
+            ReadPool(1, "unrelated-at-cap", owner="storage-c")
+        with pytest.raises(QuarantineCapReached):
+            ReadPool(1, "anonymous-at-cap")
+    finally:
+        release.set()
+        _eventually(_drained)
+    ReadPool(1, "after-drain", owner="storage-c").close()
 
 
 def test_permanently_blocked_finalizer_does_not_block_process_exit():
@@ -90,13 +139,14 @@ calls = []
 def uncertain_close():
     calls.append(1)
     raise OSError('close result is uncertain')
-pool = ReadPool(1, 'failed-close')
+pool = ReadPool(1, 'failed-close', owner='storage')
 owner = CloseAction(uncertain_close)
 assert not pool.close(owner)
 assert not pool.close(owner)
 assert calls == [1]
+ReadPool(1, 'unrelated', owner='other-storage').close()
 try:
-    ReadPool(1, 'replacement')
+    ReadPool(1, 'replacement', owner='storage')
 except ReadTimeout:
     print('replacement-refused', flush=True)
 else:
@@ -129,7 +179,7 @@ def test_bound_shard_startup_timeout_closes_late_open(tmp_path, monkeypatch):
         assert entered.is_set()
         os.fstat(descriptors[0])
         with pytest.raises(ReadTimeout, match="not drained"):
-            ReadPool(1, "startup-replacement")
+            ReadPool(1, "startup-replacement", owner=storage_owner("weights", tmp_path))
     finally:
         release.set()
         _eventually(_drained)
@@ -287,7 +337,8 @@ def test_atlas_flush_deadline_cannot_credit_late_persistence(tmp_path, monkeypat
         assert collector.counters()["atlas_io_failed"] == 1
         collector.close()
         with pytest.raises(ReadTimeout, match="not drained"):
-            ReadPool(1, "atlas-replacement")
+            ReadPool(1, "atlas-replacement",
+                     owner=storage_owner("expert-atlas", tmp_path / "atlas"))
     finally:
         release.set()
         _eventually(_drained)
@@ -320,7 +371,8 @@ def test_atlas_trace_close_deadline_is_bounded_and_owned(tmp_path, monkeypatch):
         assert closes == [1] and not trace.closed
         assert collector.counters()["atlas_io_failed"] == 1
         with pytest.raises(ReadTimeout, match="not drained"):
-            ReadPool(1, "trace-replacement")
+            ReadPool(1, "trace-replacement",
+                     owner=storage_owner("expert-atlas", tmp_path / "trace"))
     finally:
         release.set()
         _eventually(_drained)
@@ -423,3 +475,28 @@ def test_ple_hot_rows_inventory_has_deadline(tmp_path, monkeypatch):
         release.set()
         _eventually(_drained)
     assert not table._lru
+
+
+def test_bounded_pool_accepts_the_next_call_once_the_previous_result_returned():
+    # Future.result() wakes the caller before the pool's done-callback has
+    # retired the future. A finished call must not hold the pending window.
+    # Two workers: the delayed callback runs on the first one.
+    pool = ReadPool(2, "back-to-back", timeout=5.0, max_pending=1)
+    callback_entered, release = threading.Event(), threading.Event()
+    retire = pool._completed
+
+    def delayed_retire(future):
+        callback_entered.set()
+        assert release.wait(3)
+        retire(future)
+
+    pool._completed = delayed_retire
+    try:
+        assert pool.submit(lambda: 1).result(timeout=2) == 1
+        assert callback_entered.wait(2)
+        pool._completed = retire
+        assert pool.call(lambda: 2) == 2
+    finally:
+        release.set()
+        pool.close()
+        _eventually(_drained)

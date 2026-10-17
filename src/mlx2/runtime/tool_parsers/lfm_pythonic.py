@@ -215,7 +215,9 @@ def _has_nul(value) -> bool:
     return False
 
 
-def _parse_arguments(text: str, position: int) -> tuple[dict, int]:
+def _parse_arguments(
+    text: str, position: int, *, repeats_keep_last: bool = False
+) -> tuple[dict, int]:
     """Arguments from just after ``(``; returns them and the index after ``)``."""
     arguments = {}
     while True:
@@ -237,19 +239,22 @@ def _parse_arguments(text: str, position: int) -> tuple[dict, int]:
         if text[end] not in ",)":
             raise ValueError("LFM tool-call argument has mismatched brackets")
         name = key.group(0)
-        if name in arguments:
+        if name in arguments and not repeats_keep_last:
             raise ValueError(f"LFM tool call repeats argument {name!r}")
         arguments[name] = literal_value(text[start:end])
         position = end + 1 if text[end] == "," else end
 
 
-def parse_tool_call(text: str, tools: Any | None = None):
+def parse_tool_call(text: str, tools: Any | None = None, *, repeats_keep_last=False):
     """Every call of one tool-call block body, in order.
 
     ``text`` is what lies between the markers: a bracketed list of calls (the
     template's form) or, leniently, the calls without the brackets.  Names
     are not checked against ``tools`` here; the output parser rejects an
-    undeclared tool, as for every other wire.
+    undeclared tool, as for every other wire.  A repeated argument name is
+    malformed, except under ``repeats_keep_last``: the forced-call grammar's
+    free-argument tail cannot express uniqueness, so a grammar-forced call
+    keeps the last value as a JSON object would.
     """
     del tools  # names are validated by the output parser
     position = _skip_ws(text, 0)
@@ -272,7 +277,9 @@ def parse_tool_call(text: str, tools: Any | None = None):
         position = _skip_ws(text, name.end())
         if not text.startswith("(", position):
             raise ValueError("LFM tool-call name must be followed by '('")
-        arguments, position = _parse_arguments(text, position + 1)
+        arguments, position = _parse_arguments(
+            text, position + 1, repeats_keep_last=repeats_keep_last
+        )
         calls.append({"name": name.group(0), "arguments": arguments})
         position = _skip_ws(text, position)
         if text.startswith(",", position):
@@ -345,6 +352,14 @@ def partial_function_names(partial: str, tools: Any | None = None) -> list[str]:
 
 
 parse_tool_call.partial_function_names = partial_function_names
+
+
+def parse_forced_tool_call(text: str, tools: Any | None = None):
+    """:func:`parse_tool_call` for a grammar-forced call (repeats keep last)."""
+    return parse_tool_call(text, tools, repeats_keep_last=True)
+
+
+parse_forced_tool_call.partial_function_names = partial_function_names
 
 
 # ---------------------------------------------------------------------------

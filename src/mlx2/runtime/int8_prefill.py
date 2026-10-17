@@ -2460,7 +2460,14 @@ def apply(
             # Do not silently apply Splash's gate/up geometry to a differently
             # named MLP projection. An adapter for that family must first
             # declare the correct mathematical role and block geometry.
-            _rotation_block(spec.path)
+            block = _rotation_block(spec.path)
+            # Refuse here: under cache="none" nothing is built before the
+            # first eligible prefill, which would fail mid-request.
+            if spec.k % block:
+                raise Int8PrefillError(
+                    f"{spec.path}: int8 prefill rotation block {block} does "
+                    f"not divide input width {spec.k}"
+                )
         q8 = q45 = False
         if policy.q8_inplace:
             q8, why = q8_inplace_eligible(spec, module)
@@ -2727,7 +2734,7 @@ def checkpoint_census(adapter, scope: str) -> dict:
 
 def resolve_auto(
     adapter, *, qualification_mode, qualified_settings, conflicts=(),
-    max_prefill_rows=None,
+    max_prefill_rows=None, media_prefill=False,
 ):
     """Resolve ``--int8-prefill auto`` once the model is loaded.
 
@@ -2743,10 +2750,16 @@ def resolve_auto(
     resolves off.  Off adds nothing to the route settings, so records of
     every route that resolves off still match.
 
-    ``max_prefill_rows`` is the largest row count one prefill projection call
-    can present on this route; below the policy's row threshold the wrapper
-    could never run, so auto resolves off instead of selecting an inert
-    mechanism (Gemma 4 31B at prefill_step 256, 2026-10-15)."""
+    ``max_prefill_rows`` is the largest row count one ordinary (chunked)
+    prefill projection call can present on this route, ``prefill_step x
+    max_lanes``.  Below the policy's row threshold ordinary traffic never
+    engages the wrapper, so auto resolves off (``stepped_aside:
+    "row_bound"``) instead of selecting a mechanism that stays inert
+    (Gemma 4 31B at prefill_step 256, 2026-10-15).  ``media_prefill`` says
+    the route also accepts media, whose cold requests prefill their uncached
+    tail in one chunk that can be longer; that tail is deliberately not
+    counted, so on such a route media requests serve stock prefill too
+    (sweep 2026-10-16 APC-10)."""
     receipt = {"requested": AUTO}
 
     def off(reason):
@@ -2771,8 +2784,21 @@ def resolve_auto(
     policy = auto_policy(adapter, census)
     receipt["policy"] = policy.as_dict()
     if max_prefill_rows is not None and int(max_prefill_rows) < policy.row_threshold:
+        rows = int(max_prefill_rows)
+        receipt["stepped_aside"] = "row_bound"
+        receipt["row_bound"] = {
+            "max_prefill_rows": rows,
+            "row_threshold": policy.row_threshold,
+            **({"cold_media_tail_counted": False} if media_prefill else {}),
+        }
+        if media_prefill:
+            return off(
+                f"ordinary prefill calls present at most {rows} rows, below the "
+                f"int8 row threshold {policy.row_threshold}; only a cold media "
+                "request's one-chunk tail could reach it, which is not counted"
+            )
         return off(
-            f"prefill calls present at most {int(max_prefill_rows)} rows, below "
+            f"prefill calls present at most {rows} rows, below "
             f"the int8 row threshold {policy.row_threshold}; it could never run"
         )
     if qualification_mode:
@@ -2809,6 +2835,10 @@ def engine_status(engine) -> dict:
             "modules": 0,
             "counts": {},
         }
+    # Selected (bound on this route) and observed-used (an engaged call since
+    # load) are separate claims; neither implies the other.
+    status["selected"] = bool(handle is not None and status.get("active"))
+    status["observed_used"] = int((status.get("counts") or {}).get("engaged_calls", 0)) > 0
     if auto is not None:
         # What ``auto`` resolved to and why (on: the evidence; off: the reason).
         status = {**status, "auto": dict(auto)}

@@ -71,3 +71,37 @@ def test_apcv2_status_reports_recent_spills_and_restores(tmp_path):
     restores = apc.apc_stats["idle_disk"]["recent"]["restores"]
     assert restores["10s"]["count"] == 1 and restores["10s"]["bytes"] > 0
     assert apc.apc_stats["idle_disk"]["restores"] == 1
+
+
+def test_settling_a_background_spill_is_not_counted_twice(tmp_path):
+    probe = APCv2(max_size=8, layout_name="rolling-spill-v1")
+    probe.store(APCKey("p"), [1] * 8, [_state(8)])
+    entry_bytes = probe.nbytes
+    now = [0.0]
+    apc = APCv2(
+        max_size=64,
+        max_bytes=2 * entry_bytes,
+        layout_name="rolling-spill-v1",
+        idle_disk_seconds=3600,
+        idle_disk_dir=str(tmp_path),
+        now_fn=lambda: now[0],
+        background_spill=True,
+        background_spill_max_bytes=1 << 30,
+    )
+    key = APCKey("bg")
+    for step, first in ((1.0, 10), (2.0, 20), (3.0, 30)):
+        now[0] = step
+        apc.store(key, [first] * 8, [_state(8)])
+    spills = apc.apc_stats["idle_disk"]["recent"]["spills"]["10s"]
+    assert spills["count"] == 1 and spills["background"] == 1.0
+    with apc._apc_lock:
+        entry = apc._trie.get(key, [10] * 8)
+        assert apc._spill_job_of(entry) is not None
+        # The idle spill only settles the write already handed to the writer.
+        assert apc._spill_entry_locked(key, [10] * 8, entry, reason="idle")
+    disk = apc.apc_stats["idle_disk"]
+    assert disk["pressure_spills"] == 1 and disk["idle_spills"] == 0
+    spills = disk["recent"]["spills"]["10s"]
+    assert spills["count"] == 1 and spills["bytes"] == float(entry_bytes)
+    assert "idle" not in spills
+    apc.close()
