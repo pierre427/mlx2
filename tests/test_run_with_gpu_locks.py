@@ -29,6 +29,8 @@ def test_foreign_decision_server_blocks_gpu_admission(monkeypatch):
             "11 /venv/bin/python -m mlx2.decisions.server --port 9000\n"
             "12 /venv/bin/python -m mlx2.top\n"
             "13 /venv/bin/python -m mlx2.server_helpers\n"
+            "14 ssh gpu-host /venv/bin/python -m mlx2.server --port 9001\n"
+            "15 /usr/bin/ssh gpu-host mlx_lm.server --port 9002\n"
         ),
     )
     assert module.foreign_model_processes() == [

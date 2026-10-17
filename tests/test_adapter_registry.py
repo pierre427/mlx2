@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,8 +30,36 @@ def test_registry_import_is_gpu_free():
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert out.returncode == 0, out.stderr
+
+
+@pytest.mark.parametrize("mtp_geometry", [["attention", "moe"], None])
+def test_nemotron_omni_registry_assigns_source_bound_artifact_to_full_adapter(
+    tmp_path, monkeypatch, mtp_geometry
+):
+    from mlx2.adapters import registry
+
+    modules = {
+        ".nemotron35_super": SimpleNamespace(
+            Nemotron35SuperAdapter=type("Full", (), {}),
+            DESCRIPTOR=object(),
+            inspect_artifact=lambda path: {"path": str(path), "kind": "full"},
+        ),
+    }
+    seen = []
+
+    def load(name, package):
+        seen.append((name, package))
+        return modules[name]
+
+    monkeypatch.setattr(registry.importlib, "import_module", load)
+    llm = {} if mtp_geometry is None else {"mtp_layers_block_type": mtp_geometry}
+    resolved = registry._nemotron_h_omni(tmp_path, {"llm_config": llm})
+    assert resolved.adapter_type.__name__ == "Full"
+    assert resolved.artifact["kind"] == "full"
+    assert seen == [(".nemotron35_super", registry.__package__)]
 
 
 def test_muse_dispatch_is_metadata_based(tmp_path):

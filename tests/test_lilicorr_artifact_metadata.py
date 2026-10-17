@@ -186,6 +186,15 @@ def test_tiny_strict_bf16_load_is_candidate_only(artifact):
         load_drafter(
             record, object(), runtime_quantization={"bits": 4, "group_size": 32}
         )
+    with pytest.raises(ValueError, match="source NVFP4 artifact"):
+        load_drafter(
+            record,
+            object(),
+            runtime_quantization={
+                "format": "modelopt_nvfp4",
+                "policy": "fused_b1",
+            },
+        )
 
 
 def test_attention_override_validated_before_allocation_and_source_unchanged(artifact):

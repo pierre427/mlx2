@@ -265,6 +265,7 @@ def _plane_kind(name: str) -> CachePlaneKind | None:
         "attention_ring": CachePlaneKind.ATTENTION_RING,
         "qsa_summary": CachePlaneKind.QSA_SUMMARY,
         "gdn_recurrent": CachePlaneKind.GDN_RECURRENT,
+        "mamba_recurrent": CachePlaneKind.MAMBA_RECURRENT,
         "draft_mtp": CachePlaneKind.MTP_DRAFT,
     }.get(name)
 
@@ -349,7 +350,36 @@ def _layer_segment_specs(
     specs = []
     for kind, projection, compatibility in kinds:
         logical_bytes = _tree_nbytes(projection)
-        if kind == CachePlaneKind.GDN_RECURRENT:
+        if kind == CachePlaneKind.MAMBA_RECURRENT:
+            # A Nemotron Mamba layer owns one live conv/SSM state plus any
+            # exact internal state checkpoints captured by ArraysCache.
+            # Account those checkpoints as real APCv2 layer segments instead
+            # of hiding them inside a generic recurrent object.  The live
+            # segment remains the authoritative boundary; checkpoint segments
+            # are additional exact restore points within that layer.
+            live = (
+                getattr(cache, "cache", None),
+                getattr(cache, "left_padding", None),
+                getattr(cache, "lengths", None),
+            )
+            spans = [("state", 0, offset, _tree_nbytes(live))]
+            checkpoints = getattr(cache, "_persistable_checkpoints", None)
+            if callable(checkpoints):
+                for position, snapshot in checkpoints():
+                    position = int(position)
+                    if not 0 <= position <= offset:
+                        raise COWCheckpointPublicationUnsafe(
+                            "Mamba state checkpoint lies outside its live boundary"
+                        )
+                    spans.append(
+                        (
+                            "checkpoint",
+                            0,
+                            position,
+                            _tree_nbytes(snapshot),
+                        )
+                    )
+        elif kind == CachePlaneKind.GDN_RECURRENT:
             spans = [("state", 0, offset, logical_bytes)]
         elif kind == CachePlaneKind.ATTENTION_RING:
             retained = int(
@@ -379,7 +409,8 @@ def _build_layer_segment_manifest(
     transcript_ledger: TranscriptLedgerPlane | None = None,
 ) -> LayeredSegmentManifest:
     segments = []
-    for layer_index, cache in enumerate(source_cache):
+    for cache_slot, cache in enumerate(source_cache):
+        layer_index = int(getattr(cache, "apcv2_layer_index", cache_slot))
         specs = _layer_segment_specs(
             cache, layer_index=layer_index, covered_tokens=covered_tokens
         )
@@ -553,7 +584,7 @@ def _attach_mutation_hooks(cache: Any, tokens: dict[str, _SegmentToken]) -> None
         hooked_names.append(name)
     cache._cow_hooked_methods = tuple(hooked_names)
     state = getattr(cache, "cache", None)
-    recurrent = tokens.get("gdn_recurrent")
+    recurrent = tokens.get("gdn_recurrent") or tokens.get("mamba_recurrent")
     if recurrent is not None and isinstance(state, list):
         cache.cache = _COWTrackedList(state, recurrent)
 
@@ -905,6 +936,7 @@ class COWCacheOwner:
             CachePlaneKind.ATTENTION_RING,
             CachePlaneKind.QSA_SUMMARY,
             CachePlaneKind.GDN_RECURRENT,
+            CachePlaneKind.MAMBA_RECURRENT,
         }
     )
 

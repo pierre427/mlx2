@@ -201,17 +201,26 @@ def test_raw_schema_matches_real_runtime_parameters(artifact):
     )
 
 
-def test_registry_reaches_text_adapter_and_refuses_mtp(artifact):
+def test_registry_reserves_omni_type_for_full_adapter_and_legacy_refuses_mtp(
+    artifact,
+):
     from mlx2.adapters.registry import inspect_model, resolve_adapter
 
     path, _, _ = artifact
-    resolved = inspect_model(path)
-    assert resolved.adapter_type is adapter.Nemotron35SuperVLAdapter
-    assert resolved.default_route == "ordinary"
-    assert resolved.default_execution_policy("ordinary") == {}
-    assert resolve_adapter(path) is adapter.Nemotron35SuperVLAdapter
-    with pytest.raises(ValueError, match="no implemented native MTP"):
-        resolve_adapter(path, mtp=True)
+    # Automatic dispatch owns this model type through the complete source-bound
+    # multimodal conversion.  A valid legacy text-only research export must not
+    # be able to select the production cache/router contract.
+    with pytest.raises(ValueError, match="Expected Nemotron 3.5 Super VL composition"):
+        inspect_model(path)
+    with pytest.raises(ValueError, match="Expected Nemotron 3.5 Super VL composition"):
+        resolve_adapter(path)
+
+    record = adapter.inspect_artifact(path)
+    obj = adapter.Nemotron35SuperVLAdapter.__new__(adapter.Nemotron35SuperVLAdapter)
+    obj.artifact = record
+    assert obj.default_route == "ordinary"
+    with pytest.raises(ValueError, match="native MTP"):
+        obj.profile_name(True)
 
 
 def test_planning_cache_geometry_is_available_without_model_allocation():

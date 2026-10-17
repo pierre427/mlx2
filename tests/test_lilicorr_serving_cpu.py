@@ -40,6 +40,15 @@ def pair():
     return model, draft
 
 
+def test_dense_draft_reports_modelopt_capability_as_unavailable():
+    _model, draft = pair()
+    status = draft.execution_diagnostics()["modelopt_nvfp4"]
+    assert not status["implemented"]
+    assert not status["qualified"]
+    assert not status["selected"]
+    assert not status["observed_used"]
+
+
 def engine(model, draft, step=3):
     return ExternalDraftBatchGenerator(
         model,

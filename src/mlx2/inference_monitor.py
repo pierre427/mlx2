@@ -202,6 +202,7 @@ class CompletedRequest:
 class SpeculationReading:
     mode: str | None = None
     num_draft: int | None = None
+    receipt_kind: str | None = None
     cycles: int = 0
     accepted_all: int = 0
     accepted_partial: int = 0
@@ -215,6 +216,14 @@ class SpeculationReading:
     receipt_requests: int = 0
     copy_proposed: int = 0
     copy_accepted: int = 0
+    progressive_tile: int | None = None
+    progressive_rounds: int = 0
+    progressive_launches: int = 0
+    progressive_target_rows: int = 0
+    progressive_padding_rows: int = 0
+    progressive_ragged_launches: int = 0
+    progressive_rejections: int = 0
+    progressive_full_tiles: int = 0
 
 
 @dataclass(frozen=True)
@@ -701,11 +710,24 @@ def _recent_requests(
         if not isinstance(receipt, dict):
             continue
         request_id = str(receipt.get("request_id") or "?")
-        stats = _dig(receipt, "mtp", "stats") or {}
-        proposed = _int(stats.get("draft_proposed"))
-        accepted = _int(stats.get("draft_accepted"))
-        cycles = _int(stats.get("cycles"))
-        emitted = _int(stats.get("total_emitted"))
+        stats = _dig(receipt, "mtp", "stats")
+        speculation = receipt.get("speculation")
+        if isinstance(stats, dict):
+            proposed = _int(stats.get("draft_proposed"))
+            accepted = _int(stats.get("draft_accepted"))
+            cycles = _int(stats.get("cycles"))
+            emitted = _int(stats.get("total_emitted"))
+        elif isinstance(speculation, dict):
+            proposed = _int(speculation.get("proposed"))
+            accepted = _int(speculation.get("accepted"))
+            cycles = _int(speculation.get("external_rounds"))
+            # External draft receipts intentionally do not infer emitted
+            # tokens from accepts plus rounds: an early stop can suppress the
+            # target bonus token.  Leave tokens/cycle unavailable until the
+            # executor publishes an exact emitted count.
+            emitted = _int(speculation.get("total_emitted"))
+        else:
+            proposed = accepted = cycles = emitted = None
         result.append(
             CompletedRequest(
                 request_id=request_id,
@@ -715,7 +737,15 @@ def _recent_requests(
                 completion_tokens=_int(receipt.get("completion_tokens")),
                 ttft_seconds=_float(receipt.get("ttft_seconds")),
                 elapsed_seconds=_float(receipt.get("elapsed_seconds")),
-                route=(_dig(receipt, "mtp", "route") or receipt.get("route")),
+                route=(
+                    _dig(receipt, "mtp", "route")
+                    or receipt.get("route")
+                    or (
+                        speculation.get("kind")
+                        if isinstance(speculation, dict)
+                        else None
+                    )
+                ),
                 thinking=_dig(receipt, "request_controls", "thinking"),
                 draft_acceptance=None if not proposed else (accepted or 0) / proposed,
                 tokens_per_cycle=None if not cycles or emitted is None else emitted / cycles,
@@ -735,16 +765,50 @@ def _speculation(
         or _dig(settings, "execution_policy", "num_draft")
     )
     proposed = accepted = emitted = cycles = requests = 0
+    receipt_kinds: set[str] = set()
+    receipt_progressive: dict[str, Any] = {}
+    emitted_complete = True
     for receipt in (status or {}).get("recent_receipts") or ():
         stats = _dig(receipt, "mtp", "stats")
-        if not isinstance(stats, dict):
-            continue
-        requests += 1
-        proposed += _int(stats.get("draft_proposed")) or 0
-        accepted += _int(stats.get("draft_accepted")) or 0
-        emitted += _int(stats.get("total_emitted")) or 0
-        cycles += _int(stats.get("cycles")) or 0
+        speculation = receipt.get("speculation") if isinstance(receipt, dict) else None
+        if isinstance(stats, dict):
+            requests += 1
+            proposed += _int(stats.get("draft_proposed")) or 0
+            accepted += _int(stats.get("draft_accepted")) or 0
+            emitted += _int(stats.get("total_emitted")) or 0
+            cycles += _int(stats.get("cycles")) or 0
+        elif isinstance(speculation, dict):
+            requests += 1
+            proposed += _int(speculation.get("proposed")) or 0
+            accepted += _int(speculation.get("accepted")) or 0
+            exact_emitted = _int(speculation.get("total_emitted"))
+            if exact_emitted is None:
+                emitted_complete = False
+            else:
+                emitted += exact_emitted
+            cycles += _int(speculation.get("external_rounds")) or 0
+            receipt_kind = str(
+                receipt.get("route") or speculation.get("kind") or ""
+            )
+            if receipt_kind:
+                receipt_kinds.add(receipt_kind)
+            progressive = speculation.get("progressive_verification")
+            if isinstance(progressive, dict):
+                receipt_progressive = progressive
     scheduler = (status or {}).get("scheduler") or {}
+    receipt_kind = (
+        next(iter(receipt_kinds))
+        if len(receipt_kinds) == 1
+        else "mixed"
+        if receipt_kinds
+        else None
+    )
+
+    def progressive_value(scheduler_key: str, receipt_key: str) -> int:
+        value = _int(scheduler.get(scheduler_key))
+        if value is None:
+            value = _int(receipt_progressive.get(receipt_key))
+        return value or 0
 
     def event(name: str) -> int:
         return int(metrics.value("segmented_mtp_events_total", event=name) or 0)
@@ -758,6 +822,7 @@ def _speculation(
     return SpeculationReading(
         mode=settings.get("speculation") or None,
         num_draft=num_draft,
+        receipt_kind=receipt_kind,
         cycles=event("accepted_all") + event("accepted_partial") + event("accepted_zero"),
         accepted_all=event("accepted_all"),
         accepted_partial=event("accepted_partial"),
@@ -766,11 +831,36 @@ def _speculation(
         window_accepted_all=window_event("accepted_all"),
         receipt_proposed=proposed,
         receipt_accepted=accepted,
-        receipt_emitted=emitted,
+        receipt_emitted=emitted if emitted_complete else 0,
         receipt_cycles=cycles,
         receipt_requests=requests,
         copy_proposed=_int(scheduler.get("self_mtp_copy_proposed_tokens")) or 0,
         copy_accepted=_int(scheduler.get("self_mtp_copy_accepted_tokens")) or 0,
+        progressive_tile=(
+            _int(scheduler.get("external_progressive_verify_tile"))
+            or _int(receipt_progressive.get("verification_tile"))
+        ),
+        progressive_rounds=progressive_value(
+            "external_progressive_verify_rounds", "rounds"
+        ),
+        progressive_launches=progressive_value(
+            "external_progressive_verify_launches", "target_launches"
+        ),
+        progressive_target_rows=progressive_value(
+            "external_progressive_verify_target_rows", "target_rows"
+        ),
+        progressive_padding_rows=progressive_value(
+            "external_progressive_verify_padding_rows", "padding_rows"
+        ),
+        progressive_ragged_launches=progressive_value(
+            "external_progressive_verify_ragged_launches", "ragged_launches"
+        ),
+        progressive_rejections=progressive_value(
+            "external_progressive_verify_rejections", "rejections"
+        ),
+        progressive_full_tiles=progressive_value(
+            "external_progressive_verify_full_tiles", "full_nonfinal_tiles"
+        ),
     )
 
 

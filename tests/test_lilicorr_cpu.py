@@ -222,3 +222,36 @@ def test_correlation_walk_uses_selected_predecessor_without_unary_addition():
     )
     assert tokens == [[1, 1, 0]]
     assert [q[t] for q, t in zip(laws[0], tokens[0])] == [1.0, 1.0, 1.0]
+
+
+def test_ordered_alternatives_share_one_lattice_and_keep_b1_greedy():
+    from types import SimpleNamespace
+
+    model = LiLiCorrDraftModel(config())
+    embedding = nn.Embedding(9, 4)
+    model.bind(SimpleNamespace(model=SimpleNamespace(embed_tokens=embedding)))
+    model._hidden = lambda inputs, h, c: mx.zeros((1, 4, 4))
+    model._logits = lambda h: mx.array(
+        [[[10.0, 9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * 3]
+    )
+    model.lilicorr = lambda *a: mx.array(
+        [[[[3.0, 2.0], [3.0, 2.0]],
+          [[4.0, 0.0], [0.0, 4.0]],
+          [[4.0, 0.0], [0.0, 4.0]]]]
+    )
+    tokens, _laws = model.draft_distributions(
+        [2],
+        mx.zeros((1, 0, 8)),
+        model.make_cache(),
+        3,
+        [object()],
+        [0.0],
+    )
+    alternatives = model.ordered_alternative_proposals(
+        tokens,
+        branch_count=2,
+        strategy="distinct_root",
+        shared_prefix_tokens=None,
+    )[0]
+    assert alternatives[0] == tokens[0]
+    assert alternatives == [[0, 0, 0], [1, 1, 1]]

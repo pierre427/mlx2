@@ -267,6 +267,9 @@ def ssm_attn(
     A = -mx.exp(A_log).astype(dt.dtype)
     dtA = dt * A.reshape(1, 1, -1)
     dtx = dt.reshape(b, l, h, 1) * x
+    if lengths is not None:
+        length_mask = mx.arange(l)[None, :] < lengths[:, None]
+        mask = length_mask if mask is None else mx.logical_and(mask, length_mask)
     if mask is not None:
         # Padding is a neutral recurrence step, matching ssd_prefill below:
         # exp(dtA)=1 carries the state, and dtx=0 contributes no new write.
@@ -291,7 +294,10 @@ def ssm_attn(
         y = mx.swapaxes(y, 1, 2)
 
         if lengths is not None:
-            pos = mx.maximum(mx.minimum(lengths, step) - 1, 0)
+            # The final chunk may be shorter than ``step``. Bound the gather by
+            # this chunk's real width so exhausted/oversized row metadata can
+            # never address beyond the decay slab.
+            pos = mx.maximum(mx.minimum(lengths, s) - 1, 0)
             pos = mx.expand_dims(pos, (1, 2, 3))
             decay = mx.take_along_axis(decay, pos, axis=2)
         else:
@@ -314,7 +320,7 @@ def ssm_attn(
             y += exp_dtA_cumsum[..., None] * y_prev
         if lengths is not None and state is not None:
             next_state = mx.where(
-                mx.expand_dims(lengths < 0, (1, 2, 3)), state, next_state
+                mx.expand_dims(lengths <= 0, (1, 2, 3)), state, next_state
             )
 
         return y.astype(x.dtype), next_state

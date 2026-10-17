@@ -5166,6 +5166,15 @@ class ServingEngine:
             public_request["skip_writing_prefix_cache"] = True
             count_add(self.counts, "activation_capsule_requests", 1)
         if has_media:
+            supported_media_routes = getattr(self.adapter, "multimodal_routes", None)
+            if supported_media_routes is not None:
+                selected_route = (self.snapshot.get("settings") or {}).get("route")
+                if selected_route not in supported_media_routes:
+                    from .api_resources import CapabilityUnavailable
+
+                    raise CapabilityUnavailable(
+                        f"the selected {selected_route} route has no implemented multimodal prefill"
+                    )
             prepare = getattr(self.adapter, "prepare_multimodal_request", None)
             if not callable(prepare):
                 from .api_resources import CapabilityUnavailable

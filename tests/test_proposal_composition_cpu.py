@@ -33,13 +33,22 @@ from mlx2.runtime.proposal_composition import (
 
 def test_progressive_external_policy_is_shared_and_identity_bound():
     policy = normalize_progressive_external_policy(
-        {"progressive_verification_tile": 3, "progressive_multilane_draft_cap": 5},
+        {
+            "progressive_verification_tile": 3,
+            "progressive_multilane_draft_cap": 5,
+            "progressive_alternative_branches": 4,
+            "progressive_alternative_strategy": "shared_prefix",
+            "progressive_alternative_depth_policy": "full",
+        },
         num_draft=15,
         minimum_proposals=3,
     )
     assert policy["proposal_composition"] is False
     assert policy["progressive_verification_tile"] == 3
     assert policy["progressive_multilane_draft_cap"] == 5
+    assert policy["progressive_alternative_branches"] == 4
+    assert policy["progressive_alternative_strategy"] == "shared_prefix"
+    assert policy["progressive_alternative_depth_policy"] == "full"
     assert progressive_external_identity(policy) != progressive_external_identity(
         {**policy, "progressive_multilane_draft_cap": 4}
     )
@@ -53,6 +62,8 @@ def test_external_adapter_mix_in_selects_and_reports_progressive_policy():
             "num_draft": 8,
             "progressive_verification_tile": 2,
             "progressive_multilane_draft_cap": 3,
+            "progressive_alternative_branches": 4,
+            "progressive_alternative_strategy": "shared_prefix",
         },
         family="test",
     )
@@ -63,6 +74,8 @@ def test_external_adapter_mix_in_selects_and_reports_progressive_policy():
     assert adapter.external_policy["proposal_composition"] is False
     assert settings["progressive_verification_tile"] == 2
     assert settings["progressive_multilane_draft_cap"] == 3
+    assert settings["progressive_alternative_branches"] == 4
+    assert settings["progressive_alternative_strategy"] == "shared_prefix"
 
 
 def test_shared_external_policy_rejects_unconsumed_fold_key():
@@ -80,6 +93,7 @@ def test_shared_external_policy_rejects_unconsumed_fold_key():
         ({"progressive_verification_tile": True}, {"num_draft": 8}, "integer"),
         ({"progressive_verification_tile": 8}, {"num_draft": 8}, "below num_draft"),
         ({"progressive_multilane_draft_cap": 3}, {"num_draft": 8}, "requires progressive"),
+        ({"progressive_alternative_branches": 2}, {"num_draft": 8}, "requires progressive"),
         (
             {
                 "progressive_verification_tile": 2,

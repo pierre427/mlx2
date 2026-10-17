@@ -36,9 +36,15 @@ class _Wrapper:
 
 class _Adapter:
     incremental_tokenizer_cache_supported = True
-    incremental_tokenizer_renderer_revision = "qwen-hf-chat-template-v1"
 
-    def __init__(self, artifact: Path):
+    def __init__(self, artifact: Path, *, renderer: str):
+        if renderer not in {"qwen-thinking-off", "nemotron-thinking-on"}:
+            raise ValueError(f"unsupported renderer: {renderer}")
+        self.renderer = renderer
+        self.incremental_tokenizer_renderer_revision = {
+            "qwen-thinking-off": "qwen-hf-chat-template-v1",
+            "nemotron-thinking-on": "nemotron35-super-vl-renderer-v1",
+        }[renderer]
         tokenizer = AutoTokenizer.from_pretrained(
             artifact, local_files_only=True, trust_remote_code=False
         )
@@ -51,8 +57,16 @@ class _Adapter:
                 digest.update(path.read_bytes())
         self.identity = {"fingerprint": digest.hexdigest()}
 
-    @staticmethod
-    def render_incremental_prompt(tokenizer, request):
+    def _request(self, request):
+        if self.renderer == "nemotron-thinking-on":
+            return {
+                **request,
+                "enable_thinking": bool(request.get("enable_thinking", True)),
+            }
+        return request
+
+    def render_incremental_prompt(self, tokenizer, request):
+        request = self._request(request)
         if "messages" not in request:
             return request["prompt"]
         return tokenizer.apply_chat_template(
@@ -66,6 +80,7 @@ class _Adapter:
         )
 
     def prompt_tokens(self, request):
+        request = self._request(request)
         rendered = self.render_incremental_prompt(self.tokenizer._tokenizer, request)
         return self.tokenizer.encode(rendered, add_special_tokens=False)
 
@@ -104,7 +119,14 @@ def _cases(base_characters: int, turns: int):
     return out
 
 
-def run(artifact: Path, *, base_characters: int, turns: int, repeats: int) -> dict:
+def run(
+    artifact: Path,
+    *,
+    base_characters: int,
+    turns: int,
+    repeats: int,
+    renderer: str = "qwen-thinking-off",
+) -> dict:
     samples = {
         name: {"ordinary_ns": [], "candidate_ns": []}
         for name, _ in _cases(base_characters, turns)
@@ -112,7 +134,7 @@ def run(artifact: Path, *, base_characters: int, turns: int, repeats: int) -> di
     final_rows = None
     final_status = None
     for _repeat in range(repeats):
-        adapter = _Adapter(artifact)
+        adapter = _Adapter(artifact, renderer=renderer)
         cache = IncrementalPromptTokenizerCache(
             max_entries=4,
             max_characters=max(8 << 20, base_characters * 8),
@@ -181,6 +203,7 @@ def run(artifact: Path, *, base_characters: int, turns: int, repeats: int) -> di
             "turns": turns,
             "repeats": repeats,
             "entries": 4,
+            "renderer": renderer,
         },
         "all_ids_exact": all(row["exact"] for row in final_rows),
         "cases": final_rows,
@@ -199,6 +222,12 @@ def main() -> int:
     parser.add_argument("--base-characters", type=int, default=100_000)
     parser.add_argument("--turns", type=int, default=12)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument(
+        "--renderer",
+        choices=("qwen-thinking-off", "nemotron-thinking-on"),
+        default="qwen-thinking-off",
+        help="Exact chat-template default to benchmark.",
+    )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     if min(args.base_characters, args.turns, args.repeats) < 1:
@@ -208,6 +237,7 @@ def main() -> int:
         base_characters=args.base_characters,
         turns=args.turns,
         repeats=args.repeats,
+        renderer=args.renderer,
     )
     encoded = json.dumps(report, indent=2, sort_keys=True)
     if args.out is not None:

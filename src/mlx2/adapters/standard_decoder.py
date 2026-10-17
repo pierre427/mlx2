@@ -1177,6 +1177,9 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
                     "adaptive_verification"
                 ),
             }
+            diagnostics = getattr(self.draft_model, "execution_diagnostics", None)
+            if callable(diagnostics):
+                result["speculation"]["execution"] = diagnostics()
         if self.external_policy.get("target_verify_row_exact", False):
             result["target_protocol"] = self.model.external_execution_receipt
         return result

@@ -117,6 +117,10 @@ def foreign_model_processes() -> list[str]:
         executable = fields[1].split(None, 1)[0]
         if executable.endswith(("/zsh", "/bash", "/sh", "/git", "/git-remote-https")):
             continue
+        if Path(executable).name.lower() in {"ssh", "ssh.exe"}:
+            # A local SSH client can mention mlx2.server in the command it
+            # executes on another host; it does not own this host's GPU.
+            continue
         if MODEL_PROCESS.search(fields[1]):
             foreign.append(row.strip()[:500])
     return foreign

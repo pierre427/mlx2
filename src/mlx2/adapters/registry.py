@@ -131,7 +131,7 @@ class AdapterResolution:
                     return {}
         policy = declared.get(route) or {}
         if not isinstance(policy, dict):
-            raise ValueError(f"{name} {route} default policy must be an object")
+            raise TypeError(f"{name} {route} default policy must be an object")
         unknown = set(policy) - ADAPTER_DEFAULT_POLICY_KEYS
         if unknown:
             raise ValueError(
@@ -319,9 +319,20 @@ def _nemotron_h(path: Path, config: dict) -> AdapterResolution:
 
 
 def _nemotron_h_omni(path: Path, config: dict) -> AdapterResolution:
-    module = importlib.import_module(".nemotron35_super_vl", __package__)
-    return AdapterResolution(module.Nemotron35SuperVLAdapter, module.DESCRIPTOR,
-                             module.inspect_artifact(path))
+    # The completed source-bound conversion is owned by the full adapter.  Its
+    # inspector validates the conversion receipt, complete tensor inventory,
+    # source revision, quantization plan, media geometry and MTP geometry.  Do
+    # not infer adapter ownership from one optional config field: that allowed
+    # a look-alike artifact to switch cache/router contracts.  The legacy
+    # text-only loader remains available for explicit research construction,
+    # but is not an automatic registry target for this model type.
+    module = importlib.import_module(".nemotron35_super", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(
+        module.Nemotron35SuperAdapter,
+        module.DESCRIPTOR,
+        artifact,
+    )
 
 
 def _gemma3n(path: Path, config: dict) -> AdapterResolution:

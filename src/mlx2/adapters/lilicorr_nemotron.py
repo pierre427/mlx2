@@ -16,7 +16,7 @@ from pathlib import Path
 from ..runtime.io_ownership import call_io
 from .dflash2 import _decode_unique_json, _read_safetensors_header, _source_binding
 from .lilicorr import LiLiCorrConfig, _file_sha256, expected_weight_shapes
-from .nemotron35_super_vl import _metadata_bytes, inspect_artifact
+from .nemotron35_super_vl import _metadata_bytes, inspect_artifact, runtime_config
 
 SOURCE_REVISION = "7c7221aeb4cb3139307aa457f7dce11a8fb6ceb2"
 EXPORTS = {
@@ -305,6 +305,16 @@ def inspect_drafter(path, *, target_path=None, target_artifact=None):
         if target_artifact is None
         else copy.deepcopy(target_artifact)
     )
+    # The full Super adapter and the deliberately stripped text-only adapter
+    # expose different load plans over the same language geometry.  Normalize
+    # the full artifact here so the owned LiLiCorr head binds to the adapter's
+    # actual target identity while retaining one inspection implementation.
+    if "text_config" not in target:
+        target["text_config"] = runtime_config(target["config"])
+    if "load_plan" not in target:
+        target["load_plan"] = {
+            "resident_weight_bytes": int(target["conversion"]["tensor_bytes"]),
+        }
     return call_io("nemotron-lilicorr-drafter", _inspect_drafter, str(path), target)
 
 
@@ -340,9 +350,10 @@ def load_drafter(
     runtime_quantization=None,
     draft_attention_windows=None,
 ):
-    """Load the exact BF16 export after reconciling its inspected identity."""
-    if runtime_quantization is not None:
-        raise ValueError("Nemotron LiLiCorr runtime quantization is not supported")
+    """Load the pinned BF16 export and an optional adapter-owned Q8 profile."""
+    from .nemotron35_draft_quantization import normalize_runtime_quantization
+
+    runtime_quantization = normalize_runtime_quantization(runtime_quantization)
     if draft_attention_windows is not None:
         raise ValueError("Nemotron LiLiCorr trained sliding windows are immutable")
     if record.get("variant") != "bf16" or record.get("runtime_load_supported") is not True:
@@ -369,7 +380,14 @@ def load_drafter(
     weights = model.sanitize(mx.load(str(file)))
     mx.eval(list(weights.values()))
     model.load_weights(list(weights.items()), strict=True)
+    if runtime_quantization is not None:
+        from .nemotron35_draft_quantization import apply_runtime_quantization
+
+        apply_runtime_quantization(model, runtime_quantization)
+    else:
+        model.runtime_weight_quantization = None
     model.eval()
     mx.eval(model.parameters())
     weights.clear()
+    mx.clear_cache()
     return model.bind(target_model, target_contract=target_contract)

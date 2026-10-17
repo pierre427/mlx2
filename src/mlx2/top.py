@@ -279,10 +279,10 @@ def render_server(server: ServerReading, *, width: int = 100) -> list[str]:
                     f"verify cycles {_count(spec.cycles)}: all {_ratio(spec.accepted_all, spec.cycles)}"
                     f" · partial {_ratio(spec.accepted_partial, spec.cycles)}"
                     f" · zero {_ratio(spec.accepted_zero, spec.cycles)}"
-                    if spec.cycles
+                    if spec.cycles and spec.mode != "external_draft"
                     else None,
                     f"30s all-accept {_ratio(spec.window_accepted_all, spec.window_cycles)}"
-                    if spec.window_cycles
+                    if spec.window_cycles and spec.mode != "external_draft"
                     else None,
                 ],
                 "  ·  ",
@@ -294,15 +294,38 @@ def render_server(server: ServerReading, *, width: int = 100) -> list[str]:
                 + _join_present(
                     [
                         (f"last {spec.receipt_requests} receipts: draft accept "
-                        f"{_ratio(spec.receipt_accepted, spec.receipt_proposed)}"
-                        f" ({_count(spec.receipt_accepted)}/{_count(spec.receipt_proposed)})"),
+                        f"{100.0 * spec.receipt_accepted / spec.receipt_proposed:.1f}%"
+                        f" ({_count(spec.receipt_accepted)}/{_count(spec.receipt_proposed)})")
+                        if spec.receipt_proposed
+                        else f"last {spec.receipt_requests} receipts: no draft proposals",
                         f"{spec.receipt_emitted / spec.receipt_cycles:.2f} tok/cycle"
-                        if spec.receipt_cycles
+                        if spec.receipt_cycles and spec.receipt_emitted
                         else None,
                         f"copy-draft {_ratio(spec.copy_accepted, spec.copy_proposed)}"
                         f" ({_count(spec.copy_accepted)}/{_count(spec.copy_proposed)})"
                         if spec.copy_proposed
                         else None,
+                    ],
+                    "  ·  ",
+                )
+            )
+        if spec.progressive_rounds:
+            lines.append(
+                "          "
+                + _join_present(
+                    [
+                        f"progressive tile {spec.progressive_tile}"
+                        if spec.progressive_tile is not None
+                        else "progressive verify",
+                        (
+                            f"{_count(spec.progressive_launches)} launches / "
+                            f"{_count(spec.progressive_rounds)} rounds"
+                        ),
+                        f"{_count(spec.progressive_target_rows)} rows",
+                        f"{_count(spec.progressive_padding_rows)} padding",
+                        f"{_count(spec.progressive_ragged_launches)} ragged",
+                        f"{_count(spec.progressive_rejections)} rejected",
+                        f"{_count(spec.progressive_full_tiles)} continued",
                     ],
                     "  ·  ",
                 )

@@ -261,6 +261,111 @@ def test_reading_turns_counters_into_rates_and_window_statistics():
     assert "Accelerators" not in output
 
 
+def test_external_draft_receipts_and_progressive_tiles_reach_top():
+    endpoint = ServerEndpoint(url="http://127.0.0.1:8297", pid=4015)
+    status = {
+        "model": "Nemotron-Super-4bit",
+        "settings": {
+            "speculation": "external_draft",
+            "adapter_policy": {"num_draft": 7},
+        },
+        "scheduler": {
+            "external_progressive_verify_tile": 4,
+            "external_progressive_verify_rounds": 38,
+            "external_progressive_verify_launches": 60,
+            "external_progressive_verify_target_rows": 151,
+            "external_progressive_verify_padding_rows": 9,
+            "external_progressive_verify_ragged_launches": 4,
+            "external_progressive_verify_rejections": 16,
+            "external_progressive_verify_full_tiles": 22,
+        },
+        "recent_receipts": [
+            {
+                "request_id": "chatcmpl-nemotron",
+                "prompt_tokens": 80,
+                "cached_tokens": 0,
+                "completion_tokens": 128,
+                "ttft_seconds": 0.4,
+                "elapsed_seconds": 4.4,
+                "route": "external_draft",
+                "mtp": None,
+                "speculation": {
+                    "kind": "external_draft_v1",
+                    "external_rounds": 38,
+                    "accepted": 106,
+                    "proposed": 153,
+                    "progressive_verification": {
+                        "verification_tile": 4,
+                        "rounds": 38,
+                        "target_launches": 60,
+                        "target_rows": 151,
+                        "padding_rows": 9,
+                        "ragged_launches": 4,
+                        "rejections": 16,
+                        "full_nonfinal_tiles": 22,
+                        "observed_used": True,
+                    },
+                },
+            }
+        ],
+    }
+    reading = build_reading(
+        endpoint,
+        Metrics.parse(_EXPOSITION_BEFORE),
+        now=100.0,
+        status=status,
+    )
+    spec = reading.speculation
+    assert spec.mode == "external_draft" and spec.num_draft == 7
+    assert spec.receipt_kind == "external_draft"
+    assert spec.receipt_requests == 1 and spec.receipt_cycles == 38
+    assert (spec.receipt_accepted, spec.receipt_proposed) == (106, 153)
+    assert spec.progressive_tile == 4 and spec.progressive_rounds == 38
+    assert spec.progressive_launches == 60 and spec.progressive_target_rows == 151
+    assert spec.progressive_padding_rows == 9
+    assert spec.progressive_ragged_launches == 4
+    assert spec.progressive_rejections == 16 and spec.progressive_full_tiles == 22
+    recent = reading.recent_requests[0]
+    assert recent.route == "external_draft"
+    assert recent.draft_acceptance == 106 / 153
+    # External receipts do not publish a definitive total-emitted count; the
+    # monitor must not invent one from accepted proposals plus rounds.
+    assert recent.tokens_per_cycle is None
+    output = render(_host_reading(), servers=(reading,))
+    assert "external_draft draft 7" in output
+    assert "draft accept 69.3% (106/153)" in output
+    assert "9 padding" in output and "4 ragged" in output
+    assert "progressive tile 4" in output
+    assert "60 launches / 38 rounds" in output
+    assert "151 rows" in output and "22 continued" in output
+
+
+def test_external_draft_receipt_without_proposals_renders_safely():
+    reading = build_reading(
+        ServerEndpoint(url="http://127.0.0.1:8297"),
+        Metrics.parse(_EXPOSITION_BEFORE),
+        now=100.0,
+        status={
+            "settings": {"speculation": "external_draft"},
+            "recent_receipts": [
+                {
+                    "request_id": "chatcmpl-ordinary-fallback",
+                    "route": "external_draft",
+                    "speculation": {
+                        "kind": "external_draft_v1",
+                        "external_rounds": 0,
+                        "accepted": 0,
+                        "proposed": 0,
+                    },
+                }
+            ],
+        },
+    )
+    output = render(_host_reading(), servers=(reading,))
+    assert "last 1 receipts: no draft proposals" in output
+    assert reading.recent_requests[0].draft_acceptance is None
+
+
 def test_renderer_reports_unreachable_and_missing_servers():
     down = ServerReading(
         endpoint=ServerEndpoint(url="http://127.0.0.1:8285"),

@@ -2,12 +2,12 @@
   "schema": 1,
   "dispatchers": {
     "mlx2.adapters.registry": {
-      "sha256": "90db44fc43b63735f935db63aa193ac8c79d8e9e3eeef5f170b4f2a78fdf9af2",
+      "sha256": "bb860198ba8501c558de4eadd7a635f334b41fb82225d6cbb56e4163bcc8ec32",
       "targets": [],
       "reason": "selected-adapter dispatch"
     },
     "mlx2.runtime.models.cache": {
-      "sha256": "5566f32ae93e4ee5ad2ac6664ddb5d7da3c8d90601f245f87a515707539ad923",
+      "sha256": "fb19232212c1cda48ccd82f4dfa93bb988f2a0f52b46e1988a3074acec35792c",
       "targets": [],
       "reason": "revision-bound cache classes supplied by the selected adapter"
     },

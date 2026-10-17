@@ -16,6 +16,7 @@ class CachePlaneKind(str, Enum):
     ATTENTION_RING = "attention_ring"
     QSA_SUMMARY = "qsa_summary"
     GDN_RECURRENT = "gdn_recurrent"
+    MAMBA_RECURRENT = "mamba_recurrent"
     MTP_DRAFT = "mtp_draft"
     PLE_HINTS = "ple_hints"
     COMPILED_SCHEDULE = "compiled_schedule"

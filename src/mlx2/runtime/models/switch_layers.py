@@ -27,7 +27,7 @@ _SORTED_QMM_K_TILE = 64
 def _switch_sort_decision(
     policy: str, *, assignments: int, token_length: int, invariant: bool
 ) -> tuple[bool, str]:
-    """Pure host decision for SwitchGLU gather ordering and its counter key."""
+    """Pure host decision for switched-expert gather ordering and its counter key."""
     if policy not in {"auto", "unsorted_decode"}:
         raise ValueError("SwitchGLU sort policy must be auto or unsorted_decode")
     if invariant:
@@ -561,10 +561,57 @@ class SwitchMLP(nn.Module):
         self.fc1 = SwitchLinear(input_dims, hidden_dims, num_experts, bias=bias)
         self.fc2 = SwitchLinear(hidden_dims, input_dims, num_experts, bias=bias)
         self.activation = activation if activation is not None else nn.GELU(approx="precise")
+        # Adapter-owned candidate matching SwitchGLU's exact B=1 selector.
+        # The default preserves the existing global assignment threshold.
+        self._sort_policy = "auto"
+        self._sort_counts = {
+            "auto_sorted": 0,
+            "auto_unsorted": 0,
+            "invariant_sorted": 0,
+            "unsorted_decode": 0,
+        }
+
+    def set_sort_policy(self, policy: str) -> str:
+        if policy not in {"auto", "unsorted_decode"}:
+            raise ValueError("SwitchMLP sort policy must be auto or unsorted_decode")
+        old, self._sort_policy = self._sort_policy, policy
+        return old
+
+    def sort_status(self) -> dict:
+        return {"policy": self._sort_policy, "counts": dict(self._sort_counts)}
+
+    def project_up(self, x, indices):
+        """Run the served fc1 gather and restore original routed-slot order."""
+        x = mx.expand_dims(x, (-2, -3))
+        token_length = int(indices.shape[-2]) if indices.ndim >= 2 else 1
+        do_sort, counter = _switch_sort_decision(
+            self._sort_policy,
+            assignments=int(indices.size),
+            token_length=token_length,
+            invariant=_invariant.active(),
+        )
+        self._sort_counts[counter] += 1
+        idx = indices
+        inv_order = None
+        if do_sort:
+            x, idx, inv_order = _gather_sort(x, indices)
+        if self.training:
+            idx = mx.stop_gradient(idx)
+        x = self.fc1(x, idx, sorted_indices=do_sort)
+        if do_sort:
+            x = _scatter_unsort(x, inv_order, indices.shape)
+        return x.squeeze(-2)
 
     def __call__(self, x, indices):
         x = mx.expand_dims(x, (-2, -3))
-        do_sort = indices.size >= _GATHER_SORT_MIN_ASSIGNMENTS
+        token_length = int(indices.shape[-2]) if indices.ndim >= 2 else 1
+        do_sort, counter = _switch_sort_decision(
+            self._sort_policy,
+            assignments=int(indices.size),
+            token_length=token_length,
+            invariant=_invariant.active(),
+        )
+        self._sort_counts[counter] += 1
         idx = indices
         inv_order = None
         if do_sort:

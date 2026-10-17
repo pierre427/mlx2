@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Adapted from mlx-lm-unified; see provenance/nemotron3-super-5bit.json.
 import copy
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -8,6 +9,7 @@ import mlx.core as mx
 from mlx import nn
 
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..progressive_external_verify import PROGRESSIVE_TARGET_PROTOCOL_VERSION
 from .activations import swiglu
 from .base import (
     BaseModelArgs,
@@ -68,11 +70,19 @@ class ModelArgs(BaseModelArgs):
     mtp_layers_block_type: list[str] | None = None
     mtp_hybrid_override_pattern: list[str] | None = None
     mtp_block_configs: list[dict] | None = None
+    router_compute_dtype: str = "input"
 
     # Map from layers_block_type names to single-char pattern codes
-    _block_type_to_char: ClassVar[dict[str, str]] = {"mamba": "M", "attention": "*", "moe": "E", "mlp": "-"}
+    _block_type_to_char: ClassVar[dict[str, str]] = {
+        "mamba": "M",
+        "attention": "*",
+        "moe": "E",
+        "mlp": "-",
+    }
 
     def __post_init__(self):
+        if self.router_compute_dtype not in {"input", "float32"}:
+            raise ValueError("Unsupported Nemotron router compute dtype")
         if self.time_step_limit is None:
             self.time_step_limit = (0.0, float("inf"))
 
@@ -101,12 +111,49 @@ class MambaRMSNormGated(nn.Module):
         self.eps = eps
         self.weight = mx.ones(hidden_size)
         self.group_size = group_size
+        self._policy = "auto"
+        self._counts = {"ordinary": 0, "fused_b1": 0, "fused_short": 0, "refused": 0}
+
+    def set_policy(self, policy: str) -> str:
+        if policy not in {"auto", "fused_b1", "fused_short"}:
+            raise ValueError(
+                "Nemotron Mamba norm policy must be auto, fused_b1, or fused_short"
+            )
+        previous, self._policy = self._policy, policy
+        return previous
+
+    def status(self) -> dict:
+        return {"policy": self._policy, "counts": dict(self._counts)}
 
     def __call__(self, x: mx.array, gate: mx.array = None) -> mx.array:
+        if gate is not None and self._policy in {"fused_b1", "fused_short"}:
+            from .nemotron_mamba_norm import (
+                admit_fused_mamba_norm_short,
+                fused_mamba_norm_refusal,
+                fused_mamba_norm_short,
+            )
+
+            admission = admit_fused_mamba_norm_short(
+                y=x,
+                gate=gate,
+                weight=self.weight,
+                eps=self.eps,
+                group_size=self.group_size,
+                training=self.training,
+            )
+            if (
+                admission.accepted
+                and (self._policy == "fused_short" or x.shape[1] == 1)
+                and fused_mamba_norm_refusal(x.dtype) is None
+            ):
+                self._counts[self._policy] += 1
+                return fused_mamba_norm_short(x, gate, self.weight)
+            self._counts["refused"] += 1
         if gate is not None:
             x = swiglu(gate, x)
         x = mx.unflatten(x, axis=-1, shape=(-1, self.group_size))
         x = mx.fast.rms_norm(x, weight=None, eps=self.eps)
+        self._counts["ordinary"] += 1
         return self.weight * x.flatten(-2)
 
 
@@ -122,6 +169,25 @@ class NemotronHMamba2Mixer(nn.Module):
         self.head_dim = args.mamba_head_dim
         self.time_step_limit = args.time_step_limit
         self.heads_per_group = self.num_heads // self.n_groups
+        self._conv_policy = "auto"
+        self._conv_counts = {
+            "ordinary": 0,
+            "fused_b1": 0,
+            "fused_b1_compact": 0,
+            "fused_short": 0,
+            "refused": 0,
+        }
+        self._ssm_policy = "auto"
+        self._ssm_counts = {
+            "ordinary": 0,
+            "fused_short": 0,
+            "fused_short_gate": 0,
+            "fused_short_replay": 0,
+            "refused": 0,
+        }
+        self._ssm_refusal_reasons = {}
+        self._projection_policy = "auto"
+        self._projection_counts = defaultdict(int)
 
         self.conv_dim = self.intermediate_size + 2 * self.n_groups * self.ssm_state_size
 
@@ -153,11 +219,66 @@ class NemotronHMamba2Mixer(nn.Module):
             self.intermediate_size, self.hidden_size, bias=args.mamba_proj_bias
         )
 
+    def set_conv_policy(self, policy: str) -> str:
+        if policy not in {"auto", "fused_b1", "fused_b1_compact", "fused_short"}:
+            raise ValueError(
+                "Nemotron Mamba conv policy must be auto, fused_b1, or "
+                "fused_b1_compact, or fused_short"
+            )
+        previous, self._conv_policy = self._conv_policy, policy
+        return previous
+
+    def set_ssm_policy(self, policy: str) -> str:
+        if policy not in {"auto", "fused_short", "fused_short_gate"}:
+            raise ValueError(
+                "Nemotron Mamba SSM policy must be auto, fused_short, or "
+                "fused_short_gate"
+            )
+        previous, self._ssm_policy = self._ssm_policy, policy
+        return previous
+
+    def set_projection_policy(self, policy: str) -> str:
+        if policy not in {
+            "auto",
+            "compact_padded",
+            "compact_row_exact",
+            "adaptive_row_exact",
+            "short_row_exact",
+            "native_qmm_residual_b1",
+        }:
+            raise ValueError(
+                "Nemotron Mamba projection policy must be auto, compact_padded, "
+                "compact_row_exact, adaptive_row_exact, short_row_exact, or "
+                "native_qmm_residual_b1"
+            )
+        previous, self._projection_policy = self._projection_policy, policy
+        return previous
+
+    def projection_status(self) -> dict:
+        return {
+            "policy": self._projection_policy,
+            "counts": dict(self._projection_counts),
+        }
+
+    def owns_residual_boundary(self) -> bool:
+        return self._projection_policy == "native_qmm_residual_b1"
+
+    def ssm_status(self) -> dict:
+        return {
+            "policy": self._ssm_policy,
+            "counts": dict(self._ssm_counts),
+            "refusal_reasons": dict(self._ssm_refusal_reasons),
+        }
+
+    def conv_status(self) -> dict:
+        return {"policy": self._conv_policy, "counts": dict(self._conv_counts)}
+
     def _conv(
         self,
         conv_input: mx.array,
         cache: ArraysCache | None,
         mask: mx.array | None,
+        capture_window: bool = False,
     ) -> tuple[mx.array, mx.array]:
         if mask is not None:
             conv_input = mx.where(mask[..., None], conv_input, 0)
@@ -170,6 +291,91 @@ class NemotronHMamba2Mixer(nn.Module):
                 )
             else:
                 conv_state = cache[0]
+            if self._conv_policy == "fused_short" and cache.lengths is None:
+                from .nemotron_mamba_conv import (
+                    admit_fused_mamba_conv_short,
+                    fused_mamba_conv_refusal,
+                    fused_mamba_conv_short,
+                )
+
+                bias = getattr(self.conv1d, "bias", None)
+                admission = admit_fused_mamba_conv_short(
+                    conv_input=conv_input,
+                    conv_state=conv_state,
+                    weight=self.conv1d.weight,
+                    bias=bias,
+                    mask=mask,
+                    training=self.training,
+                    kernel_size=self.conv_kernel_size,
+                )
+                refusal = fused_mamba_conv_refusal(conv_input.dtype)
+                if admission.accepted and refusal is None:
+                    conv_output, history = fused_mamba_conv_short(
+                        conv_input,
+                        conv_state,
+                        self.conv1d.weight,
+                        bias,
+                        capture_checkpoints=capture_window,
+                    )
+                    if capture_window:
+                        cache[0] = history[:, -1]
+                        padded_input = history
+                    else:
+                        cache[0] = history
+                        padded_input = None
+                    self._conv_counts["fused_short"] += 1
+                    return conv_output, padded_input
+                reason = admission.reason if not admission.accepted else refusal
+                self._conv_counts["refused"] += 1
+                key = f"refused:{reason}"
+                self._conv_counts[key] = self._conv_counts.get(key, 0) + 1
+            if (
+                self._conv_policy
+                in {
+                    "fused_b1",
+                    "fused_b1_compact",
+                }
+                and cache.lengths is None
+            ):
+                from .nemotron_mamba_conv import (
+                    admit_fused_mamba_conv_b1,
+                    fused_mamba_conv_b1,
+                    fused_mamba_conv_refusal,
+                )
+
+                bias = getattr(self.conv1d, "bias", None)
+                admission = admit_fused_mamba_conv_b1(
+                    conv_input=conv_input,
+                    conv_state=conv_state,
+                    weight=self.conv1d.weight,
+                    bias=bias,
+                    mask=mask,
+                    training=self.training,
+                    kernel_size=self.conv_kernel_size,
+                )
+                if (
+                    admission.accepted
+                    and fused_mamba_conv_refusal(conv_input.dtype) is None
+                ):
+                    compact = (
+                        self._conv_policy == "fused_b1_compact" and not capture_window
+                    )
+                    conv_output, history = fused_mamba_conv_b1(
+                        conv_input,
+                        conv_state,
+                        self.conv1d.weight,
+                        bias,
+                        capture_window=not compact,
+                    )
+                    if compact:
+                        cache[0] = history
+                        padded_input = None
+                    else:
+                        padded_input = history
+                        cache[0] = padded_input[:, 1:, :]
+                    self._conv_counts[self._conv_policy] += 1
+                    return conv_output, padded_input
+                self._conv_counts["refused"] += 1
             padded_input = mx.concatenate([conv_state, conv_input], axis=1)
             n_keep = self.conv_kernel_size - 1
             if cache.lengths is not None:
@@ -185,6 +391,7 @@ class NemotronHMamba2Mixer(nn.Module):
             )
 
         conv_output = self.conv1d(padded_input)
+        self._conv_counts["ordinary"] += 1
         return nn.silu(conv_output), padded_input
 
     def _ssm(
@@ -195,7 +402,8 @@ class NemotronHMamba2Mixer(nn.Module):
         dt: mx.array,
         cache: ArraysCache | None,
         mask: mx.array | None,
-    ) -> mx.array:
+        gate: mx.array | None = None,
+    ) -> tuple[mx.array, bool]:
         batch_size, seq_len, _ = hidden_states.shape
 
         hidden_states = hidden_states.reshape(
@@ -208,22 +416,125 @@ class NemotronHMamba2Mixer(nn.Module):
         else:
             state = None
 
-        y, state = ssm_update(
-            hidden_states,
+        gate_fused = False
+        if self._ssm_policy == "fused_short_gate" and gate is not None:
+            from .nemotron_mamba_ssm import (
+                admit_fused_mamba_ssm_gate_short,
+                fused_mamba_ssm_gate_refusal,
+                fused_mamba_ssm_gate_short,
+            )
+
+            D = self.D.astype(hidden_states.dtype)
+            admission = admit_fused_mamba_ssm_gate_short(
+                x=hidden_states,
+                B=B,
+                C=C,
+                dt=dt,
+                A_log=self.A_log,
+                D=D,
+                dt_bias=self.dt_bias,
+                state=state,
+                gate=gate,
+                mask=mask,
+                lengths=None if cache is None else cache.lengths,
+            )
+            refusal = fused_mamba_ssm_gate_refusal(hidden_states.dtype)
+            if admission.accepted and refusal is None:
+                self._ssm_counts["fused_short_gate"] += 1
+                y, state = fused_mamba_ssm_gate_short(
+                    hidden_states,
+                    self.A_log,
+                    B,
+                    C,
+                    D,
+                    dt,
+                    self.dt_bias,
+                    state,
+                    gate,
+                    self.time_step_limit,
+                )
+                gate_fused = True
+            else:
+                reason = admission.reason if not admission.accepted else refusal
+                self._ssm_counts["refused"] += 1
+                self._ssm_refusal_reasons[reason] = (
+                    self._ssm_refusal_reasons.get(reason, 0) + 1
+                )
+                self._ssm_counts["ordinary"] += 1
+                y, state = ssm_update(
+                    hidden_states,
+                    self.A_log,
+                    B,
+                    C,
+                    D,
+                    dt,
+                    self.dt_bias,
+                    state,
+                    self.time_step_limit,
+                    mask,
+                )
+        else:
+            y, state = self._ssm_update_arrays(hidden_states, B, C, dt, state, mask)
+        if cache:
+            cache[1] = state
+
+        return y.reshape(batch_size, seq_len, self.intermediate_size), gate_fused
+
+    def _ssm_update_arrays(self, x, B, C, dt, state, mask):
+        D = self.D.astype(x.dtype)
+        if self._ssm_policy in {"fused_short", "fused_short_gate"}:
+            from .nemotron_mamba_ssm import (
+                admit_fused_mamba_ssm_short,
+                fused_mamba_ssm_short,
+            )
+
+            admission = admit_fused_mamba_ssm_short(
+                x=x,
+                B=B,
+                C=C,
+                dt=dt,
+                A_log=self.A_log,
+                D=D,
+                dt_bias=self.dt_bias,
+                state=state,
+                mask=mask,
+                lengths=None,
+            )
+            if admission.accepted:
+                counter = (
+                    "fused_short"
+                    if self._ssm_policy == "fused_short"
+                    else "fused_short_replay"
+                )
+                self._ssm_counts[counter] += 1
+                return fused_mamba_ssm_short(
+                    x,
+                    self.A_log,
+                    B,
+                    C,
+                    D,
+                    dt,
+                    self.dt_bias,
+                    state,
+                    self.time_step_limit,
+                )
+            self._ssm_counts["refused"] += 1
+            self._ssm_refusal_reasons[admission.reason] = (
+                self._ssm_refusal_reasons.get(admission.reason, 0) + 1
+            )
+        self._ssm_counts["ordinary"] += 1
+        return ssm_update(
+            x,
             self.A_log,
             B,
             C,
-            self.D.astype(hidden_states.dtype),
+            D,
             dt,
             self.dt_bias,
             state,
             self.time_step_limit,
             mask,
         )
-        if cache:
-            cache[1] = state
-
-        return y.reshape(batch_size, seq_len, self.intermediate_size)
 
     def __call__(
         self,
@@ -231,17 +542,69 @@ class NemotronHMamba2Mixer(nn.Module):
         mask: mx.array | None,
         cache: ArraysCache | None = None,
         ssm_sink: list | None = None,
+        residual: mx.array | None = None,
     ) -> mx.array:
         initial_conv = cache[0] if cache is not None else None
         initial_state = cache[1] if cache is not None else None
-        projected = self.in_proj(hidden_states)
+        projection_lengths = None
+        if (
+            self._projection_policy
+            in {
+                "compact_padded",
+                "compact_row_exact",
+                "adaptive_row_exact",
+            }
+            and cache is not None
+        ):
+            left_padding = cache._left_padding_vector()
+            if left_padding is None or not any(value > 0 for value in left_padding):
+                projection_lengths = cache._length_vector()
+            else:
+                self._projection_counts["left_padding_declines"] += 1
+        projected = None
+        if (
+            self._projection_policy == "short_row_exact"
+            and hidden_states.ndim == 3
+            and hidden_states.shape[0] == 1
+            and 1 < hidden_states.shape[1] <= 16
+        ):
+            from .row_exact_qmv import quantized_linear
+
+            projected, route = quantized_linear(self.in_proj, hidden_states)
+            self._projection_counts[f"in_proj_short_{route}"] += 1
+        if (
+            projection_lengths is not None
+            and self._projection_policy != "adaptive_row_exact"
+        ):
+            from .nemotron_varlen_projection import project_live_rows
+
+            projected = project_live_rows(
+                self.in_proj,
+                hidden_states,
+                projection_lengths,
+                self._projection_counts,
+                boundary="in_proj",
+                arithmetic=(
+                    "row_exact"
+                    if self._projection_policy == "compact_row_exact"
+                    else "stock"
+                ),
+            )
+        if projected is None:
+            self._projection_counts["in_proj_ordinary"] += 1
+            projected = self.in_proj(hidden_states)
 
         gate, conv_input, dt = mx.split(
             projected,
             [self.intermediate_size, self.intermediate_size + self.conv_dim],
             axis=-1,
         )
-        conv_output, padded_input = self._conv(conv_input, cache, mask)
+        capture_window = bool(
+            (cache is not None and cache.speculating) or ssm_sink is not None
+        )
+        conv_output, padded_input = self._conv(
+            conv_input, cache, mask, capture_window=capture_window
+        )
         hidden_states_ssm, B, C = mx.split(
             conv_output,
             [
@@ -262,19 +625,32 @@ class NemotronHMamba2Mixer(nn.Module):
             c = C.reshape(C.shape[0], steps, self.n_groups, self.ssm_state_size)
             keep = self.conv_kernel_size - 1
 
-            def rollback(prefix, *, x=x, b=b, c=c, dt=dt,
-                         padded=padded_input, state=initial_state):
-                _, restored = ssm_update(
-                    x[:, :prefix], self.A_log, b[:, :prefix], c[:, :prefix],
-                    self.D.astype(x.dtype), dt[:, :prefix], self.dt_bias,
-                    state, self.time_step_limit,
+            def rollback(
+                prefix,
+                *,
+                x=x,
+                b=b,
+                c=c,
+                dt=dt,
+                padded=padded_input,
+                state=initial_state,
+            ):
+                _, restored = self._ssm_update_arrays(
+                    x[:, :prefix],
+                    b[:, :prefix],
+                    c[:, :prefix],
+                    dt[:, :prefix],
+                    state,
                     None if mask is None else mask[:, :prefix],
                 )
-                return [mx.contiguous(padded[:, prefix:prefix + keep]), restored]
+                conv = (
+                    padded[:, prefix]
+                    if padded.ndim == 4
+                    else mx.contiguous(padded[:, prefix : prefix + keep])
+                )
+                return [conv, restored]
 
-            cache.record_rollback(
-                steps, rollback, [initial_conv, initial_state]
-            )
+            cache.record_rollback(steps, rollback, [initial_conv, initial_state])
         if ssm_sink is not None:
             # Everything needed to replay this update on an accepted prefix
             # during speculative rollback; tuple layout consumed by
@@ -297,11 +673,74 @@ class NemotronHMamba2Mixer(nn.Module):
                     self.conv_kernel_size,
                 )
             )
-        y = self._ssm(hidden_states_ssm, B, C, dt, cache, mask)
+        y, gate_fused = self._ssm(hidden_states_ssm, B, C, dt, cache, mask, gate=gate)
         if cache:
             cache.advance(y.shape[1])
-        y = self.norm(y, gate)
-        return self.out_proj(y)
+        y = self.norm(y, None if gate_fused else gate)
+        projected = None
+        if (
+            self._projection_policy == "short_row_exact"
+            and y.ndim == 3
+            and y.shape[0] == 1
+            and 1 < y.shape[1] <= 16
+        ):
+            from .row_exact_qmv import quantized_linear
+
+            projected, route = quantized_linear(self.out_proj, y)
+            self._projection_counts[f"out_proj_short_{route}"] += 1
+        compact_out = projection_lengths is not None
+        if compact_out and self._projection_policy == "adaptive_row_exact":
+            from .nemotron_varlen_projection import adaptive_row_exact_selected
+
+            compact_out = adaptive_row_exact_selected(
+                "out_proj", y.shape, projection_lengths
+            )
+            self._projection_counts[
+                "adaptive_out_selected" if compact_out else "adaptive_out_declines"
+            ] += 1
+        if compact_out:
+            from .nemotron_varlen_projection import project_live_rows
+
+            projected = project_live_rows(
+                self.out_proj,
+                y,
+                projection_lengths,
+                self._projection_counts,
+                boundary="out_proj",
+                arithmetic=(
+                    "row_exact"
+                    if self._projection_policy
+                    in {
+                        "compact_row_exact",
+                        "adaptive_row_exact",
+                    }
+                    else "stock"
+                ),
+            )
+        if (
+            projected is None
+            and residual is not None
+            and self._projection_policy == "native_qmm_residual_b1"
+        ):
+            from .nemotron_mamba_native_outproj_residual import (
+                admit_native_outproj_residual_b1,
+                native_outproj_residual_b1,
+            )
+
+            admission = admit_native_outproj_residual_b1(
+                y=y,
+                residual=residual,
+                projection=self.out_proj,
+                training=self.training,
+            )
+            if admission.accepted:
+                self._projection_counts["native_qmm_residual_b1"] += 1
+                return native_outproj_residual_b1(y, residual, self.out_proj)
+            self._projection_counts["native_qmm_residual_refused"] += 1
+        if projected is None:
+            self._projection_counts["out_proj_ordinary"] += 1
+            projected = self.out_proj(y)
+        return residual + projected if residual is not None else projected
 
 
 class NemotronHAttention(nn.Module):
@@ -424,23 +863,36 @@ class MoEGate(nn.Module):
         # Puzzle configs omit group routing / scaling; default to the identity
         # (no grouping, unit scale), preserving explicitly configured zeroes.
         self.routed_scaling_factor = (
-            1.0 if config.routed_scaling_factor is None else config.routed_scaling_factor
+            1.0
+            if config.routed_scaling_factor is None
+            else config.routed_scaling_factor
         )
         self.n_group = 1 if config.n_group is None else config.n_group
         self.topk_group = 1 if config.topk_group is None else config.topk_group
         if (
-            self.n_group < 1 or not 1 <= self.topk_group <= self.n_group
+            self.n_group < 1
+            or not 1 <= self.topk_group <= self.n_group
             or self.n_routed_experts % self.n_group
-            or not 1 <= self.top_k <= self.topk_group * (self.n_routed_experts // self.n_group)
-            or (self.n_group > self.topk_group and self.n_routed_experts // self.n_group < 2)
+            or not 1
+            <= self.top_k
+            <= self.topk_group * (self.n_routed_experts // self.n_group)
+            or (
+                self.n_group > self.topk_group
+                and self.n_routed_experts // self.n_group < 2
+            )
         ):
             raise ValueError("invalid Nemotron grouped expert routing geometry")
         self.weight = mx.zeros((self.n_routed_experts, config.hidden_size))
         self.e_score_correction_bias = mx.zeros((self.n_routed_experts,))
 
     def __call__(self, x):
+        logits = (
+            x.astype(mx.float32) @ self.weight.astype(mx.float32).T
+            if getattr(self.config, "router_compute_dtype", "input") == "float32"
+            else x @ self.weight.T
+        )
         return group_expert_select(
-            x @ self.weight.T,
+            logits,
             self.e_score_correction_bias,
             self.top_k,
             self.n_group,
@@ -469,6 +921,9 @@ class NemotronHMoE(nn.Module):
             config.n_routed_experts,
             activation=nn.ReLU2(),
         )
+        self._relu2_down_policy = "auto"
+        self._relu2_down_counts = {"ordinary": 0, "fused_b1": 0, "refused": 0}
+        self._routed_batch_counts = {"ordinary": 0, "routed_batch_exact": 0, "refused": 0}
 
         self.gate = MoEGate(config)
         if config.n_shared_experts is not None:
@@ -486,6 +941,93 @@ class NemotronHMoE(nn.Module):
                 config.moe_latent_size, config.hidden_size, bias=config.mlp_bias
             )
 
+    def set_relu2_down_policy(self, policy: str) -> str:
+        if policy not in {"auto", "fused_b1"}:
+            raise ValueError("Nemotron ReLU2/down policy must be auto or fused_b1")
+        old, self._relu2_down_policy = self._relu2_down_policy, policy
+        return old
+
+    def relu2_down_status(self) -> dict:
+        return {
+            "policy": self._relu2_down_policy,
+            "counts": dict(self._relu2_down_counts),
+        }
+
+    def _routed_batch_geometry_refusal(self, rows: int) -> str | None:
+        if self.training:
+            return "training"
+        if not 2 <= rows <= 16:
+            return f"rows {rows}"
+        geometry = (
+            self.config.hidden_size,
+            self.config.n_routed_experts,
+            self.config.num_experts_per_tok,
+            self.config.moe_latent_size,
+            self.config.moe_intermediate_size,
+            self.config.moe_shared_expert_intermediate_size,
+        )
+        if geometry != (4096, 512, 22, 1024, 2688, 5376):
+            return f"geometry {geometry}"
+        if self.config.n_shared_experts is None:
+            return "no shared expert"
+        if self._relu2_down_policy != "auto":
+            return f"relu2/down policy {self._relu2_down_policy}"
+        if self.switch_mlp._sort_policy != "auto":
+            return f"sort policy {self.switch_mlp._sort_policy}"
+        return None
+
+    def routed_batch_refusal(self, x) -> str | None:
+        if x.ndim != 3 or x.shape[0] != 1:
+            return f"shape {tuple(x.shape)}"
+        return self._routed_batch_geometry_refusal(int(x.shape[1]))
+
+    def routed_batch_status(self) -> dict:
+        return {"counts": dict(self._routed_batch_counts)}
+
+    @staticmethod
+    def _rowwise(function, x):
+        return mx.concatenate(
+            [function(x[:, row : row + 1]) for row in range(x.shape[1])], axis=1
+        )
+
+    def routed_batch_exact(self, x):
+        """Batch only the routed expert core while preserving B1 boundaries."""
+        refusal = self.routed_batch_refusal(x)
+        if refusal is not None:
+            self._routed_batch_counts["refused"] += 1
+            raise ValueError(f"Nemotron routed expert batch refused: {refusal}")
+
+        residuals = x
+        selected = [self.gate(x[:, row : row + 1]) for row in range(x.shape[1])]
+        inds = mx.concatenate([item[0] for item in selected], axis=1)
+        scores = mx.concatenate([item[1] for item in selected], axis=1)
+        x = self._rowwise(self.fc1_latent_proj, x)
+
+        routed = self.switch_mlp(x, inds)
+        y = mx.concatenate(
+            [
+                (
+                    routed[:, row : row + 1]
+                    * scores[:, row : row + 1, :, None]
+                )
+                .sum(axis=-2)
+                .astype(routed.dtype)
+                for row in range(routed.shape[1])
+            ],
+            axis=1,
+        )
+        y = self._rowwise(self.fc2_latent_proj, y)
+        shared = self._rowwise(self.shared_experts, residuals)
+        y = mx.concatenate(
+            [
+                y[:, row : row + 1] + shared[:, row : row + 1]
+                for row in range(y.shape[1])
+            ],
+            axis=1,
+        )
+        self._routed_batch_counts["routed_batch_exact"] += 1
+        return y
+
     def __call__(self, x):
         residuals = x
         inds, scores = self.gate(x)
@@ -493,8 +1035,27 @@ class NemotronHMoE(nn.Module):
         if self.moe_latent_size is not None:
             x = self.fc1_latent_proj(x)
 
-        y = self.switch_mlp(x, inds)
-        y = (y * scores[..., None]).sum(axis=-2).astype(y.dtype)
+        fused = None
+        if self._relu2_down_policy == "fused_b1":
+            from .nemotron_relu2_down import admit, relu2_down_combine
+
+            admission = admit(
+                x, inds, scores, self.switch_mlp.fc2, training=self.training
+            )
+            if admission.accepted:
+                preactivation = self.switch_mlp.project_up(x, inds)
+                fused = relu2_down_combine(
+                    preactivation, inds, scores, self.switch_mlp.fc2
+                )
+                self._relu2_down_counts["fused_b1"] += 1
+            else:
+                self._relu2_down_counts["refused"] += 1
+        if fused is None:
+            y = self.switch_mlp(x, inds)
+            y = (y * scores[..., None]).sum(axis=-2).astype(y.dtype)
+            self._relu2_down_counts["ordinary"] += 1
+        else:
+            y = fused
 
         if self.moe_latent_size is not None:
             y = self.fc2_latent_proj(y)
@@ -530,14 +1091,21 @@ class NemotronHBlock(nn.Module):
     ):
         hidden_states = self.norm(x)
         if self.block_type == "M":
+            owns_residual = self.mixer.owns_residual_boundary()
             hidden_states = self.mixer(
-                hidden_states, mask=mask, cache=cache, ssm_sink=ssm_sink
+                hidden_states,
+                mask=mask,
+                cache=cache,
+                ssm_sink=ssm_sink,
+                residual=x if owns_residual else None,
             )
         elif self.block_type == "*":
             hidden_states = self.mixer(hidden_states, mask=mask, cache=cache)
         else:
             hidden_states = self.mixer(hidden_states)
 
+        if self.block_type == "M" and owns_residual:
+            return hidden_states
         return x + hidden_states
 
 
@@ -564,9 +1132,7 @@ class NemotronHMTPBlock(NemotronHBlock):
         super().__init__(args, block_type)
         eps = args.layer_norm_epsilon
         if is_first:
-            self.eh_proj = nn.Linear(
-                2 * args.hidden_size, args.hidden_size, bias=False
-            )
+            self.eh_proj = nn.Linear(2 * args.hidden_size, args.hidden_size, bias=False)
             self.enorm = nn.RMSNorm(args.hidden_size, eps=eps)
             self.hnorm = nn.RMSNorm(args.hidden_size, eps=eps)
         if is_last:
@@ -593,6 +1159,7 @@ class NemotronHMTP(nn.Module):
 class NemotronHModel(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
+        self.hidden_size = args.hidden_size
         self.embeddings = nn.Embedding(args.vocab_size, args.hidden_size)
         pattern = args.hybrid_override_pattern
         block_configs = args.block_configs or [None] * len(pattern)
@@ -624,8 +1191,13 @@ class NemotronHModel(nn.Module):
         ssm_sink: list | None = None,
         capture_layers: tuple[int, ...] = (),
         hidden_sink: list | None = None,
+        inputs_embeds=None,
     ):
-        hidden_states = self.embeddings(inputs)
+        hidden_states = (
+            self.embeddings(inputs) if inputs_embeds is None else inputs_embeds
+        )
+        if hidden_states.shape != (*inputs.shape, self.hidden_size):
+            raise ValueError("Nemotron input embeddings must match token geometry")
 
         if cache is None:
             cache = [None] * len(self.layers)
@@ -644,9 +1216,10 @@ class NemotronHModel(nn.Module):
         if ssm_cache is not None and hidden_states.shape[0] == 1:
             left_padding = ssm_cache._left_padding_vector()
             lengths = ssm_cache._length_vector()
-            if not ((left_padding is None or left_padding[0] == 0) and (
-                lengths is None or lengths[0] >= hidden_states.shape[1]
-            )):
+            if not (
+                (left_padding is None or left_padding[0] == 0)
+                and (lengths is None or lengths[0] >= hidden_states.shape[1])
+            ):
                 ssm_mask = create_ssm_mask(hidden_states, ssm_cache)
         else:
             ssm_mask = create_ssm_mask(hidden_states, ssm_cache)
@@ -671,6 +1244,13 @@ class NemotronHModel(nn.Module):
 
 
 class Model(nn.Module):
+    # Nemotron-H's ordinary B1 forward updates KV and recurrent caches one
+    # token at a time.  Progressive verification stages those exact updates
+    # on request-private cache copies and promotes only an accepted boundary.
+    # Declare the protocol on the shared language model as both the text-only
+    # Super adapter and the multimodal composition use this implementation.
+    progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
+
     # External hybrid verification uses existing ArraysCache record/replay.
     # Tiny CPU protocol evidence: provenance/nemotron-external-taps.json.
     supports_speculative_rollback = True
@@ -693,8 +1273,153 @@ class Model(nn.Module):
         self.backbone = NemotronHModel(args)
         self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
         self.model_type = args.model_type
+        self._short_segment_policy = "auto"
+        self._short_segment_counts = {
+            "layerwise_short_exact": 0,
+            "layerwise_short_exact_routed_batch": 0,
+            "rows": 0,
+            "refused": 0,
+        }
+        self._short_segment_refusal_reasons = {}
         if args.num_nextn_predict_layers > 0 and args.mtp_hybrid_override_pattern:
             self.mtp = NemotronHMTP(args)
+
+    def set_short_segment_policy(self, policy: str) -> str:
+        if policy not in {
+            "auto",
+            "layerwise_short_exact",
+            "layerwise_short_exact_routed_batch",
+        }:
+            raise ValueError(
+                "Nemotron short-segment policy must be auto, layerwise_short_exact, "
+                "or layerwise_short_exact_routed_batch"
+            )
+        previous, self._short_segment_policy = self._short_segment_policy, policy
+        return previous
+
+    def short_segment_status(self) -> dict:
+        return {
+            "policy": self._short_segment_policy,
+            "counts": dict(self._short_segment_counts),
+            "refusal_reasons": dict(self._short_segment_refusal_reasons),
+        }
+
+    def _short_segment_refusal(self, inputs, cache) -> str | None:
+        if self._short_segment_policy not in {
+            "layerwise_short_exact",
+            "layerwise_short_exact_routed_batch",
+        }:
+            return "policy"
+        if inputs.ndim != 2 or inputs.shape[0] != 1 or not 2 <= inputs.shape[1] <= 16:
+            return f"token shape {tuple(inputs.shape)}"
+        if cache is None or not any(
+            getattr(entry, "speculating", False) for entry in cache
+        ):
+            return "non-speculative cache"
+        # Layer rows run unmasked.  Padded caches keep the per-token path,
+        # which builds the padding masks (the same guard it applies itself).
+        for entry in cache:
+            if isinstance(entry, BatchKVCache):
+                if entry._right_padding is not None:
+                    return "right padding"
+                if int(entry.left_padding[0].item()) != 0:
+                    return "left padding"
+            elif isinstance(entry, ArraysCache):
+                left_padding = entry._left_padding_vector()
+                if left_padding is not None and left_padding[0] > 0:
+                    return "left padding"
+        for layer in self.layers:
+            if layer.block_type == "E":
+                if self._short_segment_policy == "layerwise_short_exact_routed_batch":
+                    refusal = layer.mixer._routed_batch_geometry_refusal(
+                        int(inputs.shape[1])
+                    )
+                    if refusal is not None:
+                        return f"expert routed batch {refusal}"
+                continue
+            if layer.block_type != "M":
+                continue
+            mixer = layer.mixer
+            if mixer._conv_policy != "fused_short":
+                return f"mamba conv {mixer._conv_policy}"
+            if mixer._ssm_policy not in {"fused_short", "fused_short_gate"}:
+                return f"mamba ssm {mixer._ssm_policy}"
+            if mixer._projection_policy != "short_row_exact":
+                return f"mamba projection {mixer._projection_policy}"
+        return None
+
+    def _layerwise_short_hidden(self, inputs, cache, capture_layers):
+        """Return exact short-segment hidden rows and requested layer taps.
+
+        Mamba owns the recurrent segment and its internal rollback tape.  Every
+        other block retains one-token decode arithmetic, including attention
+        cache updates and switched-expert gather decisions.  This is the
+        adapter-selected execution primitive consumed by the generic
+        speculative scheduler; no scheduler model-name branch is required.
+        """
+        hidden = self.backbone.embeddings(inputs)
+        taps = []
+        cache_index = 0
+        for layer_index, layer in enumerate(self.layers):
+            layer_cache = None
+            if layer.block_type in {"M", "*"}:
+                layer_cache = cache[cache_index]
+                cache_index += 1
+            if layer.block_type == "M":
+                hidden = layer(hidden, mask=None, cache=layer_cache)
+            elif (
+                layer.block_type == "E"
+                and self._short_segment_policy
+                == "layerwise_short_exact_routed_batch"
+            ):
+                normalized = mx.concatenate(
+                    [
+                        layer.norm(hidden[:, row : row + 1])
+                        for row in range(hidden.shape[1])
+                    ],
+                    axis=1,
+                )
+                mixed = layer.mixer.routed_batch_exact(normalized)
+                hidden = mx.concatenate(
+                    [
+                        hidden[:, row : row + 1] + mixed[:, row : row + 1]
+                        for row in range(hidden.shape[1])
+                    ],
+                    axis=1,
+                )
+            else:
+                rows = []
+                for row in range(hidden.shape[1]):
+                    rows.append(
+                        layer(
+                            hidden[:, row : row + 1],
+                            mask=None,
+                            cache=layer_cache,
+                        )
+                    )
+                hidden = mx.concatenate(rows, axis=1)
+            if layer_index in capture_layers:
+                taps.append(hidden)
+        hidden = self.backbone.norm_f(hidden)
+        self._short_segment_counts[self._short_segment_policy] += 1
+        self._short_segment_counts["rows"] += int(inputs.shape[1])
+        return hidden, taps
+
+    def _forward_layerwise_short_exact(
+        self, inputs, cache, capture_layers, *, body_only: bool
+    ):
+        hidden, taps = self._layerwise_short_hidden(inputs, cache, capture_layers)
+        if body_only:
+            logits = None
+        else:
+            logits = mx.concatenate(
+                [
+                    self.lm_head(hidden[:, row : row + 1])
+                    for row in range(hidden.shape[1])
+                ],
+                axis=1,
+            )
+        return logits, mx.concatenate(taps, axis=-1)
 
     def __call__(
         self,
@@ -713,7 +1438,15 @@ class Model(nn.Module):
     def external_execution_receipt(self):
         return {
             "single_row_verification": "ordinary_tokenwise",
-            "batched_verification": "block_candidate",
+            "batched_verification": (
+                self._short_segment_policy
+                if self._short_segment_policy
+                in {
+                    "layerwise_short_exact",
+                    "layerwise_short_exact_routed_batch",
+                }
+                else "block_candidate"
+            ),
             "batched_numerical_qualification": False,
             "real_artifact_qualification": False,
         }
@@ -725,16 +1458,36 @@ class Model(nn.Module):
         in capture IDs, using the ordinary backbone's compact cache mapping.
         """
         capture_layers = tuple(capture_layers)
-        if (not capture_layers
-                or any(type(index) is not int for index in capture_layers)
-                or tuple(sorted(set(capture_layers))) != capture_layers
-                or capture_layers[0] < 0 or capture_layers[-1] >= len(self.layers)):
+        if (
+            not capture_layers
+            or any(type(index) is not int for index in capture_layers)
+            or tuple(sorted(set(capture_layers))) != capture_layers
+            or capture_layers[0] < 0
+            or capture_layers[-1] >= len(self.layers)
+        ):
             raise ValueError("Invalid target capture layers")
-        expected_caches = sum(layer.block_type in ('M', '*') for layer in self.layers)
+        expected_caches = sum(layer.block_type in ("M", "*") for layer in self.layers)
         if cache is not None and len(cache) != expected_caches:
             raise ValueError("Target cache must match compact hybrid layer topology")
-        if (inputs.shape[0] == 1 and inputs.shape[1] > 1 and cache is not None
-                and any(getattr(entry, "speculating", False) for entry in cache)):
+        short_refusal = self._short_segment_refusal(inputs, cache)
+        if short_refusal is None:
+            return self._forward_layerwise_short_exact(
+                inputs, cache, capture_layers, body_only=body_only
+            )
+        if self._short_segment_policy in {
+            "layerwise_short_exact",
+            "layerwise_short_exact_routed_batch",
+        }:
+            self._short_segment_counts["refused"] += 1
+            self._short_segment_refusal_reasons[short_refusal] = (
+                self._short_segment_refusal_reasons.get(short_refusal, 0) + 1
+            )
+        if (
+            inputs.shape[0] == 1
+            and inputs.shape[1] > 1
+            and cache is not None
+            and any(getattr(entry, "speculating", False) for entry in cache)
+        ):
             # Match ordinary S=1 recurrence and attention rounding, just as
             # mtp_verify_backbone does. Non-speculative prefill stays blocked;
             # true B>1 verification remains an unqualified numerical strategy.
@@ -742,16 +1495,25 @@ class Model(nn.Module):
             marked = []
             try:
                 for entry in cache:
-                    if (isinstance(entry, BatchKVCache)
-                            and entry._right_padding is None
-                            and int(entry.left_padding[0].item()) == 0):
-                        marked.append((entry, entry.__dict__.get(
-                            "_nemotron_unpadded_verify", None)))
+                    if (
+                        isinstance(entry, BatchKVCache)
+                        and entry._right_padding is None
+                        and int(entry.left_padding[0].item()) == 0
+                    ):
+                        marked.append(
+                            (
+                                entry,
+                                entry.__dict__.get("_nemotron_unpadded_verify", None),
+                            )
+                        )
                         entry._nemotron_unpadded_verify = True
                 for index in range(inputs.shape[1]):
                     output, taps = self.forward_with_taps(
-                        inputs[:, index:index + 1], cache, capture_layers,
-                        body_only=body_only)
+                        inputs[:, index : index + 1],
+                        cache,
+                        capture_layers,
+                        body_only=body_only,
+                    )
                     if not body_only:
                         logits.append(output)
                     features.append(taps)
@@ -761,11 +1523,16 @@ class Model(nn.Module):
                         entry.__dict__.pop("_nemotron_unpadded_verify", None)
                     else:
                         entry._nemotron_unpadded_verify = previous
-            return (None if body_only else mx.concatenate(logits, axis=1)), mx.concatenate(features, axis=1)
+            return (
+                None if body_only else mx.concatenate(logits, axis=1)
+            ), mx.concatenate(features, axis=1)
         taps = []
-        hidden = self.backbone(inputs, cache=cache, capture_layers=capture_layers,
-                               hidden_sink=taps)
-        return (None if body_only else self.logits(hidden)), mx.concatenate(taps, axis=-1)
+        hidden = self.backbone(
+            inputs, cache=cache, capture_layers=capture_layers, hidden_sink=taps
+        )
+        return (None if body_only else self.logits(hidden)), mx.concatenate(
+            taps, axis=-1
+        )
 
     def prefill_body(self, inputs, cache, capture_layers):
         return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
@@ -780,11 +1547,16 @@ class Model(nn.Module):
 
     def make_cache(self):
         caches = []
-        for l in self.layers:
+        for layer_index, l in enumerate(self.layers):
             if l.block_type == "M":
-                caches.append(ArraysCache(size=2))
+                cache = ArraysCache(size=2)
+                cache.apcv2_recurrent_kind = "mamba"
+                cache.apcv2_layer_index = layer_index
+                caches.append(cache)
             elif l.block_type == "*":
-                caches.append(KVCache())
+                cache = KVCache()
+                cache.apcv2_layer_index = layer_index
+                caches.append(cache)
         return caches
 
     def logits(self, hidden: mx.array) -> mx.array:
@@ -805,16 +1577,33 @@ class Model(nn.Module):
         attn_caches = [entry for entry in cache if isinstance(entry, BatchKVCache)]
         try:
             for entry in attn_caches:
-                if entry._right_padding is None and int(entry.left_padding[0].item()) == 0:
+                if (
+                    entry._right_padding is None
+                    and int(entry.left_padding[0].item()) == 0
+                ):
                     entry._nemotron_unpadded_verify = True
+            short_refusal = self._short_segment_refusal(tokens, cache)
+            if short_refusal is None:
+                hidden, _taps = self._layerwise_short_hidden(tokens, cache, ())
+                return hidden, hidden
+            if self._short_segment_policy in {
+                "layerwise_short_exact",
+                "layerwise_short_exact_routed_batch",
+            }:
+                self._short_segment_counts["refused"] += 1
+                self._short_segment_refusal_reasons[short_refusal] = (
+                    self._short_segment_refusal_reasons.get(short_refusal, 0) + 1
+                )
             for index in range(tokens.shape[1]):
-                output, hidden = self.mtp_backbone(tokens[:, index:index + 1], cache)
+                output, hidden = self.mtp_backbone(tokens[:, index : index + 1], cache)
                 logits_hidden.append(output)
                 draft_hidden.append(hidden)
         finally:
             for entry in attn_caches:
                 entry.__dict__.pop("_nemotron_unpadded_verify", None)
-        return mx.concatenate(logits_hidden, axis=1), mx.concatenate(draft_hidden, axis=1)
+        return mx.concatenate(logits_hidden, axis=1), mx.concatenate(
+            draft_hidden, axis=1
+        )
 
     @property
     def quant_predicate(self):
@@ -825,11 +1614,18 @@ class Model(nn.Module):
         return lambda path, _: path != "lm_head"
 
     def make_mtp_cache(self):
-        return [
-            ArraysCache(size=2) if layer.block_type == "M" else KVCache()
-            for layer in self.mtp.layers
-            if layer.block_type in ("M", "*")
-        ]
+        caches = []
+        for layer_index, layer in enumerate(self.mtp.layers):
+            if layer.block_type == "M":
+                cache = ArraysCache(size=2)
+                cache.apcv2_recurrent_kind = "mamba"
+                cache.apcv2_layer_index = layer_index
+                caches.append(cache)
+            elif layer.block_type == "*":
+                cache = KVCache()
+                cache.apcv2_layer_index = layer_index
+                caches.append(cache)
+        return caches
 
     def mtp_step(self, hidden, tokens, mtp_cache):
         """One MTP forward over S positions.
@@ -933,9 +1729,7 @@ class Model(nn.Module):
                 weights[k] = v.moveaxis(2, 1)
 
         # Stack experts (backbone and mtp layers alike)
-        prefixes = {
-            k.rsplit(".experts.", 1)[0] for k in weights if ".experts." in k
-        }
+        prefixes = {k.rsplit(".experts.", 1)[0] for k in weights if ".experts." in k}
         for prefix in prefixes:
             for m, n in [("down_proj", "fc2"), ("up_proj", "fc1")]:
                 if f"{prefix}.experts.0.{m}.weight" in weights:

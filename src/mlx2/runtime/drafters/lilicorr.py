@@ -193,6 +193,121 @@ class LiLiCorrHead(nn.Module):
         return mx.concatenate([first, pairs], axis=1)
 
 
+def _ordered_lilicorr_paths(
+    hosted,
+    ids,
+    greedy_tokens,
+    branch_count,
+    *,
+    strategy="distinct_root",
+    shared_prefix_tokens=None,
+):
+    """Materialize ordered deterministic paths from one candidate lattice."""
+
+    proposal_length = len(greedy_tokens)
+    if strategy not in {
+        "distinct_root",
+        "shared_prefix",
+        "paired_continuations",
+        "confidence_tree",
+    }:
+        raise ValueError("unsupported LiLiCorr alternative branch strategy")
+    if strategy == "distinct_root":
+        root_order = np.argsort(-hosted[0, 0], kind="stable")
+        alternatives = []
+        for root_column in root_order[:branch_count]:
+            predecessor_column = int(root_column)
+            path = []
+            for position in range(proposal_length):
+                if position:
+                    predecessor_column = int(
+                        np.argmax(hosted[position, predecessor_column])
+                    )
+                path.append(int(ids[position, predecessor_column]))
+            alternatives.append(path)
+        return alternatives
+
+    if (
+        type(shared_prefix_tokens) is not int
+        or not 1 <= shared_prefix_tokens < proposal_length
+    ):
+        raise ValueError(
+            "shared-prefix LiLiCorr alternatives require a nonempty proper prefix"
+        )
+    greedy_columns = []
+    predecessor_column = 0
+    for position in range(proposal_length):
+        predecessor_column = int(
+            np.argmax(hosted[position, predecessor_column])
+        )
+        greedy_columns.append(predecessor_column)
+    divergence = shared_prefix_tokens
+    predecessor_column = greedy_columns[divergence - 1]
+    branch_order = np.argsort(
+        -hosted[divergence, predecessor_column], kind="stable"
+    )
+    if strategy == "confidence_tree":
+        alternatives = [list(greedy_tokens)]
+        for branch_column in branch_order:
+            column = int(branch_column)
+            token = int(ids[divergence, column])
+            if token == int(greedy_tokens[divergence]):
+                continue
+            path = list(greedy_tokens[:divergence]) + [token]
+            for position in range(divergence + 1, proposal_length):
+                column = int(np.argmax(hosted[position, column]))
+                path.append(int(ids[position, column]))
+            alternatives.append(path)
+            if len(alternatives) == branch_count:
+                break
+        if len(alternatives) != branch_count:
+            raise ValueError("LiLiCorr confidence tree lacks distinct children")
+        return alternatives
+    if strategy == "paired_continuations":
+        if divergence + 1 >= proposal_length or branch_count > 4:
+            raise ValueError(
+                "paired LiLiCorr continuations require two suffix positions "
+                "and at most four branches"
+            )
+        parents = []
+        parent_columns = []
+        for branch_column in branch_order[: min(2, branch_count)]:
+            path = list(greedy_tokens[:divergence])
+            column = int(branch_column)
+            parent_columns.append(column)
+            path.append(int(ids[divergence, column]))
+            for position in range(divergence + 1, proposal_length):
+                column = int(np.argmax(hosted[position, column]))
+                path.append(int(ids[position, column]))
+            parents.append(path)
+        alternatives = list(parents)
+        for parent_index in range(min(2, max(0, branch_count - 2))):
+            column = parent_columns[parent_index]
+            continuation_order = np.argsort(
+                -hosted[divergence + 1, column], kind="stable"
+            )
+            child_column = int(continuation_order[1])
+            path = list(parents[parent_index][: divergence + 1])
+            path.append(int(ids[divergence + 1, child_column]))
+            for position in range(divergence + 2, proposal_length):
+                child_column = int(np.argmax(hosted[position, child_column]))
+                path.append(int(ids[position, child_column]))
+            alternatives.append(path)
+        return alternatives[:branch_count]
+    alternatives = []
+    for branch_column in branch_order[:branch_count]:
+        path = list(greedy_tokens[:divergence])
+        predecessor_column = int(branch_column)
+        path.append(int(ids[divergence, predecessor_column]))
+        for position in range(divergence + 1, proposal_length):
+            predecessor_column = int(
+                np.argmax(hosted[position, predecessor_column])
+            )
+            path.append(int(ids[position, predecessor_column]))
+        alternatives.append(path)
+    return alternatives
+
+
 class LiLiCorrDraftModel(XPressDraftModel):
     """DFlash + learned LiLiCorr head; no XPress or local selector parameters.
 
@@ -204,8 +319,16 @@ class LiLiCorrDraftModel(XPressDraftModel):
     requires_processor_histories = True
     requires_pending_context_at_prefill = True
     proposal_distribution = "deterministic_point_mass"
+    supports_ordered_alternatives = True
 
     def __init__(self, config, *, draft_attention_windows=None):
+        if draft_attention_windows is None and "sliding_attention" in config.layer_types:
+            draft_attention_windows = [
+                config.sliding_window - 1
+                if kind == "sliding_attention"
+                else None
+                for kind in config.layer_types
+            ]
         windows = validate_attention_windows(
             draft_attention_windows, config.num_hidden_layers
         )
@@ -303,10 +426,21 @@ class LiLiCorrDraftModel(XPressDraftModel):
             "owned_lm_head": bool(getattr(self.config, "has_own_lm_head", False)),
             "owned_final_norm": True,
             "trained_sliding_window": self.config.sliding_window,
+            "weight_quantization": self.config.quantization,
+            "runtime_weight_quantization": getattr(
+                self, "runtime_weight_quantization", None
+            ),
             "draft_attention_windows": None
             if self.draft_attention_windows is None
             else list(self.draft_attention_windows),
         }
+
+    def execution_diagnostics(self):
+        """Expose adapter-owned ModelOpt counters without serving introspection."""
+
+        from ..models.modelopt_nvfp4 import nvfp4_model_status
+
+        return {"modelopt_nvfp4": nvfp4_model_status(self)}
 
     def sanitize(self, weights):
         result = {}
@@ -338,6 +472,7 @@ class LiLiCorrDraftModel(XPressDraftModel):
             raise ValueError("LiLiCorr proposal length outside trained block")
         anchor_ids = [int(a) for a in anchors]
         self.draft_feedback_payloads = None
+        self._ordered_alternative_context = None
         batch = len(anchor_ids)
         histories = processor_histories or [[] for _ in range(batch)]
         processors = logits_processors or [[] for _ in range(batch)]
@@ -452,7 +587,53 @@ class LiLiCorrDraftModel(XPressDraftModel):
                 laws[row].append(q)
                 confidence_features[row].append(confidence)
         self.adaptive_confidence_features = confidence_features
+        self._ordered_alternative_context = (hosted, ids, bool(any(processors)))
         return tokens, laws
+
+    def ordered_alternative_proposals(
+        self,
+        primary_tokens,
+        *,
+        branch_count,
+        strategy,
+        shared_prefix_tokens,
+    ):
+        if (
+            type(branch_count) is not int
+            or not 1 <= branch_count <= 4
+            or branch_count > self.config.lilicorr_candidate_topk
+        ):
+            raise ValueError(
+                "LiLiCorr alternative branch count must be 1 through 4 and "
+                "fit candidate_topk"
+            )
+        context = self._ordered_alternative_context
+        if context is None:
+            raise ValueError("LiLiCorr alternative context is unavailable")
+        hosted, ids, had_processors = context
+        if had_processors:
+            raise ValueError(
+                "LiLiCorr alternative branches do not support logits processors"
+            )
+        alternatives = []
+        for row, primary in enumerate(primary_tokens):
+            row_prefix = (
+                shared_prefix_tokens[row]
+                if isinstance(shared_prefix_tokens, (list, tuple))
+                else shared_prefix_tokens
+            )
+            paths = _ordered_lilicorr_paths(
+                hosted[row],
+                ids[row],
+                list(primary),
+                branch_count,
+                strategy=strategy,
+                shared_prefix_tokens=row_prefix,
+            )
+            if paths[0] != list(primary):
+                raise RuntimeError("LiLiCorr ordered B1 path differs from primary")
+            alternatives.append(paths)
+        return alternatives
 
 
 Model = LiLiCorrDraftModel

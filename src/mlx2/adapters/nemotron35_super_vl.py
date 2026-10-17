@@ -22,6 +22,12 @@ from .dflash2 import _decode_unique_json, _read_safetensors_header, _source_bind
 from .external_draft_policy import ExternalDraftAdapterMixin
 from .nemotron3_super import Nemotron3SuperAdapter, configure_environment
 from .nemotron3_super_memory import NemotronCacheBudget
+from .nemotron35_super import (
+    _split_super_execution_policy,
+    _super_expert_gathers,
+    _super_mamba_mixers,
+    _super_moe_mixers,
+)
 
 SOURCE_REVISION = "533d66230b6e75518bf32d2d7a7b95a24c3dd517"
 CONFIG_SHA256 = "d04bef96be42705e90a60034800b23cb9b22bfdae27cca7c49d6dafd53454901"
@@ -320,6 +326,7 @@ def _inspect(path):
         raise ValueError("Conversion tensor byte accounting differs")
     return {
         "config": config,
+        "conversion": receipt,
         "text_config": runtime_config(config),
         "weight_map": weight_map,
         "has_mtp": False,
@@ -414,9 +421,26 @@ class Nemotron35SuperVLAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter)
         )
 
     def _initialize(self, model_path, execution_policy):
+        (
+            expert_sort,
+            mamba_conv,
+            mamba_norm,
+            mamba_ssm,
+            mamba_projection,
+            mamba_segment,
+            relu2_down,
+            external_policy,
+        ) = _split_super_execution_policy(execution_policy)
         external = self._parse_external_policy(
-            execution_policy, family="Nemotron 3.5 Super VL"
+            external_policy, family="Nemotron 3.5 Super VL"
         )
+        self.expert_gather_sort = expert_sort
+        self.mamba_conv = mamba_conv
+        self.mamba_norm = mamba_norm
+        self.mamba_ssm = mamba_ssm
+        self.mamba_projection = mamba_projection
+        self.mamba_segment = mamba_segment
+        self.moe_relu2_down = relu2_down
         artifact = inspect_artifact(model_path)
         draft_record = None
         if external:
@@ -433,6 +457,63 @@ class Nemotron35SuperVLAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter)
 
         claim_stock_moe(self, "the Nemotron 3.5 Super VL text adapter")
         self.model = load_text_model(artifact)
+        self._super_expert_gathers = _super_expert_gathers(self.model)
+        self._super_mamba_mixers = _super_mamba_mixers(self.model)
+        self._super_moe_mixers = _super_moe_mixers(self.model)
+        if self.expert_gather_sort != "auto":
+            for switch in self._super_expert_gathers:
+                switch.set_sort_policy(self.expert_gather_sort)
+            self.layout += ":expert-gather-unsorted-decode-v1"
+        if self.mamba_conv != "auto":
+            for mixer in self._super_mamba_mixers:
+                mixer.set_conv_policy(self.mamba_conv)
+            self.layout += (
+                ":mamba-conv4-silu-short-checkpoints-v1"
+                if self.mamba_conv == "fused_short"
+                else (
+                    ":mamba-conv4-silu-b1-compact-state-v2"
+                    if self.mamba_conv == "fused_b1_compact"
+                    else ":mamba-conv4-silu-b1-v1"
+                )
+            )
+        if self.mamba_norm != "auto":
+            for mixer in self._super_mamba_mixers:
+                mixer.norm.set_policy(self.mamba_norm)
+            self.layout += (
+                ":mamba-gate-group-rms-short-v1"
+                if self.mamba_norm == "fused_short"
+                else ":mamba-gate-group-rms-b1-v1"
+            )
+        if self.mamba_ssm != "auto":
+            for mixer in self._super_mamba_mixers:
+                mixer.set_ssm_policy(self.mamba_ssm)
+            self.layout += (
+                ":mamba-ssm-short-dt-gate-v1"
+                if self.mamba_ssm == "fused_short_gate"
+                else ":mamba-ssm-short-dt-v1"
+            )
+        if self.mamba_projection != "auto":
+            for mixer in self._super_mamba_mixers:
+                mixer.set_projection_policy(self.mamba_projection)
+            projection_layout = {
+                "compact_padded": ":mamba-varlen-q8-projection-v1",
+                "compact_row_exact": ":mamba-varlen-row-exact-q8-projection-v1",
+                "adaptive_row_exact": ":mamba-varlen-adaptive-row-exact-q8-projection-v1",
+                "short_row_exact": ":mamba-short-row-exact-q8-projection-v1",
+                "native_qmm_residual_b1": ":mamba-native-qmm-residual-b1-v1",
+            }
+            self.layout += projection_layout[self.mamba_projection]
+        if self.mamba_segment != "auto":
+            self.model.set_short_segment_policy(self.mamba_segment)
+            self.layout += (
+                ":mamba-layerwise-short-exact-routed-batch-v1"
+                if self.mamba_segment == "layerwise_short_exact_routed_batch"
+                else ":mamba-layerwise-short-exact-v1"
+            )
+        if self.moe_relu2_down != "auto":
+            for mixer in self._super_moe_mixers:
+                mixer.set_relu2_down_policy(self.moe_relu2_down)
+            self.layout += ":relu2-down-fp32-top22-b1-v1"
         # Reject changed files before making the adapter reachable.
         if inspect_artifact(model_path)["identity"] != self.identity:
             raise ValueError("Nemotron artifact changed during model load")
@@ -456,9 +537,7 @@ class Nemotron35SuperVLAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter)
             contract = self.nemotron_lilicorr_target_contract(draft_record)
 
             def loader(record, target_model):
-                return load_drafter(
-                    record, target_model, target_contract=contract
-                )
+                return load_drafter(record, target_model, target_contract=contract)
 
             self._bind_external_drafter(draft_record, loader, DESCRIPTOR)
             self.descriptor = replace(
@@ -499,9 +578,7 @@ class Nemotron35SuperVLAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter)
             return self._external_execution_config(
                 max_lanes=max_lanes, prefill_step=prefill_step
             )
-        return super().execution_config(
-            max_lanes=max_lanes, prefill_step=prefill_step
-        )
+        return super().execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
 
     def exact_prefix_cascade_contract(self):
         # The inherited older-family primitive carries a different source
@@ -554,12 +631,107 @@ class Nemotron35SuperVLAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter)
         }
 
     def diagnostics(self):
-        return {
+        base = {
             "architecture": "nemotron-h-mamba-moe-gqa",
             "layout": self.layout,
             "qualification": "unqualified",
             "load_plan": self.load_plan,
             "route_capability_contract": self.route_capability_contract(),
+        }
+        gather_counts = self._sum_candidate_counts(
+            self._super_expert_gathers, "sort_status"
+        )
+        conv_counts = self._sum_candidate_counts(
+            self._super_mamba_mixers, "conv_status"
+        )
+        norm_counts = self._sum_candidate_counts(
+            (mixer.norm for mixer in self._super_mamba_mixers), "status"
+        )
+        ssm_counts = self._sum_candidate_counts(self._super_mamba_mixers, "ssm_status")
+        projection_counts = self._sum_candidate_counts(
+            self._super_mamba_mixers, "projection_status"
+        )
+        relu2_counts = self._sum_candidate_counts(
+            self._super_moe_mixers, "relu2_down_status"
+        )
+        return {
+            **base,
+            "expert_gather_sort": self._candidate_status(
+                self.expert_gather_sort,
+                gather_counts,
+                ("unsorted_decode",),
+                len(self._super_expert_gathers),
+            ),
+            "mamba_conv": self._candidate_status(
+                self.mamba_conv,
+                conv_counts,
+                ("fused_b1", "fused_b1_compact", "fused_short"),
+                len(self._super_mamba_mixers),
+            ),
+            "mamba_norm": self._candidate_status(
+                self.mamba_norm,
+                norm_counts,
+                ("fused_b1", "fused_short"),
+                len(self._super_mamba_mixers),
+            ),
+            "mamba_ssm": self._candidate_status(
+                self.mamba_ssm,
+                ssm_counts,
+                ("fused_short", "fused_short_gate"),
+                len(self._super_mamba_mixers),
+            ),
+            "mamba_projection": self._candidate_status(
+                self.mamba_projection,
+                projection_counts,
+                (
+                    "in_proj_compaction_calls",
+                    "out_proj_compaction_calls",
+                    "in_proj_short_kernel",
+                    "out_proj_short_kernel",
+                    "native_qmm_residual_b1",
+                ),
+                len(self._super_mamba_mixers),
+            ),
+            "mamba_segment": {
+                **self._candidate_status(
+                    self.mamba_segment,
+                    self.model.short_segment_status()["counts"],
+                    (
+                        "layerwise_short_exact",
+                        "layerwise_short_exact_routed_batch",
+                    ),
+                    1,
+                ),
+                "schema": "mlx2.nemotron35-super-mamba-segment.v1",
+                "refusal_reasons": self.model.short_segment_status()["refusal_reasons"],
+            },
+            "moe_relu2_down": self._candidate_status(
+                self.moe_relu2_down,
+                relu2_counts,
+                ("fused_b1",),
+                len(self._super_moe_mixers),
+            ),
+        }
+
+    @staticmethod
+    def _sum_candidate_counts(modules, status_name):
+        totals = {}
+        for module in modules:
+            status = getattr(module, status_name)()
+            for name, count in status.get("counts", {}).items():
+                totals[name] = totals.get(name, 0) + int(count)
+        return totals
+
+    @staticmethod
+    def _candidate_status(policy, counts, observed_names, modules):
+        return {
+            "implemented": True,
+            "qualified": False,
+            "selected": policy != "auto",
+            "observed_used": any(counts.get(name, 0) > 0 for name in observed_names),
+            "policy": policy,
+            "modules": modules,
+            "counts": counts,
         }
 
     def close(self):

@@ -79,6 +79,45 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
             "progressive_multilane_draft_cap requires progressive verification "
             "and must be between minimum proposals and num_draft"
         )
+    alternatives = policy.get("progressive_alternative_branches", 1)
+    if (
+        type(alternatives) is not int
+        or not 1 <= alternatives <= 4
+        or alternatives > 1 and tile is None
+    ):
+        raise ValueError(
+            "progressive_alternative_branches must be 1 through 4 and requires "
+            "progressive verification"
+        )
+    alternative_strategy = policy.get(
+        "progressive_alternative_strategy", "distinct_root"
+    )
+    alternative_depth_policy = policy.get(
+        "progressive_alternative_depth_policy", "full"
+    )
+    if alternative_strategy not in {
+        "distinct_root",
+        "shared_prefix",
+        "paired_continuations",
+        "confidence_tree",
+    }:
+        raise ValueError("unsupported progressive alternative strategy")
+    if (
+        alternative_strategy
+        in {"shared_prefix", "paired_continuations", "confidence_tree"}
+        and alternatives <= 1
+    ):
+        raise ValueError(
+            "shared-prefix progressive alternatives require multiple branches"
+        )
+    if alternative_depth_policy not in {"full", "confidence_tail"}:
+        raise ValueError("unsupported progressive alternative depth policy")
+    if alternative_depth_policy == "confidence_tail" and (
+        alternative_strategy != "confidence_tree" or alternatives < 3
+    ):
+        raise ValueError(
+            "confidence_tail requires confidence_tree with at least three branches"
+        )
     return policy
 
 
@@ -95,6 +134,15 @@ def progressive_external_identity(policy, binding=None):
             "algorithm": PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
             "verification_tile": tile,
             "multilane_draft_cap": policy.get("progressive_multilane_draft_cap"),
+            "alternative_branches": policy.get(
+                "progressive_alternative_branches", 1
+            ),
+            "alternative_strategy": policy.get(
+                "progressive_alternative_strategy", "distinct_root"
+            ),
+            "alternative_depth_policy": policy.get(
+                "progressive_alternative_depth_policy", "full"
+            ),
             "target_protocol": (
                 None if binding is None else binding["target_protocol"]
             ),
@@ -114,7 +162,7 @@ class ExternalDraftAdapterMixin:
     def _parse_external_policy(self, execution_policy, *, family):
         self.external_policy = dict(execution_policy or {})
         self.draft_model = None
-        if set(self.external_policy) - {
+        allowed = {
             "draft_model",
             "num_draft",
             "adaptive_verification",
@@ -124,9 +172,15 @@ class ExternalDraftAdapterMixin:
             "lilicorr_feedback",
             "progressive_verification_tile",
             "progressive_multilane_draft_cap",
+            "progressive_alternative_branches",
+            "progressive_alternative_strategy",
+            "progressive_alternative_depth_policy",
             "progressive_verification_fidelity",
             "cost_per_commit_handoff",
-        } or (self.external_policy and not self.external_policy.get("draft_model")):
+        } | set(getattr(self, "EXTERNAL_POLICY_EXTENSIONS", ()))
+        if set(self.external_policy) - allowed or (
+            self.external_policy and not self.external_policy.get("draft_model")
+        ):
             raise ValueError(
                 f"{family} execution policy has no qualified overrides; only an "
                 "external draft_model, num_draft and adaptive_verification may be configured"
@@ -373,6 +427,16 @@ class ExternalDraftAdapterMixin:
         composition_identity += progressive_external_identity(
             self.external_policy, self._progressive_external_binding
         )
+        if "draft_weight_quantization" in self.external_policy:
+            composition_identity += json.dumps(
+                {
+                    "draft_weight_quantization": self.external_policy[
+                        "draft_weight_quantization"
+                    ]
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         if "lilicorr_feedback" in self.external_policy:
             from ..runtime.lilicorr_feedback import LiLiCorrFeedbackPolicy
 
@@ -498,6 +562,15 @@ class ExternalDraftAdapterMixin:
                     "progressive_multilane_draft_cap": self.external_policy.get(
                         "progressive_multilane_draft_cap"
                     ),
+                    "progressive_alternative_branches": self.external_policy.get(
+                        "progressive_alternative_branches", 1
+                    ),
+                    "progressive_alternative_strategy": self.external_policy.get(
+                        "progressive_alternative_strategy", "distinct_root"
+                    ),
+                    "progressive_alternative_depth_policy": self.external_policy.get(
+                        "progressive_alternative_depth_policy", "full"
+                    ),
                     "progressive_verification_fidelity": progressive_fidelity,
                     **(
                         {
@@ -550,6 +623,22 @@ class ExternalDraftAdapterMixin:
             kwargs.setdefault(
                 "multilane_draft_cap",
                 self.external_policy.get("progressive_multilane_draft_cap"),
+            )
+            kwargs.setdefault(
+                "progressive_alternative_branches",
+                self.external_policy.get("progressive_alternative_branches", 1),
+            )
+            kwargs.setdefault(
+                "progressive_alternative_strategy",
+                self.external_policy.get(
+                    "progressive_alternative_strategy", "distinct_root"
+                ),
+            )
+            kwargs.setdefault(
+                "progressive_alternative_depth_policy",
+                self.external_policy.get(
+                    "progressive_alternative_depth_policy", "full"
+                ),
             )
             kwargs.setdefault(
                 "progressive_verification_fidelity",

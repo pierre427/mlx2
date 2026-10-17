@@ -408,6 +408,28 @@ RECURRENT_OPERATIONS = CacheOperationsContract(
     publication_conditions=ROLLBACK_PUBLICATION_CONDITIONS,
 )
 
+# Nemotron-H uses the same exact record/replay ABI as the generic recurrent
+# cache, but the state is Mamba conv + SSM state rather than gated-delta state.
+# Give APCv2 a distinct plane identity so a layer segment can never be
+# mistaken for a Qwen GDN checkpoint merely because both use ArraysCache.
+MAMBA_RECURRENT_OPERATIONS = CacheOperationsContract(
+    family="recurrent",
+    topology="checkpointed_hybrid",
+    state_revision="mlx2.nemotron-mamba-arrays.v1",
+    cache_layout="ordered-mamba-conv-ssm-arrays",
+    numerics="stored_dtype",
+    planes=(
+        CachePlaneDeclaration(
+            "mamba_recurrent", ("cache", "left_padding", "lengths")
+        ),
+    ),
+    exact_prefix=True,
+    restores_at_checkpoints=True,
+    rollback="recurrent_record_trim",
+    offset_field=None,
+    publication_conditions=ROLLBACK_PUBLICATION_CONDITIONS,
+)
+
 QSA_KV_OPERATIONS = CacheOperationsContract(
     family="indexed_kv",
     topology="checkpointed_hybrid",
@@ -560,6 +582,7 @@ __all__ = [
     "CachePlaneDeclaration",
     "CheckpointPublicationCondition",
     "KV_OPERATIONS",
+    "MAMBA_RECURRENT_OPERATIONS",
     "QSA_KV_OPERATIONS",
     "QSA_QUANTIZED_KV_OPERATIONS",
     "QUANTIZED_KV_OPERATIONS",

@@ -37,6 +37,7 @@ from .generate import (
 )
 from .prefill_plan import prompt_length_prefill_step
 from .processor_probe import VerifyWindow, copy_sharing, rollback_shared_memo
+from .ragged_verify_layout import RaggedVerifyLayout, padded_capabilities
 from .progressive_external_verify import (
     PROGRESSIVE_APPROXIMATE_TARGET_PROTOCOL_VERSION,
     PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
@@ -58,12 +59,32 @@ from .speculative_sampling import (
     verify_greedy_proposals,
     verify_proposals,
 )
+from .speculative_topology import (
+    AdaptiveTopologyLatch,
+    confidence_tree_branch_depths,
+    confidence_tree_trunk_length,
+    ordered_alternative_proposals,
+    ordered_alternative_winner,
+    ordered_branch_outcomes,
+    staged_branch_indices,
+    validate_ordered_alternative_strategy,
+)
 
 _COUNTER_MAX = (1 << 63) - 1
 
 
 def _bump(stats, key, amount=1):
     stats[key] = min(_COUNTER_MAX, int(stats.get(key, 0)) + int(amount))
+
+
+def _first_tiles_pairwise_disjoint(token_rows, tile):
+    """Prove proposal diversity without publishing request-private tokens."""
+    first = [set(row[:tile]) for row in token_rows]
+    return all(
+        first[left].isdisjoint(first[right])
+        for left in range(len(first))
+        for right in range(left + 1, len(first))
+    )
 
 
 def _delivered_accepts(decision):
@@ -513,6 +534,7 @@ class ExternalDraftBatchGenerator:
     # bind only the lane methods) keep the off behaviour.
     prefill_allocator_reclaim = False
     external_varlen_prefill = False
+    progressive_alternative_branches = 1
     adaptive_policy = None
     multilane_draft_cap = None
 
@@ -533,6 +555,9 @@ class ExternalDraftBatchGenerator:
                  external_prefill_coalesce_min_tokens=1,
                  exact_verification="token",
                  progressive_verification_tile=None,
+                 progressive_alternative_branches=1,
+                 progressive_alternative_strategy="distinct_root",
+                 progressive_alternative_depth_policy="full",
                  multilane_draft_cap=None,
                  progressive_verification_fidelity=None,
                  progressive_target_protocol=None,
@@ -805,8 +830,42 @@ class ExternalDraftBatchGenerator:
             raise ValueError(
                 "progressive verification requires an exact reference chain "
                 "with host proposals and no FLy, tree, continuation, composition, "
-                "or adaptive route; "
-                "only B1 cohorts use the progressive transaction"
+                "or adaptive route"
+            )
+        if (
+            type(progressive_alternative_branches) is not int
+            or not 1 <= progressive_alternative_branches <= 4
+        ):
+            raise ValueError(
+                "progressive_alternative_branches must be an integer from 1 to 4"
+            )
+        if progressive_alternative_branches > 1 and (
+            progressive_verification_tile is None
+            or completion_batch_size != 1
+            or getattr(draft_model, "proposal_distribution", None)
+            != "deterministic_point_mass"
+        ):
+            raise ValueError(
+                "ordered alternative branches require B1 exact progressive "
+                "verification and deterministic point-mass proposals"
+            )
+        validate_ordered_alternative_strategy(
+            progressive_alternative_strategy, progressive_alternative_branches
+        )
+        if progressive_alternative_depth_policy not in {"full", "confidence_tail"}:
+            raise ValueError("unsupported progressive alternative depth policy")
+        if progressive_alternative_depth_policy == "confidence_tail" and (
+            progressive_alternative_strategy != "confidence_tree"
+            or progressive_alternative_branches < 3
+        ):
+            raise ValueError(
+                "confidence_tail requires confidence_tree with at least three branches"
+            )
+        if progressive_alternative_branches > 1 and not callable(
+            getattr(draft_model, "ordered_alternative_proposals", None)
+        ):
+            raise ValueError(
+                "ordered alternative branches require a capable proposal adapter"
             )
         self.progressive_verification_fidelity = None
         self.progressive_target_protocol = None
@@ -843,6 +902,17 @@ class ExternalDraftBatchGenerator:
             self.progressive_target_protocol = resolved["target_protocol"]
             self.progressive_protocol_binding = resolved
         self.progressive_verification_tile = progressive_verification_tile
+        self.progressive_alternative_branches = progressive_alternative_branches
+        self.progressive_alternative_strategy = progressive_alternative_strategy
+        self.progressive_alternative_depth_policy = (
+            progressive_alternative_depth_policy
+        )
+        self.progressive_topology_latch = (
+            AdaptiveTopologyLatch(progressive_alternative_branches)
+            if progressive_alternative_strategy == "confidence_tree"
+            and progressive_alternative_branches > 1
+            else None
+        )
         if multilane_draft_cap is not None and (
             type(multilane_draft_cap) is not int
             or not self.minimum_draft_proposals
@@ -889,6 +959,31 @@ class ExternalDraftBatchGenerator:
                 external_progressive_verify_target_rows=0,
                 external_progressive_verify_rejections=0,
                 external_progressive_verify_full_tiles=0,
+                external_progressive_verify_tile_checkpoints=0,
+                external_progressive_verify_physical_launches=0,
+                external_progressive_verify_ragged_launches=0,
+                external_progressive_verify_padding_rows=0,
+                external_progressive_verify_batched_rounds=0,
+                external_progressive_verify_batched_lanes=0,
+                external_progressive_verify_b1_aligned_tile_launches=0,
+                external_progressive_verify_b1_aligned_continued_launches=0,
+                external_progressive_verify_b2_aligned_tile_launches=0,
+                external_progressive_verify_b2_aligned_continued_launches=0,
+                external_progressive_verify_b3_aligned_tile_launches=0,
+                external_progressive_verify_b3_aligned_continued_launches=0,
+                external_progressive_verify_b4_aligned_tile_launches=0,
+                external_progressive_verify_b4_aligned_continued_launches=0,
+                external_progressive_verify_b4_disjoint_first_tiles=0,
+                external_progressive_verify_max_cohort_width=0,
+                external_progressive_alternative_rounds=0,
+                external_progressive_alternative_sampled_primary_rounds=0,
+                external_progressive_alternative_stop_guard_rounds=0,
+                external_progressive_alternative_branches=0,
+                external_progressive_alternative_full_accepts=0,
+                external_progressive_alternative_b2_short_circuits=0,
+                external_progressive_alternative_shared_prefix_rounds=0,
+                external_progressive_alternative_shared_prefix_tokens=0,
+                external_progressive_alternative_unique_target_rows=0,
                 external_progressive_verify_tile=self.progressive_verification_tile,
                 external_multilane_draft_cap=self.multilane_draft_cap,
                 external_multilane_draft_cap_rounds=0,
@@ -1498,12 +1593,154 @@ class ExternalDraftBatchGenerator:
                 "target_rows": getattr(
                     lane, "progressive_verify_target_rows", 0
                 ),
+                "padding_rows": getattr(
+                    lane, "progressive_verify_padding_rows", 0
+                ),
+                "ragged_launches": getattr(
+                    lane, "progressive_verify_ragged_launches", 0
+                ),
                 "rejections": getattr(
                     lane, "progressive_verify_rejections", 0
                 ),
                 "full_nonfinal_tiles": getattr(
                     lane, "progressive_verify_full_tiles", 0
                 ),
+                "tile_checkpoints": getattr(
+                    lane, "progressive_verify_tile_checkpoints", 0
+                ),
+                "last_tile_input_rows": getattr(
+                    lane, "progressive_verify_last_tile_input_rows", []
+                ),
+                "last_tile_checkpoints": getattr(
+                    lane, "progressive_verify_last_tile_checkpoints", []
+                ),
+                "last_rollback_base_tile": getattr(
+                    lane, "progressive_verify_last_rollback_base_tile", 0
+                ),
+                "last_cohort_width": getattr(
+                    lane, "progressive_verify_last_cohort_width", 0
+                ),
+                "max_cohort_width": getattr(
+                    lane, "progressive_verify_max_cohort_width", 0
+                ),
+                "last_proposal_sha256": getattr(
+                    lane, "progressive_verify_last_proposal_sha256", None
+                ),
+                "last_ragged_layout": getattr(
+                    lane, "progressive_verify_last_ragged_layout", None
+                ),
+                "ordered_alternatives": {
+                    "configured_branches": self.progressive_alternative_branches,
+                    "last_active_branches": getattr(
+                        lane,
+                        "progressive_alternative_last_active_branches",
+                        1,
+                    ),
+                    "configured_strategy": self.progressive_alternative_strategy,
+                    "configured_depth_policy": (
+                        self.progressive_alternative_depth_policy
+                    ),
+                    "rounds": getattr(
+                        lane, "progressive_alternative_rounds", 0
+                    ),
+                    "sampled_primary_rounds": getattr(
+                        lane, "progressive_alternative_sampled_primary_rounds", 0
+                    ),
+                    "stop_guard_primary_rounds": getattr(
+                        lane, "progressive_alternative_stop_guard_rounds", 0
+                    ),
+                    "last_branch_accepts": getattr(
+                        lane,
+                        "progressive_alternative_last_branch_accepts",
+                        [],
+                    ),
+                    "last_branch_proposal_counts": getattr(
+                        lane,
+                        "progressive_alternative_last_branch_proposal_counts",
+                        [],
+                    ),
+                    "last_branch_outcomes": getattr(
+                        lane,
+                        "progressive_alternative_last_branch_outcomes",
+                        [],
+                    ),
+                    "last_branch_sha256": getattr(
+                        lane,
+                        "progressive_alternative_last_branch_hashes",
+                        [],
+                    ),
+                    "last_full_accept_branches": getattr(
+                        lane,
+                        "progressive_alternative_last_full_branches",
+                        [],
+                    ),
+                    "last_selected_branch": getattr(
+                        lane,
+                        "progressive_alternative_last_selected_branch",
+                        None,
+                    ),
+                    "last_discarded_branches": getattr(
+                        lane,
+                        "progressive_alternative_last_discarded_branches",
+                        [],
+                    ),
+                    "last_short_circuit_after_branch": getattr(
+                        lane,
+                        "progressive_alternative_last_short_circuit",
+                        None,
+                    ),
+                    "last_strategy": getattr(
+                        lane,
+                        "progressive_alternative_last_strategy",
+                        None,
+                    ),
+                    "last_shared_prefix_tokens": getattr(
+                        lane,
+                        "progressive_alternative_last_shared_prefix_tokens",
+                        0,
+                    ),
+                    "last_unique_target_rows": getattr(
+                        lane,
+                        "progressive_alternative_last_unique_target_rows",
+                        0,
+                    ),
+                    "b2_full_accept_short_circuits": getattr(
+                        lane,
+                        "progressive_alternative_b2_short_circuits",
+                        0,
+                    ),
+                    "fallback_when_none_full": "commit_b1_exact_result",
+                    "next_round_base": "selected_branch_committed_state",
+                    "committed_physical_width": getattr(
+                        lane,
+                        "progressive_alternative_last_physical_width",
+                        0,
+                    ),
+                    "cross_shape_state_equivalence": (
+                        "unqualified_shape_sensitive_float_arithmetic"
+                    ),
+                    "adaptive_latch": {
+                        "scope": "bound_drafter_artifact_and_serving_shape",
+                        "decision_uses": "prior_completed_batches_only",
+                        "last_decision": getattr(
+                            lane,
+                            "progressive_topology_latch_last_decision",
+                            None,
+                        ),
+                        "last_observation": getattr(
+                            lane,
+                            "progressive_topology_latch_last_observation",
+                            None,
+                        ),
+                    },
+                },
+                "b4_disjoint_first_tiles": getattr(
+                    lane, "progressive_verify_b4_disjoint_first_tiles", 0
+                ),
+                "checkpoint_state": (
+                    "joint_attention_kv_and_recurrent_layer_state"
+                ),
+                "rollback_policy": "last_accepted_tile_then_exact_prefix",
                 "state_promotion": "request_private_then_atomic_lane_publish",
                 "performance_claim": False,
             }
@@ -2048,6 +2285,15 @@ class ExternalDraftBatchGenerator:
         pending context stays in ``lane.tail`` and ``_commit`` extends it, so
         the probe times only the target step the ordinary route performs.
         """
+        self._last_alternative_blocks = {}
+        self._last_alternative_prefix_tokens = {}
+        self._last_alternative_latch = {}
+        # Host doubles bind _propose without __init__; off unless configured.
+        branches = getattr(self, "progressive_alternative_branches", 1)
+        if branches > 1 and len(cohort) != 1:
+            raise ValueError(
+                "ordered alternative proposals require one request lane"
+            )
         tree_budget = (
             self._tree_node_budget() if self.draft_topology == "tree15" else None
         )
@@ -2093,6 +2339,47 @@ class ExternalDraftBatchGenerator:
             adaptive_count = min(requested_count, int(adaptive_depth))
             requested_count = self._proposal_depth(adaptive_count, requested_count)
         if any(l.ordinary for l in cohort): requested_count = 0
+        alternative_round = branches > 1 and not (
+            (
+                self.progressive_alternative_strategy == "paired_continuations"
+                and requested_count
+                <= int(self.progressive_verification_tile or 0) + 1
+            )
+            or (
+                self.progressive_alternative_strategy == "confidence_tree"
+                and requested_count < 2
+            )
+            or (
+                # The shared prefix diverges at the tile; a short terminal
+                # round has no proposal position there to branch from.
+                self.progressive_alternative_strategy == "shared_prefix"
+                and requested_count
+                <= int(self.progressive_verification_tile or 0)
+            )
+        )
+        if alternative_round and requested_count and any(
+            float(l.sampling.get("sampling_temp", 0)) != 0.0 for l in cohort
+        ):
+            # Alternative verification is greedy-only.  A sampled lane keeps
+            # the primary progressive chain, counted so the receipt separates
+            # the configured option from the rounds that actually used it.
+            alternative_round = False
+            _bump(
+                self.scheduler_stats,
+                "external_progressive_alternative_sampled_primary_rounds",
+            )
+            for lane in cohort:
+                lane.progressive_alternative_sampled_primary_rounds = (
+                    getattr(lane, "progressive_alternative_sampled_primary_rounds", 0)
+                    + 1
+                )
+        # Alternative rows are valid only for the proposal round that created
+        # them.  Clear the prior round before deciding whether this round has
+        # enough suffix depth to branch; short terminal paired rounds then use
+        # the primary progressive chain instead of replaying stale branches.
+        for lane in cohort:
+            self._last_alternative_blocks.pop(lane.uid, None)
+            self._last_alternative_prefix_tokens.pop(lane.uid, None)
         blocks = [None]*len(cohort)
         if not requested_count:
             if force_zero:
@@ -2233,15 +2520,20 @@ class ExternalDraftBatchGenerator:
                 requested_count * sum(bool(value) for value in processors),
             )
             self.scheduler_stats["draft_max_width"] = max(self.scheduler_stats["draft_max_width"],len(lanes))
-            confidence = None
-            deterministic_admission = (
-                self.adaptive_policy is not None and self.adaptive_policy.mode == "per_request"
-                and getattr(self.draft, "proposal_distribution", None) == "deterministic_point_mass"
+            deterministic_proposals = (
+                getattr(self.draft, "proposal_distribution", None)
+                == "deterministic_point_mass"
             )
-            if deterministic_admission:
+            confidence = None
+            if deterministic_proposals:
                 confidence = getattr(self.draft, "adaptive_confidence_features", None)
                 if confidence is not None and len(confidence) != len(lanes):
                     raise ValueError("deterministic drafter confidence rows mismatch")
+            deterministic_admission = (
+                self.adaptive_policy is not None
+                and self.adaptive_policy.mode == "per_request"
+                and deterministic_proposals
+            )
             sources = getattr(self.draft, "last_proposal_sources", None)
             scored_composition = hasattr(self.draft, "last_proposal_score_keys")
             score_keys = getattr(self.draft, "last_proposal_score_keys", None)
@@ -2294,6 +2586,86 @@ class ExternalDraftBatchGenerator:
                 or any(periodic and not audit for periodic, audit in zip(periodic_audit_rows, audit_rows))
             ):
                 raise ValueError("invalid composed proposal score rows")
+            alternatives = None
+            alternative_prefixes = None
+            active_alternative_branches = getattr(self, "progressive_alternative_branches", 1)
+            latch_decisions = None
+            if alternative_round:
+                if self.progressive_alternative_strategy == "confidence_tree":
+                    if confidence is None:
+                        raise ValueError(
+                            "confidence tree requires per-token confidence features"
+                        )
+                    alternative_prefixes = tuple(
+                        confidence_tree_trunk_length(
+                            confidence[row],
+                            len(tokens[row]),
+                            int(self.progressive_verification_tile or 0),
+                        )
+                        for row in range(len(lanes))
+                    )
+                    latch_decisions = tuple(
+                        self.progressive_topology_latch.choose(
+                            alternative_prefixes[row],
+                            len(tokens[row]),
+                            int(self.progressive_verification_tile or 0),
+                        )
+                        for row in range(len(lanes))
+                    )
+                    active_alternative_branches = min(
+                        decision.active_branches for decision in latch_decisions
+                    )
+                    suggested_alternative_prefixes = tuple(
+                        decision.trunk_tokens for decision in latch_decisions
+                    )
+                    if self.progressive_alternative_depth_policy == "confidence_tail":
+                        # A verification tile counts its current anchor.  Keep
+                        # enough room for one distinct child while preserving
+                        # the requested physical tile width.  For tile4 this
+                        # locks the shared trunk to at most two proposals, so
+                        # the first suffix launch is 4+4 rather than a five-row
+                        # terminal slab when three confidence features are
+                        # strong.
+                        maximum_tail_trunk = max(
+                            1, int(self.progressive_verification_tile or 0) - 2
+                        )
+                        alternative_prefixes = tuple(
+                            min(value, maximum_tail_trunk)
+                            for value in suggested_alternative_prefixes
+                        )
+                    else:
+                        alternative_prefixes = suggested_alternative_prefixes
+                    alternative_round = active_alternative_branches > 1
+                    for lane, decision, suggested, actual in zip(
+                        lanes,
+                        latch_decisions,
+                        suggested_alternative_prefixes,
+                        alternative_prefixes,
+                        strict=True,
+                    ):
+                        payload = dict(decision.__dict__)
+                        payload["suggested_trunk_tokens"] = int(suggested)
+                        payload["trunk_tokens"] = int(actual)
+                        payload["snapshot_before"] = (
+                            self.progressive_topology_latch.snapshot()
+                        )
+                        self._last_alternative_latch[lane.uid] = payload
+                        lane.progressive_topology_latch_last_decision = payload
+                if alternative_round:
+                    alternatives = ordered_alternative_proposals(
+                        self.draft,
+                        tokens,
+                        branch_count=active_alternative_branches,
+                        strategy=self.progressive_alternative_strategy,
+                        shared_prefix_tokens=(
+                            alternative_prefixes
+                            if alternative_prefixes is not None
+                            else self.progressive_verification_tile
+                            if self.progressive_alternative_strategy
+                            in {"shared_prefix", "paired_continuations"}
+                            else None
+                        ),
+                    )
             for j,row in enumerate(indices):
                 feature_row = None
                 if deterministic_admission:
@@ -2326,6 +2698,62 @@ class ExternalDraftBatchGenerator:
                     q[j] if isinstance(q[j], (CompactDraftRow, TreeDraftRow))
                     else HostDraftRow(tokens[j], q[j], len(lanes), feature_row)
                 )
+                if alternative_round:
+                    if (
+                        alternatives is None
+                        or len(alternatives) != len(lanes)
+                        or len(alternatives[j])
+                        != active_alternative_branches
+                    ):
+                        raise ValueError(
+                            "drafter did not publish the requested ordered alternatives"
+                        )
+                    row_blocks = []
+                    branch_depths = (
+                        confidence_tree_branch_depths(
+                            len(tokens[j]),
+                            active_alternative_branches,
+                            int(alternative_prefixes[j]),
+                        )
+                        if self.progressive_alternative_depth_policy
+                        == "confidence_tail"
+                        else (len(tokens[j]),) * active_alternative_branches
+                    )
+                    for branch_index, branch_tokens in enumerate(alternatives[j]):
+                        branch_tokens = list(branch_tokens[: branch_depths[branch_index]])
+                        if not 1 <= len(branch_tokens) <= len(tokens[j]):
+                            raise ValueError("ordered alternative proposal depth is invalid")
+                        branch_laws = []
+                        for position, token in enumerate(branch_tokens):
+                            law = np.zeros_like(
+                                np.asarray(q[j][position], dtype=np.float64)
+                            )
+                            if not 0 <= int(token) < len(law):
+                                raise ValueError(
+                                    "ordered alternative token is outside proposal law"
+                                )
+                            law[int(token)] = 1.0
+                            branch_laws.append(law)
+                        row_blocks.append(
+                            HostDraftRow(
+                                list(branch_tokens),
+                                branch_laws,
+                                active_alternative_branches,
+                            )
+                        )
+                    if row_blocks[0].tokens != list(tokens[j]):
+                        raise ValueError(
+                            "ordered alternative B1 differs from primary proposal"
+                        )
+                    self._last_alternative_blocks[lanes[j].uid] = row_blocks
+                    self._last_alternative_prefix_tokens[lanes[j].uid] = (
+                        int(alternative_prefixes[j])
+                        if alternative_prefixes is not None
+                        else int(self.progressive_verification_tile or 0)
+                    )
+                    lanes[j].progressive_alternative_last_active_branches = (
+                        active_alternative_branches
+                    )
                 if sources is not None:
                     if not isinstance(blocks[row], (HostDraftRow, CompactDraftRow)):
                         raise ValueError("composition requires supported chain proposal blocks")
@@ -2356,172 +2784,789 @@ class ExternalDraftBatchGenerator:
             _bump(self.scheduler_stats, "external_proposal_floor_raises")
         return max(floor, requested)
 
-    def _progressive_verify(self, lane, block):
-        """Verify one complete B1 proposal on private target state.
+    def _progressive_verify_many(self, cohort, blocks, *, terminal=True):
+        """Verify one to four independent proposal chains in aligned tiles.
 
-        Every tile commits only to ``private_cache``.  The caller promotes the
-        final cache and concatenated committed taps through ``_commit`` after
-        this method has produced a complete decision.  The enclosing round
-        snapshot restores proposal state and RNG if any stage fails.
+        Each lane owns private target state and RNG.  A physical target launch
+        batches only the lanes still advancing at the same tile boundary; a
+        rejection commits that lane's exact in-tile prefix and removes it from
+        later launches without changing another lane's checkpoint.
         """
 
         if self.progressive_verification_tile is None:
             raise RuntimeError("progressive verification is not selected")
-        if (
-            self.progressive_verification_fidelity
-            == PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED
-            and float(lane.sampling.get("sampling_temp", 0)) != 0.0
-        ):
-            raise LaneFailure(
-                lane.uid,
-                "near-tie-bounded progressive verification is greedy-only",
-            )
-        if lane.processors:
-            raise LaneFailure(
-                lane.uid,
-                "progressive verification does not support logits processors",
-            )
-        if not isinstance(block, HostDraftRow):
-            raise LaneFailure(
-                lane.uid,
-                "progressive verification requires dense host proposal laws",
-            )
-        drafts = list(block.tokens)
-        laws = list(block.laws)
-        if not drafts or len(laws) != len(drafts):
-            raise LaneFailure(
-                lane.uid,
-                "progressive verification requires one law per proposal token",
-            )
-        # The proposal-law shape is the shared executor contract. Model
-        # families store the same vocabulary metadata in different argument
-        # layouts (for example Qwen3.8 nests it under ``text_config``).
-        vocab = len(laws[0])
-        validate_proposal_laws(drafts, laws, vocab)
+        if not 1 <= len(cohort) == len(blocks) <= 4:
+            raise RuntimeError("progressive verification supports B1 through B4 cohorts")
 
-        private_cache = self._copy_reference_cache(lane.cache)
-        private_rng = RequestRNG(state=lane.rng.snapshot())
-        local_history = list(lane.history)
-        anchor = int(lane.anchor)
-        offset = 0
-        accepted = 0
-        emitted = []
-        committed_inputs = []
-        feature_parts = []
-        target_laws = []
-        response_rows = [] if lane.sampling.get("emit_logprobs", True) else None
-        window = VerifyWindow(())
-        launches = 0
-        target_rows = 0
-        rejected = False
-        full_tiles = 0
-
-        while offset < len(drafts):
-            remaining = len(drafts) - offset
-            final = remaining <= self.progressive_verification_tile
-            count = remaining if final else self.progressive_verification_tile
-            stage_tokens = drafts[offset : offset + count]
-            stage_laws = laws[offset : offset + count]
-            inputs = (
-                [anchor, *stage_tokens]
-                if final
-                else [anchor, *stage_tokens[:-1]]
+        states = []
+        proposal_counts = []
+        for lane, block in zip(cohort, blocks, strict=True):
+            if (
+                self.progressive_verification_fidelity
+                == PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED
+                and float(lane.sampling.get("sampling_temp", 0)) != 0.0
+            ):
+                raise LaneFailure(
+                    lane.uid,
+                    "near-tie-bounded progressive verification is greedy-only",
+                )
+            if lane.processors:
+                raise LaneFailure(
+                    lane.uid,
+                    "progressive verification does not support logits processors",
+                )
+            if not isinstance(block, HostDraftRow):
+                raise LaneFailure(
+                    lane.uid,
+                    "progressive verification requires dense host proposal laws",
+                )
+            drafts = list(block.tokens)
+            laws = list(block.laws)
+            if not drafts or len(laws) != len(drafts):
+                raise LaneFailure(
+                    lane.uid,
+                    "progressive verification requires one law per proposal token",
+                )
+            vocab = len(laws[0])
+            validate_proposal_laws(drafts, laws, vocab)
+            proposal_counts.append(len(drafts))
+            states.append(
+                {
+                    "lane": lane,
+                    "drafts": drafts,
+                    "laws": laws,
+                    "private_cache": self._copy_reference_cache(lane.cache),
+                    "private_rng": RequestRNG(state=lane.rng.snapshot()),
+                    "local_history": list(lane.history),
+                    "anchor": int(lane.anchor),
+                    "offset": 0,
+                    "accepted": 0,
+                    "emitted": [],
+                    "committed_inputs": [],
+                    "feature_parts": [],
+                    "target_laws": [],
+                    "response_rows": (
+                        [] if lane.sampling.get("emit_logprobs", True) else None
+                    ),
+                    "window": VerifyWindow(()),
+                    "launches": 0,
+                    "target_rows": 0,
+                    "rejected": False,
+                    "full_tiles": 0,
+                    "tile_input_rows": [],
+                    "tile_checkpoints": [],
+                    "rollback_base_tile": 0,
+                    "done": False,
+                }
             )
-            owner = self._target_owner([private_cache])
-            transaction = owner.begin(lengths=[len(inputs)])
+        physical_launches = 0
+        ragged_launches = 0
+        padding_rows = 0
+        last_layout_receipt = None
+        max_cohort_width = 0
+        aligned_tile_launches = {width: 0 for width in range(1, 5)}
+        aligned_continued_launches = {width: 0 for width in range(1, 5)}
+        first_tile_pairwise_disjoint = _first_tiles_pairwise_disjoint(
+            [state["drafts"] for state in states],
+            self.progressive_verification_tile,
+        )
+        while active := [index for index, state in enumerate(states) if not state["done"]]:
+            inputs = []
+            stage = []
+            for index in active:
+                state = states[index]
+                remaining = len(state["drafts"]) - state["offset"]
+                final = terminal and remaining <= self.progressive_verification_tile
+                count = min(remaining, self.progressive_verification_tile)
+                stage_tokens = state["drafts"][
+                    state["offset"] : state["offset"] + count
+                ]
+                stage_laws = state["laws"][
+                    state["offset"] : state["offset"] + count
+                ]
+                row_inputs = (
+                    [state["anchor"], *stage_tokens]
+                    if final
+                    else [state["anchor"], *stage_tokens[:-1]]
+                )
+                state["rollback_base_tile"] = state["full_tiles"]
+                inputs.append(row_inputs)
+                stage.append((index, final, count, stage_tokens, stage_laws))
+            request_lane_uids = [states[index]["lane"].uid for index in active]
+            layout_lane_uids = (
+                request_lane_uids
+                if len(set(request_lane_uids)) == len(request_lane_uids)
+                else list(range(len(active)))
+            )
+            layout = RaggedVerifyLayout.from_draft_depths(
+                layout_lane_uids,
+                [len(row) - 1 for row in inputs],
+            )
+            plan = layout.select_backend(
+                padded_capabilities(max_lanes=4)
+            )
+            last_layout_receipt = layout.receipt(plan)
+            last_layout_receipt["request_lane_uids"] = request_lane_uids
+            last_layout_receipt["physical_lane_uids"] = layout_lane_uids
+            input_lengths = list(layout.query_lengths)
+            launch_width = layout.max_query_len
+            launch_padding = plan.padding_rows
+            ragged = launch_padding > 0
+            if ragged:
+                # Cache/state planes consume the exact lengths. Token values in
+                # the right-padding tail are therefore inert and never commit.
+                padded_inputs = [
+                    row + [row[-1]] * (launch_width - len(row)) for row in inputs
+                ]
+                ragged_launches += 1
+                padding_rows += launch_padding
+            else:
+                padded_inputs = inputs
+            active_width = len(active)
+            if not ragged:
+                aligned_tile_launches[active_width] += 1
+                if all(states[index]["offset"] > 0 for index in active):
+                    aligned_continued_launches[active_width] += 1
+
+            owner = self._target_owner(
+                [states[index]["private_cache"] for index in active]
+            )
+            transaction = owner.begin(lengths=input_lengths)
+            results = []
             try:
                 logits, features = self.model.forward_with_taps(
-                    self.mx.array([inputs]),
+                    self.mx.array(padded_inputs),
                     transaction.caches,
                     self.layers,
                 )
                 self.mx.eval(logits, features)
-                expected = count + int(final)
-                if int(logits.shape[1]) != expected:
-                    raise RuntimeError(
-                        "progressive target stage returned the wrong row count"
-                    )
-                if int(features.shape[1]) != len(inputs):
-                    raise RuntimeError(
-                        "progressive target stage returned the wrong feature count"
-                    )
-                stage_response_rows = [] if response_rows is not None else None
-                stage_target_laws = []
-                for row in range(expected):
-                    stage_target_laws.append(
-                        self._target_law(
-                            lane,
-                            logits[0, row],
-                            local_history,
-                            True,
-                            stage_response_rows,
-                            history_suffix=inputs[: row + 1],
-                        )
-                    )
-                    window.mark()
-                outcome = verify_proposal_tile(
+                for physical_row, (
+                    index,
+                    final,
+                    count,
                     stage_tokens,
                     stage_laws,
-                    stage_target_laws,
-                    private_rng,
-                    final=final,
+                ) in enumerate(stage):
+                    state = states[index]
+                    expected = count + int(final)
+                    if int(logits.shape[1]) < expected:
+                        raise RuntimeError(
+                            "progressive target stage returned the wrong row count"
+                        )
+                    if int(features.shape[1]) < len(inputs[physical_row]):
+                        raise RuntimeError(
+                            "progressive target stage returned the wrong feature count"
+                        )
+                    stage_response_rows = (
+                        [] if state["response_rows"] is not None else None
+                    )
+                    stage_target_laws = []
+                    for row in range(expected):
+                        stage_target_laws.append(
+                            self._target_law(
+                                state["lane"],
+                                logits[physical_row, row],
+                                state["local_history"],
+                                True,
+                                stage_response_rows,
+                                history_suffix=inputs[physical_row][: row + 1],
+                            )
+                        )
+                        state["window"].mark()
+                    outcome = verify_proposal_tile(
+                        stage_tokens,
+                        stage_laws,
+                        stage_target_laws,
+                        state["private_rng"],
+                        final=final,
+                    )
+                    stage_emitted = list(outcome.emitted)
+                    stopped = False
+                    for emitted_index, token in enumerate(stage_emitted):
+                        if token in self.stops:
+                            stage_emitted = stage_emitted[: emitted_index + 1]
+                            stopped = True
+                            break
+                    consumed = min(outcome.accepted + 1, len(stage_emitted))
+                    results.append(
+                        (
+                            index,
+                            final,
+                            count,
+                            outcome,
+                            stage_emitted,
+                            stopped,
+                            consumed,
+                            stage_target_laws,
+                            stage_response_rows,
+                            features[physical_row : physical_row + 1, :consumed],
+                            inputs[physical_row],
+                        )
+                    )
+                committed = transaction.commit(
+                    accepted_lengths=[result[6] for result in results]
                 )
-                stage_emitted = list(outcome.emitted)
-                stopped = False
-                for index, token in enumerate(stage_emitted):
-                    if token in self.stops:
-                        stage_emitted = stage_emitted[: index + 1]
-                        stopped = True
-                        break
-                consumed = min(outcome.accepted + 1, len(stage_emitted))
-                private_cache = transaction.commit(
-                    accepted_lengths=[consumed]
-                )[0]
             except BaseException:
                 if not transaction.closed:
                     transaction.abort()
                 raise
 
-            launches += 1
-            target_rows += len(inputs)
-            feature_parts.append(features[:, :consumed])
-            committed = inputs[:consumed]
-            committed_inputs.extend(committed)
-            local_history.extend(committed)
-            emitted.extend(stage_emitted)
-            accepted += outcome.accepted
-            target_laws.extend(outcome.target_probabilities[: len(stage_emitted)])
-            if response_rows is not None:
-                response_rows.extend(stage_response_rows[: len(stage_emitted)])
-            anchor = int(stage_emitted[-1])
-            if outcome.rejected or stopped:
-                rejected = bool(outcome.rejected)
-                break
-            offset += count
-            if final:
-                break
-            full_tiles += 1
+            physical_launches += 1
+            max_cohort_width = max(max_cohort_width, len(active))
+            for private_cache, result in zip(committed, results, strict=True):
+                (
+                    index,
+                    final,
+                    count,
+                    outcome,
+                    stage_emitted,
+                    stopped,
+                    consumed,
+                    stage_target_laws,
+                    stage_response_rows,
+                    feature_part,
+                    row_inputs,
+                ) = result
+                state = states[index]
+                state["private_cache"] = private_cache
+                state["launches"] += 1
+                state["target_rows"] += len(row_inputs)
+                state["tile_input_rows"].append(len(row_inputs))
+                state["feature_parts"].append(feature_part)
+                committed_inputs = row_inputs[:consumed]
+                state["committed_inputs"].extend(committed_inputs)
+                state["local_history"].extend(committed_inputs)
+                state["emitted"].extend(stage_emitted)
+                # A stop can truncate an otherwise accepted proposal tile.
+                # Count only accepted proposal tokens that are part of the
+                # emitted prefix; proposals after the stop never commit.
+                state["accepted"] += min(
+                    int(outcome.accepted), len(stage_emitted)
+                )
+                state["target_laws"].extend(
+                    outcome.target_probabilities[: len(stage_emitted)]
+                )
+                if state["response_rows"] is not None:
+                    state["response_rows"].extend(
+                        stage_response_rows[: len(stage_emitted)]
+                    )
+                state["anchor"] = int(stage_emitted[-1])
+                if outcome.rejected or stopped:
+                    state["rejected"] = bool(outcome.rejected)
+                    state["done"] = True
+                    continue
+                state["offset"] += count
+                if final:
+                    state["done"] = True
+                    continue
+                state["full_tiles"] += 1
+                state["tile_checkpoints"].append(
+                    {
+                        "tile": state["full_tiles"],
+                        "committed_inputs": len(state["committed_inputs"]),
+                        "accepted_proposals": state["accepted"],
+                    }
+                )
+                if state["offset"] == len(state["drafts"]):
+                    state["done"] = True
 
+        decisions = []
+        feature_rows = []
+        stats = []
+        for state in states:
+            decisions.append(
+                RoundDecision(
+                    accepted=state["accepted"],
+                    emitted=state["emitted"],
+                    target_laws=state["target_laws"],
+                    response_logprobs=state["response_rows"],
+                    verify_window=state["window"],
+                    commit_count=len(state["committed_inputs"]),
+                    committed_inputs=state["committed_inputs"],
+                )
+            )
+            feature_rows.append(
+                self.mx.concatenate(state["feature_parts"], axis=1)
+            )
+            stats.append(
+                {
+                    "launches": state["launches"],
+                    "target_rows": state["target_rows"],
+                    "rejected": int(state["rejected"]),
+                    "full_tiles": state["full_tiles"],
+                    "tile_checkpoints": state["tile_checkpoints"],
+                    "tile_input_rows": state["tile_input_rows"],
+                    "rollback_base_tile": state["rollback_base_tile"],
+                    "cohort_width": len(cohort),
+                }
+            )
+        width = max(int(row.shape[1]) for row in feature_rows)
+        padded = []
+        for row in feature_rows:
+            missing = width - int(row.shape[1])
+            if missing:
+                row = self.mx.concatenate(
+                    [
+                        row,
+                        self.mx.zeros(
+                            (1, missing, int(row.shape[2])), dtype=row.dtype
+                        ),
+                    ],
+                    axis=1,
+                )
+            padded.append(row)
         return (
-            RoundDecision(
-                accepted=accepted,
-                emitted=emitted,
-                target_laws=target_laws,
-                response_logprobs=response_rows,
-                verify_window=window,
-                commit_count=len(committed_inputs),
-                committed_inputs=committed_inputs,
-            ),
-            self.mx.concatenate(feature_parts, axis=1),
-            private_cache,
-            private_rng,
+            decisions,
+            self.mx.concatenate(padded, axis=0),
+            [state["private_cache"] for state in states],
+            [state["private_rng"] for state in states],
+            stats,
             {
-                "launches": launches,
-                "target_rows": target_rows,
-                "rejected": int(rejected),
-                "full_tiles": full_tiles,
+                "physical_launches": physical_launches,
+                "physical_target_rows": sum(
+                    int(state["target_rows"]) for state in states
+                ),
+                "ragged_launches": ragged_launches,
+                "padding_rows": padding_rows,
+                "last_ragged_layout": last_layout_receipt,
+                "max_cohort_width": max_cohort_width,
+                "aligned_tile_launches": aligned_tile_launches,
+                "aligned_continued_launches": aligned_continued_launches,
+                "b2_aligned_tile_launches": aligned_tile_launches[2],
+                "b2_aligned_continued_launches": aligned_continued_launches[2],
+                "b4_aligned_tile_launches": aligned_tile_launches[4],
+                "b4_aligned_continued_launches": aligned_continued_launches[4],
+                "first_tile_pairwise_disjoint": first_tile_pairwise_disjoint,
             },
         )
+
+    def _progressive_verify_paired_suffix_family(self, lanes, blocks):
+        """Verify one family parent once, then fan out its two continuations."""
+
+        if len(lanes) != 2 or len(blocks) != 2:
+            raise RuntimeError("paired continuation family requires two rows")
+        if any(len(block.tokens) < 2 for block in blocks):
+            raise RuntimeError("paired continuation family requires child suffixes")
+        if int(blocks[0].tokens[0]) != int(blocks[1].tokens[0]):
+            raise RuntimeError("paired continuation family parents differ")
+        parent = HostDraftRow(
+            [int(blocks[0].tokens[0])], [blocks[0].laws[0]], 1
+        )
+        (
+            parent_decisions,
+            parent_features,
+            parent_caches,
+            parent_rngs,
+            parent_stats,
+            parent_physical,
+        ) = self._progressive_verify_many([lanes[0]], [parent], terminal=False)
+        parent_decision = parent_decisions[0]
+        if int(parent_decision.accepted) != 1:
+            decisions = [copy.copy(parent_decision), copy.copy(parent_decision)]
+            features = self.mx.concatenate(
+                [parent_features, parent_features], axis=0
+            )
+            caches = [
+                parent_caches[0], self._copy_reference_cache(parent_caches[0])
+            ]
+            rngs = [
+                RequestRNG(state=parent_rngs[0].snapshot()),
+                RequestRNG(state=parent_rngs[0].snapshot()),
+            ]
+            stats = [dict(parent_stats[0]), dict(parent_stats[0])]
+            physical = dict(parent_physical)
+            physical["paired_parent_rows_reused"] = 1
+            return decisions, features, caches, rngs, stats, physical
+
+        child_lanes = []
+        child_blocks = []
+        for index, (lane, block) in enumerate(zip(lanes, blocks, strict=True)):
+            child = copy.copy(lane)
+            child.cache = (
+                parent_caches[0]
+                if index == 0
+                else self._copy_reference_cache(parent_caches[0])
+            )
+            child.rng = RequestRNG(state=parent_rngs[0].snapshot())
+            child.history = list(lane.history) + list(
+                parent_decision.committed_inputs
+            )
+            child.anchor = int(parent_decision.emitted[-1])
+            child_lanes.append(child)
+            child_blocks.append(
+                HostDraftRow(
+                    list(block.tokens[1:]), list(block.laws[1:]), len(blocks)
+                )
+            )
+        (
+            child_decisions,
+            child_features,
+            child_caches,
+            child_rngs,
+            child_stats,
+            child_physical,
+        ) = self._progressive_verify_many(child_lanes, child_blocks)
+        decisions = []
+        stats = []
+        feature_rows = []
+        for index, (decision, child_stat) in enumerate(
+            zip(child_decisions, child_stats, strict=True)
+        ):
+            decisions.append(
+                RoundDecision(
+                    accepted=1 + int(decision.accepted),
+                    emitted=list(parent_decision.emitted) + list(decision.emitted),
+                    target_laws=list(parent_decision.target_laws)
+                    + list(decision.target_laws),
+                    response_logprobs=(
+                        None
+                        if parent_decision.response_logprobs is None
+                        else list(parent_decision.response_logprobs)
+                        + list(decision.response_logprobs)
+                    ),
+                    verify_window=decision.verify_window,
+                    commit_count=int(parent_decision.commit_count)
+                    + int(decision.commit_count),
+                    committed_inputs=list(parent_decision.committed_inputs)
+                    + list(decision.committed_inputs),
+                )
+            )
+            feature_rows.append(
+                self.mx.concatenate(
+                    [parent_features, child_features[index : index + 1]],
+                    axis=1,
+                )
+            )
+            stats.append(
+                {
+                    "launches": parent_stats[0]["launches"]
+                    + child_stat["launches"],
+                    "target_rows": parent_stats[0]["target_rows"]
+                    + child_stat["target_rows"],
+                    "rejected": parent_stats[0]["rejected"]
+                    + child_stat["rejected"],
+                    "full_tiles": parent_stats[0]["full_tiles"]
+                    + child_stat["full_tiles"],
+                    "tile_checkpoints": list(
+                        parent_stats[0]["tile_checkpoints"]
+                    )
+                    + list(child_stat["tile_checkpoints"]),
+                    "tile_input_rows": list(parent_stats[0]["tile_input_rows"])
+                    + list(child_stat["tile_input_rows"]),
+                    "rollback_base_tile": child_stat["rollback_base_tile"],
+                    "cohort_width": 2,
+                }
+            )
+        aligned = {
+            width: parent_physical["aligned_tile_launches"][width]
+            + child_physical["aligned_tile_launches"][width]
+            for width in range(1, 5)
+        }
+        continued = {
+            width: parent_physical["aligned_continued_launches"][width]
+            + child_physical["aligned_continued_launches"][width]
+            for width in range(1, 5)
+        }
+        physical = {
+            "physical_launches": parent_physical["physical_launches"]
+            + child_physical["physical_launches"],
+            "physical_target_rows": parent_physical["physical_target_rows"]
+            + child_physical["physical_target_rows"],
+            "ragged_launches": parent_physical.get("ragged_launches", 0)
+            + child_physical.get("ragged_launches", 0),
+            "padding_rows": parent_physical.get("padding_rows", 0)
+            + child_physical.get("padding_rows", 0),
+            "last_ragged_layout": child_physical.get("last_ragged_layout")
+            or parent_physical.get("last_ragged_layout"),
+            "max_cohort_width": max(
+                parent_physical["max_cohort_width"],
+                child_physical["max_cohort_width"],
+            ),
+            "aligned_tile_launches": aligned,
+            "aligned_continued_launches": continued,
+            "b2_aligned_tile_launches": aligned[2],
+            "b2_aligned_continued_launches": continued[2],
+            "b4_aligned_tile_launches": aligned[4],
+            "b4_aligned_continued_launches": continued[4],
+            "first_tile_pairwise_disjoint": False,
+            "paired_parent_rows_reused": 1,
+        }
+        return (
+            decisions,
+            self.mx.concatenate(feature_rows, axis=0),
+            child_caches,
+            child_rngs,
+            stats,
+            physical,
+        )
+
+    def _progressive_verify_shared_prefix(self, lane, blocks, *, prefix_count=None):
+        """Verify one common tile once, then only the unique branch suffixes.
+
+        The prefix transaction is request-private and nonterminal, so a full
+        prefix accept emits no bonus token.  Each suffix starts from an exact
+        copy of that joint attention/recurrent checkpoint and RNG state.  A
+        prefix rejection is authoritative for every branch because their
+        proposal tokens and laws are identical up to the divergence point.
+        """
+
+        prefix_count = int(
+            self.progressive_verification_tile
+            if prefix_count is None
+            else prefix_count
+        )
+        if not blocks or any(len(block.tokens) <= prefix_count for block in blocks):
+            raise RuntimeError("shared-prefix alternatives require a suffix")
+        prefix_tokens = list(blocks[0].tokens[:prefix_count])
+        prefix_laws = list(blocks[0].laws[:prefix_count])
+        if any(list(block.tokens[:prefix_count]) != prefix_tokens for block in blocks):
+            raise RuntimeError("shared-prefix alternatives diverged before the tile")
+        prefix_block = HostDraftRow(prefix_tokens, prefix_laws, 1)
+        (
+            prefix_decisions,
+            prefix_features,
+            prefix_caches,
+            prefix_rngs,
+            prefix_stats,
+            prefix_physical,
+        ) = self._progressive_verify_many(
+            [lane], [prefix_block], terminal=False
+        )
+        prefix_decision = prefix_decisions[0]
+        branch_count = len(blocks)
+        if int(prefix_decision.accepted) != prefix_count:
+            decisions = [copy.copy(prefix_decision) for _ in blocks]
+            features = self.mx.concatenate(
+                [prefix_features for _ in blocks], axis=0
+            )
+            caches = [
+                prefix_caches[0]
+                if index == 0
+                else self._copy_reference_cache(prefix_caches[0])
+                for index in range(branch_count)
+            ]
+            rngs = [
+                RequestRNG(state=prefix_rngs[0].snapshot())
+                for _ in blocks
+            ]
+            zero = {
+                "launches": 0,
+                "target_rows": 0,
+                "rejected": 0,
+                "full_tiles": 0,
+                "tile_checkpoints": [],
+                "tile_input_rows": [],
+                "rollback_base_tile": 0,
+                "cohort_width": branch_count,
+            }
+            stats = [prefix_stats[0], *[dict(zero) for _ in blocks[1:]]]
+            physical = dict(prefix_physical)
+            physical.update(
+                shared_prefix_tokens=prefix_count,
+                unique_target_rows=prefix_physical["physical_target_rows"],
+                prefix_rejected=True,
+            )
+            return decisions, features, caches, rngs, stats, physical
+
+        suffix_lanes = []
+        suffix_blocks = []
+        for block in blocks:
+            branch = copy.copy(lane)
+            branch.cache = prefix_caches[0]
+            branch.rng = prefix_rngs[0]
+            branch.history = list(lane.history) + list(
+                prefix_decision.committed_inputs
+            )
+            branch.anchor = int(prefix_decision.emitted[-1])
+            suffix_lanes.append(branch)
+            suffix_blocks.append(
+                HostDraftRow(
+                    list(block.tokens[prefix_count:]),
+                    list(block.laws[prefix_count:]),
+                    branch_count,
+                )
+            )
+        decisions = [None] * branch_count
+        feature_rows = [None] * branch_count
+        committed_caches = [None] * branch_count
+        committed_rngs = [None] * branch_count
+        combined_stats = [None] * branch_count
+        aligned = dict(prefix_physical["aligned_tile_launches"])
+        continued = dict(prefix_physical["aligned_continued_launches"])
+        physical_launches = int(prefix_physical["physical_launches"])
+        ragged_launches = int(prefix_physical.get("ragged_launches", 0))
+        padding_rows = int(prefix_physical.get("padding_rows", 0))
+        last_ragged_layout = prefix_physical.get("last_ragged_layout")
+        unique_target_rows = int(prefix_physical["physical_target_rows"])
+        max_cohort_width = int(prefix_physical["max_cohort_width"])
+        short_circuit_after_branch = None
+        proposal_counts = tuple(len(block.tokens) for block in blocks)
+        for indices in staged_branch_indices(
+            branch_count, self.progressive_alternative_strategy, 2
+        ):
+            (
+                cohort_decisions,
+                cohort_features,
+                cohort_caches,
+                cohort_rngs,
+                cohort_stats,
+                cohort_physical,
+            ) = (
+                self._progressive_verify_paired_suffix_family(
+                    [suffix_lanes[index] for index in indices],
+                    [suffix_blocks[index] for index in indices],
+                )
+                if self.progressive_alternative_strategy
+                == "paired_continuations"
+                and len(indices) == 2
+                else self._progressive_verify_many(
+                    [suffix_lanes[index] for index in indices],
+                    [suffix_blocks[index] for index in indices],
+                )
+            )
+            physical_launches += int(cohort_physical["physical_launches"])
+            ragged_launches += int(cohort_physical.get("ragged_launches", 0))
+            padding_rows += int(cohort_physical.get("padding_rows", 0))
+            last_ragged_layout = (
+                cohort_physical.get("last_ragged_layout") or last_ragged_layout
+            )
+            unique_target_rows += int(cohort_physical["physical_target_rows"])
+            max_cohort_width = max(
+                max_cohort_width, int(cohort_physical["max_cohort_width"])
+            )
+            for width in range(1, 5):
+                aligned[width] += cohort_physical["aligned_tile_launches"][width]
+                continued[width] += cohort_physical[
+                    "aligned_continued_launches"
+                ][width]
+            for local, (decision, stats) in enumerate(
+                zip(cohort_decisions, cohort_stats, strict=True)
+            ):
+                index = indices[local]
+                combined = RoundDecision(
+                    accepted=prefix_count + int(decision.accepted),
+                    emitted=list(prefix_decision.emitted) + list(decision.emitted),
+                    target_laws=list(prefix_decision.target_laws)
+                    + list(decision.target_laws),
+                    response_logprobs=(
+                        None
+                        if prefix_decision.response_logprobs is None
+                        else list(prefix_decision.response_logprobs)
+                        + list(decision.response_logprobs)
+                    ),
+                    verify_window=decision.verify_window,
+                    commit_count=int(prefix_decision.commit_count)
+                    + int(decision.commit_count),
+                    committed_inputs=list(prefix_decision.committed_inputs)
+                    + list(decision.committed_inputs),
+                )
+                decisions[index] = combined
+                feature_rows[index] = self.mx.concatenate(
+                    [prefix_features, cohort_features[local : local + 1]],
+                    axis=1,
+                )
+                committed_caches[index] = cohort_caches[local]
+                committed_rngs[index] = cohort_rngs[local]
+                combined_stats[index] = {
+                    "launches": prefix_stats[0]["launches"] + stats["launches"],
+                    "target_rows": prefix_stats[0]["target_rows"]
+                    + stats["target_rows"],
+                    "rejected": prefix_stats[0]["rejected"] + stats["rejected"],
+                    "full_tiles": prefix_stats[0]["full_tiles"]
+                    + stats["full_tiles"],
+                    "tile_checkpoints": list(prefix_stats[0]["tile_checkpoints"])
+                    + list(stats["tile_checkpoints"]),
+                    "tile_input_rows": list(prefix_stats[0]["tile_input_rows"])
+                    + list(stats["tile_input_rows"]),
+                    "rollback_base_tile": stats["rollback_base_tile"],
+                    "cohort_width": len(indices),
+                }
+            full = [
+                index
+                for index in indices
+                if int(decisions[index].accepted) == proposal_counts[index]
+            ]
+            if full:
+                short_circuit_after_branch = full[0] + 1
+                break
+
+        template = next(row for row in feature_rows if row is not None)
+        zero_stats = {
+            "launches": 0,
+            "target_rows": 0,
+            "rejected": 0,
+            "full_tiles": 0,
+            "tile_checkpoints": [],
+            "tile_input_rows": [],
+            "rollback_base_tile": 0,
+            "cohort_width": 0,
+        }
+        for index in range(branch_count):
+            if decisions[index] is not None:
+                continue
+            decisions[index] = RoundDecision(
+                accepted=-1,
+                emitted=[],
+                target_laws=[],
+                commit_count=0,
+                committed_inputs=[],
+            )
+            feature_rows[index] = self.mx.zeros_like(template)
+            committed_caches[index] = prefix_caches[0]
+            committed_rngs[index] = prefix_rngs[0]
+            combined_stats[index] = dict(zero_stats)
+
+        feature_width = max(int(row.shape[1]) for row in feature_rows)
+        padded_features = []
+        for row in feature_rows:
+            missing = feature_width - int(row.shape[1])
+            if missing:
+                row = self.mx.concatenate(
+                    [
+                        row,
+                        self.mx.zeros(
+                            (1, missing, int(row.shape[2])), dtype=row.dtype
+                        ),
+                    ],
+                    axis=1,
+                )
+            padded_features.append(row)
+        physical = {
+            "physical_launches": physical_launches,
+            "physical_target_rows": unique_target_rows,
+            "ragged_launches": ragged_launches,
+            "padding_rows": padding_rows,
+            "last_ragged_layout": last_ragged_layout,
+            "max_cohort_width": max_cohort_width,
+            "aligned_tile_launches": aligned,
+            "aligned_continued_launches": continued,
+            "b2_aligned_tile_launches": aligned[2],
+            "b2_aligned_continued_launches": continued[2],
+            "b4_aligned_tile_launches": aligned[4],
+            "b4_aligned_continued_launches": continued[4],
+            "first_tile_pairwise_disjoint": False,
+            "shared_prefix_tokens": prefix_count,
+            "unique_target_rows": unique_target_rows,
+            "prefix_rejected": False,
+            "short_circuit_after_branch": short_circuit_after_branch,
+        }
+        return (
+            decisions,
+            self.mx.concatenate(padded_features, axis=0),
+            committed_caches,
+            committed_rngs,
+            combined_stats,
+            physical,
+        )
+
+    def _progressive_verify(self, lane, block):
+        """Compatibility wrapper for the exact B1 progressive contract."""
+
+        decisions, features, caches, rngs, stats, _physical = (
+            self._progressive_verify_many([lane], [block])
+        )
+        return decisions[0], features, caches[0], rngs[0], stats[0]
+
 
     def _verify(self, cohort, blocks, logits):
         """Accept phase over the target logits of one verify forward."""
@@ -4711,77 +5756,412 @@ class ExternalDraftBatchGenerator:
                 trusted_round = False
             if (
                 self.progressive_verification_tile is not None
-                and len(cohort) == 1
-                and len(blocks) == 1
-                and blocks[0] is not None
-                and proposal_counts[0] > self.progressive_verification_tile
-                and not cohort[0].processors
+                and 1 <= len(cohort) == len(blocks) <= 4
+                and all(block is not None for block in blocks)
+                and max(proposal_counts, default=0)
+                > self.progressive_verification_tile
+                and not any(lane.processors for lane in cohort)
                 and not any(
-                    int(token) in self.stops for token in blocks[0].tokens
+                    int(token) in self.stops
+                    for block in blocks
+                    for token in block.tokens
                 )
             ):
-                if len(cohort) != 1 or len(blocks) != 1:
-                    raise RuntimeError(
-                        "progressive verification escaped its B1 constructor gate"
+                alternative_mode = (
+                    self.progressive_alternative_branches > 1
+                    and cohort[0].uid in self._last_alternative_blocks
+                )
+                verify_cohort = cohort
+                verify_blocks = blocks
+                if alternative_mode:
+                    lane = cohort[0]
+                    if float(lane.sampling.get("sampling_temp", 0)) != 0.0:
+                        raise LaneFailure(
+                            lane.uid,
+                            "ordered alternative verification is greedy-only",
+                        )
+                    verify_blocks = self._last_alternative_blocks.get(lane.uid)
+                    if verify_blocks is None:
+                        raise LaneFailure(
+                            lane.uid,
+                            "ordered alternative proposal rows are unavailable",
+                        )
+                    if any(
+                        int(token) in self.stops
+                        for block in verify_blocks
+                        for token in block.tokens
+                    ):
+                        # The primary chain already passed the stop-token
+                        # gate above. Alternative rows must not bypass it;
+                        # use the primary progressive chain for this round.
+                        alternative_mode = False
+                        verify_blocks = blocks
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_alternative_stop_guard_rounds",
+                        )
+                        lane.progressive_alternative_stop_guard_rounds = (
+                            getattr(
+                                lane,
+                                "progressive_alternative_stop_guard_rounds",
+                                0,
+                            )
+                            + 1
+                        )
+                    else:
+                        verify_cohort = [
+                            copy.copy(lane) for _ in range(len(verify_blocks))
+                        ]
+                if (
+                    alternative_mode
+                    and self.progressive_alternative_strategy
+                    in {
+                        "shared_prefix",
+                        "paired_continuations",
+                        "confidence_tree",
+                    }
+                ):
+                    (
+                        decisions,
+                        features,
+                        committed_caches,
+                        committed_rngs,
+                        progressive_stats,
+                        physical_stats,
+                    ) = self._progressive_verify_shared_prefix(
+                        cohort[0],
+                        verify_blocks,
+                        prefix_count=self._last_alternative_prefix_tokens.get(
+                            cohort[0].uid
+                        ),
                     )
-                (
-                    decision,
-                    features,
-                    committed_cache,
-                    committed_rng,
-                    progressive_stats,
-                ) = self._progressive_verify(cohort[0], blocks[0])
-                lane = cohort[0]
-                lane.progressive_verify_rounds = (
-                    getattr(lane, "progressive_verify_rounds", 0) + 1
-                )
-                lane.progressive_verify_launches = (
-                    getattr(lane, "progressive_verify_launches", 0)
-                    + progressive_stats["launches"]
-                )
-                lane.progressive_verify_target_rows = (
-                    getattr(lane, "progressive_verify_target_rows", 0)
-                    + progressive_stats["target_rows"]
-                )
-                lane.progressive_verify_rejections = (
-                    getattr(lane, "progressive_verify_rejections", 0)
-                    + progressive_stats["rejected"]
-                )
-                lane.progressive_verify_full_tiles = (
-                    getattr(lane, "progressive_verify_full_tiles", 0)
-                    + progressive_stats["full_tiles"]
-                )
-                _bump(self.scheduler_stats, "external_progressive_verify_rounds")
+                else:
+                    (
+                        decisions,
+                        features,
+                        committed_caches,
+                        committed_rngs,
+                        progressive_stats,
+                        physical_stats,
+                    ) = self._progressive_verify_many(
+                        verify_cohort, verify_blocks
+                    )
+                if alternative_mode:
+                    proposal_counts = tuple(
+                        int(block.lengths[0]) for block in verify_blocks
+                    )
+                    winner, full = ordered_alternative_winner(
+                        decisions, proposal_counts
+                    )
+                    branch_accepts = [
+                        int(decision.accepted) for decision in decisions
+                    ]
+                    branch_outcomes = list(
+                        ordered_branch_outcomes(branch_accepts, proposal_counts)
+                    )
+                    branch_hashes = [
+                        hashlib.sha256(
+                            json.dumps(
+                                [int(token) for token in block.tokens],
+                                separators=(",", ":"),
+                            ).encode()
+                        ).hexdigest()
+                        for block in verify_blocks
+                    ]
+                    lane = cohort[0]
+                    lane.progressive_alternative_rounds = (
+                        getattr(lane, "progressive_alternative_rounds", 0) + 1
+                    )
+                    lane.progressive_alternative_last_branch_accepts = branch_accepts
+                    lane.progressive_alternative_last_branch_proposal_counts = list(
+                        proposal_counts
+                    )
+                    lane.progressive_alternative_last_branch_outcomes = (
+                        branch_outcomes
+                    )
+                    lane.progressive_alternative_last_branch_hashes = branch_hashes
+                    lane.progressive_alternative_last_full_branches = [
+                        index + 1 for index in full
+                    ]
+                    lane.progressive_alternative_last_selected_branch = winner + 1
+                    lane.progressive_alternative_last_discarded_branches = [
+                        index + 1
+                        for index in range(len(decisions))
+                        if index != winner
+                    ]
+                    lane.progressive_alternative_last_short_circuit = (
+                        winner + 1 if winner in full else None
+                    )
+                    lane.progressive_alternative_last_physical_width = (
+                        physical_stats["max_cohort_width"]
+                    )
+                    lane.progressive_alternative_last_strategy = (
+                        self.progressive_alternative_strategy
+                    )
+                    lane.progressive_alternative_last_shared_prefix_tokens = int(
+                        physical_stats.get("shared_prefix_tokens", 0)
+                    )
+                    lane.progressive_alternative_last_unique_target_rows = int(
+                        physical_stats.get(
+                            "unique_target_rows",
+                            physical_stats["physical_target_rows"],
+                        )
+                    )
+                    if self.progressive_topology_latch is not None:
+                        self.progressive_topology_latch.observe(
+                            branch_accepts=branch_accepts,
+                            proposal_counts=proposal_counts,
+                            selected_branch=winner + 1,
+                            unique_target_rows=(
+                                lane.progressive_alternative_last_unique_target_rows
+                            ),
+                        )
+                        lane.progressive_topology_latch_last_observation = {
+                            "branch_accepts": list(branch_accepts),
+                            "proposal_counts": list(proposal_counts),
+                            "selected_branch": winner + 1,
+                            "unique_target_rows": (
+                                lane.progressive_alternative_last_unique_target_rows
+                            ),
+                            "snapshot_after": (
+                                self.progressive_topology_latch.snapshot()
+                            ),
+                        }
+                    lane.progressive_alternative_b2_short_circuits = (
+                        getattr(
+                            lane,
+                            "progressive_alternative_b2_short_circuits",
+                            0,
+                        )
+                        + int(winner == 1 and winner in full)
+                    )
+                    lane.target_max_width = max(
+                        lane.target_max_width, physical_stats["max_cohort_width"]
+                    )
+                    selected_stats = dict(progressive_stats[winner])
+                    selected_stats["launches"] = physical_stats[
+                        "physical_launches"
+                    ]
+                    selected_stats["target_rows"] = int(
+                        physical_stats["physical_target_rows"]
+                    )
+                    selected_stats["rejected"] = sum(
+                        int(stats["rejected"]) for stats in progressive_stats
+                    )
+                    selected_stats["full_tiles"] = sum(
+                        int(stats["full_tiles"]) for stats in progressive_stats
+                    )
+                    decisions = [decisions[winner]]
+                    features = features[winner : winner + 1]
+                    committed_caches = [committed_caches[winner]]
+                    committed_rngs = [committed_rngs[winner]]
+                    progressive_stats = [selected_stats]
+                    blocks = [verify_blocks[winner]]
+                for lane, block, lane_stats in zip(
+                    cohort, blocks, progressive_stats, strict=True
+                ):
+                    lane.progressive_verify_rounds = (
+                        getattr(lane, "progressive_verify_rounds", 0) + 1
+                    )
+                    lane.progressive_verify_launches = (
+                        getattr(lane, "progressive_verify_launches", 0)
+                        + lane_stats["launches"]
+                    )
+                    lane.progressive_verify_target_rows = (
+                        getattr(lane, "progressive_verify_target_rows", 0)
+                        + lane_stats["target_rows"]
+                    )
+                    lane.progressive_verify_padding_rows = (
+                        getattr(lane, "progressive_verify_padding_rows", 0)
+                        + physical_stats.get("padding_rows", 0)
+                    )
+                    lane.progressive_verify_ragged_launches = (
+                        getattr(lane, "progressive_verify_ragged_launches", 0)
+                        + physical_stats.get("ragged_launches", 0)
+                    )
+                    lane.progressive_verify_rejections = (
+                        getattr(lane, "progressive_verify_rejections", 0)
+                        + lane_stats["rejected"]
+                    )
+                    lane.progressive_verify_full_tiles = (
+                        getattr(lane, "progressive_verify_full_tiles", 0)
+                        + lane_stats["full_tiles"]
+                    )
+                    lane.progressive_verify_tile_checkpoints = (
+                        getattr(lane, "progressive_verify_tile_checkpoints", 0)
+                        + len(lane_stats["tile_checkpoints"])
+                    )
+                    lane.progressive_verify_last_tile_input_rows = list(
+                        lane_stats["tile_input_rows"]
+                    )
+                    lane.progressive_verify_last_tile_checkpoints = list(
+                        lane_stats["tile_checkpoints"]
+                    )
+                    lane.progressive_verify_last_rollback_base_tile = int(
+                        lane_stats["rollback_base_tile"]
+                    )
+                    lane.progressive_verify_last_cohort_width = len(cohort)
+                    lane.progressive_verify_max_cohort_width = max(
+                        getattr(lane, "progressive_verify_max_cohort_width", 0),
+                        physical_stats["max_cohort_width"],
+                    )
+                    lane.progressive_verify_last_proposal_sha256 = hashlib.sha256(
+                        json.dumps(
+                            [int(token) for token in block.tokens],
+                            separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest()
+                    lane.progressive_verify_last_ragged_layout = physical_stats.get(
+                        "last_ragged_layout"
+                    )
+                    if len(cohort) == 4 and physical_stats[
+                        "first_tile_pairwise_disjoint"
+                    ]:
+                        lane.progressive_verify_b4_disjoint_first_tiles = (
+                            getattr(
+                                lane,
+                                "progressive_verify_b4_disjoint_first_tiles",
+                                0,
+                            )
+                            + 1
+                        )
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_verify_launches",
+                        lane_stats["launches"],
+                    )
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_verify_target_rows",
+                        lane_stats["target_rows"],
+                    )
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_verify_rejections",
+                        lane_stats["rejected"],
+                    )
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_verify_full_tiles",
+                        lane_stats["full_tiles"],
+                    )
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_verify_tile_checkpoints",
+                        len(lane_stats["tile_checkpoints"]),
+                    )
                 _bump(
                     self.scheduler_stats,
-                    "external_progressive_verify_launches",
-                    progressive_stats["launches"],
+                    "external_progressive_verify_rounds",
+                    len(cohort),
                 )
                 _bump(
                     self.scheduler_stats,
-                    "external_progressive_verify_target_rows",
-                    progressive_stats["target_rows"],
+                    "external_progressive_verify_physical_launches",
+                    physical_stats["physical_launches"],
                 )
                 _bump(
                     self.scheduler_stats,
-                    "external_progressive_verify_rejections",
-                    progressive_stats["rejected"],
+                    "external_progressive_verify_ragged_launches",
+                    physical_stats.get("ragged_launches", 0),
                 )
                 _bump(
                     self.scheduler_stats,
-                    "external_progressive_verify_full_tiles",
-                    progressive_stats["full_tiles"],
+                    "external_progressive_verify_padding_rows",
+                    physical_stats.get("padding_rows", 0),
+                )
+                if len(cohort) > 1:
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_verify_batched_rounds",
+                    )
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_verify_batched_lanes",
+                        len(cohort),
+                    )
+                    for width in range(1, 5):
+                        _bump(
+                            self.scheduler_stats,
+                            f"external_progressive_verify_b{width}_aligned_tile_launches",
+                            physical_stats["aligned_tile_launches"][width],
+                        )
+                        _bump(
+                            self.scheduler_stats,
+                            f"external_progressive_verify_b{width}_aligned_continued_launches",
+                            physical_stats["aligned_continued_launches"][width],
+                        )
+                    if len(cohort) == 4 and physical_stats[
+                        "first_tile_pairwise_disjoint"
+                    ]:
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_verify_b4_disjoint_first_tiles",
+                        )
+                elif alternative_mode:
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_alternative_rounds",
+                    )
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_alternative_branches",
+                        len(verify_blocks),
+                    )
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_alternative_full_accepts",
+                        len(full),
+                    )
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_alternative_b2_short_circuits",
+                        int(winner == 1 and winner in full),
+                    )
+                    if self.progressive_alternative_strategy == "shared_prefix":
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_alternative_shared_prefix_rounds",
+                        )
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_alternative_shared_prefix_tokens",
+                            physical_stats.get("shared_prefix_tokens", 0),
+                        )
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_alternative_unique_target_rows",
+                            physical_stats.get("unique_target_rows", 0),
+                        )
+                    for width in range(1, 5):
+                        _bump(
+                            self.scheduler_stats,
+                            f"external_progressive_verify_b{width}_aligned_tile_launches",
+                            physical_stats["aligned_tile_launches"][width],
+                        )
+                        _bump(
+                            self.scheduler_stats,
+                            f"external_progressive_verify_b{width}_aligned_continued_launches",
+                            physical_stats["aligned_continued_launches"][width],
+                        )
+                self.scheduler_stats[
+                    "external_progressive_verify_max_cohort_width"
+                ] = max(
+                    self.scheduler_stats[
+                        "external_progressive_verify_max_cohort_width"
+                    ],
+                    physical_stats["max_cohort_width"],
                 )
                 if clock is not None:
                     clock = self._mark("progressive_verify", clock)
                 self._commit(
                     cohort,
-                    [decision],
+                    decisions,
                     features,
                     blocks=blocks,
                     transaction=None,
-                    committed_rows=[committed_cache],
-                    committed_rngs=[committed_rng],
+                    committed_rows=committed_caches,
+                    committed_rngs=committed_rngs,
                 )
                 return
             if self.adaptive_policy is not None:

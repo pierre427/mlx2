@@ -3,6 +3,8 @@
 This loader accepts complete compatible exported artifacts, never a heuristic
 replacement. Newly acquired owned-head/sliding-attention exports require their
 own explicit schema and target contract; artifact presence is not compatibility.
+Imported ModelOpt storage is accepted only through its explicit quantization
+contract; it never substitutes a heuristic for the trained correlation head.
 Provenance: provenance/lilicorr.json.
 """
 
@@ -31,6 +33,7 @@ class LiLiCorrConfig(DFlashConfig):
     conv_kernel_size: int = 0
     conv_group_size: int = 0
     has_own_lm_head: bool = False
+    quantization: dict | None = None
 
     def __post_init__(self):
         # The original Qwen3 export shares XPress' full-attention backbone.
@@ -71,6 +74,26 @@ class LiLiCorrConfig(DFlashConfig):
         else:
             # Shared backbone contract, independently of any XPress head.
             XPressConfig(**backbone, xpress_num_passes=1)
+        if type(self.has_own_lm_head) is not bool:
+            raise ValueError("LiLiCorr has_own_lm_head must be boolean")
+        if self.quantization is not None:
+            from ..conversion.nvfp4 import NATIVE_QUANTIZATION
+
+            modules = self.quantization.get("modules") if isinstance(
+                self.quantization, dict
+            ) else None
+            if (
+                not isinstance(self.quantization, dict)
+                or {
+                    k: v for k, v in self.quantization.items() if k != "modules"
+                }
+                != NATIVE_QUANTIZATION
+                or not isinstance(modules, list)
+                or not modules
+                or any(not isinstance(key, str) for key in modules)
+                or len(set(modules)) != len(modules)
+            ):
+                raise ValueError("Unsupported LiLiCorr storage quantization")
         width = self.lilicorr_hidden_size
         if type(width) is not int or width < 0:
             raise ValueError("Invalid LiLiCorr hidden size")
@@ -127,7 +150,7 @@ class LiLiCorrConfig(DFlashConfig):
             raise ValueError("Expected Qwen3 LiLiCorrDraftModel artifact")
         if config.get("has_own_lm_head", False) is not False:
             raise ValueError("LiLiCorr owned LM heads are not supported")
-        allowed = set(DFlashConfig.__dataclass_fields__) | {
+        allowed = set(cls.__dataclass_fields__) | {
             "architectures",
             "model_type",
             "dflash_config",
@@ -153,7 +176,7 @@ class LiLiCorrConfig(DFlashConfig):
         if (
             config.get("hidden_act", "silu") != "silu"
             or config.get("attention_dropout", 0) != 0
-            or config.get("use_sliding_window", False) is not False
+            or type(config.get("use_sliding_window", False)) is not bool
         ):
             raise ValueError("Unsupported LiLiCorr backbone variant")
         nested = config.get("dflash_config")
@@ -165,11 +188,21 @@ class LiLiCorrConfig(DFlashConfig):
             )
         if set(nested) - (
             required_nested
-            | {"lilicorr_enabled", "block_size", "conv_kernel_size", "conv_group_size"}
+            | {"lilicorr_enabled", "block_size", "conv_kernel_size", "conv_group_size",
+               "causal", "projector_type", "use_swa", "swa_window_size"}
         ):
             raise ValueError("Unsupported LiLiCorr nested geometry")
         if nested.get("lilicorr_enabled", True) is not True:
             raise ValueError("LiLiCorr must be enabled")
+        if (nested.get("causal", False) is not False
+                or nested.get("projector_type", "lilicorr") != "lilicorr"):
+            raise ValueError("Unsupported LiLiCorr draft attention/projector")
+        if "use_swa" in nested and nested["use_swa"] != config.get("use_sliding_window", False):
+            raise ValueError("Conflicting LiLiCorr trained sliding window")
+        if "swa_window_size" in nested and nested["swa_window_size"] != config.get("sliding_window"):
+            raise ValueError("Conflicting LiLiCorr trained sliding window")
+        if bool(config.get("use_sliding_window", False)) != ("sliding_attention" in config.get("layer_types", [])):
+            raise ValueError("Conflicting LiLiCorr trained attention types")
         required = {
             "hidden_size",
             "intermediate_size",
@@ -285,6 +318,17 @@ def _validate_headers(paths, mapping, args, configured_dtype):
     if dtype is None:
         raise ValueError("Unsupported LiLiCorr checkpoint dtype")
     expected, observed, digests = expected_weight_shapes(args), {}, []
+    dtypes = {name: dtype for name in expected}
+    if args.quantization:
+        for prefix in args.quantization["modules"]:
+            key = prefix + ".weight"
+            if key not in expected or len(expected[key]) != 2 or expected[key][-1] % 16:
+                raise ValueError(f"Unsupported LiLiCorr NVFP4 module: {prefix}")
+            rows, columns = expected[key]
+            expected[key], dtypes[key] = [rows, columns // 8], "U32"
+            expected[prefix + ".scales"], dtypes[prefix + ".scales"] = [rows, columns // 16], "U8"
+            expected[prefix + ".global_scale"], dtypes[prefix + ".global_scale"] = [], "F32"
+    dtype_bytes = {**_DTYPE_BYTES, "U32": 4, "U8": 1}
     for path in paths:
         raw, header, size = _read_safetensors_header(path)
         digests.append(hashlib.sha256(raw).hexdigest())
@@ -302,7 +346,7 @@ def _validate_headers(paths, mapping, args, configured_dtype):
                 raise ValueError(f"Invalid LiLiCorr tensor metadata: {name}")
             shape, offsets = item["shape"], item["data_offsets"]
             if (
-                item["dtype"] != dtype
+                item["dtype"] != dtypes[name]
                 or not isinstance(shape, list)
                 or any(type(n) is not int for n in shape)
                 or shape != expected[name]
@@ -313,7 +357,7 @@ def _validate_headers(paths, mapping, args, configured_dtype):
                 or len(offsets) != 2
                 or any(type(n) is not int for n in offsets)
                 or not 0 <= offsets[0] <= offsets[1] <= size
-                or offsets[1] - offsets[0] != math.prod(shape) * _DTYPE_BYTES[dtype]
+                or offsets[1] - offsets[0] != math.prod(shape) * dtype_bytes[dtypes[name]]
             ):
                 raise ValueError(f"Invalid LiLiCorr tensor offsets: {name}")
             if mapping is not None and mapping.get(name) != path.name:
@@ -352,18 +396,19 @@ def inspect_drafter(path, target):
     target_config = _decode_unique_json(
         (Path(target) / "config.json").read_bytes(), "target config"
     )
-    text = target_config.get("text_config", target_config)
-    if text.get("model_type") != "qwen3":
-        raise ValueError("LiLiCorr target must be Qwen3")
-    for key in (
-        "hidden_size",
-        "vocab_size",
-        "num_attention_heads",
-        "num_key_value_heads",
-        "head_dim",
-        "rope_theta",
-        "rms_norm_eps",
-    ):
+    text = target_config.get("llm_config", target_config.get("text_config", target_config))
+    nemotron = (target_config.get("model_type") == "nemotron_h_omni"
+                and text.get("model_type") == "nemotron_h")
+    if nemotron:
+        from .nemotron35_super_config import language_config
+        text = language_config(target_config)
+        keys = ("hidden_size", "vocab_size")
+    elif text.get("model_type") == "qwen3":
+        keys = ("hidden_size", "vocab_size", "num_attention_heads",
+                "num_key_value_heads", "head_dim", "rope_theta", "rms_norm_eps")
+    else:
+        raise ValueError("LiLiCorr target requires a supported feature/embedding contract")
+    for key in keys:
         if text.get(key) != getattr(args, key):
             raise ValueError(f"LiLiCorr target {key} mismatch")
     if (
@@ -433,11 +478,14 @@ def content_revision(record):
 def load_drafter(
     record, target_model, *, runtime_quantization=None, draft_attention_windows=None
 ):
-    if runtime_quantization is not None:
-        raise ValueError("LiLiCorr runtime quantization is not supported")
+    from ..runtime.models.modelopt_nvfp4 import normalize_nvfp4_execution
+
+    nvfp4_execution = normalize_nvfp4_execution(runtime_quantization)
     from ..runtime.drafters.attention_windows import validate_attention_windows
 
     args = record["args"]
+    if nvfp4_execution is not None and not args.quantization:
+        raise ValueError("ModelOpt NVFP4 execution requires a source NVFP4 artifact")
     validate_attention_windows(draft_attention_windows, args.num_hidden_layers)
     if args != LiLiCorrConfig.from_dict(record["config"]):
         raise ValueError("LiLiCorr load configuration differs from inspected source")
@@ -475,7 +523,24 @@ def load_drafter(
         shard = model.sanitize(mx.load(str(path)))
         mx.eval(list(shard.values()))
         weights.update(shard)
+    if args.quantization:
+        from ..runtime.models.modelopt_nvfp4 import (
+            configure_nvfp4_modules,
+            install_nvfp4_modules,
+        )
+        install_nvfp4_modules(model, args.quantization["modules"])
     model.load_weights(list(weights.items()), strict=True)
+    if nvfp4_execution is not None:
+        model.runtime_weight_quantization = configure_nvfp4_modules(
+            model,
+            policy=nvfp4_execution["policy"],
+            decoded_budget_bytes=nvfp4_execution["decoded_budget_bytes"],
+            decoded_large_row_threshold=nvfp4_execution[
+                "decoded_large_row_threshold"
+            ],
+        )
+    else:
+        model.runtime_weight_quantization = None
     model.eval()
     mx.eval(model.parameters())
     weights.clear()

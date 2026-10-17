@@ -16,6 +16,7 @@ import pytest
 
 from mlx2.runtime.generate import PromptProcessingBatch
 from mlx2.runtime.models.cache import ArraysCache
+from mlx2.runtime.models.ssm import ssm_attn
 
 # Batched vs single-row float32 rounding is ~5e-6 here; the mlx-vlm mask
 # shape planted below moves the same quantities by 7e-4 to 0.85.
@@ -31,8 +32,9 @@ def _qwen38():
 
 
 def _qwen36():
-    from mlx2.runtime.models.qwen36_35b import Model, ModelArgs
     from test_qwen36_35b_port import TINY_MTP_MOE
+
+    from mlx2.runtime.models.qwen36_35b import Model, ModelArgs
 
     mx.random.seed(5)
     model = Model(ModelArgs.from_dict(
@@ -56,7 +58,11 @@ def _nemotron():
 
 def _agnes():
     from mlx2.runtime.models.agnes import (
-        LAYER_DELTA, LAYER_GLOBAL, Model, ModelArgs, TextModelArgs,
+        LAYER_DELTA,
+        LAYER_GLOBAL,
+        Model,
+        ModelArgs,
+        TextModelArgs,
     )
 
     args = TextModelArgs(
@@ -168,3 +174,31 @@ def test_both_bounds_intersect():
         [True] * 5 + [False] * 3,
         [False] * 2 + [True] * 6,
     ]
+
+
+def test_ssm_lengths_alone_bound_final_chunk_and_preserve_exhausted_state():
+    """Lengths are sufficient even without a separately materialized mask."""
+    mx.random.seed(71)
+    batch, length, heads, head_dim, groups, state_dim = 3, 7, 2, 4, 1, 8
+    x = mx.random.normal((batch, length, heads, head_dim)) * 0.1
+    b = mx.random.normal((batch, length, groups, state_dim)) * 0.1
+    c = mx.random.normal(b.shape) * 0.1
+    dt = mx.random.normal((batch, length, heads)) * 0.1 - 5
+    initial = mx.random.normal((batch, heads, head_dim, state_dim))
+    lengths = mx.array([0, 5, 7])
+    args = (x, mx.zeros(heads), b, c, mx.ones(heads), dt, mx.zeros(heads))
+
+    implicit_y, implicit_state = ssm_attn(
+        *args, state=initial, lengths=lengths, step=4
+    )
+    explicit_y, explicit_state = ssm_attn(
+        *args,
+        state=initial,
+        mask=mx.arange(length)[None, :] < lengths[:, None],
+        step=4,
+    )
+    mx.eval(implicit_y, implicit_state, explicit_y, explicit_state)
+
+    assert bool(mx.allclose(implicit_y, explicit_y, atol=1e-6, rtol=1e-6))
+    assert bool(mx.allclose(implicit_state, explicit_state, atol=1e-6, rtol=1e-6))
+    assert bool(mx.array_equal(implicit_state[0], initial[0]))

@@ -16,6 +16,7 @@ from mlx2.runtime.drafters.dflash2_config import DFlash2Config
 from mlx2.runtime.external_speculative import (
     ExternalDraftBatchGenerator,
     ExternalDraftState,
+    _first_tiles_pairwise_disjoint,
 )
 from mlx2.runtime.models.muse_glimmer import Model
 from mlx2.runtime.sample_utils import LaneRNG
@@ -179,13 +180,42 @@ def _forced_target_proposal(model, prompt, count, reject_at):
 
 
 def _run_forced_progressive_round(
-    tile, reject_at, *, stop_index=None, sampling_temp=0, processor=False
+    tile,
+    reject_at,
+    *,
+    stop_index=None,
+    stop_expected=False,
+    sampling_temp=0,
+    processor=False,
 ):
     model, draft = tiny()
     prompt = [1, 2, 3, 4]
-    expected_anchor, _expected, proposal, laws = _forced_target_proposal(
+    expected_anchor, expected, proposal, laws = _forced_target_proposal(
         model, prompt, 3, reject_at
     )
+    if stop_expected and stop_index is not None:
+        stop_token = expected[stop_index]
+        # Keep the target correction as the only occurrence of the stop. If
+        # the tiny fixture repeats that token later, the scheduler would
+        # correctly route around progressive verification before exercising
+        # the correction-stop accounting under test.
+        proposal = [
+            (
+                next(
+                    candidate
+                    for candidate in range(model.args.vocab_size)
+                    if candidate != stop_token
+                )
+                if token == stop_token
+                else token
+            )
+            for token in proposal
+        ]
+        laws = []
+        for token in proposal:
+            law = np.zeros(model.args.vocab_size, dtype=np.float64)
+            law[token] = 1.0
+            laws.append(law)
     model.configure_target_verify_row_exact(True)
     batch = ExternalDraftBatchGenerator(
         model,
@@ -195,7 +225,9 @@ def _run_forced_progressive_round(
         completion_batch_size=1,
         prefill_step_size=8,
         stop_tokens=(
-            [] if stop_index is None else [[proposal[stop_index]]]
+            []
+            if stop_index is None
+            else [[(expected if stop_expected else proposal)[stop_index]]]
         ),
         progressive_verification_tile=tile,
     )
@@ -221,6 +253,60 @@ def _run_forced_progressive_round(
         batch._prefill(lane)
     batch._round([lane])
     return batch, lane
+
+
+def _run_forced_progressive_many(tile, reject_at, proposal_counts=None):
+    model, draft = tiny()
+    prompts = tuple(
+        tuple(range(1 + 4 * index, 5 + 4 * index))
+        for index in range(len(reject_at))
+    )
+    rows = [
+        _forced_target_proposal(model, prompt, 3, rejected)
+        for prompt, rejected in zip(prompts, reject_at, strict=True)
+    ]
+    proposal_counts = (
+        [3] * len(rows) if proposal_counts is None else list(proposal_counts)
+    )
+    assert len(proposal_counts) == len(rows)
+    model.configure_target_verify_row_exact(True)
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=draft,
+        binding="progressive-multilane-test",
+        num_draft=3,
+        completion_batch_size=len(prompts),
+        prefill_step_size=8,
+        progressive_verification_tile=tile,
+    )
+    real = draft.draft_distributions
+
+    def forced(anchors, hidden, caches, count, rngs, temps, **kwargs):
+        real(anchors, hidden, caches, count, rngs, temps, **kwargs)
+        assert count == 3 and anchors == [row[0] for row in rows]
+        return (
+            [row[2][: min(count, proposal_counts[index])] for index, row in enumerate(rows)],
+            [row[3][: min(count, proposal_counts[index])] for index, row in enumerate(rows)],
+        )
+
+    draft.draft_distributions = forced
+    uids = batch.insert(
+        list(prompts),
+        max_tokens=[8] * len(prompts),
+        lane_rngs=[LaneRNG(919 + index) for index in range(len(prompts))],
+    )
+    lanes = [batch.lanes[uid] for uid in uids]
+    for lane in lanes:
+        while lane.anchor is None:
+            batch._prefill(lane)
+    batch._round(lanes)
+    return batch, lanes, [
+        row[2][: proposal_counts[index]] for index, row in enumerate(rows)
+    ]
+
+
+def _run_forced_progressive_b2(tile, reject_at):
+    return _run_forced_progressive_many(tile, reject_at)
 
 
 def _assert_lane_target_state_equal(left, right):
@@ -287,6 +373,135 @@ def test_progressive_tile_one_spans_entire_long_proposal_without_bonus_draws():
     assert len(lane.ready) == 4
 
 
+@pytest.mark.parametrize("reject_at", [(None, None), (0, None), (2, 1)])
+def test_progressive_b2_distinct_proposals_match_fixed_lane_state(reject_at):
+    fixed_batch, fixed, fixed_proposals = _run_forced_progressive_b2(
+        None, reject_at
+    )
+    progressive_batch, progressive, progressive_proposals = (
+        _run_forced_progressive_b2(2, reject_at)
+    )
+    try:
+        assert progressive_proposals == fixed_proposals
+        assert progressive_proposals[0] != progressive_proposals[1]
+        proposal_hashes = []
+        for actual, expected in zip(progressive, fixed, strict=True):
+            _assert_lane_target_state_equal(actual, expected)
+            receipt = actual.ready[-1].speculative_receipt[
+                "progressive_verification"
+            ]
+            assert receipt["last_cohort_width"] == 2
+            assert receipt["max_cohort_width"] == 2
+            assert receipt["last_tile_input_rows"] in ([2], [2, 2])
+            assert receipt["checkpoint_state"] == (
+                "joint_attention_kv_and_recurrent_layer_state"
+            )
+            assert receipt["rollback_policy"] == (
+                "last_accepted_tile_then_exact_prefix"
+            )
+            proposal_hashes.append(receipt["last_proposal_sha256"])
+        assert len(set(proposal_hashes)) == 2
+        stats = progressive_batch.scheduler_stats
+        assert stats["external_progressive_verify_rounds"] == 2
+        assert stats["external_progressive_verify_physical_launches"] == 2
+        assert stats["external_progressive_verify_batched_rounds"] == 1
+        assert stats["external_progressive_verify_batched_lanes"] == 2
+        assert stats["external_progressive_verify_max_cohort_width"] == 2
+    finally:
+        fixed_batch.close()
+        progressive_batch.close()
+
+
+def test_progressive_b2_counts_initial_and_continued_physical_launches():
+    fixed_batch, fixed, _ = _run_forced_progressive_b2(None, (None, None))
+    progressive_batch, progressive, _ = _run_forced_progressive_b2(
+        2, (None, None)
+    )
+    try:
+        for actual, expected in zip(progressive, fixed, strict=True):
+            _assert_lane_target_state_equal(actual, expected)
+        stats = progressive_batch.scheduler_stats
+        assert stats["external_progressive_verify_b2_aligned_tile_launches"] == 2
+        assert (
+            stats["external_progressive_verify_b2_aligned_continued_launches"]
+            == 1
+        )
+    finally:
+        fixed_batch.close()
+        progressive_batch.close()
+
+
+@pytest.mark.parametrize("proposal_counts", [(3, 2), (3, 3, 2, 1)])
+def test_progressive_ragged_proposals_match_fixed_lane_state(proposal_counts):
+    rejected = (None,) * len(proposal_counts)
+    fixed_batch, fixed, fixed_proposals = _run_forced_progressive_many(
+        None, rejected, proposal_counts
+    )
+    progressive_batch, progressive, progressive_proposals = (
+        _run_forced_progressive_many(2, rejected, proposal_counts)
+    )
+    try:
+        assert progressive_proposals == fixed_proposals
+        for actual, expected in zip(progressive, fixed, strict=True):
+            _assert_lane_target_state_equal(actual, expected)
+            receipt = actual.ready[-1].speculative_receipt[
+                "progressive_verification"
+            ]
+            assert receipt["ragged_launches"] >= 1
+            assert receipt["padding_rows"] >= 1
+            layout = receipt["last_ragged_layout"]
+            assert layout["schema"] == "mlx2.ragged-verify-layout.v1"
+            assert layout["backend_mode"] == "padded"
+            assert layout["logical_rows"] <= layout["physical_rows"]
+        stats = progressive_batch.scheduler_stats
+        assert stats["external_progressive_verify_ragged_launches"] == 1
+        expected_padding = 1 if len(proposal_counts) == 2 else 3
+        assert stats["external_progressive_verify_padding_rows"] == expected_padding
+    finally:
+        fixed_batch.close()
+        progressive_batch.close()
+
+
+@pytest.mark.parametrize(
+    "reject_at",
+    [(None, None, None, None), (0, None, 2, None)],
+)
+def test_progressive_b4_distinct_proposals_match_fixed_lane_state(reject_at):
+    fixed_batch, fixed, fixed_proposals = _run_forced_progressive_many(
+        None, reject_at
+    )
+    progressive_batch, progressive, progressive_proposals = (
+        _run_forced_progressive_many(2, reject_at)
+    )
+    try:
+        assert progressive_proposals == fixed_proposals
+        assert len({tuple(row) for row in progressive_proposals}) == 4
+        for actual, expected in zip(progressive, fixed, strict=True):
+            _assert_lane_target_state_equal(actual, expected)
+            receipt = actual.ready[-1].speculative_receipt[
+                "progressive_verification"
+            ]
+            assert receipt["last_cohort_width"] == 4
+            assert receipt["max_cohort_width"] == 4
+        stats = progressive_batch.scheduler_stats
+        assert stats["external_progressive_verify_batched_lanes"] == 4
+        assert stats["external_progressive_verify_max_cohort_width"] == 4
+    finally:
+        fixed_batch.close()
+        progressive_batch.close()
+
+
+def test_first_tile_disjoint_proof_does_not_publish_tokens():
+    assert _first_tiles_pairwise_disjoint(
+        ([1, 1, 1, 1], [2, 2, 2, 2], [3, 3, 3, 3], [4, 4, 4, 4]),
+        4,
+    )
+    assert not _first_tiles_pairwise_disjoint(
+        ([1, 5, 6, 7], [2, 5, 8, 9], [3, 10, 11, 12], [4, 13, 14, 15]),
+        4,
+    )
+
+
 def test_progressive_stop_proposal_uses_fixed_verifier_and_preserves_rng():
     fixed_batch, fixed = _run_forced_progressive_round(
         None, None, stop_index=0
@@ -303,6 +518,29 @@ def test_progressive_stop_proposal_uses_fixed_verifier_and_preserves_rng():
     ]
     assert receipt["selected"] and not receipt["observed_used"]
     assert receipt["rounds"] == 0
+
+
+def test_progressive_target_correction_stop_counts_only_committed_accepts():
+    fixed_batch, fixed = _run_forced_progressive_round(
+        None, 0, stop_index=0, stop_expected=True
+    )
+    progressive_batch, progressive = _run_forced_progressive_round(
+        2, 0, stop_index=0, stop_expected=True
+    )
+    try:
+        _assert_lane_target_state_equal(progressive, fixed)
+        assert [item.token for item in progressive.ready] == [
+            fixed.ready[-1].token
+        ]
+        assert progressive.ready[-1].finish_reason == "stop"
+        assert progressive.accepted == 0
+        assert progressive_batch.scheduler_stats["accepted_proposals"] == 0
+        receipt = progressive.ready[-1].speculative_receipt
+        assert receipt["round_accepted"] == 0
+        assert receipt["progressive_verification"]["observed_used"] is True
+    finally:
+        fixed_batch.close()
+        progressive_batch.close()
 
 
 @pytest.mark.parametrize("stop_index", [None, 0, 1])

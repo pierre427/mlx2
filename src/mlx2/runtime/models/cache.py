@@ -2300,6 +2300,24 @@ class ArraysCache(_BaseCache):
         self._host_lengths = None
         self._host_left_padding = None
 
+    def cache_operations_contract(self):
+        """Return the exact recurrent ABI, specialized by model ownership.
+
+        ArraysCache is shared by several recurrent families.  Nemotron marks
+        its instances as Mamba-owned when constructing the layer cache so
+        APCv2 fingerprints and layer segments describe the actual state math.
+        Unmarked instances retain the historical generic/GDN identity.
+        """
+
+        from ..cache_operations import (
+            MAMBA_RECURRENT_OPERATIONS,
+            RECURRENT_OPERATIONS,
+        )
+
+        if getattr(self, "apcv2_recurrent_kind", None) == "mamba":
+            return MAMBA_RECURRENT_OPERATIONS
+        return RECURRENT_OPERATIONS
+
     def start_speculation(self, rollback_window: Optional[int] = None):
         self.speculating = True
         self._rollback_window = max(
