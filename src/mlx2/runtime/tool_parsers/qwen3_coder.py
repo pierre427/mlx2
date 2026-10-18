@@ -696,4 +696,10 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
             rf"<tool_call>\n<function={re.escape(name)}>{body}\n</function>\n</tool_call>"
         )
     call = "(?:" + "|".join(calls) + ")"
-    return call if parallel_tool_calls is False else call + rf"(?:\n{call})*"
+    if parallel_tool_calls is False:
+        return call
+    # The templates write ``</tool_call>\n`` before the end-of-turn token, so
+    # a model ends a call block with a newline.  Without the optional final
+    # newline that newline can only open another call, and greedy decoding
+    # repeats the call until max_tokens (Nemotron 3.5 Super, 2026-10-18).
+    return call + rf"(?:\n{call})*\n?"
