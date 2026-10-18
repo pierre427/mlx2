@@ -72,6 +72,14 @@ class DFlashAttention(nn.Module):
         self.o_proj = nn.Linear(self.n_heads * self.head_dim, dim, bias=False)
         self.q_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        if getattr(config, "attention_sink_bias", False):
+            # One learned logit per query head joins each softmax denominator
+            # (the gpt-oss sink law MLX's fused attention implements).
+            self.attention_sink_bias = mx.zeros((self.n_heads,))
+
+    def _sinks(self, queries):
+        sinks = getattr(self, "attention_sink_bias", None)
+        return None if sinks is None else sinks.astype(queries.dtype)
 
     def __call__(self, x: mx.array, x_ctx: mx.array, rope, cache: KVCache):
         B, L, _ = x.shape
@@ -83,6 +91,8 @@ class DFlashAttention(nn.Module):
         prop_keys = self.k_proj(x)
         prop_values = self.v_proj(x)
         fold = getattr(self, "fold_policy", None) is not None
+        if fold and getattr(self, "attention_sink_bias", None) is not None:
+            raise ValueError("FOLD attention does not implement attention sinks")
         query_rows = queries.reshape(B, L, self.n_heads, -1)
         context_key_rows = ctx_keys.reshape(B, S, self.n_kv_heads, self.head_dim)
         proposal_key_rows = prop_keys.reshape(B, L, self.n_kv_heads, -1)
@@ -134,7 +144,7 @@ class DFlashAttention(nn.Module):
                 if self.is_sliding and keys.shape[2] > self.sliding_window-1:
                     keys, values = keys[:, :, -(self.sliding_window-1):], values[:, :, -(self.sliding_window-1):]
                     entry.keys, entry.values, entry._idx = keys, values, keys.shape[2]
-                outputs.append(mx.fast.scaled_dot_product_attention(q, mx.concatenate([keys,pk],axis=2), mx.concatenate([values,prop_values[row:row+1]],axis=2), scale=self.scale,mask=None))
+                outputs.append(mx.fast.scaled_dot_product_attention(q, mx.concatenate([keys,pk],axis=2), mx.concatenate([values,prop_values[row:row+1]],axis=2), scale=self.scale,mask=None, sinks=self._sinks(q)))
             o = mx.concatenate(outputs,axis=0)
             return self.o_proj(o.transpose(0,2,1,3).reshape(B,L,-1))
         if getattr(self, "fold_policy", None) is not None:
@@ -169,7 +179,8 @@ class DFlashAttention(nn.Module):
         # limit resident prefix context through the rotating cache above.
         mask = None
         o = mx.fast.scaled_dot_product_attention(
-            queries, keys, values, scale=self.scale, mask=mask
+            queries, keys, values, scale=self.scale, mask=mask,
+            sinks=self._sinks(queries),
         )
         return self.o_proj(o.transpose(0, 2, 1, 3).reshape(B, L, -1))
 

@@ -401,8 +401,6 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         )
 
     def _init_super(self, model_path, execution_policy):
-        from .process_globals import claim_moe, claim_stock_moe
-
         execution_policy, self.moe_nax_gather = _split_moe_nax_gather(execution_policy)
         (
             expert_sort,
@@ -436,47 +434,81 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         self._num_draft = native_draft_depth(
             3 if external else policy.get("num_draft", 3)
         )
-        artifact = inspect_artifact(model_path)
-        self.identity, self.layout = artifact["identity"], CACHE_LAYOUT
+        artifact = type(self).artifact_inspector(model_path)
+        self.identity, self.layout = artifact["identity"], type(self).cache_layout
         self.source_config, self.conversion = artifact["config"], artifact["conversion"]
         draft_record = None
         draft_loader = None
         if external:
-            draft_config = json.loads(
-                (Path(self.external_policy["draft_model"]) / "config.json").read_text()
+            draft_record, draft_loader = self._external_drafter(
+                model_path, artifact, draft_weight_quantization
             )
-            if draft_config.get("architectures") == ["DSparkDraftModel"]:
-                from .nemotron35_dspark import inspect_drafter, load_drafter
-
-                draft_record = inspect_drafter(
-                    self.external_policy["draft_model"], model_path
-                )
-
-                def draft_loader(record, target_model):
-                    return load_drafter(
-                        record,
-                        target_model,
-                        runtime_quantization=draft_weight_quantization,
-                    )
-            else:
-                from .lilicorr_nemotron import inspect_drafter, load_drafter
-
-                draft_record = inspect_drafter(
-                    self.external_policy["draft_model"], target_artifact=artifact
-                )
-                contract = self.nemotron_lilicorr_target_contract(draft_record)
-
-                def draft_loader(record, target_model):
-                    return load_drafter(
-                        record,
-                        target_model,
-                        target_contract=contract,
-                        runtime_quantization=draft_weight_quantization,
-                    )
             self.external_policy.setdefault(
                 "num_draft", draft_record["args"].block_size - 1
             )
             self._check_num_draft(draft_record)
+        self._load_super_model(artifact, draft_record, draft_loader)
+
+    def _external_drafter(self, model_path, artifact, draft_weight_quantization):
+        """Inspect this target's external head; returns (record, loader)."""
+        draft_config = json.loads(
+            (Path(self.external_policy["draft_model"]) / "config.json").read_text()
+        )
+        if draft_config.get("architectures") == ["DSparkDraftModel"]:
+            from .nemotron35_dspark import inspect_drafter, load_drafter
+
+            draft_record = inspect_drafter(
+                self.external_policy["draft_model"], model_path
+            )
+
+            def draft_loader(record, target_model):
+                return load_drafter(
+                    record,
+                    target_model,
+                    runtime_quantization=draft_weight_quantization,
+                )
+        else:
+            from .lilicorr_nemotron import inspect_drafter, load_drafter
+
+            draft_record = inspect_drafter(
+                self.external_policy["draft_model"], target_artifact=artifact
+            )
+            contract = self.nemotron_lilicorr_target_contract(draft_record)
+
+            def draft_loader(record, target_model):
+                return load_drafter(
+                    record,
+                    target_model,
+                    target_contract=contract,
+                    runtime_quantization=draft_weight_quantization,
+                )
+        return draft_record, draft_loader
+
+    # Composition hooks; a declared derivative (Nemotron 3.5 Bolt) overrides
+    # these instead of branching on model names in shared code.
+    cache_layout = CACHE_LAYOUT
+    eos_token_ids = (11,)
+
+    @staticmethod
+    def _runtime_language_config(config):
+        return language_config(config)
+
+    @staticmethod
+    def _runtime_model_class():
+        from ..runtime.models.nemotron35_super import Model
+
+        return Model
+
+    def _declare_model_contracts(self, model, text):
+        """Adapter-owned model declarations made after construction (none)."""
+
+    def _check_tokenizer(self, tokenizer):
+        if tokenizer.convert_tokens_to_ids("<image>") != 18:
+            raise ValueError("Super VL tokenizer image token differs")
+
+    def _load_super_model(self, artifact, draft_record, draft_loader):
+        from .process_globals import claim_moe, claim_stock_moe
+
         self.environment = configure_environment()
         self.environment["MLX_LM_MTP_BOUNDARY_COW"] = "1"
         os.environ["MLX_LM_MTP_BOUNDARY_COW"] = "1"
@@ -488,14 +520,16 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         from mlx import nn
         from transformers import AutoTokenizer
 
-        from ..runtime.models.nemotron35_super import Model
         from ..runtime.models.nemotron_h import ModelArgs
         from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         from ..runtime.ubc_evict import load_shards_evicting
 
         path = Path(self.identity["path"])
-        self.model = Model(ModelArgs.from_dict(language_config(self.source_config)))
+        Model = self._runtime_model_class()
+        text = self._runtime_language_config(self.source_config)
+        self.model = Model(ModelArgs.from_dict(text))
+        self._declare_model_contracts(self.model, text)
         weights = self.model.sanitize(
             load_shards_evicting(
                 path / name for name in sorted(set(artifact["weight_map"].values()))
@@ -577,14 +611,15 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             path, local_files_only=True, trust_remote_code=False
         )
         self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
-        if tokenizer.convert_tokens_to_ids("<image>") != 18:
-            raise ValueError("Super VL tokenizer image token differs")
+        self._check_tokenizer(tokenizer)
         self.tokenizer = TokenizerWrapper(
-            tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=[11]
+            tokenizer,
+            detokenizer_class=BPEStreamingDetokenizer,
+            eos_token_ids=list(type(self).eos_token_ids),
         )
         self.max_context = self.model.args.max_position_embeddings
         if draft_record is not None:
-            self._bind_external_drafter(draft_record, draft_loader, DESCRIPTOR)
+            self._bind_external_drafter(draft_record, draft_loader, type(self).descriptor)
 
     def prompt_tokens(self, request):
         if "_mlx2_prompt_tokens" in request:

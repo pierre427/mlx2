@@ -116,11 +116,15 @@ def test_registry_routes_puzzle_omni_to_bolt(monkeypatch, tmp_path):
     assert seen == [(".nemotron35_bolt", registry.__package__)]
 
 
-def test_bolt_descriptor_advertises_no_executable_contract():
-    assert not bolt.DESCRIPTOR.capabilities
-    assert not bolt.DESCRIPTOR.state_planes
-    assert bolt.DESCRIPTOR.cache_layout is None
-    assert bolt.DESCRIPTOR.metadata["implementation_scope"] == "artifact-inspection-only"
+def test_bolt_descriptor_is_text_only_without_native_mtp():
+    from mlx2.contracts import Capability
+
+    caps = bolt.DESCRIPTOR.capabilities
+    assert Capability.TEXT in caps and Capability.APC_V2 in caps
+    assert Capability.MTP not in caps and Capability.VISION not in caps
+    assert bolt.DESCRIPTOR.cache_layout == bolt.CACHE_LAYOUT
+    assert bolt.DESCRIPTOR.metadata["qualification"] == "unqualified"
+    assert bolt.DESCRIPTOR.metadata["native_mtp"] == "absent"
 
 
 def test_registry_malformed_llm_config_does_not_raise_attribute_error(monkeypatch, tmp_path):
@@ -208,13 +212,13 @@ def test_target_inspector_checks_metadata_header_and_shard_closure(monkeypatch, 
     monkeypatch.setattr(bolt, "SOURCE_TENSOR_BYTES", payload)
     monkeypatch.setattr(bolt, "SOURCE_SHARD_BYTES", shard_size)
     monkeypatch.setattr(bolt, "SOURCE_SHARDS", 1)
-    result = bolt.inspect_artifact(tmp_path)
+    result = bolt.inspect_source_artifact(tmp_path)
     assert result["tensor_count"] == 28_885
     assert result["files"][0][0] == shard_name
     (tmp_path / "tokenizer.json").unlink()
     (tmp_path / "tokenizer.json").symlink_to(tmp_path / "config.json")
     with pytest.raises(ValueError, match="Missing or escaped"):
-        bolt.inspect_artifact(tmp_path)
+        bolt.inspect_source_artifact(tmp_path)
 
 
 def test_lilicorr_inspector_checks_exact_header_and_weight_hash(monkeypatch, tmp_path):
@@ -269,9 +273,79 @@ def test_lilicorr_inspector_checks_exact_header_and_weight_hash(monkeypatch, tmp
         bolt.inspect_lilicorr(tmp_path, target_artifact=target)
 
 
-def test_bolt_constructor_refuses_before_runtime_import(monkeypatch):
+def test_bolt_source_checkpoint_is_not_servable(tmp_path):
+    # The mixed GGML/ModelOpt source has no conversion receipt: refuse before
+    # any accelerator import, pointing at the converter.
     had_mlx_core = "mlx.core" in sys.modules
-    monkeypatch.setattr(bolt, "inspect_artifact", lambda path: {"path": str(path)})
-    with pytest.raises(ValueError, match="Q8_0.*IQ2_XXS"):
-        bolt.Nemotron35BoltAdapter("/does/not/matter")
+    with pytest.raises(ValueError, match="convert_nemotron35_bolt"):
+        bolt.Nemotron35BoltAdapter(tmp_path)
     assert ("mlx.core" in sys.modules) is had_mlx_core
+
+
+def _bolt_provenance():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    return root, json.loads((root / "provenance" / "nemotron35-bolt.json").read_text())
+
+
+def test_bolt_provenance_names_only_real_model_args_fields():
+    import re
+
+    from mlx2.runtime.models.nemotron_h import ModelArgs
+
+    _root, record = _bolt_provenance()
+    named = {
+        name
+        for text in record["modifications"]
+        for name in re.findall(r"\bModelArgs\.(\w+)", text)
+    }
+    assert named <= set(ModelArgs.__dataclass_fields__), sorted(
+        named - set(ModelArgs.__dataclass_fields__)
+    )
+
+
+def test_bolt_observed_lifecycle_is_recorded_under_its_checkpoint():
+    # AGENTS.md: model-path results go in model-feature-decisions.tsv under
+    # the exact checkpoint and the mlx2 commit each run came from.
+    import csv
+    from pathlib import Path
+
+    root, record = _bolt_provenance()
+    conversion = record["validation"]["conversion"]
+    checkpoint = f"{Path(conversion['artifact']).name}@{conversion['fingerprint'][:8]}"
+    units = {
+        Path(section["evidence"]).name: section["commit"]
+        for section in record["validation"].values()
+        if isinstance(section, dict) and "evidence" in section and "commit" in section
+    }
+    with (root / "docs" / "research" / "model-feature-decisions.tsv").open(newline="") as handle:
+        rows = {
+            row["feature_or_flag"]: row
+            for row in csv.DictReader(handle, delimiter="\t")
+            if row["model"] == "nemotron_h_omni:base" and row["checkpoint"] == checkpoint
+        }
+    observed = {
+        name: route for name, route in record["lifecycle"].items() if route["observed_used"]
+    }
+    assert observed
+    for name, route in record["lifecycle"].items():
+        assert route["qualified"] is False, name
+        for feature in route.get("grid_features", ()):
+            row = rows.get(feature)
+            assert row is not None, (name, feature)
+            assert row["qualified"] == "no", (name, feature)
+            if route["selected"]:
+                assert row["selected"] == "yes", (name, feature)
+            if not route["observed_used"]:
+                assert row["observed_used"] != "yes", (name, feature)
+    for name, route in observed.items():
+        assert route["grid_features"], name
+        assert route["evidence"], name
+        for unit in route["evidence"]:
+            commit = units[unit.split(" ")[0]]
+            for feature in route["grid_features"]:
+                row = rows[feature]
+                assert row["observed_used"] == "yes", (name, feature)
+                assert commit in row["source_revision"], (name, feature, commit)
+                assert unit.split(" ")[0] in row["evidence"], (name, feature, unit)

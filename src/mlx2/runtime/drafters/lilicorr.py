@@ -348,14 +348,16 @@ class LiLiCorrDraftModel(XPressDraftModel):
     def bind(self, target_model, *, target_contract=None):
         """Bind target embeddings while preserving an exported owned head."""
         owned = bool(getattr(self.config, "has_own_lm_head", False))
-        if owned:
+        # A Nemotron target contract binds owned-head and shared-head
+        # (target lm_head) sliding exports alike; plain Qwen pairs pass none.
+        if owned or target_contract is not None:
             required = {
                 "schema": "mlx2.nemotron-lilicorr-target.v1",
                 "target_model_type": "nemotron_h_omni",
                 "capture": "post-layer-pre-final-norm",
                 "ordinary_reference_preserved": True,
                 "speculative_rollback": "exact",
-                "owned_lm_head": True,
+                "owned_lm_head": owned,
                 "owned_final_norm": True,
                 "qualified": False,
             }
@@ -391,18 +393,20 @@ class LiLiCorrDraftModel(XPressDraftModel):
                 is not True
             ):
                 raise ValueError("Nemotron LiLiCorr target interface differs")
-            head = self.lm_head
+            head = self.lm_head if owned else None
             super().bind(target_model)
-            self.lm_head = head
+            if owned:
+                self.lm_head = head
             self.target_contract = dict(target_contract)
             return self
-        if target_contract is not None:
-            raise ValueError("shared-head LiLiCorr does not accept a target contract")
         return super().bind(target_model)
 
     def reset(self, target_model):
         """Reset caches without dropping the immutable owned-head binding."""
-        if getattr(self.config, "has_own_lm_head", False):
+        if (
+            getattr(self.config, "has_own_lm_head", False)
+            or getattr(self, "target_contract", None) is not None
+        ):
             self.bind(
                 target_model,
                 target_contract=getattr(self, "target_contract", None),

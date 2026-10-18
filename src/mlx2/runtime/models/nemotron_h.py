@@ -28,6 +28,21 @@ from . import moe_nax_gather as _moe_nax
 from .switch_layers import SwitchMLP
 
 NEMOTRON_ROUTED_EXACT_MAX_ROWS = 16
+# (hidden, routed experts, top-k, latent, expert width, shared width) of the
+# MoE layers whose exact routed-batch strip has been established.  Without an
+# adapter declaration only the Nemotron 3.5 Super 120B geometry is admitted.
+NEMOTRON_ROUTED_EXACT_DEFAULT_GEOMETRIES = ((4096, 512, 22, 1024, 2688, 5376),)
+_ROUTED_EXACT_DECLARATION = "_mlx2_routed_exact_geometries"
+
+
+def _geometry_tuple(item) -> tuple[int, ...]:
+    if (
+        not isinstance(item, (list, tuple))
+        or len(item) != 6
+        or any(type(value) is not int or value <= 0 for value in item)
+    ):
+        raise ValueError(f"invalid Nemotron routed-exact geometry {item!r}")
+    return tuple(item)
 NEMOTRON_ROUTED_LATTICE_MAX_ROWS = 8 * NEMOTRON_ROUTED_EXACT_MAX_ROWS
 
 
@@ -1117,7 +1132,15 @@ class NemotronHMoE(nn.Module):
             self.config.moe_intermediate_size,
             self.config.moe_shared_expert_intermediate_size,
         )
-        if geometry != (4096, 512, 22, 1024, 2688, 5376):
+        # Adapter-owned only: set by Model.declare_routed_exact_geometries after
+        # construction, never read from a checkpoint/config dict.
+        declared = self.__dict__.get(_ROUTED_EXACT_DECLARATION)
+        admitted = (
+            NEMOTRON_ROUTED_EXACT_DEFAULT_GEOMETRIES
+            if declared is None
+            else tuple(tuple(item) for item in declared)
+        )
+        if geometry not in admitted:
             return f"geometry {geometry}"
         if self.config.n_shared_experts is None:
             return "no shared expert"
@@ -1441,6 +1464,10 @@ def _moe_layer_args(args: ModelArgs, block_cfg: dict | None) -> ModelArgs:
         layer_args.moe_intermediate_size = block_cfg["moe_intermediate_size"]
     if block_cfg.get("num_experts_per_tok") is not None:
         layer_args.num_experts_per_tok = block_cfg["num_experts_per_tok"]
+    # Puzzle-NAS prunings (Nemotron 3.5 Bolt) also vary the routed-expert
+    # count per layer; the router, its correction bias and SwitchGLU follow.
+    if block_cfg.get("n_routed_experts") is not None:
+        layer_args.n_routed_experts = block_cfg["n_routed_experts"]
     return layer_args
 
 
@@ -1622,6 +1649,22 @@ class Model(nn.Module):
         self._short_segment_refusal_reasons = {}
         if args.num_nextn_predict_layers > 0 and args.mtp_hybrid_override_pattern:
             self.mtp = NemotronHMTP(args)
+
+    def declare_routed_exact_geometries(self, geometries) -> tuple:
+        """Adapter-owned admission of MoE geometries to the exact routed strip.
+
+        Replaces the default (Super-only) set on every MoE layer.  A layer must
+        still match one declared geometry, and each admitted op still passes
+        its own parity canaries.  Config dicts cannot reach this.
+        """
+        declared = tuple(sorted({_geometry_tuple(item) for item in geometries}))
+        if not declared:
+            raise ValueError("a routed-exact declaration needs at least one geometry")
+        for layer in self.layers:
+            if isinstance(getattr(layer, "mixer", None), NemotronHMoE):
+                # object.__setattr__: keep it out of the module parameter tree.
+                object.__setattr__(layer.mixer, _ROUTED_EXACT_DECLARATION, declared)
+        return declared
 
     def set_short_segment_policy(self, policy: str) -> str:
         if policy not in {

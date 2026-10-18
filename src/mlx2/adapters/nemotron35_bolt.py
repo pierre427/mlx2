@@ -1,21 +1,24 @@
-"""Pinned NVIDIA Nemotron 3.5 Bolt target and LiLiCorr artifact contract.
+"""Nemotron 3.5 Bolt adapter: pinned source contract and converted-artifact serving.
 
 Bolt reuses the Nemotron-H/RADIO model family, but its published 24 GB
-checkpoint is not an affine Super conversion.  It combines ModelOpt NVFP4,
-GGML Q8_0 and GGML IQ2_XXS tensors and uses heterogeneous Puzzle-NAS MoE
-geometry.  Inspection is CPU-only and execution fails closed until mlx2 owns
-the two GGML projection laws.  See provenance/nemotron35-bolt.json.
+checkpoint mixes ModelOpt NVFP4, GGML Q8_0 and GGML IQ2_XXS tensors over a
+heterogeneous Puzzle-NAS MoE geometry.  The source is inspected only; the
+executable artifact is its CPU conversion to native affine MLX tensors
+(scripts/convert_nemotron35_bolt.py).  Serving is text-only, has no native
+MTP head, and takes the companion LiLiCorr export as its external drafter.
+Every route is unqualified.  See provenance/nemotron35-bolt.json.
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
 from collections import Counter
 from pathlib import Path
 
-from ..contracts import ModelDescriptor
+from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import MODEL_CARD, SamplingDefaults, VendorSampling
 from .dflash2 import _decode_unique_json, _read_safetensors_header
 from .nemotron35_super import Nemotron35SuperAdapter
@@ -43,21 +46,48 @@ LILICORR_WEIGHT_SHA256 = "850c121c5fa444dfdebbc15d8f23a1ab2beda55863460ab44203e3
 LILICORR_TENSOR_BYTES = 962_467_000
 LILICORR_HEADER_SHA256 = "0b3bed1f9d9030d6b97ce9c5ffd1fca921cc7b8910e4ca7a8a083f4e2a0f8eb6"
 
+CACHE_LAYOUT = "nemotron35-bolt-hybrid-fp32-router-v1"
+CONVERSION_SCHEMA = "mlx2.nemotron35-bolt-conversion.v1"
+# The BF16 import of the pinned NVFP4 LiLiCorr (conversion/nvfp4.py, mode bf16).
+LILICORR_EXPORT_CONFIG_SHA256 = "404f0e8e4ccf6218c48c13fba7c116853193eb8bb2c43ac516fc60e8e0f6b434"
+LILICORR_EXPORT_HEADER_SHA256 = "0a88b1c4c27a6169b3b44d7015afd5c62c60f23c8656672712ff32e9247bac74"
+LILICORR_EXPORT_WEIGHT_SHA256 = "97ea2a78a446a61b330e811c954bebf7fc8d5b0924e1879b207da0c27e7a86fa"
+LILICORR_TAPS = (1, 18, 35, 51, 68, 85)
+
 DESCRIPTOR = ModelDescriptor(
     model_type="nemotron_h_omni",
     family="nemotron35-bolt-74b-a9b",
-    variant="native-iq2-nvfp4-q8",
-    cache_layout=None,
-    state_planes=frozenset(),
-    capabilities=frozenset(),
+    variant="mixed-affine-experts4g32",
+    cache_layout=CACHE_LAYOUT,
+    state_planes=frozenset(
+        {
+            StatePlane.ATTENTION_KV,
+            StatePlane.RECURRENT,
+            StatePlane.RNG,
+            StatePlane.TRANSCRIPT,
+            StatePlane.DRAFT,
+        }
+    ),
+    capabilities=frozenset(
+        {
+            Capability.TEXT,
+            Capability.STREAMING,
+            Capability.TOOLS,
+            Capability.REASONING,
+            Capability.CONTINUOUS_BATCH,
+            Capability.PREFIX_REUSE,
+            Capability.APC_V2,
+            Capability.LAYERED_CACHE,
+            Capability.GRAMMAR,
+        }
+    ),
     metadata={
         "execution": "mlx2.adapters.nemotron35_bolt.Nemotron35BoltAdapter",
-        "implementation_scope": "artifact-inspection-only",
         "qualification": "unqualified",
-        "ordinary_reference": "blocked-native-packed-projections",
-        "vision": "geometry-inspected-not-executable",
-        "native_mtp": "not-present",
-        "external_draft": "artifact-inspected-not-executable",
+        "ordinary_reference": "implemented",
+        "vision": "absent-text-only-images-fail-closed",
+        "native_mtp": "absent",
+        "external_draft": "lilicorr-bf16-import-attention-sinks",
     },
 )
 SAMPLING = VendorSampling.single(
@@ -215,7 +245,8 @@ def validate_target_config(config: dict) -> dict:
     return text
 
 
-def inspect_artifact(model_path) -> dict:
+def inspect_source_artifact(model_path) -> dict:
+    """Pinned source checkpoint (mixed GGML/ModelOpt); inspection only."""
     path = Path(model_path).expanduser().resolve()
     for name, digest in SOURCE_METADATA_SHA256.items():
         item = path / name
@@ -375,6 +406,7 @@ def validate_lilicorr_config(config: dict, target: dict) -> dict:
 
 
 def inspect_lilicorr(draft_path, *, target_artifact: dict) -> dict:
+    """Pinned source NVFP4 LiLiCorr bound to the source target; inspection only."""
     path = Path(draft_path).expanduser().resolve()
     config_path = path / "config.json"
     quant_path = path / "hf_quant_config.json"
@@ -452,18 +484,318 @@ def inspect_lilicorr(draft_path, *, target_artifact: dict) -> dict:
     }
 
 
+def inspect_artifact(model_path) -> dict:
+    """Converted affine artifact, bound to the pinned source and its recipe."""
+    from ..conversion.nemotron35_bolt_plan import language_config, make_plan
+    from ..conversion.nvfp4 import read_header, sha256
+
+    path = Path(model_path).expanduser().resolve()
+    receipt_path = path / "mlx2-conversion.json"
+    if not receipt_path.is_file():
+        raise ValueError(
+            "Nemotron 3.5 Bolt serves only its converted affine artifact; convert the "
+            "pinned source with scripts/convert_nemotron35_bolt.py"
+        )
+    _, config = _read_json(path / "config.json", "Bolt converted config")
+    _, receipt = _read_json(receipt_path, "Bolt conversion receipt")
+    if (
+        receipt.get("schema") != CONVERSION_SCHEMA
+        or receipt.get("source_revision") != SOURCE_REVISION
+        or receipt.get("source_config_sha256") != SOURCE_CONFIG_SHA256
+        or receipt.get("source_quant_sha256") != SOURCE_QUANT_SHA256
+        or receipt.get("source_index_sha256") != SOURCE_INDEX_SHA256
+        or receipt.get("output_config_sha256") != sha256(path / "config.json")
+        or receipt.get("output_index_sha256") != sha256(path / "model.safetensors.index.json")
+    ):
+        raise ValueError("Nemotron 3.5 Bolt requires a source-bound completed conversion")
+    source_config = {k: v for k, v in config.items() if k != "quantization"}
+    source_config["quantization_config"] = receipt.get("source_quantization_config")
+    validate_target_config(source_config)
+    text = language_config(config)
+    plan = make_plan(config)
+    if (
+        config.get("quantization")
+        != {"group_size": 32, "bits": 4, "mode": "affine", **plan["modules"]}
+        or receipt.get("recipe") != plan["recipe"]
+        or receipt.get("tensor_bytes") != plan["tensor_bytes"]
+    ):
+        raise ValueError("Nemotron 3.5 Bolt mixed precision differs from its recipe")
+    mapping = json.loads((path / "model.safetensors.index.json").read_text())["weight_map"]
+    if set(mapping) != set(plan["schema"]):
+        raise ValueError("Nemotron 3.5 Bolt index has missing or unexpected tensors")
+    digest, records = hashlib.sha256(), []
+    for name in ("config.json", "model.safetensors.index.json", "mlx2-conversion.json",
+                 *SOURCE_METADATA_SHA256):
+        item = path / name
+        _require_regular_file(item, "metadata")
+        if name in SOURCE_METADATA_SHA256 and _sha256(item) != SOURCE_METADATA_SHA256[name]:
+            raise ValueError(f"Nemotron 3.5 Bolt metadata differs from source: {name}")
+        digest.update(name.encode())
+        digest.update(item.read_bytes())
+    shards = {item["file"]: item for item in receipt["output_shards"]}
+    if set(shards) != set(mapping.values()):
+        raise ValueError("Nemotron 3.5 Bolt conversion receipt shard closure differs")
+    for name in sorted(shards):
+        if Path(name).name != name or not name.endswith(".safetensors"):
+            raise ValueError("Nemotron 3.5 Bolt shard path escapes artifact")
+        item = path / name
+        _require_regular_file(item, "shard")
+        if item.stat().st_size != shards[name]["bytes"]:
+            raise ValueError("Nemotron 3.5 Bolt shard is truncated")
+        header, _ = read_header(item)
+        tensors = {k: v for k, v in header.items() if k != "__metadata__"}
+        if set(tensors) != {k for k, shard in mapping.items() if shard == name}:
+            raise ValueError("Nemotron 3.5 Bolt shard/index differs")
+        for key, entry in tensors.items():
+            if {f: entry[f] for f in ("shape", "dtype")} != plan["schema"][key]:
+                raise ValueError(f"Nemotron 3.5 Bolt tensor geometry differs: {key}")
+        stat = item.stat()
+        record = (name, stat.st_size, stat.st_mtime_ns)
+        records.append(record)
+        digest.update(json.dumps(record).encode())
+        digest.update(json.dumps(header, sort_keys=True).encode())
+    return {
+        "schema": "mlx2.nemotron35-bolt-converted-artifact.v1",
+        "config": config,
+        "text_config": text,
+        "weight_map": mapping,
+        "conversion": receipt,
+        "has_mtp": False,
+        "quantization": plan["modules"],
+        "identity": {
+            "path": str(path),
+            "fingerprint": digest.hexdigest(),
+            "files": records,
+            "source_revision": SOURCE_REVISION,
+        },
+        "qualified": False,
+        "selected": False,
+        "observed_used": False,
+    }
+
+
+def lilicorr_executable_config(config: dict):
+    """LiLiCorr args for the BF16 import: shared target head, sinks, sliding 1024."""
+    from .lilicorr import LiLiCorrConfig
+
+    nested = config.get("dflash_config")
+    if (
+        not isinstance(nested, dict)
+        or config.get("quantization_config") is not None
+        or config.get("quantization") is not None
+        or config.get("has_own_lm_head") is not None
+        or config.get("tie_word_embeddings") is not False
+    ):
+        raise ValueError("Unsupported Nemotron 3.5 Bolt LiLiCorr export")
+    fields = LiLiCorrConfig.__dataclass_fields__
+    values = {k: v for k, v in config.items() if k in fields}
+    values.update({k: v for k, v in nested.items() if k in fields})
+    values.update(num_target_layers=88, has_own_lm_head=False, attention_sink_bias=True)
+    args = LiLiCorrConfig(**values)
+    if (
+        tuple(args.target_layer_ids) != LILICORR_TAPS
+        or args.block_size != 8
+        or args.sliding_window != 1024
+        or args.num_key_value_heads != 2
+    ):
+        raise ValueError("Nemotron 3.5 Bolt LiLiCorr export geometry differs")
+    return args
+
+
+def inspect_lilicorr_drafter(draft_path, *, target_artifact: dict) -> dict:
+    """Pinned BF16 LiLiCorr import bound to the converted target identity."""
+    path = Path(draft_path).expanduser().resolve()
+    config_raw, config = _read_json(path / "config.json", "Bolt LiLiCorr export config")
+    _, receipt = _read_json(path / "mlx2-conversion.json", "Bolt LiLiCorr import receipt")
+    if hashlib.sha256(config_raw).hexdigest() != LILICORR_EXPORT_CONFIG_SHA256:
+        raise ValueError("Unknown Nemotron 3.5 Bolt LiLiCorr export revision")
+    required = {
+        "schema": "mlx2.modelopt-nvfp4-import.v1",
+        "mode": "bf16",
+        "source_config_sha256": LILICORR_CONFIG_SHA256,
+        "source_weight_sha256": LILICORR_WEIGHT_SHA256,
+        "output_weight_sha256": LILICORR_EXPORT_WEIGHT_SHA256,
+        "quantized_matrices": 25,
+        "global_scale_preserved": True,
+    }
+    if any(receipt.get(k) != v for k, v in required.items()):
+        raise ValueError("Nemotron 3.5 Bolt LiLiCorr import receipt differs")
+    file = path / "model.safetensors"
+    raw_header, tensors, payload, binding = _validate_safetensors_file(file)
+    if (
+        hashlib.sha256(raw_header).hexdigest() != LILICORR_EXPORT_HEADER_SHA256
+        or {item["dtype"] for item in tensors.values()} != {"BF16"}
+        or payload != receipt.get("output_tensor_bytes")
+    ):
+        raise ValueError("Nemotron 3.5 Bolt LiLiCorr export tensors differ")
+    args = lilicorr_executable_config(config)
+    identity = target_artifact.get("identity", {})
+    if (
+        target_artifact.get("schema") != "mlx2.nemotron35-bolt-converted-artifact.v1"
+        or identity.get("source_revision") != SOURCE_REVISION
+        or not _is_sha256(identity.get("fingerprint"))
+        or target_artifact["text_config"]["hidden_size"] != args.hidden_size
+        or target_artifact["text_config"]["vocab_size"] != args.vocab_size
+    ):
+        raise ValueError("Bolt LiLiCorr target artifact contract differs")
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            [LILICORR_EXPORT_CONFIG_SHA256, LILICORR_EXPORT_HEADER_SHA256, binding,
+             identity["fingerprint"]],
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return {
+        "schema": "mlx2.nemotron35-bolt-lilicorr-drafter.v1",
+        "path": str(path),
+        "fingerprint": fingerprint,
+        "config": config,
+        "args": args,
+        "source_binding": binding,
+        "target_fingerprint": identity["fingerprint"],
+        "target_layer_ids": list(LILICORR_TAPS),
+        "expected_weight_sha256": LILICORR_EXPORT_WEIGHT_SHA256,
+        "attention_sinks": "implemented-gpt-oss-sink-law",
+        "owned_lm_head": False,
+        "runtime_load_supported": True,
+        "qualified": False,
+        "selected": False,
+        "observed_used": False,
+    }
+
+
+def load_lilicorr_drafter(record, target_model, *, target_contract):
+    refreshed = inspect_lilicorr_drafter(
+        record["path"], target_artifact=record["_target_artifact"]
+    )
+    if any(refreshed[k] != record[k] for k in ("fingerprint", "source_binding")):
+        raise ValueError("Nemotron 3.5 Bolt LiLiCorr changed since inspection")
+    file = Path(record["path"]) / "model.safetensors"
+    if _sha256(file) != record["expected_weight_sha256"]:
+        raise ValueError("Nemotron 3.5 Bolt LiLiCorr bytes differ from the pinned import")
+
+    import mlx.core as mx
+
+    from ..runtime.drafters.lilicorr import LiLiCorrDraftModel
+
+    model = LiLiCorrDraftModel(record["args"])
+    weights = model.sanitize(mx.load(str(file)))
+    model.load_weights(list(weights.items()), strict=True)
+    model.runtime_weight_quantization = None
+    model.eval()
+    mx.eval(model.parameters())
+    weights.clear()
+    mx.clear_cache()
+    return model.bind(target_model, target_contract=target_contract)
+
+
+def routed_exact_geometries(text: dict) -> list:
+    """Bolt's Puzzle-NAS MoE geometries, admitted to the exact routed batch.
+
+    One entry per distinct (experts, width) pair in ``block_configs``, in
+    Nemotron-H's (hidden, experts, top-k, latent, width, shared) order.  The
+    declaration only admits a layer to the strip; each layer's router,
+    projections, gather and combine still pass their own parity canaries.
+    """
+    return sorted(
+        {
+            (
+                int(text["hidden_size"]),
+                int(block["n_routed_experts"]),
+                int(block["num_experts_per_tok"]),
+                int(text["moe_latent_size"]),
+                int(block["moe_intermediate_size"]),
+                int(text["moe_shared_expert_intermediate_size"]),
+            )
+            for block in text["block_configs"]
+            if block["block_type"] == "moe"
+        }
+    )
+
+
 class Nemotron35BoltAdapter(Nemotron35SuperAdapter):
-    """Super-contract specialization that refuses before MLX allocation."""
+    """Super's serving contract over Bolt's converted Puzzle-NAS artifact."""
 
     descriptor = DESCRIPTOR
     sampling_defaults = SAMPLING
     artifact_inspector = staticmethod(inspect_artifact)
     default_route = "ordinary"
     multimodal_routes = frozenset()
+    cache_layout = CACHE_LAYOUT
+    # llm_config declares </s> (2); generation_config adds <|im_end|> (11).
+    eos_token_ids = (2, 11)
+    EXTERNAL_ROUTE_TAG = "bolt-external-v1"
+    EXTERNAL_PROFILE = "nemotron35-bolt-apcv2-external"
+    EXTERNAL_POLICY_EXTENSIONS = frozenset()
+    incremental_tokenizer_renderer_revision = "nemotron35-bolt-renderer-v1"
 
-    def __init__(self, model_path, *args, **kwargs):
-        self.artifact = inspect_artifact(model_path)
-        raise ValueError(
-            "Nemotron 3.5 Bolt native execution requires mlx2 GGML Q8_0 and "
-            "IQ2_XXS projection kernels; the artifact is inspected but not executable"
+    @staticmethod
+    def _runtime_language_config(config):
+        from ..conversion.nemotron35_bolt_plan import language_config
+
+        return language_config(config)
+
+    def _declare_model_contracts(self, model, text):
+        model.declare_routed_exact_geometries(routed_exact_geometries(text))
+
+    @staticmethod
+    def _runtime_model_class():
+        from ..runtime.models.nemotron35_bolt import Model
+
+        return Model
+
+    def _external_drafter(self, model_path, artifact, draft_weight_quantization):
+        if draft_weight_quantization is not None:
+            raise ValueError("Nemotron 3.5 Bolt LiLiCorr has no runtime quantization profile")
+        record = inspect_lilicorr_drafter(
+            self.external_policy["draft_model"], target_artifact=artifact
         )
+        record["_target_artifact"] = copy.deepcopy(artifact)
+        contract = self.nemotron_lilicorr_target_contract(record)
+
+        def loader(item, target_model):
+            return load_lilicorr_drafter(item, target_model, target_contract=contract)
+
+        return record, loader
+
+    def prepare_multimodal_request(self, request, *, file_loader=None):
+        for message in request.get("messages", ()):
+            content = message.get("content")
+            if isinstance(content, list) and any(
+                part.get("type") != "text" for part in content
+            ):
+                raise ValueError("Nemotron 3.5 Bolt serving is text-only")
+        return super().prepare_multimodal_request(request, file_loader=file_loader)
+
+    def profile_name(self, mtp):
+        if mtp:
+            raise ValueError("Nemotron 3.5 Bolt has no native MTP head")
+        return "nemotron35-bolt-affine4g32-apcv2-ordinary"
+
+    def execution_numerics_contract(self):
+        return {
+            "router_compute": "float32",
+            "recurrent_state": "float32",
+            "time_step_limit": [0.0, "infinity"],
+            "source_revision": SOURCE_REVISION,
+            "quantization_recipe": self.conversion["recipe"],
+            "qualification": "unqualified",
+        }
+
+    def nemotron_lilicorr_target_contract(self, draft_record):
+        if draft_record["target_fingerprint"] != self.identity["fingerprint"]:
+            raise ValueError("Nemotron 3.5 Bolt LiLiCorr target revision changed")
+        taps = tuple(draft_record["args"].target_layer_ids)
+        return {
+            "schema": "mlx2.nemotron-lilicorr-target.v1",
+            "target_model_type": "nemotron_h_omni",
+            "target_fingerprint": self.identity["fingerprint"],
+            "target_layer_ids": taps,
+            "target_feature_width": len(taps) * draft_record["args"].hidden_size,
+            "capture": "post-layer-pre-final-norm",
+            "ordinary_reference_preserved": True,
+            "speculative_rollback": "exact",
+            "owned_lm_head": False,
+            "owned_final_norm": True,
+            "qualified": False,
+        }

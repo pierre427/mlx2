@@ -34,6 +34,8 @@ class LiLiCorrConfig(DFlashConfig):
     conv_group_size: int = 0
     has_own_lm_head: bool = False
     quantization: dict | None = None
+    # Per-head learned softmax sink logits (Nemotron 3.5 Bolt export).
+    attention_sink_bias: bool = False
 
     def __post_init__(self):
         # The original Qwen3 export shares XPress' full-attention backbone.
@@ -42,7 +44,8 @@ class LiLiCorrConfig(DFlashConfig):
         backbone = {
             k: getattr(self, k) for k in DFlashConfig.__dataclass_fields__
         }
-        if self.has_own_lm_head:
+        # Owned-head and shared-head sliding exports share one backbone law.
+        if self.has_own_lm_head or "sliding_attention" in (self.layer_types or ()):
             for key in (
                 "hidden_size", "intermediate_size", "num_hidden_layers",
                 "num_attention_heads", "num_key_value_heads", "head_dim",
@@ -76,6 +79,10 @@ class LiLiCorrConfig(DFlashConfig):
             XPressConfig(**backbone, xpress_num_passes=1)
         if type(self.has_own_lm_head) is not bool:
             raise ValueError("LiLiCorr has_own_lm_head must be boolean")
+        if type(self.attention_sink_bias) is not bool or (
+            self.attention_sink_bias and "sliding_attention" not in self.layer_types
+        ):
+            raise ValueError("LiLiCorr attention sinks require the sliding backbone")
         if self.quantization is not None:
             from ..conversion.nvfp4 import NATIVE_QUANTIZATION
 
