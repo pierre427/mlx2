@@ -55,6 +55,43 @@ from .cache_sizing import (  # noqa: F401 - re-exported for callers and tests
 )
 from .logprobs import MAX_TOP_LOGPROBS, wants_logprobs
 
+
+class PrefillHandoffHandles:
+    """Bounded, expiring, single-use imported-state ownership."""
+
+    def __init__(self, *, maximum=4, ttl=120.0, clock=time.monotonic):
+        self.maximum, self.ttl, self.clock = maximum, ttl, clock
+        self._entries = collections.OrderedDict()
+        self._lock = threading.Lock()
+
+    def _expire(self, now):
+        for handle, (deadline, _value) in tuple(self._entries.items()):
+            if deadline <= now:
+                self._entries.pop(handle, None)
+
+    def put(self, value):
+        with self._lock:
+            now = self.clock()
+            self._expire(now)
+            while len(self._entries) >= self.maximum:
+                self._entries.popitem(last=False)
+            handle = uuid.uuid4().hex
+            self._entries[handle] = (now + self.ttl, value)
+            return handle
+
+    def take(self, handle):
+        with self._lock:
+            self._expire(self.clock())
+            entry = self._entries.pop(handle, None)
+        if entry is None:
+            raise LookupError("unknown or expired prefill handoff handle")
+        return entry[1]
+
+
+def validate_prefill_handoff_config(mode, admin_token):
+    if mode in {"import", "both"} and admin_token is None:
+        raise ValueError("--prefill-handoff import requires --admin-token-file")
+
 # Labeled-choice classifier bound; independent of the logprob serialization cap.
 MAX_CLASSIFIER_LABELS = 11
 from .request_limits import (
@@ -804,6 +841,7 @@ def validate_request(
         "return_progress",
         "verify_bitexact",
         "user",
+        "prefill_handoff",
     }
     # OpenAI clients serialize an unset field as an explicit null
     # (openai-python sends ``"stop": null`` for ``stop=None``).  Treat a
@@ -2096,6 +2134,9 @@ def handler_for(
     tensorfold_owned_router=None,
     sse_keepalive_seconds: float | None = DEFAULT_SSE_KEEPALIVE_SECONDS,
     usage_ledger=None,
+    prefill_handoff="off",
+    prefill_handoff_records=None,
+    prefill_handoff_allow_provisional=False,
 ):
     if (
         tenant_authenticator is not None
@@ -2110,6 +2151,11 @@ def handler_for(
     if tenant_authenticator is not None:
         engine.tenant_authenticator = tenant_authenticator
     engine.usage_ledger = usage_ledger
+    handoff_handles = PrefillHandoffHandles()
+    if prefill_handoff_records is None:
+        from .runtime.prefill_handoff import default_records_dir
+
+        prefill_handoff_records = default_records_dir()
     if request_tracer is not None:
         engine.request_tracer = request_tracer
     # Preserve the standalone/test embedding contract: callers that do not
@@ -2120,6 +2166,11 @@ def handler_for(
         MIN_REQUEST_BODY_BYTES
         if max_request_bytes is None
         else max_request_bytes,
+    )
+    # Imported state is intentionally much larger than a JSON prompt. It is
+    # admin-only and bounded by the engine's configured prompt-cache budget.
+    handoff_body_limit = max(
+        body_limit, int(getattr(engine, "cache_bytes", body_limit)) + (32 << 20)
     )
     state_root = (
         Path(api_state_dir).expanduser().resolve()
@@ -3223,6 +3274,31 @@ def handler_for(
                     ),
                 )
             elif self.path == "/v1/models":
+                handoff_capability = None
+                if prefill_handoff != "off":
+                    from .runtime.prefill_handoff import (
+                        OPERATION,
+                        OPERATION_REVISION,
+                        PrefillHandoffError,
+                    )
+
+                    try:
+                        identity = engine.prefill_handoff_identity()
+                    except (PrefillHandoffError, RuntimeError):
+                        # Model discovery stays available while the worker is
+                        # loading.  A partial identity must not be advertised
+                        # as a selectable fabric capability.
+                        identity = None
+                    if identity is not None:
+                        handoff_capability = {
+                            "ready": True,
+                            "export": prefill_handoff in {"export", "both"},
+                            "import": prefill_handoff in {"import", "both"},
+                            "operation": OPERATION,
+                            "operation_revision": OPERATION_REVISION,
+                            **identity,
+                            "plan_chunk_law": "prompt_length_prefill_step",
+                        }
                 self.send_json(
                     200,
                     {
@@ -3236,6 +3312,11 @@ def handler_for(
                                 "capabilities": status.get("capabilities", []),
                                 "qualification": status.get(
                                     "qualification", "unavailable"
+                                ),
+                                **(
+                                    {"prefill_handoff": handoff_capability}
+                                    if handoff_capability is not None
+                                    else {}
                                 ),
                             },
                             # vLLM shape: each concurrent LoRA adapter is a
@@ -3434,6 +3515,176 @@ def handler_for(
                     if not isinstance(error, APCSessionUnavailable):
                         raise
                     self.error(503, str(error), code=getattr(error, "code", None))
+                return
+            if path.startswith("/v1/admin/prefill-handoff/"):
+                if admin_token is None:
+                    self.api_error(403, "prefill handoff requires --admin-token-file")
+                    return
+                if not self._authorize_admin():
+                    return
+                action = path.removeprefix("/v1/admin/prefill-handoff/")
+                from .runtime.prefill_handoff import (
+                    PrefillHandoffError,
+                    load_records,
+                    match_record,
+                    plan_digest,
+                    validate_handoff,
+                )
+                from .runtime.prefill_handoff import (
+                    receipt as handoff_receipt,
+                )
+
+                try:
+                    if action in {"plan", "export", "import"}:
+                        # Establish the complete execution-bound identity
+                        # before parsing or performing any state operation.
+                        engine.prefill_handoff_identity()
+                    if action == "plan":
+                        if prefill_handoff == "off":
+                            raise PrefillHandoffError("capability_disabled")
+                        raw = self._read_json_body()
+                        if not isinstance(raw, dict):
+                            raise PrefillHandoffError("malformed")
+                        raw = dict(raw)
+                        producer_runtime_digest = raw.pop(
+                            "producer_runtime_digest", None
+                        )
+                        if (
+                            producer_runtime_digest is not None
+                            and not isinstance(producer_runtime_digest, str)
+                        ):
+                            raise PrefillHandoffError("malformed")
+                        body = validate_request(raw, chat="messages" in raw)
+                        if body.get("prefill_handoff") is not None:
+                            raise PrefillHandoffError("malformed")
+                        planned = engine.prefill_handoff_plan(body)
+                        record = None
+                        if producer_runtime_digest is not None:
+                            records = load_records(
+                                prefill_handoff_records,
+                                allow_provisional=prefill_handoff_allow_provisional,
+                            )
+                            match_kwargs = {
+                                "artifact_fingerprint": planned["artifact_fingerprint"],
+                                "producer_runtime_digest": producer_runtime_digest,
+                                "receiver_runtime_digest": planned["runtime_digest"],
+                                "receiver_execution_digest": planned["execution_digest"],
+                            }
+                            record = match_record(
+                                records,
+                                plan=planned["plan"],
+                                **match_kwargs,
+                            )
+                            if record is None:
+                                # Preserve the authoritative matching record's
+                                # context ceiling so the fabric can distinguish
+                                # an over-context request from no qualified pair.
+                                binding_plan = {
+                                    **planned["plan"],
+                                    "prompt_tokens": 1,
+                                    "prefix_tokens": 0,
+                                }
+                                record = match_record(
+                                    records, plan=binding_plan, **match_kwargs
+                                )
+                        planned["record"] = (
+                            {
+                                "record_id": record["record_id"],
+                                "record_state": record["record_state"],
+                                "max_prompt_tokens": record["max_prompt_tokens"],
+                            }
+                            if record is not None
+                            else None
+                        )
+                        self.send_json(200, planned)
+                        return
+                    if action == "export":
+                        if prefill_handoff not in {"export", "both"}:
+                            raise PrefillHandoffError("capability_disabled")
+                        body = self._read_json_body()
+                        if not isinstance(body, dict):
+                            raise PrefillHandoffError("malformed")
+                        token_ids = body.get("token_ids")
+                        if not isinstance(token_ids, list):
+                            raise PrefillHandoffError(
+                                "invalid_token_ids", "token_ids must be a list"
+                            )
+                        plan = body.get("plan")
+                        if body.get("plan_digest") != plan_digest(plan):
+                            raise PrefillHandoffError("plan_mismatch")
+                        expected = body.get("expected")
+                        identity = engine.prefill_handoff_identity()
+                        for field, reason in (
+                            ("artifact_fingerprint", "artifact_mismatch"),
+                            ("tokenizer_digest", "tokenizer_mismatch"),
+                            ("layout_fingerprint", "layout_mismatch"),
+                        ):
+                            if not isinstance(expected, dict) or expected.get(field) != identity[field]:
+                                raise PrefillHandoffError(reason)
+                        blob = engine.export_prefill_handoff(token_ids, plan)
+                        self.send_bytes(200, blob)
+                        return
+                    if action == "import":
+                        if prefill_handoff not in {"import", "both"}:
+                            raise PrefillHandoffError("capability_disabled")
+                        encoded = self.headers.get("X-Mlx2-Handoff-Expected")
+                        if not encoded:
+                            raise PrefillHandoffError("malformed", "missing expected header")
+                        try:
+                            padding = "=" * (-len(encoded) % 4)
+                            expected = json.loads(base64.urlsafe_b64decode(encoded + padding))
+                        except Exception as error:
+                            raise PrefillHandoffError("malformed", "invalid expected header") from error
+                        identity = engine.prefill_handoff_identity()
+                        for field, reason in (
+                            ("artifact_fingerprint", "artifact_mismatch"),
+                            ("tokenizer_digest", "tokenizer_mismatch"),
+                            ("layout_fingerprint", "layout_mismatch"),
+                        ):
+                            if not isinstance(expected, dict) or expected.get(field) != identity[field]:
+                                raise PrefillHandoffError(reason)
+                        size = self._content_length()
+                        if not 0 < size <= handoff_body_limit:
+                            raise PrefillHandoffError("malformed", "invalid handoff length")
+                        blob = self.read_body(size)
+                        manifest = validate_handoff(blob, expected=expected)
+                        record = match_record(
+                            load_records(
+                                prefill_handoff_records,
+                                allow_provisional=prefill_handoff_allow_provisional,
+                            ),
+                            artifact_fingerprint=identity["artifact_fingerprint"],
+                            producer_runtime_digest=manifest["producer"]["runtime_digest"],
+                            receiver_runtime_digest=identity["runtime_digest"],
+                            receiver_execution_digest=identity["execution_digest"],
+                            plan=manifest["plan"],
+                        )
+                        if record is None and not engine.qualification_mode:
+                            raise PrefillHandoffError("no_qualification_record")
+                        handle = handoff_handles.put({
+                            "blob": blob, "manifest": manifest, "record": record,
+                            "bytes": len(blob),
+                        })
+                        value = handoff_receipt(
+                            manifest=manifest, record=record,
+                            observed_used=False, bytes_moved=len(blob),
+                        )
+                        if record is None:
+                            value["reason"] = "candidate_validation"
+                        self.send_json(200, {"handle": handle, "receipt": value})
+                        return
+                    self.api_error(404, "unknown prefill handoff action")
+                except PrefillHandoffError as error:
+                    status = (
+                        503 if error.reason == "not_ready"
+                        else 413 if error.reason in {
+                            "context_limit_exceeded", "memory_admission_refused"
+                        }
+                        else 409
+                    )
+                    self.api_error(status, str(error), code=error.reason)
+                except (ValueError, json.JSONDecodeError) as error:
+                    self.api_error(400, str(error))
                 return
             if path == "/v1/admin/power":
                 if not self._authorize_admin():
@@ -3875,7 +4126,33 @@ def handler_for(
                     and (status.get("settings") or {}).get("tool_grammar_streaming")
                 )
                 model = _generation_model(status, body)
+                handoff_handle = body.pop("prefill_handoff", None)
+                if handoff_handle is not None:
+                    if admin_token is None:
+                        self.api_error(403, "prefill handoff requests require admin authentication")
+                        return
+                    if not self._authorize_admin():
+                        return
+                    if not isinstance(handoff_handle, str):
+                        self.api_error(400, "prefill_handoff must be a handle string")
+                        return
+                    try:
+                        imported = handoff_handles.take(handoff_handle)
+                        from .serving import trusted_prefill_handoff
+
+                        body["_mlx2_prefill_handoff"] = trusted_prefill_handoff(
+                            blob=imported["blob"],
+                            manifest=imported["manifest"],
+                            record=imported["record"],
+                            bytes_moved=imported["bytes"],
+                        )
+                    except LookupError as error:
+                        self.api_error(409, str(error), code="invalid_handoff_handle")
+                        return
                 sample_count = body.get("n", 1)
+                if handoff_handle is not None and sample_count != 1:
+                    self.api_error(400, "prefill handoff requires n=1")
+                    return
                 acquire_admission = getattr(engine, "acquire_admission", None)
                 if callable(acquire_admission):
                     admission_lease = acquire_admission("generation")
@@ -5444,8 +5721,28 @@ def build_parser():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8285)
     parser.add_argument(
+        "--fabric",
+        choices=("auto", "off"),
+        default="auto",
+        help="register loopback servers with the local mlx2 fabric (default: auto)",
+    )
+    parser.add_argument(
         "--admin-token-file",
         help="owner-only 0600 file containing the loopback admin bearer token",
+    )
+    parser.add_argument(
+        "--prefill-handoff",
+        choices=("off", "export", "import", "both"),
+        default="off",
+    )
+    from .runtime.prefill_handoff import default_records_dir
+    parser.add_argument(
+        "--prefill-handoff-records", type=Path, default=default_records_dir()
+    )
+    parser.add_argument(
+        "--prefill-handoff-allow-provisional",
+        action="store_true",
+        help="admit G1-G4 provisional records for qualification-time served-path checks",
     )
     tenant_auth = parser.add_argument_group(
         "tenant authentication",
@@ -6587,6 +6884,8 @@ def serving_engine_kwargs(
             else None
         ),
         "power_governor": power_governor_policy_value(args),
+        "prefill_handoff": getattr(args, "prefill_handoff", "off"),
+        "prefill_handoff_records": getattr(args, "prefill_handoff_records", None),
     }
 
 
@@ -6729,6 +7028,10 @@ def main():
             else None
         )
     except (OSError, ValueError) as error:
+        parser.error(str(error))
+    try:
+        validate_prefill_handoff_config(args.prefill_handoff, admin_token)
+    except ValueError as error:
         parser.error(str(error))
     try:
         http_security = policy_for_bind(
@@ -7036,6 +7339,9 @@ def main():
             tensorfold_owned_router=tensorfold_owned_router,
             sse_keepalive_seconds=args.sse_keepalive_seconds or None,
             usage_ledger=usage_ledger,
+            prefill_handoff=args.prefill_handoff,
+            prefill_handoff_records=args.prefill_handoff_records,
+            prefill_handoff_allow_provisional=args.prefill_handoff_allow_provisional,
         )
     except (OSError, RuntimeError, ValueError) as error:
         # The handler opens the tenant file store and resolves the semantic
@@ -7056,6 +7362,49 @@ def main():
     logging.getLogger("mlx2.server").info(
         "serving on %s:%d (pid %d)", args.host, server.server_address[1], os.getpid()
     )
+    fabric_registration = None
+    try:
+        if args.fabric == "auto" and args.host in {"127.0.0.1", "::1", "localhost"}:
+            from .fabric.community import community_exists, default_home
+            from .fabric.registry import pid_alive, register_local_server
+
+            fabric_home = default_home()
+            if community_exists(fabric_home):
+                fabric_registration = server.server_address[1]
+                register_local_server(
+                    fabric_home,
+                    port=fabric_registration,
+                    pid=os.getpid(),
+                    api_key_file=args.api_key_file,
+                    admin_token_file=args.admin_token_file,
+                )
+                pid_path = fabric_home / "node.pid"
+                live = False
+                try:
+                    live = pid_alive(int(pid_path.read_text()))
+                except (OSError, ValueError):
+                    pass
+                if not live:
+                    import subprocess
+                    import sys
+
+                    log_path = fabric_home / "node.log"
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+                    log_stream = log_path.open("ab")
+                    try:
+                        proc = subprocess.Popen(
+                            [sys.executable, "-m", "mlx2.fabric", "run"],
+                            start_new_session=True,
+                            stdout=log_stream,
+                            stderr=log_stream,
+                        )
+                        threading.Thread(target=proc.wait, daemon=True).start()
+                    finally:
+                        log_stream.close()
+                    logging.getLogger("mlx2.server").info("started mlx2 fabric node")
+                logging.getLogger("mlx2.server").info("registered local server with mlx2 fabric")
+    except Exception as error:  # noqa: BLE001 - fabric never prevents serving.
+        logging.getLogger("mlx2.server").warning("mlx2 fabric auto-registration failed: %s", error)
     try:
         server.serve_forever(poll_interval=0.1)
     except BaseException as error:
@@ -7066,10 +7415,17 @@ def main():
     finally:
         try:
             try:
-                if tensorfold_owned_router is not None:
-                    tensorfold_owned_router.close()
+                if fabric_registration is not None:
+                    from .fabric.community import default_home
+                    from .fabric.registry import unregister_local_server
+
+                    unregister_local_server(default_home(), fabric_registration)
             finally:
-                engine.close()
+                try:
+                    if tensorfold_owned_router is not None:
+                        tensorfold_owned_router.close()
+                finally:
+                    engine.close()
         finally:
             try:
                 request_tracer.close()

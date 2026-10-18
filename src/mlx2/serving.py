@@ -21,6 +21,7 @@ from pathlib import Path
 import queue
 import re
 import secrets
+import subprocess
 import threading
 import time
 import uuid
@@ -1048,6 +1049,7 @@ class HostPromptCache:
             "return_progress",
             "_mlx2_prefill_inputs",
             "_mlx2_activation_capsule",
+            "_mlx2_prefill_handoff",
             "_mlx2_multimodal_stats",
             "_mlx2_media_token_end",
         }
@@ -1261,6 +1263,21 @@ def runtime_identity() -> dict:
             )
         },
     }
+
+
+def _host_device_class():
+    """Return the normalized Apple chip class used by fabric host facts."""
+    try:
+        chip = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        chip = platform.processor() or platform.machine()
+    return re.sub(r"[^A-Za-z0-9]+", "_", chip).strip("_") or None
 
 
 def persistent_runtime_revision(identity: dict) -> tuple:
@@ -1636,6 +1653,44 @@ def activation_capsule_request(request):
     ):
         raise ValueError("runtime activation capsule gate is invalid")
     return payload
+
+
+_TRUSTED_PREFILL_HANDOFF_CAPABILITY = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _TrustedPrefillHandoff:
+    """Process-local capability for one server-validated handoff blob."""
+
+    blob: bytes
+    manifest: Mapping
+    record: Mapping | None
+    bytes_moved: int
+    _capability: object = field(repr=False, compare=False)
+
+
+def trusted_prefill_handoff(*, blob, manifest, record, bytes_moved):
+    """Wrap state admitted by the private server import endpoint."""
+    return _TrustedPrefillHandoff(
+        blob=blob,
+        manifest=manifest,
+        record=record,
+        bytes_moved=bytes_moved,
+        _capability=_TRUSTED_PREFILL_HANDOFF_CAPABILITY,
+    )
+
+
+def prefill_handoff_request(request):
+    """Return the trusted server handoff or refuse caller-created payloads."""
+    wrapped = request.get("_mlx2_prefill_handoff")
+    if wrapped is None:
+        return None
+    if (
+        not isinstance(wrapped, _TrustedPrefillHandoff)
+        or wrapped._capability is not _TRUSTED_PREFILL_HANDOFF_CAPABILITY
+    ):
+        raise ValueError("public requests cannot provide runtime prefill handoffs")
+    return wrapped
 
 
 def prepare_semantic_prefill_inputs(
@@ -3403,6 +3458,7 @@ class Job:
     effective_max_tokens: int | None = None
     max_tokens_defaulted: bool | None = None
     cached_tokens: int = 0
+    prefill_handoff_receipt: dict | None = None
     # Input lookup provenance, not this request's later cache publication.
     cache_retention_role: str | None = None
     completion_tokens: int = 0
@@ -3647,9 +3703,18 @@ class ServingEngine:
         gpu_keep_warm=None,
         power_telemetry=None,
         power_governor=None,
+        prefill_handoff="off",
+        prefill_handoff_records=None,
         _validate_only=False,
     ):
         self.default_max_tokens = validate_default_max_tokens(default_max_tokens)
+        if prefill_handoff not in {"off", "export", "import", "both"}:
+            raise ValueError("invalid prefill handoff mode")
+        self.prefill_handoff_mode = prefill_handoff
+        self.prefill_handoff_records = (
+            None if prefill_handoff_records is None else Path(prefill_handoff_records)
+        )
+        self._prefill_handoff_execution_digest = None
         # None: the adapter's prefill_step_default() applies once it loads;
         # adapters that decline use prompt-length autoscaling. An explicit
         # operator value always wins.
@@ -5205,6 +5270,15 @@ class ServingEngine:
             # publishes state into exact APCv2.
             public_request["skip_writing_prefix_cache"] = True
             count_add(self.counts, "activation_capsule_requests", 1)
+        if prefill_handoff_request(public_request) is not None:
+            requested_model = public_request.get("model")
+            if (
+                has_media
+                or requested_model not in (None, Path(self.model_path).name)
+                or public_request.get("_mlx2_lora_fingerprint") is not None
+            ):
+                raise ValueError("prefill handoff v1 accepts text-only base-model requests")
+            public_request["skip_writing_prefix_cache"] = True
         if has_media:
             supported_media_routes = getattr(self.adapter, "multimodal_routes", None)
             if supported_media_routes is not None:
@@ -6539,6 +6613,216 @@ class ServingEngine:
             admitted=admitted,
         )
 
+    def prefill_handoff_plan(self, request):
+        """Tokenize exactly as admission and return the receiver-owned plan."""
+        from .runtime.prefill_handoff import make_plan, plan_digest, token_digest
+
+        if any(isinstance(message.get("content"), list)
+               for message in request.get("messages", ())):
+            raise ValueError("prefill handoff v1 is text only")
+        manager = getattr(self, "multi_lora", None)
+        requested = request.get("model")
+        if manager is not None and requested not in (None, Path(self.model_path).name):
+            raise ValueError("prefill handoff v1 does not support LoRA")
+        tokens = self.render_prompt(request)
+        chunk = self._prefill_handoff_plan_chunk(len(tokens))
+        plan = make_plan(len(tokens), int(chunk))
+        identity = self.prefill_handoff_identity()
+        return {
+            "token_ids": tokens,
+            "prompt_tokens": len(tokens),
+            "plan": plan,
+            "plan_digest": plan_digest(plan),
+            "token_digest": token_digest(tokens[:-1]),
+            **identity,
+        }
+
+    def prefill_handoff_identity(self):
+        from .runtime.attention_topology import apcv2_cache_layout_fingerprint
+        from .runtime.prefill_handoff import runtime_digest
+
+        adapter = self.adapter
+        if adapter is None:
+            from .runtime.prefill_handoff import PrefillHandoffError
+
+            raise PrefillHandoffError("not_ready", "prefill handoff identity is not ready")
+        artifact = adapter.identity["fingerprint"]
+        layout = apcv2_cache_layout_fingerprint(adapter)
+        execution_digest = self._prefill_handoff_execution_digest
+        if execution_digest is None:
+            from .runtime.prefill_handoff import PrefillHandoffError
+
+            raise PrefillHandoffError(
+                "not_ready", "prefill handoff execution identity is not ready"
+            )
+        return {
+            "artifact_fingerprint": artifact,
+            "tokenizer_digest": str(adapter.identity.get("tokenizer_digest", artifact)),
+            "layout_fingerprint": str(layout),
+            "runtime_digest": runtime_digest(runtime_identity()),
+            "execution_digest": execution_digest,
+        }
+
+    def _prefill_handoff_plan_chunk(self, prompt_tokens):
+        from .runtime.prefill_plan import prompt_length_prefill_step
+
+        return int(
+            min(self.prefill_step, prompt_length_prefill_step(prompt_tokens))
+            if self.prefill_step_autoscale
+            else self.prefill_step
+        )
+
+    def _validate_prefill_handoff_export(self, token_ids, plan):
+        """Refuse invalid/unadmittable exports before claiming exclusivity."""
+        from .runtime.prefill_handoff import (
+            PrefillHandoffError,
+            make_plan,
+        )
+
+        if not isinstance(token_ids, list):
+            raise PrefillHandoffError("invalid_token_ids", "token_ids must be a list")
+        if len(token_ids) < 2:
+            raise PrefillHandoffError(
+                "prompt_too_short", "prefill handoff requires at least two tokens"
+            )
+        adapter = self.adapter
+        if adapter is None:
+            raise PrefillHandoffError("not_ready", "prefill handoff identity is not ready")
+        # The bound is what the embedding can index: the model config's
+        # vocab_size.  A tokenizer's ``vocab_size`` counts only its base
+        # vocabulary and excludes added specials such as <|im_start|>.
+        args = getattr(getattr(adapter, "model", None), "args", None)
+        vocab_size = None
+        for source in (getattr(args, "text_config", None), args):
+            value = (
+                source.get("vocab_size") if isinstance(source, dict)
+                else getattr(source, "vocab_size", None)
+            )
+            if isinstance(value, int) and not isinstance(value, bool):
+                vocab_size = value
+                break
+        if vocab_size is None:
+            tokenizer = getattr(adapter, "tokenizer", None)
+            try:
+                vocab_size = len(getattr(tokenizer, "_tokenizer", tokenizer))
+            except TypeError:
+                vocab_size = getattr(tokenizer, "vocab_size", None)
+        if (
+            isinstance(vocab_size, bool)
+            or not isinstance(vocab_size, int)
+            or vocab_size < 1
+        ):
+            raise PrefillHandoffError("not_ready", "model vocabulary is not ready")
+        if any(
+            type(token) is not int or not 0 <= token < vocab_size
+            for token in token_ids
+        ):
+            raise PrefillHandoffError(
+                "invalid_token_ids", f"token ids must be integers in [0, {vocab_size})"
+            )
+        expected_chunk = self._prefill_handoff_plan_chunk(len(token_ids))
+        expected_plan = make_plan(len(token_ids), expected_chunk)
+        if plan != expected_plan:
+            reason = (
+                "plan_chunk_mismatch"
+                if isinstance(plan, dict) and plan.get("chunk") != expected_chunk
+                else "plan_mismatch"
+            )
+            raise PrefillHandoffError(reason, "handoff plan differs from this engine's plan law")
+        if len(token_ids) > self.max_context:
+            raise PrefillHandoffError(
+                "context_limit_exceeded",
+                f"prompt has {len(token_ids)} tokens; limit is {self.max_context}",
+            )
+
+        # Use the adapter's ordinary lane cache projection and the same live
+        # headroom signal/reserve as request admission.  Adapters without a
+        # projection still fail closed at the ordinary context limit above.
+        budget_fn = getattr(adapter, "cache_budget", None)
+        budget = budget_fn(mtp=self.mtp) if callable(budget_fn) else None
+        project = getattr(budget, "project", None)
+        if callable(project):
+            required = int(project(len(token_ids)))
+            required += int(self.hard_reserve_gib * (1 << 30))
+            required += int(
+                prefill_transient_gib(
+                    budget,
+                    context_tokens=len(token_ids),
+                    uncached_tokens=len(token_ids),
+                    prefill_step=self.prefill_step,
+                    prefill_step_autoscale=self.prefill_step_autoscale,
+                )
+                * (1 << 30)
+            )
+            # Same accounting and patience as the parallel-sample guard:
+            # unleased resident APCv2 checkpoints count as available, headroom
+            # is re-read for a bounded wait (Metal returns a finished export's
+            # pages lazily, so back-to-back exports on the 36 GiB M3 refused on
+            # the first reading while ordinary admission would have waited),
+            # and only then is the allocator cache cleared and the footprint
+            # settled before refusing.
+            execution_headroom = self.admission_headroom_fn()
+            evictable = getattr(getattr(self, "apc", None), "unleased_resident_nbytes", None)
+
+            def available():
+                free = int(execution_headroom())
+                if free >= required or evictable is None:
+                    return free
+                return free + int(evictable())
+
+            deadline = time.monotonic() + self.PREFILL_HANDOFF_EXPORT_WAIT_SECONDS
+            while available() < required:
+                if time.monotonic() >= deadline:
+                    for reclaim in (
+                        getattr(self, "_clear_allocator_cache_before_reject", None),
+                        getattr(self, "_settle_footprint_before_reject", None),
+                    ):
+                        if callable(reclaim):
+                            reclaim()
+                        if available() >= required:
+                            break
+                    else:
+                        raise PrefillHandoffError(
+                            "memory_admission_refused",
+                            "prefill handoff cache does not fit ordinary execution headroom "
+                            f"(required {required} bytes, available {available()} bytes)",
+                        )
+                    break
+                time.sleep(0.25)
+        return expected_plan
+
+    def export_prefill_handoff(self, token_ids, plan):
+        """Produce state on the model worker's exclusive-operation boundary."""
+        from .runtime.models.cache import make_prompt_cache
+        from .runtime.prefill_handoff import (
+            build_manifest,
+            prefill_prefix,
+            serialize_handoff,
+        )
+
+        plan = self._validate_prefill_handoff_export(token_ids, plan)
+
+        def execute(adapter):
+            identity = self.prefill_handoff_identity()
+            cache = make_prompt_cache(adapter.model)
+            prefill_prefix(adapter.model, cache, token_ids, plan)
+            manifest = build_manifest(
+                cache=cache,
+                token_ids=token_ids,
+                plan=plan,
+                artifact_fingerprint=identity["artifact_fingerprint"],
+                tokenizer_digest=identity["tokenizer_digest"],
+                layout_fingerprint=identity["layout_fingerprint"],
+                producer={
+                    "runtime_digest": identity["runtime_digest"],
+                    "device_class": _host_device_class(),
+                    "mlx": importlib.metadata.version("mlx"),
+                },
+            )
+            return serialize_handoff(cache, manifest)
+
+        return self._exclusive_adapter_operation("prefill_handoff_export", execute)
+
     def synthesize_speech(
         self, input_text, *, voice, instructions, response_format, speed
     ):
@@ -6847,6 +7131,8 @@ class ServingEngine:
         )
 
     PARALLEL_SAMPLE_WAIT_SECONDS = 15.0
+    # A handoff export waits for headroom as long as parallel-sample fanout.
+    PREFILL_HANDOFF_EXPORT_WAIT_SECONDS = 15.0
 
     def _resolve_commit_direction(self, adapter):
         """Bind steering to a direction calibrated for the loaded artifact, or turn it off.
@@ -9738,18 +10024,29 @@ class ServingEngine:
             )
 
             cache_layout_fingerprint = apcv2_cache_layout_fingerprint(adapter)
+            persistent_semantic_namespace = apc_semantic_namespace(
+                cache_semantic_fingerprint(
+                    "__tenant_template__" if self.tenant_scoped_cache else None
+                ),
+                **numerics_laws,
+            )
+            from .runtime.prefill_handoff import runtime_digest as handoff_digest
+
+            self._prefill_handoff_execution_digest = handoff_digest(
+                {
+                    "apc_semantic_namespace": persistent_semantic_namespace,
+                    "adapter_numerical_contract": adapter_numerical_contract(adapter),
+                    "prefill_step": int(self.prefill_step),
+                    "prefill_step_autoscale": bool(self.prefill_step_autoscale),
+                }
+            )
             persistent_identity = APCv2.key(
                 adapter.identity["fingerprint"],
                 revision=persistent_runtime_revision(identity),
                 adapter=adapter.identity["fingerprint"],
                 tokenizer_fingerprint=adapter.identity["fingerprint"],
                 cache_layout_fingerprint=cache_layout_fingerprint,
-                semantic_fingerprint=apc_semantic_namespace(
-                    cache_semantic_fingerprint(
-                        "__tenant_template__" if self.tenant_scoped_cache else None
-                    ),
-                    **numerics_laws,
-                ),
+                semantic_fingerprint=persistent_semantic_namespace,
             )
             disk_dir = self.apc_persist_dir or self.cache_dir
             apc = APCv2(
@@ -11409,6 +11706,36 @@ class ServingEngine:
                         # Lease resident state before pressure eviction. Disk
                         # restoration remains behind the cold allocation gate.
                         hit = job.admission_hit
+                        handoff = prefill_handoff_request(job.request)
+                        if hit is None and handoff is not None:
+                            from .runtime.apc_v2 import APCLookup
+                            from .runtime.prefill_handoff import (
+                                PrefillHandoffError,
+                                materialize_handoff,
+                                token_digest,
+                            )
+                            from .runtime.prefill_handoff import (
+                                receipt as handoff_receipt,
+                            )
+
+                            manifest = handoff.manifest
+                            if (
+                                token_digest(tokens[:-1]) != manifest.get("token_digest")
+                                or len(tokens) - 1 != manifest.get("token_count")
+                            ):
+                                raise PrefillHandoffError("token_digest_mismatch")
+                            cache = materialize_handoff(handoff.blob, manifest)
+                            hit = APCLookup(
+                                cache, list(tokens[-1:]), len(tokens) - 1,
+                                True, "prefill_handoff", None,
+                            )
+                            job.cached_tokens = len(tokens) - 1
+                            job.prefill_handoff_receipt = handoff_receipt(
+                                manifest=manifest,
+                                record=handoff.record,
+                                observed_used=True,
+                                bytes_moved=handoff.bytes_moved,
+                            )
                         if hit is None:
                             key = cache_key_for(
                                 job.tenant_id,
@@ -12731,7 +13058,14 @@ class ServingEngine:
                         if isinstance(exc, Overloaded):
                             event = {"error": str(exc), "status": 429}
                         elif isinstance(exc, ValueError):
-                            event = {"error": str(exc), "status": 400}
+                            from .runtime.prefill_handoff import PrefillHandoffError
+
+                            event = {
+                                "error": str(exc),
+                                "status": 409 if isinstance(exc, PrefillHandoffError) else 400,
+                            }
+                            if isinstance(exc, PrefillHandoffError):
+                                event["code"] = exc.reason
                         elif isinstance(exc, PromptTemplateFailure):
                             # Not an unhandled TypeError: the caller reads a
                             # 500 that says the chat template failed.
@@ -13639,6 +13973,11 @@ class ServingEngine:
                                         else {}
                                     ),
                                     "route_receipt": native_route or route_receipt,
+                                    **(
+                                        {"prefill_handoff": job.prefill_handoff_receipt}
+                                        if job.prefill_handoff_receipt is not None
+                                        else {}
+                                    ),
                                     **(
                                         {
                                             "prompt_tokenization": job.prompt_tokenization_receipt
