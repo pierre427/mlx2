@@ -813,9 +813,11 @@ _Q8_GEMM_SRC = """
     auto ct_a = op.template get_left_input_cooperative_tensor<int8_t, int8_t, int32_t>();
     auto ct_b = op.template get_right_input_cooperative_tensor<int8_t, int8_t, int32_t>();
     auto acc0 = op.template get_destination_cooperative_tensor<
-        decltype(ct_a), decltype(ct_b), int32_t>();
+        metal::remove_addrspace_t<decltype(ct_a)>,
+        metal::remove_addrspace_t<decltype(ct_b)>, int32_t>();
     auto acc1 = op.template get_destination_cooperative_tensor<
-        decltype(ct_a), decltype(ct_b), int32_t>();
+        metal::remove_addrspace_t<decltype(ct_a)>,
+        metal::remove_addrspace_t<decltype(ct_b)>, int32_t>();
 
     float Cf[TM][16];
 #pragma clang loop unroll(full)
@@ -1047,9 +1049,11 @@ _Q45_GEMM_SRC = """
     auto ct_a = op.template get_left_input_cooperative_tensor<int8_t, int8_t, int32_t>();
     auto ct_b = op.template get_right_input_cooperative_tensor<int8_t, int8_t, int32_t>();
     auto acc0 = op.template get_destination_cooperative_tensor<
-        decltype(ct_a), decltype(ct_b), int32_t>();
+        metal::remove_addrspace_t<decltype(ct_a)>,
+        metal::remove_addrspace_t<decltype(ct_b)>, int32_t>();
     auto acc1 = op.template get_destination_cooperative_tensor<
-        decltype(ct_a), decltype(ct_b), int32_t>();
+        metal::remove_addrspace_t<decltype(ct_a)>,
+        metal::remove_addrspace_t<decltype(ct_b)>, int32_t>();
 
     float Cf[TM][16];
 #pragma clang loop unroll(full)
