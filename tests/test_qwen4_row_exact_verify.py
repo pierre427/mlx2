@@ -102,16 +102,21 @@ def test_quantized_linear_falls_back_to_one_row_calls_off_metal():
 def test_decline_reasons_cover_layouts_the_kernel_does_not_transcribe(monkeypatch):
     monkeypatch.setattr(REQ.mx, "default_device", lambda: REQ.mx.gpu)
     monkeypatch.setattr(REQ.mx.metal, "is_available", lambda: True)
-    x = mx.zeros((1, 3, 64), mx.bfloat16)
-    ok = nn.QuantizedLinear(64, 8, bias=False, group_size=32, bits=4)
+    x = mx.zeros((1, 3, 256), mx.bfloat16)
+    ok = nn.QuantizedLinear(256, 8, bias=False, group_size=32, bits=4)
     ok.set_dtype(mx.bfloat16)
     assert REQ.decline_reason(ok, x) is None
     assert REQ.decline_reason(nn.Linear(64, 8), x) == "not_quantized_linear"
-    three = nn.QuantizedLinear(64, 8, bias=False, group_size=32, bits=3)
+    three = nn.QuantizedLinear(256, 8, bias=False, group_size=32, bits=3)
     three.set_dtype(mx.bfloat16)
     assert REQ.decline_reason(three, x) == "bits"
     assert REQ.decline_reason(ok, x.astype(mx.float32)) == "input_dtype"
     assert REQ.decline_reason(ok, mx.zeros((1, 3, 32), mx.bfloat16)) == "k_shape"
+    small = nn.QuantizedLinear(128, 8, bias=False, group_size=32, bits=4)
+    small.set_dtype(mx.bfloat16)
+    assert REQ.decline_reason(small, mx.zeros((1, 3, 128), mx.bfloat16)) == (
+        "quad_k_stock_traversal"
+    )
 
 
 def test_fast_traversal_follows_the_fork_affine_rule():
@@ -640,13 +645,22 @@ def test_status_and_receipt_label_low_bit_layers_on_the_per_row_path():
             if isinstance(m, nn.QuantizedLinear) and m.bits == 3
         )
         assert low
+        # Covered-bit layers at K = 64 or 128 also take the per-row path
+        # (the stock one-row call there is not on the kernel's traversal).
+        quad = sorted(
+            name for name, m in model.language_model.named_modules()
+            if isinstance(m, nn.QuantizedLinear) and m.bits != 3
+            and REQ.layout_decline_reason(m) == "quad_k_stock_traversal"
+        )
         handle = install(model)
         label = handle.status()["per_row_layers"]
         assert label["exact"] is True and label["slow_path"] is True
-        assert label["quantized"]["count"] == len(low)
-        assert label["quantized"]["by_format"] == {"affine-q3-g32": len(low)}
-        assert label["quantized"]["by_reason"] == {"bits": len(low)}
-        assert label["quantized"]["layers"] == low[: len(label["quantized"]["layers"])]
+        assert label["quantized"]["count"] == len(low) + len(quad)
+        assert label["quantized"]["by_format"]["affine-q3-g32"] == len(low)
+        assert label["quantized"]["by_reason"] == {
+            "bits": len(low), **({"quad_k_stock_traversal": len(quad)} if quad else {})
+        }
+        assert set(label["quantized"]["layers"]) <= set(low) | set(quad)
         handle.enable(True)
         _fake_gdn_engaged(handle)
         cache = model.make_cache()
@@ -659,14 +673,23 @@ def test_status_and_receipt_label_low_bit_layers_on_the_per_row_path():
         assert receipt["per_row_layers"] == label    # and labelled slow
         handle.remove()
 
-        # Falsifier: an all-4-bit model has no kernel-declined layers, and
-        # its receipt carries no label (receipts of covered models unchanged).
-        covered = install(_quantized_tiny_model())
-        assert covered.status()["per_row_layers"]["quantized"]["count"] == 0
+        # Falsifier: in an all-4-bit model only its K = 64/128 layers are
+        # kernel-declined, and its receipt labels exactly those.
+        covered_model = _quantized_tiny_model()
+        quad_covered = [
+            m for _, m in covered_model.language_model.named_modules()
+            if isinstance(m, nn.QuantizedLinear)
+            and REQ.layout_decline_reason(m) is not None
+        ]
+        assert all(
+            REQ.layout_decline_reason(m) == "quad_k_stock_traversal" for m in quad_covered
+        )
+        covered = install(covered_model)
+        assert covered.status()["per_row_layers"]["quantized"]["count"] == len(quad_covered)
         covered.enable(True)
         _fake_gdn_engaged(covered)
         start = covered.snapshot()
-        assert "per_row_layers" not in covered.receipt(start)
+        assert ("per_row_layers" in covered.receipt(start)) == bool(quad_covered)
     finally:
         mx.set_default_device(previous)
 

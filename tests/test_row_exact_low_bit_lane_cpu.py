@@ -84,9 +84,18 @@ def test_declined_layers_run_the_lane_law_for_decode_and_verify(cpu, fake_lane):
     assert lane["law_id"] == "lane-matmul-v1+row-exact-low-bit"
     assert lane["intended"] == len(low)
     assert lane["qualified"] is False and lane["refused"] == {}
-    # Served by the lane now, so no longer labelled as the per-row slow path.
-    assert status["per_row_layers"]["quantized"]["count"] == 0
-    assert status["per_row_layers"]["slow_path"] is False
+    # Served by the lane now, so no longer labelled as the per-row slow path;
+    # only the fixture's K = 64/128 layers (per-row by design) remain there.
+    quad = [
+        m for _, m in model.language_model.named_modules()
+        if isinstance(m, nn.QuantizedLinear)
+        and REQ.layout_decline_reason(m) == "quad_k_stock_traversal"
+    ]
+    assert status["per_row_layers"]["quantized"]["count"] == len(quad)
+    assert status["per_row_layers"]["quantized"]["by_reason"] == (
+        {"quad_k_stock_traversal": len(quad)} if quad else {}
+    )
+    assert status["per_row_layers"]["slow_path"] is bool(quad)
 
     layer = low[0]
     k = layer.scales.shape[-1] * layer.group_size
@@ -116,7 +125,7 @@ def test_declined_layers_run_the_lane_law_for_decode_and_verify(cpu, fake_lane):
     assert stages.get("lane_exact", 0) >= len(low)
     receipt = handle.receipt(start)
     assert receipt["low_bit_lane"]["law_id"] == lane["law_id"]
-    assert "per_row_layers" not in receipt
+    assert ("per_row_layers" in receipt) == bool(quad)
     handle.remove()
     assert all(REQ.lane_preparation(m) is None for m in low)
 

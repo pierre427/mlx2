@@ -436,9 +436,13 @@ class RowExactVerify:
         from ..lane.installer import LAW_IDS
 
         backend = LM.backend()
+        # A K = 64/128 layer is declined only because its one-row stock call
+        # is not on the kernel's traversal; its per-row form is that call and
+        # exact, so it needs no lane law and is not this option's target.
         declined = [
             module for module, cls in self._swapped
-            if cls is nn.QuantizedLinear and REQ.layout_decline_reason(module) is not None
+            if cls is nn.QuantizedLinear
+            and REQ.layout_decline_reason(module) not in (None, "quad_k_stock_traversal")
         ]
         refused: Dict[str, int] = {}
         prepared = []

@@ -35,6 +35,9 @@ import mlx.nn as nn
 from .qwen4_routed_decode import QMV_HEADER
 
 MAX_ROWS = 32
+# K values whose one-row stock call does not take the qmv traversal (MLX's
+# small-K quad dispatch); measured, not inferred from the source.
+STOCK_QUAD_K = frozenset({64, 128})
 BITS = (4, 5, 6, 8)
 GROUP_SIZES = (32, 64, 128)
 # Output columns per simdgroup (qmv's own tile: a threadgroup owns 8).
@@ -360,6 +363,8 @@ def layout_decline_reason(linear) -> str | None:
         return "weight_layout"
     if k % 8:
         return "k_shape"
+    if k in STOCK_QUAD_K:
+        return "quad_k_stock_traversal"
     if group_size % _values_per_thread(bits, qmv_fast_layout(k, n, bits)):
         return "group_tile"
     return None
@@ -402,6 +407,13 @@ def decline_reason(linear, x: mx.array) -> str | None:
     fast = qmv_fast_layout(k, n, bits)
     if x.shape[-1] != k or k % 8:
         return "k_shape"
+    if k in STOCK_QUAD_K:
+        # MLX 0.32.4 runs the one-row call at exactly K = 64 and 128 on a
+        # different traversal than the qmv order this kernel reproduces:
+        # about 1e-4 of the outputs differ (M3 Pro, 4 and 8 bits, group sizes
+        # 32/64/128, 2026-10-18); K = 32, 96, 160, 192, 256 and up match.
+        # The serial call itself (per_row) is the exact form there.
+        return "quad_k_stock_traversal"
     if group_size % _values_per_thread(bits, fast):
         return "group_tile"
     return None
