@@ -249,6 +249,7 @@ def flash_next_layer(monkeypatch):
     monkeypatch.setattr(E, "fused_gdn_runtime_supported", lambda: True)
     monkeypatch.setattr(P, "runtime_supported", lambda: True)
     monkeypatch.setattr(E, "served_silu_refusal", lambda: None)
+    monkeypatch.setattr(P, "prefill_refusal", lambda *a: None)
     monkeypatch.setattr(E, "batch_verify_row_steps", lambda *a: (3, 3))
     for name in (
         "probe_qwen4_fused_gdn_decode", "probe_qwen4_fused_gdn_verify",

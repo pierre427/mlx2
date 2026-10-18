@@ -1,0 +1,10 @@
+{
+  "device": "Apple M5 Max",
+  "measured_at": "2026-10-17T16:32:28-0400",
+  "mlx_build": "0.32.4",
+  "rows_per_group": {
+    "q8/n4096/k4096/r2": 2,
+    "q8/n4096/k8192/r2": 2
+  },
+  "source": "scripts/calibrate_row_exact_tiles.py"
+}

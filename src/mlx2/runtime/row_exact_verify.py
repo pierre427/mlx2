@@ -54,7 +54,9 @@ def active() -> bool:
 
 
 @contextmanager
-def window(record: Window):
+def window(record: Optional[Window]):
+    """Open ``record`` for the block; ``None`` runs the block outside any
+    window (for example a parity probe issued from inside one)."""
     token = _WINDOW.set(record)
     try:
         yield record

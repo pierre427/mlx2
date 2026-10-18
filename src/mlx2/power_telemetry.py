@@ -116,6 +116,12 @@ def _default_frequency_table():
     return gpu_frequency_table_mhz()
 
 
+def _default_thermal_state():
+    from .system_monitor import thermal_state
+
+    return thermal_state()
+
+
 def governed_watts(reading) -> tuple[float | None, str | None]:
     """GPU + DRAM mean watts: ``(watts, None)`` or ``(None, why)``.
 
@@ -220,6 +226,7 @@ class PowerTelemetry:
         energy_sampler_factory=None,
         temperature_sampler_factory=None,
         frequency_table=None,
+        thermal_state=None,
     ):
         self.policy = PowerTelemetryPolicy.from_value(policy)
         self._token_source = token_source
@@ -228,6 +235,7 @@ class PowerTelemetry:
             temperature_sampler_factory or _default_temperature_sampler
         )
         self._frequency_table_fn = frequency_table or _default_frequency_table
+        self._thermal_state_fn = thermal_state or _default_thermal_state
         self._lock = threading.Lock()
         # ``_lifecycle`` guards thread start/stop; ``_sampling`` serializes
         # sampler reads with each other and with closing the samplers.
@@ -257,6 +265,7 @@ class PowerTelemetry:
         self._last_error = None
         self._last_cost = None
         self._last = None
+        self._last_sample_monotonic = None
         self._energy_total = {}
         self._residency_total = {}
         self._attributed = 0.0
@@ -350,9 +359,13 @@ class PowerTelemetry:
                 temperatures = self._temperature.die_summary()
             except Exception as error:  # noqa: BLE001 - temperatures are optional
                 self.temperature_reason = f"{type(error).__name__}: {error}"
+        try:
+            thermal_state = self._thermal_state_fn()
+        except Exception:  # noqa: BLE001 - public thermal state is optional
+            thermal_state = "unavailable"
         if self._frequency_table is None:
             self._resolve_frequency_table(reading)
-        self._observe(reading, temperatures, delivered, active,
+        self._observe(reading, temperatures, thermal_state, delivered, active,
                       time.perf_counter() - started)
         watts, why = governed_watts(reading)
         with self._lock:
@@ -373,7 +386,9 @@ class PowerTelemetry:
             self._frequency_table_fn, reading.gpu_states
         )
 
-    def _observe(self, reading, temperatures, delivered, active, cost) -> None:
+    def _observe(
+        self, reading, temperatures, thermal_state, delivered, active, cost
+    ) -> None:
         seconds = float(reading.seconds)
         watts = {
             label: float(reading.watts[channel])
@@ -445,6 +460,7 @@ class PowerTelemetry:
                         )
             self._append_window_locked(seconds, attributable, output_tokens)
             self._samples += 1
+            self._last_sample_monotonic = time.monotonic()
             self._last_cost = cost
             self._last = {
                 "seconds": seconds,
@@ -459,6 +475,10 @@ class PowerTelemetry:
                     }
                     if temperatures else None
                 ),
+                "battery_temperature_c": (
+                    temperatures.get("battery_c") if temperatures else None
+                ),
+                "system_thermal_state": thermal_state,
                 "output_tokens": output_tokens,
                 "attribution_basis": basis,
             }
@@ -545,6 +565,11 @@ class PowerTelemetry:
         if not self.available:
             return base
         with self._lock:
+            sample_age = (
+                None
+                if self._last_sample_monotonic is None
+                else max(0.0, time.monotonic() - self._last_sample_monotonic)
+            )
             return {
                 **base,
                 "running": self.running,
@@ -552,6 +577,7 @@ class PowerTelemetry:
                 "errors": self._errors,
                 "last_error": self._last_error,
                 "last_sample_cost_seconds": self._last_cost,
+                "last_sample_age_seconds": sample_age,
                 "last": dict(self._last) if self._last is not None else None,
                 "energy_joules_total": dict(self._energy_total),
                 "gpu_pstate_residency_seconds_total": dict(self._residency_total),

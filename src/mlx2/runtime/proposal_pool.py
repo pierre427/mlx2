@@ -207,9 +207,13 @@ class ProposalSelection:
     score_mode: str
     ranking_revision: int = 0
     verification_contract: str = VERIFICATION_CONTRACT
+    required_primary_depth: int | None = None
 
     def as_dict(self):
-        return asdict(self)
+        result = asdict(self)
+        if self.required_primary_depth is None:
+            result.pop("required_primary_depth")
+        return result
 
     def require_verification_contract(self, value):
         if value != self.verification_contract:
@@ -787,11 +791,16 @@ class ProposalPool:
             raise ValueError("unknown proposal source")
         return dict(self._source_health[source_id])
 
-    def select(self, paths, round, *, limit=15):
+    def select(self, paths, round, *, limit=15, required_primary_depth=None):
         with self.ranking_registry.lock:
-            return self._select(paths, round, limit=limit)
+            return self._select(
+                paths,
+                round,
+                limit=limit,
+                required_primary_depth=required_primary_depth,
+            )
 
-    def _select(self, paths, round, *, limit=15):
+    def _select(self, paths, round, *, limit=15, required_primary_depth=None):
         if not isinstance(round, PoolRound):
             raise TypeError("PoolRound required")
         if round.session_revision != self.session.session_revision:
@@ -800,6 +809,11 @@ class ProposalPool:
             raise ValueError(
                 "pool limit must select between 1 and 15 complete sequences"
             )
+        if required_primary_depth is not None and (
+            type(required_primary_depth) is not int
+            or not 1 <= required_primary_depth <= self.max_depth
+        ):
+            raise ValueError("required primary depth is outside the pool bound")
         paths = tuple(islice(iter(paths), self.max_raw_paths + 1))
         round = replace(round, session_scope_hash=self._scope(round))
         if len(paths) > self.max_raw_paths:
@@ -908,6 +922,20 @@ class ProposalPool:
                 p.path_id,
             )
         )
+        if required_primary_depth is not None:
+            primary = next(
+                (
+                    candidate
+                    for candidate in ranked
+                    if len(candidate.tokens) == required_primary_depth
+                ),
+                None,
+            )
+            if primary is None:
+                raise ValueError(
+                    "proposal selection lacks the required primary depth"
+                )
+            ranked = [primary, *(candidate for candidate in ranked if candidate is not primary)]
         chosen = tuple(ranked[:limit])
         content = {
             "round": asdict(round),
@@ -917,6 +945,8 @@ class ProposalPool:
             "score_mode": self.score_mode,
             "verification_contract": VERIFICATION_CONTRACT,
         }
+        if required_primary_depth is not None:
+            content["required_primary_depth"] = required_primary_depth
         ticket = _digest(content)
         if round.request_id in self._request_tickets:
             previous = self._request_tickets[round.request_id]
@@ -934,6 +964,7 @@ class ProposalPool:
             self.feedback_revision,
             self.score_mode,
             ranking_revision=self.ranking_registry.revision,
+            required_primary_depth=required_primary_depth,
         )
         self._pending[ticket] = selection
         self._request_tickets[round.request_id] = ticket

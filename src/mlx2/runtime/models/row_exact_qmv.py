@@ -59,9 +59,14 @@ METAL_FUNC void row_exact_tile(
     device T* y,
     int tile,
     int row0,
+    int total_rows,
     uint simd_gid,
     uint simd_lid) {
   constexpr bool PARTIAL = (N_OUT % (2 * RPS)) != 0;
+  // A partial last row group (mlx2): rows past the end re-read the last
+  // valid row and are never stored, so every valid row keeps its own
+  // accumulator and K order.
+  const int live = min(ROWS, total_rows - row0);
   const int in_vec_size_w = K_SIZE * BYTES_PER_PACK / PACK_FACTOR;
   const int in_vec_size_g = K_SIZE / GS;
   const int out_row = tile * (2 * RPS) + int(simd_gid) * RPS;
@@ -89,7 +94,7 @@ METAL_FUNC void row_exact_tile(
     float xs[ROWS][VALUES_PER_THREAD];
     float sums[ROWS];
     for (int i = 0; i < ROWS; i++) {
-      sums[i] = load_vector<T>(xp + i * K_SIZE, xs[i]);
+      sums[i] = load_vector<T>(xp + min(i, live - 1) * K_SIZE, xs[i]);
     }
     for (int r = 0; r < RPS; r++) {
       if (PARTIAL && r >= valid) {
@@ -114,7 +119,7 @@ METAL_FUNC void row_exact_tile(
     if (remaining > 0) {
       for (int i = 0; i < ROWS; i++) {
         float x_thread[VALUES_PER_THREAD];
-        float sum = load_vector_safe<T>(xp + i * K_SIZE, x_thread, remaining);
+        float sum = load_vector_safe<T>(xp + min(i, live - 1) * K_SIZE, x_thread, remaining);
         for (int r = 0; r < RPS; r++) {
           if (PARTIAL && r >= valid) {
             break;
@@ -134,7 +139,7 @@ METAL_FUNC void row_exact_tile(
         break;
       }
       float v = simd_sum(result[i][r]);
-      if (simd_lid == 0) {
+      if (simd_lid == 0 && i < live) {
         y[(row0 + i) * N_OUT + out_row + r] = static_cast<T>(v);
       }
     }
@@ -147,6 +152,7 @@ _SOURCE = r"""
         x, w, scales, biases, y,
         int(threadgroup_position_in_grid.z),
         int(threadgroup_position_in_grid.y) * ROWS,
+        TOTAL_ROWS,
         simdgroup_index_in_threadgroup,
         thread_index_in_simdgroup);
 """
@@ -168,7 +174,7 @@ def _group_source(count: int) -> str:
             f"    constexpr int TILES_{i} = (N_{i} + 2 * RPS - 1) / (2 * RPS);",
             f"    if (tile < start + TILES_{i}) {{",
             f"      row_exact_tile<T, K_SIZE, N_{i}, ROWS, RPS>(",
-            f"          x, w{i}, scales{i}, biases{i}, y{i}, tile - start, row0, sg, sl);",
+            f"          x, w{i}, scales{i}, biases{i}, y{i}, tile - start, row0, TOTAL_ROWS, sg, sl);",
             "      return;",
             "    }",
             f"    start += TILES_{i};",
@@ -412,27 +418,56 @@ def _launch_geometry(bits: int, fast: bool, n: int, rows: int) -> tuple[int, int
     return rows_per_group, _RPS
 
 
+def _row_groups(bits: int, fast: bool, n: int, rows: int, k: int = 0) -> int:
+    """Rows per threadgroup for one guarded launch over ``rows``.
+
+    A row's bits do not depend on how many rows share its threadgroup, so
+    this is a speed choice owned by ``mlx2.runtime.row_exact.planner``
+    (measured table, else its heuristic).
+    """
+    from ..row_exact import planner
+
+    chosen, _source = planner.rows_per_group(
+        bits=bits,
+        n=n,
+        k=k,
+        rows=rows,
+        limit=_ROW_VALUES_BUDGET // _values_per_thread(bits, fast),
+        tiles=(n + 2 * _RPS - 1) // (2 * _RPS),
+        narrow_tiles=_SHARED_ROWS_MIN_TILES,
+    )
+    return chosen
+
+
 class _Plan:
     """Static launch parameters of one (linear, row count, dtype) shape."""
 
-    __slots__ = ("kernel", "template", "grid", "output_shapes", "output_dtypes", "bias")
+    __slots__ = ("kernel", "launches", "output_dtypes", "bias")
 
     def __init__(self, linear, x: mx.array, rows: int):
         k = int(x.shape[-1])
         n = int(linear.weight.shape[0])
         bits = int(linear.bits)
         fast = qmv_fast_layout(k, n, bits)
-        rows_per_group, rps = _launch_geometry(bits, fast, n, rows)
         self.kernel = _kernel(bits, int(linear.group_size), fast)
-        self.template = [
-            ("T", x.dtype),
-            ("K_SIZE", k),
-            ("N_SIZE", n),
-            ("ROWS", rows_per_group),
-            ("RPS", rps),
+        tiles = (n + 2 * _RPS - 1) // (2 * _RPS)
+        rows_per_group = _row_groups(bits, fast, n, rows, k)
+        self.launches = [
+            (
+                0,
+                rows,
+                [
+                    ("T", x.dtype),
+                    ("K_SIZE", k),
+                    ("N_SIZE", n),
+                    ("ROWS", rows_per_group),
+                    ("RPS", _RPS),
+                    ("TOTAL_ROWS", rows),
+                ],
+                (32, 2 * (-(-rows // rows_per_group)), tiles),
+                [(rows, n)],
+            )
         ]
-        self.grid = (32, 2 * (rows // rows_per_group), (n + 2 * rps - 1) // (2 * rps))
-        self.output_shapes = [(rows, n)]
         self.output_dtypes = [x.dtype]
         self.bias = "bias" in linear
 
@@ -517,14 +552,23 @@ def quantized_linear(linear, x: mx.array, call=None):
     if plan is None:
         return per_row(stock, x), "per_row"
     flat = x.reshape(rows, x.shape[-1])
-    y = plan.kernel(
-        inputs=[flat, linear.weight, linear.scales, linear.biases],
-        template=plan.template,
-        grid=plan.grid,
-        threadgroup=(32, 2, 1),
-        output_shapes=plan.output_shapes,
-        output_dtypes=plan.output_dtypes,
-    )[0]
+    parts = [
+        plan.kernel(
+            inputs=[
+                flat if count == rows else flat[first : first + count],
+                linear.weight,
+                linear.scales,
+                linear.biases,
+            ],
+            template=template,
+            grid=grid,
+            threadgroup=(32, 2, 1),
+            output_shapes=shapes,
+            output_dtypes=plan.output_dtypes,
+        )[0]
+        for first, count, template, grid, shapes in plan.launches
+    ]
+    y = parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=0)
     if plan.bias:
         y = y + linear["bias"]
     return y.reshape(*lead, -1), "kernel"
@@ -545,7 +589,7 @@ class _GroupPlan:
         self.kernel = _group_kernel(bits, int(first.group_size), fast, len(linears))
         self.template = [("T", x.dtype), ("K_SIZE", k)]
         self.template += [(f"N_{i}", n) for i, n in enumerate(sizes)]
-        self.template += [("ROWS", rows_per_group), ("RPS", rps)]
+        self.template += [("ROWS", rows_per_group), ("RPS", rps), ("TOTAL_ROWS", rows)]
         tiles = sum((n + 2 * rps - 1) // (2 * rps) for n in sizes)
         self.grid = (32, 2 * (rows // rows_per_group), tiles)
         self.output_shapes = [(rows, n) for n in sizes]
@@ -575,11 +619,13 @@ def _group_plan(linears, x: mx.array, rows: int):
     return plans[key]
 
 
-def quantized_linears(linears, x: mx.array):
+def quantized_linears(linears, x: mx.array, *, per_member: bool = False):
     """``(tuple(linear(x) for linear in linears), route)`` with one-row
     arithmetic per row, in one launch when the projections share their
     quantization (route ``"group_kernel"``); otherwise each projection goes
-    through ``quantized_linear`` (route of the last one)."""
+    through ``quantized_linear``: the route is then that shared route, or
+    ``"mixed"`` when members differ, and with ``per_member`` the list of
+    each member's own route (so a receipt can say what each one ran)."""
     lead = x.shape[:-1]
     rows = 1
     for size in lead:
@@ -589,7 +635,12 @@ def quantized_linears(linears, x: mx.array):
     )
     if plan is None:
         results = [quantized_linear(linear, x) for linear in linears]
-        return tuple(y for y, _ in results), results[-1][1]
+        routes = [route for _, route in results]
+        if per_member:
+            return tuple(y for y, _ in results), routes
+        return tuple(y for y, _ in results), (
+            routes[0] if len(set(routes)) == 1 else "mixed"
+        )
     inputs = [x.reshape(rows, x.shape[-1])]
     for linear in linears:
         inputs += [linear.weight, linear.scales, linear.biases]

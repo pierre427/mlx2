@@ -44,12 +44,21 @@ def external_class():
         "DraftUnavailable": Unavailable,
         "_bump": lambda d, k, v=1: d.update({k: d[k] + v}),
     }
+    # Module-level helpers the extracted methods call, compiled from the same
+    # owned source so the harness tracks them.
+    helpers = [
+        n
+        for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name in {"_speculation_parked"}
+    ]
     shell = ast.ClassDef(
         name="Executor", bases=[], keywords=[], body=methods, decorator_list=[]
     )
     exec(  # noqa: S102 - owned AST executed with host doubles
         compile(
-            ast.fix_missing_locations(ast.Module(body=[shell], type_ignores=[])),
+            ast.fix_missing_locations(
+                ast.Module(body=[*helpers, shell], type_ignores=[])
+            ),
             "<external host methods>",
             "exec",
         ),

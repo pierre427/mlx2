@@ -20,6 +20,9 @@ from mlx2.runtime.models import row_exact_qmv as REQ
 from mlx2.runtime.models.qwen4_row_exact import install
 from mlx2.runtime.sample_utils import LaneRNG
 
+# Routes of a dense projection in a window (row_exact.ops.dense_linear).
+DENSE_ROUTES = {"matvec_rows", "per_row_canary"}
+
 
 def _quantized_tiny_model(seed=3):
     mx.random.seed(seed)
@@ -172,8 +175,11 @@ def test_enabled_route_matches_mtp_off_and_fails_closed_without_fused_gdn():
         assert status["windows_row_exact"] == 0
         assert status["failures"] == {"gdn_fused_verify_not_engaged": status["windows"]}
         # The tiny model keeps some projections dense (K not a multiple of
-        # the group): those run one one-token call per row.
-        assert set(status["stages"]["projections"]) == {"per_row", "dense_per_row"}
+        # the group): those run the package's broadcast matvec rows (or one
+        # one-token call per row where its canary fails).
+        routes = set(status["stages"]["projections"])
+        assert "per_row" in routes
+        assert routes - {"per_row"} and routes - {"per_row"} <= DENSE_ROUTES
         assert status["stages"]["moe_experts"]["per_row"] >= status["rows"]
         assert status["stages"]["moe_router"]["batched"] >= status["rows"]
         assert status["stages"]["attention"]["per_row"] > 0
@@ -302,16 +308,28 @@ def _mixed_tiny_model(seed=3):
     return model
 
 
-def _fake_gdn_engaged(handle):
+def _fake_gdn_engaged(handle, *, parity=True, kind="replay"):
     """Report the fused GDN verify kernel engaged (it is Metal-only), so a
-    CPU window can be counted row-exact and the other stages are what decide."""
+    CPU window can be counted row-exact and the other stages are what decide.
+
+    ``parity`` is the injected verdict of the kernel kind's decode-parity
+    canary (also Metal-only); the kinds checked are recorded on the handle."""
     calls = [0]
+    checked = []
 
-    def engaged():
+    def kinds():
         calls[0] += 1
-        return (calls[0] // 2) * len(handle._gdn)
+        launched = dict.fromkeys(("replay", "snapshot", "batch_replay", "batch_snapshot"), 0)
+        launched[kind] = (calls[0] // 2) * len(handle._gdn)
+        return launched
 
-    handle._gdn_engaged = engaged
+    def decode_parity(name):
+        checked.append(name)
+        return parity
+
+    handle._gdn_kinds = kinds
+    handle._gdn_decode_parity = decode_parity
+    handle._checked_parity = checked
 
 
 @pytest.mark.parametrize("lanes", [8, 9, 16])
@@ -345,6 +363,61 @@ def test_verify_batch_above_evidenced_lanes_fails_even_with_all_stages_exact(mon
     else:
         assert status["windows_row_exact"] == 1
         assert handle.receipt(start)["row_exact"] is True
+
+
+@pytest.mark.parametrize("kind", ["replay", "snapshot", "batch_replay"])
+def test_gdn_kernel_failing_decode_parity_fails_the_window(monkeypatch, kind):
+    """2026-10-17: every stage reported success and the fused GDN verify ran,
+    so 0 windows were counted not exact, yet the verify kernel did not
+    reproduce the decode step's bits (its SiLU spelling differed from the
+    decode kernel's).  A window is row-exact only if the kernel kind it ran
+    passes its decode-parity canary."""
+    model = _tiny_qwen4_model()
+    handle = install(model)
+    handle.enable(True)
+    _fake_gdn_engaged(handle, parity=False, kind=kind)
+
+    def trunk(self, tokens, cache, return_hyper=False):
+        REV.current().note("test_trunk", "exact")
+        return mx.zeros((*tokens.shape, 32)), mx.zeros((*tokens.shape, 64))
+
+    monkeypatch.setattr(type(model.language_model.model), "__call__", trunk)
+    start = handle.snapshot()
+    hidden, _ = handle.verify_backbone(mx.ones((1, 3), mx.uint32), None)
+    mx.eval(handle.verify_logits(hidden))
+    status = handle.status()
+    assert handle._checked_parity == [kind]
+    assert status["windows_row_exact"] == 0
+    assert status["windows_not_exact"] == 1
+    assert status["failures"] == {f"gdn_{kind}_verify_differs_from_decode": 1}
+    receipt = handle.receipt(start)
+    assert receipt["row_exact"] is False
+    assert receipt["reason"] == "window_fell_back"
+    assert receipt["windows_not_exact"] == 1
+
+
+def test_gdn_kinds_split_verify_counters_by_kernel(monkeypatch):
+    model = _tiny_qwen4_model()
+    handle = install(model)
+    layers = [layer.linear_attn for layer in handle._gdn]
+    assert layers
+    before = handle._gdn_kinds()
+    for attn in layers:
+        attn.fused_gdn_verify_calls += 2
+        attn.fused_gdn_replay_verify_calls += 1
+        attn.fused_gdn_batch_verify_calls += 3
+        attn.fused_gdn_batch_verify_compact_calls += 2
+    after = handle._gdn_kinds()
+    n = len(layers)
+    assert {k: after[k] - before[k] for k in after} == {
+        "replay": n, "snapshot": n, "batch_replay": 2 * n, "batch_snapshot": n,
+    }
+    assert handle._gdn_engaged() == sum(after.values())
+    # The canary's state class: the layers' default (no attribute) is fp32.
+    assert handle._gdn_state_dtype() == mx.float32
+    for attn in layers:
+        object.__setattr__(attn, "_gdn_state_dtype", mx.float16)
+    assert handle._gdn_state_dtype() == mx.float16
 
 
 @pytest.mark.parametrize("lanes", [2, 8, 16])
@@ -396,7 +469,8 @@ def test_zero_depth_target_uses_verify_accounting_hooks():
 def test_window_with_dense_linear_is_row_exact_only_with_one_token_rows(monkeypatch):
     """W3 (Metal): the bf16 HC inject at M=R is not the one-token gemv, yet a
     window that ran it was labelled row-exact.  A window counted row-exact
-    must not have run any dense ``nn.Linear`` at more than one row."""
+    must not have run any dense ``nn.Linear`` at more than one row (the
+    package's broadcast matvec does not call the module at all)."""
     previous = mx.default_device()
     mx.set_default_device(mx.cpu)
     try:
@@ -425,11 +499,11 @@ def test_window_with_dense_linear_is_row_exact_only_with_one_token_rows(monkeypa
         mx.eval(handle.verify_logits(hidden))
         status = handle.status()
         assert status["windows"] == 1
-        assert seen, "the window reached no dense projection"
-        if status["windows_row_exact"]:
+        if status["windows_row_exact"] and seen:
             assert max(seen) == 1, f"dense Linear ran at {max(seen)} rows in a row-exact window"
         assert status["windows_row_exact"] == 1, status["failures"]
-        assert status["stages"]["projections"]["dense_per_row"] > 0
+        dense = status["stages"]["projections"]
+        assert sum(dense.get(route, 0) for route in DENSE_ROUTES) > 0, dense
     finally:
         mx.set_default_device(previous)
 
@@ -451,7 +525,8 @@ def test_dense_linear_rows_equal_their_one_token_calls():
             np.array(y.view(mx.uint32)),
             np.array(mx.concatenate(one, axis=1).view(mx.uint32)),
         )
-        assert record.exact and record.stages == {"projections": {"dense_per_row": 5}}
+        assert record.exact
+        assert record.stages["projections"] in ({"matvec_rows": 1}, {"per_row_canary": 1})
         # Outside a window (and at one row) the layer is the plain Linear.
         assert np.array_equal(np.array(layer(x)), np.array(nn.Linear.__call__(layer, x)))
         handle.remove()

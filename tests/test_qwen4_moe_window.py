@@ -398,7 +398,8 @@ def test_batch_decode_above_its_row_cap_declines_quietly(monkeypatch, ref_kernel
 def test_dense_shared_gate_runs_one_row_at_a_time(monkeypatch, ref_kernels, consumer):
     # Mixed-precision artifacts keep the shared gate a bf16 nn.Linear: a
     # multi-row matmul is not the one-token gemv, so the window gives every
-    # row its own one-token-shaped gate call (8-bit router still row-exact qmv).
+    # row the one-token arithmetic (row_exact.ops.dense_linear: a one-output
+    # gate runs one one-row call per row; 8-bit router still row-exact qmv).
     block = _block(monkeypatch)
     block.shared_expert_gate = nn.Linear(H, 1, bias=False)
     block.shared_expert_gate.set_dtype(mx.bfloat16)
@@ -426,9 +427,13 @@ def test_dense_shared_gate_runs_one_row_at_a_time(monkeypatch, ref_kernels, cons
         got = block(x)
     assert mx.array_equal(got.reshape(rows, H), want).item()
     assert block.moe_window_calls[consumer] == 1 and block.moe_window_shared_calls == 1
-    assert shapes == [(1, 1, H)] * rows
+    # The gate never runs at more than one row: the package's broadcast
+    # matvec does not call the module, and its canary reference and fallback
+    # are one-token-shaped calls.
+    assert set(shapes) <= {(1, 1, H)}
     if consumer == "row_exact":
-        assert record.exact and record.stages["projections"].get("dense_per_row") == rows
+        dense = record.stages["projections"]
+        assert record.exact and dense.get("per_row_single_output") == 1, dense
 
 
 def test_dense_shared_gate_with_bias_is_refused(monkeypatch, ref_kernels):

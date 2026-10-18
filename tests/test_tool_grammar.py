@@ -123,6 +123,7 @@ def test_p5_stateless_and_adapter_processors_declare_history_purity():
     assert processors and all(p.history_pure is True for p in processors)
     minimum = minimum_tokens_processor(mx, [EOS], 2, 3)
     assert minimum.history_pure is True
+    assert minimum.progressive_branch_safe is True
     assert _assert_dormant_is_sound(minimum) == {True, False}
     assert NorthActionProcessor(prompt_length=2, action_open=(7,)).history_pure
     muse = MuseRecipientProcessor(2, [(2, 3)])

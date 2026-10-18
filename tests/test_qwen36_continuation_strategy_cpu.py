@@ -83,8 +83,41 @@ def test_dflash2_is_a_bound_complete_path_source_not_target_state():
         limit=8,
     )
     assert source.mechanism == "dflash2"
-    assert [path.tokens for path in paths] == [(10, 11, 12), (20, 21, 22)]
-    assert all(path.confidence_features == (None, None, None) for path in paths)
+    assert [path.tokens for path in paths] == [
+        (10,),
+        (10, 11),
+        (10, 11, 12),
+        (20,),
+        (20, 21),
+        (20, 21, 22),
+    ]
+    assert all(
+        path.confidence_features == (None,) * len(path.tokens) for path in paths
+    )
+
+
+def test_dflash2_enumerates_all_fifteen_prefix_closed_tree_nodes_before_limit():
+    class Draft:
+        proposal_distribution = "categorical_distribution"
+        config = SimpleNamespace(block_size=8)
+
+        def propose_tree(
+            self, _inputs, _features, _cache, nodes, *, lattice_positions
+        ):
+            assert nodes == 15
+            assert lattice_positions == 4
+            tokens = list(range(10, 25))
+            parents = [-1, 0, 1, -1, 3, 4, -1, 6, 7, -1, 9, 10, -1, 12, 13]
+            return (tokens, parents), None
+
+    paths = ExternalContinuationSource(Draft())(
+        SimpleNamespace(depth=3, anchor=17, pending_features=None, draft_cache=[]),
+        limit=15,
+    )
+    assert len(paths) == 15
+    assert [len(path.tokens) for path in paths] == [1, 2, 3] * 5
+    assert paths[0].tokens == (10,)
+    assert paths[-1].tokens == (22, 23, 24)
 
 
 def test_fold_keeps_dflash2_complete_path_protocol_with_distinct_identity():
@@ -107,7 +140,7 @@ def test_fold_keeps_dflash2_complete_path_protocol_with_distinct_identity():
         limit=8,
     )
     assert source.mechanism == "dflash2_fold"
-    assert [path.tokens for path in paths] == [(10, 11)]
+    assert [path.tokens for path in paths] == [(10,), (10, 11)]
 
 
 def test_dspark_complete_path_bridge_is_a_supported_provider_contract():

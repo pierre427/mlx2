@@ -140,36 +140,60 @@ def check_gdn(rows_list, seed):
 
     FV.set_verify_max_steps(17)
     ty = FG.probe_qwen4_fused_gdn_decode(mx.bfloat16, contract=QWEN4_GDN_CONTRACT)
-    out = []
+    out = [{"served_silu_exp": FG.served_silu_exp()}]
     mx.random.seed(seed)
     conv_weight = (mx.random.normal((FG.CONV_DIM, FG.CONV_KERNEL, 1)) * 0.3).astype(mx.bfloat16)
     A_log = mx.random.uniform(-2, 1, (FG.NUM_VALUE_HEADS,)).astype(mx.float32)
     dt_bias = (mx.random.normal((FG.NUM_VALUE_HEADS,)) * 0.5).astype(mx.bfloat16)
     norm_weight = (1 + mx.random.normal((FG.VALUE_HEAD_DIM,)) * 0.1).astype(mx.bfloat16)
-    for rows in rows_list:
-        qkv = mx.random.normal((1, rows, FG.CONV_DIM)).astype(mx.bfloat16)
+    # SiLU sweep: an identity last tap makes each conv output exactly its qkv
+    # input, and the inputs cycle through every bf16 value in [-16, 16], so
+    # any SiLU spelling difference between the decode and verify kernels shows
+    # (random N(0,1)*0.3 conv outputs almost never reach the values where the
+    # metal::exp and metal::precise::exp forms round apart; 2026-10-17).
+    import numpy as np
+
+    encodings = np.arange(1 << 16, dtype=np.uint32).astype(np.uint16)
+    widened = (encodings.astype(np.uint32) << 16).view(np.float32)
+    grid = mx.array(encodings[np.isfinite(widened) & (np.abs(widened) <= 16)]).view(mx.bfloat16)
+    sweep_weight = mx.zeros((FG.CONV_DIM, FG.CONV_KERNEL, 1), dtype=mx.bfloat16)
+    sweep_weight[:, FG.CONV_KERNEL - 1, 0] = 1
+    # Four rows hold every one of the ~33.5k values (CONV_DIM per row).
+    cases = [("random", rows) for rows in rows_list] + [("silu_sweep", rows) for rows in (4, 8)]
+    for inputs, rows in cases:
         z = mx.random.normal((1, rows, FG.VALUE_DIM)).astype(mx.bfloat16)
         b = mx.random.normal((1, rows, FG.NUM_VALUE_HEADS)).astype(mx.bfloat16)
         a = mx.random.normal((1, rows, FG.NUM_VALUE_HEADS)).astype(mx.bfloat16)
-        conv0 = mx.random.normal((1, FG.CONV_KERNEL - 1, FG.CONV_DIM)).astype(mx.bfloat16)
         state0 = (mx.random.normal((1, FG.NUM_VALUE_HEADS, FG.VALUE_HEAD_DIM, FG.KEY_HEAD_DIM)) * 0.1).astype(mx.float32)
-        mx.eval(qkv, z, b, a, conv0, state0)
+        if inputs == "random":
+            weight = conv_weight
+            qkv = mx.random.normal((1, rows, FG.CONV_DIM)).astype(mx.bfloat16)
+            conv0 = mx.random.normal((1, FG.CONV_KERNEL - 1, FG.CONV_DIM)).astype(mx.bfloat16)
+        else:
+            weight = sweep_weight
+            reps = -(-rows * FG.CONV_DIM // grid.size)
+            flat = mx.tile(grid, (reps,))[: rows * FG.CONV_DIM]
+            qkv = flat[mx.random.permutation(flat.size)].reshape(1, rows, FG.CONV_DIM)
+            assert rows * FG.CONV_DIM >= grid.size
+            conv0 = mx.zeros((1, FG.CONV_KERNEL - 1, FG.CONV_DIM), dtype=mx.bfloat16)
+        conv_weight_case = weight
+        mx.eval(qkv, z, b, a, conv0, state0, conv_weight_case)
         conv, state = conv0, state0
         outs, states, convs = [], [], []
         for r in range(rows):
             o, conv, state = FG.qwen4_fused_gdn_decode(
                 qkv[:, r : r + 1], z[:, r : r + 1], b[:, r : r + 1], a[:, r : r + 1],
-                conv, conv_weight, A_log, dt_bias, state, norm_weight, 1e-6, threadgroup_y=ty, contract=QWEN4_GDN_CONTRACT)
+                conv, conv_weight_case, A_log, dt_bias, state, norm_weight, 1e-6, threadgroup_y=ty, contract=QWEN4_GDN_CONTRACT)
             mx.eval(o, conv, state)
             outs.append(o)
             states.append(state)
             convs.append(conv)
         serial_out = mx.concatenate(outs, axis=1)
-        entry = {"rows": rows}
+        entry = {"inputs": inputs, "rows": rows}
         vty = FV.probe_qwen4_fused_gdn_verify(mx.bfloat16, rows, contract=QWEN4_GDN_CONTRACT)
         if vty is not None:
             vo, vconv, vstate, snaps, csnaps = FV.qwen4_fused_gdn_verify(
-                qkv, z, b, a, conv0, conv_weight, A_log, dt_bias, state0, norm_weight,
+                qkv, z, b, a, conv0, conv_weight_case, A_log, dt_bias, state0, norm_weight,
                 1e-6, threadgroup_y=vty, contract=QWEN4_GDN_CONTRACT)
             mx.eval(vo, vconv, vstate, snaps, csnaps)
             entry["verify_out_equal"] = bits_equal(vo, serial_out)[0]
@@ -180,7 +204,7 @@ def check_gdn(rows_list, seed):
         rty = FV.probe_qwen4_fused_gdn_replay_verify(mx.bfloat16, rows)
         if rty is not None:
             ro, rconv, rstate, keys, corr, decay = FV.qwen4_fused_gdn_replay_verify(
-                qkv, z, b, a, conv0, conv_weight, A_log, dt_bias, state0, norm_weight,
+                qkv, z, b, a, conv0, conv_weight_case, A_log, dt_bias, state0, norm_weight,
                 1e-6, threadgroup_y=rty)
             mx.eval(ro, rstate, keys, corr, decay)
             entry["replay_out_equal"] = bits_equal(ro, serial_out)[0]

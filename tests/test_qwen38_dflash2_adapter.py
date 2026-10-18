@@ -483,6 +483,64 @@ def test_external_execution_config_normalizes_pairwise_and_adaptive_policy():
     }
 
 
+def test_qwen38_external_batch_forwards_adaptive_proposal_topology(monkeypatch):
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
+
+    adapter_type = Qwen3827BAdapter
+    adapter = object.__new__(adapter_type)
+    adapter.model = object()
+    adapter.draft_model = object()
+    adapter.identity = {"fingerprint": "test"}
+    adapter.external_policy = {
+        "num_draft": 15,
+        "progressive_verification_tile": 3,
+        "progressive_verification_fidelity": "exact",
+        "progressive_alternative_branches": 4,
+        "progressive_alternative_strategy": "confidence_tree",
+        "progressive_alternative_depth_policy": "confidence_tail",
+        "progressive_cross_session_pack_rows": 8,
+        "progressive_cross_session_pack_mode": "ordered_live_frontier",
+    }
+    adapter._progressive_external_binding = {
+        "target_protocol": "test-target-protocol",
+    }
+    monkeypatch.setattr(adapter_type, "_initialize_external_feedback", lambda self: None)
+    calls = []
+    monkeypatch.setattr(
+        "mlx2.runtime.external_speculative.ExternalDraftBatchGenerator",
+        lambda *args, **kwargs: calls.append(kwargs) or object(),
+    )
+
+    adapter.create_external_batch()
+
+    assert calls[-1]["progressive_alternative_branches"] == 4
+    assert calls[-1]["progressive_alternative_strategy"] == "confidence_tree"
+    assert calls[-1]["progressive_alternative_depth_policy"] == "confidence_tail"
+    assert calls[-1]["progressive_cross_session_pack_rows"] == 8
+    assert calls[-1]["progressive_cross_session_pack_mode"] == "ordered_live_frontier"
+    config = adapter.execution_config(max_lanes=4, prefill_step=16)
+    assert config["progressive_alternative_branches"] == 4
+    assert config["progressive_alternative_strategy"] == "confidence_tree"
+    assert config["progressive_alternative_depth_policy"] == "confidence_tail"
+    assert config["progressive_cross_session_pack_rows"] == 8
+    assert config["progressive_cross_session_pack_mode"] == "ordered_live_frontier"
+
+
+def test_qwen_external_policy_allowlists_adaptive_proposal_topology():
+    from mlx2.adapters.qwen36_35b import EXTERNAL_POLICY_KEYS as qwen36_keys
+    from mlx2.adapters.qwen38_27b import EXTERNAL_POLICY_KEYS as qwen38_keys
+
+    ast_keys = {
+        "progressive_alternative_branches",
+        "progressive_alternative_strategy",
+        "progressive_alternative_depth_policy",
+        "progressive_cross_session_pack_rows",
+        "progressive_cross_session_pack_mode",
+    }
+    assert ast_keys <= qwen38_keys
+    assert ast_keys.isdisjoint(qwen36_keys)
+
+
 def test_external_varlen_prefill_has_a_distinct_counter_free_identity():
     from mlx2.runtime.prefill_plan import (
         EXTERNAL_VARLEN_PREFILL_IDENTITY,

@@ -14,6 +14,7 @@ from mlx2.runtime.cache_operations import (
 from mlx2.runtime.cow_cache import COWCacheUnsupported, freeze_prompt_cache
 from mlx2.runtime.hybrid_speculative import _reject_unsupported_self_mtp_caches
 from mlx2.runtime.models.cache import ArraysCache, KVCache, RotatingKVCache
+from mlx2.runtime.models.nemotron_h import NemotronMambaCache
 from mlx2.runtime.models.qwen4_exp import QSAKVCache, Qwen4ArraysCache
 from mlx2.runtime.models.qwen4_exp import QSAQuantizedKVCache
 from mlx2.runtime.pld import _rewind, _snapshot, _validate_cache
@@ -168,6 +169,70 @@ def test_current_qwen4_cache_families_declare_own_contracts():
         == "indexed_quantized_kv"
     )
     assert "cache_operations_contract" in SharedSuffixQSAKVCache.__dict__
+
+
+def test_arrays_cache_row_transforms_preserve_provider_identity():
+    rows = []
+    for _ in range(2):
+        cache = ArraysCache(2)
+        cache.apcv2_recurrent_kind = "mamba"
+        cache.apcv2_layer_index = 7
+        rows.append(cache)
+
+    merged = ArraysCache.merge(rows)
+    extracted = merged.extract(0)
+
+    for cache in (merged, extracted):
+        assert cache.apcv2_recurrent_kind == "mamba"
+        assert cache.apcv2_layer_index == 7
+        assert (
+            cache_operations(cache, capability="test").fingerprint
+            == cache_operations(rows[0], capability="test").fingerprint
+        )
+
+
+def test_adapter_owned_mamba_cache_keeps_contract_through_row_transforms():
+    rows = []
+    for _ in range(2):
+        cache = NemotronMambaCache(2)
+        cache.apcv2_recurrent_kind = "mamba"
+        cache.apcv2_layer_index = 7
+        rows.append(cache)
+
+    merged = NemotronMambaCache.merge(rows)
+    extracted = merged.extract(0)
+
+    assert type(merged) is NemotronMambaCache
+    assert type(extracted) is NemotronMambaCache
+    assert cache_operations(merged, capability="test").family == "recurrent"
+    assert (
+        cache_operations(extracted, capability="test").fingerprint
+        == cache_operations(rows[0], capability="test").fingerprint
+    )
+
+
+@pytest.mark.parametrize(
+    ("attribute", "left", "right"),
+    [
+        ("apcv2_recurrent_kind", "mamba", None),
+        ("apcv2_layer_index", 7, 8),
+    ],
+)
+def test_arrays_cache_merge_refuses_mixed_provider_identity(
+    attribute, left, right
+):
+    rows = [ArraysCache(2), ArraysCache(2)]
+    for cache in rows:
+        cache.apcv2_recurrent_kind = "mamba"
+        cache.apcv2_layer_index = 7
+    if right is None:
+        delattr(rows[1], attribute)
+    else:
+        setattr(rows[0], attribute, left)
+        setattr(rows[1], attribute, right)
+
+    with pytest.raises(ValueError, match=rf"provider identity {attribute} differs"):
+        ArraysCache.merge(rows)
 
 
 def test_checkpoint_and_segmented_publication_have_distinct_guards():

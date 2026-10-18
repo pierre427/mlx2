@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import itertools
+from types import SimpleNamespace
 
 import mlx.core as mx
 import numpy as np
@@ -17,16 +18,53 @@ from test_standard_xpress_serving_cpu import drain, generator, reference
 from mlx2.adapters.proposal_path_sources import (
     ExternalContinuationSource,
     NativeMTPContinuationSource,
+    SourceContinuation,
     build_continuation_drafter,
 )
+from mlx2.runtime.proposal_pool import VERIFICATION_CONTRACT
 from mlx2.runtime.proposal_providers import (
     ContinuationContext,
+    ContinuationDraftModel,
     ContinuationPoolPolicy,
+    InsufficientContinuationAlternatives,
+    PointMassLaw,
     PromptLookupContinuationSource,
+    _continuation_confidence_features,
     continuation_context_revision,
 )
 
 PIN = "a" * 64
+
+
+class _Selection:
+    def __init__(self, paths):
+        self.paths = tuple(paths)
+        self.checked_contracts = []
+
+    def require_verification_contract(self, value):
+        self.checked_contracts.append(value)
+        assert value == VERIFICATION_CONTRACT
+
+
+def _ranked_path(tokens, rank, source="external"):
+    contributor = SimpleNamespace(
+        source_id=source,
+        source_revision=(str(rank % 10) or "0") * 64,
+        candidate_id=f"{source}:{rank}",
+    )
+    return SimpleNamespace(
+        tokens=tuple(tokens),
+        path_id=f"path-{rank}",
+        contributors=(contributor,),
+        representative=contributor,
+    )
+
+
+def _continuation_bridge(*rows):
+    model = ContinuationDraftModel.__new__(ContinuationDraftModel)
+    model.last_continuation_selections = tuple(_Selection(row) for row in rows)
+    model.last_ordered_alternative_provenance = ()
+    return model
 
 
 def context(model, draft, history=(1, 2), anchor=3, depth=2):
@@ -143,6 +181,226 @@ def test_pld_enumerates_multiple_committed_matching_continuations():
     assert ctx.history == (1, 2, 3, 1, 4, 5, 1, 6, 7)
 
 
+def test_ranked_continuation_slate_bridges_to_confidence_tree_with_provenance():
+    primary = (1, 2, 3, 4)
+    paths = [
+        _ranked_path(primary, 0, "native_mtp"),
+        _ranked_path(primary, 1, "prompt_lookup"),  # full-path duplicate
+        _ranked_path((1, 2, 8, 9), 2, "external"),
+        _ranked_path((1, 7, 6, 5), 3, "prompt_lookup"),  # wrong trunk
+        _ranked_path((1, 2, 6, 7), 4, "prompt_lookup"),
+        _ranked_path((1, 2, 5), 6, "external"),  # incompatible depth skipped
+    ]
+    model = _continuation_bridge(paths)
+
+    alternatives = model.ordered_alternative_proposals(
+        [list(primary)],
+        branch_count=3,
+        strategy="confidence_tree",
+        shared_prefix_tokens=(2,),
+    )
+
+    assert alternatives == [[[1, 2, 3, 4], [1, 2, 8, 9], [1, 2, 6, 7]]]
+    assert model.last_continuation_selections[0].checked_contracts == [
+        VERIFICATION_CONTRACT
+    ]
+    provenance = model.last_ordered_alternative_provenance[0]
+    assert [item["rank"] for item in provenance] == [0, 2, 4]
+    assert [item["sources"] for item in provenance] == [
+        ("native_mtp",),
+        ("external",),
+        ("prompt_lookup",),
+    ]
+    assert all(len(item["contributors"][0]) == 3 for item in provenance)
+
+
+def test_ranked_r8_slate_searches_deeper_exact_fanout():
+    primary = (1, 2, 3, 4)
+    paths = [
+        _ranked_path(primary, 0),
+        _ranked_path((1, 2, 8, 9), 1),
+        _ranked_path((1, 2, 7, 6), 2),
+        _ranked_path((1, 2, 5, 0), 3),
+        _ranked_path((1, 2, 4, 8), 4),
+        _ranked_path((1, 2, 6, 7), 5),
+    ]
+    model = _continuation_bridge(paths)
+
+    alternatives = model.ordered_alternative_proposals(
+        [list(primary)],
+        branch_count=4,
+        strategy="confidence_tree",
+        shared_prefix_tokens=(1,),
+        allow_adaptive_prefix_search=True,
+    )
+
+    assert alternatives == [[
+        [1, 2, 3, 4],
+        [1, 2, 8, 9],
+        [1, 2, 7, 6],
+        [1, 2, 5, 0],
+    ]]
+    assert model.last_ordered_alternative_prefix_tokens == (2,)
+    assert model.last_ordered_alternative_search_diagnostics == ({
+        "attempted_prefixes": (1, 2, 3, 0),
+        "feasible_width_by_prefix": ((1, 1), (2, 4), (3, 1), (0, 4)),
+        "chosen_prefix": 2,
+        "chosen_width": 4,
+    },)
+    assert [
+        item["rank"] for item in model.last_ordered_alternative_provenance[0]
+    ] == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("branch_count", [4, 3, 2])
+def test_rootless_adaptive_rows_are_contiguous_global_rank_prefix(branch_count):
+    primary = (1, 2, 3, 4)
+    paths = [
+        _ranked_path(primary, 0),
+        _ranked_path((8, 8, 7, 6), 1),
+        _ranked_path((9, 2, 5, 0), 2),
+        _ranked_path((7, 2, 4, 8), 3),
+    ][:branch_count]
+    model = _continuation_bridge(paths)
+
+    alternatives = model.ordered_alternative_proposals(
+        [list(primary)],
+        branch_count=branch_count,
+        strategy="confidence_tree",
+        shared_prefix_tokens=(3,),
+        allow_adaptive_prefix_search=True,
+    )
+
+    assert alternatives == [[[int(token) for token in path.tokens] for path in paths]]
+    assert model.last_ordered_alternative_prefix_tokens == (0,)
+    assert [
+        item["rank"] for item in model.last_ordered_alternative_provenance[0]
+    ] == list(range(branch_count))
+
+
+def test_rootless_ragged_path_exceeding_requested_depth_fails_closed():
+    primary = (1, 2)
+    model = _continuation_bridge([
+        _ranked_path(primary, 0),
+        _ranked_path((8, 7, 6, 5), 1),
+    ])
+    model.last_requested_proposal_length = 3
+
+    with pytest.raises(
+        ValueError,
+        match="continuation alternative exceeds the requested depth",
+    ):
+        model.ordered_alternative_proposals(
+            [list(primary)],
+            branch_count=2,
+            strategy="confidence_tree",
+            shared_prefix_tokens=(1,),
+            allow_adaptive_prefix_search=True,
+        )
+
+
+def test_ranked_continuation_slate_preserves_paired_family_order():
+    primary = (1, 2, 3, 4)
+    # Ranking may place the child paths before the second parent.  The bridge
+    # still emits B1, B2, B3(B1), B4(B2), as required by staged verification.
+    paths = [
+        _ranked_path(primary, 0),
+        _ranked_path((1, 2, 3, 9), 1),
+        _ranked_path((1, 2, 8, 7), 2),
+        _ranked_path((1, 2, 8, 4), 3),
+    ]
+    model = _continuation_bridge(paths)
+
+    alternatives = model.ordered_alternative_proposals(
+        [list(primary)],
+        branch_count=4,
+        strategy="paired_continuations",
+        shared_prefix_tokens=2,
+    )
+
+    assert alternatives == [
+        [[1, 2, 3, 4], [1, 2, 8, 7], [1, 2, 3, 9], [1, 2, 8, 4]]
+    ]
+    assert [item["rank"] for item in model.last_ordered_alternative_provenance[0]] == [
+        0,
+        2,
+        1,
+        3,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("paths", "branches", "message"),
+    [
+        (
+            [_ranked_path((9, 2, 3), 0), _ranked_path((1, 8, 3), 1)],
+            2,
+            "B1 path differs",
+        ),
+        (
+            [_ranked_path((1, 2, 3), 0), _ranked_path((1, 8), 1)],
+            2,
+            "lacks the requested distinct branches",
+        ),
+        (
+            [_ranked_path((1, 2, 3), 0), _ranked_path((1, 2, 8), 1)],
+            2,
+            "lacks the requested distinct branches",
+        ),
+    ],
+)
+def test_ranked_continuation_bridge_fails_closed_on_invalid_slates(
+    paths, branches, message
+):
+    model = _continuation_bridge(paths)
+    with pytest.raises((ValueError, RuntimeError), match=message):
+        model.ordered_alternative_proposals(
+            [[1, 2, 3]],
+            branch_count=branches,
+            strategy="distinct_root",
+            shared_prefix_tokens=None,
+        )
+
+
+@pytest.mark.parametrize("branch_count", [0, 5])
+def test_ranked_continuation_bridge_bounds_physical_branch_count(branch_count):
+    model = _continuation_bridge([_ranked_path((1, 2, 3), 0)])
+    with pytest.raises(ValueError, match="one through four"):
+        model.ordered_alternative_proposals(
+            [[1, 2, 3]],
+            branch_count=branch_count,
+            strategy="distinct_root",
+            shared_prefix_tokens=None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("probabilities", "depth"),
+    [
+        ([0.5, 0.5], 2),
+        ((0.5,), 2),
+        ((float("nan"),), 1),
+        ((True,), 1),
+        (("0.5",), 1),
+        ((-0.1,), 1),
+        ((1.1,), 1),
+    ],
+)
+def test_continuation_confidence_fails_closed_without_exact_valid_features(
+    probabilities, depth
+):
+    with pytest.raises(ValueError, match="valid per-token confidence"):
+        _continuation_confidence_features(probabilities, depth)
+
+
+def test_continuation_confidence_log_odds_are_finite_and_bounded():
+    assert _continuation_confidence_features((0.0, 0.5, 1.0), 3) == (
+        -40.0,
+        0.0,
+        40.0,
+    )
+
+
 def test_unconfigured_admission_does_not_change_v2_policy_identity():
     policy = ContinuationPoolPolicy.from_value({"ngram_min": 1, "ngram_max": 1})
     assert "admission" not in policy.as_dict()
@@ -198,10 +456,1464 @@ def test_bound_wrapper_selects_fifteen_complete_paths_and_advances_context_once(
         assert all(len(path.tokens) == 2 for path in selection.paths)
         assert tokens[row] == list(selection.paths[0].tokens)
         assert all(
-            q[token] == 1 and np.count_nonzero(q) == 1
-            for token, q in zip(tokens[row], laws[row])
+            q == PointMassLaw(token)
+            for token, q in zip(tokens[row], laws[row], strict=True)
         )
         wrapper.proposal_pool.discard(selection)
+    assert len(wrapper.adaptive_confidence_features) == 2
+    assert all(
+        len(features) == len(tokens[row])
+        and np.isfinite(features).all()
+        and np.abs(features).max() <= 40
+        for row, features in enumerate(wrapper.adaptive_confidence_features)
+    )
+    for row, provenance in enumerate(
+        wrapper.last_continuation_confidence_provenance
+    ):
+        selected = wrapper.last_continuation_selections[row].paths[0]
+        assert provenance["path_id"] == selected.path_id
+        assert provenance["score_authority"] == selected.score_authority
+        assert provenance["verification_contract"] == VERIFICATION_CONTRACT
+        expected = [
+            max(
+                -40.0,
+                min(
+                    40.0,
+                    np.log(max(probability, np.exp(-40.0)))
+                    - np.log(max(1.0 - probability, np.exp(-40.0))),
+                ),
+            )
+            for probability in selected.conditional_acceptance
+        ]
+        np.testing.assert_allclose(wrapper.adaptive_confidence_features[row], expected)
+
+
+def test_actual_ranked_pool_drives_confidence_tree_without_changing_primary_law():
+    model, draft = pair("xpress")
+    wrapper = wrapped(model, draft, {"sources": ["external"]})
+    history, anchor = [1, 2, 3], 4
+    hidden = model.prefill_body(
+        mx.array([history]), model.make_cache(), draft.config.target_layer_ids
+    )
+    identity = {
+        "request_id": "confidence-tree-bridge",
+        "round_id": 0,
+        "context_revision": continuation_context_revision(
+            wrapper.session.session_revision, history, anchor
+        ),
+    }
+    tokens, laws = wrapper.draft_distributions(
+        [anchor],
+        hidden,
+        draft.make_cache(),
+        2,
+        [None],
+        [0],
+        processor_histories=[history],
+        proposal_contexts=[identity],
+    )
+    primary = list(tokens[0])
+    primary_laws = list(laws[0])
+
+    alternatives = wrapper.ordered_alternative_proposals(
+        tokens,
+        branch_count=4,
+        strategy="confidence_tree",
+        shared_prefix_tokens=(1,),
+    )[0]
+
+    assert alternatives[0] == primary
+    assert len({tuple(path) for path in alternatives}) == 4
+    assert all(len(path) == 2 and path[:1] == primary[:1] for path in alternatives)
+    assert len(wrapper.adaptive_confidence_features[0]) == len(primary)
+    assert len(wrapper.last_ordered_alternative_provenance[0]) == 4
+    for token, before, after in zip(primary, primary_laws, laws[0], strict=True):
+        assert after == before == PointMassLaw(token)
+    wrapper.proposal_pool.discard(wrapper.last_continuation_selections[0])
+
+
+def test_continuation_backbone_uses_private_retry_stable_rng(monkeypatch):
+    from mlx2.runtime.speculative_sampling import RequestRNG
+
+    model, draft = pair("xpress")
+    wrapper = wrapped(model, draft, {"sources": ["external"]})
+    history, anchor = [1, 2, 3], 4
+    hidden = model.prefill_body(
+        mx.array([history]), model.make_cache(), draft.config.target_layer_ids
+    )
+    identity = {
+        "request_id": "private-backbone-rng",
+        "round_id": 7,
+        "context_revision": continuation_context_revision(
+            wrapper.session.session_revision, history, anchor
+        ),
+    }
+    original = draft.draft_distributions
+    seen = []
+
+    def consuming(*args, **kwargs):
+        seen.append(tuple(rng.uniform() for rng in args[4]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(draft, "draft_distributions", consuming)
+    authoritative = RequestRNG(91)
+    before = authoritative.snapshot()
+    outputs = []
+    for _ in range(2):
+        tokens, laws = wrapper.draft_distributions(
+            [anchor],
+            hidden,
+            draft.make_cache(),
+            2,
+            [authoritative],
+            [0],
+            processor_histories=[history],
+            proposal_contexts=[identity],
+        )
+        outputs.append(tokens)
+        assert all(isinstance(law, PointMassLaw) for law in laws[0])
+        wrapper.proposal_pool.discard(wrapper.last_continuation_selections[0])
+    assert authoritative.snapshot() == before
+    assert seen[0] == seen[1]
+    assert outputs[0] == outputs[1]
+
+
+def test_empty_complete_path_tree_uses_private_primary_spine(monkeypatch):
+    from mlx2.runtime.speculative_sampling import RequestRNG
+
+    model, draft = pair("xpress")
+    wrapper = wrapped(model, draft, {"sources": ["external"]})
+    monkeypatch.setattr(draft, "proposal_distribution", "stochastic_exact_law")
+    monkeypatch.setitem(wrapper.providers, "external", lambda _context, _limit: ())
+    history, anchor = [1, 2, 3], 4
+    hidden = model.prefill_body(
+        mx.array([history]), model.make_cache(), draft.config.target_layer_ids
+    )
+    identity = {
+        "request_id": "empty-tree-primary-spine",
+        "round_id": 0,
+        "context_revision": continuation_context_revision(
+            wrapper.session.session_revision, history, anchor
+        ),
+    }
+    authoritative = RequestRNG(91)
+    before = authoritative.snapshot()
+    tokens, laws = wrapper.draft_distributions(
+        [anchor],
+        hidden,
+        draft.make_cache(),
+        2,
+        [authoritative],
+        [0],
+        processor_histories=[history],
+        proposal_contexts=[identity],
+    )
+    selection = wrapper.last_continuation_selections[0]
+    assert len(selection.paths) == 1
+    assert tokens[0] == list(selection.paths[0].tokens)
+    assert laws[0] == [PointMassLaw(token) for token in tokens[0]]
+    assert authoritative.snapshot() == before
+    with pytest.raises(InsufficientContinuationAlternatives):
+        wrapper.ordered_alternative_proposals(
+            tokens,
+            branch_count=2,
+            strategy="distinct_root",
+            shared_prefix_tokens=(1,),
+        )
+    wrapper.proposal_pool.discard(selection)
+
+
+def test_shallow_only_tree_uses_private_full_depth_primary_spine(monkeypatch):
+    from mlx2.runtime.speculative_sampling import RequestRNG
+
+    model, draft = pair("xpress")
+    wrapper = wrapped(model, draft, {"sources": ["external"]})
+    monkeypatch.setattr(draft, "proposal_distribution", "stochastic_exact_law")
+    monkeypatch.setitem(
+        wrapper.providers,
+        "external",
+        lambda _context, _limit: (
+            SourceContinuation((1,), (0.5,), 10.0, "shallow_only"),
+        ),
+    )
+    history, anchor = [1, 2, 3], 4
+    hidden = model.prefill_body(
+        mx.array([history]), model.make_cache(), draft.config.target_layer_ids
+    )
+    identity = {
+        "request_id": "shallow-tree-primary-spine",
+        "round_id": 0,
+        "context_revision": continuation_context_revision(
+            wrapper.session.session_revision, history, anchor
+        ),
+    }
+    authoritative = RequestRNG(91)
+    before = authoritative.snapshot()
+    tokens, laws = wrapper.draft_distributions(
+        [anchor],
+        hidden,
+        draft.make_cache(),
+        2,
+        [authoritative],
+        [0],
+        processor_histories=[history],
+        proposal_contexts=[identity],
+    )
+    selection = wrapper.last_continuation_selections[0]
+    assert len(selection.paths[0].tokens) == 2
+    assert len(selection.paths[1].tokens) == 1
+    spine = selection.paths[0].representative
+    assert spine.candidate_id == "external:0:private-spine"
+    assert spine.ranking_convention == "shallow_only"
+    assert spine.ranking_score < selection.paths[1].representative.ranking_score
+    assert tokens[0] == list(selection.paths[0].tokens)
+    assert laws[0] == [PointMassLaw(token) for token in tokens[0]]
+    assert authoritative.snapshot() == before
+    wrapper.proposal_pool.discard(selection)
+
+
+def test_continuation_ast_bridge_settles_one_ticket_and_matches_reference(monkeypatch):
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from scripts.paired_direct_ab import state_digest
+
+    model, base = pair("xpress")
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    )
+
+    model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
+    wrapper = wrapped(model, base, {"sources": ["external"]})
+
+    def force_nonprimary_target_winner(context, _limit):
+        target = tuple(
+            reference(
+                model,
+                [*context.history, context.anchor],
+                context.depth,
+            )
+        )
+        wrong = ((target[0] + 1) % base.config.vocab_size, *target[1:])
+        return (
+            SourceContinuation(wrong, (0.5,) * context.depth, 2.0, "forced"),
+            SourceContinuation(target, (0.5,) * context.depth, 1.0, "forced"),
+        )
+
+    monkeypatch.setitem(
+        wrapper.providers,
+        "external",
+        force_nonprimary_target_winner,
+    )
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="continuation-ast-bridge",
+        completion_batch_size=1,
+        num_draft=2,
+        prefill_step_size=64,
+        ready_drain="all",
+        continuation_pool=wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=1,
+        progressive_alternative_branches=2,
+        progressive_alternative_strategy="distinct_root",
+    )
+    assert batch._continuation_ast_bridge_geometry(1) == {
+        "schema": "mlx2.continuation-ast-bridge-geometry.v1",
+        "sessions": 1,
+        "branches_per_session": 2,
+        "physical_path_rows": 2,
+        "tile_rows_per_path": 2,
+        "maximum_target_rows_per_launch": 4,
+        "private_target_checkpoints": 2,
+        "private_provider_cache_rows": 1,
+        "live_frontier": False,
+    }
+    prompt = [1, 2, 3]
+    batch.insert([prompt], max_tokens=[6], sampling_configs=[{"sampling_temp": 0}])
+    output, final = drain(batch)
+    assert output[0] == reference(model, prompt, 6)
+    pool = final[0].speculative_receipt["continuation_pool"]
+    assert pool["verification_role"] == "proposal_only_ast_bridge"
+    assert pool["observed_used"]
+    assert pool["ast_observed_used"]
+    assert pool["selected_path"] == 1
+    assert pool["selected_physical_path"] == 1
+    assert pool["physical_width"] == 2
+    assert pool["physical_span"] == 4
+    assert not pool["strategy_observed_used"]
+    assert pool["ranked_complete_sequences"] == 2
+    assert pool["admitted_complete_sequences"] == 2
+    assert pool["selected_ast_provenance"]["rank"] == 1
+    assert pool["selected_ast_provenance"]["path_id"]
+    assert pool["selected_sources"]
+    assert pool["provider_stats"]["external"]["selected_rounds"] > 0
+    assert pool["last_admission"]
+    assert any(
+        row["target_selected"] and row["rank"] == 1
+        for row in pool["last_candidate_slate"]
+    )
+    ordinary = ExternalDraftBatchGenerator(
+        model,
+        draft_model=base,
+        binding="continuation-ast-ordinary-control",
+        completion_batch_size=1,
+        num_draft=2,
+        prefill_step_size=64,
+        ready_drain="all",
+    )
+    ordinary_uid = ordinary.insert(
+        [prompt],
+        max_tokens=[6],
+        sampling_configs=[{"sampling_temp": 0}],
+    )[0]
+    ordinary.disable_speculation(ordinary_uid)
+    ordinary_output, ordinary_final = drain(ordinary)
+    assert ordinary_output[ordinary_uid] == output[0]
+    for ast_cache, ordinary_cache in zip(
+        final[0].prompt_cache,
+        ordinary_final[ordinary_uid].prompt_cache,
+        strict=True,
+    ):
+        assert ast_cache.offset == ordinary_cache.offset
+        np.testing.assert_allclose(
+            np.asarray(ast_cache.keys)[..., : ast_cache.offset, :],
+            np.asarray(ordinary_cache.keys)[..., : ordinary_cache.offset, :],
+            rtol=0,
+            atol=2e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(ast_cache.values)[..., : ast_cache.offset, :],
+            np.asarray(ordinary_cache.values)[..., : ordinary_cache.offset, :],
+            rtol=0,
+            atol=2e-6,
+        )
+    primary_wrapper = wrapped(model, base, {"sources": ["external"]})
+
+    def force_primary_target_winner(context, _limit):
+        target = tuple(
+            reference(
+                model,
+                [*context.history, context.anchor],
+                context.depth,
+            )
+        )
+        wrong = ((target[0] + 1) % base.config.vocab_size, *target[1:])
+        return (
+            SourceContinuation(target, (0.5,) * context.depth, 2.0, "forced"),
+            SourceContinuation(wrong, (0.5,) * context.depth, 1.0, "forced"),
+        )
+
+    monkeypatch.setitem(
+        primary_wrapper.providers,
+        "external",
+        force_primary_target_winner,
+    )
+    primary = ExternalDraftBatchGenerator(
+        model,
+        draft_model=primary_wrapper,
+        binding="continuation-ast-bridge",
+        completion_batch_size=1,
+        num_draft=2,
+        prefill_step_size=64,
+        ready_drain="all",
+        continuation_pool=primary_wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=1,
+        progressive_alternative_branches=2,
+        progressive_alternative_strategy="distinct_root",
+    )
+    primary_uid = primary.insert(
+        [prompt],
+        max_tokens=[6],
+        sampling_configs=[{"sampling_temp": 0}],
+    )[0]
+    primary_output, primary_final = drain(primary)
+    assert primary_output[primary_uid] == output[0]
+    final[0].cache_sidecar.validate(
+        "continuation-ast-bridge", len(final[0].all_tokens)
+    )
+    primary_final[primary_uid].cache_sidecar.validate(
+        "continuation-ast-bridge",
+        len(primary_final[primary_uid].all_tokens),
+    )
+    assert state_digest(final[0].cache_sidecar) == state_digest(
+        primary_final[primary_uid].cache_sidecar
+    )
+    assert state_digest(final[0].prompt_cache) == state_digest(
+        primary_final[primary_uid].prompt_cache
+    )
+    assert wrapper.proposal_pool.feedback_revision > 0
+    assert not wrapper.proposal_pool._pending
+
+
+def test_continuation_ast_bridge_admission_uses_ast_geometry_not_pool_limit():
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    )
+
+    reservations = []
+    for limit in (2, 15):
+        model, base = pair("xpress")
+        model.progressive_external_verify_protocol = (
+            PROGRESSIVE_TARGET_PROTOCOL_VERSION
+        )
+        wrapper = wrapped(
+            model,
+            base,
+            {"sources": ["external"], "limit": limit},
+        )
+        batch = ExternalDraftBatchGenerator(
+            model,
+            draft_model=wrapper,
+            binding=f"continuation-ast-admission-{limit}",
+            completion_batch_size=1,
+            num_draft=2,
+            prefill_step_size=64,
+            ready_drain="all",
+            continuation_pool=wrapper.policy,
+            continuation_pool_ast_bridge=True,
+            progressive_verification_tile=1,
+            progressive_alternative_branches=2,
+            memory_headroom=lambda: 1 << 60,
+        )
+        batch.insert(
+            [[1, 2, 3]],
+            max_tokens=[6],
+            sampling_configs=[{"sampling_temp": 0}],
+        )
+        assert batch._admit(list(batch.lanes.values()), 3)
+        assert batch.scheduler_stats["continuation_ast_bridge_geometry"] == (
+            batch._continuation_ast_bridge_geometry(1)
+        )
+        assert batch.scheduler_stats["continuation_ast_bridge_private_bytes"] > 0
+        reservations.append(batch.scheduler_stats["reservation_bytes"])
+
+    # The provider may rank 2 or 15 candidate paths, but only the declared AST
+    # frontier/checkpoints are resident.  Pool breadth must not multiply the
+    # target reservation.
+    assert reservations[0] == reservations[1]
+
+
+def test_continuation_ast_b4_confidence_tail_reports_executed_physical_span(
+    monkeypatch,
+):
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    )
+
+    model, base = pair("xpress")
+    model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
+    wrapper = wrapped(model, base, {"sources": ["external"]})
+
+    def four_paths(context, _limit):
+        target = tuple(
+            reference(
+                model,
+                [*context.history, context.anchor],
+                context.depth,
+            )
+        )
+
+        def changed(delta):
+            tokens = list(target)
+            tokens[1] = (tokens[1] + delta) % base.config.vocab_size
+            return tuple(tokens)
+
+        confidence = (0.9, 0.8, 0.1)
+        return (
+            SourceContinuation(changed(1), confidence, 4.0, "forced"),
+            SourceContinuation(target, confidence, 3.0, "forced"),
+            SourceContinuation(changed(2), confidence, 2.0, "forced"),
+            SourceContinuation(changed(3), confidence, 1.0, "forced"),
+        )
+
+    monkeypatch.setitem(wrapper.providers, "external", four_paths)
+    draft_distributions = wrapper.draft_distributions
+
+    def confidence_tail(*args, **kwargs):
+        result = draft_distributions(*args, **kwargs)
+        wrapper.adaptive_confidence_features = (
+            (1.0, 0.5, -2.0),
+        )
+        return result
+
+    monkeypatch.setattr(wrapper, "draft_distributions", confidence_tail)
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="continuation-ast-b4-confidence-tail",
+        completion_batch_size=1,
+        num_draft=3,
+        prefill_step_size=64,
+        ready_drain="all",
+        continuation_pool=wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=2,
+        progressive_alternative_branches=4,
+        progressive_alternative_strategy="confidence_tree",
+        progressive_alternative_depth_policy="confidence_tail",
+    )
+    prompt = [1, 2, 3]
+    uid = batch.insert(
+        [prompt],
+        max_tokens=[4],
+        sampling_configs=[{"sampling_temp": 0}],
+    )[0]
+    output, final = drain(batch)
+    assert output[uid] == reference(model, prompt, 4)
+    receipt = final[uid].speculative_receipt
+    alternatives = receipt["progressive_verification"]["ordered_alternatives"]
+    assert alternatives["last_branch_proposal_counts"] == [3, 3, 2, 2]
+    pool = receipt["continuation_pool"]
+    assert pool["ast_observed_used"]
+    assert pool["ranked_complete_sequences"] == 4
+    assert pool["admitted_complete_sequences"] == 4
+    assert pool["physical_width"] == 4
+    assert pool["physical_span"] == 10
+    assert pool["selected_path"] == 1
+    assert pool["selected_physical_path"] == 1
+    assert pool["selected_ast_provenance"]["rank"] == 1
+    assert pool["selected_ast_provenance"]["path_id"]
+    assert pool["selected_ast_provenance"]["representative_source"] == "external"
+    assert pool["selected_sources"] == [
+        ("external", wrapper.source_records["external"].revision)
+    ]
+    assert not wrapper.proposal_pool._pending
+    ordinary = ExternalDraftBatchGenerator(
+        model,
+        draft_model=base,
+        binding="continuation-ast-b4-confidence-tail-ordinary",
+        completion_batch_size=1,
+        num_draft=3,
+        prefill_step_size=64,
+        ready_drain="all",
+    )
+    ordinary_uid = ordinary.insert(
+        [prompt],
+        max_tokens=[4],
+        sampling_configs=[{"sampling_temp": 0}],
+    )[0]
+    ordinary.disable_speculation(ordinary_uid)
+    ordinary_output, ordinary_final = drain(ordinary)
+    assert ordinary_output[ordinary_uid] == output[uid]
+    for ast_cache, ordinary_cache in zip(
+        final[uid].prompt_cache,
+        ordinary_final[ordinary_uid].prompt_cache,
+        strict=True,
+    ):
+        assert ast_cache.offset == ordinary_cache.offset
+        np.testing.assert_allclose(
+            np.asarray(ast_cache.keys)[..., : ast_cache.offset, :],
+            np.asarray(ordinary_cache.keys)[..., : ordinary_cache.offset, :],
+            rtol=0,
+            atol=2e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(ast_cache.values)[..., : ast_cache.offset, :],
+            np.asarray(ordinary_cache.values)[..., : ordinary_cache.offset, :],
+            rtol=0,
+            atol=2e-6,
+        )
+
+
+def test_continuation_ast_confidence_tree_downshifts_and_cross_session_packs(
+    monkeypatch,
+):
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    )
+    from mlx2.serving import minimum_tokens_processor
+    from scripts.paired_direct_ab import state_digest
+
+    model, base = pair("xpress")
+    model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
+    wrapper = wrapped(model, base, {"sources": ["external"]})
+    minimum = minimum_tokens_processor(mx, [0], 3, 4)
+
+    def minimum_reference(prompt, length):
+        cache, tokens = model.make_cache(), list(prompt)
+        output = []
+        for step in range(length):
+            logits = model(
+                mx.array([tokens if step == 0 else [tokens[-1]]]), cache=cache
+            )
+            processed = minimum(mx.array(tokens), logits[:, -1])
+            token = int(mx.argmax(processed[0]).item())
+            output.append(token)
+            tokens.append(token)
+        return output
+
+    def forced_prediction(path, _scope):
+        probabilities = tuple(0.5 for _ in path.tokens)
+        return (
+            probabilities,
+            float(path.ranking_score),
+            None,
+            float(path.ranking_score),
+            "forced_test_ranking",
+        )
+
+    monkeypatch.setattr(wrapper.proposal_pool, "_prediction", forced_prediction)
+
+    def two_compatible_paths(context, _limit):
+        target = tuple(
+            minimum_reference(
+                [*context.history, context.anchor], context.depth
+            )
+        )
+        primary = list(target)
+        primary[0] = (primary[0] + 3) % base.config.vocab_size
+        target_prefix = target[:2]
+        unrelated_a = list(target[:1])
+        unrelated_a[0] = (unrelated_a[0] + 1) % base.config.vocab_size
+        unrelated_b = list(target[:2])
+        unrelated_b[0] = (unrelated_b[0] + 2) % base.config.vocab_size
+        def candidate(tokens, confidence, score):
+            return SourceContinuation(
+                tuple(tokens),
+                tuple(confidence),
+                score,
+                "forced",
+            )
+
+        return (
+            candidate(target_prefix, (0.999, 0.999), 4.0),
+            candidate(primary, (0.8, 0.8, 0.8), 3.0),
+            candidate(unrelated_a, (0.5,), 2.0),
+            candidate(unrelated_b, (0.2, 0.2), 1.0),
+        )
+
+    monkeypatch.setitem(wrapper.providers, "external", two_compatible_paths)
+    draft_distributions = wrapper.draft_distributions
+
+    def confidence_tail(*args, **kwargs):
+        result = draft_distributions(*args, **kwargs)
+        wrapper.adaptive_confidence_features = tuple(
+            (1.0, 0.5, -2.0) for _ in result[0]
+        )
+        return result
+
+    monkeypatch.setattr(wrapper, "draft_distributions", confidence_tail)
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="continuation-ast-cross-session-downshift",
+        completion_batch_size=4,
+        num_draft=3,
+        prefill_step_size=64,
+        ready_drain="all",
+        continuation_pool=wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=2,
+        progressive_alternative_branches=4,
+        progressive_alternative_strategy="confidence_tree",
+        progressive_alternative_depth_policy="confidence_tail",
+        progressive_cross_session_pack_rows=8,
+        progressive_cross_session_pack_mode="ordered_live_frontier",
+    )
+    prompts = [[1, 2, 3]] * 4
+    assert 0 in reference(model, prompts[0], 4)
+    assert 0 not in minimum_reference(prompts[0], 4)
+
+    uids = batch.insert(
+        prompts,
+        max_tokens=[4] * 4,
+        sampling_configs=[{"sampling_temp": 0}] * 4,
+        logits_processors=[[minimum] for _ in prompts],
+    )
+    lanes = [batch.lanes[uid] for uid in uids]
+    for lane in lanes:
+        while lane.anchor is None:
+            batch._prefill(lane)
+    rng_before = {lane.uid: lane.rng.snapshot() for lane in lanes}
+    batch._round(lanes)
+    output = {lane.uid: [item.token for item in lane.ready] for lane in lanes}
+    final = {lane.uid: lane.ready[-1] for lane in lanes}
+    for uid, prompt in zip(uids, prompts, strict=True):
+        assert output[uid] == minimum_reference(prompt, len(output[uid]))
+        alternatives = final[uid].speculative_receipt[
+            "progressive_verification"
+        ]["ordered_alternatives"]
+        assert alternatives["last_active_branches"] == 4
+        assert alternatives["branch_downshift_rounds"] == 0
+        assert alternatives["last_branch_downshift"] is None
+        assert alternatives["last_shared_prefix_tokens"] == 0
+        assert alternatives["last_topology"] == "rootless_sibling_fanout"
+        assert alternatives["last_branch_proposal_counts"] == [3, 2, 1, 2]
+        diagnostics = alternatives["last_prefix_diagnostics"]
+        assert diagnostics["chosen_prefix"] == 0
+        assert diagnostics["chosen_width"] == 4
+        assert all(
+            width == 1
+            for prefix, width in diagnostics["feasible_width_by_prefix"]
+            if prefix != 0
+        )
+        assert (0, 4) in diagnostics["feasible_width_by_prefix"]
+        assert alternatives["cross_session_ast_packing"]["observed_used"], (
+            {
+                key: value
+                for key, value in batch.scheduler_stats.items()
+                if "progressive" in key or "cohort" in key
+            }
+        )
+        pool = final[uid].speculative_receipt["continuation_pool"]
+        assert pool["ast_observed_used"]
+        assert pool["selected_path"] == 1
+        assert pool["selected_physical_path"] == 1
+        assert pool["selected_ast_provenance"]["rank"] == 1
+        assert pool["admitted_complete_sequences"] == 4
+        assert pool["physical_span"] == 8
+        lane = batch.lanes[uid]
+        assert lane.rng.snapshot() == rng_before[uid]
+    assert batch.scheduler_stats[
+        "external_progressive_ast_branch_downshift_rounds"
+    ] == 0
+    assert batch.scheduler_stats[
+        "external_progressive_ast_branch_downshift_lanes"
+    ] == 0
+    assert batch.scheduler_stats["external_progressive_ast_rootless_rounds"] == 1
+    assert batch.scheduler_stats["external_progressive_ast_rootless_lanes"] == 4
+    assert batch.scheduler_stats[
+        "external_progressive_cross_session_ast_rounds"
+    ] == 1
+    assert batch.scheduler_stats[
+        "external_progressive_cross_session_ast_sessions"
+    ] == 4
+    assert not wrapper.proposal_pool._pending
+
+    tail_output, completed = drain(batch)
+    for lane, prompt in zip(lanes, prompts, strict=True):
+        assert tail_output[lane.uid] == minimum_reference(prompt, 4)
+        assert state_digest(completed[lane.uid].cache_sidecar) == state_digest(
+            batch._sidecar(lane)
+        )
+    assert not wrapper.proposal_pool._pending
+
+    unsupported = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="continuation-ast-unsupported-processor-fallback",
+        completion_batch_size=4,
+        num_draft=3,
+        prefill_step_size=64,
+        ready_drain="all",
+        continuation_pool=wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=2,
+        progressive_alternative_branches=4,
+        progressive_alternative_strategy="confidence_tree",
+        progressive_alternative_depth_policy="confidence_tail",
+        progressive_cross_session_pack_rows=8,
+        progressive_cross_session_pack_mode="ordered_live_frontier",
+    )
+
+    def opaque_passthrough(_tokens, value):
+        return value
+
+    unsupported_uids = unsupported.insert(
+        prompts,
+        max_tokens=[4] * 4,
+        sampling_configs=[{"sampling_temp": 0}] * 4,
+        logits_processors=[[opaque_passthrough] for _ in prompts],
+    )
+    unsupported_lanes = [unsupported.lanes[uid] for uid in unsupported_uids]
+    for lane in unsupported_lanes:
+        while lane.anchor is None:
+            unsupported._prefill(lane)
+    unsupported._round(unsupported_lanes)
+    for uid, prompt in zip(unsupported_uids, prompts, strict=True):
+        emitted = [item.token for item in unsupported.lanes[uid].ready]
+        assert emitted == reference(model, prompt, len(emitted))
+        alternatives = unsupported.lanes[uid].ready[-1].speculative_receipt[
+            "progressive_verification"
+        ]["ordered_alternatives"]
+        assert alternatives["rounds"] == 0
+        assert alternatives["primary_fallback_reasons"][
+            "unsupported_processors"
+        ] >= 1
+    assert unsupported.scheduler_stats[
+        "external_progressive_ast_primary_fallback_unsupported_processors_rounds"
+    ] >= 4
+    assert not wrapper.proposal_pool._pending
+
+    ordinary = ExternalDraftBatchGenerator(
+        model,
+        draft_model=base,
+        binding="continuation-ast-rootless-top-ranks-ordinary",
+        completion_batch_size=4,
+        num_draft=3,
+        prefill_step_size=64,
+        ready_drain="all",
+    )
+    ordinary_uids = ordinary.insert(
+        prompts,
+        max_tokens=[4] * 4,
+        sampling_configs=[{"sampling_temp": 0}] * 4,
+        logits_processors=[[minimum] for _ in prompts],
+    )
+    for uid in ordinary_uids:
+        ordinary.disable_speculation(uid)
+    ordinary_output, ordinary_final = drain(ordinary)
+    for lane, ordinary_uid in zip(lanes, ordinary_uids, strict=True):
+        assert ordinary_output[ordinary_uid] == minimum_reference(prompts[0], 4)
+        for ast_cache, ordinary_cache in zip(
+            completed[lane.uid].prompt_cache,
+            ordinary_final[ordinary_uid].prompt_cache,
+            strict=True,
+        ):
+            assert ast_cache.offset == ordinary_cache.offset
+            np.testing.assert_allclose(
+                np.asarray(ast_cache.keys)[..., : ast_cache.offset, :],
+                np.asarray(ordinary_cache.keys)[..., : ordinary_cache.offset, :],
+                rtol=0,
+                atol=2e-6,
+            )
+            np.testing.assert_allclose(
+                np.asarray(ast_cache.values)[..., : ast_cache.offset, :],
+                np.asarray(ordinary_cache.values)[..., : ordinary_cache.offset, :],
+                rtol=0,
+                atol=2e-6,
+            )
+
+
+def test_continuation_ast_rootless_dflash_shape_cross_session_packs(monkeypatch):
+    """Ranked sibling roots use exact private base states, as in live Muse r7."""
+
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    )
+    from scripts.paired_direct_ab import state_digest
+
+    model, base = pair("xpress")
+    model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
+    wrapper = wrapped(model, base, {"sources": ["external"], "limit": 8})
+
+    def mixed_topology_paths(context, _limit):
+        target = tuple(
+            reference(model, [*context.history, context.anchor], context.depth)
+        )
+
+        def changed(delta):
+            tokens = list(target)
+            position = {3: 0, 4: 1, 5: 2}[context.anchor]
+            tokens[position] = (
+                tokens[position] + delta
+            ) % base.config.vocab_size
+            return tuple(tokens)
+
+        def changed_at(position, delta):
+            tokens = list(target)
+            tokens[position] = (
+                tokens[position] + delta
+            ) % base.config.vocab_size
+            return tuple(tokens)
+
+        confidence = (0.9, 0.8, 0.1)
+        paths = (
+            SourceContinuation(changed(1), confidence, 8.0, "forced"),
+            SourceContinuation(target, confidence, 7.0, "forced"),
+            SourceContinuation(changed(2), confidence, 6.0, "forced"),
+            SourceContinuation(changed(3), confidence, 5.0, "forced"),
+            SourceContinuation(changed(4), confidence, 4.0, "forced"),
+            SourceContinuation(changed(5), confidence, 3.0, "forced"),
+        )
+        if context.anchor == 5:
+            # The suggested prefix can form B2 from lower-ranked token-1
+            # fanout, while the deeper prefix forms B4 from the first four
+            # ranked paths. Width must win before prefix preference.
+            paths += (
+                SourceContinuation(changed_at(1, 1), confidence, 2.0, "forced"),
+            )
+        return paths
+
+    monkeypatch.setitem(wrapper.providers, "external", mixed_topology_paths)
+    draft_distributions = wrapper.draft_distributions
+
+    def confidence_tail(*args, **kwargs):
+        result = draft_distributions(*args, **kwargs)
+        wrapper.adaptive_confidence_features = tuple(
+            (1.0, 0.5, -2.0) for _ in result[0]
+        )
+        return result
+
+    monkeypatch.setattr(wrapper, "draft_distributions", confidence_tail)
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="continuation-ast-rootless-live-shape",
+        completion_batch_size=4,
+        num_draft=3,
+        prefill_step_size=64,
+        ready_drain="all",
+        continuation_pool=wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=2,
+        progressive_alternative_branches=4,
+        progressive_alternative_strategy="confidence_tree",
+        progressive_alternative_depth_policy="confidence_tail",
+        progressive_cross_session_pack_rows=8,
+        progressive_cross_session_pack_mode="ordered_live_frontier",
+    )
+    prompts = [[1, 2, 3], [1, 2, 3], [1, 2, 4], [1, 2, 5]]
+    uids = batch.insert(
+        prompts,
+        max_tokens=[4] * 4,
+        sampling_configs=[{"sampling_temp": 0}] * 4,
+    )
+    lanes = [batch.lanes[uid] for uid in uids]
+    for lane in lanes:
+        while lane.anchor is None:
+            batch._prefill(lane)
+    rng_before = {lane.uid: lane.rng.snapshot() for lane in lanes}
+    batch._round(lanes)
+
+    for lane, prompt in zip(lanes, prompts, strict=True):
+        assert [item.token for item in lane.ready] == reference(model, prompt, 4)
+        alternatives = lane.ready[-1].speculative_receipt[
+            "progressive_verification"
+        ]["ordered_alternatives"]
+        expected_rootless = prompt[-1] == 3
+        expected_prefix = {3: 0, 4: 1, 5: 2}[prompt[-1]]
+        assert alternatives["last_shared_prefix_tokens"] == (
+            expected_prefix
+        )
+        assert alternatives["rootless_rounds"] == int(expected_rootless)
+        assert alternatives["last_topology"] == {
+            3: "rootless_sibling_fanout",
+            4: "shared_trunk",
+            5: "adaptive_shared_trunk",
+        }[prompt[-1]]
+        assert alternatives["adaptive_prefix_rounds"] == int(prompt[-1] in {3, 5})
+        assert alternatives["last_prefix_search"] == (
+            {"suggested": 1, "active": expected_prefix}
+            if prompt[-1] in {3, 5}
+            else None
+        )
+        diagnostics = alternatives["last_prefix_diagnostics"]
+        assert diagnostics["chosen_prefix"] == expected_prefix
+        assert diagnostics["chosen_width"] == 4
+        assert diagnostics["attempted_prefixes"][0] == 1
+        assert all(
+            len(item) == 2 for item in diagnostics["feasible_width_by_prefix"]
+        )
+        assert not any(
+            key in diagnostics for key in ("tokens", "paths", "path_ids")
+        )
+        if prompt[-1] == 5:
+            assert (1, 2) in diagnostics["feasible_width_by_prefix"]
+            assert (2, 4) in diagnostics["feasible_width_by_prefix"]
+        assert alternatives["last_active_branches"] == 4
+        assert alternatives["cross_session_ast_packing"]["observed_used"]
+        pool = lane.ready[-1].speculative_receipt["continuation_pool"]
+        assert pool["ast_observed_used"]
+        assert pool["selected_path"] == 1
+        assert pool["selected_physical_path"] == 1
+        assert pool["selected_ast_provenance"]["rank"] == 1
+        if expected_rootless:
+            assert state_digest(lane.ready[-1].cache_sidecar) == state_digest(
+                batch._sidecar(lane)
+            )
+    assert batch.scheduler_stats["external_progressive_ast_rootless_rounds"] == 1
+    assert batch.scheduler_stats["external_progressive_ast_rootless_lanes"] == 2
+    assert batch.scheduler_stats["external_progressive_ast_adaptive_prefix_rounds"] == 1
+    assert batch.scheduler_stats["external_progressive_ast_adaptive_prefix_lanes"] == 3
+    assert batch.scheduler_stats["external_progressive_cross_session_ast_rounds"] == 1
+    assert batch.scheduler_stats["external_progressive_cross_session_ast_sessions"] == 4
+    assert not wrapper.proposal_pool._pending
+
+    single = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="continuation-ast-rootless-live-shape-b1",
+        completion_batch_size=1,
+        num_draft=3,
+        prefill_step_size=64,
+        ready_drain="all",
+        continuation_pool=wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=2,
+        progressive_alternative_branches=4,
+        progressive_alternative_strategy="confidence_tree",
+        progressive_alternative_depth_policy="confidence_tail",
+    )
+    single_uid = single.insert(
+        [prompts[0]],
+        max_tokens=[4],
+        sampling_configs=[{"sampling_temp": 0}],
+    )[0]
+    single_output, single_final = drain(single)
+    assert single_output[single_uid] == reference(model, prompts[0], 4)
+    single_alternatives = single_final[single_uid].speculative_receipt[
+        "progressive_verification"
+    ]["ordered_alternatives"]
+    assert single_alternatives["last_shared_prefix_tokens"] == 0
+    assert single_alternatives["last_topology"] == "rootless_sibling_fanout"
+    assert single_alternatives["rounds"] >= 1
+    assert single_final[single_uid].speculative_receipt["continuation_pool"][
+        "ast_observed_used"
+    ]
+    assert not wrapper.proposal_pool._pending
+
+    ordinary = ExternalDraftBatchGenerator(
+        model,
+        draft_model=base,
+        binding="continuation-ast-rootless-live-shape-ordinary",
+        completion_batch_size=4,
+        num_draft=3,
+        prefill_step_size=64,
+        ready_drain="all",
+    )
+    ordinary_uids = ordinary.insert(
+        prompts,
+        max_tokens=[4] * 4,
+        sampling_configs=[{"sampling_temp": 0}] * 4,
+    )
+    for uid in ordinary_uids:
+        ordinary.disable_speculation(uid)
+    ordinary_output, ordinary_final = drain(ordinary)
+    for ast_lane, ordinary_uid in zip(lanes, ordinary_uids, strict=True):
+        assert ordinary_output[ordinary_uid] == [item.token for item in ast_lane.ready]
+        assert ast_lane.rng.snapshot() == rng_before[ast_lane.uid]
+        for ast_cache, ordinary_cache in zip(
+            ast_lane.ready[-1].prompt_cache,
+            ordinary_final[ordinary_uid].prompt_cache,
+            strict=True,
+        ):
+            assert ast_cache.offset == ordinary_cache.offset
+            np.testing.assert_allclose(
+                np.asarray(ast_cache.keys)[..., : ast_cache.offset, :],
+                np.asarray(ordinary_cache.keys)[..., : ordinary_cache.offset, :],
+                rtol=0,
+                atol=2e-6,
+            )
+            np.testing.assert_allclose(
+                np.asarray(ast_cache.values)[..., : ast_cache.offset, :],
+                np.asarray(ordinary_cache.values)[..., : ordinary_cache.offset, :],
+                rtol=0,
+                atol=2e-6,
+            )
+
+
+def test_continuation_ast_partial_group_feasibility_falls_back_exactly(monkeypatch):
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    )
+    from scripts.paired_direct_ab import state_digest
+
+    def build(*, partial):
+        model, base = pair("xpress")
+        model.progressive_external_verify_protocol = (
+            PROGRESSIVE_TARGET_PROTOCOL_VERSION
+        )
+        wrapper = wrapped(model, base, {"sources": ["external"], "limit": 8})
+
+        def partially_sparse(context, _limit):
+            target = tuple(
+                reference(model, [*context.history, context.anchor], context.depth)
+            )
+            confidence = (0.9, 0.8, 0.1)
+            if context.anchor == 4:
+                return (SourceContinuation(target, confidence, 1.0, "forced"),)
+
+            def changed_root(delta):
+                tokens = list(target)
+                tokens[0] = (tokens[0] + delta) % base.config.vocab_size
+                return tuple(tokens)
+
+            candidates = (
+                SourceContinuation(changed_root(1), confidence, 4.0, "forced"),
+                SourceContinuation(target, confidence, 3.0, "forced"),
+                SourceContinuation(changed_root(2), confidence, 2.0, "forced"),
+                SourceContinuation(changed_root(3), confidence, 1.0, "forced"),
+            )
+            return candidates if partial else candidates[:1]
+
+        monkeypatch.setitem(wrapper.providers, "external", partially_sparse)
+        kwargs = {
+            "continuation_pool_ast_bridge": True,
+            "progressive_verification_tile": 2,
+            "progressive_alternative_branches": 4,
+            "progressive_alternative_strategy": "confidence_tree",
+            "progressive_alternative_depth_policy": "confidence_tail",
+            "progressive_cross_session_pack_rows": 8,
+            "progressive_cross_session_pack_mode": "ordered_live_frontier",
+        }
+        batch = ExternalDraftBatchGenerator(
+            model,
+            draft_model=wrapper,
+            binding="continuation-ast-partial-feasibility",
+            completion_batch_size=4,
+            num_draft=3,
+            prefill_step_size=64,
+            ready_drain="all",
+            continuation_pool=wrapper.policy,
+            **kwargs,
+        )
+        prompts = [[1, 2, 3], [1, 2, 3], [1, 2, 4], [1, 2, 4]]
+        uids = batch.insert(
+            prompts,
+            max_tokens=[4] * 4,
+            sampling_configs=[{"sampling_temp": 0}] * 4,
+        )
+        lanes = [batch.lanes[uid] for uid in uids]
+        for lane in lanes:
+            while lane.anchor is None:
+                batch._prefill(lane)
+        # Exercise the production grouping boundary: one draft group can form
+        # rootless B4 while the other cannot form even B2.
+        for lane in lanes[2:]:
+            lane.tail = lane.tail.astype(mx.float16)
+        before_rng = {lane.uid: lane.rng.snapshot() for lane in lanes}
+        batch._round(lanes)
+        return batch, wrapper, prompts, lanes, before_rng
+
+    ast, ast_wrapper, prompts, ast_lanes, ast_rng_before = build(partial=True)
+    control, control_wrapper, _, control_lanes, control_rng_before = build(
+        partial=False
+    )
+
+    for ast_lane, control_lane, prompt in zip(
+        ast_lanes, control_lanes, prompts, strict=True
+    ):
+        expected = reference(ast.model, prompt, len(ast_lane.ready))
+        assert [item.token for item in ast_lane.ready] == expected
+        assert [item.token for item in control_lane.ready] == expected
+        receipt = ast_lane.ready[-1].speculative_receipt
+        assert not receipt["continuation_pool"]["ast_observed_used"]
+        alternatives = receipt["progressive_verification"]["ordered_alternatives"]
+        assert alternatives["rounds"] == 0
+        assert alternatives["last_active_branches"] == 1
+        expected_reason = (
+            "cohort_incomplete" if prompt[-1] == 3 else "insufficient_branches"
+        )
+        assert alternatives["last_primary_fallback_reason"] == expected_reason
+        proposed = alternatives["last_proposed_prefix_diagnostics"]
+        assert proposed is not None
+        assert proposed["attempted_prefixes"]
+        assert proposed["feasible_width_by_prefix"]
+        assert not any(
+            key in proposed for key in ("tokens", "paths", "path_ids")
+        )
+        assert alternatives["last_prefix_diagnostics"] is None
+        assert ast_lane.rng.snapshot() == ast_rng_before[ast_lane.uid]
+        assert control_lane.rng.snapshot() == control_rng_before[control_lane.uid]
+        assert ast_lane.rng.snapshot() == control_lane.rng.snapshot()
+        assert state_digest(ast._freeze_cache(ast_lane.cache)) == state_digest(
+            control._freeze_cache(control_lane.cache)
+        )
+        assert state_digest(ast._sidecar(ast_lane)) == state_digest(
+            control._sidecar(control_lane)
+        )
+    assert ast.scheduler_stats["external_progressive_ast_rootless_rounds"] == 0
+    assert ast.scheduler_stats["external_progressive_ast_rootless_lanes"] == 0
+    assert ast.scheduler_stats["external_progressive_ast_branch_downshift_rounds"] == 0
+    assert ast.scheduler_stats["external_progressive_ast_branch_downshift_lanes"] == 0
+    assert ast.scheduler_stats["external_progressive_ast_adaptive_prefix_rounds"] == 0
+    assert ast.scheduler_stats["external_progressive_ast_adaptive_prefix_lanes"] == 0
+    assert not ast_wrapper.proposal_pool._pending
+    assert not control_wrapper.proposal_pool._pending
+
+
+def test_continuation_ast_bridge_refuses_approximate_target_fidelity():
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    )
+
+    model, base = pair("xpress")
+    model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
+    wrapper = wrapped(model, base, {"sources": ["external"]})
+    with pytest.raises(
+        ValueError,
+        match="requires exact progressive ordered alternatives",
+    ):
+        ExternalDraftBatchGenerator(
+            model,
+            draft_model=wrapper,
+            binding="continuation-ast-approximate-refusal",
+            completion_batch_size=1,
+            num_draft=2,
+            prefill_step_size=64,
+            continuation_pool=wrapper.policy,
+            continuation_pool_ast_bridge=True,
+            progressive_verification_tile=1,
+            progressive_alternative_branches=2,
+            progressive_verification_fidelity="near_tie_bounded",
+        )
+
+
+def test_continuation_ast_sparse_slate_falls_back_to_exact_primary(monkeypatch):
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    )
+
+    model, base = pair("xpress")
+    model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
+    wrapper = wrapped(model, base, {"sources": ["external"]})
+
+    def sparse(*_args, **_kwargs):
+        raise InsufficientContinuationAlternatives("content-dependent sparse slate")
+
+    monkeypatch.setattr(wrapper, "ordered_alternative_proposals", sparse)
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="continuation-ast-primary-fallback",
+        completion_batch_size=1,
+        num_draft=2,
+        prefill_step_size=64,
+        ready_drain="all",
+        continuation_pool=wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=1,
+        progressive_alternative_branches=2,
+    )
+    prompt = [1, 2, 3]
+    batch.insert([prompt], max_tokens=[6], sampling_configs=[{"sampling_temp": 0}])
+    output, final = drain(batch)
+    assert output[0] == reference(model, prompt, 6)
+    assert batch.scheduler_stats[
+        "external_progressive_ast_primary_fallback_rounds"
+    ] > 0
+    alternatives = final[0].speculative_receipt["progressive_verification"][
+        "ordered_alternatives"
+    ]
+    assert alternatives["primary_fallback_rounds"] > 0
+    assert alternatives["primary_fallback_reasons"] == {
+        "insufficient_branches": alternatives["primary_fallback_rounds"]
+    }
+    assert alternatives["last_primary_fallback_reason"] == "insufficient_branches"
+    pool = final[0].speculative_receipt["continuation_pool"]
+    assert pool["observed_used"]
+    assert not pool["ast_observed_used"]
+    assert pool["ast_committed_rounds"] == 0
+    assert pool["ast_primary_fallback_committed_rounds"] > 0
+    assert pool["ranked_complete_sequences"] > 0
+    assert pool["admitted_complete_sequences"] == 1
+    assert pool["physical_width"] == 1
+    assert pool["physical_span"] > 0
+    assert not pool["strategy_observed_used"]
+    assert pool["selected_path"] == 0
+    assert pool["selected_sources"]
+    assert pool["selected_ast_provenance"] is None
+    assert not wrapper.proposal_pool._pending
+
+
+def test_continuation_ast_fault_discards_ticket_and_retry_is_stable(monkeypatch):
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    )
+    from scripts.paired_direct_ab import state_digest
+
+    model, base = pair("xpress")
+    model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
+    wrapper = wrapped(model, base, {"sources": ["external"]})
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="continuation-ast-fault-retry",
+        completion_batch_size=1,
+        num_draft=2,
+        prefill_step_size=64,
+        ready_drain="all",
+        continuation_pool=wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=1,
+        progressive_alternative_branches=2,
+        progressive_alternative_strategy="distinct_root",
+    )
+    prompt = [1, 2, 3]
+    uid = batch.insert(
+        [prompt],
+        max_tokens=[6],
+        sampling_configs=[{"sampling_temp": 0}],
+    )[0]
+    lane = batch.lanes[uid]
+    while lane.anchor is None:
+        batch._prefill(lane)
+    before_history = list(lane.history)
+    before_anchor = lane.anchor
+    before_rng = lane.rng.snapshot()
+    before_target_digest = state_digest(batch._freeze_cache(lane.cache))
+    before_draft_digest = state_digest(batch._sidecar(lane))
+    verify = batch._progressive_verify_many
+
+    def fault(*_args, **_kwargs):
+        raise RuntimeError("injected AST verification fault")
+
+    monkeypatch.setattr(batch, "_progressive_verify_many", fault)
+    with pytest.raises(RuntimeError, match="injected AST verification fault"):
+        batch._round([lane])
+    assert lane.history == before_history
+    assert lane.anchor == before_anchor
+    assert lane.rng.snapshot() == before_rng
+    assert state_digest(batch._freeze_cache(lane.cache)) == before_target_digest
+    assert state_digest(batch._sidecar(lane)) == before_draft_digest
+    assert not lane.ready
+    assert not wrapper.proposal_pool._pending
+    assert not getattr(lane, "continuation_ast_committed_rounds", 0)
+    monkeypatch.setattr(batch, "_progressive_verify_many", verify)
+    output, final = drain(batch)
+    assert output[uid] == reference(model, prompt, 6)
+    assert final[uid].speculative_receipt["continuation_pool"][
+        "ast_observed_used"
+    ]
+    assert not wrapper.proposal_pool._pending
+
+
+def test_continuation_ast_malformed_branch_provenance_fails_before_commit(monkeypatch):
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    )
+    from scripts.paired_direct_ab import state_digest
+
+    model, base = pair("xpress")
+    model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
+    wrapper = wrapped(model, base, {"sources": ["external"]})
+
+    def two_paths(context, _limit):
+        target = tuple(
+            reference(
+                model,
+                [*context.history, context.anchor],
+                context.depth,
+            )
+        )
+        wrong = ((target[0] + 1) % base.config.vocab_size, *target[1:])
+        return (
+            SourceContinuation(wrong, (0.5,) * context.depth, 2.0, "forced"),
+            SourceContinuation(target, (0.5,) * context.depth, 1.0, "forced"),
+        )
+
+    monkeypatch.setitem(wrapper.providers, "external", two_paths)
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="continuation-ast-malformed-provenance",
+        completion_batch_size=1,
+        num_draft=2,
+        prefill_step_size=64,
+        ready_drain="all",
+        continuation_pool=wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=1,
+        progressive_alternative_branches=2,
+        progressive_alternative_strategy="distinct_root",
+    )
+    uid = batch.insert(
+        [[1, 2, 3]],
+        max_tokens=[6],
+        sampling_configs=[{"sampling_temp": 0}],
+    )[0]
+    lane = batch.lanes[uid]
+    while lane.anchor is None:
+        batch._prefill(lane)
+    before_history = list(lane.history)
+    before_anchor = lane.anchor
+    before_rng = lane.rng.snapshot()
+    before_target_digest = state_digest(batch._freeze_cache(lane.cache))
+    before_draft_digest = state_digest(batch._sidecar(lane))
+    propose = batch._propose
+
+    def corrupt_provenance(*args, **kwargs):
+        blocks = propose(*args, **kwargs)
+        for alternatives in batch._last_alternative_blocks.values():
+            for block in alternatives:
+                if block.continuation_ast_provenance is not None:
+                    block.continuation_ast_provenance["rank"] = (
+                        block.continuation_ast_provenance["rank"] + 1
+                    ) % len(alternatives)
+        return blocks
+
+    monkeypatch.setattr(batch, "_propose", corrupt_provenance)
+    with pytest.raises(RuntimeError, match="branch/rank mapping is invalid"):
+        batch._round([lane])
+    assert lane.history == before_history
+    assert lane.anchor == before_anchor
+    assert lane.rng.snapshot() == before_rng
+    assert state_digest(batch._freeze_cache(lane.cache)) == before_target_digest
+    assert state_digest(batch._sidecar(lane)) == before_draft_digest
+    assert not wrapper.proposal_pool._pending
+    assert not getattr(lane, "continuation_ast_committed_rounds", 0)
+
+
+def test_continuation_ast_cancellation_leaves_no_pending_ticket():
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    )
+
+    model, base = pair("xpress")
+    model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
+    wrapper = wrapped(model, base, {"sources": ["external"]})
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="continuation-ast-cancel",
+        completion_batch_size=1,
+        num_draft=2,
+        prefill_step_size=64,
+        continuation_pool=wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=1,
+        progressive_alternative_branches=2,
+    )
+    uid = batch.insert([[1, 2, 3]], max_tokens=[6])[0]
+    assert batch.remove([uid], cancelled=True) == {}
+    assert not batch.lanes
+    assert not wrapper.proposal_pool._pending
+
+
+def test_continuation_ast_processor_uses_exact_primary_chain():
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    )
+
+    class IdentityProcessor:
+        history_pure = True
+
+        def __call__(self, _tokens, logits):
+            return logits
+
+    model, base = pair("xpress")
+    model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
+    wrapper = wrapped(model, base, {"sources": ["external"]})
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="continuation-ast-processor-primary",
+        completion_batch_size=1,
+        num_draft=2,
+        prefill_step_size=64,
+        ready_drain="all",
+        continuation_pool=wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=1,
+        progressive_alternative_branches=2,
+    )
+    prompt = [1, 2, 3]
+    batch.insert(
+        [prompt],
+        max_tokens=[6],
+        sampling_configs=[{"sampling_temp": 0}],
+        logits_processors=[[IdentityProcessor()]],
+    )
+    output, final = drain(batch)
+    assert output[0] == reference(model, prompt, 6)
+    assert not final[0].speculative_receipt["progressive_verification"][
+        "observed_used"
+    ]
+    assert final[0].speculative_receipt["continuation_pool"]["observed_used"]
+    assert not wrapper.proposal_pool._pending
 
 
 def test_inventory_auto_admits_actual_resident_mtp_and_refuses_missing_requested_source():

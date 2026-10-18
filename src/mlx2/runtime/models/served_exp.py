@@ -88,6 +88,28 @@ def same_bits(a: mx.array, b: mx.array) -> bool:
     return equal(a, b)
 
 
+def covering_rows(grid: mx.array, rows: int, width: int, seed: int) -> mx.array:
+    """``[rows, width]`` copies of ``grid``'s values in seeded orders, every value present.
+
+    When ``width`` holds the whole grid, each row covers it (row ``r`` is
+    shuffled with key ``seed + r``); otherwise the rows cover it together
+    (one shuffle of the flattened block, key ``seed``).  The tile is cut to
+    size before it is shuffled: shuffling a longer tile and then truncating
+    it repeats some values and drops others.
+    """
+    n = int(grid.size)
+    if width >= n:
+        base = mx.tile(grid, (-(-width // n),))[:width]
+        return mx.stack([
+            base[mx.random.permutation(width, key=mx.random.key(seed + r))] for r in range(rows)
+        ])
+    total = rows * width
+    if total < n:
+        raise ValueError(f"{rows} rows of {width} cannot cover {n} values")
+    flat = mx.tile(grid, (-(-total // n),))[:total]
+    return flat[mx.random.permutation(total, key=mx.random.key(seed))].reshape(rows, width)
+
+
 def respell(text: str, kernel_exp: str, spelling: str) -> str:
     """``text`` with its ``kernel_exp`` calls spelled ``spelling``.
 
@@ -106,6 +128,32 @@ def metal_helper(text: str, name: str) -> str:
     start = text.index(f"template <typename U>\ninline U {name}(")
     end = text.index("\n}\n", start) + 3
     return text[start:end]
+
+
+def adapted_helper_header(gate, header: str, helper_name: str, dtype=mx.bfloat16) -> tuple[str, str]:
+    """``header`` with only ``helper_name`` re-spelled to the served form.
+
+    Other helpers in the same header (softplus, log1p) keep their own
+    spelling.  Returns the header and a kernel-name suffix for the spelling.
+    When no spelling matches, the header is returned unchanged: the gate's
+    refusal keeps the gated use off, while ungated uses of the same kernel
+    (which never call the helper) still compile.
+    """
+    spelling = gate.spelling(dtype)
+    if spelling is None:
+        return header, ""
+    helper = metal_helper(header, helper_name)
+    suffix = "_precise" if "precise" in spelling else "_fast"
+    return header.replace(helper, gate.adapt(helper, dtype)), suffix
+
+
+def kernel_dtype_refusal(gate, dtype, kernel_dtype=mx.bfloat16) -> Optional[str]:
+    """Refuse ``dtype`` when no spelling reproduces it, or when it differs from
+    the spelling the kernel was compiled with for ``kernel_dtype``."""
+    refusal = gate.adaptation_refusal(dtype)
+    if refusal is None and gate.spelling(dtype) != gate.spelling(kernel_dtype):
+        refusal = f"served {gate.served_name} spelling differs between {dtype} and {kernel_dtype}"
+    return refusal
 
 
 class ServedExpGate:

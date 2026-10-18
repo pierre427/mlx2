@@ -385,9 +385,15 @@ def normalize_external_policy(value):
         "num_draft",
         "pairwise_selection",
         "proposal_composition",
+        "continuation_pool",
         "target_verify_row_exact",
         "progressive_verification_tile",
         "progressive_multilane_draft_cap",
+        "progressive_alternative_branches",
+        "progressive_alternative_strategy",
+        "progressive_alternative_depth_policy",
+        "progressive_cross_session_pack_rows",
+        "progressive_cross_session_pack_mode",
         "cost_per_commit_handoff",
     }
     if set(policy) - allowed:
@@ -415,6 +421,14 @@ def normalize_external_policy(value):
         CostPerCommitHandoffSettings.from_value(
             policy["cost_per_commit_handoff"]
         )
+    if "continuation_pool" in policy:
+        from ..runtime.proposal_providers import ContinuationPoolPolicy
+
+        ContinuationPoolPolicy.from_value(policy["continuation_pool"])
+        if policy.get("proposal_composition") not in (None, False):
+            raise ValueError(
+                "continuation_pool already arbitrates proposal sources"
+            )
     if progressive_tile is not None:
         if not row_exact or pairwise != "host":
             raise ValueError(
@@ -451,6 +465,7 @@ def normalize_external_policy(value):
     if (
         policy
         and "proposal_composition" not in policy
+        and "continuation_pool" not in policy
         and pairwise == "host"
     ):
         policy["proposal_composition"] = dict(
@@ -658,6 +673,27 @@ class MuseGlimmerAdapter:
         )
         if progressive_tile is not None:
             config["progressive_verification_tile"] = progressive_tile
+            config["progressive_alternative_branches"] = self.external_policy.get(
+                "progressive_alternative_branches", 1
+            )
+            config["progressive_alternative_strategy"] = self.external_policy.get(
+                "progressive_alternative_strategy", "distinct_root"
+            )
+            config["progressive_alternative_depth_policy"] = self.external_policy.get(
+                "progressive_alternative_depth_policy", "full"
+            )
+            config["progressive_cross_session_pack_rows"] = self.external_policy.get(
+                "progressive_cross_session_pack_rows"
+            )
+            config["progressive_cross_session_pack_mode"] = self.external_policy.get(
+                "progressive_cross_session_pack_mode"
+            )
+        if "continuation_pool" in (getattr(self, "external_policy", None) or {}):
+            config["continuation_pool"] = copy.deepcopy(
+                self.external_policy["continuation_pool"]
+            )
+            if progressive_tile is not None:
+                config["continuation_pool_ast_bridge"] = True
         multilane_cap = (getattr(self, "external_policy", None) or {}).get(
             "progressive_multilane_draft_cap"
         )
@@ -774,8 +810,11 @@ class MuseGlimmerAdapter:
 
             self.draft_model = load_drafter(draft_record, self.model)
             composition_identity = ""
+            progressive_tile = self.external_policy.get(
+                "progressive_verification_tile"
+            )
             composition = self.external_policy.get("proposal_composition")
-            if composition is not False:
+            if composition not in (None, False):
                 from ..runtime.proposal_composition import ComposedDraftModel
 
                 self.draft_model = ComposedDraftModel(
@@ -786,12 +825,61 @@ class MuseGlimmerAdapter:
                     sort_keys=True,
                     separators=(",", ":"),
                 )
+            if "continuation_pool" in self.external_policy:
+                from ..runtime.proposal_providers import ContinuationPoolPolicy
+                from .proposal_path_sources import build_continuation_drafter
+
+                pool = ContinuationPoolPolicy.from_value(
+                    self.external_policy["continuation_pool"]
+                )
+                normalized_pool = pool.as_dict()
+                session_revision = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "schema": "mlx2.continuation-session.v2",
+                            "target_revision": self.identity["fingerprint"],
+                            "draft_revision": draft_record["fingerprint"],
+                            "route": "external-dflash2-v1",
+                            "continuation_pool": normalized_pool,
+                            "draft_settings": self.draft_model.receipt_settings,
+                            "num_draft": self.external_policy.get(
+                                "num_draft", DFLASH2_DEFAULT_NUM_DRAFT
+                            ),
+                            "verification_role": (
+                                "proposal_only_ast_bridge"
+                                if progressive_tile is not None
+                                else "complete_path_verifier"
+                            ),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode()
+                ).hexdigest()
+                self.draft_model = build_continuation_drafter(
+                    self.model,
+                    self.draft_model,
+                    normalized_pool,
+                    target_revision=self.identity["fingerprint"],
+                    draft_revision=draft_record["fingerprint"],
+                    tokenizer_revision=self.identity["fingerprint"],
+                    session_revision=session_revision,
+                )
+                composition_identity = json.dumps(
+                    {
+                        "continuation_pool": normalized_pool,
+                        "verification_role": (
+                            "proposal_only_ast_bridge"
+                            if progressive_tile is not None
+                            else "complete_path_verifier"
+                        ),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
             self.profile_name = self.external_profile_name
             progressive_identity = progressive_external_identity(
                 self.external_policy
-            )
-            progressive_tile = self.external_policy.get(
-                "progressive_verification_tile"
             )
             digest = hashlib.sha256((self.identity["fingerprint"] + draft_record["fingerprint"] + "external-dflash2-v1" + composition_identity + progressive_identity).encode()).hexdigest()
             self.identity = {**self.identity, "target_fingerprint": self.identity["fingerprint"], "draft_fingerprint": draft_record["fingerprint"], "fingerprint": digest}
@@ -830,6 +918,28 @@ class MuseGlimmerAdapter:
                     "multilane_draft_cap": self.external_policy.get(
                         "progressive_multilane_draft_cap"
                     ),
+                    "alternative_branches": self.external_policy.get(
+                        "progressive_alternative_branches", 1
+                    ),
+                    "alternative_strategy": self.external_policy.get(
+                        "progressive_alternative_strategy", "distinct_root"
+                    ),
+                    "alternative_depth_policy": self.external_policy.get(
+                        "progressive_alternative_depth_policy", "full"
+                    ),
+                    "cross_session_apt_pack_rows": self.external_policy.get(
+                        "progressive_cross_session_pack_rows"
+                    ),
+                    "cross_session_ast_pack_rows": self.external_policy.get(
+                        "progressive_cross_session_pack_rows"
+                    ),
+                    "cross_session_apt_pack_mode": self.external_policy.get(
+                        "progressive_cross_session_pack_mode"
+                    ),
+                    "cross_session_ast_pack_mode": self.external_policy.get(
+                        "progressive_cross_session_pack_mode"
+                    ),
+                    "deprecated_cross_session_apt_alias": True,
                     "performance_claim": False,
                 }
             self.descriptor = replace(
@@ -849,7 +959,52 @@ class MuseGlimmerAdapter:
         if self.draft_model is None:
             raise ValueError("No external draft model bound")
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
-        return ExternalDraftBatchGenerator(self.model, draft_model=self.draft_model, binding=self.identity["fingerprint"], num_draft=self.external_policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT), pairwise_selection=self.external_policy.get("pairwise_selection","host"), progressive_verification_tile=self.external_policy.get("progressive_verification_tile"), multilane_draft_cap=self.external_policy.get("progressive_multilane_draft_cap"), cost_per_commit_handoff=self.external_policy.get("cost_per_commit_handoff"), **kwargs)
+        return ExternalDraftBatchGenerator(
+            self.model,
+            draft_model=self.draft_model,
+            binding=self.identity["fingerprint"],
+            num_draft=self.external_policy.get(
+                "num_draft", DFLASH2_DEFAULT_NUM_DRAFT
+            ),
+            pairwise_selection=self.external_policy.get(
+                "pairwise_selection", "host"
+            ),
+            progressive_verification_tile=self.external_policy.get(
+                "progressive_verification_tile"
+            ),
+            multilane_draft_cap=self.external_policy.get(
+                "progressive_multilane_draft_cap"
+            ),
+            progressive_alternative_branches=self.external_policy.get(
+                "progressive_alternative_branches", 1
+            ),
+            progressive_alternative_strategy=self.external_policy.get(
+                "progressive_alternative_strategy", "distinct_root"
+            ),
+            progressive_alternative_depth_policy=self.external_policy.get(
+                "progressive_alternative_depth_policy", "full"
+            ),
+            progressive_cross_session_pack_rows=self.external_policy.get(
+                "progressive_cross_session_pack_rows"
+            ),
+            progressive_cross_session_pack_mode=self.external_policy.get(
+                "progressive_cross_session_pack_mode"
+            ),
+            continuation_pool=(
+                self.draft_model.policy
+                if hasattr(self.draft_model, "last_continuation_selections")
+                else None
+            ),
+            continuation_pool_ast_bridge=(
+                "continuation_pool" in self.external_policy
+                and self.external_policy.get("progressive_verification_tile")
+                is not None
+            ),
+            cost_per_commit_handoff=self.external_policy.get(
+                "cost_per_commit_handoff"
+            ),
+            **kwargs,
+        )
 
     def prompt_tokens(self, request: dict) -> list[int]:
         return self.tokenizer.encode(

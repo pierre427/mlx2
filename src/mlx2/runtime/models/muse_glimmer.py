@@ -431,6 +431,38 @@ class Model(nn.Module):
 
         return PROGRESSIVE_TARGET_PROTOCOL_VERSION
 
+    def progressive_external_target_rows(self, inputs, cache, capture_layers):
+        """Execute an exact progressive target launch on Muse-owned row math.
+
+        ``forward_with_taps`` already owns Muse's row-exact attention, MLP,
+        normalization, and vocabulary projection when target verification is
+        selected.  Exposing that same implementation through the generic
+        capability hook makes the physical-launch receipt truthful without
+        teaching the scheduler about Muse.  Refuse before touching private
+        cache state if selection was revoked after generator construction.
+        """
+        if not self._target_verify_row_exact:
+            raise RuntimeError("Muse progressive row-exact target is not selected")
+        from ..progressive_external_verify import (
+            PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+            ProgressiveTargetRows,
+        )
+
+        logits, features = self.forward_with_taps(
+            inputs, cache, capture_layers
+        )
+        return ProgressiveTargetRows(
+            logits=logits,
+            features=features,
+            protocol=PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+            row_exact=True,
+            detail={
+                "algorithm": TARGET_VERIFY_ROW_EXACT_VERSION,
+                "physical_width": int(inputs.shape[0]),
+                "token_width": int(inputs.shape[1]),
+            },
+        )
+
     @property
     def external_execution_receipt(self):
         if not self._target_verify_row_exact:

@@ -23,6 +23,56 @@ from mlx2.runtime.sample_utils import LaneRNG
 from mlx2.runtime.speculative_sampling import RequestRNG, verify_proposals
 
 
+def test_dflash_continuation_wrapper_is_private_point_mass_and_retry_stable():
+    from mlx2.adapters.proposal_path_sources import build_continuation_drafter
+    from mlx2.runtime.proposal_providers import (
+        PointMassLaw,
+        continuation_context_revision,
+    )
+
+    model, draft = tiny()
+    wrapper = build_continuation_drafter(
+        model,
+        draft,
+        {"sources": ["external"], "limit": 4},
+        target_revision="a" * 64,
+        draft_revision="b" * 64,
+        tokenizer_revision="c" * 64,
+        session_revision="d" * 64,
+    )
+    history, anchor = [1, 2], 3
+    hidden = model.prefill_body(
+        mx.array([history]), model.make_cache(), draft.config.target_layer_ids
+    )
+    identity = {
+        "request_id": "dflash-private-wrapper",
+        "round_id": 0,
+        "context_revision": continuation_context_revision(
+            wrapper.session.session_revision, history, anchor
+        ),
+    }
+    authoritative = RequestRNG(41)
+    before = authoritative.snapshot()
+    observed = []
+    for _ in range(2):
+        tokens, laws = wrapper.draft_distributions(
+            [anchor],
+            hidden,
+            draft.make_cache(),
+            2,
+            [authoritative],
+            [0],
+            processor_histories=[history],
+            proposal_contexts=[identity],
+        )
+        observed.append(tokens)
+        assert len(tokens[0]) == 2
+        assert laws[0] == [PointMassLaw(token) for token in tokens[0]]
+        wrapper.proposal_pool.discard(wrapper.last_continuation_selections[0])
+    assert authoritative.snapshot() == before
+    assert observed[0] == observed[1]
+
+
 def _write_safetensors_headers(path, tensors, *, dtype="BF16"):
     item_size = {"BF16": 2, "F16": 2, "F32": 4}[dtype]
     offset = 0
@@ -187,6 +237,7 @@ def _run_forced_progressive_round(
     stop_expected=False,
     sampling_temp=0,
     processor=False,
+    processor_history_pure=False,
 ):
     model, draft = tiny()
     prompt = [1, 2, 3, 4]
@@ -239,14 +290,25 @@ def _run_forced_progressive_round(
         return [proposal[:count]], [laws[:count]]
 
     draft.draft_distributions = forced
+    processors = None
+    if processor:
+        if callable(processor):
+            passthrough = processor
+        else:
+            def passthrough(_tokens, value):
+                return value
+
+            if processor_history_pure:
+                passthrough.history_pure = True
+                passthrough.progressive_branch_safe = True
+                passthrough.forbidden_token_ids_at_length = lambda _length: ()
+        processors = [[passthrough]]
     uid = batch.insert(
         [prompt],
         max_tokens=[8],
         lane_rngs=[LaneRNG(919)],
         sampling_configs=[{"sampling_temp": sampling_temp}],
-        logits_processors=(
-            [[lambda _tokens, value: value]] if processor else None
-        ),
+        logits_processors=processors,
     )[0]
     lane = batch.lanes[uid]
     while lane.anchor is None:
@@ -371,6 +433,24 @@ def test_progressive_tile_one_spans_entire_long_proposal_without_bonus_draws():
     assert batch.scheduler_stats["external_progressive_verify_launches"] == 3
     assert batch.scheduler_stats["external_progressive_verify_full_tiles"] == 2
     assert len(lane.ready) == 4
+
+
+def test_muse_progressive_receipt_reports_adapter_owned_exact_target_rows():
+    batch, lane = _run_forced_progressive_round(2, None)
+    try:
+        executor = lane.ready[-1].speculative_receipt[
+            "progressive_verification"
+        ]["target_row_executor"]
+        assert executor["adapter_owned_launches"] == executor["launches"] >= 1
+        assert executor["legacy_launches"] == 0
+        assert executor["row_exact_launches"] == executor["launches"]
+        assert executor["nonexact_launches"] == 0
+        assert executor["last"]["execution"] == "adapter_owned"
+        assert executor["last"]["adapter_detail"]["algorithm"] == (
+            "muse-q4-native-b1s1-causal-prefix-v1"
+        )
+    finally:
+        batch.close()
 
 
 @pytest.mark.parametrize("reject_at", [(None, None), (0, None), (2, 1)])
@@ -697,6 +777,40 @@ def test_progressive_processor_request_uses_exact_fixed_verifier():
         "progressive_verification"
     ]
     assert receipt["selected"] and not receipt["observed_used"]
+
+
+def test_progressive_branch_safe_processor_uses_exact_progressive_verifier():
+    _fixed_batch, fixed = _run_forced_progressive_round(
+        None, None, processor=True, processor_history_pure=True
+    )
+    progressive_batch, progressive = _run_forced_progressive_round(
+        2, None, processor=True, processor_history_pure=True
+    )
+    _assert_lane_target_state_equal(progressive, fixed)
+    assert progressive_batch.scheduler_stats[
+        "external_progressive_verify_rounds"
+    ] == 1
+    receipt = progressive.ready[-1].speculative_receipt[
+        "progressive_verification"
+    ]
+    assert receipt["selected"] and receipt["observed_used"]
+
+
+def test_progressive_minimum_tokens_processor_matches_fixed_verifier():
+    from mlx2.serving import minimum_tokens_processor
+
+    processor = minimum_tokens_processor(mx, [19], 4, 8)
+    _fixed_batch, fixed = _run_forced_progressive_round(
+        None, None, processor=processor
+    )
+    progressive_batch, progressive = _run_forced_progressive_round(
+        2, None, processor=processor
+    )
+    _assert_lane_target_state_equal(progressive, fixed)
+    assert int(fixed.ready[0].token) != 19
+    assert progressive_batch.scheduler_stats[
+        "external_progressive_verify_rounds"
+    ] == 1
 
 
 def test_progressive_sampled_round_matches_fixed_rng_and_state():
@@ -1278,14 +1392,14 @@ def test_external_atomic_cohort_cancellation_retires_survivors_but_not_unrelated
 
 def test_external_atomic_cohort_can_shrink_after_complete_frontier_release():
     model, draft = tiny()
-    batch = generator(model, draft, completion_batch_size=2)
-    cohort = {"tenant_id": "default", "id": "released", "size": 2}
+    batch = generator(model, draft, completion_batch_size=4)
+    cohort = {"tenant_id": "default", "id": "released", "size": 4}
     uids = batch.insert(
-        [[1, 2], [3, 4]],
-        max_tokens=[3, 3],
+        [[1, 2], [3, 4], [5, 6], [7, 8]],
+        max_tokens=[3] * 4,
         sampling_configs=[
-            {"sampling_temp": 0.0, "batch_cohort": dict(cohort)},
-            {"sampling_temp": 0.0, "batch_cohort": dict(cohort)},
+            {"sampling_temp": 0.0, "batch_cohort": dict(cohort)}
+            for _ in range(4)
         ],
     )
     for _ in range(10):
@@ -1295,10 +1409,16 @@ def test_external_atomic_cohort_can_shrink_after_complete_frontier_release():
     else:
         pytest.fail("cohort did not release its complete decode frontier")
 
-    batch.remove([uids[0]])
-    assert set(batch.lanes) == {uids[1]}
+    remaining = batch.lanes[uids[3]].maximum - batch.lanes[uids[3]].generated
+    holds = batch.scheduler_stats["external_atomic_cohort_prefill_holds"]
+    batch.remove(uids[:3])
+    assert set(batch.lanes) == {uids[3]}
+    assert uids[3] not in batch.scheduler_waiting_uids()
     assert not batch.take_atomic_cohort_failures()
-    batch.close()
+    output, final = drain(batch)
+    assert set(output) == set(final) == {uids[3]}
+    assert len(output[uids[3]]) == remaining
+    assert batch.scheduler_stats["external_atomic_cohort_prefill_holds"] == holds
 
 
 def test_external_memory_blocked_prefill_is_not_reported_as_scheduler_waiting():
@@ -2332,6 +2452,46 @@ def test_partial_fit_rotates_lanes_without_ready_queue_masking(monkeypatch, ordi
     b.close()
 
 
+def test_partial_decode_fit_marks_omitted_lanes_as_transient_scheduler_waits(monkeypatch):
+    m,d=tiny();b=generator(m,d,memory_headroom=lambda:10**12)
+    b.insert([[1,2],[3,4],[5,6],[7,8]],max_tokens=[100]*4)
+    for lane in b.lanes.values():
+        while lane.anchor is None:b._prefill(lane)
+        lane.ordinary=True
+    admitted=[]
+    def fit(candidates, _append, *, prefill=False):
+        assert not prefill
+        cohort=list(candidates[:2]);admitted.append(tuple(lane.uid for lane in cohort))
+        return cohort
+    monkeypatch.setattr(b,'_fit_cohort',fit)
+    monkeypatch.setattr(b,'_round_at_batch_route',lambda group,**_kwargs:None)
+
+    b.next()
+    assert admitted==[(0,1)]
+    assert set(b.scheduler_waiting_uids())=={2,3}
+    assert not b._memory_waiting_uids
+
+    b.next()
+    assert admitted==[(0,1),(2,3)]
+    assert set(b.scheduler_waiting_uids())=={0,1}
+    assert not b._memory_waiting_uids
+    b.close()
+
+
+def test_empty_decode_fit_remains_memory_wait_not_scheduler_wait(monkeypatch):
+    m,d=tiny();b=generator(m,d,memory_headroom=lambda:10**12)
+    b.insert([[1,2],[3,4]],max_tokens=[100,100])
+    for lane in b.lanes.values():
+        while lane.anchor is None:b._prefill(lane)
+        lane.ordinary=True
+    monkeypatch.setattr(b,'_fit_cohort',lambda *_args,**_kwargs:[])
+
+    b.next()
+    assert b._memory_waiting_uids=={0,1}
+    assert not b.scheduler_waiting_uids()
+    b.close()
+
+
 def test_bounded_reclaim_remeasures_and_preserves_pending_rng():
     m,d=tiny();budget=[0];events=[]
     def reclaim():events.append('allocator')
@@ -2489,10 +2649,11 @@ def test_external_verify_histograms_decompose_the_accepted_aggregate():
 
 def _external_engine(monkeypatch, m, d):
     """A real ServingEngine on the external draft route over ``tiny()``."""
+    from test_approximate_kv_serving import Detok, Parser
+
     from mlx2 import memory, serving
     from mlx2.contracts import Capability, ModelDescriptor, StatePlane
     from mlx2.runtime import os_memory
-    from test_approximate_kv_serving import Detok, Parser
 
     monkeypatch.setattr(serving, "runtime_identity", lambda: {"source_sha256": "src"})
     monkeypatch.setattr(memory, "execution_headroom", lambda: 100 * 2**30)
@@ -2766,6 +2927,7 @@ def test_one_round_finish_keeps_the_committed_prompt_boundary(stop_first):
 
 def test_external_fanout_with_a_one_token_budget_shares_the_leader_boundary(monkeypatch):
     import test_parallel_sampling_fanout as harness
+
     from mlx2.runtime import generate
     from mlx2.server import collect_parallel_samples
 

@@ -52,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--max-tokens", type=int, default=16)
     parser.add_argument("--concurrent-tokens", type=int, default=64)
+    parser.add_argument(
+        "--max-lanes",
+        type=int,
+        default=2,
+        help="engine lane width; 1 for a route that admits one session",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument(
         "--startup-timeout-seconds",
@@ -80,6 +86,7 @@ def execution_plan(args) -> dict:
         "requests": {
             "cold_max_tokens": args.max_tokens,
             "concurrent_max_tokens": args.concurrent_tokens,
+            "max_lanes": args.max_lanes,
             "warm_max_tokens": args.max_tokens,
             "temperature": 0,
         },
@@ -416,7 +423,9 @@ def run_engine_check(args) -> dict:
             qualification_mode=True,
             mtp=False,
             max_inflight=4,
-            max_lanes=2,
+            # The check needs one decode in flight beside an idle-boundary
+            # resume (not a lane), so a one-session route runs it at width 1.
+            max_lanes=args.max_lanes,
             max_context=4096 if args.model_path else 2048,
             prefill_step=128,
             cache_bytes=8 << 30,
@@ -633,6 +642,8 @@ def run_engine_check(args) -> dict:
 def validate_args(parser: argparse.ArgumentParser, args) -> None:
     if args.max_tokens < 1 or args.concurrent_tokens < 2:
         parser.error("token counts must be positive and --concurrent-tokens must be at least 2")
+    if args.max_lanes < 1:
+        parser.error("--max-lanes must be at least 1")
     if args.timeout_seconds <= 0 or args.startup_timeout_seconds <= 0:
         parser.error("timeout values must be positive")
     if args.cpu and args.i_own_the_gpu:

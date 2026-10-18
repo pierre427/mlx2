@@ -10,7 +10,12 @@ Two parts, both reference-vs-fused in one process on the real checkpoint:
   prefill off and on; the output, conv state and recurrent state must be
   bit-identical and the fused route must have run (``prefill_chunk_calls``).
   Layer 0 also compares the prework q/k/v/conv and the swish norm-gate
-  against the eager ops directly.
+  against the eager ops directly, on random inputs and on a value sweep
+  (``*_sweep``: an identity last conv tap makes each conv output exactly its
+  qkv value, and z takes every bf16 value with magnitude in [2**-6, 32]).
+  Random draws almost never reach -6.84375, the bf16 input where the
+  ``metal::exp`` and ``metal::precise::exp`` sigmoids round apart, so only
+  the sweep fails on a SiLU spelling that differs from the served one.
 * ``model``: the full model through the adapter.  Each prompt is prefilled in
   fixed chunks with the prefill switch off and on; the last chunk's logits,
   every cache entry (GDN conv/recurrent state, attention K/V) and a short
@@ -258,7 +263,56 @@ def _components(mx, nn, obj, prefill, rows):
     mx.eval(fused, eager)
     same = _same(mx, fused, eager)
     out['norm_gate'] = same if same else _diff(mx, fused, eager)
+    out.update(_components_sweep(mx, nn, obj, prefill, rows))
     out['passed'] = all(v is True for v in out.values())
+    return out
+
+
+def _sweep_rows(mx, rows, width, seed):
+    """Rows covering every bf16 value with magnitude in [2**-6, 32], shuffled."""
+    from mlx2.runtime.models.qwen4_fused_gdn_verify import _decode_parity_grid
+
+    grid = _decode_parity_grid()
+    if width < int(grid.size):
+        raise ValueError(f"a row of {width} cannot cover {int(grid.size)} values")
+    # Cut the tile to width before shuffling, so every row keeps every value.
+    base = mx.tile(grid, (-(-width // int(grid.size)),))[:width]
+    return mx.stack([
+        base[mx.random.permutation(width, key=mx.random.key(seed + r))] for r in range(rows)
+    ])[None]
+
+
+def _components_sweep(mx, nn, obj, prefill, rows):
+    """The prework and swish norm-gate against the eager ops on a value sweep."""
+    C = obj.conv_dim
+    taps = int(obj.conv1d.weight.shape[1])
+    identity = mx.zeros((C, taps, 1), dtype=mx.bfloat16)
+    identity[:, taps - 1, 0] = 1
+    out = {}
+    qkv = _sweep_rows(mx, rows, C, 38270)
+    for label, state in (('cold', None), ('warm', mx.zeros((1, taps - 1, C), mx.bfloat16))):
+        fused = prefill.qwen4_gdn_prefill_prework(qkv, state, identity, numerics='qwen35')
+        conv_state = mx.zeros((1, taps - 1, C), qkv.dtype) if state is None else state
+        conv_input = mx.concatenate([conv_state, qkv], axis=1)
+        conv_out = nn.silu(mx.conv1d(conv_input, identity, groups=C))
+        kd = obj.key_dim
+        q = conv_out[..., :kd].reshape(1, rows, obj.num_k_heads, obj.head_k_dim)
+        k = conv_out[..., kd:2 * kd].reshape(1, rows, obj.num_k_heads, obj.head_k_dim)
+        v = conv_out[..., 2 * kd:].reshape(1, rows, obj.num_v_heads, obj.head_v_dim)
+        q, k = obj._normalize_qk(q, k)
+        eager = (q, k, v, mx.contiguous(conv_input[:, -(taps - 1):, :]))
+        mx.eval(*fused, *eager)
+        for part, got, want in zip(('q', 'k', 'v', 'conv_out'), fused, eager):
+            same = _same(mx, got, want)
+            out[f'prework_sweep/{label}/{part}'] = same if same else _diff(mx, got, want)
+    y = mx.random.normal((1, rows, obj.num_v_heads, obj.head_v_dim)).astype(mx.bfloat16)
+    z = _sweep_rows(mx, rows, obj.value_dim, 38271)
+    fused = prefill.qwen4_gdn_prefill_norm_gate(y, z, obj.norm.weight, obj.norm.eps,
+                                                gate='swish')
+    eager = obj.norm(y, z.reshape(y.shape)).reshape(1, rows, -1)
+    mx.eval(fused, eager)
+    same = _same(mx, fused, eager)
+    out['norm_gate_sweep'] = same if same else _diff(mx, fused, eager)
     return out
 
 

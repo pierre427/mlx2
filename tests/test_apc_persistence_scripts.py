@@ -72,6 +72,18 @@ def test_gpu_check_dry_run_describes_real_artifact_without_loading_it(tmp_path, 
     assert not artifact.exists()
 
 
+def test_gpu_check_lane_width_is_explicit_for_one_session_routes(tmp_path, capsys):
+    # A route that admits one session (Nemotron 3.5 Super ordinary/MTP) runs
+    # the check at width 1; the plan says so and width 0 is refused.
+    script = load_script("gpu_check_apc_prefetch")
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    assert script.main(["--dry-run", "--model-path", str(artifact), "--max-lanes", "1"]) == 0
+    assert '"max_lanes": 1' in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        script.main(["--dry-run", "--model-path", str(artifact), "--max-lanes", "0"])
+
+
 def test_gpu_check_tiny_fixture_completes_deferred_park_on_cpu(
     tmp_path, capsys, monkeypatch
 ):

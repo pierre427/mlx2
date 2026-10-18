@@ -95,6 +95,53 @@ def test_select_fifteen_complete_sequences_and_prefix_closure():
         selected.require_verification_contract("accept_reject_q")
 
 
+def test_required_primary_depth_promotes_best_full_path_and_binds_ticket():
+    p = pool()
+    paths = [
+        path((1,), candidate="shallow", ranking_score=40, ranking_convention="proxy"),
+        path((2, 3, 4), candidate="deep", ranking_score=30, ranking_convention="proxy"),
+        path((5, 6), candidate="full-best", ranking_score=20, ranking_convention="proxy"),
+        path((7, 8), candidate="full-next", ranking_score=10, ranking_convention="proxy"),
+    ]
+    selected = p.select(paths, round_(), required_primary_depth=2)
+    assert [item.tokens for item in selected.paths] == [
+        (5, 6),
+        (2, 3, 4),
+        (7, 8),
+        (1,),
+    ]
+    assert selected.required_primary_depth == 2
+    assert p.select(paths, round_(), required_primary_depth=2) is selected
+    with pytest.raises(ValueError, match="different pending proposal selection"):
+        p.select(paths, round_(), required_primary_depth=3)
+    p.commit_feedback(selected, (5, 0))
+    with pytest.raises(ValueError, match="already consumed"):
+        p.commit_feedback(selected, (5, 0))
+
+
+def test_required_primary_depth_refuses_missing_full_path_without_ticket():
+    p = pool()
+    with pytest.raises(
+        ValueError,
+        match="proposal selection lacks the required primary depth",
+    ):
+        p.select([path((1,), candidate="short")], round_(), required_primary_depth=2)
+    assert not p._pending
+    assert not p._request_tickets
+
+
+def test_omitted_required_primary_depth_preserves_global_order():
+    p = pool()
+    selected = p.select(
+        [path((1,), candidate="short"), path((2, 3), candidate="long")],
+        round_(),
+    )
+    assert [item.tokens for item in selected.paths] == [(2, 3), (1,)]
+    assert selected.required_primary_depth is None
+    assert "required_primary_depth" not in selected.as_dict()
+    p.discard(selected)
+
+
 def test_duplicate_sequences_keep_provenance_and_share_common_prefix():
     p = pool([source(), source("beta", "lilicorr", B)])
     selected = p.select(

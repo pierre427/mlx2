@@ -81,18 +81,24 @@ def _greedy_cache(model, prompt, tokens):
     return cache
 
 
+# Width-4 batched lanes vs B1 decode: mlx 0.32.4's CPU matmul rounds the
+# batched K/V projections up to 2e-5 away (the lab 39400a0d4 build: 5e-6).
+# Offsets stay exact, which is what pins the frozen boundary.
+_STATE_ATOL = 5e-5
+
+
 def _assert_same_cache(actual, expected):
     for got, want in zip(actual, expected):
         if isinstance(want, ArraysCache):
             for a, b in zip(got.cache, want.cache):
-                assert mx.allclose(a, b, atol=1e-5).item()
+                assert mx.allclose(a, b, atol=_STATE_ATOL).item()
         else:
             assert isinstance(want, KVCache)
             assert int(got.offset) == int(want.offset)
             keys, values = got.keys_and_values()
             want_keys, want_values = want.keys_and_values()
-            assert mx.allclose(keys, want_keys, atol=1e-5).item()
-            assert mx.allclose(values, want_values, atol=1e-5).item()
+            assert mx.allclose(keys, want_keys, atol=_STATE_ATOL).item()
+            assert mx.allclose(values, want_values, atol=_STATE_ATOL).item()
 
 
 def test_plain_rounds_pipeline_and_match_greedy_decode():

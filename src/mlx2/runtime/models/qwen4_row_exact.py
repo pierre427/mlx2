@@ -13,24 +13,32 @@ stage           row-exact implementation
 ==============  ============================================================
 projections     every trunk ``QuantizedLinear`` and the LM head: the
                 row-exact qmv kernel (``row_exact_qmv``; one weight pass,
-                one-row ``qmv_fast``/``qmv`` bits per row), or one stock
-                one-row call per row where the kernel does not cover the
-                layout
+                one-row ``qmv_fast``/``qmv`` bits per row) through the shared
+                package's canary-gated ``row_exact.ops.quantized_linear`` /
+                ``quantized_linears``, or one stock one-row call per row
+                where the kernel does not cover the layout or its canary
+                fails
 dense           every trunk dense ``nn.Linear`` (mixed-precision artifacts
 projections     keep the HC ``block_inject_weight`` and the MoE
-                ``shared_expert_gate`` bf16): one one-token call per row
-                (MLX's dense matmul is ``gemv`` at one row and
-                ``gemv_wide``/GEMM tiling at more, so the composed M=R call
-                is not the one-token arithmetic)
+                ``shared_expert_gate`` bf16): R broadcast matrix-vector
+                products (``row_exact.ops.dense_linear``, canary-checked per
+                build against the one-token call; a failed canary, a
+                biased layer or a one-output layer such as the bf16 shared
+                gate runs one one-token call per row).  MLX's dense
+                matmul is ``gemv`` at one row and ``gemv_wide``/GEMM tiling
+                at more, so the composed M=R call is not the one-token
+                arithmetic
 norms           ``GroupRMSNorm`` sees the one-token width (the width-8 fast
                 RMSNorm gate would move wider windows to the eager norm)
 attention       batched row-exact projections, then per row the one-token
                 QSA selection, cache append, RoPE and SDPA with the ordinary
                 B=1 mask, and the one-row output projection
-GDN             the fused verify kernel (already bit-identical to the
-                one-token fused decode kernel, rollback included; Metal-
-                checked at 2..17 rows); a window whose GDN falls back to the
-                stock multi-row block is not row-exact
+GDN             the fused verify kernel (bit-identical to the one-token
+                fused decode kernel, rollback included, when both compile
+                the same served-SiLU header; Metal-checked at 2..17 rows); a
+                window whose GDN falls back to the stock multi-row block, or
+                whose verify kernel kind fails its per-build decode-parity
+                canary (``decode_parity_probe``), is not row-exact
 MoE             router gate and shared expert through the kernel, routing
                 and combine batched (per-row reductions), routed experts one
                 one-token call per row; with the MoE row window selected
@@ -64,7 +72,17 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from .. import row_exact_verify as REV
+from . import row_exact_components as REC
 from . import row_exact_qmv as REQ
+
+_RowExactGatedDeltaNet = REC.RowExactGatedDeltaNetProjectionsMixin
+_RowExactLinear = REC.RowExactLinearMixin
+_RowExactMoE = REC.RowExactMoEMixin
+_RowExactQuantizedLinear = REC.RowExactQuantizedLinearMixin
+_RowExactSwitch = REC.RowExactSwitchMixin
+_grouped = REC.grouped_quantized_linears
+_rows = REC.row_count
+_subclass = REC.row_exact_subclass
 
 SCHEMA = "mlx2.qwen4-row-exact-verify.v1"
 ENV = "MLX_QWEN4_ROW_EXACT_VERIFY"
@@ -75,119 +93,6 @@ ENV = "MLX_QWEN4_ROW_EXACT_VERIFY"
 MAX_EVIDENCED_LANES = 8
 # Layer names a per-row label lists (the counts cover all of them).
 _LABEL_LAYERS = 16
-
-
-def _rows(x) -> int:
-    return int(x.size // x.shape[-1]) if x.ndim else 1
-
-
-class _RowExactQuantizedLinear:
-    """Mixin: route multi-row calls inside a window through the kernel.
-
-    A layer carrying a lane preparation (``low_bit_lane``) runs the lane law
-    for every call at every width, prefill included (chunked past the lane's
-    per-call limit, which keeps each row's bits): each verify row equals the
-    layer's one-token call, and a prompt's state does not depend on how a
-    prefix hit or a checkpoint split its prefill (Codex 2026-10-14)."""
-
-    def __call__(self, x):
-        window = REV.current()
-        lane = REQ.lane_preparation(self)
-        if lane is not None:
-            from ..lane import LaneUnsupported
-
-            try:
-                y = REQ.lane_rows(lane, x)
-            except LaneUnsupported:
-                # Refused at every width (activation dtype): the stock law
-                # below, one-token decode and per-row verify alike.
-                pass
-            else:
-                if window is not None:
-                    window.note("projections", "lane_exact")
-                return y
-        if window is None or _rows(x) <= 1:
-            return super().__call__(x)
-        stock = super().__call__
-        (y, route) = REQ.quantized_linear(self, x, call=stock)
-        window.note("projections", route)
-        return y
-
-
-class _RowExactLinear:
-    """Mixin: a dense (unquantized) ``nn.Linear`` inside a window, one
-    one-token-shaped call per row.
-
-    MLX runs a bf16 ``x @ W.T`` as ``gemv`` at one row but as ``gemv_wide`` or
-    a tiled GEMM at more, so the composed multi-row call does not carry the
-    one-token step's bits (W3, Metal: the uncensored artifact's bf16 HC
-    inject at 17 rows).  Each row here IS the one-token call."""
-
-    def __call__(self, x):
-        window = REV.current()
-        rows = _rows(x)
-        if window is None or rows <= 1:
-            return super().__call__(x)
-        call = super(_RowExactLinear, self).__call__
-        flat = x.reshape(rows, 1, 1, x.shape[-1])
-        out = mx.concatenate([call(flat[r]) for r in range(rows)], axis=0)
-        window.note("projections", "dense_per_row", rows)
-        return out.reshape(*x.shape[:-1], out.shape[-1])
-
-
-class _RowExactMoE:
-    """Mixin: the MoE block of a window.
-
-    The router gate and shared expert are projections (row-exact kernel) and
-    the routing (softmax, top-k) and combine are per-row reductions and
-    elementwise ops, so the block runs batched and only the routed experts
-    (``_RowExactSwitch``) run one row at a time.  The fused router kernel
-    (policy ``moe_router_kernel``) admits only the one-token shape, so with it
-    selected each row runs the whole one-token block.
-    """
-
-    def __call__(self, x):
-        window = REV.current()
-        rows = _rows(x)
-        if window is None or rows <= 1:
-            return super().__call__(x)
-        if getattr(self, "moe_router_mode", "stock") != "fused":
-            from . import qwen3_next as Q3N
-
-            if Q3N._MOE_GATE_COMPILE and rows > Q3N._MOE_GATE_COMPILE_MAX_TOKENS:
-                # The one-token step routes through the compiled router; a
-                # window this wide runs the eager routing instead.
-                window.fail("moe_router_compiled_one_token_eager_window")
-            window.note("moe_router", "batched", rows)
-            return super().__call__(x)
-        flat = x.reshape(rows, 1, 1, x.shape[-1])
-        out = mx.concatenate([super(_RowExactMoE, self).__call__(flat[r]) for r in range(rows)], axis=0)
-        window.note("moe", "per_row_block", rows)
-        return out.reshape(*x.shape[:-1], out.shape[-1])
-
-
-class _RowExactSwitch:
-    """Mixin: the routed experts of a window, one one-token call per row."""
-
-    def __call__(self, x, indices, scores=None, variant="scalar"):
-        window = REV.current()
-        rows = _rows(indices)
-        if window is None or rows <= 1:
-            return super().__call__(x, indices, scores=scores, variant=variant)
-        lead = indices.shape[:-1]
-        xs = x.reshape(rows, 1, 1, x.shape[-1])
-        ids = indices.reshape(rows, 1, 1, indices.shape[-1])
-        ws = None if scores is None else scores.reshape(rows, 1, 1, scores.shape[-1])
-        call = super(_RowExactSwitch, self).__call__
-        out = mx.concatenate(
-            [
-                call(xs[r], ids[r], scores=None if ws is None else ws[r], variant=variant)
-                for r in range(rows)
-            ],
-            axis=0,
-        )
-        window.note("moe_experts", "per_row", rows)
-        return out.reshape(*lead, *out.shape[2:])
 
 
 def _has_segmented_layer(cache) -> bool:
@@ -218,12 +123,6 @@ def _ordinary_b1_mask(cache):
     if not isinstance(offset, int):
         return None
     return create_causal_mask(1, offset=offset, left_padding=mx.array([0]))
-
-
-def _grouped(window, linears, x):
-    (outputs, route) = REQ.quantized_linears(linears, x)
-    window.note("projections", route, 1 if route == "group_kernel" else len(linears))
-    return outputs
 
 
 class _RowExactAttention:
@@ -357,44 +256,6 @@ class _RowExactAttention:
         return self.o_proj(mx.concatenate(gated, axis=1))
 
 
-class _RowExactGatedDeltaNet:
-    """Mixin: the four GDN input projections in one row-exact launch.
-
-    Each output column runs the same one-row arithmetic whether the serial
-    step uses the separate projections or the fused input table, so one
-    grouped launch matches either.
-    """
-
-    def _input_projections(self, inputs):
-        window = REV.current()
-        if window is None or _rows(inputs) <= 1:
-            return super()._input_projections(inputs)
-        return _grouped(
-            window,
-            (self.in_proj_qkv, self.in_proj_z, self.in_proj_b, self.in_proj_a),
-            inputs,
-        )
-
-
-_SUBCLASSES: Dict[type, type] = {}
-
-
-def _subclass(mixin, cls):
-    key = (mixin, cls)
-    sub = _SUBCLASSES.get(key)
-    if sub is None:
-        # The swapped-out class, for kernels that admit only an exact layer
-        # class: ``_row_exact_base`` (qwen4_hc_decode) and
-        # ``_mlx2_row_exact_base`` (the shared-fold admission, qwen3_next).
-        sub = type(
-            "RowExact" + cls.__name__,
-            (mixin, cls),
-            {"_row_exact_base": cls, "_mlx2_row_exact_base": cls},
-        )
-        _SUBCLASSES[key] = sub
-    return sub
-
-
 class _RequestStart:
     """A request's receipt snapshot.  Live snapshots are tracked weakly so a
     request that overlaps another is never credited with its windows (the
@@ -508,12 +369,16 @@ class RowExactVerify:
 
         ``slow_path`` (and the receipt label) is raised by quantized layers
         only; see the comment below.  A quantized layout the row-exact kernel does not cover (2/3-bit
-        weights above all; ``row_exact_qmv.layout_decline_reason``) and every
-        dense ``nn.Linear`` (``_RowExactLinear``) compute each verify row as
-        its own one-token call: exact, but the weights are read once per row,
-        so a wide verify window costs about that many decode steps.  Static:
-        the layout decides, not the device (off Metal every layer runs per
-        row anyway).  Pierre 2026-10-14: keep serving, say so."""
+        weights above all; ``row_exact_qmv.layout_decline_reason``) computes
+        each verify row as its own one-token call: exact, but the weights are
+        read once per row, so a wide verify window costs about that many
+        decode steps.  Static: the layout decides, not the device (off Metal
+        every layer runs per row anyway).  Pierre 2026-10-14: keep serving,
+        say so.  Dense ``nn.Linear`` layers (``_RowExactLinear``) are listed
+        for completeness: they run the shared package's broadcast matvec
+        rows where its parity canary holds and one one-token call per row
+        where it does not (a biased layer always); the route a window took is
+        in ``status()["stages"]["projections"]``."""
         language = self.model.language_model
         names = {id(module): name for name, module in language.named_modules()}
         quantized: Dict[str, Any] = {"count": 0, "by_format": {}, "by_reason": {}, "layers": []}
@@ -638,15 +503,45 @@ class RowExactVerify:
         self.enabled = False
 
     # -- verify hooks ----------------------------------------------------------
+    def _gdn_kinds(self) -> Dict[str, int]:
+        """Fused verify launches so far, by kernel kind (``DECODE_PARITY_KINDS``).
+
+        A batched window's GDN is engaged when the batched fused verify ran
+        (policy fused_gdn_batch_verify): every lane runs its B=1 verify
+        arithmetic.  Either way the rows are the one-token decode bits only
+        if that kernel kind passes its decode-parity canary on this build
+        (``verify_backbone``)."""
+        kinds = dict.fromkeys(("replay", "snapshot", "batch_replay", "batch_snapshot"), 0)
+        for layer in self._gdn:
+            attn = layer.linear_attn
+            verify = int(attn.fused_gdn_verify_calls)
+            replay = int(getattr(attn, "fused_gdn_replay_verify_calls", 0))
+            batch = int(getattr(attn, "fused_gdn_batch_verify_calls", 0))
+            compact = int(getattr(attn, "fused_gdn_batch_verify_compact_calls", 0))
+            kinds["replay"] += replay
+            kinds["snapshot"] += verify - replay
+            kinds["batch_replay"] += compact
+            kinds["batch_snapshot"] += batch - compact
+        return kinds
+
     def _gdn_engaged(self) -> int:
-        # A batched window's GDN is engaged when the batched fused verify ran
-        # (policy fused_gdn_batch_verify): every lane's rows are its B=1
-        # fused verify bits, which are the one-token decode bits.
-        return sum(
-            int(layer.linear_attn.fused_gdn_verify_calls)
-            + int(getattr(layer.linear_attn, "fused_gdn_batch_verify_calls", 0))
-            for layer in self._gdn
-        )
+        return sum(self._gdn_kinds().values())
+
+    def _gdn_state_dtype(self):
+        dtype = getattr(self._gdn[0].linear_attn, "_gdn_state_dtype", None) if self._gdn else None
+        # ``None`` is the default fp32 class (mx.Dtype refuses ``== None``).
+        return mx.float16 if dtype is not None and dtype == mx.float16 else mx.float32
+
+    def _gdn_decode_parity(self, kind: str) -> bool:
+        """Whether ``kind``'s verify kernel reproduces serial fused decode on
+        this device and MLX build (one canary per kind and state class per
+        process; the shared registry reports it in ``status()``)."""
+        from ..row_exact.canary import CANARIES
+        from .qwen4_fused_gdn_verify import decode_parity_probe
+
+        state_dtype = self._gdn_state_dtype()
+        key = ("qwen4_fused_gdn_verify_vs_decode", kind, str(state_dtype))
+        return CANARIES.exact(key, decode_parity_probe(kind, state_dtype=state_dtype))
 
     def verify_backbone(self, tokens, cache):
         model = self.model
@@ -683,13 +578,20 @@ class RowExactVerify:
         self._admit_batch(record, lanes)
         for reason in self.static_refusals:
             record.fail(reason)
-        before = self._gdn_engaged()
+        before = self._gdn_kinds()
         with REV.window(record), Q._declared_width(1):
             out = model.language_model.model(tokens, cache, return_hyper=True)
-        engaged = self._gdn_engaged() - before
+        after = self._gdn_kinds()
+        launched = {kind: after[kind] - before[kind] for kind in after}
+        engaged = sum(launched.values())
         if engaged != len(self._gdn):
             record.fail("gdn_fused_verify_not_engaged")
         record.note("gdn", "fused_verify", engaged)
+        for kind, count in launched.items():
+            if count and not self._gdn_decode_parity(kind):
+                # The kernel ran, but its rows are not the decode step's bits
+                # on this build: the window is not row-exact.
+                record.fail(f"gdn_{kind}_verify_differs_from_decode")
         self._pending = record
         return out
 
@@ -799,7 +701,16 @@ class RowExactVerify:
                 "one_row_passthrough": counts["one_row_passthrough"],
                 "stages": {k: dict(v) for k, v in counts["stages"].items()},
                 "failures": dict(counts["failures"]),
+                # Parity-canary verdicts of the shared row_exact ops this
+                # route's projections run through (a failed form ran per row).
+                **_package_status(),
             }
+
+
+def _package_status() -> dict:
+    from .. import row_exact
+
+    return row_exact.status()
 
 
 def install(model, *, low_bit_lane: bool = False) -> RowExactVerify:

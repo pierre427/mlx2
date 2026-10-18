@@ -159,10 +159,14 @@ class DSparkDraftModel(XPressDraftModel):
         self.adaptive_confidence_features = confidence
         self.stats["backbone_blocks"] += batch
         self.stats["markov_steps"] += batch * proposal_length
+        from ..speculative_topology import processors_branch_safe
+
         self._ordered_alternative_context = (
             base,
             tuple(int(anchor) for anchor in anchors),
-            bool(any(processors)),
+            # Branch-safe processors do not block alternatives (verification
+            # applies them to the target); any other processor does.
+            any(row and not processors_branch_safe(row) for row in processors),
         )
         return tokens, laws
 
@@ -181,10 +185,10 @@ class DSparkDraftModel(XPressDraftModel):
         context = self._ordered_alternative_context
         if context is None:
             raise ValueError("DSpark alternative context is unavailable")
-        base, anchors, had_processors = context
-        if had_processors:
+        base, anchors, unsafe_processors = context
+        if unsafe_processors:
             raise ValueError(
-                "DSpark alternative branches do not support logits processors"
+                "DSpark alternative branches need branch-safe logits processors"
             )
         alternatives = []
         for row, primary in enumerate(primary_tokens):

@@ -26,6 +26,7 @@ from mlx2.runtime.models.qwen4_exp import (
     Qwen4ArraysCache,
 )
 from mlx2.runtime.sample_utils import LaneRNG
+from mlx2.seeded_fixtures import legacy_conv_init
 
 
 def _tiny_qwen4_model():
@@ -70,7 +71,8 @@ def _tiny_qwen4_model():
             "partial_rotary_factor": 0.25,
         },
     )
-    model = Model(ModelArgs(model_type="qwen4_exp", text_config=text_config))
+    with legacy_conv_init():
+        model = Model(ModelArgs(model_type="qwen4_exp", text_config=text_config))
     mx.eval(model.parameters())
     return model
 

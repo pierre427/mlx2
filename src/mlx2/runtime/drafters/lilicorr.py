@@ -587,7 +587,16 @@ class LiLiCorrDraftModel(XPressDraftModel):
                 laws[row].append(q)
                 confidence_features[row].append(confidence)
         self.adaptive_confidence_features = confidence_features
-        self._ordered_alternative_context = (hosted, ids, bool(any(processors)))
+        # Branch-safe processors (the stateless contract the engine admits
+        # into alternative rounds) do not block alternatives: verification
+        # applies them to the target.  Any other processor still does.
+        from ..speculative_topology import processors_branch_safe
+
+        self._ordered_alternative_context = (
+            hosted,
+            ids,
+            any(row and not processors_branch_safe(row) for row in processors),
+        )
         return tokens, laws
 
     def ordered_alternative_proposals(
@@ -610,10 +619,10 @@ class LiLiCorrDraftModel(XPressDraftModel):
         context = self._ordered_alternative_context
         if context is None:
             raise ValueError("LiLiCorr alternative context is unavailable")
-        hosted, ids, had_processors = context
-        if had_processors:
+        hosted, ids, unsafe_processors = context
+        if unsafe_processors:
             raise ValueError(
-                "LiLiCorr alternative branches do not support logits processors"
+                "LiLiCorr alternative branches need branch-safe logits processors"
             )
         alternatives = []
         for row, primary in enumerate(primary_tokens):

@@ -2040,7 +2040,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             return self._fused_gdn_prefill_fallback(admission.reason)
         if not _gdn_prefill.runtime_supported():
             return self._fused_gdn_prefill_fallback("Metal runtime unavailable")
-        refusal = served_silu_refusal()
+        refusal = served_silu_refusal() or _gdn_prefill.prefill_refusal("qwen4", "sigmoid")
         if refusal is not None:
             return self._fused_gdn_prefill_fallback(refusal)
         steps = int(qkv.shape[1])

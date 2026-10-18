@@ -159,6 +159,8 @@ def kernels_on_cpu(monkeypatch):
 
     monkeypatch.setattr(gdn_prefill, "runtime_supported", lambda: True)
     monkeypatch.setattr(route.kernels, "served_silu_refusal", lambda: None)
+    # The eager-parity canary needs Metal; tests below inject its outcome.
+    monkeypatch.setattr(gdn_prefill, "prefill_refusal", lambda *a: None)
     monkeypatch.setattr(gdn_prefill, "qwen4_gdn_prefill_prework", prework)
     monkeypatch.setattr(gdn_prefill, "qwen4_gdn_prefill_norm_gate", norm_gate)
     return calls

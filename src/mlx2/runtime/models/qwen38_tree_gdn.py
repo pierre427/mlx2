@@ -11,6 +11,9 @@ from collections.abc import Sequence
 from typing import Any
 
 import mlx.core as mx
+import mlx.nn as nn
+
+from .served_exp import EXP_SPELLINGS, ServedExpGate, is_device_fault, respell
 
 
 def ints(values: Sequence[int]) -> mx.array:
@@ -48,11 +51,40 @@ _COUNTERS = {
 }
 
 
-def stats() -> dict[str, int | str]:
-    return {"backend": "mlx2_qwen38_unified_tree_gdn_v1", **_COUNTERS}
+def stats() -> dict[str, int | str | None]:
+    # ``pre_silu_exp`` is the conv SiLU spelling the pre kernel compiled (None
+    # until it first ran), ``pre_parity`` its once-per-process verdict.
+    spellings = [spelling for spelling in EXP_SPELLINGS if spelling in _kernel_cache]
+    built = spellings[0] if len(spellings) == 1 else (None if not spellings else ",".join(spellings))
+    parity = _PARITY.get(built) if built in _PARITY else None
+    return {
+        "backend": "mlx2_qwen38_unified_tree_gdn_v1",
+        **_COUNTERS,
+        "pre_silu_exp": built,
+        "pre_parity": None if built is None else ("exact" if parity is None else parity),
+    }
 
 
 MAX_STREAMS = 8  # conv-state buffers per launch
+
+# The conv SiLU's sigmoid, as written by the corrected TensorFold source with
+# ``metal::exp``.  MLX 0.32.4 serves compiled ``nn.silu`` with
+# ``metal::precise::exp``; the two bf16 sigmoids round apart on one input
+# (-6.84375, which real conv outputs reach), so a fixed spelling made the tree
+# rows' q/k/v differ from the ordinary decode and prefill paths on that build.
+# ``_SILU_GATE`` probes this exact text against the served ``nn.silu`` over
+# every bf16 encoding and the kernel compiles the matching spelling.
+_PRE_SILU = """    const bfloat sigmoid_exp = bfloat(metal::exp(metal::abs(conv)));
+    const bfloat sigmoid_low = bfloat(bfloat(1.0f) / bfloat(bfloat(1.0f) + sigmoid_exp));
+    const bfloat sigmoid = conv < bfloat(0.0f)
+        ? sigmoid_low : bfloat(bfloat(1.0f) - sigmoid_low);
+"""
+_SILU_GATE = ServedExpGate(
+    "qwen38_tree_gdn_pre_silu",
+    served_name="compiled nn.silu",
+    served=nn.silu,
+    body="    const bfloat conv = x;\n" + _PRE_SILU + "    y = bfloat(conv * sigmoid);",
+)
 
 # Use lane_fuse gdn_pre arithmetic with each stream's conv state and window rows in the grouped layout.
 _PRE = (
@@ -81,13 +113,12 @@ _PRE = (
       acc += float(CW[c * TAPS + tap]) * xv;
     }
     // Compiled nn.silu on the served Qwen3.8 path evaluates the stable,
-    // symmetric fast-exp sigmoid in bf16, then rounds the product to bf16.
+    // symmetric sigmoid in bf16, then rounds the product to bf16.  Its exp
+    // spelling is the served one (_PRE_SILU, respelled per MLX build).
     const bfloat conv = bfloat(acc);
-    const bfloat sigmoid_exp = bfloat(metal::exp(metal::abs(conv)));
-    const bfloat sigmoid_low = bfloat(bfloat(1.0f) / bfloat(bfloat(1.0f) + sigmoid_exp));
-    const bfloat sigmoid = conv < bfloat(0.0f)
-        ? sigmoid_low : bfloat(bfloat(1.0f) - sigmoid_low);
-    vals[j] = float(bfloat(conv * sigmoid));
+"""
+    + "__PRE_SILU__"
+    + r"""    vals[j] = float(bfloat(conv * sigmoid));
   }
   if (isq || isk) {
     float ss = 0.0f;
@@ -136,6 +167,10 @@ _PRE = (
 """
 )
 
+KERNEL_SILU_EXP = "metal::exp"
+if "__PRE_SILU__" not in _PRE:
+    raise RuntimeError("stream_gdn pre source lost its SiLU site")
+
 _INPUTS = [
     "QKV",
     *[f"CS{i}" for i in range(MAX_STREAMS)],
@@ -147,25 +182,172 @@ _INPUTS = [
     "DT",
     "row_stream",
 ]
-_kernel_cache: list[Any] = []
+_kernel_cache: dict[str, Any] = {}
+_PARITY: dict[str, str | None] = {}
 
 
-def source() -> str:
-    return _PRE
+def source(spelling: str = KERNEL_SILU_EXP) -> str:
+    """The pre kernel source with its conv SiLU spelled ``spelling``."""
+    if spelling not in EXP_SPELLINGS:
+        raise ValueError(f"unknown exp spelling {spelling!r}")
+    silu = _PRE_SILU if spelling == KERNEL_SILU_EXP else respell(_PRE_SILU, KERNEL_SILU_EXP, spelling)
+    return _PRE.replace("__PRE_SILU__", silu)
+
+
+def _build(spelling: str) -> Any:
+    if spelling not in _kernel_cache:
+        text = source(spelling)
+        # The name carries the source digest: MLX caches libraries by name.
+        digest = hashlib.sha256(text.encode()).hexdigest()[:16]
+        _kernel_cache[spelling] = mx.fast.metal_kernel(
+            name=f"stream_gdn_pre_{digest}",
+            input_names=_INPUTS,
+            output_names=["Q", "Kout", "Vout", "G", "BETA"],
+            source=text,
+        )
+    return _kernel_cache[spelling]
+
+
+def served_silu_spelling() -> str | None:
+    """The conv SiLU spelling that reproduces the served ``nn.silu`` (Metal)."""
+    return _SILU_GATE.spelling(mx.bfloat16)
+
+
+def pre_refusal() -> str | None:
+    """Why the pre kernel may not stand in for the ordinary GDN prework, or None.
+
+    Two once-per-process checks (Metal): the SiLU expression against the served
+    ``nn.silu`` over every bf16 encoding (``_SILU_GATE``), then the compiled
+    kernel itself against the eager chain on a sweep of conv outputs covering
+    every bf16 value with magnitude in [2**-6, 32] (``_decode_parity``).  A
+    random draw almost never reaches the inputs where the spellings round
+    apart, which is how the fixed ``metal::exp`` passed every parity check
+    while serving MLX 0.32.4.
+    """
+    refusal = _SILU_GATE.adaptation_refusal(mx.bfloat16)
+    if refusal is not None:
+        return f"stream_gdn.gdn_pre: {refusal}"
+    spelling = served_silu_spelling()
+    if spelling not in _PARITY:
+        try:
+            _PARITY[spelling] = _decode_parity(spelling)
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            if is_device_fault(exc):
+                raise
+            _PARITY[spelling] = f"stream_gdn.gdn_pre: parity probe failed: {type(exc).__name__}"
+    return _PARITY[spelling]
 
 
 def _kernel() -> Any:
-    if not _kernel_cache:
-        digest = hashlib.sha256(_PRE.encode()).hexdigest()[:16]
-        _kernel_cache.append(
-            mx.fast.metal_kernel(
-                name=f"stream_gdn_pre_{digest}",
-                input_names=_INPUTS,
-                output_names=["Q", "Kout", "Vout", "G", "BETA"],
-                source=_PRE,
-            )
+    refusal = pre_refusal()
+    if refusal is not None:
+        raise RuntimeError(refusal)
+    return _build(served_silu_spelling())
+
+
+def _parity_inputs(rows: int, nk: int, nv: int, dk: int, dv: int, taps: int):
+    """Sweep conv outputs (identity last tap, zero state) plus fixed gates."""
+    import numpy as np
+
+    channels = 2 * nk * dk + nv * dv
+    encodings = np.arange(1 << 16, dtype=np.uint32).astype(np.uint16)
+    widened = (encodings.astype(np.uint32) << 16).view(np.float32)
+    keep = np.isfinite(widened) & (np.abs(widened) >= 2.0 ** -6) & (np.abs(widened) <= 32.0)
+    grid = mx.array(encodings[keep]).view(mx.bfloat16)
+    from .served_exp import covering_rows
+
+    qkv = covering_rows(grid, rows, channels, 9300)[None]
+    weight = mx.zeros((channels, taps, 1), dtype=mx.bfloat16)
+    weight[:, taps - 1, 0] = 1
+    k1, k2, k3 = mx.random.split(mx.random.key(9400), 3)
+    a = (mx.random.normal((1, rows, nv), key=k1) * 3).astype(mx.bfloat16)
+    b = (mx.random.normal((1, rows, nv), key=k2) * 3).astype(mx.bfloat16)
+    a_log = mx.linspace(-2.0, 1.0, nv).astype(mx.bfloat16)
+    dt_bias = (mx.random.normal((nv,), key=k3) * 0.5).astype(mx.bfloat16)
+    state = mx.zeros((1, taps - 1, channels), dtype=mx.bfloat16)
+    return qkv, state, weight, a, b, a_log, dt_bias
+
+
+def _decode_parity(spelling: str, *, nk=16, nv=48, dk=128, dv=128, taps=4) -> str | None:
+    """Compiled pre kernel vs the eager Qwen3.5-family chain, bit for bit.
+
+    The eager chain is what the ordinary decode and prefill paths run:
+    ``nn.silu(conv1d(.))``, ``normalize_gdn_qk``, ``compute_g`` and the
+    widened ``gate_sigmoid(b)``.  Checked at the Qwen3.8 27B geometry.
+    """
+    from .gated_delta import compute_g, normalize_gdn_qk
+    from .precise_ops import gate_sigmoid
+
+    rows = 2
+    qkv, state, weight, a, b, a_log, dt_bias = _parity_inputs(rows, nk, nv, dk, dv, taps)
+    windows = ints([t + r for r in range(rows) for t in range(taps)])
+    q, k, v, g, beta = _launch(
+        _build(spelling), qkv, [state], weight, windows, a, b, a_log, dt_bias,
+        mx.zeros((rows,), dtype=mx.int32), nk=nk, nv=nv, dk=dk, dv=dv, zs=nv, ao=0, bo=0,
+    )
+    conv = nn.silu(mx.conv1d(mx.concatenate([state, qkv], axis=1), weight, groups=int(qkv.shape[-1])))
+    eq, ek, ev = mx.split(conv, [nk * dk, 2 * nk * dk], -1)
+    eq, ek = normalize_gdn_qk(eq.reshape(1, rows, nk, dk), ek.reshape(1, rows, nk, dk))
+    expected = {
+        "q": eq, "k": ek, "v": ev.reshape(1, rows, nv, dv),
+        "g": compute_g(a_log, a, dt_bias).astype(mx.float32),
+        "beta": gate_sigmoid(b.astype(mx.float32)),
+    }
+    got = {"q": q, "k": k, "v": v, "g": g, "beta": beta}
+    for name, want in expected.items():
+        have = got[name]
+        width = mx.uint16 if have.dtype.size == 2 else mx.uint32
+        if have.shape != want.shape or have.dtype != want.dtype or not bool(
+            mx.all(have.view(width) == want.view(width)).item()
+        ):
+            return f"stream_gdn.gdn_pre: {name} differs from the eager GDN prework ({spelling})"
+    return None
+
+
+def _launch(kernel, qkv, states, conv_weight, windows, a, b, a_log, dt_bias, row_stream, *,
+            nk, nv, dk, dv, zs, ao, bo):
+    rows = int(qkv.shape[-2])
+    channels = int(qkv.shape[-1])
+    taps = int(conv_weight.shape[1])
+    spare = states[0]
+    cs = [s.reshape(taps - 1, channels) for s in states] + [spare.reshape(taps - 1, channels)] * (
+        MAX_STREAMS - len(states)
+    )
+    return tuple(
+        kernel(
+            inputs=[
+                qkv.reshape(rows, channels),
+                *cs,
+                conv_weight.reshape(channels, taps),
+                windows,
+                a.reshape(rows, -1),
+                b.reshape(rows, -1),
+                a_log,
+                dt_bias,
+                row_stream,
+            ],
+            template=[
+                ("NK", nk),
+                ("NV", nv),
+                ("DK", dk),
+                ("DV", dv),
+                ("TAPS", taps),
+                ("ZS", zs),
+                ("AO", ao),
+                ("BO", bo),
+            ],
+            grid=(32, 2 * nk + nv, rows),
+            threadgroup=(32, 1, 1),
+            output_shapes=[
+                (1, rows, nk, dk),
+                (1, rows, nk, dk),
+                (1, rows, nv, dv),
+                (1, rows, nv),
+                (1, rows, nv),
+            ],
+            output_dtypes=[qkv.dtype, qkv.dtype, qkv.dtype, mx.float32, mx.float32],
         )
-    return _kernel_cache[0]
+    )
 
 
 class ConvPlan:
@@ -233,45 +415,10 @@ def gdn_pre(
         raise ValueError(
             "stream_gdn.gdn_pre: rows, head sizes or [z | b | a] width do not match"
         )
-    spare = states[0]
     zba2 = zba.reshape(R, zs)
-    cs = [s.reshape(taps - 1, C) for s in states] + [spare.reshape(taps - 1, C)] * (
-        MAX_STREAMS - len(states)
-    )
-    result = tuple(
-        _kernel()(
-            inputs=[
-                qkv.reshape(R, C),
-                *cs,
-                conv_weight.reshape(C, taps),
-                plan.windows,
-                zba2,
-                zba2,
-                a_log,
-                dt_bias,
-                plan.row_stream,
-            ],
-            template=[
-                ("NK", nk),
-                ("NV", nv),
-                ("DK", dk),
-                ("DV", dv),
-                ("TAPS", taps),
-                ("ZS", zs),
-                ("AO", nv * dv + nv),
-                ("BO", nv * dv),
-            ],
-            grid=(32, 2 * nk + nv, R),
-            threadgroup=(32, 1, 1),
-            output_shapes=[
-                (1, R, nk, dk),
-                (1, R, nk, dk),
-                (1, R, nv, dv),
-                (1, R, nv),
-                (1, R, nv),
-            ],
-            output_dtypes=[qkv.dtype, qkv.dtype, qkv.dtype, mx.float32, mx.float32],
-        )
+    result = _launch(
+        _kernel(), qkv, states, conv_weight, plan.windows, zba2, zba2, a_log, dt_bias,
+        plan.row_stream, nk=nk, nv=nv, dk=dk, dv=dv, zs=zs, ao=nv * dv + nv, bo=nv * dv,
     )
     _COUNTERS["pre_calls"] += 1
     _COUNTERS["pre_rows"] += R
@@ -313,47 +460,9 @@ def gdn_pre_split(
     ):
         raise ValueError("stream_gdn.gdn_pre_split: rows or head sizes do not match")
     row_stream = mx.zeros((rows,), dtype=mx.int32)
-    state = conv_state.reshape(taps - 1, channels)
-    result = tuple(
-        _kernel()(
-            inputs=[
-                qkv.reshape(rows, channels),
-                *([state] * MAX_STREAMS),
-                conv_weight.reshape(channels, taps),
-                windows,
-                a.reshape(rows, nv),
-                b.reshape(rows, nv),
-                a_log,
-                dt_bias,
-                row_stream,
-            ],
-            template=[
-                ("NK", nk),
-                ("NV", nv),
-                ("DK", dk),
-                ("DV", dv),
-                ("TAPS", taps),
-                ("ZS", nv),
-                ("AO", 0),
-                ("BO", 0),
-            ],
-            grid=(32, 2 * nk + nv, rows),
-            threadgroup=(32, 1, 1),
-            output_shapes=[
-                (1, rows, nk, dk),
-                (1, rows, nk, dk),
-                (1, rows, nv, dv),
-                (1, rows, nv),
-                (1, rows, nv),
-            ],
-            output_dtypes=[
-                qkv.dtype,
-                qkv.dtype,
-                qkv.dtype,
-                mx.float32,
-                mx.float32,
-            ],
-        )
+    result = _launch(
+        _kernel(), qkv, [conv_state], conv_weight, windows, a, b, a_log, dt_bias,
+        row_stream, nk=nk, nv=nv, dk=dk, dv=dv, zs=nv, ao=0, bo=0,
     )
     _COUNTERS["pre_calls"] += 1
     _COUNTERS["pre_rows"] += rows

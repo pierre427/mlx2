@@ -31,6 +31,7 @@ from mlx2.runtime.progressive_external_verify import (
     PROGRESSIVE_APPROXIMATE_TARGET_PROTOCOL_VERSION,
     PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
     PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED,
+    ProgressiveTargetRows,
     progressive_target_protocol_binding,
 )
 from test_qwen38_dflash2_cpu import tiny_pair
@@ -272,6 +273,53 @@ def test_one_round_records_real_approximate_engagement():
         assert progressive["target_launches"] >= 1
         assert progressive["target_rows"] >= 1
         assert progressive["source_hashes"] == binding["source_hashes"]
+        executor = progressive["target_row_executor"]
+        assert executor["legacy_launches"] >= 1
+        assert executor["adapter_owned_launches"] == 0
+        assert executor["last"]["execution"] == "legacy_forward_with_taps"
+    finally:
+        batch.close()
+
+
+def test_adapter_owned_target_executor_is_observed_in_lane_receipt():
+    batch, _binding = _candidate()
+    target = batch.model
+    original = target.forward_with_taps
+
+    def target_rows(tokens, caches, layers):
+        logits, features = original(tokens, caches, layers)
+        return ProgressiveTargetRows(
+            logits=logits,
+            features=features,
+            protocol=PROGRESSIVE_APPROXIMATE_TARGET_PROTOCOL_VERSION,
+            row_exact=True,
+            detail={"path": "cpu-test-adapter-owner"},
+        )
+
+    object.__setattr__(target, "progressive_external_target_rows", target_rows)
+    try:
+        uid = batch.insert(
+            [[1, 2, 3, 4]],
+            max_tokens=[8],
+            lane_rngs=[LaneRNG(919)],
+            sampling_configs=[{"sampling_temp": 0}],
+        )[0]
+        lane = batch.lanes[uid]
+        while lane.anchor is None:
+            batch._prefill(lane)
+        batch._round([lane])
+        receipt = lane.ready[-1].speculative_receipt
+        executor = receipt["progressive_verification"]["target_row_executor"]
+        assert executor["adapter_owned_launches"] >= 1
+        assert executor["legacy_launches"] == 0
+        assert executor["row_exact_launches"] >= 1
+        assert executor["last"]["adapter_detail"] == {
+            "path": "cpu-test-adapter-owner"
+        }
+        assert executor["last"]["physical_width"] == 1
+        assert batch.scheduler_stats[
+            "external_progressive_target_executor_adapter_owned_launches"
+        ] >= 1
     finally:
         batch.close()
 

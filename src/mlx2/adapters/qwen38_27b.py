@@ -355,6 +355,11 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "exact_verification",
         "progressive_verification_tile",
         "progressive_multilane_draft_cap",
+        "progressive_alternative_branches",
+        "progressive_alternative_strategy",
+        "progressive_alternative_depth_policy",
+        "progressive_cross_session_pack_rows",
+        "progressive_cross_session_pack_mode",
         "progressive_verification_fidelity",
         "cost_per_commit_handoff",
         "fold",
@@ -1393,6 +1398,30 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             kwargs.setdefault(
                 "multilane_draft_cap",
                 self.external_policy.get("progressive_multilane_draft_cap"),
+            )
+            kwargs.setdefault(
+                "progressive_alternative_branches",
+                self.external_policy.get("progressive_alternative_branches", 1),
+            )
+            kwargs.setdefault(
+                "progressive_alternative_strategy",
+                self.external_policy.get(
+                    "progressive_alternative_strategy", "distinct_root"
+                ),
+            )
+            kwargs.setdefault(
+                "progressive_alternative_depth_policy",
+                self.external_policy.get(
+                    "progressive_alternative_depth_policy", "full"
+                ),
+            )
+            kwargs.setdefault(
+                "progressive_cross_session_pack_rows",
+                self.external_policy.get("progressive_cross_session_pack_rows"),
+            )
+            kwargs.setdefault(
+                "progressive_cross_session_pack_mode",
+                self.external_policy.get("progressive_cross_session_pack_mode"),
             )
             kwargs.setdefault(
                 "progressive_verification_fidelity",

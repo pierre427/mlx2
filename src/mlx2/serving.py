@@ -1210,6 +1210,10 @@ def minimum_tokens_processor(array_module, eos_token_ids, prompt_tokens, minimum
     # Stateless: speculative draft probes can safely call the same function.
     processor.probe = processor
     processor.history_pure = True
+    # The law depends only on the supplied history length and has no mutable
+    # receipt/grammar state, so private progressive/AST branches may evaluate
+    # it independently and discard unselected rows without side effects.
+    processor.progressive_branch_safe = True
     processor.dormant = lambda tokens: int(tokens.shape[-1]) - prompt_tokens >= minimum
     processor.forbidden_token_ids_at_length = lambda length: (
         eos_token_ids if int(length) - prompt_tokens < minimum else ()
@@ -3594,6 +3598,7 @@ class ServingEngine:
         qualification_mode=False,
         qualification=None,
         execution_policy=None,
+        adaptive_profile_receipt=None,
         tenant_scoped_cache=False,
         adaptive_mtp_depth=None,
         mtp_acceptance_log=None,
@@ -3679,6 +3684,25 @@ class ServingEngine:
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         self.execution_policy = execution_policy
+        if adaptive_profile_receipt is not None and not qualification:
+            raise ValueError(
+                "adaptive profile reuse requires a matching route qualification"
+            )
+        self.adaptive_profile_receipt = (
+            None
+            if adaptive_profile_receipt is None
+            else Path(adaptive_profile_receipt).expanduser().resolve()
+        )
+        self.adaptive_profile_binding = (
+            None
+            if self.adaptive_profile_receipt is None
+            else {
+                "schema": "mlx2.adaptive-profile-binding.v2",
+                "state": "pending_post_load_fingerprint",
+                "selected": False,
+                "runtime_mutation": False,
+            }
+        )
         # Some exactness candidates can change target cache state according to
         # physical batch geometry.  The worker resolves this after the adapter
         # has declared its effective execution config.  Until a candidate is
@@ -9544,6 +9568,78 @@ class ServingEngine:
                 route_receipt = route.receipt
                 route_capabilities = route.profile.capabilities
                 approximate_evidence = tuple(route.profile.evidence)
+            if self.adaptive_profile_receipt is not None:
+                from .adaptive_profile import (
+                    bind_live_profile,
+                    live_tuning_fingerprint,
+                    qualification_evidence,
+                )
+                from .cache_sizing import physical_memory_bytes
+
+                telemetry_contract = {
+                    "power": self.power_telemetry_policy.as_dict(),
+                    "source": "ioreport" if self.power_telemetry is not None else None,
+                    "power_available": bool(
+                        self.power_telemetry is not None
+                        and self.power_telemetry.available
+                    ),
+                    "temperature_available": bool(
+                        self.power_telemetry is not None
+                        and self.power_telemetry.available
+                        and self.power_telemetry.temperature_reason is None
+                    ),
+                    "system_thermal_state": "system_monitor",
+                    "power_governor": self.power_governor_policy.as_dict(),
+                }
+                serving_shape = {
+                    "max_context": self.max_context,
+                    "max_lanes": self.max_lanes,
+                    "max_inflight": self.max_inflight,
+                    "cache_bytes": self.cache_bytes,
+                    "prefill_step": self.prefill_step,
+                    "default_max_tokens": self.default_max_tokens,
+                    "coalesce_window_ms": self.coalesce_window_seconds * 1000,
+                    "batch_cohort_timeout_ms": (
+                        self.batch_cohort_timeout_seconds * 1000
+                    ),
+                    "prefill_step_source": self.prefill_step_source,
+                    "prefill_step_autoscale": self.prefill_step_autoscale,
+                    "cache_bytes_source": self.cache_bytes_source,
+                    "cache_bytes_clamped_from": self.cache_bytes_clamped_from,
+                    "cache_bytes_headroom": self.cache_bytes_headroom,
+                    "cache_budget": settings.get("cache_budget"),
+                    "disk_cache": bool(self.cache_dir or self.apc_persist_dir),
+                    "apc_persistence": bool(self.apc_persist_dir),
+                    "apc_persist_on_shutdown": self.apc_persist_on_shutdown,
+                    "apc_persist_shutdown_seconds": (
+                        self.apc_persist_shutdown_seconds
+                    ),
+                    "persistent_block_bytes": self.persistent_block_bytes,
+                }
+                fingerprint = live_tuning_fingerprint(
+                    adapter=adapter,
+                    runtime=identity,
+                    settings=settings,
+                    serving_shape=serving_shape,
+                    telemetry=telemetry_contract,
+                    memory_bytes=physical_memory_bytes(),
+                )
+                self.adaptive_profile_binding = bind_live_profile(
+                    self.adaptive_profile_receipt,
+                    fingerprint,
+                    active_execution_policy=settings.get("execution_policy"),
+                    qualification_state=self.qualification_state,
+                    qualification_binding=qualification_evidence(
+                        self.qualification,
+                        runtime=identity,
+                        settings=settings,
+                    ),
+                    telemetry_status=(
+                        self.power_telemetry.status()
+                        if self.power_telemetry is not None
+                        else {}
+                    ),
+                )
             approximate_controller = None
             approximate_status = {
                 "enabled": False,
@@ -10339,6 +10435,11 @@ class ServingEngine:
                     if self.qualification_state == "qualified"
                     else [],
                     "qualification": self.qualification_state,
+                    **(
+                        {"adaptive_profile": dict(self.adaptive_profile_binding)}
+                        if self.adaptive_profile_binding is not None
+                        else {}
+                    ),
                     "max_context": self.max_context,
                     "max_lanes": self.max_lanes,
                     # Whether a request that says nothing about reasoning opens
@@ -13519,6 +13620,15 @@ class ServingEngine:
                                     ),
                                     "profile": self.snapshot["profile"],
                                     "qualification": self.snapshot["qualification"],
+                                    **(
+                                        {
+                                            "adaptive_profile": dict(
+                                                self.adaptive_profile_binding
+                                            )
+                                        }
+                                        if self.adaptive_profile_binding is not None
+                                        else {}
+                                    ),
                                     "route_receipt": native_route or route_receipt,
                                     **(
                                         {

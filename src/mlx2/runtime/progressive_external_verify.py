@@ -8,6 +8,7 @@ can stage every tile on request-private state before atomically promoting it.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 
@@ -118,6 +119,104 @@ def progressive_target_protocol_binding(model, fidelity):
             if fidelity == PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED
             else None
         ),
+    }
+
+
+@dataclass(frozen=True)
+class ProgressiveTargetRows:
+    """Result from an adapter-owned progressive target-row executor.
+
+    This is a capability seam, not an exactness claim.  A model may expose
+    ``progressive_external_target_rows`` only after its adapter owns every
+    width-sensitive target stage.  The executor must report the bound
+    protocol and whether this particular launch stayed on its row-exact
+    path; exact verification fails closed on a fallback.
+    """
+
+    logits: object
+    features: object
+    protocol: str
+    row_exact: bool
+    detail: dict
+
+
+def _bounded_target_executor_detail(detail):
+    """Keep adapter evidence finite and free of request-private structures."""
+
+    if not isinstance(detail, dict):
+        raise TypeError("progressive target-row executor detail must be a mapping")
+    if len(detail) > 16:
+        raise ValueError("progressive target-row executor detail is too large")
+    result = {}
+    for key, value in detail.items():
+        if not isinstance(key, str) or not key or len(key) > 64:
+            raise ValueError("progressive target-row executor detail key is invalid")
+        if value is not None and type(value) not in (bool, int, float, str):
+            raise TypeError(
+                "progressive target-row executor detail values must be scalars"
+            )
+        if type(value) is int and not -(1 << 63) <= value < (1 << 63):
+            raise ValueError("progressive target-row executor integer is too large")
+        if type(value) is float and not np.isfinite(value):
+            raise ValueError("progressive target-row executor float must be finite")
+        if isinstance(value, str) and len(value) > 256:
+            raise ValueError("progressive target-row executor detail value is too large")
+        result[key] = value
+    return result
+
+
+def execute_progressive_target_rows(
+    model,
+    tokens,
+    caches,
+    capture_layers,
+    *,
+    protocol,
+    fidelity,
+):
+    """Run an optional model-owned target-row executor, with a safe fallback.
+
+    Existing protocol owners keep their established ``forward_with_taps``
+    path.  A future Qwen3.6 executor can use this seam without adding a model
+    name branch to the scheduler.  Merely defining the hook is insufficient:
+    exact fidelity also requires a launch-local row-exact attestation.
+    """
+
+    if fidelity not in PROGRESSIVE_FIDELITIES:
+        raise ValueError("unsupported progressive verification fidelity")
+    if not isinstance(protocol, str) or not protocol:
+        raise ValueError("progressive target-row executor requires a protocol")
+    executor = getattr(model, "progressive_external_target_rows", None)
+    if executor is None:
+        logits, features = model.forward_with_taps(tokens, caches, capture_layers)
+        return logits, features, {
+            "execution": "legacy_forward_with_taps",
+            "protocol": protocol,
+            "row_exact": None,
+            "adapter_detail": {},
+            "physical_width": int(tokens.shape[0]),
+            "token_width": int(tokens.shape[1]),
+        }
+    if not callable(executor):
+        raise TypeError("progressive target-row executor must be callable")
+    result = executor(tokens, caches, capture_layers)
+    if not isinstance(result, ProgressiveTargetRows):
+        raise TypeError(
+            "progressive target-row executor must return ProgressiveTargetRows"
+        )
+    if result.protocol != protocol:
+        raise RuntimeError("progressive target-row executor protocol mismatch")
+    if type(result.row_exact) is not bool:
+        raise TypeError("progressive target-row executor row_exact must be boolean")
+    if fidelity == PROGRESSIVE_FIDELITY_EXACT and not result.row_exact:
+        raise RuntimeError("progressive target-row executor fell off its exact path")
+    return result.logits, result.features, {
+        "execution": "adapter_owned",
+        "protocol": result.protocol,
+        "row_exact": result.row_exact,
+        "adapter_detail": _bounded_target_executor_detail(result.detail),
+        "physical_width": int(tokens.shape[0]),
+        "token_width": int(tokens.shape[1]),
     }
 
 

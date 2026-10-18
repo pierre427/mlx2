@@ -162,13 +162,17 @@ def main():
     import mlx.core as mx
     from check_mtp_row_exact import PROMPTS
     from mlx2.adapters.flash_next import FlashNextAdapter
-    from mlx2.runtime.models.qwen4_row_exact import install
 
     mx.set_cache_limit(4 << 30)
     arms = tuple(a for a in args.arms.split(",") if a)
     if "off" not in arms or "mtp" not in arms:
         parser.error("--arms must include off and mtp (the ratios are taken against them)")
     adapter = FlashNextAdapter(args.model, execution_policy=json.loads(args.policy) if args.policy else None)
+    # Only now: the adapter pins its import profile before any model module
+    # loads (import_env.assert_profile_applied), so importing the route
+    # earlier raised ImportOrderError.
+    from mlx2.runtime.models.qwen4_row_exact import install
+
     adapter.row_exact_verify = install(adapter.model)
     copy_policy = None
     if not args.no_copy:

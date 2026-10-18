@@ -2286,7 +2286,12 @@ def _propose_batched_self_mtp_impl(
             stats.ragged_verify_stage_rows[name] = (
                 stats.ragged_verify_stage_rows.get(name, 0) + values["rows"]
             )
-    return replace(result, verify_observation=receipt)
+    observed = replace(result, verify_observation=receipt)
+    # Commit checks the open proposal by identity: the observed copy must be
+    # the proposal the caller commits, or every timed round is refused.
+    if getattr(batch, "_open_proposal", None) is result:
+        batch._open_proposal = observed
+    return observed
 
 
 def _ragged_verify_layout(lanes, draft_depths):

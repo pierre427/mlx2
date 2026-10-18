@@ -975,7 +975,7 @@ def _command_head(command):
     return command[0] if isinstance(command, list) and command else command
 
 
-def preflight_identity(runtime_identity_fn=None):
+def preflight_identity(runtime_identity_fn=None, *, tree=None):
     """Identity that lets a live qualifier trust an earlier full-suite run."""
     root = Path(__file__).resolve().parents[1]
     if runtime_identity_fn is None:
@@ -992,12 +992,22 @@ def preflight_identity(runtime_identity_fn=None):
         "interpreter": interpreter_identity(),
         # The whole preflight tree, not only tests/**/*.py: the cross-host (v3)
         # receipt binds the identity alone.  The key keeps its name for that schema.
-        "test_source_sha256": preflight_tree_sha256(preflight_tree(root)),
+        "test_source_sha256": preflight_tree_sha256(
+            preflight_tree(root) if tree is None else tree
+        ),
         "pytest_config_sha256": hashlib.sha256((root / "pyproject.toml").read_bytes()).hexdigest(),
     }
 
 
 FULL_SUITE_PYTEST_ARGS = ("-m", "pytest")
+PREFLIGHT_DURATION_ARGS = ("--durations=25", "--durations-min=1.0")
+PREFLIGHT_CPU_ENV = {
+    "MLX2_PREFLIGHT_CPU_ONLY": "1",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    "PYTEST_ADDOPTS": "",
+    "PYTEST_PLUGINS": "",
+}
+IMPORT_GUARD_TIMING_PREFIX = "MLX2_IMPORT_GUARD_TIMING "
 # These tests deliberately reject a real MLX import.  tests/conftest.py imports
 # MLX to put ordinary tensor tests on the CPU, so the guards need a fresh
 # interpreter without that conftest.  Every listed module is still required:
@@ -1078,7 +1088,7 @@ def preflight_test_commands(*, pytest_args=None):
         not (root / module).is_file() for module in guards
     ):
         raise AssertionError("preflight import-guard manifest is missing or invalid")
-    ordinary = [sys.executable, *FULL_SUITE_PYTEST_ARGS,
+    ordinary = [sys.executable, *FULL_SUITE_PYTEST_ARGS, *PREFLIGHT_DURATION_ARGS,
                 *(f"--ignore={module}" for module in guards), *(pytest_args or [])]
     # One interpreter per guard module: module-level import poisons differ
     # (some refuse only mlx, some every mlx2 import) and break each other when
@@ -1097,9 +1107,24 @@ def run_import_guards(modules) -> int:
             print(f"refusing unlisted import-guard module {module}", flush=True)
             return 2
         print(f"=== import guard: {module}", flush=True)
+        started = time.perf_counter()
         completed = subprocess.run(
-            [sys.executable, *FULL_SUITE_PYTEST_ARGS, "-q", "--noconftest", module],
+            [sys.executable, *FULL_SUITE_PYTEST_ARGS, *PREFLIGHT_DURATION_ARGS,
+             "-q", "--noconftest", module],
             cwd=root,
+            env={**os.environ, **PREFLIGHT_CPU_ENV},
+            check=False,
+        )
+        print(
+            IMPORT_GUARD_TIMING_PREFIX + json.dumps(
+                {
+                    "module": module,
+                    "duration_seconds": round(time.perf_counter() - started, 6),
+                    "returncode": completed.returncode,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
         )
         if completed.returncode != 0:
             failed.append(module)
@@ -1108,11 +1133,39 @@ def run_import_guards(modules) -> int:
     return 1 if failed else 0
 
 
+def _import_guard_timings(output):
+    """Structured per-module timings emitted by the isolated guard runner."""
+    timings = []
+    for line in output.splitlines():
+        if not line.startswith(IMPORT_GUARD_TIMING_PREFIX):
+            continue
+        try:
+            row = json.loads(line.removeprefix(IMPORT_GUARD_TIMING_PREFIX))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if (isinstance(row, dict) and row.get("module") in PREFLIGHT_IMPORT_GUARD_MODULES
+                and type(row.get("duration_seconds")) in (int, float)
+                and row["duration_seconds"] >= 0
+                and type(row.get("returncode")) is int):
+            timings.append(row)
+    return timings
+
+
+def _preflight_snapshot(identity_fn, tree_fn):
+    """Capture one bound tree and identity without hashing the tree twice."""
+    tree = dict(tree_fn())
+    if identity_fn is preflight_identity and tree_fn is preflight_tree:
+        identity = identity_fn(tree=tree)
+    else:
+        identity = identity_fn()
+    return json.loads(json.dumps(identity)), tree
+
+
 def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
                             identity_fn=preflight_identity, tree_fn=preflight_tree):
+    preflight_started = time.perf_counter()
     command, guard_command = preflight_test_commands(pytest_args=pytest_args)
-    env = {**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
-           "PYTEST_ADDOPTS": "", "PYTEST_PLUGINS": ""}
+    env = {**os.environ, **PREFLIGHT_CPU_ENV}
     external_sources = (
         ("MLX2_TEST_TENSORFOLD_OWNED_SOURCE", PREFLIGHT_TENSORFOLD_OWNED_SOURCE),
         (
@@ -1126,14 +1179,20 @@ def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
     root = Path(__file__).resolve().parents[1]
     # Bind the source that was present before execution, not only whatever
     # happens to be on disk after a long suite completes.
-    identity_before = json.loads(json.dumps(identity_fn()))
-    tree_before = dict(tree_fn())
+    snapshot_started = time.perf_counter()
+    identity_before, tree_before = _preflight_snapshot(identity_fn, tree_fn)
+    snapshot_before_seconds = time.perf_counter() - snapshot_started
+    ordinary_started = time.perf_counter()
     completed = run(command, capture_output=True, text=True, env=env, cwd=root)
+    ordinary_seconds = time.perf_counter() - ordinary_started
+    guards_started = time.perf_counter()
     guarded = run(guard_command, capture_output=True, text=True, env=env, cwd=root)
+    guards_seconds = time.perf_counter() - guards_started
     output = completed.stdout + completed.stderr
     guard_output = guarded.stdout + guarded.stderr
-    identity_after = identity_fn()
-    tree_after = tree_fn()
+    snapshot_started = time.perf_counter()
+    identity_after, tree_after = _preflight_snapshot(identity_fn, tree_fn)
+    snapshot_after_seconds = time.perf_counter() - snapshot_started
     source_stable = identity_before == identity_after and tree_before == tree_after
     receipt = {
         "schema": PREFLIGHT_SCHEMA,
@@ -1142,6 +1201,16 @@ def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
         "identity": identity_after,
         "tree": tree_after,
         "source_stable": source_stable,
+        "execution_environment": dict(PREFLIGHT_CPU_ENV),
+        "phase_timings_seconds": {
+            "snapshot_before": round(snapshot_before_seconds, 6),
+            "ordinary_tests": round(ordinary_seconds, 6),
+            "import_guards": round(guards_seconds, 6),
+            "snapshot_after": round(snapshot_after_seconds, 6),
+            "total": round(time.perf_counter() - preflight_started, 6),
+        },
+        "import_guard_timings": _import_guard_timings(guard_output),
+        "import_guard_parallelism": 1,
         "identity_before": identity_before,
         "tree_before": tree_before,
         "test_command": command,
@@ -1232,7 +1301,8 @@ def _delta_test_commands(impacted):
     guarded = [p for p in impacted if p in guards]
     root = Path(__file__).resolve().parents[1]
     return (
-        [sys.executable, *FULL_SUITE_PYTEST_ARGS, *ordinary] if ordinary else None,
+        [sys.executable, *FULL_SUITE_PYTEST_ARGS, *PREFLIGHT_DURATION_ARGS, *ordinary]
+        if ordinary else None,
         [sys.executable, str(Path(__file__).resolve().relative_to(root)),
          "--run-import-guards", *guarded] if guarded else None,
     )
@@ -1360,16 +1430,18 @@ def write_preflight_delta(path, base_path, *, run=subprocess.run, identity_fn=pr
     changes = preflight_tree_changes(base["tree"], current)
     impacted = preflight_impacted_tests(changes, current)  # refuses conftest/unreachable
     ordinary, guarded = _delta_test_commands(impacted)
-    env = {**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
-           "PYTEST_ADDOPTS": "", "PYTEST_PLUGINS": ""}
+    env = {**os.environ, **PREFLIGHT_CPU_ENV}
     root = Path(__file__).resolve().parents[1]
-    outputs, codes = [], []
+    outputs, codes, durations = [], [], []
     for command in (ordinary, guarded):
         if command is None:
             outputs.append("")
             codes.append(None)
+            durations.append(0.0)
             continue
+        started = time.perf_counter()
         completed = run(command, capture_output=True, text=True, env=env, cwd=root)
+        durations.append(time.perf_counter() - started)
         outputs.append(completed.stdout + completed.stderr)
         codes.append(completed.returncode)
     receipt = {
@@ -1377,6 +1449,14 @@ def write_preflight_delta(path, base_path, *, run=subprocess.run, identity_fn=pr
         "passed": _lane_passed(ordinary, codes[0]) and _lane_passed(guarded, codes[1]),
         "timestamp": time.time(),
         "identity": expected,
+        "execution_environment": dict(PREFLIGHT_CPU_ENV),
+        "phase_timings_seconds": {
+            "ordinary_tests": round(durations[0], 6),
+            "import_guards": round(durations[1], 6),
+            "total": round(sum(durations), 6),
+        },
+        "import_guard_timings": _import_guard_timings(outputs[1]),
+        "import_guard_parallelism": 1,
         "base": {"path": str(base_path),
                  "sha256": hashlib.sha256(base_path.read_bytes()).hexdigest()},
         "tree": current,

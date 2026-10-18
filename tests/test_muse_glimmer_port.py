@@ -234,6 +234,88 @@ def test_progressive_tile_two_is_accepted():
     assert accepted["progressive_verification_tile"] == 2
 
 
+def test_muse_ast_policy_reaches_execution_config_and_batch(monkeypatch):
+    policy = normalize_external_policy(
+        {
+            **_PROGRESSIVE_BASE,
+            "num_draft": 15,
+            "progressive_verification_tile": 3,
+            "progressive_alternative_branches": 4,
+            "progressive_alternative_strategy": "confidence_tree",
+            "progressive_alternative_depth_policy": "confidence_tail",
+            "progressive_cross_session_pack_rows": 8,
+            "progressive_cross_session_pack_mode": "ordered_live_frontier",
+        }
+    )
+    adapter = object.__new__(MuseGlimmerAdapter)
+    adapter.model = object()
+    adapter.draft_model = object()
+    adapter.identity = {"fingerprint": "test"}
+    adapter.external_policy = policy
+    calls = []
+    monkeypatch.setattr(
+        "mlx2.runtime.external_speculative.ExternalDraftBatchGenerator",
+        lambda *args, **kwargs: calls.append(kwargs) or object(),
+    )
+
+    adapter.create_external_batch()
+
+    assert calls[-1]["progressive_alternative_branches"] == 4
+    assert calls[-1]["progressive_alternative_strategy"] == "confidence_tree"
+    assert calls[-1]["progressive_alternative_depth_policy"] == "confidence_tail"
+    assert calls[-1]["progressive_cross_session_pack_rows"] == 8
+    assert calls[-1]["progressive_cross_session_pack_mode"] == "ordered_live_frontier"
+    config = adapter.execution_config(max_lanes=4, prefill_step=16)
+    assert config["progressive_alternative_branches"] == 4
+    assert config["progressive_alternative_strategy"] == "confidence_tree"
+    assert config["progressive_alternative_depth_policy"] == "confidence_tail"
+    assert config["progressive_cross_session_pack_rows"] == 8
+    assert config["progressive_cross_session_pack_mode"] == "ordered_live_frontier"
+
+
+def test_muse_continuation_ast_bridge_is_explicit_and_fail_closed(monkeypatch):
+    policy = normalize_external_policy(
+        {
+            **_PROGRESSIVE_BASE,
+            "num_draft": 7,
+            "progressive_verification_tile": 3,
+            "progressive_alternative_branches": 4,
+            "progressive_alternative_strategy": "confidence_tree",
+            "continuation_pool": {"sources": ["external"], "limit": 15},
+        }
+    )
+    assert policy["proposal_composition"] is False
+    adapter = object.__new__(MuseGlimmerAdapter)
+    adapter.model = object()
+    adapter.draft_model = type(
+        "BoundContinuation",
+        (),
+        {
+            "policy": object(),
+            "last_continuation_selections": (),
+        },
+    )()
+    adapter.identity = {"fingerprint": "test"}
+    adapter.external_policy = policy
+    calls = []
+    monkeypatch.setattr(
+        "mlx2.runtime.external_speculative.ExternalDraftBatchGenerator",
+        lambda *args, **kwargs: calls.append(kwargs) or object(),
+    )
+    adapter.create_external_batch()
+    assert calls[-1]["continuation_pool"] is adapter.draft_model.policy
+    assert calls[-1]["continuation_pool_ast_bridge"] is True
+    with pytest.raises(ValueError, match="ordered alternative branches"):
+        normalize_external_policy(
+            {
+                **_PROGRESSIVE_BASE,
+                "num_draft": 7,
+                "progressive_verification_tile": 3,
+                "continuation_pool": {"sources": ["external"]},
+            }
+        )
+
+
 def test_shipped_progressive_profiles_still_accepted():
     root = Path(__file__).resolve().parents[1] / "qualification/policies"
     names = ("muse-dflash2-progressive.json", "muse-dflash2-progressive-b1-m3.json")

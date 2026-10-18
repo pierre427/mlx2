@@ -433,13 +433,21 @@ _SOURCE_BATCH_ST16 = (
 )
 
 
-@lru_cache(maxsize=None)
-def _kernel(st16: bool = False):
+def _served_decode_header() -> tuple[str, str]:
+    """The one-token decode kernel's header and kernel-name suffix.
+
+    ``_HEADER`` with only the copied conv SiLU helper (``mlx_sigmoid_fast``)
+    respelled to the served ``nn.silu`` spelling; raises when none matches.
+    """
     spelling = served_silu_exp()
     if spelling is None:
         raise RuntimeError("served SiLU matches no kernel form")
-    header = _served_silu_header(spelling)
-    suffix = "_precise" if "precise" in spelling else "_fast"
+    return _served_silu_header(spelling), ("_precise" if "precise" in spelling else "_fast")
+
+
+@lru_cache(maxsize=None)
+def _kernel(st16: bool = False):
+    header, suffix = _served_decode_header()
     return mx.fast.metal_kernel(
         name="qwen4_fused_gdn_decode" + ("_st16" if st16 else "") + suffix,
         input_names=[
@@ -464,11 +472,7 @@ def _kernel(st16: bool = False):
 
 @lru_cache(maxsize=None)
 def _kernel_batch(st16: bool = False):
-    spelling = served_silu_exp()
-    if spelling is None:
-        raise RuntimeError("served SiLU matches no kernel form")
-    header = _served_silu_header(spelling)
-    suffix = "_precise" if "precise" in spelling else "_fast"
+    header, suffix = _served_decode_header()
     return mx.fast.metal_kernel(
         name="qwen4_fused_gdn_batch_decode" + ("_st16" if st16 else "") + suffix,
         input_names=[
@@ -504,12 +508,18 @@ OUTPROJ_DISABLED = (
 )
 
 
-@lru_cache(maxsize=None)
-def _kernel_outproj():
-    # The builder stays for the two-dispatch rework; nothing may launch it.
-    raise RuntimeError(OUTPROJ_DISABLED)
-    return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_decode_outproj_q4",
+def _outproj_kernel_spec() -> dict:
+    """``mx.fast.metal_kernel`` arguments of the decode + out-projection kernel.
+
+    Its GDN core is the one-token decode step, so it compiles the decode
+    kernel's served-SiLU header (``_served_decode_header``) and carries the
+    spelling in its name.  Until 2026-10-17 it compiled the raw ``_HEADER``
+    (``metal::exp``), which on MLX 0.32.4 (served ``metal::precise::exp``)
+    would have differed from decode on a conv output of -6.84375.
+    """
+    header, suffix = _served_decode_header()
+    return dict(
+        name="qwen4_fused_gdn_decode_outproj_q4" + suffix,
         input_names=[
             "qkv",
             "z",
@@ -529,10 +539,17 @@ def _kernel_outproj():
             "norm_eps",
         ],
         output_names=["output", "conv_state_out", "recurrent_state_out", "partials"],
-        header=_HEADER,
+        header=header,
         source=_SOURCE_OUTPROJ,
         ensure_row_contiguous=True,
     )
+
+
+@lru_cache(maxsize=None)
+def _kernel_outproj():
+    # The builder stays for the two-dispatch rework; nothing may launch it.
+    raise RuntimeError(OUTPROJ_DISABLED)
+    return mx.fast.metal_kernel(**_outproj_kernel_spec())
 
 
 def qwen4_fused_gdn_decode(

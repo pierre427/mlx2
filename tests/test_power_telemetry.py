@@ -66,6 +66,7 @@ def _telemetry(tokens, *, table=(300, 600, 900), policy=None, energy=None):
         energy_sampler_factory=lambda: energy,
         temperature_sampler_factory=FakeTemperature,
         frequency_table=lambda: list(table),
+        thermal_state=lambda: "nominal",
     )
     return telemetry, energy
 
@@ -256,6 +257,9 @@ def test_residency_frequency_and_temperature():
         "OFF": 0.5, "P1": 0.5, "P2": 1.0, "P3": 0.0,
     }
     assert last["die_temperature_c"] == {"max": 71.5, "mean": 64.25}
+    assert last["battery_temperature_c"] == 30.0
+    assert last["system_thermal_state"] == "nominal"
+    assert telemetry.status()["last_sample_age_seconds"] >= 0
 
 
 def test_frequency_is_omitted_when_the_table_does_not_map():
@@ -376,6 +380,8 @@ def test_metrics_render_power_families():
         "mlx2_gpu_frequency_mean_hertz 500000000",
         'mlx2_die_temperature_celsius{stat="max"} 71.5',
         'mlx2_die_temperature_celsius{stat="mean"} 64.25',
+        "mlx2_battery_temperature_celsius 30",
+        'mlx2_system_thermal_state{state="nominal"} 1',
         "mlx2_energy_per_output_token_joules 3",
     ):
         assert line in text, line

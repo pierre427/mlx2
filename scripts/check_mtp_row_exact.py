@@ -94,6 +94,9 @@ PROMPTS = {
 }
 
 COMPONENTS = ("ple", "attn_hc", "mixer", "mlp_hc", "mlp", "out")
+# ``--gdn-taps``: GDN-layer intermediates, compared between ``attn_hc`` and
+# ``mixer`` in this order (carried states first: they are row 0's only).
+GDN_TAPS = ("gdn_state_in", "gdn_conv_in", "gdn_qkv", "gdn_z", "gdn_b", "gdn_a", "gdn_core")
 # Captured per-row digests are skipped for forwards wider than this (prefill).
 CAPTURE_MAX_ROWS = 32
 
@@ -137,6 +140,7 @@ class Recorder:
     def __init__(self, *, components: bool):
         self.components = components
         self.active = False
+        self.arm = None
         self.forwards = []
         self._depth = 0
         self._current = None
@@ -201,6 +205,99 @@ class Recorder:
 
     def close_trunk_logits(self):
         self._current = None
+
+
+class _OutProjTap:
+    """Stand-in child for ``out_proj`` during one tapped GDN call."""
+
+    def __init__(self, inner, sink):
+        self.inner = inner
+        self.sink = sink
+
+    def __call__(self, x):
+        self.sink(x)
+        return self.inner(x)
+
+
+def _dump_gdn_call(path, self, arrays, ids):
+    """Save one tapped GDN call's inputs, parameters and core (raw bits)."""
+    import mlx.core as mx
+    import numpy as np
+
+    def raw(value):
+        mx.eval(value)
+        if value.dtype in (mx.bfloat16, mx.float16):
+            return np.array(value.view(mx.uint16))
+        return np.array(value)
+
+    params = {
+        "conv_weight": self.conv1d.weight, "A_log": self.A_log,
+        "dt_bias": self.dt_bias, "norm_weight": self.norm.weight,
+    }
+    payload = {name: raw(value) for name, value in {**arrays, **params}.items()}
+    dtypes = {name: str(value.dtype) for name, value in {**arrays, **params}.items()}
+    np.savez(path, ids=np.array(ids), norm_eps=np.array(self.norm.eps),
+             dtypes=np.array(json.dumps(dtypes)), **payload)
+
+
+def install_gdn_taps(model, recorder, *, dump_layer=None, dump_calls=0, dump_dir=None):
+    """Capture each GDN layer's carried state and core intermediates.
+
+    The serial reference and a verify window reach the same seam
+    (``_try_fused_decode``): the input projections are done, the carried
+    conv/recurrent state is the cache's, and every fused path ends in
+    ``self.out_proj(core)``, so the core is tapped by swapping the child for
+    the call.  A row whose ``mixer`` differs is then attributed to the first
+    of state, projections, core (the fused kernel) or ``out_proj``.
+    """
+    from mlx2.runtime.models import qwen4_exp as Q
+
+    layers = model.language_model.model.layers
+    index_of = {
+        id(layer.linear_attn): i for i, layer in enumerate(layers)
+        if getattr(layer, "linear_attn", None) is not None
+    }
+    original = Q.GatedDeltaNet._try_fused_decode
+    from collections import Counter
+
+    counter = Counter()
+
+    def tapped(self, qkv, z, b, a, mask, cache):
+        index = index_of.get(id(self))
+        if index is None or recorder._current is None or not recorder._current["capture"]:
+            return original(self, qkv, z, b, a, mask, cache)
+
+        def cap(name, value):
+            recorder.capture((index, name), value)
+
+        if cache is not None and cache[0] is not None and cache[1] is not None:
+            cap("gdn_state_in", cache[1].reshape(1, 1, -1))
+            cap("gdn_conv_in", cache[0].reshape(1, 1, -1))
+        for name, value in (("gdn_qkv", qkv), ("gdn_z", z), ("gdn_b", b), ("gdn_a", a)):
+            cap(name, value.reshape(1, -1, value.shape[-1]))
+        dump = None
+        if index == dump_layer and dump_dir is not None and counter[recorder.arm] < dump_calls:
+            counter[recorder.arm] += 1
+            dump = {"qkv": qkv, "z": z, "b": b, "a": a}
+            if cache is not None and cache[0] is not None and cache[1] is not None:
+                dump.update(conv_state=cache[0], recurrent_state=cache[1])
+        inner = self.out_proj
+
+        def sink(core):
+            cap("gdn_core", core.reshape(1, -1, core.shape[-1]))
+            if dump is not None:
+                dump["core"] = core
+
+        self.out_proj = _OutProjTap(inner, sink)
+        try:
+            return original(self, qkv, z, b, a, mask, cache)
+        finally:
+            self.out_proj = inner
+            if dump is not None and "core" in dump:
+                name = f"{recorder.arm}-L{index}-{counter[recorder.arm]:03d}.npz"
+                _dump_gdn_call(Path(dump_dir) / name, self, dump, recorder._current["ids"])
+
+    Q.GatedDeltaNet._try_fused_decode = tapped
 
 
 def install_hooks(model, recorder):
@@ -339,14 +436,18 @@ def _logit_stats(a, b):
     return float(np.max(np.abs(af - bf)))
 
 
-def _component_order(num_layers):
+def _component_order(num_layers, gdn_taps=False):
+    names = COMPONENTS
+    if gdn_taps:
+        at = COMPONENTS.index("mixer")
+        names = COMPONENTS[:at] + GDN_TAPS + COMPONENTS[at:]
     order = []
     for layer in range(num_layers):
-        order += [(layer, name) for name in COMPONENTS]
+        order += [(layer, name) for name in names]
     return order + ["final"]
 
 
-def compare(reference, candidate, prompt_len, num_layers):
+def compare(reference, candidate, prompt_len, num_layers, gdn_taps=False):
     """Per-row equality of candidate verify rows against one-token decode."""
     first_div = None
     ref_seq, cand_seq = reference["sequence"], candidate["sequence"]
@@ -356,7 +457,7 @@ def compare(reference, candidate, prompt_len, num_layers):
             break
     limit = first_div if first_div is not None else min(len(ref_seq), len(cand_seq))
     ref_rows, cand_rows = reference["rows"], candidate["rows"]
-    order = _component_order(num_layers)
+    order = _component_order(num_layers, gdn_taps)
     by_width = {}
     first_component = {}
     worst = 0.0
@@ -391,8 +492,16 @@ def compare(reference, candidate, prompt_len, num_layers):
         name = culprit.split(".", 1)[-1] if culprit.startswith("L") else culprit
         first_component[name] = first_component.get(name, 0) + 1
         if len(examples) < 12:
-            examples.append({"position": position, "window": width, "row": cand["row"],
-                             "first_differing": culprit, "max_abs_dlogit": delta})
+            example = {"position": position, "window": width, "row": cand["row"],
+                       "first_differing": culprit, "max_abs_dlogit": delta}
+            if gdn_taps and culprit.startswith("L"):
+                layer = int(culprit[1:].split(".", 1)[0])
+                example["gdn_taps_equal"] = {
+                    name: cand["digests"][(layer, name)] == ref["digests"][(layer, name)]
+                    for name in GDN_TAPS + ("mixer",)
+                    if (layer, name) in cand["digests"] and (layer, name) in ref["digests"]
+                }
+            examples.append(example)
     return {
         "first_divergent_token": None if first_div is None else first_div - prompt_len,
         "identical_output": first_div is None and len(ref_seq) == len(cand_seq),
@@ -443,6 +552,7 @@ def run_arm(adapter, recorder, prompt_ids, *, arm, num_draft, max_tokens, prefil
     diag_before = _diagnostics(adapter)
     recorder.forwards = []
     recorder.active = True
+    recorder.arm = arm
     tokens = []
     t0 = time.perf_counter()
     try:
@@ -569,6 +679,12 @@ def main():
     parser.add_argument("--prefill-step", type=int, default=2048)
     parser.add_argument("--no-copy", action="store_true", help="MTP arms without copy drafts")
     parser.add_argument("--no-components", action="store_true")
+    parser.add_argument("--gdn-taps", action="store_true",
+                        help="also digest GDN carried state, projections and core per row")
+    parser.add_argument("--gdn-dump-layer", type=int, default=None,
+                        help="with --gdn-taps: save this GDN layer's call inputs and core (npz)")
+    parser.add_argument("--gdn-dump-calls", type=int, default=6, help="calls saved per arm")
+    parser.add_argument("--gdn-dump-dir", default=None)
     parser.add_argument("--execution-policy", default=None, help="JSON FlashNextPolicy mapping")
     parser.add_argument("--out", required=True)
     parser.add_argument("--dry-run", action="store_true")
@@ -598,6 +714,11 @@ def main():
         copy_policy = adapter.default_route_execution_policy["native_mtp"]["self_mtp_copy_draft"]
     recorder = Recorder(components=not args.no_components)
     install_hooks(adapter.model, recorder)
+    if args.gdn_taps:
+        if args.gdn_dump_dir:
+            Path(args.gdn_dump_dir).mkdir(parents=True, exist_ok=True)
+        install_gdn_taps(adapter.model, recorder, dump_layer=args.gdn_dump_layer,
+                         dump_calls=args.gdn_dump_calls, dump_dir=args.gdn_dump_dir)
     num_layers = len(adapter.model.language_model.model.layers)
     report = {
         "schema": "mlx2.check-mtp-row-exact.v1",
@@ -608,6 +729,7 @@ def main():
         "copy_policy": copy_policy,
         "max_tokens": args.max_tokens,
         "prefill_step": args.prefill_step,
+        "gdn_taps": bool(args.gdn_taps),
         "load_s": load_s,
         "policy": adapter.policy.as_dict(),
         "prompts": {},
@@ -649,7 +771,7 @@ def main():
             if "kernels" in result:
                 summary["kernels"] = result["kernels"]
             if arm != "off":
-                summary.update(compare(reference, result, len(prompt_ids), num_layers))
+                summary.update(compare(reference, result, len(prompt_ids), num_layers, args.gdn_taps))
             entry["arms"][arm] = summary
             print(name, arm, json.dumps({k: summary.get(k) for k in (
                 "identical_output", "first_divergent_token", "rows_compared",

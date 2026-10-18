@@ -10,6 +10,12 @@ the fraction of differing elements and ``bit-identical: yes/no`` for:
   * prework q, k, v and the next conv state (cold ``cache[0] is None`` and
     warm existing state),
   * the gated norm output,
+  * the same prework and gated norm on a value sweep (``*_sweep``): an
+    identity last conv tap makes each conv output exactly its qkv value and
+    z takes every bf16 value with magnitude in [2**-6, 32].  Random draws
+    almost never reach -6.84375, the bf16 input where the ``metal::exp`` and
+    ``metal::precise::exp`` sigmoids round apart, so only the sweep fails on
+    a SiLU spelling that differs from the served one,
   * the MoE weighted sum (bf16 scores, and fp32 scores).
 
 It launches Metal work, so it refuses to run without ``--i-own-the-gpu``.
@@ -109,6 +115,42 @@ def _eager_prework(mx, nn, layer, qkv, conv_state):
     return q, k, v, next_state
 
 
+def _sweep_rows(mx, rows, width, seed):
+    """Rows covering every bf16 value with magnitude in [2**-6, 32], shuffled."""
+    from mlx2.runtime.models.qwen4_fused_gdn_verify import _decode_parity_grid
+
+    grid = _decode_parity_grid()
+    if width < int(grid.size):
+        raise ValueError(f"a row of {width} cannot cover {int(grid.size)} values")
+    # Cut the tile to width before shuffling, so every row keeps every value.
+    base = mx.tile(grid, (-(-width // int(grid.size)),))[:width]
+    return mx.stack([
+        base[mx.random.permutation(width, key=mx.random.key(seed + r))] for r in range(rows)
+    ])[None]
+
+
+def check_gdn_sweep(mx, nn, qwen4_exp, prefill, rows):
+    layer = _layer(mx, qwen4_exp)
+    identity = mx.zeros((C, K, 1), dtype=mx.bfloat16)
+    identity[:, K - 1, 0] = 1
+    layer.conv1d.weight = identity
+    results = []
+    qkv = _sweep_rows(mx, rows, C, 39030)
+    for label, state in (("cold", None), ("warm", mx.zeros((1, K - 1, C), dtype=mx.bfloat16))):
+        fused = prefill.qwen4_gdn_prefill_prework(qkv, state, layer.conv1d.weight)
+        eager = _eager_prework(mx, nn, layer, qkv, state)
+        mx.eval(*fused, *eager)
+        for part, got, want in zip(("q", "k", "v", "conv_out"), fused, eager):
+            results.append(_compare(mx, np_mod, f"prework_sweep/{label}/{part}", got, want))
+    y = mx.random.normal((1, rows, HV, DV)).astype(mx.bfloat16)
+    z = _sweep_rows(mx, rows, HV * DV, 39031)
+    fused = prefill.qwen4_gdn_prefill_norm_gate(y, z, layer.norm.weight, layer.norm.eps)
+    eager = layer.norm(y, z.reshape(1, rows, HV, DV)).reshape(1, rows, -1)
+    mx.eval(fused, eager)
+    results.append(_compare(mx, np_mod, "norm_gate_sweep", fused, eager))
+    return results
+
+
 def check_gdn(mx, nn, qwen4_exp, prefill, rows):
     layer = _layer(mx, qwen4_exp)
     results = []
@@ -197,8 +239,10 @@ def main(argv=None) -> int:
     report = []
     for rows in args.rows:
         mx.random.seed(args.seed + rows)
-        for entry in check_gdn(mx, nn, qwen4_exp, prefill, rows) + check_moe(
-            mx, switch_layers, wsum, rows
+        for entry in (
+            check_gdn(mx, nn, qwen4_exp, prefill, rows)
+            + check_gdn_sweep(mx, nn, qwen4_exp, prefill, rows)
+            + check_moe(mx, switch_layers, wsum, rows)
         ):
             entry["rows"] = rows
             report.append(entry)

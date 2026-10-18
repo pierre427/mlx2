@@ -3,8 +3,9 @@
 These tests deliberately do not claim qualification.  They establish that
 the hybrid transaction can commit/abort exact prefixes, while the current
 Qwen3.8 and Qwen3.6 target forwards do not supply the bit-exact wide-row law
-required by progressive verification.  The adapters therefore remain
-fail-closed instead of substituting a predictably slower serial target loop.
+required by exact progressive verification.  Qwen3.8 carries its separate
+approximate AST contract; Qwen3.6 rejects the surface before loading instead
+of substituting a predictably slower serial target loop.
 """
 
 import copy
@@ -20,6 +21,12 @@ from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
 from mlx2.runtime.hybrid_verify_rows import HybridVerifyRows
 from mlx2.runtime.models.qwen36_35b import Model as Qwen36Model
 from mlx2.runtime.models.qwen38_27b import ModelArgs
+from mlx2.runtime.progressive_external_verify import (
+    PROGRESSIVE_FIDELITY_EXACT,
+    PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    ProgressiveTargetRows,
+    execute_progressive_target_rows,
+)
 from test_qwen38_dflash2_cpu import tiny_pair, tiny_target
 
 
@@ -141,9 +148,9 @@ def test_qwen_exact_progressive_remains_fail_closed_without_wide_row_protocol():
         "progressive_multilane_draft_cap",
         "progressive_verification_fidelity",
     }
-    # Qwen3.8 exposes only the separate, explicit approximate candidate.  The
-    # exact selector below must still refuse it because the model does not
-    # declare the row-exact wide target protocol.
+    # Qwen3.8 carries the separate approximate contract. Qwen3.6 continues to
+    # reject progressive keys until it has an exact or explicitly bounded
+    # target protocol. Neither model declares the row-exact wide protocol.
     assert candidate_keys <= QWEN38_EXTERNAL_KEYS
     assert candidate_keys.isdisjoint(QWEN36_EXTERNAL_KEYS)
     assert not hasattr(tiny_target(), "progressive_external_verify_protocol")
@@ -163,3 +170,91 @@ def test_qwen_exact_progressive_remains_fail_closed_without_wide_row_protocol():
 def test_flash_next_has_no_external_progressive_policy_surface():
     with pytest.raises(ValueError, match="unknown execution policy fields"):
         FlashNextPolicy.from_mapping({"progressive_verification_tile": 2})
+
+
+@pytest.mark.parametrize("width", [2, 4, 8])
+def test_adapter_owned_target_row_executor_seam_requires_launch_attestation(width):
+    tokens = np.arange(width * 2, dtype=np.int32).reshape(width, 2)
+    logits = np.zeros((width, 2, 11), dtype=np.float32)
+    features = np.zeros((width, 2, 7), dtype=np.float32)
+
+    class Target:
+        def progressive_external_target_rows(self, seen, caches, layers):
+            np.testing.assert_array_equal(seen, tokens)
+            assert caches == "private-caches" and layers == (1, 6)
+            return ProgressiveTargetRows(
+                logits=logits,
+                features=features,
+                protocol=PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+                row_exact=True,
+                detail={"width": width, "owner": "adapter"},
+            )
+
+    actual_logits, actual_features, detail = execute_progressive_target_rows(
+        Target(),
+        tokens,
+        "private-caches",
+        (1, 6),
+        protocol=PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+        fidelity=PROGRESSIVE_FIDELITY_EXACT,
+    )
+    assert actual_logits is logits and actual_features is features
+    assert detail == {
+        "execution": "adapter_owned",
+        "protocol": PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+        "row_exact": True,
+        "adapter_detail": {"width": width, "owner": "adapter"},
+        "physical_width": width,
+        "token_width": 2,
+    }
+
+
+def test_adapter_owned_target_row_executor_fails_closed_on_fallback():
+    class Target:
+        @staticmethod
+        def progressive_external_target_rows(*_args):
+            return ProgressiveTargetRows(
+                logits=object(),
+                features=object(),
+                protocol=PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+                row_exact=False,
+                detail={"reason": "width_sensitive_attention"},
+            )
+
+    with pytest.raises(RuntimeError, match="fell off its exact path"):
+        execute_progressive_target_rows(
+            Target(),
+            object(),
+            object(),
+            (1, 6),
+            protocol=PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+            fidelity=PROGRESSIVE_FIDELITY_EXACT,
+        )
+
+
+def test_target_row_executor_legacy_fallback_is_explicit():
+    class Target:
+        @staticmethod
+        def forward_with_taps(tokens, caches, layers):
+            assert caches == "caches" and layers == (1, 6)
+            return tokens + 1, tokens + 2
+
+    tokens = np.zeros((4, 3), dtype=np.int32)
+    logits, features, detail = execute_progressive_target_rows(
+        Target(),
+        tokens,
+        "caches",
+        (1, 6),
+        protocol=PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+        fidelity=PROGRESSIVE_FIDELITY_EXACT,
+    )
+    np.testing.assert_array_equal(logits, tokens + 1)
+    np.testing.assert_array_equal(features, tokens + 2)
+    assert detail == {
+        "execution": "legacy_forward_with_taps",
+        "protocol": PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+        "row_exact": None,
+        "adapter_detail": {},
+        "physical_width": 4,
+        "token_width": 3,
+    }

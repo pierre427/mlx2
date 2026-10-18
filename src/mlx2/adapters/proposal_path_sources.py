@@ -120,7 +120,7 @@ class ExternalContinuationSource:
             result = []
             seen = set()
             for ordinal, rows in enumerate(tree_paths(parents)):
-                if len(rows) != context.depth:
+                if not 1 <= len(rows) <= context.depth:
                     continue
                 path = tuple(int(tokens[row]) for row in rows)
                 if path in seen:
@@ -134,9 +134,7 @@ class ExternalContinuationSource:
                         "dflash2_best_first_node_ordinal_proxy",
                     )
                 )
-                if len(result) >= limit:
-                    break
-            return result
+            return result[:limit]
         if self.mechanism == "dspark":
             private_context = replace(context, draft_cache=cache)
             result = draft.propose_complete_paths(private_context, limit)
@@ -316,6 +314,40 @@ class NativeMTPContinuationSource:
             raise ValueError("native MTP continuation history bound must be positive")
         self.model, self.max_history = model, max_history
 
+    def open_sidecar_tree(
+        self,
+        checkpoint,
+        candidates,
+        materialize,
+        *,
+        sampling_temperature=0.0,
+        proposal_distribution="deterministic_point_mass",
+    ):
+        """Bind ranked paths to request-private native-MTP cache sidecars.
+
+        Proposal ranking remains in this adapter-owned source.  Target
+        verification chooses the canonical branch; the returned transaction
+        then publishes only that branch's complete target/draft/pending state.
+        """
+
+        from ..runtime.native_mtp_continuation_tree import (
+            NativeMTPContinuationTreeTransaction,
+        )
+
+        paths = tuple(
+            tuple(candidate.tokens)
+            if isinstance(candidate, SourceContinuation)
+            else tuple(candidate)
+            for candidate in candidates
+        )
+        return NativeMTPContinuationTreeTransaction(
+            checkpoint,
+            paths,
+            materialize,
+            sampling_temperature=sampling_temperature,
+            proposal_distribution=proposal_distribution,
+        )
+
     def __call__(self, context, limit):
         import mlx.core as mx
 
@@ -404,16 +436,15 @@ def build_continuation_drafter(
     import hashlib
     from pathlib import Path
 
+    from ..runtime.drafter_portfolio import (
+        DrafterPortfolio,
+        PortfolioContinuationSource,
+    )
     from ..runtime.proposal_pool import ProposalSession, ProposalSource
     from ..runtime.proposal_providers import (
         ContinuationDraftModel,
         ContinuationPoolPolicy,
         PromptLookupContinuationSource,
-    )
-
-    from ..runtime.drafter_portfolio import (
-        DrafterPortfolio,
-        PortfolioContinuationSource,
     )
 
     policy = dict(policy)

@@ -45,8 +45,12 @@ def fake_lane(monkeypatch):
     def lane_matmul(x, lw):
         calls.append(int(x.size // x.shape[-1]))
         w = mx.dequantize(lw.weight, lw.scale_bias[..., 0].T, lw.scale_bias[..., 1].T,
-                          group_size=lw.group_size, bits=lw.bits)
-        y = x @ w.T.astype(x.dtype)
+                          group_size=lw.group_size, bits=lw.bits).T.astype(x.dtype)
+        # Row by row, like the real lane law (row-invariant by construction);
+        # the row_exact canary checks exactly that property inside a window.
+        flat = x.reshape(-1, x.shape[-1])
+        y = mx.concatenate([flat[i : i + 1] @ w for i in range(flat.shape[0])])
+        y = y.reshape(*x.shape[:-1], -1)
         return y if lw.bias is None else y + lw.bias
 
     monkeypatch.setattr(LM, "backend", lambda: "mpp")

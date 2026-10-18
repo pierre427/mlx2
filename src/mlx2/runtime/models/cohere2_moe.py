@@ -201,38 +201,60 @@ class BatchRowExactQ4:
         self.counts["ordinary_expert_calls"] += 1
         self.counts["ordinary_expert_rows"] += int(x.shape[0])
 
-    def linear(self, module, x):
-        from .row_exact_qmv import quantized_linear
+    # Every native form runs through the canary-gated row_exact ops on a
+    # [1, R, K] strip; a failed canary refuses, as a declined layout does.
+    _DECLINED = frozenset({"per_row", "per_row_canary", "per_row_unsupported"})
 
-        output, route = quantized_linear(module, x)
-        self.counts[route] += 1
+    @staticmethod
+    def _strip(x):
+        """``x`` (lanes of rows, last axis K) as one ``[1, R, K]`` strip."""
+        return x.reshape(1, -1, x.shape[-1])
+
+    @staticmethod
+    def _unstrip(y, x):
+        return y.reshape(*x.shape[:-1], y.shape[-1])
+
+    def linear(self, module, x):
+        from ..row_exact import ops
+
+        output, route = ops.quantized_linear_route(module, self._strip(x), stage="north")
+        output = self._unstrip(output, x)
+        self.counts[route] = self.counts.get(route, 0) + 1
         self.counts["dense_projection_calls"] += 1
         self.counts["dense_projection_rows"] += int(x.shape[0])
-        if route == "per_row":
+        if route in self._DECLINED:
             self.counts["refusals"] += 1
             raise RuntimeError("North batch row-exact q4 native projection declined")
         return output
 
     def linears(self, modules, x):
-        from .row_exact_qmv import quantized_linears
+        from ..row_exact import ops
 
-        outputs, route = quantized_linears(modules, x)
-        self.counts[route] += 1
+        outputs, routes = ops.quantized_linears_route(modules, self._strip(x), stage="north")
+        outputs = tuple(self._unstrip(y, x) for y in outputs)
+        # One grouped launch, or each member's own route (a declined member
+        # must refuse the group, not hide behind its neighbour's route).
+        members = ["group_kernel"] if routes == "group_kernel" else list(routes)
+        for route in members:
+            self.counts[route] = self.counts.get(route, 0) + 1
         self.counts["dense_projection_calls"] += len(modules)
         self.counts["dense_projection_rows"] += int(x.shape[0]) * len(modules)
-        if route == "per_row":
+        if self._DECLINED.intersection(members):
             self.counts["refusals"] += 1
             raise RuntimeError("North batch row-exact q4 native projection group declined")
         return outputs
 
     def head(self, embedding, x):
-        from .row_exact_qmv import quantized_linear
+        from ..row_exact import ops
 
-        output, route = quantized_linear(embedding, x, call=embedding.as_linear)
-        self.counts[route] += 1
+        output, route = ops.quantized_linear_route(
+            embedding, self._strip(x), stage="north_head", call=embedding.as_linear
+        )
+        output = self._unstrip(output, x)
+        self.counts[route] = self.counts.get(route, 0) + 1
         self.counts["head_calls"] += 1
         self.counts["head_rows"] += int(x.shape[0])
-        if route == "per_row":
+        if route in self._DECLINED:
             self.counts["refusals"] += 1
             raise RuntimeError("North batch row-exact q4 native tied head declined")
         start = self._forward_start

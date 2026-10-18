@@ -97,11 +97,12 @@ class Qwen38TargetTreeExecutor:
         )
 
     def receipt(self) -> dict:
-        from ..runtime.qwen38_tensorfold import gdn_backend_stats
+        from ..runtime.qwen38_tensorfold import gdn_backend_stats, glue_backend_stats
 
         return {
             "provider": self.protocol,
             "source_identity": dict(self.source_identity),
             "source_revision_token": self.source_revision_token,
             "gdn_backend": gdn_backend_stats(),
+            "glue_backend": glue_backend_stats(),
         }

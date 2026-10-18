@@ -56,9 +56,12 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
             raise ValueError(
                 "progressive_verification_tile cannot combine with adaptive verification"
             )
-        if policy.get("continuation_pool") is not None:
+        pool_branches = policy.get("progressive_alternative_branches", 1)
+        if policy.get("continuation_pool") is not None and (
+            type(pool_branches) is not int or pool_branches <= 1
+        ):
             raise ValueError(
-                "progressive_verification_tile cannot combine with continuation_pool"
+                "progressive continuation_pool requires ordered alternative branches"
             )
         if policy.get("lilicorr_feedback") is not None:
             raise ValueError(
@@ -95,6 +98,37 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
     alternative_depth_policy = policy.get(
         "progressive_alternative_depth_policy", "full"
     )
+    cross_session_pack_rows = policy.get("progressive_cross_session_pack_rows")
+    if (
+        cross_session_pack_rows is not None
+        and cap is not None
+        and cap <= tile
+    ):
+        raise ValueError(
+            "cross-session AST requires progressive_multilane_draft_cap to "
+            "exceed progressive_verification_tile"
+        )
+    if cross_session_pack_rows is not None and (
+        cross_session_pack_rows not in {4, 8}
+        or alternatives <= 1
+        or alternative_strategy != "confidence_tree"
+    ):
+        raise ValueError(
+            "progressive_cross_session_pack_rows must be 4 or 8 and requires "
+            "confidence_tree alternatives"
+        )
+    cross_session_pack_mode = policy.get("progressive_cross_session_pack_mode")
+    if cross_session_pack_mode not in {None, "ordered_live_frontier"}:
+        raise ValueError(
+            "progressive_cross_session_pack_mode must be ordered_live_frontier"
+        )
+    if (
+        cross_session_pack_mode == "ordered_live_frontier"
+        and cross_session_pack_rows is None
+    ):
+        raise ValueError(
+            "ordered_live_frontier requires progressive_cross_session_pack_rows"
+        )
     if alternative_strategy not in {
         "distinct_root",
         "shared_prefix",
@@ -143,6 +177,12 @@ def progressive_external_identity(policy, binding=None):
             "alternative_depth_policy": policy.get(
                 "progressive_alternative_depth_policy", "full"
             ),
+            "cross_session_pack_rows": policy.get(
+                "progressive_cross_session_pack_rows"
+            ),
+            "cross_session_pack_mode": policy.get(
+                "progressive_cross_session_pack_mode"
+            ),
             "target_protocol": (
                 None if binding is None else binding["target_protocol"]
             ),
@@ -175,6 +215,8 @@ class ExternalDraftAdapterMixin:
             "progressive_alternative_branches",
             "progressive_alternative_strategy",
             "progressive_alternative_depth_policy",
+            "progressive_cross_session_pack_rows",
+            "progressive_cross_session_pack_mode",
             "progressive_verification_fidelity",
             "cost_per_commit_handoff",
         } | set(getattr(self, "EXTERNAL_POLICY_EXTENSIONS", ()))
@@ -491,6 +533,23 @@ class ExternalDraftAdapterMixin:
                             "multilane_draft_cap": self.external_policy.get(
                                 "progressive_multilane_draft_cap"
                             ),
+                            "cross_session_apt_pack_rows": (
+                                self.external_policy.get(
+                                    "progressive_cross_session_pack_rows"
+                                )
+                            ),
+                            "cross_session_ast_pack_rows": (
+                                self.external_policy.get(
+                                    "progressive_cross_session_pack_rows"
+                                )
+                            ),
+                            "cross_session_apt_pack_mode": self.external_policy.get(
+                                "progressive_cross_session_pack_mode"
+                            ),
+                            "cross_session_ast_pack_mode": self.external_policy.get(
+                                "progressive_cross_session_pack_mode"
+                            ),
+                            "deprecated_cross_session_apt_alias": True,
                             "algorithm": self._progressive_external_binding[
                                 "algorithm"
                             ],
@@ -571,6 +630,12 @@ class ExternalDraftAdapterMixin:
                     "progressive_alternative_depth_policy": self.external_policy.get(
                         "progressive_alternative_depth_policy", "full"
                     ),
+                    "progressive_cross_session_pack_rows": self.external_policy.get(
+                        "progressive_cross_session_pack_rows"
+                    ),
+                    "progressive_cross_session_pack_mode": self.external_policy.get(
+                        "progressive_cross_session_pack_mode"
+                    ),
                     "progressive_verification_fidelity": progressive_fidelity,
                     **(
                         {
@@ -616,6 +681,8 @@ class ExternalDraftAdapterMixin:
                 self.external_policy["cost_per_commit_handoff"],
             )
         if self.external_policy.get("progressive_verification_tile") is not None:
+            if "continuation_pool" in self.external_policy:
+                kwargs.setdefault("continuation_pool_ast_bridge", True)
             kwargs.setdefault(
                 "progressive_verification_tile",
                 self.external_policy["progressive_verification_tile"],
@@ -639,6 +706,14 @@ class ExternalDraftAdapterMixin:
                 self.external_policy.get(
                     "progressive_alternative_depth_policy", "full"
                 ),
+            )
+            kwargs.setdefault(
+                "progressive_cross_session_pack_rows",
+                self.external_policy.get("progressive_cross_session_pack_rows"),
+            )
+            kwargs.setdefault(
+                "progressive_cross_session_pack_mode",
+                self.external_policy.get("progressive_cross_session_pack_mode"),
             )
             kwargs.setdefault(
                 "progressive_verification_fidelity",

@@ -50,6 +50,12 @@ def test_preflight_receipt_is_bound_to_git_runtime_tests_and_harness(tmp_path):
     )
     assert receipt["passed"] and receipt["schema"] == qualify.PREFLIGHT_SCHEMA
     assert receipt["returncode"] == receipt["guard_returncode"] == 0
+    assert receipt["execution_environment"] == qualify.PREFLIGHT_CPU_ENV
+    assert receipt["import_guard_parallelism"] == 1
+    assert set(receipt["phase_timings_seconds"]) == {
+        "snapshot_before", "ordinary_tests", "import_guards", "snapshot_after", "total"
+    }
+    assert all(value >= 0 for value in receipt["phase_timings_seconds"].values())
     assert receipt["test_command"] != receipt["guard_test_command"]
     evidence = qualify.validate_preflight_receipt(
         path, identity["runtime"], identity_fn=lambda: identity
@@ -86,6 +92,7 @@ def test_preflight_wires_available_owned_tensorfold_sources(tmp_path, monkeypatc
     assert all(
         env["MLX2_TEST_TENSORFOLD_OWNED_SOURCE"] == str(tensorfold)
         and env["MLX2_TEST_TENSORFOLD_OWNED_MLX_LM_SOURCE"] == str(mlx_lm)
+        and env["MLX2_PREFLIGHT_CPU_ONLY"] == "1"
         for env in calls
     )
 
@@ -275,7 +282,12 @@ def test_preflight_delta_reruns_only_impacted_modules_and_validates(tmp_path):
     guards = set(qualify.PREFLIGHT_IMPORT_GUARD_MODULES)
     assert ran == [delta["test_command"], delta["guard_test_command"]]
     assert ran[0][1:3] == ["-m", "pytest"]
-    assert ran[0][3:] == [m for m in delta["impacted"] if m not in guards]
+    assert ran[0][3:5] == list(qualify.PREFLIGHT_DURATION_ARGS)
+    assert ran[0][5:] == [m for m in delta["impacted"] if m not in guards]
+    assert delta["execution_environment"] == qualify.PREFLIGHT_CPU_ENV
+    assert set(delta["phase_timings_seconds"]) == {
+        "ordinary_tests", "import_guards", "total"
+    }
     assert set(ran[1]) & guards == set(delta["impacted"]) & guards != set()
     evidence = qualify.validate_preflight_receipt(
         delta_path, _BOUND["runtime"], identity_fn=lambda: _BOUND, tree_fn=lambda: current
@@ -698,7 +710,8 @@ def test_preflight_guard_manifest_partitions_the_test_tree():
     guards = qualify.PREFLIGHT_IMPORT_GUARD_MODULES
     assert guards and len(guards) == len(set(guards))
     assert ordinary[1:3] == ["-m", "pytest"]
-    assert ordinary[3:] == [f"--ignore={module}" for module in guards]
+    assert ordinary[3:5] == list(qualify.PREFLIGHT_DURATION_ARGS)
+    assert ordinary[5:] == [f"--ignore={module}" for module in guards]
     assert guarded[1:] == ["scripts/qualify_serving.py", "--run-import-guards", *guards]
     assert all((ROOT / module).is_file() for module in guards)
     assert "tests/test_qualify_serving_receipts.py" not in guards
@@ -1722,17 +1735,19 @@ def test_long_context_checks_record_reply_evidence():
     assert '[r.get("mlx2", r) for r in shared]' not in source
 
 
-def test_import_guards_run_one_module_per_interpreter(monkeypatch):
+def test_import_guards_run_one_module_per_interpreter(monkeypatch, capsys):
     # Guard modules poison imports at module level, some only mlx and some
     # every mlx2 import; sharing one interpreter made them fail each other
     # (16 collection errors on 2026-10-01).  The guard command runs each alone.
-    ordinary, guarded = qualify.preflight_test_commands()
+    _ordinary, guarded = qualify.preflight_test_commands()
     assert guarded[1:3] == ["scripts/qualify_serving.py", "--run-import-guards"]
     assert guarded[3:] == list(qualify.PREFLIGHT_IMPORT_GUARD_MODULES)
     calls = []
 
-    def fake_run(cmd, cwd=None):
+    def fake_run(cmd, cwd=None, env=None, check=None):
         calls.append(cmd)
+        assert env["MLX2_PREFLIGHT_CPU_ONLY"] == "1"
+        assert check is False
         return SimpleNamespace(returncode=1 if cmd[-1].endswith("b.py") else 0)
 
     monkeypatch.setattr(qualify, "PREFLIGHT_IMPORT_GUARD_MODULES", ("tests/a.py", "tests/b.py"))
@@ -1740,6 +1755,10 @@ def test_import_guards_run_one_module_per_interpreter(monkeypatch):
     assert qualify.run_import_guards(["tests/a.py", "tests/b.py"]) == 1
     assert [c[-1] for c in calls] == ["tests/a.py", "tests/b.py"]
     assert all("--noconftest" in c and c.count("tests/a.py") + c.count("tests/b.py") == 1 for c in calls)
+    assert all(arg in calls[0] for arg in qualify.PREFLIGHT_DURATION_ARGS)
+    timings = qualify._import_guard_timings(capsys.readouterr().out)
+    assert [row["module"] for row in timings] == ["tests/a.py", "tests/b.py"]
+    assert [row["returncode"] for row in timings] == [0, 1]
     calls.clear()
     assert qualify.run_import_guards(["tests/a.py"]) == 0
     assert qualify.run_import_guards(["tests/unlisted.py"]) == 2

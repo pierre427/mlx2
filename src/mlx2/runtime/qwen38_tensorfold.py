@@ -90,6 +90,20 @@ def gdn_backend_stats() -> dict:
     return stats()
 
 
+def glue_backend_stats() -> dict:
+    """Served-spelling state of the vendored mlp_act/gdn_post kernels.
+
+    ``exp`` is the probed spelling (None until first use), ``parity`` the
+    once-per-process value-sweep verdict ("exact", a refusal, or
+    "unchecked"), and ``fallback_calls`` how many calls ran the served eager
+    op because the kernel was refused.
+    """
+
+    from .tensorfold_qwen38 import lane_fuse, lane_glue
+
+    return {**lane_glue.stats(), "fused": lane_fuse.consumer_stats()}
+
+
 def _validate(root=None):
     validate_source(root)
 
@@ -443,5 +457,6 @@ __all__ = [
     "forward",
     "forward_many",
     "gdn_backend_stats",
+    "glue_backend_stats",
     "prepare_validated_source",
 ]

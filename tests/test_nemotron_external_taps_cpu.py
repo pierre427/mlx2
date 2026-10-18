@@ -9,7 +9,7 @@ import pytest
 mx.set_default_device(mx.cpu)
 
 from mlx2.runtime.models.cache import ArraysCache, KVCache
-from mlx2.runtime.models.nemotron_h import Model, ModelArgs
+from mlx2.runtime.models.nemotron_h import Model, ModelArgs, NemotronMambaCache
 
 
 def tiny_model():
@@ -68,7 +68,11 @@ def test_compact_cache_mapping_and_postlayer_taps_match_independent_layer_walk()
     model = tiny_model()
     tokens = mx.array([[1, 2, 3]])
     caches = model.make_cache()
-    assert [type(c) for c in caches] == [ArraysCache, KVCache, ArraysCache]
+    assert [type(c) for c in caches] == [
+        NemotronMambaCache,
+        KVCache,
+        NemotronMambaCache,
+    ]
     x = model.backbone.embeddings(tokens)
     masks = {
         "*": create_attention_mask(x, caches[1]),

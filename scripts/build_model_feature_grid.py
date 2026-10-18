@@ -2,6 +2,14 @@
 
 This is a static source inventory. It never imports mlx2 or loads a model.
 Unrecorded evidence means unreviewed, not unsupported or safe to enable.
+
+Dimensions: model family, ``checkpoint`` and feature/flag, plus the mlx2
+commit each decision was established on (``source_revision``).  A
+``checkpoint`` of ``*`` is a family-level decision (what the adapter
+declares); evidence from running a model names the exact checkpoint it ran,
+``<artifact name>@<fingerprint>`` (Pierre, 2026-10-17: checkpoint and commit
+are dimensions of every test and qualification record).  A row that claims
+``qualified=yes`` or ``observed_used=yes`` without both is refused.
 """
 
 from __future__ import annotations
@@ -83,6 +91,30 @@ def environment_flags() -> set[str]:
     return flags
 
 
+FAMILY = "*"
+UNRECORDED = {"", "not_recorded", "unreviewed"}
+
+
+def validate_decisions(rows) -> dict:
+    """Index reviewed rows by (model, checkpoint, scope, feature); refuse
+    duplicates and strong claims without their checkpoint and commit."""
+    overrides = {}
+    for row in rows:
+        checkpoint = (row.get("checkpoint") or "").strip()
+        if not checkpoint:
+            raise ValueError(f"decision without a checkpoint (use {FAMILY!r} for family level): {row['model']} {row['feature_or_flag']}")
+        key = (row["model"], checkpoint, row["scope"], row["feature_or_flag"])
+        if key in overrides:
+            raise ValueError(f"duplicate reviewed decision: {key}")
+        strong = row["qualified"] == "yes" or row["observed_used"] == "yes"
+        if strong and checkpoint == FAMILY:
+            raise ValueError(f"qualified/observed decision must name its checkpoint: {key}")
+        if strong and row.get("source_revision", "").strip() in UNRECORDED:
+            raise ValueError(f"qualified/observed decision must name its mlx2 commit: {key}")
+        overrides[key] = row
+    return overrides
+
+
 def main() -> None:
     models = [
         f"{model_type}:{variant}"
@@ -96,14 +128,9 @@ def main() -> None:
     )
     with DECISIONS.open(newline="") as handle:
         decisions = list(csv.DictReader(handle, delimiter="\t"))
-    overrides = {}
-    for row in decisions:
-        key = (row["model"], row["scope"], row["feature_or_flag"])
-        if key in overrides:
-            raise ValueError(f"duplicate reviewed decision: {key}")
-        overrides[key] = row
+    overrides = validate_decisions(decisions)
     columns = (
-        "model", "scope", "feature_or_flag", "implemented", "qualified",
+        "model", "checkpoint", "scope", "feature_or_flag", "implemented", "qualified",
         "selected", "observed_used", "decision", "reason", "evidence",
         "source_revision", "artifact_profile",
     )
@@ -112,15 +139,24 @@ def main() -> None:
         writer = csv.DictWriter(handle, fieldnames=columns, delimiter="\t", lineterminator="\n")
         writer.writeheader()
         for model in models:
-            for scope, flag in flags:
-                key = (model, scope, flag)
-                row = dict.fromkeys(columns, "not_recorded")
-                row.update({"model": model, "scope": scope, "feature_or_flag": flag,
-                            "implemented": "unreviewed", "qualified": "unreviewed",
-                            "selected": "unreviewed", "observed_used": "unreviewed",
-                            "decision": "review_needed"})
-                row.update(overrides.pop(key, {}))
-                writer.writerow(row)
+            # Family-level cells for every switch, then each reviewed exact
+            # checkpoint of this family with its own rows.
+            checkpoints = [FAMILY] + sorted({
+                key[1] for key in overrides if key[0] == model and key[1] != FAMILY
+            })
+            for checkpoint in checkpoints:
+                for scope, flag in flags:
+                    key = (model, checkpoint, scope, flag)
+                    if checkpoint != FAMILY and key not in overrides:
+                        continue
+                    row = dict.fromkeys(columns, "not_recorded")
+                    row.update({"model": model, "checkpoint": checkpoint, "scope": scope,
+                                "feature_or_flag": flag,
+                                "implemented": "unreviewed", "qualified": "unreviewed",
+                                "selected": "unreviewed", "observed_used": "unreviewed",
+                                "decision": "review_needed"})
+                    row.update(overrides.pop(key, {}))
+                    writer.writerow(row)
     if overrides:
         raise ValueError(f"reviewed decisions absent from inventory: {sorted(overrides)}")
     print(f"{OUT}: {len(models)} model variants x {len(flags)} switches = {len(models) * len(flags)} review cells; {len(decisions)} reviewed")

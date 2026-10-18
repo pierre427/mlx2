@@ -233,16 +233,24 @@ def _replace_once(source: str, old: str, new: str) -> str:
     return source.replace(old, new)
 
 
-def _variant_sources() -> dict[str, tuple[str, list[str], list[str]]]:
+def _variant_source(name: str) -> tuple[str, list[str], list[str]]:
+    # mlx2 modification (2026-10-17): built from lane_glue's served-spelling
+    # source (lane_glue.served_source), not its fixed metal::exp text.
     from . import lane_glue
 
-    post = _replace_once(lane_glue._GDN_POST, "float(Z[m * NV * DV + hv * DV + d])", "float(Z[m * ZS + hv * DV + d])")
-    act = _replace_once(lane_glue._MLP_ACT, "GATE[e]", "GATE[e + int(m) * N]")    # rows of 2N
-    act = _replace_once(act, "UP[e]", "UP[e + int(m) * N + N]")
-    return {
-        "gdn_post": (post, ["Y", "Z", "NW", "eps", "dims"], ["OUT", "XS"]),
-        "mlp_act": (act, ["GATE", "UP", "dims"], ["HOUT", "XS"]),
-    }
+    if name == "gdn_post":
+        post = _replace_once(lane_glue.served_source("gdn_post"), "float(Z[m * NV * DV + hv * DV + d])",
+                             "float(Z[m * ZS + hv * DV + d])")
+        return post, ["Y", "Z", "NW", "eps", "dims"], ["OUT", "XS"]
+    if name == "mlp_act":
+        act = _replace_once(lane_glue.served_source("mlp_act"), "GATE[e]", "GATE[e + int(m) * N]")  # rows of 2N
+        act = _replace_once(act, "UP[e]", "UP[e + int(m) * N + N]")
+        return act, ["GATE", "UP", "dims"], ["HOUT", "XS"]
+    raise KeyError(name)
+
+
+def _variant_sources() -> dict[str, tuple[str, list[str], list[str]]]:
+    return {name: _variant_source(name) for name in ("gdn_post", "mlp_act")}
 
 
 def sources() -> dict[str, str]:
@@ -252,14 +260,64 @@ def sources() -> dict[str, str]:
 
 
 def _kernel(name: str) -> Any:
-    hit = _variants.get(name)
+    from . import lane_glue
+
+    key = f"{name}:{lane_glue.served_spelling(name)}"
+    hit = _variants.get(key)
     if hit is None:
-        source, inputs, outputs = _variant_sources()[name]
+        source, inputs, outputs = _variant_source(name)
         digest = hashlib.sha256(source.encode()).hexdigest()[:16]
         kernel = mx.fast.metal_kernel(name=f"lane_fuse_{name}_{digest}", input_names=inputs, output_names=outputs,
                                       source=source)
-        hit = _variants[name] = (source, kernel)
+        hit = _variants[key] = (source, kernel)
     return hit[1]
+
+
+_FALLBACK_CALLS = {"mlp_act": 0, "gdn_post": 0}
+
+
+def _parity(name: str) -> str | None:
+    """The stacked-input variant against the served eager op on lane_glue's value sweep."""
+
+    from . import lane_glue
+
+    args, want = lane_glue.parity_case(name)
+    if name == "mlp_act":
+        gate, up = args
+        have = _mlp_act_kernel(mx.concatenate([gate, up], axis=-1))
+    else:
+        y, z, weight, eps = args
+        rows, nv = int(y.shape[1]), int(y.shape[2])
+        zba = mx.concatenate([z, mx.zeros((1, rows, 2 * nv), dtype=z.dtype)], axis=-1)   # [z | b | a]
+        have = _gdn_post_kernel(y, zba, weight, eps)
+    if not lane_glue._bits_equal(have, want):
+        return f"lane_fuse.{name}: kernel differs from the served eager op on the value sweep"
+    return None
+
+
+def refusal(name: str) -> str | None:
+    """Why the stacked ``mlp_act``/``gdn_post`` may not stand in for the served op, or None."""
+
+    from . import lane_glue
+
+    reason = lane_glue.refusal(name)
+    if reason is not None:
+        return reason
+    return lane_glue.checked_parity(("lane_fuse", name, lane_glue.served_spelling(name)), lambda: _parity(name))
+
+
+def consumer_stats() -> dict[str, Any]:
+    """Parity verdict and eager-fallback count of the stacked consumer kernels."""
+
+    from . import lane_glue
+
+    out: dict[str, Any] = {}
+    for name in ("mlp_act", "gdn_post"):
+        spelling = lane_glue.stats()[name]["exp"]
+        verdict = lane_glue._PARITY.get(("lane_fuse", name, spelling), "unchecked")
+        out[name] = {"exp": spelling, "parity": "exact" if verdict is None else verdict,
+                     "fallback_calls": _FALLBACK_CALLS[name]}
+    return out
 
 
 _consts: dict[Any, mx.array] = {}
@@ -284,6 +342,16 @@ def gdn_post(y: mx.array, zba: mx.array, weight: mx.array, eps: float) -> mx.arr
 
     from . import lane_glue
 
+    if refusal("gdn_post") is not None:
+        _FALLBACK_CALLS["gdn_post"] += 1
+        nv, dv = int(y.shape[2]), int(y.shape[3])
+        return lane_glue.gdn_post_reference(y, zba[..., :nv * dv], weight, eps)
+    return _gdn_post_kernel(y, zba, weight, eps)
+
+
+def _gdn_post_kernel(y: mx.array, zba: mx.array, weight: mx.array, eps: float) -> mx.array:
+    from . import lane_glue
+
     _, W, nv, dv = (int(s) for s in y.shape)
     zs = int(zba.shape[-1])
     MP = 16 * ((W + 15) // 16)
@@ -298,6 +366,16 @@ def gdn_post(y: mx.array, zba: mx.array, weight: mx.array, eps: float) -> mx.arr
 def mlp_act(gu: mx.array) -> mx.array:
     """``lane_glue.mlp_act`` on ``mlp_gate_up``'s [gate | up] rows: SiLU(gate) * up, (..., N)."""
 
+    from . import lane_glue
+
+    if refusal("mlp_act") is not None:
+        _FALLBACK_CALLS["mlp_act"] += 1
+        N = int(gu.shape[-1]) // 2
+        return lane_glue.mlp_act_reference(gu[..., :N], gu[..., N:])
+    return _mlp_act_kernel(gu)
+
+
+def _mlp_act_kernel(gu: mx.array) -> mx.array:
     from . import lane_glue
 
     N2 = int(gu.shape[-1])
@@ -351,5 +429,5 @@ def warm(model: Any, *, rows: tuple[int, ...] = (1, 17, 33)) -> int:
     return len(seen)
 
 
-__all__ = ["GROUPS", "attn_kv", "auto_build", "build", "clear", "enabled", "gdn_in", "gdn_post", "kinds",
-           "mlp_act", "mlp_gate_up", "separate_rows", "sources", "stats", "warm"]
+__all__ = ["GROUPS", "attn_kv", "auto_build", "build", "clear", "consumer_stats", "enabled", "gdn_in", "gdn_post",
+           "kinds", "mlp_act", "mlp_gate_up", "refusal", "separate_rows", "sources", "stats", "warm"]

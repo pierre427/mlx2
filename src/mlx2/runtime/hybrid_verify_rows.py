@@ -108,9 +108,20 @@ class HybridVerifyRows:
                 _recurrent(cache) or _supported_kv(cache)
                 for cache in layer
             ):
+                details = [
+                    {
+                        "type": f"{type(cache).__module__}.{type(cache).__qualname__}",
+                        "fingerprint": cache_operations(
+                            cache, capability="hybrid verify diagnostic"
+                        ).fingerprint,
+                        "recurrent": _recurrent(cache),
+                        "supported_kv": _supported_kv(cache),
+                    }
+                    for cache in layer
+                ]
                 raise HybridVerifyUnsupported(
                     "hybrid verify needs ArraysCache, plain KVCache, or explicitly "
-                    "declared exact KV transaction layers"
+                    f"declared exact KV transaction layers; rows={details!r}"
                 )
             for cache in layer:
                 if _recurrent(cache):

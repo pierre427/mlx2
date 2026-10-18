@@ -210,6 +210,7 @@ def tiny_flash_next():
     import mlx.core as mx
 
     from mlx2.runtime.models.qwen4_exp import Model, ModelArgs
+    from mlx2.seeded_fixtures import legacy_conv_init
 
     mx.random.seed(43)
     text = dict(
@@ -225,7 +226,8 @@ def tiny_flash_next():
         indexer_compress_ratio=2, mtp_num_hidden_layers=1,
         rope_parameters={"type": "default", "rope_theta": 10000, "partial_rotary_factor": 0.25},
     )
-    model = Model(ModelArgs(model_type="qwen4_exp", text_config=text))
+    with legacy_conv_init():  # seeded weights independent of the MLX build
+        model = Model(ModelArgs(model_type="qwen4_exp", text_config=text))
     model.eval()
     mx.eval(model.parameters())
     return model

@@ -998,3 +998,154 @@ def test_native_decision_on_final_token_is_not_a_handoff(monkeypatch):
         assert evidence["decision"]["reason"] == "cost_per_committed_token"
         assert evidence["handoff_triggered"] is False
     assert run.leftover_states == {}
+
+
+def _reversible(**settings):
+    return _state(
+        reversible=True,
+        reprobe_tokens=4,
+        reprobe_max_tokens=16,
+        **{"settle_rounds": 0, **settings},
+    )
+
+
+def _park(state, width=1):
+    _observe(state, "ordinary", 100, width=width)
+    _observe(state, "ordinary", 100, width=width)
+    _observe(state, "speculative", 150, width=width)
+    _observe(state, "speculative", 150, width=width)
+    return _observe(state, "speculative", 150, width=width)
+
+
+def test_reversible_session_parks_instead_of_terminal_handoff():
+    state = _reversible()
+    event = _park(state)
+    assert event["event"] == "park"
+    assert event["speculative_to_ordinary_cost_ratio"] == pytest.approx(1.5)
+    assert state.speculation_paused
+    assert not state.handed_off
+    assert not state.needs_ordinary_probe(1)
+    receipt = state.receipt()
+    assert receipt["one_way"] is False
+    assert receipt["decision_reached"] is False
+    assert receipt["reversible"]["state"] == "parked"
+    assert receipt["reversible"]["parks"] == 1
+
+
+def test_parked_session_reprobes_and_reengages_when_speculation_wins():
+    state = _reversible()
+    _park(state)
+    for _ in range(3):
+        assert _observe(state, "ordinary", 100) is None
+    event = _observe(state, "ordinary", 100)
+    assert event["event"] == "reprobe"
+    assert not state.speculation_paused
+    # The first probe round pays the deferred draft catch-up and is excluded.
+    assert _observe(state, "speculative", 10_000, committed=2) is None
+    # A two-token speculative round at 120 ns beats 100 ns per ordinary token.
+    assert _observe(state, "speculative", 120, committed=2) is None
+    event = _observe(state, "speculative", 120, committed=2)
+    assert event["event"] == "reengage"
+    assert event["speculative_to_ordinary_cost_ratio"] == pytest.approx(0.6)
+    assert not state.speculation_paused
+    receipt = state.receipt()["reversible"]
+    assert receipt["state"] == "speculating"
+    assert receipt["reengagements"] == 1
+    assert receipt["reprobe_after_tokens"] == 4
+    # Re-engaged evidence starts from the winning probe; a sustained renewed
+    # loss outweighs it and parks again (after any stale-baseline refresh).
+    events = []
+    for _ in range(16):
+        if state.needs_ordinary_probe(1):
+            _observe(state, "ordinary", 100)
+            continue
+        event = _observe(state, "speculative", 300)
+        if event is not None:
+            events.append(event["event"])
+            break
+    assert events == ["park"]
+    assert state.receipt()["reversible"]["parks"] == 2
+
+
+def test_failed_reprobe_reparks_with_doubled_capped_wait():
+    state = _reversible()
+    _park(state)
+    waits = []
+    for _ in range(4):
+        while not (event := _observe(state, "ordinary", 100)):
+            pass
+        assert event["event"] == "reprobe"
+        _observe(state, "speculative", 300)  # catch-up round, excluded
+        _observe(state, "speculative", 300)
+        event = _observe(state, "speculative", 300)
+        assert event["event"] == "repark"
+        assert state.speculation_paused
+        waits.append(event["reprobe_after_tokens"])
+    assert waits == [8, 16, 16, 16]
+    assert state.receipt()["reversible"]["failed_reprobes"] == 4
+
+
+def test_reversible_near_tie_does_not_reengage():
+    # Re-engaging needs the same margin that parks: hysteresis, no flapping.
+    state = _reversible()
+    _park(state)
+    while not _observe(state, "ordinary", 100):
+        pass
+    _observe(state, "speculative", 99)  # catch-up round, excluded
+    _observe(state, "speculative", 99)
+    assert _observe(state, "speculative", 99)["event"] == "repark"
+
+
+def test_paused_session_ignores_peer_forced_speculative_rounds():
+    state = _reversible()
+    _park(state)
+    assert _observe(state, "speculative", 10, committed=5) is None
+    assert state.speculation_paused
+
+
+def test_reversible_compares_session_wait_across_cohort_widths():
+    state = _reversible()
+    _observe(state, "ordinary", 100, width=1)
+    _observe(state, "ordinary", 100, width=4)
+    _observe(state, "speculative", 150, width=4)
+    _observe(state, "speculative", 150, width=2)
+    assert _observe(state, "speculative", 150, width=4)["event"] == "park"
+
+
+def test_reversible_settings_validate_reprobe_bounds():
+    with pytest.raises(ValueError, match="reprobe_max_tokens"):
+        CostPerCommitHandoffSettings(
+            enabled=True, reversible=True, reprobe_tokens=64, reprobe_max_tokens=32
+        )
+    with pytest.raises(ValueError, match="reversible must be boolean"):
+        CostPerCommitHandoffSettings(enabled=True, reversible=1)
+    settings = CostPerCommitHandoffSettings.from_value(
+        {"reversible": True, "deferred_context_cap": 64}
+    )
+    assert settings.as_dict()["reversible"] is True
+    assert settings.as_dict()["deferred_context_cap"] == 64
+
+
+def test_reversible_settle_rounds_exclude_warmup_of_each_kind():
+    state = _state(reversible=True, settle_rounds=1)
+    # First ordinary round after an APCv2 restore pays the lazy restore.
+    _observe(state, "ordinary", 10_000)
+    _observe(state, "ordinary", 100)
+    assert state.needs_ordinary_probe(1)
+    _observe(state, "ordinary", 100)
+    # First speculative round ingests the prompt into the draft plane.
+    assert _observe(state, "speculative", 50_000, committed=8) is None
+    _observe(state, "speculative", 90, committed=1)
+    assert _observe(state, "speculative", 90, committed=1) is None
+    assert not state.speculation_paused
+    assert state.receipt()["reversible"]["settle_skipped_rounds"] == 2
+
+
+def test_reversible_ordinary_baseline_is_a_median():
+    state = _reversible(ordinary_samples=3)
+    for elapsed in (100, 100, 9_000):
+        _observe(state, "ordinary", elapsed)
+    # A mean baseline (3067) would hide a 3x loss; the median (100) parks.
+    _observe(state, "speculative", 300)
+    _observe(state, "speculative", 300)
+    assert _observe(state, "speculative", 300)["event"] == "park"

@@ -45,9 +45,15 @@ Matches (same rounding sites):
 3. Squares: ``mx.square`` rounds each square to bf16; the kernel does too.
 4. SiLU: eager ``nn.silu`` is ``x * sigmoid(x)`` in bf16 with the MLX unary
    sigmoid ``1/(1+exp(|x|))`` and its reflection; the kernel uses the same
-   formula (``metal::exp``) and the same two bf16 rounding sites.  mlx2's
-   qualified decode kernel (``qwen4_fused_gdn.py``) uses the same fast-exp
-   form for this SiLU.
+   formula and the same two bf16 rounding sites, with the ``exp`` spelling
+   the installed MLX serves (``metal::precise::exp`` on MLX 0.32.4; the
+   source text keeps the donor's ``metal::exp``).  ``_PREWORK_SILU_GATE``
+   probes the kernel's own expression against the served ``nn.silu`` and
+   ``prefill_refusal`` checks the compiled kernels against the eager chain
+   once per process on a sweep of every bf16 value with magnitude in
+   [2**-6, 32].  Before 2026-10-17 the spelling was fixed to ``metal::exp``,
+   so on MLX 0.32.4 every conv output of -6.84375 (and the q/k norms of its
+   head) differed from the eager path while random-input gates passed.
 5. Norm weight convention: ``linear_attn.norm.weight`` is NOT in the
    ``sanitize`` zero-centred list, so no ``+1`` fold happens; both paths
    multiply by the stored gain as-is (``w * T(x * inv)``, the
@@ -96,8 +102,8 @@ the qualified 27B decode kernel (``qwen4_fused_gdn`` ``AGNES_NUMERICS``):
   (``L2 = 0``) with the epsilon corrected from ``1e-6`` to ``1e-6 / DK``.
 * the output gate is ``Qwen3NextRMSNormGated`` -> compiled
   ``_precise_swiglu``: ``bf16(fp32(rms_norm(y, w)) * (z * sigmoid(z)))``
-  with the runtime-compiled (``metal::exp``) sigmoid, instead of Qwen4's
-  precise sigmoid.
+  with the runtime-compiled fp32 ``nn.silu`` sigmoid (served spelling,
+  ``_SWISH_GATE``), instead of Qwen4's precise eager sigmoid.
 
 The recurrence stays the layer's own ``_gated_delta_update`` (the 27B's has
 no ``beta_input_dtype``).  The 27B wiring lives in ``qwen38_fused_gdn``.
@@ -138,6 +144,7 @@ from typing import Any, Optional, Sequence
 
 import mlx.core as mx
 
+from .served_exp import EXP_SPELLINGS, ServedExpGate, is_device_fault, respell
 from .qwen4_fused_gdn import (
     CONV_DIM,
     CONV_KERNEL,
@@ -346,16 +353,62 @@ NORM_GATES = ("sigmoid", "swish")
 _QWEN35_RMS_EPS = "1.0e-6f / float(DK)"
 
 
-def prefill_prework_source(numerics: str = "qwen4") -> str:
+#: The donor's conv SiLU (compiled ``nn.silu`` in the activation dtype) and
+#: the Qwen3.5 swish gate (compiled fp32 ``nn.silu``), each spelled
+#: ``metal::exp`` in the source text.  The kernels compile the spelling the
+#: served op uses on this MLX build (``ServedExpGate``).
+KERNEL_SILU_EXP = "metal::exp"
+_PREWORK_SILU = """        T sy = T(1) / (T(1) + metal::exp(metal::abs(conv)));
+        const T act = conv * ((conv < T(0)) ? sy : T(1) - sy);
+"""
+_SWISH_SIGMOID = "float sy = 1.0f / (1.0f + metal::exp(metal::abs(zv)));"
+_SWISH_PRODUCT = "float sig = zv * (zv < 0.0f ? sy : 1.0f - sy);"
+
+
+def _served_silu(x):
+    import mlx.nn as nn
+
+    return nn.silu(x)
+
+
+_PREWORK_SILU_GATE = ServedExpGate(
+    "qwen4_gdn_prefill_prework_silu",
+    served_name="compiled nn.silu",
+    served=_served_silu,
+    body="        const T conv = x;\n" + _PREWORK_SILU + "        y = act;",
+)
+_SWISH_GATE = ServedExpGate(
+    "qwen35_gdn_prefill_swish_gate",
+    served_name="compiled fp32 nn.silu",
+    served=_served_silu,
+    body=f"        float zv = float(x);\n        {_SWISH_SIGMOID}\n        {_SWISH_PRODUCT}\n"
+    "        y = sig;",
+)
+
+
+def _check_spelling(silu_exp: str) -> None:
+    if silu_exp not in EXP_SPELLINGS:
+        raise ValueError(f"unknown exp spelling {silu_exp!r}")
+
+
+def prefill_prework_source(numerics: str = "qwen4", silu_exp: str = KERNEL_SILU_EXP) -> str:
     """The verify prework with the row count read at run time.
 
     ``numerics="qwen4"`` is the L2 variant Flash-Next qualified (unchanged).
     ``numerics="qwen35"`` is the donor's RMS branch (``L2 = 0``) with the
-    Qwen3.5 epsilon; the template ``L2`` selects the branch.
+    Qwen3.5 epsilon; the template ``L2`` selects the branch.  ``silu_exp``
+    spells the conv SiLU's ``exp`` (the kernels pass the served spelling).
     """
     if numerics not in PREWORK_NUMERICS:
         raise ValueError(f"unsupported GDN prework numerics {numerics!r}")
+    _check_spelling(silu_exp)
     source = _VERIFY_PREWORK_SOURCE
+    if _PREWORK_SILU not in source:
+        raise RuntimeError("GDN prework source changed: conv SiLU missing")
+    if silu_exp != KERNEL_SILU_EXP:
+        source = source.replace(
+            _PREWORK_SILU, respell(_PREWORK_SILU, KERNEL_SILU_EXP, silu_exp)
+        )
     substitutions = [
         ("uint(NKEEP - S)", "uint(NKEEP) - S_rt"),
         ("S < NKEEP", "S_rt < uint(NKEEP)"),
@@ -375,15 +428,18 @@ def prefill_prework_source(numerics: str = "qwen4") -> str:
     return "    const uint S_rt = uint(s_len);\n" + source
 
 
-def prefill_norm_gate_source(gate: str = "sigmoid") -> str:
+def prefill_norm_gate_source(gate: str = "sigmoid", silu_exp: str = KERNEL_SILU_EXP) -> str:
     """The decode norm-gate addressed by (row, head) instead of head only.
 
     ``gate="swish"`` replaces the precise sigmoid gate with the Qwen3.5
-    ``zv * sigmoid_fast(zv)`` gate, the form the qualified 27B decode kernel
-    uses for the compiled ``_precise_swiglu``.
+    ``zv * sigmoid(zv)`` gate, the form the qualified 27B decode kernel uses
+    for the compiled ``_precise_swiglu``, its ``exp`` spelled ``silu_exp``.
+    The Qwen4 ``sigmoid`` gate stands in for eager ``mx.sigmoid`` and stays
+    precise (``silu_exp`` does not apply to it).
     """
     if gate not in NORM_GATES:
         raise ValueError(f"unsupported GDN output gate {gate!r}")
+    _check_spelling(silu_exp)
     old = "uint base = head * uint(DV) + lane * 4;"
     if old not in _DECODE_NORM_GATE_SOURCE:
         raise RuntimeError("GDN norm-gate source changed")
@@ -396,12 +452,11 @@ def prefill_norm_gate_source(gate: str = "sigmoid") -> str:
         for old, new in (
             (
                 "float sy = 1.0f / (1.0f + metal::precise::exp(metal::abs(zv)));",
-                "float sy = 1.0f / (1.0f + metal::exp(metal::abs(zv)));",
+                _SWISH_SIGMOID
+                if silu_exp == KERNEL_SILU_EXP
+                else respell(_SWISH_SIGMOID, KERNEL_SILU_EXP, silu_exp),
             ),
-            (
-                "float sig = zv < 0.0f ? sy : 1.0f - sy;",
-                "float sig = zv * (zv < 0.0f ? sy : 1.0f - sy);",
-            ),
+            ("float sig = zv < 0.0f ? sy : 1.0f - sy;", _SWISH_PRODUCT),
         ):
             if old not in source:
                 raise RuntimeError(f"GDN norm-gate source changed: {old!r} missing")
@@ -412,6 +467,8 @@ def prefill_norm_gate_source(gate: str = "sigmoid") -> str:
 _KERNELS: dict = {}
 
 # Kernel names per variant; the Flash-Next names are the historical ones.
+# Each compiled name also carries its SiLU spelling: MLX caches libraries by
+# name, so two spellings must never share one.
 _PREWORK_NAMES = {
     "qwen4": "mlx2_qwen4_gdn_prefill_prework",
     "qwen35": "mlx2_qwen35_gdn_prefill_prework",
@@ -422,26 +479,159 @@ _NORM_GATE_NAMES = {
 }
 
 
-def _kernels(numerics: str = "qwen4", gate: str = "sigmoid"):
-    key = (numerics, gate)
+def _suffix(spelling: str) -> str:
+    return "_precise" if "precise" in spelling else "_fast"
+
+
+def served_spellings(gate: str = "sigmoid") -> tuple[Optional[str], Optional[str]]:
+    """``(prework SiLU, norm-gate SiLU)`` spellings the served ops use (Metal).
+
+    The Qwen4 ``sigmoid`` gate has no SiLU, so its second entry is the
+    source spelling, which that gate never reads.
+    """
+    prework = _PREWORK_SILU_GATE.spelling(mx.bfloat16)
+    norm = _SWISH_GATE.spelling(mx.float32) if gate == "swish" else KERNEL_SILU_EXP
+    return prework, norm
+
+
+def _build(numerics: str, gate: str, prework_exp: str, norm_exp: str):
+    key = (numerics, gate, prework_exp, norm_exp)
     if key not in _KERNELS:
         _KERNELS[key] = (
             mx.fast.metal_kernel(
-                name=_PREWORK_NAMES[numerics],
+                name=_PREWORK_NAMES[numerics] + _suffix(prework_exp),
                 input_names=["qkv", "conv_state", "conv_w", "q_scale", "k_scale", "s_len"],
                 output_names=["q_out", "k_out", "v_out", "conv_out"],
-                source=prefill_prework_source(numerics),
+                source=prefill_prework_source(numerics, prework_exp),
                 ensure_row_contiguous=True,
             ),
             mx.fast.metal_kernel(
-                name=_NORM_GATE_NAMES[gate],
+                name=_NORM_GATE_NAMES[gate] + (_suffix(norm_exp) if gate == "swish" else ""),
                 input_names=["y", "z", "norm_w", "eps"],
                 output_names=["out"],
-                source=prefill_norm_gate_source(gate),
+                source=prefill_norm_gate_source(gate, norm_exp),
                 ensure_row_contiguous=True,
             ),
         )
     return _KERNELS[key]
+
+
+def _kernels(numerics: str = "qwen4", gate: str = "sigmoid"):
+    """The prework and norm-gate kernels compiled with the served spellings.
+
+    Raises when no spelling reproduces a served op; callers check
+    ``prefill_refusal`` first and fall back to the eager path.
+    """
+    prework_exp, norm_exp = served_spellings(gate)
+    if prework_exp is None:
+        raise RuntimeError(_PREWORK_SILU_GATE.adaptation_refusal(mx.bfloat16))
+    if norm_exp is None:
+        raise RuntimeError(_SWISH_GATE.adaptation_refusal(mx.float32))
+    return _build(numerics, gate, prework_exp, norm_exp)
+
+
+# -- eager-parity canary -------------------------------------------------------
+# The kernels claim the eager prefill chain's bits (semantics audit above).  A
+# random draw almost never reaches the inputs where the two exp spellings round
+# apart (one bf16 conv output, -6.84375, and ~1% of fp32 swish gates), so the
+# check below runs the compiled kernels once per process and spelling on conv
+# outputs and gates covering every bf16 value with magnitude in [2**-6, 32]
+# and compares them with the eager ops bit for bit.
+_PARITY: dict = {}
+
+
+def _sweep(rows: int, width: int, seed: int):
+    import numpy as np
+
+    encodings = np.arange(1 << 16, dtype=np.uint32).astype(np.uint16)
+    widened = (encodings.astype(np.uint32) << 16).view(np.float32)
+    keep = np.isfinite(widened) & (np.abs(widened) >= 2.0 ** -6) & (np.abs(widened) <= 32.0)
+    grid = mx.array(encodings[keep]).view(mx.bfloat16)
+    from .served_exp import covering_rows
+
+    return covering_rows(grid, rows, width, seed)[None]
+
+
+def _same(a, b) -> bool:
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    width = mx.uint16 if a.dtype.size == 2 else mx.uint32
+    return bool(mx.all(a.view(width) == b.view(width)).item())
+
+
+def eager_parity(numerics: str, gate: str, prework_exp: str, norm_exp: str) -> Optional[str]:
+    """Compiled prework and norm-gate vs the eager chain on the bf16 sweep.
+
+    Prework (identity last conv tap, so each conv output is its qkv value)
+    vs ``nn.silu(conv1d(.))`` plus the numerics' q/k normalization; norm gate
+    (z swept) vs ``RMSNormGated``/``Qwen3NextRMSNormGated``.  ``None`` when
+    every element matches, else the first differing output.
+    """
+    import mlx.nn as nn
+
+    from .gated_delta import normalize_gdn_qk
+    from .qwen3_next import _precise_swiglu
+
+    prework, norm_gate = _build(numerics, gate, prework_exp, norm_exp)
+    hk, hv, dk, dv = NUM_KEY_HEADS, NUM_VALUE_HEADS, KEY_HEAD_DIM, VALUE_HEAD_DIM
+    rows = 2
+    qkv = _sweep(rows, CONV_DIM, 9500)
+    weight = mx.zeros((CONV_DIM, CONV_KERNEL, 1), dtype=mx.bfloat16)
+    weight[:, CONV_KERNEL - 1, 0] = 1
+    q, k, v, _ = qwen4_gdn_prefill_prework(qkv, None, weight, numerics=numerics, _kernel=prework)
+    state = mx.zeros((1, NKEEP, CONV_DIM), dtype=mx.bfloat16)
+    conv = nn.silu(mx.conv1d(mx.concatenate([state, qkv], axis=1), weight, groups=CONV_DIM))
+    eq, ek, ev = mx.split(conv, [hk * dk, 2 * hk * dk], -1)
+    eq, ek = eq.reshape(1, rows, hk, dk), ek.reshape(1, rows, hk, dk)
+    if numerics == "qwen4":
+        eq = eq * mx.rsqrt(mx.sum(mx.square(eq), axis=-1, keepdims=True) + 1e-06)
+        ek = ek * mx.rsqrt(mx.sum(mx.square(ek), axis=-1, keepdims=True) + 1e-06)
+        eq = eq * dk ** (-0.5)
+    else:
+        eq, ek = normalize_gdn_qk(eq, ek)
+    eps = 1e-6
+    y = mx.random.normal((1, rows, hv, dv), key=mx.random.key(9600)).astype(mx.bfloat16)
+    z = _sweep(rows, hv * dv, 9700)
+    w = (1 + 0.1 * mx.random.normal((dv,), key=mx.random.key(9800))).astype(mx.bfloat16)
+    out = qwen4_gdn_prefill_norm_gate(y, z, w, eps, gate=gate, _kernel=norm_gate)
+    zr = z.reshape(1, rows, hv, dv)
+    if gate == "sigmoid":
+        x = mx.fast.rms_norm(y, w, eps).astype(mx.float32)
+        ref = (x * mx.sigmoid(zr.astype(mx.float32))).astype(mx.bfloat16)
+    else:
+        ref = _precise_swiglu(y, zr, mx.fast.rms_norm(y, w, eps))
+    checks = (
+        ("v", v, ev.reshape(1, rows, hv, dv)),
+        ("q", q, eq),
+        ("k", k, ek),
+        ("norm_gate", out, ref.reshape(1, rows, hv * dv)),
+    )
+    for name, have, want in checks:
+        if not _same(have, want):
+            return f"fused GDN prefill {name} differs from the eager path ({numerics}/{gate})"
+    return None
+
+
+def prefill_refusal(numerics: str = "qwen4", gate: str = "sigmoid") -> Optional[str]:
+    """Why the fused prefill kernels may not stand in for the eager chain.
+
+    Callers check ``fused_gdn_runtime_supported()`` first (Metal).  Cached
+    per process, contract and spelling; a device fault is raised, not cached.
+    """
+    prework_exp, norm_exp = served_spellings(gate)
+    if prework_exp is None:
+        return _PREWORK_SILU_GATE.adaptation_refusal(mx.bfloat16)
+    if norm_exp is None:
+        return _SWISH_GATE.adaptation_refusal(mx.float32)
+    key = (numerics, gate, prework_exp, norm_exp)
+    if key not in _PARITY:
+        try:
+            _PARITY[key] = eager_parity(numerics, gate, prework_exp, norm_exp)
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            if is_device_fault(exc):
+                raise
+            _PARITY[key] = f"fused GDN prefill parity probe failed: {type(exc).__name__}"
+    return _PARITY[key]
 
 
 def qwen4_gdn_prefill_prework(
@@ -454,6 +644,7 @@ def qwen4_gdn_prefill_prework(
     key_head_dim: int = KEY_HEAD_DIM,
     value_head_dim: int = VALUE_HEAD_DIM,
     numerics: str = "qwen4",
+    _kernel=None,
 ):
     """``(q, k, v, next_conv_state)``; callers must run admission first.
 
@@ -468,7 +659,11 @@ def qwen4_gdn_prefill_prework(
     conv_dim = int(qkv.shape[2])
     if conv_state is None:
         conv_state = mx.zeros((1, NKEEP, conv_dim), dtype=qkv.dtype)
-    prework, _ = _kernels(numerics, "sigmoid" if numerics == "qwen4" else "swish")
+    prework = (
+        _kernel
+        if _kernel is not None
+        else _kernels(numerics, "sigmoid" if numerics == "qwen4" else "swish")[0]
+    )
     hk, hv, dk, dv = num_key_heads, num_value_heads, key_head_dim, value_head_dim
     if numerics == "qwen4":
         # q_l2 * k.shape[-1] ** -0.5 (qwen4_exp._normalize_qk); k unscaled.
@@ -520,6 +715,7 @@ def qwen4_gdn_prefill_norm_gate(
     num_value_heads: int = NUM_VALUE_HEADS,
     value_head_dim: int = VALUE_HEAD_DIM,
     gate: str = "sigmoid",
+    _kernel=None,
 ) -> mx.array:
     """``RMSNormGated(y, z)`` flattened to ``(1, S, HV*DV)``.
 
@@ -529,7 +725,11 @@ def qwen4_gdn_prefill_norm_gate(
         raise ValueError(f"unsupported GDN output gate {gate!r}")
     length = int(y.shape[1])
     hv, dv = num_value_heads, value_head_dim
-    _, norm_gate = _kernels("qwen4" if gate == "sigmoid" else "qwen35", gate)
+    norm_gate = (
+        _kernel
+        if _kernel is not None
+        else _kernels("qwen4" if gate == "sigmoid" else "qwen35", gate)[1]
+    )
     return norm_gate(
         inputs=[y, z, norm_weight, mx.array(eps, dtype=mx.float32)],
         template=[("T", y.dtype), ("HV", hv), ("DV", dv)],

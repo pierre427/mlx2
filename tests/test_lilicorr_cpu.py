@@ -255,3 +255,71 @@ def test_ordered_alternatives_share_one_lattice_and_keep_b1_greedy():
     )[0]
     assert alternatives[0] == tokens[0]
     assert alternatives == [[0, 0, 0], [1, 1, 1]]
+
+
+def _ordered_alternative_model():
+    from types import SimpleNamespace
+
+    model = LiLiCorrDraftModel(config())
+    embedding = nn.Embedding(9, 4)
+    model.bind(SimpleNamespace(model=SimpleNamespace(embed_tokens=embedding)))
+    model._hidden = lambda inputs, h, c: mx.zeros((1, 4, 4))
+    model._logits = lambda h: mx.array(
+        [[[10.0, 9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * 3]
+    )
+    model.lilicorr = lambda *a: mx.array(
+        [[[[3.0, 2.0], [3.0, 2.0]],
+          [[4.0, 0.0], [0.0, 4.0]],
+          [[4.0, 0.0], [0.0, 4.0]]]]
+    )
+    return model
+
+
+def test_ordered_alternatives_admit_branch_safe_min_tokens_processor():
+    # The ladder's forced answer length adds the min-tokens processor; the
+    # engine admits it into AST rounds, so the drafter must too (2026-10-17:
+    # the refusal crashed the generation worker on the first ladder request).
+    from mlx2.serving import minimum_tokens_processor
+
+    model = _ordered_alternative_model()
+    processor = minimum_tokens_processor(mx, [8], prompt_tokens=1, minimum=64)
+    tokens, _laws = model.draft_distributions(
+        [2], mx.zeros((1, 0, 8)), model.make_cache(), 3, [object()], [0.0],
+        logits_processors=[[processor]], processor_histories=[[5]],
+    )
+    alternatives = model.ordered_alternative_proposals(
+        tokens, branch_count=2, strategy="distinct_root", shared_prefix_tokens=None
+    )[0]
+    assert alternatives[0] == tokens[0] and len(alternatives) == 2
+
+
+def test_ordered_alternatives_refuse_a_processor_without_the_branch_contract():
+    model = _ordered_alternative_model()
+
+    def stateful(tokens, logits):
+        return logits
+
+    stateful.probe = stateful
+    tokens, _laws = model.draft_distributions(
+        [2], mx.zeros((1, 0, 8)), model.make_cache(), 3, [object()], [0.0],
+        logits_processors=[[stateful]], processor_histories=[[5]],
+    )
+    with pytest.raises(ValueError, match="branch-safe"):
+        model.ordered_alternative_proposals(
+            tokens, branch_count=2, strategy="distinct_root", shared_prefix_tokens=None
+        )
+
+
+def test_engine_and_drafter_share_one_branch_safety_rule():
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.speculative_topology import processors_branch_safe
+    from mlx2.serving import minimum_tokens_processor
+    from types import SimpleNamespace
+
+    safe = minimum_tokens_processor(mx, [8], prompt_tokens=1, minimum=4)
+    unsafe = lambda tokens, logits: logits  # noqa: E731
+    for processors in ([], [safe], [unsafe], [safe, unsafe]):
+        lane = SimpleNamespace(processors=processors)
+        assert ExternalDraftBatchGenerator._progressive_processors_supported(lane) is (
+            processors_branch_safe(processors)
+        )

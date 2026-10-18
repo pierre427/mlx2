@@ -73,7 +73,7 @@ def pair(monkeypatch, *, target_tree_executor_provider=None):
     return target, draft, engine
 
 
-def assert_state(actual, expected):
+def assert_state(actual, expected, *, atol=2e-5):
     for got, want in zip(actual, expected):
         if isinstance(got, ArraysCache):
             assert not got.speculating and not got._rollbacks
@@ -88,7 +88,7 @@ def assert_state(actual, expected):
             if not isinstance(got, ArraysCache):
                 a, b = a[..., : got.offset, :], b[..., : want.offset, :]
             np.testing.assert_allclose(
-                np.asarray(a), np.asarray(b), atol=2e-5, rtol=2e-5
+                np.asarray(a), np.asarray(b), atol=atol, rtol=2e-5
             )
 
 

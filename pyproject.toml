@@ -40,6 +40,8 @@ observability = [
 multimodal = [
     "pillow>=10",
     "opencv-python>=4.10",
+    # Nemotron 3.5 Super VL image preprocessing (antialiased bicubic resize).
+    "torch>=2.4",
     "mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@67599f2e8ec31bf35cbb7b02794114f20844f0bb",
 ]
 radio = ["mlx>=0.32", "numpy>=2", "pillow>=10"]
@@ -71,4 +73,5 @@ testpaths = ["tests"]
 "mlx2" = ["route_dispatch.json"]
 "mlx2.adapters" = ["assets/*.npz", "assets/*.json", "vlm_contracts/*.json"]
 "mlx2.runtime" = ["data/*.json"]
+"mlx2.runtime.row_exact" = ["tables/*.json"]
 "mlx2.runtime.models" = ["exl3_kernels/*.metal", "exl3_kernels/LICENSE"]

@@ -96,10 +96,14 @@ policy = model._batch_row_exact_q4
 from mlx2.runtime.models import row_exact_qmv
 
 def exact_linear(module, value, call=None):
+    # Host stand-in for the Metal kernel: one-row calls over every leading row
+    # (the route now hands the canary-gated ops a [1, R, K] strip).
     fn = module if call is None else call
-    return mx.concatenate([fn(value[i:i+1]) for i in range(value.shape[0])]), "kernel"
+    flat = value.reshape(-1, 1, value.shape[-1])
+    y = mx.concatenate([fn(flat[i:i+1]) for i in range(flat.shape[0])])
+    return y.reshape(*value.shape[:-1], y.shape[-1]), "kernel"
 
-def exact_linears(modules, value):
+def exact_linears(modules, value, per_member=False):
     return tuple(exact_linear(module, value)[0] for module in modules), "group_kernel"
 
 row_exact_qmv.quantized_linear = exact_linear
@@ -305,3 +309,23 @@ def test_selected_numerics_contract_is_geometry_bound_and_fail_closed():
     }
     with pytest.raises(ValueError, match="live model geometry"):
         adapter.execution_numerics_contract()
+
+
+def test_group_with_one_declined_member_refuses(monkeypatch):
+    # 2026-10-17 codex round 3: an ungrouped launch used to report one route
+    # for the whole group; a declined member must refuse it.
+    import mlx.core as mx
+    import pytest
+
+    from mlx2.runtime.models.cohere2_moe import BatchRowExactQ4
+    from mlx2.runtime.row_exact import ops
+
+    def fake(modules, x, *, stage="quantized"):
+        return tuple(x for _ in modules), ["kernel", "per_row_canary"]
+
+    monkeypatch.setattr(ops, "quantized_linears_route", fake)
+    executor = BatchRowExactQ4()
+    with pytest.raises(RuntimeError, match="declined"):
+        executor.linears([object(), object()], mx.zeros((3, 8)))
+    assert executor.counts["kernel"] == 1 and executor.counts["per_row_canary"] == 1
+    assert executor.counts["refusals"] == 1

@@ -18,6 +18,26 @@ A sustained loss against an older baseline does not decide: it discards both
 windows and asks for a fresh ordinary probe at the current context.  A
 speculator that keeps winning pays no extra probes.
 
+``reversible`` selects a per-session park instead of the one-way decision.
+A parked session keeps its draft context exact (the executor runs target-only
+rounds and defers the draft append), keeps refreshing its ordinary baseline,
+and after ``reprobe_tokens`` parked tokens runs ``speculative_samples``
+speculative rounds.  If those beat the fresh ordinary cost by the same margin
+that parks it, speculation re-engages; otherwise the session re-parks with the
+wait doubled up to ``reprobe_max_tokens``.  With ``pipelined_park`` a parked
+executor overlaps each anchor-only round with the host read of the previous
+one, as the PLD plain-round pipeline does.
+
+Reversible evidence excludes one-time costs that are not the route's steady
+price: each session's first ``settle_rounds`` rounds of each kind (the first
+speculative round ingests the whole prompt into the draft plane; the first
+rounds after an APCv2 restore pay the lazy restore) and the first round of
+every re-probe (it consumes the deferred draft context).  The ordinary
+baseline is the median per-round cost, so one stalled round cannot set it.
+Reversible evidence compares the
+session's own wall time per committed token, whatever cohort width the round
+ran at, because that is what the session waits for.
+
 A decision is not a handoff.  ``decision_reached`` records the terminal
 policy decision; ``handoff_triggered`` is set only by the executor that
 actually moves the lane to ordinary decode (``mark_handoff_performed``).  A
@@ -57,6 +77,12 @@ class CostPerCommitHandoffSettings:
     loss_ratio: float = 0.97
     loss_decisions: int = 3
     window: int = 16
+    reversible: bool = False
+    reprobe_tokens: int = 32
+    reprobe_max_tokens: int = 512
+    deferred_context_cap: int = 256
+    settle_rounds: int = 1
+    pipelined_park: bool = True
 
     _KEYS = frozenset(
         {
@@ -66,23 +92,42 @@ class CostPerCommitHandoffSettings:
             "loss_ratio",
             "loss_decisions",
             "window",
+            "reversible",
+            "reprobe_tokens",
+            "reprobe_max_tokens",
+            "deferred_context_cap",
+            "settle_rounds",
+            "pipelined_park",
         }
     )
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
             raise ValueError("cost-per-commit handoff enabled must be boolean")
+        if type(self.reversible) is not bool:
+            raise ValueError("cost-per-commit reversible must be boolean")
+        if type(self.pipelined_park) is not bool:
+            raise ValueError("cost-per-commit pipelined_park must be boolean")
         for name in (
             "ordinary_samples",
             "speculative_samples",
             "loss_decisions",
             "window",
+            "reprobe_tokens",
+            "reprobe_max_tokens",
+            "deferred_context_cap",
         ):
             _positive_int(getattr(self, name), f"cost-per-commit {name}")
         _unit_interval(self.loss_ratio, "cost-per-commit loss_ratio")
         if self.window < max(self.ordinary_samples, self.speculative_samples):
             raise ValueError(
                 "cost-per-commit window must cover both sample minima"
+            )
+        if type(self.settle_rounds) is not int or self.settle_rounds < 0:
+            raise ValueError("cost-per-commit settle_rounds must be a non-negative integer")
+        if self.reprobe_max_tokens < self.reprobe_tokens:
+            raise ValueError(
+                "cost-per-commit reprobe_max_tokens must be at least reprobe_tokens"
             )
 
     @classmethod
@@ -112,7 +157,7 @@ class CostPerCommitHandoffSettings:
         return cls(**{"enabled": True, **dict(value)})
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "enabled": self.enabled,
             "ordinary_samples": self.ordinary_samples,
             "speculative_samples": self.speculative_samples,
@@ -120,10 +165,24 @@ class CostPerCommitHandoffSettings:
             "loss_decisions": self.loss_decisions,
             "window": self.window,
         }
+        if not self.reversible:
+            # The terminal (pre-reversible) form stays byte-identical, so
+            # existing receipts and qualification records keep matching.
+            return out
+        return {
+            **out,
+            "reversible": True,
+            "reprobe_tokens": self.reprobe_tokens,
+            "reprobe_max_tokens": self.reprobe_max_tokens,
+            "deferred_context_cap": self.deferred_context_cap,
+            "settle_rounds": self.settle_rounds,
+            "pipelined_park": self.pipelined_park,
+        }
 
 
 class CostPerCommitLaneState:
-    """One request's one-way handoff evidence and terminal decision."""
+    """One request's handoff evidence: a terminal decision, or (reversible)
+    its own park / re-probe / re-engage cycle."""
 
     def __init__(
         self,
@@ -163,6 +222,34 @@ class CostPerCommitLaneState:
         self._invalid_samples = 0
         self._observations = 0
         self._valid_samples = 0
+        # Reversible park state (unused by the one-way controller).
+        self._parked = False
+        self._probing = False
+        self._parked_tokens = 0
+        self._reprobe_after = settings.reprobe_tokens
+        self._probe: deque[tuple[int, int]] = deque(maxlen=settings.window)
+        self._parks = 0
+        self._reengagements = 0
+        self._reprobes = 0
+        self._failed_reprobes = 0
+        self._events: deque[dict[str, Any]] = deque(maxlen=16)
+        self._settled = {"ordinary": 0, "speculative": 0}
+        self._settle_skipped = 0
+        self._probe_catchup_pending = False
+
+    def _baseline(self, samples) -> float | None:
+        """Ordinary cost: the median round under reversible evidence."""
+        if not self.settings.reversible:
+            return self._cost(samples)
+        per_token = sorted(elapsed / count for elapsed, count in samples if count > 0)
+        if not per_token:
+            return None
+        middle = len(per_token) // 2
+        return (
+            per_token[middle]
+            if len(per_token) % 2
+            else (per_token[middle - 1] + per_token[middle]) / 2
+        )
 
     @staticmethod
     def _cost(samples: deque[tuple[int, int]]) -> float | None:
@@ -173,10 +260,19 @@ class CostPerCommitLaneState:
             else sum(elapsed for elapsed, _count in samples) / committed
         )
 
+    def _width_key(self, execution_width: int) -> int:
+        # Reversible evidence is the session's own wait per committed token.
+        return 0 if self.settings.reversible else int(execution_width)
+
+    @property
+    def speculation_paused(self) -> bool:
+        """Parked and not re-probing: the executor runs target-only rounds."""
+        return self._parked and not self._probing and not self._cancelled
+
     def needs_ordinary_probe(self, execution_width: int) -> bool:
-        if self._decision is not None or self._cancelled:
+        if self._decision is not None or self._cancelled or self._parked:
             return False
-        samples = self._ordinary.get(int(execution_width), ())
+        samples = self._ordinary.get(self._width_key(execution_width), ())
         return len(samples) < self.settings.ordinary_samples
 
     @property
@@ -231,7 +327,18 @@ class CostPerCommitLaneState:
         ):
             self._invalid_samples += 1
             return None
+        if (
+            self.settings.reversible
+            and self._settled[kind] < self.settings.settle_rounds
+        ):
+            # One-time warm-up rounds are not the route's steady price.
+            self._settled[kind] += 1
+            self._settle_skipped += 1
+            return None
         self._valid_samples += 1
+        execution_width = self._width_key(execution_width)
+        if self._parked:
+            return self._observe_parked(kind, elapsed_ns, committed_tokens)
         table = self._ordinary if kind == "ordinary" else self._speculative
         samples = table.setdefault(
             execution_width, deque(maxlen=self.settings.window)
@@ -247,7 +354,7 @@ class CostPerCommitLaneState:
         self._speculative_since_ordinary[execution_width] = since
         if len(samples) < self.settings.speculative_samples:
             return None
-        ordinary_cost = self._cost(ordinary)
+        ordinary_cost = self._baseline(ordinary)
         speculative_cost = self._cost(samples)
         if ordinary_cost is None or speculative_cost is None:
             return None
@@ -268,6 +375,8 @@ class CostPerCommitLaneState:
             self._speculative_since_ordinary[execution_width] = 0
             self._ordinary_refreshes += 1
             return None
+        if self.settings.reversible:
+            return self._park(execution_width, ordinary_cost, speculative_cost, streak)
         self._decision = {
             "reason": "cost_per_committed_token",
             "one_way": True,
@@ -280,6 +389,94 @@ class CostPerCommitLaneState:
             "speculative_samples_since_ordinary": since,
         }
         return dict(self._decision)
+
+    def _event(self, event: str, **fields: Any) -> dict[str, Any]:
+        record = {"event": event, "observation": self._observations, **fields}
+        self._events.append(record)
+        return dict(record)
+
+    def _park(self, width, ordinary_cost, speculative_cost, streak):
+        self._parked = True
+        self._probing = False
+        self._parked_tokens = 0
+        self._parks += 1
+        self._loss_streak[width] = 0
+        self._speculative.pop(width, None)
+        self._speculative_since_ordinary[width] = 0
+        return self._event(
+            "park",
+            reason="cost_per_committed_token",
+            ordinary_ns_per_committed_token=ordinary_cost,
+            speculative_ns_per_committed_token=speculative_cost,
+            speculative_to_ordinary_cost_ratio=speculative_cost / ordinary_cost,
+            loss_decisions=streak,
+            reprobe_after_tokens=self._reprobe_after,
+        )
+
+    def _observe_parked(self, kind, elapsed_ns, committed_tokens):
+        width = 0
+        if kind == "ordinary":
+            ordinary = self._ordinary.setdefault(
+                width, deque(maxlen=self.settings.window)
+            )
+            ordinary.append((elapsed_ns, committed_tokens))
+            if self._probing:
+                return None
+            self._parked_tokens += committed_tokens
+            if (
+                self._parked_tokens >= self._reprobe_after
+                and len(ordinary) >= self.settings.ordinary_samples
+            ):
+                self._probing = True
+                self._probe.clear()
+                self._probe_catchup_pending = True
+                self._reprobes += 1
+                return self._event("reprobe", parked_tokens=self._parked_tokens)
+            return None
+        if not self._probing:
+            # A speculative round while paused (a cohort peer forced it) is
+            # not evidence for this session's re-probe.
+            return None
+        if self._probe_catchup_pending:
+            # The probe's first round consumes the deferred draft context.
+            self._probe_catchup_pending = False
+            self._settle_skipped += 1
+            return None
+        self._probe.append((elapsed_ns, committed_tokens))
+        if len(self._probe) < self.settings.speculative_samples:
+            return None
+        ordinary_cost = self._baseline(self._ordinary.get(width, ()))
+        probe_cost = self._cost(self._probe)
+        self._probing = False
+        if ordinary_cost is None or probe_cost is None:
+            return None
+        ratio = probe_cost / ordinary_cost
+        if probe_cost <= ordinary_cost * self.settings.loss_ratio:
+            self._parked = False
+            self._parked_tokens = 0
+            self._reprobe_after = self.settings.reprobe_tokens
+            self._reengagements += 1
+            self._speculative[width] = deque(self._probe, maxlen=self.settings.window)
+            self._speculative_since_ordinary[width] = 0
+            self._loss_streak[width] = 0
+            return self._event(
+                "reengage",
+                ordinary_ns_per_committed_token=ordinary_cost,
+                speculative_ns_per_committed_token=probe_cost,
+                speculative_to_ordinary_cost_ratio=ratio,
+            )
+        self._failed_reprobes += 1
+        self._parked_tokens = 0
+        self._reprobe_after = min(
+            2 * self._reprobe_after, self.settings.reprobe_max_tokens
+        )
+        return self._event(
+            "repark",
+            ordinary_ns_per_committed_token=ordinary_cost,
+            speculative_ns_per_committed_token=probe_cost,
+            speculative_to_ordinary_cost_ratio=ratio,
+            reprobe_after_tokens=self._reprobe_after,
+        )
 
     def receipt(self) -> dict[str, Any]:
         def costs(table):
@@ -301,8 +498,27 @@ class CostPerCommitLaneState:
             "observed_sampling": self._valid_samples > 0,
             "decision_reached": self._decision is not None,
             "handoff_triggered": self._handoff_performed,
-            "one_way": True,
+            "one_way": not self.settings.reversible,
             "scope": "request_lane",
+            "reversible": (
+                {
+                    "state": (
+                        "probing" if self._parked and self._probing
+                        else "parked" if self._parked
+                        else "speculating"
+                    ),
+                    "parks": self._parks,
+                    "reprobes": self._reprobes,
+                    "reengagements": self._reengagements,
+                    "failed_reprobes": self._failed_reprobes,
+                    "parked_tokens": self._parked_tokens,
+                    "settle_skipped_rounds": self._settle_skipped,
+                    "reprobe_after_tokens": self._reprobe_after,
+                    "events": [dict(event) for event in self._events],
+                }
+                if self.settings.reversible
+                else None
+            ),
             "settings": self.settings.as_dict(),
             "ordinary": costs(self._ordinary),
             "speculative": costs(self._speculative),

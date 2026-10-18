@@ -2318,6 +2318,14 @@ class ArraysCache(_BaseCache):
             return MAMBA_RECURRENT_OPERATIONS
         return RECURRENT_OPERATIONS
 
+    def _copy_provider_identity_to(self, target):
+        """Preserve adapter-owned state identity across row transformations."""
+
+        for name in ("apcv2_recurrent_kind", "apcv2_layer_index"):
+            if hasattr(self, name):
+                setattr(target, name, getattr(self, name))
+        return target
+
     def start_speculation(self, rollback_window: Optional[int] = None):
         self.speculating = True
         self._rollback_window = max(
@@ -3017,7 +3025,8 @@ class ArraysCache(_BaseCache):
         self._checkpoints = [list(l) for l in a_lanes] + [list(l) for l in b_lanes]
 
     def extract(self, idx):
-        cache = ArraysCache(len(self.cache))
+        cache = type(self)(len(self.cache))
+        self._copy_provider_identity_to(cache)
         cache.cache = [
             None if c is None else mx.contiguous(c[idx : idx + 1]) for c in self.cache
         ]
@@ -3107,6 +3116,16 @@ class ArraysCache(_BaseCache):
         n_state = len(caches[0].cache)
         B = len(caches)
         cache = cls(n_state)
+        for name in ("apcv2_recurrent_kind", "apcv2_layer_index"):
+            values = [
+                (hasattr(row, name), getattr(row, name, None)) for row in caches
+            ]
+            if len(set(values)) != 1:
+                raise ValueError(
+                    f"ArraysCache.merge provider identity {name} differs"
+                )
+            if values[0][0]:
+                setattr(cache, name, values[0][1])
         cache._adopt_empty_fill(caches)
         if all((c.empty() for c in caches)):
             host_left_padding = [0] * B

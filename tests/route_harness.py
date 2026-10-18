@@ -34,8 +34,11 @@ def tiny_qwen38_mtp(seed=7, vocab=128):
         mtp_num_hidden_layers=1, partial_rotary_factor=0.5,
         rope_parameters=None, max_position_embeddings=512,
     )
+    from mlx2.seeded_fixtures import legacy_conv_init
+
     mx.random.seed(seed)
-    model = TextModel(args)
+    with legacy_conv_init():
+        model = TextModel(args)
     model.eval()
     mx.eval(model.parameters())
     return model, vocab

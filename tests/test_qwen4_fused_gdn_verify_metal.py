@@ -245,3 +245,22 @@ def test_catchup_matches_stock(gpu, steps):
         for i, name in enumerate(("output", "conv", "state")):
             assert _eq(stock[i], out[i]), (name, steps, block)
         sc, ss, fc, fs = stock[1], stock[2], out[1], out[2]
+
+
+@pytest.mark.parametrize("state_dtype", [mx.float32, mx.float16])
+@pytest.mark.parametrize("kind", fused_verify.DECODE_PARITY_KINDS)
+@pytest.mark.parametrize("steps", [2, 3, 8, 17])
+def test_verify_kernels_reproduce_serial_fused_decode_on_a_silu_sweep(gpu, kind, steps, state_dtype):
+    """Each verify-family kernel equals ``steps`` one-token fused decode
+    launches, outputs and final state, on conv outputs covering every bf16
+    value with magnitude in [2**-6, 32] (``decode_parity_probe``).
+
+    The random draws above stay far from the bf16 inputs where the two SiLU
+    exp spellings round apart, which is how verify kernels compiled with
+    ``metal::exp`` passed here while the decode kernel served
+    ``metal::precise::exp`` (MLX 0.32.4; Flash-Next row-exact, 2026-10-17).
+    """
+    fused_verify.set_verify_max_steps(fused_verify.MAX_VERIFY_WIDTH_PROVEN)
+    verify_side, decode_side = fused_verify.decode_parity_probe(kind, state_dtype=state_dtype)(steps)
+    assert verify_side.size > 1, "a kernel of this kind was refused by its probe"
+    assert _eq(verify_side, decode_side), (kind, steps, state_dtype)

@@ -1,5 +1,6 @@
 """Real hybrid rollback/tap/RNG parity for seven proposals in 4+4 rows."""
 import copy
+import itertools
 
 import mlx.core as mx
 import numpy as np
@@ -365,16 +366,8 @@ def test_confidence_tree_trunk_and_lagged_latch_retopology():
         unique_target_rows=16,
     )
     second = latch.choose(2, 7, 4)
-    assert second.active_branches == 3
+    assert second.active_branches == 2
     assert second.completed_samples == 1
-    latch.observe(
-        branch_accepts=[3, 2, 1],
-        proposal_counts=[7, 7, 3],
-        selected_branch=1,
-        unique_target_rows=13,
-    )
-    third = latch.choose(2, 7, 4)
-    assert third.active_branches == 2
     latch.observe(
         branch_accepts=[3, 2],
         proposal_counts=[7, 7],
@@ -384,11 +377,202 @@ def test_confidence_tree_trunk_and_lagged_latch_retopology():
     parked = latch.choose(2, 7, 4)
     assert parked.active_branches == 1
     assert parked.reason == "parked_after_repeated_no_alternative_win"
+    assert latch.park_remaining == 2
+    latch.observe_primary_only(
+        decision_token=parked.decision_token,
+        session_count=1,
+    )
+    assert latch.park_remaining == 1
+    assert latch.snapshot()["primary_only_samples"] == 1
+    parked_again = latch.choose(2, 7, 4)
+    assert parked_again.active_branches == 1
+    latch.observe_primary_only(
+        decision_token=parked_again.decision_token,
+        session_count=1,
+    )
+    assert latch.park_remaining == 0
     # The fifth decision is a configured-width reprobe based only on the
     # already completed samples; it cannot see its own pending outcome.
     reprobe = latch.choose(2, 7, 4)
     assert reprobe.active_branches == 4
     assert reprobe.reprobe is True
+    latch.observe_many(
+        [
+            {
+                "branch_accepts": [3, 7, 1, 0],
+                "proposal_counts": [7, 7, 3, 3],
+                "selected_branch": 2,
+                "unique_target_rows": 16,
+                "outcome": "committed_conclusive",
+            }
+        ],
+        decision_token=reprobe.decision_token,
+    )
+    recovered = latch.choose(2, 7, 4)
+    assert recovered.active_branches == 2
+    assert latch.park_remaining == 0
+    assert latch.snapshot()["periodic_reprobes"] == 1
+    assert latch.snapshot()["accepted_token_uplift"] == 4
+
+
+def test_ast_no_uplift_without_incremental_cost_does_not_downshift():
+    latch = AdaptiveTopologyLatch(4, shrink_after=1)
+    decision = latch.choose(2, 7, 4)
+    latch.observe_many(
+        [
+            {
+                "branch_accepts": [3, 2, 1, 0],
+                "proposal_counts": [7, 7, 3, 3],
+                "selected_branch": 1,
+                "unique_target_rows": 4,
+                "outcome": "committed_conclusive",
+            }
+        ],
+        decision_token=decision.decision_token,
+    )
+    snapshot = latch.snapshot()
+    assert snapshot["active_branches"] == 4
+    assert snapshot["downshifts"] == 0
+    assert snapshot["avoidable_target_rows"] == 0
+
+
+def test_parked_ast_primary_commit_advances_sparse_audit_and_receipt():
+    batch, lane, _calls, _proposal = run_round(
+        4,
+        2,
+        proposal_count=7,
+        alternative_accept_branch=9,
+        alternative_strategy="confidence_tree",
+        alternative_depth_policy="confidence_tail",
+        confidence_features=[2.0, 1.0, 0.5, -2.0, -2.0, -2.0, -2.0],
+    )
+    try:
+        # The latch is per session: park only this request's latch.
+        latch = batch.progressive_topology_latch.session(lane.uid)
+        latch.active_branches = 1
+        latch.park_remaining = 2
+        before = latch.snapshot()["last_applied_token"]
+        batch._round([lane])
+        receipt = lane.ready[-1].speculative_receipt[
+            "progressive_verification"
+        ]["ordered_alternatives"]
+        observation = receipt["adaptive_latch"]["last_observation"]
+        assert receipt["last_active_branches"] == 1
+        assert receipt["last_primary_fallback_reason"] == "adaptive_utility_latch"
+        assert observation["outcome"] == "committed_primary_only"
+        assert observation["executed_alternative_branches"] == 0
+        assert observation["snapshot_after"]["last_applied_token"] == before + 1
+        assert observation["snapshot_after"]["primary_only_samples"] == 1
+        assert batch.scheduler_stats[
+            "external_progressive_ast_primary_only_rounds"
+        ] == 1
+        assert batch.scheduler_stats[
+            "external_progressive_ast_utility_downshift_sessions"
+        ] == 1
+    finally:
+        batch.close()
+
+
+def test_ast_branch_safe_minimum_processor_is_not_censored():
+    from types import SimpleNamespace
+
+    from mlx2.serving import minimum_tokens_processor
+
+    batch, lane, _calls, _proposal = run_round(
+        4,
+        2,
+        proposal_count=7,
+        alternative_accept_branch=9,
+        alternative_strategy="confidence_tree",
+        alternative_depth_policy="confidence_tail",
+        confidence_features=[2.0, 1.0, 0.5, -2.0, -2.0, -2.0, -2.0],
+    )
+    try:
+        lane.processors = [
+            minimum_tokens_processor(mx, [0], len(lane.history), 8)
+        ]
+        decision = SimpleNamespace(emitted=[1])
+        outcome = batch._topology_observation_outcome(
+            lane, decision, [2, 1, 0, 0], [7, 7, 3, 3], 1
+        )
+        assert outcome["outcome"] == "committed_conclusive"
+        assert "processor_limited" not in outcome["censor_reasons"]
+
+        lane.processors = [lambda _tokens, logits: logits]
+        outcome = batch._topology_observation_outcome(
+            lane, decision, [2, 1, 0, 0], [7, 7, 3, 3], 1
+        )
+        assert outcome["outcome"] == "committed_censored"
+        assert "processor_limited" in outcome["censor_reasons"]
+    finally:
+        batch.close()
+
+
+def test_ast_cohort_choice_consumes_one_lagged_decision_epoch():
+    latch = AdaptiveTopologyLatch(4, reprobe_interval=3)
+    decisions = latch.choose_many([1, 2, 1, 2], [7, 7, 7, 7], 4)
+    assert latch.decisions == 0
+    assert {decision.active_branches for decision in decisions} == {4}
+    assert [decision.trunk_tokens for decision in decisions] == [1, 2, 1, 2]
+    assert not any(decision.reprobe for decision in decisions)
+
+
+def test_ast_cohort_observation_is_order_independent_and_idempotent():
+    rows = [
+        {
+            "branch_accepts": [3, 2, 1, 0],
+            "proposal_counts": [7, 7, 3, 3],
+            "selected_branch": selected,
+            "unique_target_rows": 16 + selected,
+            "outcome": "committed_conclusive",
+        }
+        for selected in (1, 2, 1, 1)
+    ]
+    snapshots = []
+    for ordering in itertools.permutations(rows):
+        latch = AdaptiveTopologyLatch(4, shrink_after=1)
+        decisions = latch.choose_many([2] * 4, [7] * 4, 4)
+        token = decisions[0].decision_token
+        assert latch.observe_many(ordering, decision_token=token) is True
+        assert latch.observe_many(ordering, decision_token=token) is False
+        snapshots.append(latch.snapshot())
+    assert all(snapshot == snapshots[0] for snapshot in snapshots)
+    assert snapshots[0]["completed_samples"] == 1
+    assert snapshots[0]["completed_sessions"] == 4
+    assert snapshots[0]["alternative_wins"] == 1
+
+
+def test_ast_censored_cohort_cannot_shrink_and_out_of_order_token_fails():
+    latch = AdaptiveTopologyLatch(4, shrink_after=1)
+    decision = latch.choose(2, 7, 4)
+    latch.observe_many(
+        [
+            {
+                "branch_accepts": [3, -1, -1, -1],
+                "proposal_counts": [7, 7, 3, 3],
+                "selected_branch": 1,
+                "unique_target_rows": 4,
+                "outcome": "committed_censored",
+            }
+        ],
+        decision_token=decision.decision_token,
+    )
+    assert latch.active_branches == 4
+    assert latch.no_alternative_win == 0
+    assert latch.snapshot()["censored_sessions"] == 1
+    with pytest.raises(ValueError, match="stale or out of order"):
+        latch.observe_many(
+            [
+                {
+                    "branch_accepts": [3, 2, 1, 0],
+                    "proposal_counts": [7, 7, 3, 3],
+                    "selected_branch": 1,
+                    "unique_target_rows": 16,
+                    "outcome": "committed_conclusive",
+                }
+            ],
+            decision_token=3,
+        )
 
 
 def test_paired_continuations_short_terminal_round_uses_primary_chain():
@@ -581,6 +765,452 @@ def close_caches(left, right, *, atol=1e-6):
             )
 
 
+def run_cross_session_ast(
+    pack_rows=None,
+    *,
+    execute=True,
+    pack_mode=None,
+    force_full_alternative=True,
+    truncate_branch=False,
+):
+    mx.set_default_device(mx.cpu)
+    mx.random.seed(81)
+    args = tiny_model().args
+    model = SuperModel.__new__(SuperModel)
+    LanguageModel.__init__(model, args)
+    proposal_count = 7
+    draft = XPressDraftModel(XPressConfig(
+        hidden_size=8, intermediate_size=12, num_hidden_layers=1,
+        num_attention_heads=2, num_key_value_heads=1, head_dim=4,
+        vocab_size=16, mask_token_id=15, num_target_layers=5,
+        target_layer_ids=[0, 1, 4], block_size=proposal_count + 1,
+        layer_types=["full_attention"], xpress_rank=3,
+        xpress_mlp_hidden=5, xpress_num_passes=3,
+    )).bind(model)
+    prompts = [[1 + row, 2 + row, 3 + row, 4 + row] for row in range(4)]
+    exact_rows = []
+    for prompt in prompts:
+        cache = model.make_cache()
+        model(mx.array([prompt[:-1]]), cache)
+        token = prompt[-1]
+        exact = []
+        for _ in range(proposal_count):
+            token = int(mx.argmax(model(mx.array([[token]]), cache)[0, -1]).item())
+            exact.append(token)
+        exact_rows.append(exact)
+    primary_rows = [list(row) for row in exact_rows]
+    if pack_rows is not None:
+        for session, row in enumerate(primary_rows):
+            if (
+                pack_mode == "ordered_live_frontier"
+                and force_full_alternative
+                and session == 0
+            ):
+                continue
+            row[2] = (row[2] + session + 1) % args.vocab_size
+
+    primary_laws = []
+    for row in primary_rows:
+        laws = []
+        for token in row:
+            law = np.zeros(args.vocab_size, np.float64)
+            law[token] = 1.0
+            laws.append(law)
+        primary_laws.append(laws)
+    original = draft.draft_distributions
+    expected_anchors = [prompt[-1] for prompt in prompts]
+
+    def forced(anchors, hidden, caches, count, rngs, temps, **kwargs):
+        generated_tokens, generated_laws = original(
+            anchors, hidden, caches, count, rngs, temps, **kwargs
+        )
+        if anchors != expected_anchors:
+            return generated_tokens, generated_laws
+        draft.adaptive_confidence_features = [
+            (
+                [2.0, -1.0, -2.0, -2.0, -2.0, -2.0, -2.0]
+                if row % 2 == 0
+                else [2.0, 1.0, -1.0, -2.0, -2.0, -2.0, -2.0]
+            )
+            for row, _anchor in enumerate(anchors)
+        ]
+        return [list(row) for row in primary_rows], [
+            list(row) for row in primary_laws
+        ]
+
+    def alternatives(
+        primary_tokens, *, branch_count, strategy, shared_prefix_tokens
+    ):
+        assert strategy == "confidence_tree"
+        assert list(shared_prefix_tokens) == [1, 2, 1, 2]
+        result = []
+        for session, exact in enumerate(exact_rows):
+            second = list(exact)
+            if not force_full_alternative:
+                suffix_start = int(shared_prefix_tokens[session])
+                second[suffix_start] = (
+                    second[suffix_start] + session + 9
+                ) % args.vocab_size
+            branches = [list(primary_tokens[session]), second]
+            for branch in range(2, branch_count):
+                candidate = list(exact)
+                mutation = (
+                    int(shared_prefix_tokens[session])
+                    if not force_full_alternative
+                    else 2
+                )
+                candidate[mutation] = (
+                    candidate[mutation] + session + branch + 1
+                ) % args.vocab_size
+                branches.append(candidate)
+            if truncate_branch and session == 1:
+                # A processor-masked draft can end a branch at its shared
+                # prefix (no finite candidate past a forbidden token).
+                branches[1] = list(branches[1][: int(shared_prefix_tokens[session])])
+            result.append(branches)
+        return result
+
+    draft.draft_distributions = forced
+    draft.ordered_alternative_proposals = alternatives
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=draft,
+        binding="super-cross-session-ast-cpu",
+        num_draft=proposal_count,
+        completion_batch_size=4,
+        prefill_step_size=8,
+        progressive_verification_tile=4,
+        progressive_alternative_branches=4 if pack_rows is not None else 1,
+        progressive_alternative_strategy=(
+            "confidence_tree" if pack_rows is not None else "distinct_root"
+        ),
+        progressive_alternative_depth_policy=(
+            "confidence_tail" if pack_rows is not None else "full"
+        ),
+        progressive_cross_session_pack_rows=pack_rows,
+        progressive_cross_session_pack_mode=pack_mode,
+    )
+    uids = batch.insert(
+        prompts,
+        max_tokens=[16] * 4,
+        lane_rngs=[LaneRNG(1200 + row) for row in range(4)],
+        sampling_configs=[{"sampling_temp": 0}] * 4,
+    )
+    lanes = [batch.lanes[uid] for uid in uids]
+    for lane in lanes:
+        while lane.anchor is None:
+            batch._prefill(lane)
+    if execute:
+        batch._round(lanes)
+    return batch, lanes
+
+
+@pytest.mark.parametrize("pack_rows", [4, 8])
+def test_cross_session_ast_packs_four_private_sessions_and_matches_b1(pack_rows):
+    baseline_batch, baseline = run_cross_session_ast()
+    packed_batch, packed = run_cross_session_ast(pack_rows)
+    try:
+        for actual, expected in zip(packed, baseline, strict=True):
+            assert actual.history == expected.history
+            assert actual.anchor == expected.anchor
+            assert actual.generated == expected.generated
+            assert actual.accepted == expected.accepted
+            assert actual.rng.snapshot() == expected.rng.snapshot()
+            assert [item.token for item in actual.ready] == [
+                item.token for item in expected.ready
+            ]
+            close_caches(actual.cache, expected.cache)
+            alternatives = actual.ready[-1].speculative_receipt[
+                "progressive_verification"
+            ]["ordered_alternatives"]
+            assert alternatives["last_selected_branch"] == 2
+            assert alternatives["last_branch_accepts"] == [2, 7, 2, 2]
+            packing = alternatives["cross_session_ast_packing"]
+            assert packing["observed_used"] is True
+            assert packing["configured_pack_rows"] == pack_rows
+            assert packing["configured_mode"] is None
+            assert packing["mode"] == "eager_all_branches"
+            assert packing["last_pack_rows"] == pack_rows
+            expected_launches = 5 if pack_rows == 4 else 3
+            assert len(packing["last_packs"]) == expected_launches
+            for physical_pack in packing["last_packs"]:
+                assert set(physical_pack["session_slots"]) == {0, 1, 2, 3}
+                assert physical_pack["logical_rows"] <= pack_rows
+                assert (
+                    physical_pack["max_physical_width"]
+                    == physical_pack["logical_rows"]
+                )
+            scheduled = [
+                (session, branch, continued)
+                for launch in packing["last_packs"]
+                for session, branch, continued in zip(
+                    launch["session_slots"],
+                    launch["branch_numbers"],
+                    launch["continued"],
+                    strict=True,
+                )
+            ]
+            for session in range(4):
+                assert [
+                    continued
+                    for slot, branch, continued in scheduled
+                    if slot == session and branch == 3
+                ] == [False]
+                assert [
+                    continued
+                    for slot, branch, continued in scheduled
+                    if slot == session and branch == 2
+                ] == [False, True]
+            first_continuation = next(
+                index
+                for index, launch in enumerate(packing["last_packs"])
+                if any(launch["continued"])
+            )
+            assert all(
+                branch != 3
+                for launch in packing["last_packs"][first_continuation:]
+                for branch in launch["branch_numbers"]
+            )
+        stats = packed_batch.scheduler_stats
+        assert len({id(lane.cache) for lane in packed}) == 4
+        assert len({id(lane.rng) for lane in packed}) == 4
+        assert stats["external_progressive_cross_session_ast_rounds"] == 1
+        assert stats["external_progressive_cross_session_ast_sessions"] == 4
+        assert stats["external_progressive_cross_session_ast_packs"] == (
+            5 if pack_rows == 4 else 3
+        )
+        assert stats["external_progressive_verify_max_cohort_width"] == pack_rows
+        if pack_rows == 8:
+            assert stats["external_progressive_cross_session_ast_b8_launches"] > 0
+    finally:
+        baseline_batch.close()
+        packed_batch.close()
+
+
+def test_cross_session_ast_pack_failure_restores_all_four_sessions(monkeypatch):
+    batch, lanes = run_cross_session_ast(8, execute=False)
+    before = [copy.deepcopy(lane.__dict__) for lane in lanes]
+    before_stats = copy.deepcopy(batch.scheduler_stats)
+    before_latch = copy.deepcopy(batch.progressive_topology_latch.snapshot())
+    real_forward = batch.model.forward_with_taps
+
+    def fail_packed_suffix(inputs, *args, **kwargs):
+        if int(inputs.shape[0]) == 8:
+            raise RuntimeError("injected cross-session AST pack failure")
+        return real_forward(inputs, *args, **kwargs)
+
+    monkeypatch.setattr(batch.model, "forward_with_taps", fail_packed_suffix)
+    try:
+        with pytest.raises(RuntimeError, match="cross-session AST pack failure"):
+            batch._round(lanes)
+        assert not batch._open
+        for lane, expected in zip(lanes, before, strict=True):
+            assert lane.history == expected["history"]
+            assert lane.anchor == expected["anchor"]
+            assert lane.generated == expected["generated"]
+            assert lane.rng.snapshot() == expected["rng"].snapshot()
+            assert not lane.ready
+            close_caches(lane.cache, expected["cache"])
+            close_caches(lane.draft_cache, expected["draft_cache"])
+        ignored = {
+            "external_cow_snapshots",
+            "external_cow_fallbacks",
+            "recovery_checkpoint_captures",
+            "recovery_checkpoint_restores",
+        }
+        assert {
+            key: value
+            for key, value in batch.scheduler_stats.items()
+            if key not in ignored
+        } == {
+            key: value
+            for key, value in before_stats.items()
+            if key not in ignored
+        }
+        assert batch.progressive_topology_latch.snapshot() == before_latch
+    finally:
+        batch.close()
+
+
+@pytest.mark.parametrize("pack_rows", [4, 8])
+def test_cross_session_apt_live_frontier_retires_and_refills_without_parity_drift(
+    pack_rows,
+):
+    baseline_batch, baseline = run_cross_session_ast()
+    packed_batch, packed = run_cross_session_ast(
+        pack_rows,
+        pack_mode="ordered_live_frontier",
+    )
+    try:
+        for session_slot, (actual, expected) in enumerate(
+            zip(packed, baseline, strict=True)
+        ):
+            assert actual.history == expected.history
+            assert actual.anchor == expected.anchor
+            assert actual.generated == expected.generated
+            assert actual.rng.snapshot() == expected.rng.snapshot()
+            close_caches(actual.cache, expected.cache)
+            alternatives = actual.ready[-1].speculative_receipt[
+                "progressive_verification"
+            ]["ordered_alternatives"]
+            packing = alternatives["cross_session_ast_packing"]
+            assert alternatives["last_selected_branch"] == (
+                1 if session_slot == 0 else 2
+            )
+            assert alternatives["last_branch_accepts"][2:] == [-1, -1]
+            assert packing["configured_mode"] == "ordered_live_frontier"
+            assert packing["mode"] == "ordered_live_frontier"
+            frontier = packing["live_frontier"]
+            assert frontier["finished"] is True
+            assert frontier["sessions_retired"] == 4
+            assert frontier["rows_admitted"] == 7
+            assert frontier["branches_unvisited"] == 9
+            assert frontier["refills"] == 3
+            assert frontier["proposal_tokens_not_scheduled"] > 0
+            assert all(
+                launch["logical_rows"] <= min(4, pack_rows)
+                for launch in packing["last_packs"]
+            )
+            assert any(
+                any(launch["continued"])
+                and any(
+                    branch == 2 and not continued
+                    for branch, continued in zip(
+                        launch["branch_numbers"],
+                        launch["continued"],
+                        strict=True,
+                    )
+                )
+                for launch in packing["last_packs"]
+            )
+        assert (
+            packed_batch.scheduler_stats[
+                "external_progressive_apt_frontier_rows_admitted"
+            ]
+            == 7
+        )
+        assert (
+            packed_batch.scheduler_stats[
+                "external_progressive_apt_frontier_sessions_retired"
+            ]
+            == 4
+        )
+    finally:
+        baseline_batch.close()
+        packed_batch.close()
+
+
+def test_cross_session_apt_live_frontier_fault_restores_every_session(monkeypatch):
+    batch, lanes = run_cross_session_ast(
+        8,
+        execute=False,
+        pack_mode="ordered_live_frontier",
+    )
+    before = [copy.deepcopy(lane.__dict__) for lane in lanes]
+    before_stats = copy.deepcopy(batch.scheduler_stats)
+    before_latch = copy.deepcopy(batch.progressive_topology_latch.snapshot())
+    real_forward = batch.model.forward_with_taps
+    calls = 0
+
+    def fail_first_frontier_refill(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("injected live-frontier refill failure")
+        return real_forward(*args, **kwargs)
+
+    monkeypatch.setattr(batch.model, "forward_with_taps", fail_first_frontier_refill)
+    try:
+        with pytest.raises(RuntimeError, match="live-frontier refill failure"):
+            batch._round(lanes)
+        assert not batch._open
+        for lane, expected in zip(lanes, before, strict=True):
+            assert lane.history == expected["history"]
+            assert lane.anchor == expected["anchor"]
+            assert lane.generated == expected["generated"]
+            assert lane.rng.snapshot() == expected["rng"].snapshot()
+            assert not lane.ready
+            close_caches(lane.cache, expected["cache"])
+            close_caches(lane.draft_cache, expected["draft_cache"])
+        ignored = {
+            "external_cow_snapshots",
+            "external_cow_fallbacks",
+            "recovery_checkpoint_captures",
+            "recovery_checkpoint_restores",
+        }
+        assert {
+            key: value
+            for key, value in batch.scheduler_stats.items()
+            if key not in ignored
+        } == {
+            key: value
+            for key, value in before_stats.items()
+            if key not in ignored
+        }
+        assert batch.progressive_topology_latch.snapshot() == before_latch
+    finally:
+        batch.close()
+
+
+def test_cross_session_apt_live_frontier_no_full_preserves_b1_fallback():
+    eager_batch, eager = run_cross_session_ast(
+        8,
+        force_full_alternative=False,
+    )
+    live_batch, live = run_cross_session_ast(
+        8,
+        pack_mode="ordered_live_frontier",
+        force_full_alternative=False,
+    )
+    try:
+        for actual, expected in zip(live, eager, strict=True):
+            assert actual.history == expected.history
+            assert actual.anchor == expected.anchor
+            assert actual.generated == expected.generated
+            assert actual.rng.snapshot() == expected.rng.snapshot()
+            close_caches(actual.cache, expected.cache)
+            alternatives = actual.ready[-1].speculative_receipt[
+                "progressive_verification"
+            ]["ordered_alternatives"]
+            assert alternatives["last_selected_branch"] == 1
+            assert -1 not in alternatives["last_branch_accepts"]
+            frontier = alternatives["cross_session_apt_packing"]["live_frontier"]
+            assert frontier["branches_unvisited"] == 0
+            assert frontier["proposal_tokens_not_scheduled"] == 0
+    finally:
+        eager_batch.close()
+        live_batch.close()
+
+
+def test_cross_session_ast_postcommit_observation_failure_is_diagnostic(
+    monkeypatch,
+):
+    batch, lanes = run_cross_session_ast(4, execute=False)
+    before_latch = copy.deepcopy(batch.progressive_topology_latch.snapshot())
+
+    def fail_observation(*_args, **_kwargs):
+        raise RuntimeError("injected postcommit AST observation failure")
+
+    monkeypatch.setattr(
+        batch.progressive_topology_latch, "observe_many", fail_observation
+    )
+    try:
+        batch._round(lanes)
+        assert all(lane.ready for lane in lanes)
+        assert batch.progressive_topology_latch.snapshot() == before_latch
+        # Each session owns its latch, so each session's observation fails
+        # (and is counted) on its own.
+        assert (
+            batch.scheduler_stats[
+                "external_progressive_topology_observation_failures"
+            ]
+            == len(lanes)
+        )
+        assert "injected postcommit" in batch.last_topology_observation_error
+    finally:
+        batch.close()
+
+
 @pytest.mark.parametrize("reject_at", [None, *range(7)])
 def test_two_tiles_preserve_hybrid_state_rng_taps_and_ordinary_next_token(reject_at):
     fixed_batch, fixed, _, _ = run_round(None, reject_at)
@@ -734,3 +1364,149 @@ def test_nemotron_mamba_apcv2_segments_include_internal_checkpoint():
     finally:
         branch.close()
         frozen.close()
+
+
+def test_cross_session_ast_latch_is_per_session_with_mixed_widths():
+    """One session's latch never narrows (or widens) its packed peers."""
+    baseline_batch, baseline = run_cross_session_ast()
+    batch, lanes = run_cross_session_ast(4, execute=False)
+    latches = batch.progressive_topology_latch
+    # Session 1 has parked itself on its primary chain; session 2 runs the
+    # economical two-way check; sessions 0 and 3 keep all four branches.
+    parked = latches.session(lanes[1].uid)
+    parked.active_branches = 1
+    parked.park_remaining = 2
+    latches.session(lanes[2].uid).active_branches = 2
+    try:
+        batch._round(lanes)
+        widths = []
+        for actual, expected in zip(lanes, baseline, strict=True):
+            # Every session commits an exact prefix of its B1 continuation.
+            assert actual.history == expected.history[: len(actual.history)]
+            receipt = actual.ready[-1].speculative_receipt[
+                "progressive_verification"
+            ]["ordered_alternatives"]
+            widths.append(len(receipt["last_branch_accepts"]))
+            assert receipt["adaptive_latch"]["scope"] == "request_session"
+        assert widths == [4, 1, 2, 4]
+        primary_only = lanes[1].progressive_topology_latch_last_observation
+        assert primary_only["outcome"] == "committed_primary_only"
+        # The width-four sessions learned from their own rows only.
+        snapshot = latches.snapshot()
+        assert snapshot["active_branches_by_session"][str(lanes[1].uid)] == 1
+        assert latches.session(lanes[0].uid).active_branches == 4
+        assert latches.session(lanes[3].uid).active_branches == 4
+        assert latches.session(lanes[1].uid).primary_only_samples == 1
+        assert latches.session(lanes[0].uid).primary_only_samples == 0
+        assert (
+            batch.scheduler_stats["external_progressive_ast_mixed_width_rounds"] == 1
+        )
+    finally:
+        batch.close()
+        baseline_batch.close()
+
+
+def test_per_session_latch_released_with_its_request():
+    batch, lanes = run_cross_session_ast(4)
+    try:
+        latches = batch.progressive_topology_latch
+        assert latches.snapshot()["live_sessions"] == 4
+        batch.remove([lanes[0].uid])
+        assert latches.snapshot()["live_sessions"] == 3
+        assert latches.released_sessions == 1
+    finally:
+        batch.close()
+
+
+def _no_win(latch, decision):
+    latch.observe_many(
+        [
+            {
+                "branch_accepts": [3] + [1] * (decision.active_branches - 1),
+                "proposal_counts": [7] + [3] * (decision.active_branches - 1),
+                "selected_branch": 1,
+                "unique_target_rows": 4 + 3 * (decision.active_branches - 1),
+                "outcome": "committed_conclusive",
+            }
+        ],
+        decision_token=decision.decision_token,
+    )
+
+
+def test_ast_park_expiry_reengages_two_way_check_with_backoff():
+    latch = AdaptiveTopologyLatch(
+        4, shrink_after=1, park_rounds=2, max_park_rounds=4, reprobe_interval=1000
+    )
+    parks = []
+    for _ in range(40):
+        decision = latch.choose(2, 7, 4)
+        if decision.active_branches == 1:
+            latch.observe_primary_only(
+                decision_token=decision.decision_token, session_count=1
+            )
+            if decision.reason == "parked_after_repeated_no_alternative_win":
+                continue
+        else:
+            if decision.reason == "park_expired_economical_check":
+                parks.append(latch.park_length)
+            _no_win(latch, decision)
+    snapshot = latch.snapshot()
+    # Every expired park re-engaged a two-way check instead of staying at one.
+    assert snapshot["park_expiries"] >= 3
+    # Each fruitless check doubled the next park, up to the cap.
+    assert parks[:3] == [4, 4, 4]
+    assert latch.park_length == 4
+
+
+def test_ast_alternative_win_resets_park_backoff():
+    latch = AdaptiveTopologyLatch(
+        4, shrink_after=1, park_rounds=2, max_park_rounds=8, reprobe_interval=1000
+    )
+    for _ in range(3):
+        _no_win(latch, latch.choose(2, 7, 4))
+    assert latch.active_branches == 1 and latch.park_length == 4
+    while latch.active_branches == 1:
+        decision = latch.choose(2, 7, 4)
+        latch.observe_primary_only(
+            decision_token=decision.decision_token, session_count=1
+        )
+    decision = latch.choose(2, 7, 4)
+    assert decision.active_branches == 2
+    assert decision.reason == "park_expired_economical_check"
+    latch.observe_many(
+        [
+            {
+                "branch_accepts": [1, 7],
+                "proposal_counts": [7, 7],
+                "selected_branch": 2,
+                "unique_target_rows": 10,
+                "outcome": "committed_conclusive",
+            }
+        ],
+        decision_token=decision.decision_token,
+    )
+    assert latch.active_branches == 2
+    assert latch.park_length == 2
+
+
+def test_cross_session_live_frontier_keeps_b1_when_a_branch_ends_at_its_prefix():
+    # 2026-10-17: a min-tokens request made LiLiCorr end a branch at the
+    # shared prefix; the live-frontier planner refused the zero-depth row and
+    # the generation worker died.  The round must keep the exact primary path.
+    baseline_batch, baseline = run_cross_session_ast()
+    packed_batch, packed = run_cross_session_ast(
+        8, pack_mode="ordered_live_frontier", truncate_branch=True
+    )
+    try:
+        # The primary-only round accepts fewer of its (mutated) drafts than
+        # the unpacked baseline, but every committed token is the exact B1
+        # greedy continuation.
+        for actual, expected in zip(packed, baseline, strict=True):
+            assert actual.generated >= 1
+            assert actual.history == expected.history[: len(actual.history)]
+        assert packed_batch.scheduler_stats[
+            "external_progressive_ast_geometry_guard_rounds"
+        ] == 4
+    finally:
+        baseline_batch.close()
+        packed_batch.close()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from threading import Lock
 from typing import Any
 
 import mlx.core as mx
@@ -163,7 +164,7 @@ _GDN_POST = r"""
     const bfloat normed = bfloat(NW[d] * normalized);
     const float zf = float(Z[m * NV * DV + hv * DV + d]);
     // Qwen3.8's swish gate widens z to fp32 and compiled nn.silu uses the
-    // stable symmetric fast-exp sigmoid.
+    // stable symmetric sigmoid; its exp is respelled to the served one.
     const float gate_exp = metal::exp(metal::abs(zf));
     const float gate_low = 1.0f / (1.0f + gate_exp);
     const float gate_sigmoid = zf < 0.0f ? gate_low : 1.0f - gate_low;
@@ -193,6 +194,7 @@ _MLP_ACT = r"""
   }
   const int e = int(m) * N + int(g) * 64 + int(t);
   const bfloat gf = GATE[e];
+  // compiled swiglu's stable symmetric bf16 sigmoid; its exp is respelled to the served one.
   const bfloat mlp_sigmoid_exp = bfloat(metal::exp(metal::abs(gf)));
   const bfloat mlp_sigmoid_low = bfloat(bfloat(1.0f) / bfloat(bfloat(1.0f) + mlp_sigmoid_exp));
   const bfloat mlp_sigmoid = gf < bfloat(0.0f)
@@ -209,6 +211,210 @@ _MLP_ACT = r"""
   }
 """
 
+# mlx2 modification (2026-10-17): served-SiLU spelling.  TensorFold wrote the
+# mlp_act and gdn_post sigmoids with ``metal::exp``.  MLX 0.32.4 serves the
+# compiled ``swiglu``/``nn.silu`` with ``metal::precise::exp``; the two bf16
+# sigmoids round apart at -6.84375, which real MLP gates reach, so a fixed
+# spelling made tree rows differ from ordinary decode on that build while
+# random-input parity checks passed.  Each kernel's own sigmoid text (sliced
+# below) is probed against the served op over every bf16 encoding (fp32 for
+# the widened gdn_post gate: every widened bf16 plus a random-bits sample)
+# with ``served_exp.ServedExpGate``, the kernel compiles the matching
+# spelling, and a once-per-process kernel canary on a value sweep against the
+# served eager ops must pass.  On a refusal the entry points compute the
+# served eager op instead (exact, no fused group sums) and count it.
+_EXP = "metal::exp"
+
+
+def _slice(source: str, start: str, stop: str) -> str:
+    begin = source.index(start)
+    return source[begin:source.index(stop, begin)]
+
+
+_MLP_SIGMOID = _slice(_MLP_ACT, "  const bfloat mlp_sigmoid_exp", "  const bfloat h =")
+_POST_SIGMOID = _slice(_GDN_POST, "    const float gate_exp", "    const bfloat o =")
+for _name, _text in (("mlp_act", _MLP_ACT), ("gdn_post", _GDN_POST)):
+    if _text.count(_EXP) != 1:
+        raise RuntimeError(f"lane_glue.{_name}: expected one {_EXP} site")
+_SERVED: dict[str, Any] = {}       # kernel -> (ServedExpGate, probe dtype)
+_PARITY: dict[tuple, str | None] = {}
+_FALLBACK_CALLS = {"mlp_act": 0, "gdn_post": 0}
+_PARITY_LOCK = Lock()
+_GATE_LOCK = Lock()   # separate: a parity check holds _PARITY_LOCK while it builds kernels
+
+
+def _served_swiglu(x: mx.array) -> mx.array:
+    from mlx2.runtime.models.activations import swiglu
+
+    return swiglu(x, mx.ones_like(x))
+
+
+def _gate(name: str) -> tuple[Any, Any]:
+    """The kernel's ``ServedExpGate`` and the dtype its sigmoid runs in (one per process)."""
+
+    hit = _SERVED.get(name)
+    if hit is not None:
+        return hit
+    with _GATE_LOCK:
+        if name not in _SERVED:
+            _SERVED[name] = _new_gate(name)
+        return _SERVED[name]
+
+
+def _new_gate(name: str) -> tuple[Any, Any]:
+    import mlx.nn as nn
+
+    from mlx2.runtime.models.served_exp import ServedExpGate
+
+    if name == "mlp_act":
+        gate = ServedExpGate("tensorfold_lane_glue_mlp_act", served_name="compiled swiglu",
+                             served=_served_swiglu,
+                             body="  const bfloat gf = x;\n" + _MLP_SIGMOID + "  y = activated;")
+        return gate, mx.bfloat16
+    if name == "gdn_post":
+        gate = ServedExpGate("tensorfold_lane_glue_gdn_post", served_name="compiled nn.silu (fp32 gate)",
+                             served=nn.silu,
+                             body="    const float zf = float(x);\n" + _POST_SIGMOID + "    y = gate;")
+        return gate, mx.float32
+    raise KeyError(name)
+
+
+def served_spelling(name: str) -> str | None:
+    """The exp spelling that reproduces ``name``'s served op (Metal), or None."""
+
+    gate, dtype = _gate(name)
+    return gate.spelling(dtype)
+
+
+def served_source(name: str) -> str:
+    """``mlp_act``/``gdn_post`` source with its sigmoid spelled as the served op."""
+
+    from mlx2.runtime.models.served_exp import respell
+
+    source = {"mlp_act": _MLP_ACT, "gdn_post": _GDN_POST}[name]
+    spelling = served_spelling(name)
+    if spelling is None:
+        gate, dtype = _gate(name)
+        raise RuntimeError(f"lane_glue.{name}: {gate.adaptation_refusal(dtype)}")
+    return source if spelling == _EXP else respell(source, _EXP, spelling)
+
+
+def _sweep(count: int) -> mx.array:
+    """Every finite bf16 value at least once, tiled to ``count`` elements in a fixed order."""
+
+    import numpy as np
+
+    from mlx2.runtime.models.served_exp import covering_rows
+
+    bits = np.arange(1 << 16, dtype=np.uint32).astype(np.uint16)
+    finite = np.isfinite((bits.astype(np.uint32) << 16).view(np.float32))
+    grid = mx.array(bits[finite]).view(mx.bfloat16)
+    return covering_rows(grid, 1, count, 10170).reshape(count)
+
+
+def _bits_equal(a: mx.array, b: mx.array) -> bool:
+    from mlx2.runtime.models.served_exp import same_bits
+
+    return same_bits(a, b)
+
+
+def mlp_act_reference(gate: mx.array, up: mx.array) -> mx.array:
+    """The served (ordinary decode) MLP activation: compiled ``swiglu``."""
+
+    from mlx2.runtime.models.activations import swiglu
+
+    return swiglu(gate, up)
+
+
+def gdn_post_reference(y: mx.array, z: mx.array, weight: mx.array, eps: float) -> mx.array:
+    """The served Qwen3.8 GDN norm gate (``Qwen3NextRMSNormGated``), [1, W, nv * dv]."""
+
+    from mlx2.runtime.models.qwen3_next import _precise_swiglu
+
+    _, W, nv, dv = (int(s) for s in y.shape)
+    out = _precise_swiglu(y, z.reshape(1, W, nv, dv), mx.fast.rms_norm(y, weight, eps))
+    return out.reshape(1, W, nv * dv)
+
+
+def parity_case(name: str) -> tuple[tuple, mx.array]:
+    """Value-sweep inputs for ``name`` and the served eager op's output on them.
+
+    ``mlp_act``: every finite bf16 gate value (16 rows of 4096) times a random
+    up; ``gdn_post``: every finite bf16 z value (11 rows at the Qwen3.8 27B
+    48 x 128 head geometry) against a random y and norm weight.
+    """
+
+    if name == "mlp_act":
+        rows, n = 16, 4096
+        gate = _sweep(rows * n).reshape(1, rows, n)
+        up = mx.random.normal((1, rows, n), key=mx.random.key(10171)).astype(mx.bfloat16)
+        return (gate, up), mlp_act_reference(gate, up)
+    if name == "gdn_post":
+        rows, nv, dv, eps = 11, 48, 128, 1e-6
+        z = _sweep(rows * nv * dv).reshape(1, rows, nv * dv)
+        y = mx.random.normal((1, rows, nv, dv), key=mx.random.key(10172)).astype(mx.bfloat16)
+        weight = (1 + 0.1 * mx.random.normal((dv,), key=mx.random.key(10173))).astype(mx.bfloat16)
+        return (y, z, weight, eps), gdn_post_reference(y, z, weight, eps)
+    raise KeyError(name)
+
+
+def _parity(name: str) -> str | None:
+    (args, want) = parity_case(name)
+    have = (_mlp_act_kernel if name == "mlp_act" else _gdn_post_kernel)(*args)
+    if not _bits_equal(have, want):
+        return f"lane_glue.{name}: kernel differs from the served eager op on the value sweep"
+    return None
+
+
+def checked_parity(key: tuple, check: Any) -> str | None:
+    """Memoize one parity verdict per process (device faults are re-raised)."""
+
+    if key in _PARITY:
+        return _PARITY[key]
+    with _PARITY_LOCK:
+        if key not in _PARITY:
+            from mlx2.runtime.models.served_exp import is_device_fault
+
+            try:
+                _PARITY[key] = check()
+            except Exception as exc:  # noqa: BLE001 - fail closed
+                if is_device_fault(exc):
+                    raise
+                _PARITY[key] = f"{key[0]}.{key[1]}: parity probe failed: {type(exc).__name__}"
+        return _PARITY[key]
+
+
+def refusal(name: str) -> str | None:
+    """Why ``mlp_act``/``gdn_post`` may not stand in for the served op, or None.
+
+    Once per process (Metal): the sigmoid expression against the served op
+    (``ServedExpGate``), then the compiled kernel against the served eager op
+    on a value sweep (``parity_case``).
+    """
+
+    gate, dtype = _gate(name)
+    reason = gate.adaptation_refusal(dtype)
+    if reason is not None:
+        return f"lane_glue.{name}: {reason}"
+    return checked_parity(("lane_glue", name, served_spelling(name)), lambda: _parity(name))
+
+
+def stats() -> dict[str, Any]:
+    """Spelling, parity verdict and eager-fallback count per gated kernel."""
+
+    out: dict[str, Any] = {"backend": "mlx2_tensorfold_lane_glue_served_exp_v1"}
+    for name in ("mlp_act", "gdn_post"):
+        gate, dtype = _SERVED.get(name, (None, None))
+        spelling = gate._spellings.get(str(dtype)) if gate is not None else None
+        verdict = _PARITY.get(("lane_glue", name, spelling), "unchecked")
+        out[name] = {
+            "exp": spelling,
+            "parity": "exact" if verdict is None else verdict,
+            "fallback_calls": _FALLBACK_CALLS[name],
+        }
+    return out
+
+
 _kernels: dict[str, Any] = {}
 
 
@@ -217,7 +423,11 @@ def _named(base: str, source: str) -> str:
 
 
 def _kernel(name: str) -> Any:
-    if name not in _kernels:
+    if name in ("mlp_act", "gdn_post"):
+        key = f"{name}:{served_spelling(name)}"
+    else:
+        key = name
+    if key not in _kernels:
         spec = {
             "norm": (_NORM_XS.replace("RESIDUAL_ADD", "h = bfloat(float(h) + float(R[base + i]));\n      HO[base + i] = h;")
                      .replace("RESIDUAL_RELOAD", "h = HO[base + i];"),
@@ -226,13 +436,15 @@ def _kernel(name: str) -> Any:
                            ["H", "Wt", "eps", "dims"], ["XO", "XS"]),
 
             "gdn_pre": (_GDN_PRE, ["QKV", "CS", "CW", "windows", "Ain", "Bin", "ALOG", "DT"], ["Q", "Kout", "Vout", "G", "BETA"]),
-            "gdn_post": (_GDN_POST, ["Y", "Z", "NW", "eps", "dims"], ["OUT", "XS"]),
-            "mlp_act": (_MLP_ACT, ["GATE", "UP", "dims"], ["HOUT", "XS"]),
+            "gdn_post": (None, ["Y", "Z", "NW", "eps", "dims"], ["OUT", "XS"]),
+            "mlp_act": (None, ["GATE", "UP", "dims"], ["HOUT", "XS"]),
         }[name]
         source, inputs, outputs = spec
-        _kernels[name] = mx.fast.metal_kernel(name=_named("lane_glue_" + name, source), input_names=inputs,
-                                              output_names=outputs, source=source)
-    return _kernels[name]
+        if source is None:
+            source = served_source(name)
+        _kernels[key] = mx.fast.metal_kernel(name=_named("lane_glue_" + name, source), input_names=inputs,
+                                             output_names=outputs, source=source)
+    return _kernels[key]
 
 
 _consts: dict[Any, mx.array] = {}
@@ -318,6 +530,13 @@ def gdn_pre(qkv: mx.array, conv_state: mx.array, conv_weight: mx.array, windows:
 def gdn_post(y: mx.array, z: mx.array, weight: mx.array, eps: float) -> mx.array:
     """SiLU(z) * RMSNorm(y) * weight per head: y [1, W, nv, dv], z [1, W, nv * dv] -> [1, W, nv * dv]."""
 
+    if refusal("gdn_post") is not None:
+        _FALLBACK_CALLS["gdn_post"] += 1
+        return gdn_post_reference(y, z, weight, eps)
+    return _gdn_post_kernel(y, z, weight, eps)
+
+
+def _gdn_post_kernel(y: mx.array, z: mx.array, weight: mx.array, eps: float) -> mx.array:
     _, W, nv, dv = (int(s) for s in y.shape)
     MP = 16 * ((W + 15) // 16)
     out, xs = _kernel("gdn_post")(
@@ -331,6 +550,13 @@ def gdn_post(y: mx.array, z: mx.array, weight: mx.array, eps: float) -> mx.array
 def mlp_act(gate: mx.array, up: mx.array) -> mx.array:
     """SiLU(gate) * up, (1, W, N) bf16, with its group sums remembered for the down projection."""
 
+    if refusal("mlp_act") is not None:
+        _FALLBACK_CALLS["mlp_act"] += 1
+        return mlp_act_reference(gate, up)
+    return _mlp_act_kernel(gate, up)
+
+
+def _mlp_act_kernel(gate: mx.array, up: mx.array) -> mx.array:
     N = int(gate.shape[-1])
     W = int(gate.size // N)
     MP = 16 * ((W + 15) // 16)
@@ -341,4 +567,5 @@ def mlp_act(gate: mx.array, up: mx.array) -> mx.array:
     return remember(h.reshape(gate.shape), xs)
 
 
-__all__ = ["gdn_post", "gdn_pre", "mlp_act", "norm_xs", "remember"]
+__all__ = ["gdn_post", "gdn_post_reference", "gdn_pre", "mlp_act", "mlp_act_reference", "norm_xs", "refusal",
+           "remember", "served_source", "served_spelling", "stats"]

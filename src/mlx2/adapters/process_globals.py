@@ -154,6 +154,26 @@ def claim(holder, owner, selections) -> Claim:
     return Claim(holder, owner, selections).apply()
 
 
+def claim_moe(holder, owner: str, nax_mode: str = "off") -> Claim:
+    """Claim the sorted-MoE selections: a NAX gather mode and the pad floor.
+
+    ``nax_mode`` "gather" admits the segmented NAX sorted gather (bit-identical
+    to the stock sorted kernel, prefill forwards only) for an adapter whose
+    trunk opens ``moe_nax_gather.forward_scope``; "off" is ``claim_stock_moe``.
+    """
+    from ..runtime.models import moe_nax_gather, switch_layers
+
+    holder._process_claim = claim(
+        holder,
+        owner,
+        {
+            MOE_NAX_GATHER: (nax_mode, moe_nax_gather.set_mode),
+            MOE_RHS_PAD_POLICY: ("floor", switch_layers.set_pad_policy),
+        },
+    )
+    return holder._process_claim
+
+
 def claim_stock_moe(holder, owner: str) -> Claim:
     """Claim the stock sorted-MoE selections (NAX gather off, pad floor).
 

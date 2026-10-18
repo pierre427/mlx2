@@ -9,6 +9,11 @@ import pytest
 
 from mlx2.adapters.muse_glimmer_config import ModelArgs
 from mlx2.runtime.models.muse_glimmer import Model
+from mlx2.runtime.progressive_external_verify import (
+    PROGRESSIVE_FIDELITY_EXACT,
+    PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    execute_progressive_target_rows,
+)
 from mlx2.runtime.segmented_rotating_kv import SegmentedKVRows
 
 
@@ -119,3 +124,62 @@ def test_row_exact_receipt_marks_observed_use_without_qualification():
     assert receipt["observed_used"] and receipt["executed_forwards"] == 1
     assert receipt["physical_query_rows"] == 2
     assert not receipt["qualified"] and not receipt["performance_claim"]
+
+
+@pytest.mark.parametrize("width", [1, 4])
+def test_progressive_target_rows_are_adapter_owned_and_transaction_exact(width):
+    model, base = model_and_cache()
+    tokens = mx.array(
+        [[7 + lane, 11 + lane] for lane in range(width)]
+    )
+    rows = [copy.deepcopy(base) for _ in range(width)]
+    owner = SegmentedKVRows(rows)
+    transaction = owner.begin([2] * width)
+    model.configure_target_verify_row_exact(True)
+
+    logits, taps, detail = execute_progressive_target_rows(
+        model,
+        tokens,
+        transaction.caches,
+        (0, 3),
+        protocol=PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+        fidelity=PROGRESSIVE_FIDELITY_EXACT,
+    )
+    mx.eval(logits, taps)
+    committed = transaction.commit([1] * width)
+
+    assert detail["execution"] == "adapter_owned"
+    assert detail["row_exact"] is True
+    assert detail["adapter_detail"] == {
+        "algorithm": "muse-q4-native-b1s1-causal-prefix-v1",
+        "physical_width": width,
+        "token_width": 2,
+    }
+    for lane in range(width):
+        reference = copy.deepcopy(base)
+        expected_logits, expected_taps = [], []
+        for token in tokens[lane].tolist():
+            row_logits, row_taps = model.forward_with_taps(
+                mx.array([[token]]), reference, (0, 3)
+            )
+            expected_logits.append(row_logits)
+            expected_taps.append(row_taps)
+        assert mx.array_equal(
+            logits[lane : lane + 1], mx.concatenate(expected_logits, axis=1)
+        )
+        assert mx.array_equal(
+            taps[lane : lane + 1], mx.concatenate(expected_taps, axis=1)
+        )
+        committed_reference = copy.deepcopy(base)
+        mx.eval(model(mx.array([[tokens[lane, 0].item()]]), cache=committed_reference))
+        assert_cache_equal(committed[lane], committed_reference)
+
+
+def test_progressive_target_rows_refuse_before_cache_mutation_when_deselected():
+    model, base = model_and_cache()
+    before = copy.deepcopy(base)
+    with pytest.raises(RuntimeError, match="not selected"):
+        model.progressive_external_target_rows(
+            mx.array([[7, 8]]), base, (0, 3)
+        )
+    assert_cache_equal(base, before)

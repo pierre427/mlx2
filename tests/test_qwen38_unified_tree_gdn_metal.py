@@ -1,129 +1,180 @@
-"""Exact parity for the mlx2-owned Qwen3.8 tree/cohort GDN backend."""
+"""Exact parity for the mlx2-owned Qwen3.8 tree/cohort GDN backend.
+
+Every operation is compared with the served eager ops the ordinary decode
+path runs, not with the vendored TensorFold kernels: those copied MLX's
+``metal::exp`` sigmoid, which MLX 0.32.4 no longer serves, and a comparison
+against them passed only because random inputs never reach -6.84375, the one
+bf16 conv output where the two spellings round apart.  The pre kernel is
+checked on a value sweep (an identity last conv tap makes each conv output
+exactly its qkv value, covering every bf16 value with magnitude in
+[2**-6, 32]) and on random conv weights through each row's tree window; the
+tree, replay and conv-tail kernels are checked against the served one-token
+``gated_delta_kernel`` stepped along each node's path.
+"""
 
 from __future__ import annotations
 
 import mlx.core as mx
+import mlx.nn as nn
+import numpy as np
+import pytest
 
 from mlx2.runtime.models import qwen38_tree_gdn as owned
+from mlx2.runtime.models.gated_delta import compute_g, gated_delta_kernel, normalize_gdn_qk
+from mlx2.runtime.models.precise_ops import gate_sigmoid
+from mlx2.runtime.models.served_exp import covering_rows
 
-def _reference():
-    from mlx2.runtime.tensorfold_qwen38 import lane_glue, stream_gdn
+pytestmark = pytest.mark.skipif(not mx.metal.is_available(), reason="needs Metal")
 
-    return stream_gdn, lane_glue
-
-
-def _equal(left, right):
-    mx.eval(left, right)
-    assert bool(mx.array_equal(left, right).item())
+NK, NV, DK, DV, TAPS = 16, 48, 128, 128, 4
+C = 2 * NK * DK + NV * DV
+PARENTS = ([-1, 0, 0, 1, 1], [-1, 0, 1, 1, 2])
 
 
-def test_owned_tree_backend_matches_corrected_tensorfold_all_operations():
-    reference, reference_glue = _reference()
-    parents = ([-1, 0, 0, 1, 1], [-1, 0, 1, 1, 2])
-    nk, nv, dk, dv, taps = 16, 48, 128, 128, 4
-    rows = sum(len(row) for row in parents)
-    channels = 2 * nk * dk + nv * dv
-    zba_width = nv * dv + 2 * nv
+@pytest.fixture(autouse=True)
+def gpu():
+    # The served ops are the GPU ones (tests/conftest.py defaults to the CPU).
+    previous = mx.default_device()
+    mx.set_default_device(mx.gpu)
+    try:
+        yield
+    finally:
+        mx.set_default_device(previous)
 
-    def draw(shape, seed, dtype=mx.bfloat16):
-        return (mx.random.normal(shape, key=mx.random.key(seed)) * 0.05).astype(dtype)
 
-    qkv = draw((1, rows, channels), 1)
-    zba = draw((1, rows, zba_width), 2)
-    conv_weight = draw((channels, taps, 1), 3)
-    conv_states = [draw((1, taps - 1, channels), 10 + lane) for lane in range(2)]
-    recurrent = [draw((1, nv, dv, dk), 20 + lane, mx.float32) for lane in range(2)]
-    a_log = draw((nv,), 30)
-    dt_bias = draw((nv,), 31)
+def _equal(have, want, what):
+    mx.eval(have, want)
+    assert have.shape == want.shape and have.dtype == want.dtype, what
+    width = mx.uint16 if have.dtype.size == 2 else mx.uint32
+    bad = int((have.view(width) != want.view(width)).sum().item())
+    assert bad == 0, f"{what}: {bad} of {have.size} elements differ from the served eager op"
 
-    reference_plan = reference.ConvPlan(parents, taps - 1)
-    owned_plan = owned.ConvPlan(parents, taps - 1)
-    reference_pre = reference.gdn_pre(
-        qkv,
-        conv_states,
-        conv_weight,
-        reference_plan,
-        zba,
-        a_log,
-        dt_bias,
-        nk=nk,
-        nv=nv,
-        dk=dk,
-        dv=dv,
+
+def _draw(shape, seed, dtype=mx.bfloat16, scale=0.05):
+    return (mx.random.normal(shape, key=mx.random.key(seed)) * scale).astype(dtype)
+
+
+def _sweep(rows, seed):
+    encodings = np.arange(1 << 16, dtype=np.uint32).astype(np.uint16)
+    widened = (encodings.astype(np.uint32) << 16).view(np.float32)
+    keep = np.isfinite(widened) & (np.abs(widened) >= 2.0 ** -6) & (np.abs(widened) <= 32.0)
+    grid = mx.array(encodings[keep]).view(mx.bfloat16)
+    return covering_rows(grid, rows, C, seed)[None]
+
+
+def _eager_pre(qkv, states, weight, zba, a_log, dt_bias):
+    """The ordinary prework of every row, through its own tree window."""
+    rows = []
+    offset = 0
+    for stream, parents in enumerate(PARENTS):
+        _, paths = owned.tree_paths(parents)
+        for path in paths:
+            window = mx.concatenate(
+                [states[stream], qkv[:, [offset + row for row in path]]], axis=1
+            )[:, -TAPS:]
+            rows.append(nn.silu(mx.conv1d(window, weight, groups=C)))
+        offset += len(parents)
+    conv = mx.concatenate(rows, axis=1)
+    count = int(conv.shape[1])
+    q, k, v = mx.split(conv, [NK * DK, 2 * NK * DK], -1)
+    q, k = normalize_gdn_qk(q.reshape(1, count, NK, DK), k.reshape(1, count, NK, DK))
+    b = zba[..., NV * DV:NV * DV + NV]
+    a = zba[..., NV * DV + NV:]
+    g = compute_g(a_log, a, dt_bias).astype(mx.float32)
+    beta = gate_sigmoid(b.astype(mx.float32))
+    return q, k, v.reshape(1, count, NV, DV), g, beta
+
+
+def _inputs(qkv):
+    rows = int(qkv.shape[1])
+    zba = mx.concatenate([
+        _draw((1, rows, NV * DV), 2),
+        _draw((1, rows, 2 * NV), 4, scale=3.0),
+    ], axis=-1)
+    states = [_draw((1, TAPS - 1, C), 10 + lane) for lane in range(len(PARENTS))]
+    a_log = mx.linspace(-2.0, 1.0, NV).astype(mx.bfloat16)
+    dt_bias = _draw((NV,), 31, scale=0.5)
+    return zba, states, a_log, dt_bias
+
+
+def _run_pre(qkv, weight, zba, states, a_log, dt_bias):
+    plan = owned.ConvPlan(PARENTS, TAPS - 1)
+    return owned.gdn_pre(qkv, states, weight, plan, zba, a_log, dt_bias, nk=NK, nv=NV, dk=DK, dv=DV)
+
+
+def test_tree_pre_matches_served_eager_prework_on_a_silu_value_sweep():
+    rows = sum(len(p) for p in PARENTS)
+    qkv = _sweep(rows, 9600)
+    weight = mx.zeros((C, TAPS, 1), dtype=mx.bfloat16)
+    weight[:, TAPS - 1, 0] = 1
+    zba, states, a_log, dt_bias = _inputs(qkv)
+    have = _run_pre(qkv, weight, zba, states, a_log, dt_bias)
+    want = _eager_pre(qkv, states, weight, zba, a_log, dt_bias)
+    assert bool(mx.any(qkv == mx.array(-6.84375, dtype=mx.bfloat16)).item())
+    for name, left, right in zip("qkvgb", have, want):
+        _equal(left, right, f"gdn_pre {name} (sweep)")
+
+
+def test_owned_tree_backend_matches_served_eager_ops_all_operations():
+    rows = sum(len(p) for p in PARENTS)
+    qkv = _draw((1, rows, C), 1, scale=1.0)
+    weight = _draw((C, TAPS, 1), 3, scale=0.5)
+    zba, states, a_log, dt_bias = _inputs(qkv)
+    recurrent = [_draw((1, NV, DV, DK), 20 + lane, mx.float32) for lane in range(len(PARENTS))]
+
+    pre = _run_pre(qkv, weight, zba, states, a_log, dt_bias)
+    eager = _eager_pre(qkv, states, weight, zba, a_log, dt_bias)
+    for name, left, right in zip("qkvgb", pre, eager):
+        _equal(left, right, f"gdn_pre {name} (tree windows)")
+
+    # The split entry point (installed as TensorFold's lane_glue.gdn_pre) on stream 0.
+    first = len(PARENTS[0])
+    plan = owned.ConvPlan(PARENTS, TAPS - 1)
+    split = owned.gdn_pre_split(
+        qkv[:, :first], states[0], weight, plan.windows[: first * TAPS],
+        zba[:, :first, -NV:], zba[:, :first, NV * DV:NV * DV + NV], a_log, dt_bias,
+        nk=NK, nv=NV, dk=DK, dv=DV,
     )
-    owned_pre = owned.gdn_pre(
-        qkv,
-        conv_states,
-        conv_weight,
-        owned_plan,
-        zba,
-        a_log,
-        dt_bias,
-        nk=nk,
-        nv=nv,
-        dk=dk,
-        dv=dv,
-    )
-    for left, right in zip(reference_pre, owned_pre):
-        _equal(left, right)
+    for name, left, right in zip("qkvgb", split, eager):
+        _equal(left, right[:, :first], f"gdn_pre_split {name}")
 
-    first_rows = len(parents[0])
-    first_windows = reference_plan.windows[: first_rows * taps]
-    split_a = zba[:, :first_rows, -nv:]
-    split_b = zba[:, :first_rows, nv * dv : nv * dv + nv]
-    split_pre = owned.gdn_pre_split(
-        qkv[:, :first_rows],
-        conv_states[0],
-        conv_weight,
-        first_windows,
-        split_a,
-        split_b,
-        a_log,
-        dt_bias,
-        nk=nk,
-        nv=nv,
-        dk=dk,
-        dv=dv,
-    )
-    glue_pre = reference_glue.gdn_pre(
-        qkv[:, :first_rows],
-        conv_states[0],
-        conv_weight,
-        first_windows,
-        split_a,
-        split_b,
-        a_log,
-        dt_bias,
-        nk=nk,
-        nv=nv,
-        dk=dk,
-        dv=dv,
-    )
-    for left, right in zip(glue_pre, split_pre):
-        _equal(left, right)
-
-    reference_tree = reference.tree(
-        *reference_pre[:5], recurrent, reference.TreePlan(parents)
-    )
-    owned_tree = owned.tree(*owned_pre[:5], recurrent, owned.TreePlan(parents))
-    _equal(reference_tree, owned_tree)
-
+    # Tree and replay against the served one-token kernel stepped along each path.
+    q, k, v, g, beta = eager
+    tree_y = owned.tree(*pre[:5], recurrent, owned.TreePlan(PARENTS))
     paths = ([0, 1, 3], [0, 1, 2, 4])
-    firsts = (0, len(parents[0]))
-    reference_commit = reference.CommitPlan(paths, firsts, taps - 1)
-    owned_commit = owned.CommitPlan(paths, firsts, taps - 1)
-    reference_replay = reference.replay(*reference_pre[:5], recurrent, reference_commit)
-    owned_replay = owned.replay(*owned_pre[:5], recurrent, owned_commit)
-    for left, right in zip(reference_replay, owned_replay):
-        _equal(left, right)
+    firsts = (0, first)
+    offset = 0
+    want_y = []
+    want_states = []
+    for stream, parents in enumerate(PARENTS):
+        _, node_paths = owned.tree_paths(parents)
+        for path in node_paths:
+            state = recurrent[stream]
+            for row in path:
+                at = slice(offset + row, offset + row + 1)
+                y, state = gated_delta_kernel(q[:, at], k[:, at], v[:, at], g[:, at], beta[:, at], state)
+            want_y.append(y)
+        state = recurrent[stream]
+        for row in paths[stream]:
+            at = slice(offset + row, offset + row + 1)
+            _, state = gated_delta_kernel(q[:, at], k[:, at], v[:, at], g[:, at], beta[:, at], state)
+        want_states.append(state)
+        offset += len(parents)
+    _equal(tree_y, mx.concatenate(want_y, axis=1), "tree")
 
-    reference_tails = reference.conv_tails(conv_states, qkv, reference_commit)
-    owned_tails = owned.conv_tails(conv_states, qkv, owned_commit)
-    for left, right in zip(reference_tails, owned_tails):
-        _equal(left, right)
+    commit = owned.CommitPlan(paths, firsts, TAPS - 1)
+    for stream, (left, right) in enumerate(zip(owned.replay(*pre[:5], recurrent, commit), want_states)):
+        _equal(left, right, f"replay stream {stream}")
+
+    tails = owned.conv_tails(states, qkv, commit)
+    for stream, tail in enumerate(tails):
+        rows_ = [firsts[stream] + row for row in paths[stream]]
+        want = mx.concatenate([states[stream], qkv[:, rows_]], axis=1)[:, -(TAPS - 1):]
+        _equal(tail, want, f"conv tail stream {stream}")
 
     stats = owned.stats()
     assert stats["backend"] == "mlx2_qwen38_unified_tree_gdn_v1"
+    assert stats["pre_parity"] == "exact"
     assert stats["pre_calls"] >= 1
     assert stats["tree_calls"] >= 1
     assert stats["replay_calls"] >= 1

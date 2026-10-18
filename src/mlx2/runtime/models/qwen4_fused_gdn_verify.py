@@ -20,7 +20,6 @@ from .gdn_state import STATS as _GDN_STATS
 from .gdn_state import derive_source
 from .import_env import snapshot as _import_env_snapshot
 from .qwen4_fused_gdn import (
-    _HEADER,
     _THREADGROUP_Y_CANDIDATES,
     CONV_DIM,
     CONV_KERNEL,
@@ -36,6 +35,9 @@ from .qwen4_fused_gdn import (
     admit_rollback_span,
     fused_gdn_runtime_supported,
     probe_qwen4_fused_gdn_decode,
+    qwen4_fused_gdn_decode,
+    _served_silu_header,
+    served_silu_exp,
     st16_source,
 )
 
@@ -454,12 +456,32 @@ _QWEN35_REPLAY_SOURCE_ST16 = st16_source(
 )
 
 
+def _decode_header() -> tuple[str, str]:
+    """The header the one-token decode kernel compiles, and its name suffix.
+
+    Every verify-family kernel (snapshot verify, catch-up, compact replay and
+    their batched forms) must reproduce the decode kernel's arithmetic for
+    each row, and that arithmetic includes the SiLU helper's ``exp``
+    spelling, which ``qwen4_fused_gdn._kernel`` respells to the served MLX
+    SiLU (``metal::precise::exp`` on MLX 0.32.4).  Compiling these kernels
+    with the unrespelled ``_HEADER`` (``metal::exp``) made a verify row differ
+    from the decode step wherever the two bf16 sigmoids round apart (one bf16
+    input near -6.84 among them, which real conv outputs reach): Flash-Next
+    row-exact verify, 2026-10-17.
+    """
+    spelling = served_silu_exp()
+    if spelling is None:
+        raise RuntimeError("served SiLU matches no kernel form")
+    return _served_silu_header(spelling), ("_precise" if "precise" in spelling else "_fast")
+
+
 @lru_cache(maxsize=None)
 def _kernel(
     st16: bool = False, activation_dtype_arithmetic: bool = False
 ):
+    header, suffix = _decode_header()
     return mx.fast.metal_kernel(
-        name=f"{('activation_dtype' if activation_dtype_arithmetic else 'float32_decay')}_fused_gdn_verify" + ("_st16" if st16 else ""),
+        name=f"{('activation_dtype' if activation_dtype_arithmetic else 'float32_decay')}_fused_gdn_verify" + ("_st16" if st16 else "") + suffix,
         input_names=[
             "qkv",
             "z",
@@ -480,7 +502,7 @@ def _kernel(
             "state_snapshots",
             "conv_snapshots",
         ],
-        header=_HEADER,
+        header=header,
         source=(
             (_QWEN35_SOURCE_ST16 if st16 else _QWEN35_SOURCE)
             if activation_dtype_arithmetic
@@ -494,8 +516,9 @@ def _kernel(
 def _catchup_kernel(
     st16: bool = False, activation_dtype_arithmetic: bool = False
 ):
+    header, suffix = _decode_header()
     return mx.fast.metal_kernel(
-        name=f"{('activation_dtype' if activation_dtype_arithmetic else 'float32_decay')}_fused_gdn_catchup" + ("_st16" if st16 else ""),
+        name=f"{('activation_dtype' if activation_dtype_arithmetic else 'float32_decay')}_fused_gdn_catchup" + ("_st16" if st16 else "") + suffix,
         input_names=[
             "qkv",
             "z",
@@ -510,7 +533,7 @@ def _catchup_kernel(
             "norm_eps",
         ],
         output_names=["output", "conv_state_out", "recurrent_state_out"],
-        header=_HEADER,
+        header=header,
         source=(
             (_QWEN35_CATCHUP_SOURCE_ST16 if st16 else _QWEN35_CATCHUP_SOURCE)
             if activation_dtype_arithmetic
@@ -525,9 +548,10 @@ def _replay_verify_kernel(
     st16: bool = False,
     activation_dtype_arithmetic: bool = False,
 ):
+    header, suffix = _decode_header()
     return mx.fast.metal_kernel(
         name=f"{('activation_dtype' if activation_dtype_arithmetic else 'float32_decay')}_fused_gdn_replay_verify"
-        + ("_st16" if st16 else ""),
+        + ("_st16" if st16 else "") + suffix,
         input_names=[
             "qkv",
             "z",
@@ -549,7 +573,7 @@ def _replay_verify_kernel(
             "replay_corrections",
             "replay_decay",
         ],
-        header=_HEADER,
+        header=header,
         source=(
             (_QWEN35_REPLAY_SOURCE_ST16 if st16 else _QWEN35_REPLAY_SOURCE)
             if activation_dtype_arithmetic
@@ -1565,15 +1589,16 @@ _VERIFY_INPUTS = [
 def _batch_kernel(
     st16: bool = False, activation_dtype_arithmetic: bool = False
 ):
+    header, suffix = _decode_header()
     return mx.fast.metal_kernel(
         name=f"{('activation_dtype' if activation_dtype_arithmetic else 'float32_decay')}_fused_gdn_batch_verify"
-        + ("_st16" if st16 else ""),
+        + ("_st16" if st16 else "") + suffix,
         input_names=_VERIFY_INPUTS,
         output_names=[
             "output", "conv_state_out", "recurrent_state_out",
             "state_snapshots", "conv_snapshots",
         ],
-        header=_HEADER,
+        header=header,
         source=(
             _derive_batch_verify_source(
                 _QWEN35_SOURCE_ST16 if st16 else _QWEN35_SOURCE,
@@ -1587,14 +1612,15 @@ def _batch_kernel(
 
 @lru_cache(maxsize=None)
 def _batch_replay_kernel(st16: bool = False):
+    header, suffix = _decode_header()
     return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_batch_replay_verify" + ("_st16" if st16 else ""),
+        name="qwen4_fused_gdn_batch_replay_verify" + ("_st16" if st16 else "") + suffix,
         input_names=_VERIFY_INPUTS,
         output_names=[
             "output", "conv_state_out", "recurrent_state_out",
             "replay_keys", "replay_corrections", "replay_decay",
         ],
-        header=_HEADER,
+        header=header,
         source=_BATCH_REPLAY_SOURCE_ST16 if st16 else _BATCH_REPLAY_SOURCE,
         ensure_row_contiguous=True,
     )
@@ -1797,3 +1823,115 @@ def probe_qwen4_fused_gdn_batch_verify(
                 )
         _PROBED_BATCH[key] = result
         return result
+
+
+# -- decode-parity canary ------------------------------------------------------
+# The verify-family kernels claim each row is the one-token fused decode step's
+# bits.  The claim rests on two sources (``qwen4_fused_gdn._SOURCE`` and this
+# module's ``_SOURCE``) and two compiled headers staying in lockstep, which a
+# build repin can break silently (2026-10-17: the decode SiLU was respelled to
+# the served ``metal::precise::exp`` and the verify kernels were not).  The
+# probe below checks it on the device: ``rows`` serial decode steps against one
+# verify launch of ``kind``, on inputs whose conv outputs are every bf16 value
+# with magnitude in [2**-6, 32] in every row (an identity last conv tap), so a
+# SiLU spelling difference cannot hide in a random draw.
+DECODE_PARITY_KINDS = ("replay", "snapshot", "batch_replay", "batch_snapshot")
+
+
+def _decode_parity_grid():
+    import numpy as np
+
+    encodings = np.arange(1 << 16, dtype=np.uint32).astype(np.uint16)
+    widened = (encodings.astype(np.uint32) << 16).view(np.float32)
+    magnitude = np.abs(widened)
+    keep = np.isfinite(widened) & (magnitude >= 2.0 ** -6) & (magnitude <= 32.0)
+    return mx.array(encodings[keep]).view(mx.bfloat16)
+
+
+def _decode_parity_inputs(lanes: int, rows: int, state_dtype):
+    from .served_exp import covering_rows
+
+    grid = _decode_parity_grid()
+    qkv = covering_rows(grid, lanes * rows, CONV_DIM, 9100).reshape(lanes, rows, CONV_DIM)
+    key = mx.random.key(9001)
+    k1, k2, k3, k4, k5 = mx.random.split(key, 5)
+    z = mx.random.normal((lanes, rows, VALUE_DIM), key=k1).astype(mx.bfloat16)
+    b = mx.random.normal((lanes, rows, NUM_VALUE_HEADS), key=k2).astype(mx.bfloat16)
+    a = mx.random.normal((lanes, rows, NUM_VALUE_HEADS), key=k3).astype(mx.bfloat16)
+    state = (mx.random.normal((lanes, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM), key=k4) * 0.1)
+    state = state.astype(state_dtype)
+    weight = mx.zeros((CONV_DIM, CONV_KERNEL, 1), dtype=mx.bfloat16)
+    weight[:, CONV_KERNEL - 1, 0] = 1
+    params = {
+        "conv_weight": weight,
+        "A_log": mx.linspace(-2.0, 1.0, NUM_VALUE_HEADS).astype(mx.bfloat16),
+        "dt_bias": (mx.random.normal((NUM_VALUE_HEADS,), key=k5) * 0.5).astype(mx.bfloat16),
+        "norm_weight": mx.ones((VALUE_HEAD_DIM,), dtype=mx.bfloat16),
+    }
+    conv = mx.zeros((lanes, CONV_KERNEL - 1, CONV_DIM), dtype=mx.bfloat16)
+    return qkv, z, b, a, conv, state, params
+
+
+def _packed(out, state):
+    return mx.concatenate(
+        [out.astype(mx.float32).reshape(-1), state.astype(mx.float32).reshape(-1)]
+    )
+
+
+def decode_parity_probe(kind: str, *, state_dtype=mx.float32):
+    """``probe(rows) -> (verify, serial decode)`` for a row-exact canary.
+
+    Each side packs the window's outputs and its final recurrent state.  A
+    kernel that cannot be built or probed here returns a mismatching pair,
+    so the caller's verdict fails closed rather than raising mid-forward.
+    """
+    if kind not in DECODE_PARITY_KINDS:
+        raise ValueError(f"unknown decode-parity kind {kind!r}")
+    contract = QWEN4_GDN_CONTRACT
+    eps = 1e-6
+    state_kw = {"state_dtype": mx.float16} if state_dtype == mx.float16 else {}
+    refused = (mx.zeros((1,), dtype=mx.float32), mx.ones((1,), dtype=mx.float32))
+
+    def probe(rows: int):
+        lanes = 2 if kind.startswith("batch") else 1
+        qkv, z, b, a, conv, state, p = _decode_parity_inputs(lanes, rows, state_dtype)
+        dty = probe_qwen4_fused_gdn_decode(mx.bfloat16, contract=contract, **state_kw)
+        if kind.startswith("batch"):
+            vty = probe_qwen4_fused_gdn_batch_verify(
+                mx.bfloat16, rows, compact=kind == "batch_replay", contract=contract, **state_kw
+            )
+        elif kind == "replay":
+            vty = probe_qwen4_fused_gdn_replay_verify(mx.bfloat16, rows, contract=contract, **state_kw)
+        else:
+            vty = probe_qwen4_fused_gdn_verify(mx.bfloat16, rows, contract=contract, **state_kw)
+        if dty is None or vty is None:
+            return refused
+        common = (p["conv_weight"], p["A_log"], p["dt_bias"])
+        serial_outs, serial_states = [], []
+        for lane in range(lanes):
+            c, s, outs = conv[lane : lane + 1], state[lane : lane + 1], []
+            for row in range(rows):
+                cut = slice(row, row + 1)
+                o, c, s = qwen4_fused_gdn_decode(
+                    qkv[lane : lane + 1, cut], z[lane : lane + 1, cut],
+                    b[lane : lane + 1, cut], a[lane : lane + 1, cut], c, *common, s,
+                    p["norm_weight"], eps, threadgroup_y=dty, contract=contract,
+                )
+                outs.append(o)
+            serial_outs.append(mx.concatenate(outs, axis=1))
+            serial_states.append(s)
+        serial = _packed(mx.concatenate(serial_outs), mx.concatenate(serial_states))
+        args = (qkv, z, b, a, conv, *common, state, p["norm_weight"], eps)
+        if kind == "replay":
+            outputs = qwen4_fused_gdn_replay_verify(*args, threadgroup_y=vty, contract=contract)
+        elif kind == "snapshot":
+            outputs = qwen4_fused_gdn_verify(*args, threadgroup_y=vty, contract=contract)
+        elif kind == "batch_replay":
+            outputs = qwen4_fused_gdn_batch_replay_verify(*args, (rows,) * lanes, threadgroup_y=vty)
+        else:
+            outputs = qwen4_fused_gdn_batch_verify(
+                *args, (rows,) * lanes, threadgroup_y=vty, contract=contract
+            )
+        return _packed(outputs[0], outputs[2]), serial
+
+    return probe

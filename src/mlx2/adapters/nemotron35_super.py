@@ -156,6 +156,70 @@ def _split_super_execution_policy(execution_policy):
     )
 
 
+MOE_NAX_GATHER_MODES = ("off", "gather")
+
+
+def _split_moe_nax_gather(execution_policy):
+    """``(policy without "moe_nax_gather", mode)``; the mode defaults to off.
+
+    "gather" runs prefill expert gathers through the segmented NAX sorted
+    kernel (``runtime/models/moe_nax_gather.py``), bit-identical to the stock
+    sorted kernel; "fused" needs a fused gate/up module Nemotron's relu2
+    experts do not have.
+    """
+    if not isinstance(execution_policy, dict) or "moe_nax_gather" not in execution_policy:
+        return execution_policy, "off"
+    policy = dict(execution_policy)
+    mode = policy.pop("moe_nax_gather")
+    if mode not in MOE_NAX_GATHER_MODES:
+        raise ValueError("Super VL moe_nax_gather must be off or gather")
+    return policy, mode
+
+
+def _moe_nax_gather_report(mode):
+    from ..runtime.models import moe_nax_gather as _moe_nax
+
+    # The qualifier reads engaged calls and fallbacks from the status keys
+    # (qualification.moe_nax_gather_engagement), so they sit at top level.
+    return {
+        **(_moe_nax.status() if mode != "off" else {"mode": "off"}),
+        "schema": "mlx2.nemotron35-super-moe-nax-gather.v1",
+        "implemented": True,
+        "qualified": False,
+        "selected": mode != "off",
+        "policy": mode,
+    }
+
+
+NEMOTRON_INT8_PREFILL_SCOPES = ("mlp", "all")
+
+
+def nemotron_int8_prefill_select(scope):
+    """Trunk projections that may take the int8 (W8A8) prefill route.
+
+    ``mlp``: the 8-bit shared experts (``mixer.shared_experts.*``).  ``all``
+    adds the Mamba ``in_proj``/``out_proj`` and attention ``q/k/v/o``.  The
+    routed experts (sorted gathers), the bf16 router and latent projections,
+    the LM head, the MTP head and any media tower stay stock.  Approximate:
+    the Mamba projections feed 40 recurrent layers, so this needs a
+    long-context KL check before it is ever selected by default.
+    """
+
+    def select(path, module):
+        segments = path.split(".")
+        if segments[:2] != ["backbone", "layers"] or len(segments) < 5:
+            return False
+        if segments[3] != "mixer" or "switch_mlp" in segments:
+            return False
+        if "shared_experts" in segments:
+            return segments[-1] in {"up_proj", "down_proj"}
+        if scope != "all":
+            return False
+        return segments[-1] in {"in_proj", "out_proj", "q_proj", "k_proj", "v_proj", "o_proj"}
+
+    return select
+
+
 def _super_expert_gathers(model):
     layers = list(model.layers)
     mtp = getattr(model, "mtp", None)
@@ -290,13 +354,42 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
     descriptor = DESCRIPTOR
     sampling_defaults = SAMPLING
     artifact_inspector = staticmethod(inspect_artifact)
-    default_route = "ordinary"
+    # Locked in by Pierre on 2026-10-18 after the feature sweep: native MTP
+    # depth 2 is the default text route.  Greedy output was identical to
+    # ordinary on every probe (feature sweep 33235e9f1, mtp-d2 unit), row-exact
+    # canaries 0 failed, decode about 1.3-2x ordinary at 4K-32K (exploratory
+    # single-repetition ladders on snapshot 6f843160).  Images are served on
+    # the ordinary route only (``multimodal_routes``), so a multimodal server
+    # passes --ordinary.  Not a qualification: the route stays unqualified.
+    default_route = "native_mtp"
     multimodal_routes = frozenset({"ordinary"})
     default_mtp_ordinary_handoff_max_width = None
+    # The exact kernels of that route: the fused short Mamba conv and gated
+    # SSM, short row-exact projections, the layerwise short-exact routed-batch
+    # segment, and the bit-identical NAX sorted MoE gather for prefill.  An
+    # operator policy that names any of these keys wins.
+    adapter_owned_default_policy_keys = frozenset({
+        "mamba_conv", "mamba_projection", "mamba_segment", "mamba_ssm",
+        "moe_nax_gather", "num_draft",
+    })
+    default_route_execution_policy = {
+        "native_mtp": {
+            "mamba_conv": "fused_short",
+            "mamba_projection": "short_row_exact",
+            "mamba_segment": "layerwise_short_exact_routed_batch",
+            "mamba_ssm": "fused_short_gate",
+            "moe_nax_gather": "gather",
+            "num_draft": 2,
+        },
+    }
     think_close_separator = ""
     EXTERNAL_DEFAULT_NUM_DRAFT = 7
     EXTERNAL_ROUTE_TAG = "super-vl-external-v1"
     EXTERNAL_PROFILE = "nemotron35-super-vl-apcv2-external"
+    # int8 (W8A8) prefill: declared, never selected without an explicit
+    # --int8-prefill or a matching qualification record (int8_prefill auto).
+    int8_prefill_supported = staticmethod(lambda: NEMOTRON_INT8_PREFILL_SCOPES)
+    int8_prefill_select = staticmethod(nemotron_int8_prefill_select)
     EXTERNAL_POLICY_EXTENSIONS = frozenset({"draft_weight_quantization"})
     incremental_tokenizer_renderer_revision = "nemotron35-super-vl-renderer-v1"
 
@@ -308,8 +401,9 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         )
 
     def _init_super(self, model_path, execution_policy):
-        from .process_globals import claim_stock_moe
+        from .process_globals import claim_moe, claim_stock_moe
 
+        execution_policy, self.moe_nax_gather = _split_moe_nax_gather(execution_policy)
         (
             expert_sort,
             mamba_conv,
@@ -386,7 +480,10 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         self.environment = configure_environment()
         self.environment["MLX_LM_MTP_BOUNDARY_COW"] = "1"
         os.environ["MLX_LM_MTP_BOUNDARY_COW"] = "1"
-        claim_stock_moe(self, "the Nemotron 3.5 Super VL adapter")
+        if self.moe_nax_gather == "off":
+            claim_stock_moe(self, "the Nemotron 3.5 Super VL adapter")
+        else:
+            claim_moe(self, "the Nemotron 3.5 Super VL adapter", self.moe_nax_gather)
         import mlx.core as mx
         from mlx import nn
         from transformers import AutoTokenizer
@@ -675,6 +772,14 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
                 for key in ("recipe", "expert_bits", "activation_aware")
             },
             "external_draft": self.draft_model is not None,
+            "moe_nax_gather": _moe_nax_gather_report(
+                getattr(self, "moe_nax_gather", "off")
+            ),
+            "row_exact": (
+                self.model.row_exact_status()
+                if hasattr(self.model, "row_exact_status")
+                else None
+            ),
             "expert_gather_sort": {
                 "schema": "mlx2.nemotron35-super-expert-gather-sort.v1",
                 "implemented": True,

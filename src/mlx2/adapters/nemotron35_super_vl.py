@@ -23,6 +23,10 @@ from .external_draft_policy import ExternalDraftAdapterMixin
 from .nemotron3_super import Nemotron3SuperAdapter, configure_environment
 from .nemotron3_super_memory import NemotronCacheBudget
 from .nemotron35_super import (
+    NEMOTRON_INT8_PREFILL_SCOPES,
+    _moe_nax_gather_report,
+    nemotron_int8_prefill_select,
+    _split_moe_nax_gather,
     _split_super_execution_policy,
     _super_expert_gathers,
     _super_mamba_mixers,
@@ -413,6 +417,9 @@ class Nemotron35SuperVLAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter)
     EXTERNAL_DEFAULT_NUM_DRAFT = 7
     EXTERNAL_ROUTE_TAG = "external-nemotron35-lilicorr-bf16-v1"
     EXTERNAL_PROFILE = "nemotron35-super-vl-apcv2-lilicorr-bf16"
+    # int8 (W8A8) prefill: declared, off unless explicitly or record-selected.
+    int8_prefill_supported = staticmethod(lambda: NEMOTRON_INT8_PREFILL_SCOPES)
+    int8_prefill_select = staticmethod(nemotron_int8_prefill_select)
 
     def __init__(self, model_path, *, execution_policy=None):
         from .process_globals import guarded_construction
@@ -422,6 +429,7 @@ class Nemotron35SuperVLAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter)
         )
 
     def _initialize(self, model_path, execution_policy):
+        execution_policy, self.moe_nax_gather = _split_moe_nax_gather(execution_policy)
         (
             expert_sort,
             mamba_conv,
@@ -454,9 +462,12 @@ class Nemotron35SuperVLAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter)
         self.identity, self.load_plan = artifact["identity"], artifact["load_plan"]
         self.layout, self._num_draft, self._has_mtp = CACHE_LAYOUT, 0, False
         self.environment = configure_environment()
-        from .process_globals import claim_stock_moe
+        from .process_globals import claim_moe, claim_stock_moe
 
-        claim_stock_moe(self, "the Nemotron 3.5 Super VL text adapter")
+        if self.moe_nax_gather == "off":
+            claim_stock_moe(self, "the Nemotron 3.5 Super VL text adapter")
+        else:
+            claim_moe(self, "the Nemotron 3.5 Super VL text adapter", self.moe_nax_gather)
         self.model = load_text_model(artifact)
         self._super_expert_gathers = _super_expert_gathers(self.model)
         self._super_mamba_mixers = _super_mamba_mixers(self.model)
@@ -657,6 +668,14 @@ class Nemotron35SuperVLAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter)
         )
         return {
             **base,
+            "moe_nax_gather": _moe_nax_gather_report(
+                getattr(self, "moe_nax_gather", "off")
+            ),
+            "row_exact": (
+                self.model.row_exact_status()
+                if hasattr(getattr(self, "model", None), "row_exact_status")
+                else None
+            ),
             "expert_gather_sort": self._candidate_status(
                 self.expert_gather_sort,
                 gather_counts,

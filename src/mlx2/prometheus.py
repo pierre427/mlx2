@@ -1929,6 +1929,21 @@ def _add_power(builder: PrometheusBuilder, engine: Any) -> None:
                 float(value),
                 {"stat": stat},
             )
+    battery = last.get("battery_temperature_c")
+    if battery is not None:
+        builder.gauge(
+            "mlx2_battery_temperature_celsius",
+            "Battery temperature from the HID gas-gauge sensor at the last sample.",
+            float(battery),
+        )
+    thermal_state = last.get("system_thermal_state")
+    if thermal_state in {"nominal", "fair", "serious", "critical"}:
+        builder.gauge(
+            "mlx2_system_thermal_state",
+            "Current public NSProcessInfo thermal state as a labelled one-hot gauge.",
+            1.0,
+            {"state": thermal_state},
+        )
     per_token = (status.get("window") or {}).get("joules_per_output_token")
     if per_token is not None:
         builder.gauge(

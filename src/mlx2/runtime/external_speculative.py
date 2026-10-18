@@ -13,6 +13,7 @@ import os
 import time
 import uuid
 from collections import defaultdict, deque
+from contextlib import suppress
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -37,15 +38,20 @@ from .generate import (
 )
 from .prefill_plan import prompt_length_prefill_step
 from .processor_probe import VerifyWindow, copy_sharing, rollback_shared_memo
-from .ragged_verify_layout import RaggedVerifyLayout, padded_capabilities
 from .progressive_external_verify import (
     PROGRESSIVE_APPROXIMATE_TARGET_PROTOCOL_VERSION,
     PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
     PROGRESSIVE_FIDELITY_EXACT,
     PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED,
+    execute_progressive_target_rows,
     progressive_target_protocol_binding,
     verify_proposal_tile,
 )
+from .proposal_providers import (
+    InsufficientContinuationAlternatives,
+    PointMassLaw,
+)
+from .ragged_verify_layout import RaggedVerifyLayout, padded_capabilities
 from .speculative_sampling import (
     FLyVerificationPolicy,
     RequestRNG,
@@ -60,10 +66,12 @@ from .speculative_sampling import (
     verify_proposals,
 )
 from .speculative_topology import (
-    AdaptiveTopologyLatch,
+    PerSessionSpeculationTopology,
+    OrderedLiveFrontierPlanner,
     confidence_tree_branch_depths,
     confidence_tree_trunk_length,
     ordered_alternative_proposals,
+    processors_branch_safe,
     ordered_alternative_winner,
     ordered_branch_outcomes,
     staged_branch_indices,
@@ -73,8 +81,109 @@ from .speculative_topology import (
 _COUNTER_MAX = (1 << 63) - 1
 
 
+def _speculation_parked(lane) -> bool:
+    """A reversible cost-handoff session that is parked and not re-probing."""
+    state = getattr(lane, "cost_handoff_state", None)
+    return state is not None and state.speculation_paused
+
+
+class _CommittedPlainRows:
+    """A plain transaction already committed before its host read.
+
+    The pipelined parked round commits its one-token plain transaction before
+    the following round begins (a plain round accepts every anchor, so its
+    commit needs no host token); ``_commit`` then books the round against
+    the rows that commit returned.
+    """
+
+    closed = True
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def commit(self, accepted_lengths):
+        if any(int(count) != 1 for count in accepted_lengths):
+            raise RuntimeError("a pipelined parked round accepts exactly its anchor")
+        return self._rows
+
+
+@dataclass
+class _ParkedInflight:
+    """One dispatched, unread anchor-only round of a parked cohort."""
+
+    lanes: list
+    transaction: object
+    logits: object
+    features: object
+    next_anchors: object
+    normalizers: object
+    logprob_rows: object
+    recovery: list
+    timing_start_ns: int
+    generated_before: list
+
 def _bump(stats, key, amount=1):
     stats[key] = min(_COUNTER_MAX, int(stats.get(key, 0)) + int(amount))
+
+
+def _target_executor_stats():
+    return {
+        "schema": "mlx2.progressive-target-row-executor.v1",
+        "scope": "physical_launches_shared_by_receipt_cohort",
+        "launches": 0,
+        "adapter_owned_launches": 0,
+        "legacy_launches": 0,
+        "row_exact_launches": 0,
+        "nonexact_launches": 0,
+        "physical_width_hist": {},
+        "token_width_hist": {},
+        "last": None,
+    }
+
+
+def _observe_target_executor(stats, receipt):
+    stats["launches"] += 1
+    execution = receipt["execution"]
+    counter = (
+        "adapter_owned_launches"
+        if execution == "adapter_owned"
+        else "legacy_launches"
+    )
+    stats[counter] += 1
+    if receipt["row_exact"] is True:
+        stats["row_exact_launches"] += 1
+    elif receipt["row_exact"] is False:
+        stats["nonexact_launches"] += 1
+    for source, target in (
+        ("physical_width", "physical_width_hist"),
+        ("token_width", "token_width_hist"),
+    ):
+        key = str(int(receipt[source]))
+        stats[target][key] = stats[target].get(key, 0) + 1
+    stats["last"] = copy.deepcopy(receipt)
+
+
+def _merge_target_executor_stats(*rows):
+    result = _target_executor_stats()
+    for row in rows:
+        if not row:
+            continue
+        for key in (
+            "launches",
+            "adapter_owned_launches",
+            "legacy_launches",
+            "row_exact_launches",
+            "nonexact_launches",
+        ):
+            result[key] += int(row.get(key, 0))
+        for key in ("physical_width_hist", "token_width_hist"):
+            for width, count in row.get(key, {}).items():
+                result[key][str(width)] = (
+                    result[key].get(str(width), 0) + int(count)
+                )
+        if row.get("last") is not None:
+            result["last"] = copy.deepcopy(row["last"])
+    return result
 
 
 def _first_tiles_pairwise_disjoint(token_rows, tile):
@@ -388,6 +497,10 @@ class HostDraftRow:
     continuation_selection: object = None
     continuation_admission: object = None
     continuation_slate: object = None
+    continuation_ast_provenance: object = None
+    continuation_ast_admitted_provenance: object = None
+    continuation_ast_branch_index: int | None = None
+    continuation_ast_admitted_depths: object = None
     feedback_payload: object = None
 
     @property
@@ -466,7 +579,15 @@ def _greedy_proposal_supported(block, laws, drafts, vocab):
     """
     if not drafts:
         return
-    if isinstance(laws, CompactDraftRow):
+    if isinstance(laws, (list, tuple)) and all(
+        isinstance(law, PointMassLaw) for law in laws
+    ):
+        if len(laws) != len(drafts) or any(
+            law.token != int(token) or not 0 <= law.token < vocab
+            for token, law in zip(drafts, laws, strict=True)
+        ):
+            raise ValueError("invalid sparse point-mass proposal laws")
+    elif isinstance(laws, CompactDraftRow):
         validate_compact_proposal_laws(
             drafts, laws.candidate_ids, laws.candidate_probs, vocab
         )
@@ -535,6 +656,8 @@ class ExternalDraftBatchGenerator:
     prefill_allocator_reclaim = False
     external_varlen_prefill = False
     progressive_alternative_branches = 1
+    progressive_cross_session_pack_rows = None
+    progressive_cross_session_pack_mode = None
     adaptive_policy = None
     multilane_draft_cap = None
 
@@ -545,6 +668,7 @@ class ExternalDraftBatchGenerator:
                  pairwise_selection="host", ready_drain="one",
                  prefill_allocator_reclaim=False, adaptive_verification=None,
                  continuation_pool=None, continuation_verification_strategy=None,
+                 continuation_pool_ast_bridge=False,
                  dynamic_singleton_tree=False,
                  dynamic_tree_max_width=1, external_varlen_prefill=False,
                  tree_node_budget_by_lanes=None,
@@ -558,6 +682,8 @@ class ExternalDraftBatchGenerator:
                  progressive_alternative_branches=1,
                  progressive_alternative_strategy="distinct_root",
                  progressive_alternative_depth_policy="full",
+                 progressive_cross_session_pack_rows=None,
+                 progressive_cross_session_pack_mode=None,
                  multilane_draft_cap=None,
                  progressive_verification_fidelity=None,
                  progressive_target_protocol=None,
@@ -582,6 +708,9 @@ class ExternalDraftBatchGenerator:
         )
         self._feedback_outbox = None
         self.continuation_policy = None
+        if type(continuation_pool_ast_bridge) is not bool:
+            raise ValueError("continuation_pool_ast_bridge must be boolean")
+        self.continuation_pool_ast_bridge = continuation_pool_ast_bridge
         if continuation_pool is not None:
             from .proposal_providers import ContinuationPoolPolicy
             self.continuation_policy = (continuation_pool if isinstance(continuation_pool, ContinuationPoolPolicy)
@@ -590,6 +719,10 @@ class ExternalDraftBatchGenerator:
                 raise ValueError("continuation_pool requires the matching bound proposal provider")
         elif hasattr(draft_model, "last_continuation_selections"):
             self.continuation_policy = draft_model.policy
+        if getattr(self, "continuation_pool_ast_bridge", False) and self.continuation_policy is None:
+            raise ValueError(
+                "continuation_pool_ast_bridge requires a bound continuation pool"
+            )
         from .continuation_strategy import ContinuationStrategy
 
         self.continuation_strategy = ContinuationStrategy.from_value(
@@ -822,10 +955,16 @@ class ExternalDraftBatchGenerator:
             or self.pairwise_selection != "host"
             or self.fly_verification.enabled
             or self.exact_verification != "token"
-            or self.continuation_policy is not None
+            or (
+                self.continuation_policy is not None
+                and not getattr(self, "continuation_pool_ast_bridge", False)
+            )
             or self.adaptive_policy is not None
             or dynamic_singleton_tree
-            or hasattr(draft_model, "last_proposal_sources")
+            or (
+                hasattr(draft_model, "last_proposal_sources")
+                and not getattr(self, "continuation_pool_ast_bridge", False)
+            )
         ):
             raise ValueError(
                 "progressive verification requires an exact reference chain "
@@ -839,15 +978,40 @@ class ExternalDraftBatchGenerator:
             raise ValueError(
                 "progressive_alternative_branches must be an integer from 1 to 4"
             )
+        if progressive_cross_session_pack_rows is not None and (
+            progressive_cross_session_pack_rows not in {4, 8}
+            or progressive_alternative_strategy != "confidence_tree"
+            or progressive_alternative_branches <= 1
+            or not 2 <= completion_batch_size <= 4
+        ):
+            raise ValueError(
+                "progressive_cross_session_pack_rows must be 4 or 8 and requires "
+                "two to four confidence-tree sessions"
+            )
+        if progressive_cross_session_pack_mode not in {None, "ordered_live_frontier"}:
+            raise ValueError(
+                "progressive_cross_session_pack_mode must be ordered_live_frontier"
+            )
+        if (
+            progressive_cross_session_pack_mode == "ordered_live_frontier"
+            and progressive_cross_session_pack_rows is None
+        ):
+            raise ValueError(
+                "ordered_live_frontier requires progressive cross-session packing"
+            )
         if progressive_alternative_branches > 1 and (
             progressive_verification_tile is None
-            or completion_batch_size != 1
+            or (
+                completion_batch_size != 1
+                and progressive_cross_session_pack_rows is None
+            )
             or getattr(draft_model, "proposal_distribution", None)
             != "deterministic_point_mass"
         ):
             raise ValueError(
-                "ordered alternative branches require B1 exact progressive "
-                "verification and deterministic point-mass proposals"
+                "ordered alternative branches require B1 or explicit cross-session "
+                "packing, exact progressive verification, and deterministic "
+                "point-mass proposals"
             )
         validate_ordered_alternative_strategy(
             progressive_alternative_strategy, progressive_alternative_branches
@@ -866,6 +1030,21 @@ class ExternalDraftBatchGenerator:
         ):
             raise ValueError(
                 "ordered alternative branches require a capable proposal adapter"
+            )
+        if getattr(self, "continuation_pool_ast_bridge", False) and (
+            progressive_verification_tile is None
+            or progressive_alternative_branches <= 1
+            or progressive_verification_fidelity
+            not in (None, PROGRESSIVE_FIDELITY_EXACT)
+            or getattr(draft_model, "proposal_distribution", None)
+            != "deterministic_point_mass"
+            or not callable(
+                getattr(draft_model, "ordered_alternative_proposals", None)
+            )
+        ):
+            raise ValueError(
+                "continuation_pool_ast_bridge requires exact progressive ordered "
+                "alternatives from a deterministic point-mass continuation wrapper"
             )
         self.progressive_verification_fidelity = None
         self.progressive_target_protocol = None
@@ -907,8 +1086,12 @@ class ExternalDraftBatchGenerator:
         self.progressive_alternative_depth_policy = (
             progressive_alternative_depth_policy
         )
+        self.progressive_cross_session_pack_rows = (
+            progressive_cross_session_pack_rows
+        )
+        self.progressive_cross_session_pack_mode = progressive_cross_session_pack_mode
         self.progressive_topology_latch = (
-            AdaptiveTopologyLatch(progressive_alternative_branches)
+            PerSessionSpeculationTopology(progressive_alternative_branches)
             if progressive_alternative_strategy == "confidence_tree"
             and progressive_alternative_branches > 1
             else None
@@ -938,6 +1121,9 @@ class ExternalDraftBatchGenerator:
         self.stops = {int(t[0]) for t in stop_tokens}
         self.layers = tuple(draft_model.config.target_layer_ids)
         self.lanes = {}; self.next_uid = 0; self.boundaries = {}
+        # A parked cohort's dispatched, unread round (pipelined parked decode).
+        self._parked_inflight = None
+        self._parked_last_read_ns = None
         self._lane_failures = []
         # Client-declared cohorts own every member until their first complete
         # decode frontier.  Cancellation/removal before that boundary fails
@@ -946,7 +1132,9 @@ class ExternalDraftBatchGenerator:
         self._atomic_cohort_failures = []
         self._released_atomic_cohorts = set()
         self._memory_waiting_uids = set()
+        self._decode_fit_waiting_uids = set()
         self._atomic_prefill_waiting_uids = set()
+        self._decode_service_epoch = 0
         self.scheduler_stats = {"external_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0, "external_context_token_pairings": 0, "external_verify_steer_rounds": 0, "external_verify_steered_lanes": 0, "external_allocator_reclaims": 0, "external_idle_allocator_reclaims": 0, "external_atomic_cohort_prefill_holds": 0, "external_atomic_cohort_releases": 0, "external_atomic_cohort_failures": 0}
         self.scheduler_stats.update(
             external_minimum_draft_proposals=self.minimum_draft_proposals,
@@ -963,6 +1151,10 @@ class ExternalDraftBatchGenerator:
                 external_progressive_verify_physical_launches=0,
                 external_progressive_verify_ragged_launches=0,
                 external_progressive_verify_padding_rows=0,
+                external_progressive_target_executor_adapter_owned_launches=0,
+                external_progressive_target_executor_legacy_launches=0,
+                external_progressive_target_executor_row_exact_launches=0,
+                external_progressive_target_executor_nonexact_launches=0,
                 external_progressive_verify_batched_rounds=0,
                 external_progressive_verify_batched_lanes=0,
                 external_progressive_verify_b1_aligned_tile_launches=0,
@@ -978,12 +1170,53 @@ class ExternalDraftBatchGenerator:
                 external_progressive_alternative_rounds=0,
                 external_progressive_alternative_sampled_primary_rounds=0,
                 external_progressive_alternative_stop_guard_rounds=0,
+                external_progressive_ast_geometry_guard_rounds=0,
                 external_progressive_alternative_branches=0,
                 external_progressive_alternative_full_accepts=0,
                 external_progressive_alternative_b2_short_circuits=0,
                 external_progressive_alternative_shared_prefix_rounds=0,
                 external_progressive_alternative_shared_prefix_tokens=0,
                 external_progressive_alternative_unique_target_rows=0,
+                external_progressive_cross_session_ast_rounds=0,
+                external_progressive_cross_session_ast_sessions=0,
+                external_progressive_cross_session_ast_packs=0,
+                external_progressive_cross_session_ast_b8_launches=0,
+                external_progressive_apt_frontier_rows_admitted=0,
+                external_progressive_apt_frontier_sessions_retired=0,
+                external_progressive_apt_frontier_branches_unvisited=0,
+                external_progressive_apt_frontier_proposal_tokens_not_scheduled=0,
+                external_progressive_apt_frontier_refills=0,
+                external_progressive_apt_frontier_occupancy_numerator=0,
+                external_progressive_apt_frontier_occupancy_denominator=0,
+                external_progressive_apt_frontier_partial_packs=0,
+                external_progressive_apt_frontier_full_packs=0,
+                external_progressive_apt_frontier_max_service_gap=0,
+                deprecated_external_progressive_apt_frontier_alias_for=(
+                    "external_progressive_ast_frontier_*"
+                ),
+                external_progressive_ast_frontier_rows_admitted=0,
+                external_progressive_ast_frontier_sessions_retired=0,
+                external_progressive_ast_frontier_branches_unvisited=0,
+                external_progressive_ast_frontier_proposal_tokens_not_scheduled=0,
+                external_progressive_ast_frontier_refills=0,
+                external_progressive_ast_frontier_occupancy_numerator=0,
+                external_progressive_ast_frontier_occupancy_denominator=0,
+                external_progressive_ast_frontier_partial_packs=0,
+                external_progressive_ast_frontier_full_packs=0,
+                external_progressive_ast_frontier_max_service_gap=0,
+                external_progressive_ast_primary_fallback_insufficient_branches_rounds=0,
+                external_progressive_ast_primary_fallback_depth_not_above_tile_rounds=0,
+                external_progressive_ast_branch_downshift_rounds=0,
+                external_progressive_ast_branch_downshift_lanes=0,
+                external_progressive_ast_rootless_rounds=0,
+                external_progressive_ast_rootless_lanes=0,
+                external_progressive_ast_adaptive_prefix_rounds=0,
+                external_progressive_ast_adaptive_prefix_lanes=0,
+                external_progressive_ast_utility_downshift_rounds=0,
+                external_progressive_ast_utility_downshift_sessions=0,
+                external_progressive_ast_primary_only_rounds=0,
+                external_progressive_ast_primary_only_sessions=0,
+                external_progressive_topology_observation_failures=0,
                 external_progressive_verify_tile=self.progressive_verification_tile,
                 external_multilane_draft_cap=self.multilane_draft_cap,
                 external_multilane_draft_cap_rounds=0,
@@ -1097,6 +1330,65 @@ class ExternalDraftBatchGenerator:
     def _target_args(self):
         # Hybrid targets keep text geometry under ``speculative_args``.
         return getattr(self.model, "speculative_args", self.model.args)
+
+    def _cohort_target_forward(self, inputs, transaction, cohort, *, site, taps=True):
+        """Target forward for one cohort transaction: lane-exact when owned.
+
+        A batched hybrid transaction at B>1 otherwise runs the plain batched
+        forward: multi-row SDPA and batched Mamba/MoE/projection kernels whose
+        bits depend on the cohort's width and padding.  When the route is
+        configured for exact progressive verification and the target exposes
+        its adapter-owned row-exact executor (the same one progressive verify
+        launches), every row runs with its own lane's one-token decode
+        arithmetic instead, so a lane's stream no longer depends on which
+        lanes shared its round.  ``site`` names the scheduler path in the
+        counters and in each lane's receipt.  ``taps=False`` (a logits-only
+        caller) keeps the plain logits-only model call whenever the lane-exact
+        executor is not selected, and returns ``None`` features.
+
+        The path is classified by the cohort's lane count, whatever the
+        transaction type: ``lane_exact``, ``batched`` (two or more lanes on
+        any other forward, KV or hybrid) or ``single_lane``.
+        """
+        width = int(inputs.shape[1])
+        batch = int(inputs.shape[0])
+        executor = getattr(self.model, "progressive_external_target_rows", None)
+        lane_exact = bool(
+            executor is not None
+            and self.progressive_verification_fidelity == PROGRESSIVE_FIDELITY_EXACT
+            and getattr(transaction, "batched", False)
+            and 2 <= batch <= 8
+            and 1 <= width <= 16
+        )
+        if lane_exact:
+            logits, features, detail = execute_progressive_target_rows(
+                self.model,
+                inputs,
+                transaction.caches,
+                self.layers,
+                protocol=self.progressive_target_protocol,
+                fidelity=PROGRESSIVE_FIDELITY_EXACT,
+            )
+            path = "lane_exact"
+            if detail["row_exact"] is not True:
+                raise RuntimeError("cohort target executor left its row-exact path")
+        else:
+            if taps:
+                logits, features = self.model.forward_with_taps(
+                    inputs, transaction.caches, self.layers
+                )
+            else:
+                logits, features = self.model(inputs, cache=transaction.caches), None
+            detail = None
+            path = "batched" if batch >= 2 else "single_lane"
+        _bump(self.scheduler_stats, f"external_cohort_target_{path}_{site}_rounds")
+        for lane in cohort:
+            counts = getattr(lane, "cohort_target_execution", None)
+            if counts is None:
+                counts = lane.cohort_target_execution = {}
+            key = f"{site}:{path}"
+            counts[key] = counts.get(key, 0) + 1
+        return logits, features
 
     def _target_owner(self, rows):
         """Verify-transaction owner chosen by cache topology, never by model.
@@ -1629,7 +1921,30 @@ class ExternalDraftBatchGenerator:
                 "last_ragged_layout": getattr(
                     lane, "progressive_verify_last_ragged_layout", None
                 ),
+                "target_row_executor": copy.deepcopy(
+                    getattr(
+                        lane,
+                        "progressive_target_row_executor",
+                        _target_executor_stats(),
+                    )
+                ),
+                # Non-progressive cohort forwards (standard verify after a
+                # progressive decline, plain/parked/ordinary rounds), by
+                # ``site:path``: ``lane_exact`` ran the adapter-owned
+                # row-exact executor, ``batched`` the width-sensitive batched
+                # forward, ``single_lane`` a B1 transaction.
+                "cohort_target_execution": dict(
+                    getattr(lane, "cohort_target_execution", None) or {}
+                ),
                 "ordered_alternatives": {
+                    "display_name": "Adaptive Speculation Topology",
+                    "mechanism_id": "adaptive_speculation_topology",
+                    "mechanism_short_name": "AST",
+                    "deprecated_mechanism_aliases": [
+                        "adaptive_proposal_topology",
+                        "APT",
+                    ],
+                    "mechanism": "adaptive_speculation_topology",
                     "configured_branches": self.progressive_alternative_branches,
                     "last_active_branches": getattr(
                         lane,
@@ -1642,6 +1957,47 @@ class ExternalDraftBatchGenerator:
                     ),
                     "rounds": getattr(
                         lane, "progressive_alternative_rounds", 0
+                    ),
+                    "primary_fallback_rounds": getattr(
+                        lane, "progressive_ast_primary_fallback_rounds", 0
+                    ),
+                    "primary_fallback_reasons": copy.deepcopy(
+                        getattr(lane, "progressive_ast_primary_fallback_reasons", {})
+                    ),
+                    "last_primary_fallback_reason": getattr(
+                        lane, "progressive_ast_last_primary_fallback_reason", None
+                    ),
+                    "branch_downshift_rounds": getattr(
+                        lane, "progressive_ast_branch_downshift_rounds", 0
+                    ),
+                    "last_branch_downshift": copy.deepcopy(
+                        getattr(lane, "progressive_ast_last_branch_downshift", None)
+                    ),
+                    "rootless_rounds": getattr(
+                        lane, "progressive_ast_rootless_rounds", 0
+                    ),
+                    "last_topology": getattr(
+                        lane, "progressive_ast_last_topology", None
+                    ),
+                    "adaptive_prefix_rounds": getattr(
+                        lane, "progressive_ast_adaptive_prefix_rounds", 0
+                    ),
+                    "last_prefix_search": copy.deepcopy(
+                        getattr(lane, "progressive_ast_last_prefix_search", None)
+                    ),
+                    "last_prefix_diagnostics": copy.deepcopy(
+                        getattr(
+                            lane,
+                            "progressive_ast_last_prefix_diagnostics",
+                            None,
+                        )
+                    ),
+                    "last_proposed_prefix_diagnostics": copy.deepcopy(
+                        getattr(
+                            lane,
+                            "progressive_ast_last_proposed_prefix_diagnostics",
+                            None,
+                        )
                     ),
                     "sampled_primary_rounds": getattr(
                         lane, "progressive_alternative_sampled_primary_rounds", 0
@@ -1719,9 +2075,80 @@ class ExternalDraftBatchGenerator:
                     "cross_shape_state_equivalence": (
                         "unqualified_shape_sensitive_float_arithmetic"
                     ),
+                    "cross_session_ast_packing": {
+                        "configured_pack_rows": (
+                            self.progressive_cross_session_pack_rows
+                        ),
+                        "configured_mode": (
+                            self.progressive_cross_session_pack_mode
+                        ),
+                        "observed_used": bool(
+                            getattr(
+                                lane,
+                                "progressive_cross_session_ast_last_packs",
+                                [],
+                            )
+                        ),
+                        "last_pack_rows": getattr(
+                            lane,
+                            "progressive_cross_session_ast_last_pack_rows",
+                            None,
+                        ),
+                        "last_packs": getattr(
+                            lane,
+                            "progressive_cross_session_ast_last_packs",
+                            [],
+                        ),
+                        "mode": getattr(
+                            lane,
+                            "progressive_cross_session_ast_last_mode",
+                            None,
+                        ),
+                        "live_frontier": getattr(
+                            lane,
+                            "progressive_cross_session_ast_last_frontier",
+                            None,
+                        ),
+                        "state_scope": "request_private",
+                        "physical_scope": "shared_target_launch_only",
+                    },
+                    "cross_session_apt_packing": {
+                        "deprecated_alias_for": "cross_session_ast_packing",
+                        "configured_pack_rows": self.progressive_cross_session_pack_rows,
+                        "configured_mode": self.progressive_cross_session_pack_mode,
+                        "observed_used": bool(
+                            getattr(
+                                lane,
+                                "progressive_cross_session_ast_last_packs",
+                                [],
+                            )
+                        ),
+                        "last_pack_rows": getattr(
+                            lane,
+                            "progressive_cross_session_ast_last_pack_rows",
+                            None,
+                        ),
+                        "last_packs": getattr(
+                            lane,
+                            "progressive_cross_session_ast_last_packs",
+                            [],
+                        ),
+                        "mode": getattr(
+                            lane,
+                            "progressive_cross_session_ast_last_mode",
+                            None,
+                        ),
+                        "live_frontier": getattr(
+                            lane,
+                            "progressive_cross_session_ast_last_frontier",
+                            None,
+                        ),
+                        "state_scope": "request_private",
+                        "physical_scope": "shared_target_launch_only",
+                    },
                     "adaptive_latch": {
-                        "scope": "bound_drafter_artifact_and_serving_shape",
-                        "decision_uses": "prior_completed_batches_only",
+                        "scope": "request_session",
+                        "decision_uses": "this_session_prior_completed_batches_only",
                         "last_decision": getattr(
                             lane,
                             "progressive_topology_latch_last_decision",
@@ -2276,6 +2703,12 @@ class ExternalDraftBatchGenerator:
             declared=bool(getattr(self.draft, "supports_logits_processors", False)),
         )
 
+    @staticmethod
+    def _progressive_processors_supported(lane):
+        """Require an explicit law-and-side-effect-safe private-branch contract."""
+
+        return processors_branch_safe(lane.processors)
+
     def _propose(self, cohort, *, adaptive_depth=None, force_zero=False):
         """Draft phase: one proposal block per cohort row, ``None`` for no draft.
 
@@ -2288,11 +2721,56 @@ class ExternalDraftBatchGenerator:
         self._last_alternative_blocks = {}
         self._last_alternative_prefix_tokens = {}
         self._last_alternative_latch = {}
+        self._last_alternative_topology = {}
+        self._last_alternative_downshift = {}
+        self._last_alternative_prefix_search = {}
+        self._last_alternative_prefix_diagnostics = {}
+        ast_fallback_uids = set()
+
+        def record_ast_primary_fallback(lanes, reason):
+            _bump(
+                self.scheduler_stats,
+                "external_progressive_ast_primary_fallback_rounds",
+                len(lanes),
+            )
+            _bump(
+                self.scheduler_stats,
+                f"external_progressive_ast_primary_fallback_{reason}_rounds",
+                len(lanes),
+            )
+            for lane in lanes:
+                ast_fallback_uids.add(lane.uid)
+                # This round executed only the exact primary chain.  Keep
+                # cumulative AST history, but do not expose a proposal-only
+                # branch width as the last observed execution shape.
+                lane.progressive_alternative_last_active_branches = 1
+                lane.progressive_ast_primary_fallback_rounds = (
+                    getattr(lane, "progressive_ast_primary_fallback_rounds", 0)
+                    + 1
+                )
+                reasons = getattr(
+                    lane, "progressive_ast_primary_fallback_reasons", {}
+                )
+                reasons[reason] = reasons.get(reason, 0) + 1
+                lane.progressive_ast_primary_fallback_reasons = reasons
+                lane.progressive_ast_last_primary_fallback_reason = reason
+                prefix_diagnostics = self._last_alternative_prefix_diagnostics.get(
+                    lane.uid
+                )
+                if prefix_diagnostics is not None:
+                    lane.progressive_ast_last_proposed_prefix_diagnostics = (
+                        copy.deepcopy(prefix_diagnostics)
+                    )
         # Host doubles bind _propose without __init__; off unless configured.
         branches = getattr(self, "progressive_alternative_branches", 1)
-        if branches > 1 and len(cohort) != 1:
+        if (
+            branches > 1
+            and len(cohort) != 1
+            and getattr(self, "progressive_cross_session_pack_rows", None) is None
+        ):
             raise ValueError(
-                "ordered alternative proposals require one request lane"
+                "ordered alternative proposals require one request lane or "
+                "explicit cross-session packing"
             )
         tree_budget = (
             self._tree_node_budget() if self.draft_topology == "tree15" else None
@@ -2338,7 +2816,8 @@ class ExternalDraftBatchGenerator:
         elif adaptive_depth is not None:
             adaptive_count = min(requested_count, int(adaptive_depth))
             requested_count = self._proposal_depth(adaptive_count, requested_count)
-        if any(l.ordinary for l in cohort): requested_count = 0
+        if any(l.ordinary or _speculation_parked(l) for l in cohort):
+            requested_count = 0
         alternative_round = branches > 1 and not (
             (
                 self.progressive_alternative_strategy == "paired_continuations"
@@ -2373,6 +2852,12 @@ class ExternalDraftBatchGenerator:
                     getattr(lane, "progressive_alternative_sampled_primary_rounds", 0)
                     + 1
                 )
+        if alternative_round and any(
+            not self._progressive_processors_supported(lane) for lane in cohort
+        ):
+            alternative_round = False
+            if getattr(self, "continuation_pool_ast_bridge", False):
+                record_ast_primary_fallback(cohort, "unsupported_processors")
         # Alternative rows are valid only for the proposal round that created
         # them.  Clear the prior round before deciding whether this round has
         # enough suffix depth to branch; short terminal paired rounds then use
@@ -2380,6 +2865,19 @@ class ExternalDraftBatchGenerator:
         for lane in cohort:
             self._last_alternative_blocks.pop(lane.uid, None)
             self._last_alternative_prefix_tokens.pop(lane.uid, None)
+        if (
+            getattr(self, "continuation_pool_ast_bridge", False)
+            and active_width > 1
+            and self.progressive_cross_session_pack_rows is not None
+            and requested_count
+            and requested_count <= int(self.progressive_verification_tile or 0)
+            and all(
+                float(lane.sampling.get("sampling_temp", 0)) == 0.0
+                for lane in cohort
+            )
+        ):
+            alternative_round = False
+            record_ast_primary_fallback(cohort, "depth_not_above_tile")
         blocks = [None]*len(cohort)
         if not requested_count:
             if force_zero:
@@ -2391,6 +2889,7 @@ class ExternalDraftBatchGenerator:
         for row,lane in enumerate(cohort):
             groups.setdefault((int(lane.tail.shape[1]),str(lane.tail.dtype)),[]).append(row)
         for indices in groups.values():
+            session_alternative_branches = None
             lanes = [cohort[i] for i in indices]
             processors = [lane.processors for lane in lanes]
             arguments = (
@@ -2604,16 +3103,21 @@ class ExternalDraftBatchGenerator:
                         )
                         for row in range(len(lanes))
                     )
-                    latch_decisions = tuple(
-                        self.progressive_topology_latch.choose(
-                            alternative_prefixes[row],
-                            len(tokens[row]),
-                            int(self.progressive_verification_tile or 0),
-                        )
-                        for row in range(len(lanes))
+                    latch_decisions = self.progressive_topology_latch.choose_many(
+                        alternative_prefixes,
+                        [len(row) for row in tokens],
+                        int(self.progressive_verification_tile or 0),
+                        session_uids=[lane.uid for lane in lanes],
                     )
-                    active_alternative_branches = min(
-                        decision.active_branches for decision in latch_decisions
+                    # Each session owns its width.  Proposals are drafted at
+                    # the widest session's width and trimmed per session
+                    # before any target row is verified.
+                    session_alternative_branches = {
+                        int(lane.uid): int(decision.active_branches)
+                        for lane, decision in zip(lanes, latch_decisions, strict=True)
+                    }
+                    active_alternative_branches = max(
+                        session_alternative_branches.values()
                     )
                     suggested_alternative_prefixes = tuple(
                         decision.trunk_tokens for decision in latch_decisions
@@ -2647,25 +3151,161 @@ class ExternalDraftBatchGenerator:
                         payload["suggested_trunk_tokens"] = int(suggested)
                         payload["trunk_tokens"] = int(actual)
                         payload["snapshot_before"] = (
-                            self.progressive_topology_latch.snapshot()
+                            self.progressive_topology_latch.snapshot(lane.uid)
                         )
                         self._last_alternative_latch[lane.uid] = payload
-                        lane.progressive_topology_latch_last_decision = payload
+                    downshifted = [
+                        lane for lane in lanes
+                        if session_alternative_branches[int(lane.uid)]
+                        < self.progressive_alternative_branches
+                    ]
+                    if downshifted:
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_ast_utility_downshift_rounds",
+                        )
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_ast_utility_downshift_sessions",
+                            len(downshifted),
+                        )
+                    if active_alternative_branches == 1:
+                        record_ast_primary_fallback(
+                            lanes, "adaptive_utility_latch"
+                        )
+                    elif any(
+                        width == 1 for width in session_alternative_branches.values()
+                    ):
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_ast_mixed_width_rounds",
+                        )
                 if alternative_round:
-                    alternatives = ordered_alternative_proposals(
-                        self.draft,
-                        tokens,
-                        branch_count=active_alternative_branches,
-                        strategy=self.progressive_alternative_strategy,
-                        shared_prefix_tokens=(
-                            alternative_prefixes
-                            if alternative_prefixes is not None
-                            else self.progressive_verification_tile
-                            if self.progressive_alternative_strategy
-                            in {"shared_prefix", "paired_continuations"}
-                            else None
-                        ),
+                    requested_branches = active_alternative_branches
+                    requested_prefixes = tuple(alternative_prefixes or ())
+                    branch_attempts = tuple(
+                        range(requested_branches, 1, -1)
+                        if getattr(self, "continuation_pool_ast_bridge", False)
+                        and self.progressive_alternative_strategy
+                        == "confidence_tree"
+                        else (requested_branches,)
                     )
+                    selected_topologies = ("shared_trunk",) * len(lanes)
+                    for candidate_branches in branch_attempts:
+                        adaptive_prefix_search = (
+                            getattr(self, "continuation_pool_ast_bridge", False)
+                            and self.progressive_alternative_strategy
+                            == "confidence_tree"
+                        )
+                        try:
+                            alternatives = ordered_alternative_proposals(
+                                self.draft,
+                                tokens,
+                                branch_count=candidate_branches,
+                                strategy=self.progressive_alternative_strategy,
+                                shared_prefix_tokens=(
+                                    alternative_prefixes
+                                    if alternative_prefixes is not None
+                                    else self.progressive_verification_tile
+                                    if self.progressive_alternative_strategy
+                                    in {"shared_prefix", "paired_continuations"}
+                                    else None
+                                ),
+                                allow_adaptive_prefix_search=adaptive_prefix_search,
+                            )
+                        except InsufficientContinuationAlternatives:
+                            alternatives = None
+                            failed_diagnostics = getattr(
+                                self.draft,
+                                "last_ordered_alternative_search_diagnostics",
+                                (),
+                            )
+                            if len(failed_diagnostics) == len(lanes):
+                                for lane, diagnostics in zip(
+                                    lanes, failed_diagnostics, strict=True
+                                ):
+                                    self._last_alternative_prefix_diagnostics[
+                                        lane.uid
+                                    ] = copy.deepcopy(diagnostics)
+                            continue
+                        actual_prefixes = getattr(
+                            self.draft,
+                            "last_ordered_alternative_prefix_tokens",
+                            (),
+                        )
+                        if actual_prefixes:
+                            if len(actual_prefixes) != len(lanes):
+                                raise ValueError(
+                                    "AST bridge prefix provenance rows mismatch"
+                                )
+                            alternative_prefixes = tuple(
+                                int(value) for value in actual_prefixes
+                            )
+                        active_alternative_branches = candidate_branches
+                        if adaptive_prefix_search:
+                            selected_topologies = tuple(
+                                "rootless_sibling_fanout"
+                                if prefix == 0
+                                else "adaptive_shared_trunk"
+                                if prefix != requested_prefixes[index]
+                                else "shared_trunk"
+                                for index, prefix in enumerate(alternative_prefixes)
+                            )
+                        break
+                    if alternatives is not None:
+                        prefix_diagnostics = getattr(
+                            self.draft,
+                            "last_ordered_alternative_search_diagnostics",
+                            (),
+                        )
+                        if prefix_diagnostics:
+                            if len(prefix_diagnostics) != len(lanes):
+                                raise ValueError(
+                                    "AST bridge prefix diagnostics rows mismatch"
+                                )
+                            for lane, diagnostics in zip(
+                                lanes, prefix_diagnostics, strict=True
+                            ):
+                                self._last_alternative_prefix_diagnostics[
+                                    lane.uid
+                                ] = copy.deepcopy(diagnostics)
+                        for lane, selected_topology in zip(
+                            lanes, selected_topologies, strict=True
+                        ):
+                            self._last_alternative_topology[lane.uid] = (
+                                selected_topology
+                            )
+                        for index, lane in enumerate(lanes):
+                            if (
+                                alternative_prefixes is not None
+                                and requested_prefixes
+                                and alternative_prefixes[index]
+                                != requested_prefixes[index]
+                            ):
+                                self._last_alternative_prefix_search[lane.uid] = {
+                                    "suggested": requested_prefixes[index],
+                                    "active": alternative_prefixes[index],
+                                }
+                        if active_alternative_branches < requested_branches:
+                            for lane, selected_topology in zip(
+                                lanes, selected_topologies, strict=True
+                            ):
+                                self._last_alternative_downshift[lane.uid] = {
+                                    "configured": requested_branches,
+                                    "active": active_alternative_branches,
+                                    "reason": (
+                                        "insufficient_root_sibling_branches"
+                                        if selected_topology
+                                        == "rootless_sibling_fanout"
+                                        else "insufficient_shared_prefix_branches"
+                                    ),
+                                }
+                    if alternatives is None:
+                        alternatives = None
+                        alternative_round = False
+                        record_ast_primary_fallback(
+                            lanes, "insufficient_branches"
+                        )
             for j,row in enumerate(indices):
                 feature_row = None
                 if deterministic_admission:
@@ -2679,6 +3319,12 @@ class ExternalDraftBatchGenerator:
                     if len(row_laws) != len(tokens[j]):
                         raise ValueError("deterministic proposal law lengths mismatch")
                     for token, (ids, law) in zip(tokens[j], row_laws):
+                        if isinstance(law, PointMassLaw):
+                            if law.token != int(token):
+                                raise ValueError(
+                                    "sparse point-mass law differs from proposal token"
+                                )
+                            continue
                         law = probability(law)
                         index = int(token)
                         if ids is not None:
@@ -2699,60 +3345,148 @@ class ExternalDraftBatchGenerator:
                     else HostDraftRow(tokens[j], q[j], len(lanes), feature_row)
                 )
                 if alternative_round:
+                    provenance_rows = getattr(
+                        self.draft,
+                        "last_ordered_alternative_provenance",
+                        None,
+                    )
                     if (
                         alternatives is None
                         or len(alternatives) != len(lanes)
                         or len(alternatives[j])
                         != active_alternative_branches
                     ):
+                        raise ValueError("drafter did not publish ordered alternatives")
+                    if getattr(self, "continuation_pool_ast_bridge", False) and (
+                        provenance_rows is None
+                        or len(provenance_rows) != len(lanes)
+                        or len(provenance_rows[j])
+                        != active_alternative_branches
+                    ):
                         raise ValueError(
-                            "drafter did not publish the requested ordered alternatives"
+                            "AST bridge drafter did not publish branch provenance"
                         )
                     row_blocks = []
-                    branch_depths = (
-                        confidence_tree_branch_depths(
-                            len(tokens[j]),
-                            active_alternative_branches,
-                            int(alternative_prefixes[j]),
+                    if self.progressive_alternative_depth_policy == "confidence_tail":
+                        branch_prefix = (
+                            int(alternative_prefixes[j])
+                            if alternative_prefixes is not None
+                            else int(self.progressive_verification_tile or 0)
                         )
-                        if self.progressive_alternative_depth_policy
-                        == "confidence_tail"
-                        else (len(tokens[j]),) * active_alternative_branches
+                        branch_depths = (
+                            tuple(
+                                len(branch_tokens)
+                                for branch_tokens in alternatives[j]
+                            )
+                            if getattr(self, "continuation_pool_ast_bridge", False)
+                            and self.progressive_alternative_strategy
+                            == "confidence_tree"
+                            and branch_prefix == 0
+                            else confidence_tree_branch_depths(
+                                len(tokens[j]),
+                                active_alternative_branches,
+                                branch_prefix,
+                            )
+                        )
+                    else:
+                        branch_depths = (
+                            (len(tokens[j]),) * active_alternative_branches
+                        )
+                    admitted_depths = tuple(
+                        min(len(branch_tokens), branch_depths[branch_index])
+                        for branch_index, branch_tokens in enumerate(
+                            alternatives[j]
+                        )
                     )
                     for branch_index, branch_tokens in enumerate(alternatives[j]):
-                        branch_tokens = list(branch_tokens[: branch_depths[branch_index]])
-                        if not 1 <= len(branch_tokens) <= len(tokens[j]):
+                        branch_tokens = list(
+                            branch_tokens[: admitted_depths[branch_index]]
+                        )
+                        maximum_branch_depth = (
+                            requested_count
+                            if getattr(self, "continuation_pool_ast_bridge", False)
+                            and self.progressive_alternative_strategy
+                            == "confidence_tree"
+                            and int(alternative_prefixes[j]) == 0
+                            else len(tokens[j])
+                        )
+                        if not 1 <= len(branch_tokens) <= maximum_branch_depth:
                             raise ValueError("ordered alternative proposal depth is invalid")
                         branch_laws = []
                         for position, token in enumerate(branch_tokens):
-                            law = np.zeros_like(
-                                np.asarray(q[j][position], dtype=np.float64)
-                            )
-                            if not 0 <= int(token) < len(law):
-                                raise ValueError(
-                                    "ordered alternative token is outside proposal law"
+                            if getattr(self, "continuation_pool_ast_bridge", False):
+                                if not 0 <= int(token) < self._target_args.vocab_size:
+                                    raise ValueError(
+                                        "AST bridge token is outside the target vocabulary"
+                                    )
+                                law = PointMassLaw(int(token))
+                            elif isinstance(q[j][position], PointMassLaw):
+                                law = PointMassLaw(int(token))
+                            else:
+                                law = np.zeros_like(
+                                    np.asarray(q[j][position], dtype=np.float64)
                                 )
-                            law[int(token)] = 1.0
+                                if not 0 <= int(token) < len(law):
+                                    raise ValueError(
+                                        "ordered alternative token is outside proposal law"
+                                    )
+                                law[int(token)] = 1.0
                             branch_laws.append(law)
                         row_blocks.append(
                             HostDraftRow(
                                 list(branch_tokens),
                                 branch_laws,
                                 active_alternative_branches,
+                                continuation_selection=(
+                                    None if selections is None else selections[j]
+                                ),
+                                continuation_admission=(
+                                    None if admissions is None else admissions[j]
+                                ),
+                                continuation_slate=(
+                                    None if slates is None else slates[j]
+                                ),
+                                continuation_ast_provenance=copy.deepcopy(
+                                    provenance_rows[j][branch_index]
+                                    if getattr(self, "continuation_pool_ast_bridge", False)
+                                    else None
+                                ),
+                                continuation_ast_admitted_provenance=copy.deepcopy(
+                                    provenance_rows[j]
+                                    if getattr(self, "continuation_pool_ast_bridge", False)
+                                    else None
+                                ),
+                                continuation_ast_branch_index=(
+                                    branch_index
+                                    if getattr(self, "continuation_pool_ast_bridge", False)
+                                    else None
+                                ),
+                                continuation_ast_admitted_depths=(
+                                    admitted_depths
+                                    if getattr(self, "continuation_pool_ast_bridge", False)
+                                    else None
+                                ),
+                                feedback_payload=(
+                                    None if payloads is None else payloads[j]
+                                ),
                             )
                         )
                     if row_blocks[0].tokens != list(tokens[j]):
                         raise ValueError(
                             "ordered alternative B1 differs from primary proposal"
                         )
+                    own_width = (
+                        session_alternative_branches.get(int(lanes[j].uid))
+                        if session_alternative_branches is not None
+                        else None
+                    )
+                    if own_width is not None and own_width < len(row_blocks):
+                        row_blocks = row_blocks[:own_width]
                     self._last_alternative_blocks[lanes[j].uid] = row_blocks
                     self._last_alternative_prefix_tokens[lanes[j].uid] = (
                         int(alternative_prefixes[j])
                         if alternative_prefixes is not None
                         else int(self.progressive_verification_tile or 0)
-                    )
-                    lanes[j].progressive_alternative_last_active_branches = (
-                        active_alternative_branches
                     )
                 if sources is not None:
                     if not isinstance(blocks[row], (HostDraftRow, CompactDraftRow)):
@@ -2773,7 +3507,105 @@ class ExternalDraftBatchGenerator:
                     blocks[row].continuation_slate = slates[j]
                 if payloads is not None and isinstance(blocks[row], HostDraftRow):
                     blocks[row].feedback_payload = payloads[j]
+        if getattr(self, "continuation_pool_ast_bridge", False) and branches > 1:
+            feasible = [
+                lane for lane in cohort if lane.uid in self._last_alternative_blocks
+            ]
+            if len(feasible) != len(cohort) and feasible:
+                # Cross-session AST is an all-lanes transaction.  Do not let
+                # proposal-only topology telemetry claim execution when one
+                # draft group could not form even B2.
+                missing_receipt = [
+                    lane for lane in feasible if lane.uid not in ast_fallback_uids
+                ]
+                if missing_receipt:
+                    record_ast_primary_fallback(
+                        missing_receipt, "cohort_incomplete"
+                    )
+                self._last_alternative_blocks.clear()
+                self._last_alternative_prefix_tokens.clear()
+                self._last_alternative_latch.clear()
+                self._last_alternative_topology.clear()
+                self._last_alternative_downshift.clear()
+                self._last_alternative_prefix_search.clear()
+                self._last_alternative_prefix_diagnostics.clear()
         return blocks
+
+    def _record_ast_topology_execution(self, lanes):
+        """Publish content topology only after its target rows executed."""
+
+        rootless = [
+            lane
+            for lane in lanes
+            if self._last_alternative_topology.get(lane.uid)
+            == "rootless_sibling_fanout"
+        ]
+        if rootless:
+            _bump(
+                self.scheduler_stats,
+                "external_progressive_ast_rootless_rounds",
+            )
+            _bump(
+                self.scheduler_stats,
+                "external_progressive_ast_rootless_lanes",
+                len(rootless),
+            )
+        downshifted = [
+            lane for lane in lanes if lane.uid in self._last_alternative_downshift
+        ]
+        if downshifted:
+            _bump(
+                self.scheduler_stats,
+                "external_progressive_ast_branch_downshift_rounds",
+            )
+            _bump(
+                self.scheduler_stats,
+                "external_progressive_ast_branch_downshift_lanes",
+                len(downshifted),
+            )
+        prefix_searched = [
+            lane for lane in lanes if lane.uid in self._last_alternative_prefix_search
+        ]
+        if prefix_searched:
+            _bump(
+                self.scheduler_stats,
+                "external_progressive_ast_adaptive_prefix_rounds",
+            )
+            _bump(
+                self.scheduler_stats,
+                "external_progressive_ast_adaptive_prefix_lanes",
+                len(prefix_searched),
+            )
+        for lane in lanes:
+            topology = self._last_alternative_topology.get(lane.uid)
+            if topology is not None:
+                lane.progressive_ast_last_topology = topology
+            if topology == "rootless_sibling_fanout":
+                lane.progressive_ast_rootless_rounds = (
+                    getattr(lane, "progressive_ast_rootless_rounds", 0) + 1
+                )
+            downshift = self._last_alternative_downshift.get(lane.uid)
+            if downshift is not None:
+                lane.progressive_ast_branch_downshift_rounds = (
+                    getattr(lane, "progressive_ast_branch_downshift_rounds", 0) + 1
+                )
+                lane.progressive_ast_last_branch_downshift = copy.deepcopy(downshift)
+            prefix_search = self._last_alternative_prefix_search.get(lane.uid)
+            if prefix_search is not None:
+                lane.progressive_ast_adaptive_prefix_rounds = (
+                    getattr(lane, "progressive_ast_adaptive_prefix_rounds", 0) + 1
+                )
+                lane.progressive_ast_last_prefix_search = copy.deepcopy(prefix_search)
+            prefix_diagnostics = self._last_alternative_prefix_diagnostics.get(
+                lane.uid
+            )
+            if prefix_diagnostics is not None:
+                lane.progressive_ast_last_prefix_diagnostics = copy.deepcopy(
+                    prefix_diagnostics
+                )
+                lane.progressive_ast_last_proposed_prefix_diagnostics = (
+                    copy.deepcopy(prefix_diagnostics)
+                )
 
     def _proposal_depth(self, requested, maximum):
         """Apply the configured floor without exceeding terminal headroom."""
@@ -2784,8 +3616,18 @@ class ExternalDraftBatchGenerator:
             _bump(self.scheduler_stats, "external_proposal_floor_raises")
         return max(floor, requested)
 
-    def _progressive_verify_many(self, cohort, blocks, *, terminal=True):
-        """Verify one to four independent proposal chains in aligned tiles.
+    def _progressive_verify_many(
+        self,
+        cohort,
+        blocks,
+        *,
+        terminal=True,
+        max_physical_rows=4,
+        queue_rows=False,
+        row_metadata=None,
+        row_refill=None,
+    ):
+        """Verify bounded independent proposal chains in aligned tiles.
 
         Each lane owns private target state and RNG.  A physical target launch
         batches only the lanes still advancing at the same tile boundary; a
@@ -2795,12 +3637,32 @@ class ExternalDraftBatchGenerator:
 
         if self.progressive_verification_tile is None:
             raise RuntimeError("progressive verification is not selected")
-        if not 1 <= len(cohort) == len(blocks) <= 4:
-            raise RuntimeError("progressive verification supports B1 through B4 cohorts")
+        if max_physical_rows not in {4, 8}:
+            raise RuntimeError("progressive physical row cap must be 4 or 8")
+        logical_row_cap = 16 if queue_rows else max_physical_rows
+        if not 1 <= len(cohort) == len(blocks) <= logical_row_cap:
+            raise RuntimeError(
+                "progressive verification exceeds its logical row cap"
+            )
+        if row_metadata is not None and len(row_metadata) != len(cohort):
+            raise RuntimeError("progressive row metadata does not match its cohort")
+        if queue_rows and row_metadata is None:
+            raise RuntimeError(
+                "queued progressive verification requires row metadata"
+            )
+        if row_refill is not None and not queue_rows:
+            raise RuntimeError("progressive row refill requires queued verification")
 
         states = []
         proposal_counts = []
-        for lane, block in zip(cohort, blocks, strict=True):
+        cohort = list(cohort)
+        blocks = list(blocks)
+        if row_metadata is not None:
+            row_metadata = list(row_metadata)
+
+        def add_state(lane, block, metadata=None):
+            if len(states) >= logical_row_cap:
+                raise RuntimeError("progressive verification exceeds its logical row cap")
             if (
                 self.progressive_verification_fidelity
                 == PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED
@@ -2810,10 +3672,10 @@ class ExternalDraftBatchGenerator:
                     lane.uid,
                     "near-tie-bounded progressive verification is greedy-only",
                 )
-            if lane.processors:
+            if lane.processors and not self._progressive_processors_supported(lane):
                 raise LaneFailure(
                     lane.uid,
-                    "progressive verification does not support logits processors",
+                    "progressive verification requires branch-safe logits processors",
                 )
             if not isinstance(block, HostDraftRow):
                 raise LaneFailure(
@@ -2827,14 +3689,33 @@ class ExternalDraftBatchGenerator:
                     lane.uid,
                     "progressive verification requires one law per proposal token",
                 )
-            vocab = len(laws[0])
-            validate_proposal_laws(drafts, laws, vocab)
+            sparse_point_mass = all(
+                isinstance(law, PointMassLaw) for law in laws
+            )
+            if sparse_point_mass:
+                if float(lane.sampling.get("sampling_temp", 0)) != 0.0:
+                    raise LaneFailure(
+                        lane.uid,
+                        "continuation AST point-mass verification is greedy-only",
+                    )
+                vocab = int(self.draft.config.vocab_size)
+                _greedy_proposal_supported(block, laws, drafts, vocab)
+            else:
+                vocab = len(laws[0])
+                validate_proposal_laws(drafts, laws, vocab)
             proposal_counts.append(len(drafts))
+            cohort.append(lane)
+            blocks.append(block)
+            if row_metadata is not None:
+                if metadata is None:
+                    raise RuntimeError("refilled progressive row requires metadata")
+                row_metadata.append(dict(metadata))
             states.append(
                 {
                     "lane": lane,
                     "drafts": drafts,
                     "laws": laws,
+                    "sparse_point_mass": sparse_point_mass,
                     "private_cache": self._copy_reference_cache(lane.cache),
                     "private_rng": RequestRNG(state=lane.rng.snapshot()),
                     "local_history": list(lane.history),
@@ -2848,7 +3729,7 @@ class ExternalDraftBatchGenerator:
                     "response_rows": (
                         [] if lane.sampling.get("emit_logprobs", True) else None
                     ),
-                    "window": VerifyWindow(()),
+                    "window": VerifyWindow(lane.processors),
                     "launches": 0,
                     "target_rows": 0,
                     "rejected": False,
@@ -2859,18 +3740,46 @@ class ExternalDraftBatchGenerator:
                     "done": False,
                 }
             )
+            return len(states) - 1
+
+        initial_cohort = list(cohort)
+        initial_blocks = list(blocks)
+        initial_metadata = None if row_metadata is None else list(row_metadata)
+        cohort.clear()
+        blocks.clear()
+        if row_metadata is not None:
+            row_metadata.clear()
+        for index, (lane, block) in enumerate(
+            zip(initial_cohort, initial_blocks, strict=True)
+        ):
+            add_state(
+                lane,
+                block,
+                None if initial_metadata is None else initial_metadata[index],
+            )
         physical_launches = 0
         ragged_launches = 0
         padding_rows = 0
         last_layout_receipt = None
         max_cohort_width = 0
-        aligned_tile_launches = {width: 0 for width in range(1, 5)}
-        aligned_continued_launches = {width: 0 for width in range(1, 5)}
+        target_executor = _target_executor_stats()
+        aligned_tile_launches = {
+            width: 0 for width in range(1, max_physical_rows + 1)
+        }
+        aligned_continued_launches = {
+            width: 0 for width in range(1, max_physical_rows + 1)
+        }
         first_tile_pairwise_disjoint = _first_tiles_pairwise_disjoint(
             [state["drafts"] for state in states],
             self.progressive_verification_tile,
         )
-        while active := [index for index, state in enumerate(states) if not state["done"]]:
+        ready = deque(range(len(states)))
+        launch_schedule = []
+        while ready:
+            active = [
+                ready.popleft()
+                for _ in range(min(max_physical_rows, len(ready)))
+            ]
             inputs = []
             stage = []
             for index in active:
@@ -2903,7 +3812,7 @@ class ExternalDraftBatchGenerator:
                 [len(row) - 1 for row in inputs],
             )
             plan = layout.select_backend(
-                padded_capabilities(max_lanes=4)
+                padded_capabilities(max_lanes=max_physical_rows)
             )
             last_layout_receipt = layout.receipt(plan)
             last_layout_receipt["request_lane_uids"] = request_lane_uids
@@ -2923,6 +3832,26 @@ class ExternalDraftBatchGenerator:
             else:
                 padded_inputs = inputs
             active_width = len(active)
+            if row_metadata is not None:
+                launch_schedule.append(
+                    {
+                        "session_slots": [
+                            int(row_metadata[index]["session_slot"])
+                            for index in active
+                        ],
+                        "branch_numbers": [
+                            int(row_metadata[index]["branch_number"])
+                            for index in active
+                        ],
+                        "logical_rows": active_width,
+                        "max_physical_width": active_width,
+                        "physical_launches": 1,
+                        "padding_rows": int(launch_padding),
+                        "continued": [
+                            bool(states[index]["offset"] > 0) for index in active
+                        ],
+                    }
+                )
             if not ragged:
                 aligned_tile_launches[active_width] += 1
                 if all(states[index]["offset"] > 0 for index in active):
@@ -2934,10 +3863,20 @@ class ExternalDraftBatchGenerator:
             transaction = owner.begin(lengths=input_lengths)
             results = []
             try:
-                logits, features = self.model.forward_with_taps(
+                (
+                    logits,
+                    features,
+                    _target_executor_detail,
+                ) = execute_progressive_target_rows(
+                    self.model,
                     self.mx.array(padded_inputs),
                     transaction.caches,
                     self.layers,
+                    protocol=self.progressive_target_protocol,
+                    fidelity=self.progressive_verification_fidelity,
+                )
+                _observe_target_executor(
+                    target_executor, _target_executor_detail
                 )
                 self.mx.eval(logits, features)
                 for physical_row, (
@@ -2969,17 +3908,58 @@ class ExternalDraftBatchGenerator:
                                 state["local_history"],
                                 True,
                                 stage_response_rows,
+                                greedy_token=state["sparse_point_mass"],
                                 history_suffix=inputs[physical_row][: row + 1],
                             )
                         )
                         state["window"].mark()
-                    outcome = verify_proposal_tile(
-                        stage_tokens,
-                        stage_laws,
-                        stage_target_laws,
-                        state["private_rng"],
-                        final=final,
-                    )
+                    if state["sparse_point_mass"]:
+                        mismatch = next(
+                            (
+                                position
+                                for position, (draft, target) in enumerate(
+                                    zip(
+                                        stage_tokens,
+                                        stage_target_laws,
+                                        strict=not final,
+                                    )
+                                )
+                                if int(draft) != int(target)
+                            ),
+                            None,
+                        )
+                        if mismatch is not None:
+                            emitted = [
+                                *stage_tokens[:mismatch],
+                                int(stage_target_laws[mismatch]),
+                            ]
+                            accepted = mismatch
+                            rejected = True
+                        elif final:
+                            emitted = [
+                                *stage_tokens,
+                                int(stage_target_laws[len(stage_tokens)]),
+                            ]
+                            accepted = len(stage_tokens)
+                            rejected = False
+                        else:
+                            emitted = list(stage_tokens)
+                            accepted = len(stage_tokens)
+                            rejected = False
+                        outcome = SimpleNamespace(
+                            accepted=accepted,
+                            emitted=tuple(emitted),
+                            target_probabilities=tuple(None for _ in emitted),
+                            rejected=rejected,
+                        )
+                    else:
+                        outcome = verify_proposal_tile(
+                            stage_tokens,
+                            stage_laws,
+                            stage_target_laws,
+                            state["private_rng"],
+                            final=final,
+                        )
                     stage_emitted = list(outcome.emitted)
                     stopped = False
                     for emitted_index, token in enumerate(stage_emitted):
@@ -3069,6 +4049,24 @@ class ExternalDraftBatchGenerator:
                 )
                 if state["offset"] == len(state["drafts"]):
                     state["done"] = True
+            refill_indices = []
+            if row_refill is not None:
+                for index in active:
+                    state = states[index]
+                    if not state["done"]:
+                        continue
+                    refill = row_refill(
+                        index,
+                        state,
+                        dict(row_metadata[index]),
+                    )
+                    if refill is not None:
+                        lane, block, metadata = refill
+                        refill_indices.append(add_state(lane, block, metadata))
+            for index in active:
+                if not states[index]["done"]:
+                    ready.append(index)
+            ready.extend(refill_indices)
 
         decisions = []
         feature_rows = []
@@ -3130,13 +4128,23 @@ class ExternalDraftBatchGenerator:
                 "padding_rows": padding_rows,
                 "last_ragged_layout": last_layout_receipt,
                 "max_cohort_width": max_cohort_width,
+                "target_row_executor": target_executor,
                 "aligned_tile_launches": aligned_tile_launches,
                 "aligned_continued_launches": aligned_continued_launches,
                 "b2_aligned_tile_launches": aligned_tile_launches[2],
                 "b2_aligned_continued_launches": aligned_continued_launches[2],
                 "b4_aligned_tile_launches": aligned_tile_launches[4],
                 "b4_aligned_continued_launches": aligned_continued_launches[4],
+                "b8_aligned_tile_launches": aligned_tile_launches.get(8, 0),
+                "b8_aligned_continued_launches": aligned_continued_launches.get(
+                    8, 0
+                ),
+                "physical_row_cap": max_physical_rows,
                 "first_tile_pairwise_disjoint": first_tile_pairwise_disjoint,
+                "launch_schedule": launch_schedule,
+                "row_metadata": (
+                    None if row_metadata is None else copy.deepcopy(row_metadata)
+                ),
             },
         )
 
@@ -3282,6 +4290,10 @@ class ExternalDraftBatchGenerator:
                 parent_physical["max_cohort_width"],
                 child_physical["max_cohort_width"],
             ),
+            "target_row_executor": _merge_target_executor_stats(
+                parent_physical.get("target_row_executor"),
+                child_physical.get("target_row_executor"),
+            ),
             "aligned_tile_launches": aligned,
             "aligned_continued_launches": continued,
             "b2_aligned_tile_launches": aligned[2],
@@ -3315,6 +4327,22 @@ class ExternalDraftBatchGenerator:
             if prefix_count is None
             else prefix_count
         )
+        if prefix_count == 0:
+            if not blocks:
+                raise RuntimeError("zero-trunk AST requires proposal branches")
+            decisions, features, caches, rngs, stats, physical = (
+                self._progressive_verify_many(
+                    [copy.copy(lane) for _ in blocks],
+                    list(blocks),
+                )
+            )
+            physical = dict(physical)
+            physical.update(
+                shared_prefix_tokens=0,
+                unique_target_rows=physical["physical_target_rows"],
+                prefix_rejected=False,
+            )
+            return decisions, features, caches, rngs, stats, physical
         if not blocks or any(len(block.tokens) <= prefix_count for block in blocks):
             raise RuntimeError("shared-prefix alternatives require a suffix")
         prefix_tokens = list(blocks[0].tokens[:prefix_count])
@@ -3399,6 +4427,9 @@ class ExternalDraftBatchGenerator:
         last_ragged_layout = prefix_physical.get("last_ragged_layout")
         unique_target_rows = int(prefix_physical["physical_target_rows"])
         max_cohort_width = int(prefix_physical["max_cohort_width"])
+        target_executor = _merge_target_executor_stats(
+            prefix_physical.get("target_row_executor")
+        )
         short_circuit_after_branch = None
         proposal_counts = tuple(len(block.tokens) for block in blocks)
         for indices in staged_branch_indices(
@@ -3433,6 +4464,9 @@ class ExternalDraftBatchGenerator:
             unique_target_rows += int(cohort_physical["physical_target_rows"])
             max_cohort_width = max(
                 max_cohort_width, int(cohort_physical["max_cohort_width"])
+            )
+            target_executor = _merge_target_executor_stats(
+                target_executor, cohort_physical.get("target_row_executor")
             )
             for width in range(1, 5):
                 aligned[width] += cohort_physical["aligned_tile_launches"][width]
@@ -3538,6 +4572,7 @@ class ExternalDraftBatchGenerator:
             "padding_rows": padding_rows,
             "last_ragged_layout": last_ragged_layout,
             "max_cohort_width": max_cohort_width,
+            "target_row_executor": target_executor,
             "aligned_tile_launches": aligned,
             "aligned_continued_launches": continued,
             "b2_aligned_tile_launches": aligned[2],
@@ -3557,6 +4592,523 @@ class ExternalDraftBatchGenerator:
             committed_rngs,
             combined_stats,
             physical,
+        )
+
+    def _progressive_verify_cross_session_ast(
+        self, cohort, block_groups, prefix_counts, *, pack_rows
+    ):
+        """Verify private AST sessions while packing their suffix rows together.
+
+        The shared trunk is evaluated once per request in a B1-semantic row.
+        Accepted trunks fan out into request-private branch states.  Only those
+        branch rows share a physical target launch; cache, RNG, history,
+        selection, rollback, and final promotion remain request-scoped.
+        """
+
+        if self.progressive_alternative_strategy != "confidence_tree":
+            raise RuntimeError("cross-session AST packing requires confidence_tree")
+        if pack_rows not in {4, 8}:
+            raise RuntimeError("cross-session AST pack rows must be 4 or 8")
+        if not 2 <= len(cohort) == len(block_groups) == len(prefix_counts) <= 4:
+            raise RuntimeError("cross-session AST packing requires two to four sessions")
+        if any(not 1 <= len(blocks) <= 4 for blocks in block_groups) or all(
+            len(blocks) == 1 for blocks in block_groups
+        ):
+            # A session latched to its primary chain packs as one trunk plus
+            # one suffix branch; at least one session must still branch.
+            raise RuntimeError(
+                "cross-session AST requires one to four branches per session "
+                "and at least one branching session"
+            )
+
+        prefix_blocks = []
+        for blocks, prefix_count in zip(block_groups, prefix_counts, strict=True):
+            prefix_count = int(prefix_count)
+            if prefix_count < 0 or any(
+                len(block.tokens) <= prefix_count for block in blocks
+            ):
+                raise RuntimeError("cross-session AST requires a nonempty branch suffix")
+            if prefix_count == 0:
+                prefix_blocks.append(None)
+                continue
+            prefix_tokens = list(blocks[0].tokens[:prefix_count])
+            prefix_laws = list(blocks[0].laws[:prefix_count])
+            if any(
+                list(block.tokens[:prefix_count]) != prefix_tokens
+                for block in blocks
+            ):
+                raise RuntimeError("cross-session AST branches diverged before trunk")
+            prefix_blocks.append(HostDraftRow(prefix_tokens, prefix_laws, 1))
+
+        positive_prefix_rows = [
+            index for index, block in enumerate(prefix_blocks) if block is not None
+        ]
+        prefix_decisions = [None] * len(cohort)
+        prefix_features = [None] * len(cohort)
+        prefix_caches = [None] * len(cohort)
+        prefix_rngs = [None] * len(cohort)
+        prefix_stats = [None] * len(cohort)
+        prefix_physical = {
+            "physical_launches": 0,
+            "physical_target_rows": 0,
+            "ragged_launches": 0,
+            "padding_rows": 0,
+            "last_ragged_layout": None,
+            "max_cohort_width": 0,
+            "target_row_executor": _target_executor_stats(),
+            "aligned_tile_launches": {width: 0 for width in range(1, 5)},
+            "aligned_continued_launches": {width: 0 for width in range(1, 5)},
+        }
+        if positive_prefix_rows:
+            (
+                positive_decisions,
+                positive_features,
+                positive_caches,
+                positive_rngs,
+                positive_stats,
+                prefix_physical,
+            ) = self._progressive_verify_many(
+                [cohort[index] for index in positive_prefix_rows],
+                [prefix_blocks[index] for index in positive_prefix_rows],
+                terminal=False,
+                max_physical_rows=4,
+            )
+            for local, session_index in enumerate(positive_prefix_rows):
+                prefix_decisions[session_index] = positive_decisions[local]
+                prefix_features[session_index] = positive_features[local : local + 1]
+                prefix_caches[session_index] = positive_caches[local]
+                prefix_rngs[session_index] = positive_rngs[local]
+                prefix_stats[session_index] = positive_stats[local]
+        for session_index, prefix_count in enumerate(prefix_counts):
+            if int(prefix_count) != 0:
+                continue
+            lane = cohort[session_index]
+            prefix_decisions[session_index] = RoundDecision(
+                accepted=0,
+                emitted=[],
+                target_laws=[],
+                response_logprobs=(
+                    [] if lane.sampling.get("emit_logprobs", True) else None
+                ),
+                commit_count=0,
+                committed_inputs=[],
+            )
+            prefix_caches[session_index] = lane.cache
+            prefix_rngs[session_index] = lane.rng
+            prefix_stats[session_index] = {
+                "launches": 0,
+                "target_rows": 0,
+                "rejected": 0,
+                "full_tiles": 0,
+                "tile_checkpoints": [],
+                "tile_input_rows": [],
+                "rollback_base_tile": 0,
+            }
+
+        branch_results = {}
+        pending = []
+        live_frontier = (
+            self.progressive_cross_session_pack_mode == "ordered_live_frontier"
+        )
+        frontier_planner = None
+
+        def branch_row(session_index, branch_index):
+            lane = cohort[session_index]
+            blocks = block_groups[session_index]
+            prefix_count = int(prefix_counts[session_index])
+            branch = copy.copy(lane)
+            branch.cache = prefix_caches[session_index]
+            branch.rng = prefix_rngs[session_index]
+            branch.history = list(lane.history) + list(
+                prefix_decisions[session_index].committed_inputs
+            )
+            branch.anchor = (
+                int(lane.anchor)
+                if prefix_count == 0
+                else int(prefix_decisions[session_index].emitted[-1])
+            )
+            block = blocks[branch_index]
+            suffix = HostDraftRow(
+                list(block.tokens[prefix_count:]),
+                list(block.laws[prefix_count:]),
+                len(blocks),
+            )
+            return branch_index, session_index, branch, suffix
+
+        if live_frontier:
+            frontier_planner = OrderedLiveFrontierPlanner(
+                [
+                    [len(block.tokens) - int(prefix_count) for block in blocks]
+                    for blocks, prefix_count in zip(
+                        block_groups, prefix_counts, strict=True
+                    )
+                ]
+            )
+            eligible = [
+                session_index
+                for session_index, prefix_count in enumerate(prefix_counts)
+                if int(prefix_decisions[session_index].accepted) == int(prefix_count)
+            ]
+            for session_index in range(len(cohort)):
+                if session_index not in eligible:
+                    frontier_planner.retire_unadmitted(session_index)
+            pending = [
+                branch_row(admission.session_slot, admission.branch_index)
+                for admission in frontier_planner.start(eligible)
+            ]
+        else:
+            for session_index, (blocks, prefix_count) in enumerate(
+                zip(block_groups, prefix_counts, strict=True)
+            ):
+                if int(prefix_decisions[session_index].accepted) != int(prefix_count):
+                    continue
+                pending.extend(
+                    branch_row(session_index, branch_index)
+                    for branch_index in range(len(blocks))
+                )
+        # Interleave by branch rank so every full pack draws from all live
+        # sessions instead of filling one session's branches first.
+        pending.sort(key=lambda item: (item[0], item[1]))
+
+        physical_launches = int(prefix_physical["physical_launches"])
+        physical_target_rows = int(prefix_physical["physical_target_rows"])
+        ragged_launches = int(prefix_physical.get("ragged_launches", 0))
+        padding_rows = int(prefix_physical.get("padding_rows", 0))
+        max_cohort_width = int(prefix_physical["max_cohort_width"])
+        target_executor = _merge_target_executor_stats(
+            prefix_physical.get("target_row_executor")
+        )
+        aligned = {width: 0 for width in range(1, pack_rows + 1)}
+        continued = {width: 0 for width in range(1, pack_rows + 1)}
+        for width, value in prefix_physical["aligned_tile_launches"].items():
+            aligned[width] += value
+        for width, value in prefix_physical["aligned_continued_launches"].items():
+            continued[width] += value
+        uid_to_slot = {int(lane.uid): index for index, lane in enumerate(cohort)}
+
+        def receipt_layout(layout):
+            if layout is None:
+                return None
+            result = copy.deepcopy(layout)
+            result["request_lane_uids"] = [
+                uid_to_slot[int(uid)] for uid in result["request_lane_uids"]
+            ]
+            result["request_lane_identity"] = "cohort_local_session_slot"
+            return result
+
+        last_ragged_layout = receipt_layout(
+            prefix_physical.get("last_ragged_layout")
+        )
+        packs = []
+        if pending:
+            def refill(_row_index, state, metadata):
+                if frontier_planner is None:
+                    return None
+                session_index = int(metadata["session_slot"])
+                branch_index = int(metadata["branch_number"]) - 1
+                admission = frontier_planner.complete(
+                    session_index,
+                    branch_index,
+                    full=int(state["accepted"]) == len(state["drafts"]),
+                )
+                if admission is None:
+                    return None
+                row = branch_row(admission.session_slot, admission.branch_index)
+                return (
+                    row[2],
+                    row[3],
+                    {
+                        "session_slot": int(row[1]),
+                        "branch_number": int(row[0]) + 1,
+                    },
+                )
+
+            (
+                decisions,
+                features,
+                caches,
+                rngs,
+                stats,
+                physical,
+            ) = self._progressive_verify_many(
+                [row[2] for row in pending],
+                [row[3] for row in pending],
+                max_physical_rows=pack_rows,
+                queue_rows=True,
+                row_metadata=[
+                    {
+                        "session_slot": int(row[1]),
+                        "branch_number": int(row[0]) + 1,
+                    }
+                    for row in pending
+                ],
+                row_refill=refill if live_frontier else None,
+            )
+            physical_launches += int(physical["physical_launches"])
+            physical_target_rows += int(physical["physical_target_rows"])
+            ragged_launches += int(physical.get("ragged_launches", 0))
+            padding_rows += int(physical.get("padding_rows", 0))
+            max_cohort_width = max(
+                max_cohort_width, int(physical["max_cohort_width"])
+            )
+            target_executor = _merge_target_executor_stats(
+                target_executor, physical.get("target_row_executor")
+            )
+            last_ragged_layout = (
+                receipt_layout(physical.get("last_ragged_layout"))
+                or last_ragged_layout
+            )
+            for width in aligned:
+                aligned[width] += physical["aligned_tile_launches"].get(width, 0)
+                continued[width] += physical["aligned_continued_launches"].get(
+                    width, 0
+                )
+            packs = list(physical["launch_schedule"])
+            result_metadata = physical["row_metadata"]
+            for local, metadata in enumerate(result_metadata):
+                key = (
+                    int(metadata["session_slot"]),
+                    int(metadata["branch_number"]) - 1,
+                )
+                branch_results[key] = (
+                    decisions[local],
+                    features[local : local + 1],
+                    caches[local],
+                    rngs[local],
+                    stats[local],
+                )
+
+        selected_decisions = []
+        selected_features = []
+        selected_caches = []
+        selected_rngs = []
+        selected_stats = []
+        selected_blocks = []
+        selections = []
+        for session_index, (lane, blocks, prefix_count) in enumerate(
+            zip(cohort, block_groups, prefix_counts, strict=True)
+        ):
+            prefix_count = int(prefix_count)
+            prefix = prefix_decisions[session_index]
+            proposal_counts = tuple(len(block.tokens) for block in blocks)
+            if int(prefix.accepted) != prefix_count:
+                decisions = [copy.copy(prefix) for _ in blocks]
+                winner, full = ordered_alternative_winner(decisions, proposal_counts)
+                selected_feature = prefix_features[session_index][
+                    :, : int(prefix.commit_count)
+                ]
+                selected_cache = prefix_caches[session_index]
+                selected_rng = prefix_rngs[session_index]
+                stats = dict(prefix_stats[session_index])
+                branch_accepts = [int(prefix.accepted)] * len(blocks)
+                unique_target_rows = int(prefix_stats[session_index]["target_rows"])
+            else:
+                decisions = []
+                features = []
+                caches = []
+                rngs = []
+                stats_rows = []
+                session_template = next(
+                    (
+                        result[1]
+                        for (slot, _branch), result in branch_results.items()
+                        if slot == session_index
+                    ),
+                    None,
+                )
+                if session_template is None:
+                    raise RuntimeError("AST session admitted no branch rows")
+                for branch_index in range(len(blocks)):
+                    result = branch_results.get((session_index, branch_index))
+                    if result is None:
+                        decisions.append(
+                            RoundDecision(
+                                accepted=-1,
+                                emitted=[],
+                                target_laws=[],
+                                commit_count=0,
+                                committed_inputs=[],
+                            )
+                        )
+                        features.append(
+                            self.mx.zeros_like(session_template)[:, :0]
+                        )
+                        caches.append(prefix_caches[session_index])
+                        rngs.append(prefix_rngs[session_index])
+                        stats_rows.append(
+                            {
+                                "launches": 0,
+                                "target_rows": 0,
+                                "rejected": 0,
+                                "full_tiles": 0,
+                                "tile_checkpoints": [],
+                                "tile_input_rows": [],
+                                "rollback_base_tile": 0,
+                            }
+                        )
+                        continue
+                    decision, feature, cache, rng, stats = result
+                    decisions.append(
+                        RoundDecision(
+                            accepted=prefix_count + int(decision.accepted),
+                            emitted=list(prefix.emitted) + list(decision.emitted),
+                            target_laws=list(prefix.target_laws)
+                            + list(decision.target_laws),
+                            response_logprobs=(
+                                None
+                                if prefix.response_logprobs is None
+                                else list(prefix.response_logprobs)
+                                + list(decision.response_logprobs)
+                            ),
+                            verify_window=decision.verify_window,
+                            commit_count=int(prefix.commit_count)
+                            + int(decision.commit_count),
+                            committed_inputs=list(prefix.committed_inputs)
+                            + list(decision.committed_inputs),
+                        )
+                    )
+                    branch_feature = feature[:, : int(decision.commit_count)]
+                    if prefix_count:
+                        branch_feature = self.mx.concatenate(
+                            [
+                                prefix_features[session_index][
+                                    :, : int(prefix.commit_count)
+                                ],
+                                branch_feature,
+                            ],
+                            axis=1,
+                        )
+                    features.append(branch_feature)
+                    caches.append(cache)
+                    rngs.append(rng)
+                    stats_rows.append(stats)
+                winner, full = ordered_alternative_winner(decisions, proposal_counts)
+                selected_feature = features[winner]
+                selected_cache = caches[winner]
+                selected_rng = rngs[winner]
+                stats = {
+                    **stats_rows[winner],
+                    "launches": int(prefix_stats[session_index]["launches"])
+                    + sum(int(row["launches"]) for row in stats_rows),
+                    "target_rows": int(prefix_stats[session_index]["target_rows"])
+                    + sum(int(row["target_rows"]) for row in stats_rows),
+                    "rejected": int(prefix_stats[session_index]["rejected"])
+                    + sum(int(row["rejected"]) for row in stats_rows),
+                    "full_tiles": int(prefix_stats[session_index]["full_tiles"])
+                    + sum(int(row["full_tiles"]) for row in stats_rows),
+                    "tile_checkpoints": list(
+                        prefix_stats[session_index]["tile_checkpoints"]
+                    )
+                    + list(stats_rows[winner]["tile_checkpoints"]),
+                    "tile_input_rows": list(
+                        prefix_stats[session_index]["tile_input_rows"]
+                    )
+                    + list(stats_rows[winner]["tile_input_rows"]),
+                }
+                branch_accepts = [int(decision.accepted) for decision in decisions]
+                unique_target_rows = int(stats["target_rows"])
+            selected_decisions.append(decisions[winner])
+            selected_features.append(selected_feature)
+            selected_caches.append(selected_cache)
+            selected_rngs.append(selected_rng)
+            selected_stats.append(stats)
+            selected_blocks.append(blocks[winner])
+            selections.append(
+                {
+                    "session_uid": int(lane.uid),
+                    "branch_accepts": branch_accepts,
+                    "proposal_counts": list(proposal_counts),
+                    "full": list(full),
+                    "winner": int(winner),
+                    "unique_target_rows": unique_target_rows,
+                }
+            )
+
+        feature_width = max(int(row.shape[1]) for row in selected_features)
+        padded_features = []
+        for row in selected_features:
+            missing = feature_width - int(row.shape[1])
+            if missing:
+                row = self.mx.concatenate(
+                    [
+                        row,
+                        self.mx.zeros(
+                            (1, missing, int(row.shape[2])), dtype=row.dtype
+                        ),
+                    ],
+                    axis=1,
+                )
+            padded_features.append(row)
+        frontier = None
+        if frontier_planner is not None:
+            frontier = frontier_planner.snapshot()
+            if not frontier["finished"]:
+                raise RuntimeError("ordered live frontier did not retire every session")
+            occupancy_numerator = sum(int(pack["logical_rows"]) for pack in packs)
+            occupancy_denominator = len(packs) * pack_rows
+            last_service = {}
+            max_service_gap = 0
+            for launch_index, pack in enumerate(packs):
+                for session_slot in pack["session_slots"]:
+                    if session_slot in last_service:
+                        max_service_gap = max(
+                            max_service_gap,
+                            launch_index - last_service[session_slot],
+                        )
+                    last_service[session_slot] = launch_index
+            frontier.update(
+                {
+                    "occupancy_numerator": occupancy_numerator,
+                    "occupancy_denominator": occupancy_denominator,
+                    "partial_packs": sum(
+                        int(pack["logical_rows"] < pack_rows) for pack in packs
+                    ),
+                    "full_packs": sum(
+                        int(pack["logical_rows"] == pack_rows) for pack in packs
+                    ),
+                    "max_service_gap": max_service_gap,
+                }
+            )
+        physical = {
+            "physical_launches": physical_launches,
+            "physical_target_rows": physical_target_rows,
+            "ragged_launches": ragged_launches,
+            "padding_rows": padding_rows,
+            "last_ragged_layout": last_ragged_layout,
+            "max_cohort_width": max_cohort_width,
+            "target_row_executor": target_executor,
+            "aligned_tile_launches": aligned,
+            "aligned_continued_launches": continued,
+            "b2_aligned_tile_launches": aligned[2],
+            "b2_aligned_continued_launches": continued[2],
+            "b4_aligned_tile_launches": aligned[4],
+            "b4_aligned_continued_launches": continued[4],
+            "b8_aligned_tile_launches": aligned.get(8, 0),
+            "b8_aligned_continued_launches": continued.get(8, 0),
+            "first_tile_pairwise_disjoint": False,
+            "physical_row_cap": pack_rows,
+            "cross_session_ast": True,
+            "cross_session_packs": packs,
+            "cross_session_ast_mode": (
+                "ordered_live_frontier" if live_frontier else "eager_all_branches"
+            ),
+            "cross_session_apt_mode": (
+                "ordered_live_frontier" if live_frontier else "eager_all_branches"
+            ),
+            "deprecated_cross_session_apt_mode_alias_for": (
+                "cross_session_ast_mode"
+            ),
+            "live_frontier": frontier,
+        }
+        return (
+            selected_decisions,
+            self.mx.concatenate(padded_features, axis=0),
+            selected_caches,
+            selected_rngs,
+            selected_stats,
+            physical,
+            selections,
+            selected_blocks,
         )
 
     def _progressive_verify(self, lane, block):
@@ -3605,6 +5157,20 @@ class ExternalDraftBatchGenerator:
                     reachable = False
             if greedy:
                 result = verify_greedy_proposals(drafts, targets, lane.rng)
+            elif isinstance(laws, (list, tuple)) and all(
+                isinstance(law, PointMassLaw) for law in laws
+            ):
+                candidate_ids = np.asarray(
+                    [[law.token] for law in laws], dtype=np.int64
+                )
+                candidate_probs = np.ones((len(laws), 1), dtype=np.float64)
+                result = verify_compact_proposals(
+                    drafts,
+                    candidate_ids,
+                    candidate_probs,
+                    targets,
+                    lane.rng,
+                )
             elif getattr(self, "exact_verification", "token") == "block":
                 # A draft the processed target forbids zeroes P from its row
                 # on, so the unprocessed rows past it cannot change tau.
@@ -3846,7 +5412,7 @@ class ExternalDraftBatchGenerator:
         dynamic = bool(getattr(self, "dynamic_singleton_tree", False))
         continuation = getattr(self, "continuation_policy", None)
         continuation_rows = 0
-        if continuation is not None:
+        if continuation is not None and not getattr(self, "continuation_pool_ast_bridge", False):
             # Parallel verification forwards every path of one lane together
             # (max_depth=num_draft); longest-first verifies one path a launch.
             strategy = getattr(getattr(self, "continuation_strategy", None), "algorithm", None)
@@ -3856,6 +5422,14 @@ class ExternalDraftBatchGenerator:
             continuation_rows = (1 if serial else int(continuation.limit)) * (self.num_draft + 1)
         rows = {}
         for lanes in range(1, int(max_lanes) + 1):
+            lane_continuation_rows = (
+                self._continuation_ast_bridge_geometry(lanes)[
+                    "maximum_target_rows_per_launch"
+                ]
+                if continuation is not None
+                and getattr(self, "continuation_pool_ast_bridge", False)
+                else continuation_rows
+            )
             tree = (
                 lanes <= self.dynamic_tree_max_width
                 if dynamic
@@ -3871,8 +5445,39 @@ class ExternalDraftBatchGenerator:
                 cap = self._chain_draft_cap(lanes)
                 depth = self.num_draft if cap is None else min(self.num_draft, cap)
                 width_rows = lanes * (depth + 1)
-            rows[str(lanes)] = max(width_rows, continuation_rows)
+            rows[str(lanes)] = max(width_rows, lane_continuation_rows)
         return rows
+
+    def _continuation_ast_bridge_geometry(self, max_lanes):
+        """Bound live AST rows and retained request-private checkpoints."""
+
+        if not getattr(self, "continuation_pool_ast_bridge", False):
+            raise ValueError("continuation AST geometry requires the selected bridge")
+        sessions = max(1, min(int(max_lanes), int(self.capacity), 4))
+        branches = int(self.progressive_alternative_branches)
+        pack_rows = self.progressive_cross_session_pack_rows
+        live_frontier = (
+            self.progressive_cross_session_pack_mode == "ordered_live_frontier"
+        )
+        if pack_rows is None:
+            sessions = 1
+            live_paths = branches
+        elif live_frontier:
+            live_paths = sessions
+        else:
+            live_paths = min(int(pack_rows), sessions * branches)
+        tile_rows = int(self.progressive_verification_tile) + 1
+        return {
+            "schema": "mlx2.continuation-ast-bridge-geometry.v1",
+            "sessions": sessions,
+            "branches_per_session": branches,
+            "physical_path_rows": live_paths,
+            "tile_rows_per_path": tile_rows,
+            "maximum_target_rows_per_launch": live_paths * tile_rows,
+            "private_target_checkpoints": sessions * branches,
+            "private_provider_cache_rows": sessions,
+            "live_frontier": live_frontier,
+        }
 
     def _tree_count(self, lane):
         return min(self._tree_node_budget(), lane.maximum - lane.generated - 1)
@@ -4255,6 +5860,10 @@ class ExternalDraftBatchGenerator:
             )
             for decision, used in zip(decisions, consumed)
         ]
+        bridge_provenance = [
+            self._ast_bridge_commit_provenance(block)
+            for block in blocks
+        ]
         if committed_rows is not None:
             if transaction is not None or len(committed_rows) != len(cohort):
                 raise RuntimeError("invalid private-cache promotion")
@@ -4408,6 +6017,65 @@ class ExternalDraftBatchGenerator:
                 committed_relaxed,
             )
             lane.target_max_width = max(lane.target_max_width, len(cohort))
+            committed_bridge = bridge_provenance[row]
+            if committed_bridge is not None and count:
+                selection = blocks[row].continuation_selection
+                selected_index = committed_bridge["selected_rank"]
+                admitted_indices = committed_bridge["admitted_ranks"]
+                self._record_continuation_round(
+                    lane,
+                    blocks[row],
+                    selection,
+                    admitted_width=len(admitted_indices),
+                    admitted_indices=admitted_indices,
+                    selected_index=selected_index,
+                    proposed_depth=count,
+                    accepted=round_accepted,
+                )
+                lane.continuation_rounds = (
+                    getattr(lane, "continuation_rounds", 0) + 1
+                )
+                lane.continuation_verification_algorithm = (
+                    "progressive_exact_target_draw_then_matching_continuation_prefix"
+                )
+                lane.continuation_semantic_selected = len(selection.paths)
+                lane.continuation_semantic_admitted = len(admitted_indices)
+                lane.continuation_physical_width = len(admitted_indices)
+                lane.continuation_physical_span = committed_bridge[
+                    "physical_span"
+                ]
+                lane.continuation_physical_to_semantic = tuple(admitted_indices)
+                semantic_to_physical = [None] * len(selection.paths)
+                for physical, semantic in enumerate(admitted_indices):
+                    semantic_to_physical[semantic] = physical
+                lane.continuation_semantic_to_physical = tuple(
+                    semantic_to_physical
+                )
+                lane.continuation_selected_path = selected_index
+                lane.continuation_selected_physical_path = committed_bridge[
+                    "physical_branch"
+                ]
+                chosen = selection.paths[selected_index]
+                lane.continuation_selected_sources = tuple(
+                    (contributor.source_id, contributor.source_revision)
+                    for contributor in chosen.contributors
+                )
+                lane.continuation_last_ast_provenance = copy.deepcopy(
+                    committed_bridge["selected_provenance"]
+                )
+                if committed_bridge["ast_engaged"]:
+                    lane.continuation_ast_committed_rounds = (
+                        getattr(lane, "continuation_ast_committed_rounds", 0) + 1
+                    )
+                else:
+                    lane.continuation_ast_primary_fallback_committed_rounds = (
+                        getattr(
+                            lane,
+                            "continuation_ast_primary_fallback_committed_rounds",
+                            0,
+                        )
+                        + 1
+                    )
             if decision.continuation_outcome is not None:
                 outcome = decision.continuation_outcome
                 lane.continuation_rounds = getattr(lane, "continuation_rounds", 0) + 1
@@ -4472,6 +6140,82 @@ class ExternalDraftBatchGenerator:
         ] += 1
         self.scheduler_stats["target_max_width"] = max(self.scheduler_stats["target_max_width"],len(cohort))
 
+    def _ast_bridge_commit_provenance(self, block):
+        """Validate branch-bound continuation identity before target commit."""
+
+        if not getattr(self, "continuation_pool_ast_bridge", False) or block is None:
+            return None
+        selection = getattr(block, "continuation_selection", None)
+        if selection is None or not selection.paths:
+            raise RuntimeError("AST bridge proposal lacks a continuation selection")
+        selected = getattr(block, "continuation_ast_provenance", None)
+        admitted = getattr(block, "continuation_ast_admitted_provenance", None)
+        if selected is None:
+            selected_rank = 0
+            admitted_ranks = (0,)
+            physical_branch = 0
+            ast_engaged = False
+            selected_payload = None
+            admitted_depths = (len(block.tokens),)
+        else:
+            if not isinstance(selected, dict) or not isinstance(
+                admitted, (list, tuple)
+            ):
+                raise RuntimeError("AST bridge branch provenance is malformed")
+            selected_rank = selected.get("rank")
+            physical_branch = getattr(block, "continuation_ast_branch_index", None)
+            admitted_ranks = tuple(item.get("rank") for item in admitted)
+            admitted_depths = getattr(
+                block, "continuation_ast_admitted_depths", None
+            )
+            if (
+                type(selected_rank) is not int
+                or type(physical_branch) is not int
+                or any(type(rank) is not int for rank in admitted_ranks)
+                or not isinstance(admitted_depths, (list, tuple))
+                or len(admitted_depths) != len(admitted_ranks)
+                or any(type(depth) is not int or depth < 1 for depth in admitted_depths)
+                or len(set(admitted_ranks)) != len(admitted_ranks)
+                or not 0 <= physical_branch < len(admitted_ranks)
+                or admitted_ranks[physical_branch] != selected_rank
+                or admitted_depths[physical_branch] != len(block.tokens)
+            ):
+                raise RuntimeError("AST bridge branch/rank mapping is invalid")
+            admitted_depths = tuple(admitted_depths)
+            ast_engaged = True
+            selected_payload = selected
+        if (
+            not admitted_ranks
+            or any(not 0 <= rank < len(selection.paths) for rank in admitted_ranks)
+            or selected_rank not in admitted_ranks
+        ):
+            raise RuntimeError("AST bridge admitted ranks are invalid")
+        chosen = selection.paths[selected_rank]
+        if tuple(block.tokens) != tuple(chosen.tokens[: len(block.tokens)]):
+            raise RuntimeError("AST bridge winning branch differs from selected path")
+        if selected_payload is not None:
+            contributors = tuple(
+                (
+                    contributor.source_id,
+                    contributor.source_revision,
+                    contributor.candidate_id,
+                )
+                for contributor in chosen.contributors
+            )
+            if (
+                selected_payload.get("path_id") != chosen.path_id
+                or tuple(selected_payload.get("contributors", ())) != contributors
+            ):
+                raise RuntimeError("AST bridge winning provenance differs from selection")
+        return {
+            "selected_rank": selected_rank,
+            "admitted_ranks": admitted_ranks,
+            "physical_branch": physical_branch,
+            "physical_span": sum(admitted_depths),
+            "ast_engaged": ast_engaged,
+            "selected_provenance": selected_payload,
+        }
+
     def _continuation_receipt(self, lane):
         if self.continuation_policy is None:
             return {}
@@ -4525,14 +6269,40 @@ class ExternalDraftBatchGenerator:
                 "proposal_state_authoritative": False,
                 "apcv2_publication": False,
             }
-        return {"verification": "processed_target_draw_then_matching_continuation_prefix",
+        bridge_rounds = getattr(lane, "continuation_ast_committed_rounds", 0)
+        verification = (
+            "progressive_exact_target_draw_then_matching_continuation_prefix"
+            if getattr(self, "continuation_pool_ast_bridge", False)
+            else "processed_target_draw_then_matching_continuation_prefix"
+        )
+        return {"verification": verification,
                 "continuation_pool": {"implemented": True, "selected": True, "qualified": False,
                     **ranking,
+                    "verification_role": (
+                        "proposal_only_ast_bridge"
+                        if getattr(self, "continuation_pool_ast_bridge", False)
+                        else "complete_path_verifier"
+                    ),
                     "verification_algorithm": verification_algorithm,
                     "configured_verification_algorithm": configured_algorithm,
-                    "observed_used": getattr(lane, "continuation_rounds", 0) > 0,
+                    "observed_used": (
+                        getattr(lane, "continuation_rounds", 0) > 0
+                        if getattr(self, "continuation_pool_ast_bridge", False)
+                        else getattr(lane, "continuation_rounds", 0) > 0
+                    ),
+                    "ast_observed_used": (
+                        bridge_rounds > 0
+                        if getattr(self, "continuation_pool_ast_bridge", False)
+                        else False
+                    ),
                     "unit": "complete_continuation_sequences", "limit": self.continuation_policy.limit,
                     "committed_rounds": getattr(lane, "continuation_rounds", 0),
+                    "ast_committed_rounds": bridge_rounds,
+                    "ast_primary_fallback_committed_rounds": getattr(
+                        lane,
+                        "continuation_ast_primary_fallback_committed_rounds",
+                        0,
+                    ),
                     "physical_width": getattr(lane, "continuation_physical_width", 0),
                     "physical_span": getattr(lane, "continuation_physical_span", 0),
                     "strategy": strategy_value,
@@ -4543,7 +6313,7 @@ class ExternalDraftBatchGenerator:
                         == "longest_first_exact_prefix_v1"
                     ),
                     "strategy_observed_used": getattr(
-                        lane, "continuation_rounds", 0
+                        lane, "continuation_strategy_launches", 0
                     ) > 0,
                     "strategy_launches": getattr(lane, "continuation_strategy_launches", 0),
                     "shared_prefix_reused_tokens": getattr(
@@ -4568,6 +6338,9 @@ class ExternalDraftBatchGenerator:
                     "selected_path": getattr(lane, "continuation_selected_path", None),
                     "selected_physical_path": getattr(lane, "continuation_selected_physical_path", None),
                     "selected_sources": list(getattr(lane, "continuation_selected_sources", ())),
+                    "selected_ast_provenance": copy.deepcopy(
+                        getattr(lane, "continuation_last_ast_provenance", None)
+                    ),
                     # Scores and slate predictions come from the shared
                     # ranking critic, which every tenant's committed labels
                     # move; every lane's receipt is scoped (an unkeyed request
@@ -4612,10 +6385,22 @@ class ExternalDraftBatchGenerator:
         selected_index,
         proposed_depth,
         accepted,
+        admitted_indices=None,
     ):
         """Accumulate bounded host stats after target selection, before commit."""
         admission = copy.deepcopy(block.continuation_admission or {})
         slate = tuple(copy.deepcopy(block.continuation_slate or ()))
+        admitted_indices = (
+            set(range(int(admitted_width)))
+            if admitted_indices is None
+            else {int(index) for index in admitted_indices}
+        )
+        if (
+            not admitted_indices
+            or any(not 0 <= index < len(selection.paths) for index in admitted_indices)
+            or int(selected_index) not in admitted_indices
+        ):
+            raise ValueError("continuation admitted provenance is invalid")
         lane.continuation_last_admission = admission
         admission_totals = getattr(lane, "continuation_admission_totals", {})
         for budget_field in (
@@ -4634,7 +6419,7 @@ class ExternalDraftBatchGenerator:
         lane.continuation_last_slate = tuple(
             {
                 **item,
-                "admitted": int(item.get("rank", -1)) < int(admitted_width),
+                "admitted": int(item.get("rank", -1)) in admitted_indices,
                 "target_selected": int(item.get("rank", -1)) == int(selected_index),
             }
             for item in slate
@@ -5069,8 +6854,9 @@ class ExternalDraftBatchGenerator:
                     else:
                         transaction = self._target_owner([lane.cache for lane in lanes]).begin(
                             lengths=[count + 1 for count in counts])
-                        logits, hidden = self.model.forward_with_taps(
-                            self.mx.array(inputs), transaction.caches, self.layers)
+                        logits, hidden = self._cohort_target_forward(
+                            self.mx.array(inputs), transaction, lanes,
+                            site="adaptive_grouped_verify")
                     self.mx.eval(logits, hidden)
                 finally:
                     if steer is not None:
@@ -5096,6 +6882,37 @@ class ExternalDraftBatchGenerator:
         finally:
             self._open = False
 
+    def _topology_observation_outcome(
+        self,
+        lane,
+        decision,
+        branch_accepts,
+        proposal_counts,
+        selected_branch,
+    ):
+        """Classify whether a committed AST result can train the latch."""
+
+        reasons = []
+        selected = int(selected_branch) - 1
+        selected_full = (
+            int(branch_accepts[selected]) == int(proposal_counts[selected])
+        )
+        if not selected_full and any(int(value) < 0 for value in branch_accepts):
+            reasons.append("unvisited_alternative")
+        if any(int(token) in self.stops for token in decision.emitted):
+            reasons.append("target_stop")
+        if int(lane.generated) >= int(lane.maximum):
+            reasons.append("length_boundary")
+        if lane.processors and not self._progressive_processors_supported(lane):
+            reasons.append("processor_limited")
+        return {
+            "outcome": (
+                "committed_censored" if reasons else "committed_conclusive"
+            ),
+            "censor_reasons": reasons,
+            "budget_limited": "length_boundary" in reasons,
+        }
+
     def _round(self, cohort, *, forced_depth=None):
         """Publish learning observations only after every request commits."""
         planner = (
@@ -5104,7 +6921,9 @@ class ExternalDraftBatchGenerator:
         )
         admission_snapshot = planner.snapshot() if planner is not None else None
         self._feedback_outbox = []
+        self._topology_observation_outbox = []
         self._continuation_open_selections = []
+        ready_starts = {int(lane.uid): len(lane.ready) for lane in cohort}
         try:
             if forced_depth is None:
                 # Keep compatibility with lightweight observers that wrap the
@@ -5133,6 +6952,148 @@ class ExternalDraftBatchGenerator:
         else:
             # This is outside the transaction's restore path. A diagnostic
             # feedback failure must never rewind already delivered target state.
+            lane_by_uid = {int(lane.uid): lane for lane in cohort}
+            observed_topology_uids = {
+                int(uid)
+                for _token, rows in self._topology_observation_outbox
+                for uid, _observation in rows
+            }
+            primary_only = {}
+            latch_payloads = getattr(self, "_last_alternative_latch", {})
+            for lane in cohort:
+                uid = int(lane.uid)
+                payload = latch_payloads.get(uid)
+                if (
+                    uid not in observed_topology_uids
+                    and payload is not None
+                    and int(payload.get("active_branches", 0)) == 1
+                ):
+                    primary_only.setdefault(
+                        int(payload["decision_token"]), []
+                    ).append(lane)
+            for token, lane in (
+                (token, lane) for token, lanes in primary_only.items() for lane in lanes
+            ):
+                lanes = [lane]
+                try:
+                    before = self.progressive_topology_latch.snapshot(lane.uid)
+                    self.progressive_topology_latch.observe_primary_only(
+                        session_uids=[lane.uid],
+                        decision_tokens=[token],
+                    )
+                    snapshot = self.progressive_topology_latch.snapshot(lane.uid)
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_ast_primary_only_rounds",
+                    )
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_ast_primary_only_sessions",
+                        len(lanes),
+                    )
+                    for lane in lanes:
+                        uid = int(lane.uid)
+                        decision_payload = copy.deepcopy(
+                            latch_payloads[uid]
+                        )
+                        decision_payload["application"] = "committed_primary_only"
+                        lane.progressive_topology_latch_last_decision = (
+                            decision_payload
+                        )
+                        observation = {
+                            "outcome": "committed_primary_only",
+                            "executed_alternative_branches": 0,
+                            "accepted_token_uplift": 0,
+                            "decision_token": int(token),
+                            "snapshot_before": copy.deepcopy(before),
+                            "snapshot_after": copy.deepcopy(snapshot),
+                        }
+                        lane.progressive_topology_latch_last_observation = observation
+                        for response in list(lane.ready)[ready_starts[uid] :]:
+                            alternatives = response.speculative_receipt.get(
+                                "progressive_verification", {}
+                            ).get("ordered_alternatives")
+                            if alternatives is not None:
+                                alternatives["adaptive_latch"][
+                                    "last_decision"
+                                ] = copy.deepcopy(decision_payload)
+                                alternatives["adaptive_latch"][
+                                    "last_observation"
+                                ] = copy.deepcopy(observation)
+                except Exception as error:  # noqa: BLE001 - learning is post-commit
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_topology_observation_failures",
+                    )
+                    self.last_topology_observation_error = str(error)
+            for token, rows in self._topology_observation_outbox:
+                try:
+                    self.progressive_topology_latch.observe_many(
+                        [observation for _uid, observation in rows],
+                        session_uids=[uid for uid, _observation in rows],
+                        decision_tokens=[token] * len(rows),
+                    )
+                    for uid, observation in rows:
+                        snapshot = self.progressive_topology_latch.snapshot(uid)
+                        lane = lane_by_uid[uid]
+                        decision_payload = copy.deepcopy(
+                            self._last_alternative_latch[uid]
+                        )
+                        decision_payload["application"] = "committed"
+                        lane.progressive_topology_latch_last_decision = (
+                            decision_payload
+                        )
+                        lane.progressive_topology_latch_last_observation = {
+                            **copy.deepcopy(observation),
+                            "decision_token": int(token),
+                            "snapshot_after": copy.deepcopy(snapshot),
+                        }
+                        for response in list(lane.ready)[ready_starts[uid] :]:
+                            alternatives = response.speculative_receipt.get(
+                                "progressive_verification", {}
+                            ).get("ordered_alternatives")
+                            if alternatives is not None:
+                                alternatives["adaptive_latch"][
+                                    "last_decision"
+                                ] = copy.deepcopy(decision_payload)
+                                alternatives["adaptive_latch"][
+                                    "last_observation"
+                                ] = copy.deepcopy(
+                                    lane.progressive_topology_latch_last_observation
+                                )
+                except Exception as error:  # noqa: BLE001 - learning is post-commit
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_topology_observation_failures",
+                    )
+                    self.last_topology_observation_error = str(error)
+                    for uid, observation in rows:
+                        lane = lane_by_uid[uid]
+                        decision_payload = copy.deepcopy(
+                            self._last_alternative_latch[uid]
+                        )
+                        decision_payload["application"] = "committed_learning_error"
+                        lane.progressive_topology_latch_last_decision = (
+                            decision_payload
+                        )
+                        degraded = {
+                            **copy.deepcopy(observation),
+                            "decision_token": int(token),
+                            "application": "error_degraded",
+                            "error": str(error),
+                        }
+                        lane.progressive_topology_latch_last_observation = degraded
+                        for response in list(lane.ready)[ready_starts[uid] :]:
+                            alternatives = response.speculative_receipt.get(
+                                "progressive_verification", {}
+                            ).get("ordered_alternatives")
+                            if alternatives is not None:
+                                alternatives["adaptive_latch"][
+                                    "last_decision"
+                                ] = copy.deepcopy(decision_payload)
+                                alternatives["adaptive_latch"][
+                                    "last_observation"
+                                ] = copy.deepcopy(degraded)
             manager = getattr(self.draft, "feedback_manager", None)
             for lane, block, decision, round_id in self._feedback_outbox:
                 selection = block.continuation_selection
@@ -5239,6 +7200,7 @@ class ExternalDraftBatchGenerator:
                         self.last_feedback_error = str(error)
         finally:
             self._feedback_outbox = None
+            self._topology_observation_outbox = None
             self._continuation_open_selections = []
 
     def _round_at_batch_route(self, cohort, *, concurrent, active_width=None):
@@ -5252,12 +7214,51 @@ class ExternalDraftBatchGenerator:
         width = len(cohort)
         from .cost_per_commit_handoff import cohort_needs_ordinary_probe
 
-        ordinary_probe = cohort_needs_ordinary_probe(states, width)
-        ordinary_probe_uids = {
-            lane.uid
-            for lane, state in zip(cohort, states, strict=True)
-            if state is not None and state.needs_ordinary_probe(width)
-        }
+        parked_uids = {lane.uid for lane in cohort if _speculation_parked(lane)}
+        inflight = getattr(self, "_parked_inflight", None)
+        if inflight is not None and (
+            len(parked_uids) != len(cohort)
+            or [lane.uid for lane in cohort]
+            != [lane.uid for lane in inflight.lanes]
+        ):
+            # Another cohort owns this round: finish the parked one first.
+            drained = list(inflight.lanes)
+            self._drain_parked_inflight()
+            inflight = None
+            if any(lane.ready for lane in drained if lane in cohort):
+                # Those lanes just produced this poll's token.
+                return
+        if (
+            parked_uids
+            and len(parked_uids) == len(cohort)
+            and (inflight is not None or self._parked_pipeline_eligible(cohort))
+        ):
+            self._parked_pipeline_round(cohort)
+            return
+        if parked_uids and len(parked_uids) == len(cohort):
+            # A parked cohort times only the target step and defers the draft
+            # append, until a session's deferred context reaches its cap; that
+            # flush round appends it and is not timing evidence.
+            flush = any(
+                int(lane.tail.shape[1])
+                >= lane.cost_handoff_state.settings.deferred_context_cap
+                for lane in cohort
+            )
+            ordinary_probe = not flush
+            ordinary_probe_uids = set() if flush else set(parked_uids)
+            _bump(
+                self.scheduler_stats,
+                "external_cost_parked_flush_rounds" if flush
+                else "external_cost_parked_rounds",
+            )
+        else:
+            parked_uids = set()
+            ordinary_probe = cohort_needs_ordinary_probe(states, width)
+            ordinary_probe_uids = {
+                lane.uid
+                for lane, state in zip(cohort, states, strict=True)
+                if state is not None and state.needs_ordinary_probe(width)
+            }
         # Keep the default route free of timing calls.  ``states`` has one
         # entry per lane even when the capability was not selected.
         started_ns = (
@@ -5272,7 +7273,7 @@ class ExternalDraftBatchGenerator:
                 cohort,
                 generated_before,
                 started_ns,
-                ordinary_probe=ordinary_probe,
+                ordinary_probe=ordinary_probe or bool(parked_uids),
                 ordinary_probe_uids=ordinary_probe_uids,
             )
             return
@@ -5309,6 +7310,341 @@ class ExternalDraftBatchGenerator:
             self.draft_topology, self.target_execution = saved
             self._auto_active_width, self._auto_cohort_width = saved_widths
 
+    def _parked_pipeline_eligible(self, cohort, *, following=False):
+        """Whether a parked cohort's anchor-only round may run before its read.
+
+        Only the whole executor: every live lane is in this greedy, processor-
+        free, hybrid parked cohort (no other lane may see a transaction across
+        the publication point), every lane has budget for another token, and
+        the deferred draft context stays below its cap.
+        """
+        settings = self.cost_per_commit_handoff
+        if (
+            settings is None
+            or not settings.reversible
+            or not settings.pipelined_park
+            or self.dynamic_singleton_tree
+            or self.target_execution == "provider"
+            or self.fly_verification.enabled
+            or getattr(getattr(self.model, "model", None), "residual_taps", None)
+            is not None
+        ):
+            return False
+        live = [lane for lane in self.lanes.values() if not lane.cancelled]
+        if {id(lane) for lane in live} != {id(lane) for lane in cohort}:
+            return False
+        if not self._is_hybrid([lane.cache for lane in cohort]):
+            return False
+        reserve = 2 if following else 1
+        for lane in cohort:
+            if (
+                not _speculation_parked(lane)
+                or lane.ordinary
+                or lane.processors
+                or float(lane.sampling.get("sampling_temp", 0)) != 0.0
+                or lane.maximum - lane.generated <= reserve
+                or int(lane.tail.shape[1]) + reserve + 1
+                >= lane.cost_handoff_state.settings.deferred_context_cap
+            ):
+                return False
+        return True
+
+    def _dispatch_parked(self, cohort, anchors, *, timing_start_ns):
+        """Begin and dispatch one anchor-only round; nothing is read."""
+        phase = _PhaseClock(self) if self.round_timing else None
+        recovery = self._parked_recovery(cohort)
+        if phase is not None:
+            phase("parked_snapshot")
+        owner = self._target_owner([lane.cache for lane in cohort])
+        transaction = owner.begin(
+            lengths=[1] * len(cohort), plain_single_token=True
+        )
+        try:
+            if not getattr(transaction, "plain", False):
+                raise RuntimeError("a pipelined parked round requires a plain transaction")
+            if isinstance(anchors, self.mx.array):
+                inputs = anchors.astype(self.mx.int32)[:, None]
+            else:
+                inputs = self.mx.array([[int(a)] for a in anchors], dtype=self.mx.int32)
+            logits, features = self._cohort_target_forward(
+                inputs, transaction, cohort, site="parked_plain"
+            )
+            # Everything the host read needs is built here, before the
+            # following round launches: an op created on these logits after
+            # that launch would queue behind the following forward and wait
+            # for it (Rapid-MLX #4238).  Same float32 argmax and log-softmax
+            # as ``_target_law``.
+            # Per-row slices too: even a reshape or row slice made at read
+            # time is a new op behind the following round.
+            rows32 = logits[:, -1, :].astype(self.mx.float32)
+            normalizer_rows = self.mx.logsumexp(rows32, axis=-1, keepdims=True)
+            logprob_rows = [
+                rows32[row] - normalizer_rows[row] for row in range(len(cohort))
+            ]
+            normalizers = normalizer_rows.reshape(-1)
+            next_anchors = self.mx.argmax(rows32, axis=-1)
+            if phase is not None:
+                phase("parked_build")
+            self.mx.async_eval(
+                logits, features, next_anchors, normalizers, *logprob_rows
+            )
+            if phase is not None:
+                phase("parked_launch")
+        except BaseException:
+            if not transaction.closed:
+                transaction.abort()
+            raise
+        return _ParkedInflight(
+            lanes=list(cohort),
+            transaction=transaction,
+            logits=logits,
+            features=features,
+            next_anchors=next_anchors,
+            normalizers=normalizers,
+            logprob_rows=logprob_rows,
+            recovery=recovery,
+            timing_start_ns=timing_start_ns,
+            generated_before=[lane.generated for lane in cohort],
+        )
+
+    def _parked_recovery(self, cohort):
+        """A one-token plain step's exact undo record, without a deep snapshot.
+
+        The pipelined round advances each lane by exactly one anchor, so its
+        undo is the plain transaction's own: trim every KV plane back to its
+        offset and put each recurrent plane's state list back.  Host fields
+        are restored from a shallow copy; the lists the round appends to
+        (history, ready) are cut back to their lengths and the RNG is copied.
+        """
+        from .hybrid_verify_rows import _kv_offset, _recurrent
+
+        records = []
+        for lane in cohort:
+            planes = []
+            for cache in lane.cache:
+                if _recurrent(cache):
+                    planes.append(
+                        ("recurrent", cache, list(cache.cache), cache.lengths, cache.left_padding)
+                    )
+                else:
+                    planes.append(("kv", cache, _kv_offset(cache)))
+            records.append([lane, *self._parked_host_record(lane), planes])
+        return records
+
+    @staticmethod
+    def _parked_host_record(lane):
+        return dict(vars(lane)), len(lane.history), len(lane.ready), copy.deepcopy(lane.rng)
+
+    def _refresh_parked_host(self, records):
+        """Re-take the host half after the previous round is booked.
+
+        A following round is dispatched (and its cache planes recorded) before
+        the round ahead of it is read, so its host fields must be captured at
+        the same boundary as those planes: after that read.
+        """
+        for record in records:
+            record[1:5] = self._parked_host_record(record[0])
+
+    def _restore_parked(self, records):
+        from .hybrid_verify_rows import _kv_offset
+
+        for lane, fields, history, ready, rng, planes in records:
+            for plane in planes:
+                if plane[0] == "recurrent":
+                    _kind, cache, state, lengths, left_padding = plane
+                    cache.cache = list(state)
+                    cache.lengths, cache.left_padding = lengths, left_padding
+                else:
+                    _kind, cache, offset = plane
+                    drop = _kv_offset(cache) - offset
+                    if drop < 0 or (drop and int(cache.trim(drop)) != drop):
+                        raise RuntimeError("parked recovery could not rewind KV")
+            lane.__dict__.clear()
+            lane.__dict__.update(fields)
+            while len(lane.history) > history:
+                lane.history.pop()
+            while len(lane.ready) > ready:
+                lane.ready.pop()
+            lane.rng = rng
+        _bump(self.scheduler_stats, "recovery_checkpoint_restores", len(records))
+
+    def _abort_parked_inflight(self):
+        inflight, self._parked_inflight = self._parked_inflight, None
+        self._parked_last_read_ns = None
+        if inflight is not None and not inflight.transaction.closed:
+            inflight.transaction.abort()
+            _bump(self.scheduler_stats, "external_parked_pipeline_aborts")
+
+    def _drain_parked_inflight(self):
+        """Read the dispatched parked round without dispatching another."""
+        inflight, self._parked_inflight = self._parked_inflight, None
+        if inflight is None:
+            return
+        rows = inflight.transaction.commit(accepted_lengths=[1] * len(inflight.lanes))
+        _bump(self.scheduler_stats, "external_parked_pipeline_drains")
+        self._read_parked(inflight, rows, None)
+        self._parked_last_read_ns = None
+
+    def _parked_decisions(self, cohort, inflight):
+        """``_verify`` of zero-draft greedy rows from precomputed device values.
+
+        Identical decisions to ``_verify``: the float32 argmax token, the
+        processed (here: unprocessed) log-softmax response row, the same
+        greedy verifier call and its RNG schedule, and stop truncation.
+        """
+        tokens = [int(value) for value in inflight.next_anchors.tolist()]
+        normalizers = inflight.normalizers.tolist()
+        decisions = []
+        for row, lane in enumerate(cohort):
+            if not np.isfinite(float(normalizers[row])):
+                raise LaneFailure(
+                    lane.uid,
+                    "external draft target law is not a probability distribution",
+                )
+            response_rows = (
+                [inflight.logprob_rows[row]]
+                if lane.sampling.get("emit_logprobs", True)
+                else None
+            )
+            window = VerifyWindow(lane.processors)
+            window.mark()
+            result = verify_greedy_proposals([], [tokens[row]], lane.rng)
+            emitted = list(result.emitted)
+            for index, token in enumerate(emitted):
+                if token in self.stops:
+                    emitted = emitted[: index + 1]
+                    break
+            decisions.append(
+                RoundDecision(
+                    result.accepted,
+                    emitted,
+                    None,
+                    result.relaxed_accepts,
+                    response_rows,
+                    window,
+                    relaxed_positions=result.relaxed_positions,
+                )
+            )
+        return decisions
+
+    def _parked_pipeline_round(self, cohort):
+        """One poll of pipelined parked decode (the PLD plain-round pipeline).
+
+        Commit the dispatched round (no host token needed), dispatch the
+        following round from its lazy argmax, then read the committed round on
+        the host while the device runs the following one.  A first poll only
+        dispatches.
+        """
+        inflight = self._parked_inflight
+        if inflight is None:
+            self._parked_inflight = self._dispatch_parked(
+                cohort,
+                [lane.anchor for lane in cohort],
+                timing_start_ns=time.perf_counter_ns(),
+            )
+            _bump(self.scheduler_stats, "external_parked_pipeline_starts")
+            return
+        self._parked_inflight = None
+        phase = _PhaseClock(self) if self.round_timing else None
+        try:
+            rows = inflight.transaction.commit(
+                accepted_lengths=[1] * len(inflight.lanes)
+            )
+            if phase is not None:
+                phase("parked_commit")
+        except BaseException:
+            if not inflight.transaction.closed:
+                inflight.transaction.abort()
+            self._restore_parked(inflight.recovery)
+            raise
+        following = None
+        if self._parked_pipeline_eligible(cohort, following=True):
+            try:
+                following = self._dispatch_parked(
+                    cohort,
+                    inflight.next_anchors,
+                    timing_start_ns=0,
+                )
+            except BaseException:  # noqa: BLE001 - the read below still books the round
+                following = None
+        self._read_parked(inflight, rows, following)
+
+    def _read_parked(self, inflight, rows, following):
+        """Book a committed parked round; keep ``following`` only if it is exact."""
+        cohort = inflight.lanes
+        phase = _PhaseClock(self) if self.round_timing else None
+        self._open = True
+        try:
+            self.mx.eval(
+                inflight.features,
+                inflight.next_anchors,
+                inflight.normalizers,
+                *inflight.logprob_rows,
+            )
+            if phase is not None:
+                phase("parked_wait")
+            blocks = [None] * len(cohort)
+            decisions = self._parked_decisions(cohort, inflight)
+            if phase is not None:
+                phase("parked_decide")
+            lazy = [int(value) for value in inflight.next_anchors.tolist()]
+            keep = following is not None
+            for row, (lane, decision) in enumerate(zip(cohort, decisions)):
+                token = int(decision.emitted[0])
+                if (
+                    token != lazy[row]
+                    or token in self.stops
+                    or lane.generated + 1 >= lane.maximum
+                ):
+                    keep = False
+                    if token != lazy[row]:
+                        _bump(self.scheduler_stats, "external_parked_pipeline_mismatches")
+            if following is not None and not keep:
+                # The following round used an anchor this round does not
+                # commit, or a lane finishes here and its cache must freeze at
+                # this boundary: rewind it exactly before booking.
+                following.transaction.abort()
+                following = None
+                _bump(self.scheduler_stats, "external_parked_pipeline_drains")
+            self._commit(
+                cohort,
+                decisions,
+                inflight.features,
+                blocks=blocks,
+                transaction=_CommittedPlainRows(rows),
+                deferred_context=True,
+            )
+            if following is not None:
+                self._refresh_parked_host(following.recovery)
+            if phase is not None:
+                phase("parked_book")
+        except BaseException:
+            if following is not None and not following.transaction.closed:
+                with suppress(Exception):
+                    following.transaction.abort()
+            self._restore_parked(inflight.recovery)
+            self._parked_last_read_ns = None
+            raise
+        finally:
+            self._open = False
+        now = time.perf_counter_ns()
+        start = (
+            self._parked_last_read_ns
+            if self._parked_last_read_ns is not None
+            else inflight.timing_start_ns
+        )
+        self._observe_cost_handoff_round(
+            cohort,
+            inflight.generated_before,
+            start,
+            ordinary_probe=True,
+            ordinary_probe_uids={lane.uid for lane in cohort},
+        )
+        _bump(self.scheduler_stats, "external_cost_parked_rounds")
+        _bump(self.scheduler_stats, "external_parked_pipelined_rounds")
+        self._parked_last_read_ns = now if following is not None else None
+        self._parked_inflight = following
+
     def _observe_cost_handoff_round(
         self,
         cohort,
@@ -5342,6 +7678,16 @@ class ExternalDraftBatchGenerator:
                 owner_scope=(self.binding, lane.session_scope_hash),
             )
             if decision is None:
+                continue
+            if state.settings.reversible:
+                # A park only changes how the next closed boundary groups
+                # this session; its draft plane stays exact throughout.
+                _bump(self.scheduler_stats, f"external_cost_{decision['event']}_events")
+                lane.cost_handoff_receipt = state.receipt()
+                for response in lane.ready:
+                    response.speculative_receipt["cost_per_commit_handoff"] = (
+                        copy.deepcopy(lane.cost_handoff_receipt)
+                    )
                 continue
             if not any(
                 getattr(response, "finish_reason", None) is not None
@@ -5687,8 +8033,15 @@ class ExternalDraftBatchGenerator:
             raise ValueError("external forced draft depth must be zero or absent")
         if forced_depth is None and cohort and all(lane.ordinary for lane in cohort):
             return self._ordinary_round(cohort)
-        if forced_depth is None and self.continuation_policy is not None and all(
-                not lane.ordinary and lane.maximum - lane.generated > 1 for lane in cohort):
+        if (
+            forced_depth is None
+            and self.continuation_policy is not None
+            and not getattr(self, "continuation_pool_ast_bridge", False)
+            and all(
+                not lane.ordinary and lane.maximum - lane.generated > 1
+                for lane in cohort
+            )
+        ):
             return self._pool_round(cohort)
         if forced_depth is None and self.draft_topology == "tree15" and all(
             lane.maximum - lane.generated > 1 for lane in cohort
@@ -5771,26 +8124,229 @@ class ExternalDraftBatchGenerator:
                     "external_composed_trusted_pld_b1_guard_rounds",
                 )
                 trusted_round = False
+            progressive_proposal_span = max(
+                [*proposal_counts]
+                + [
+                    len(alternative.tokens)
+                    for lane in cohort
+                    for alternative in self._last_alternative_blocks.get(
+                        lane.uid, ()
+                    )
+                ],
+                default=0,
+            )
             if (
                 self.progressive_verification_tile is not None
                 and 1 <= len(cohort) == len(blocks) <= 4
                 and all(block is not None for block in blocks)
-                and max(proposal_counts, default=0)
-                > self.progressive_verification_tile
-                and not any(lane.processors for lane in cohort)
+                and progressive_proposal_span > self.progressive_verification_tile
+                and all(
+                    self._progressive_processors_supported(lane)
+                    for lane in cohort
+                )
                 and not any(
                     int(token) in self.stops
                     for block in blocks
                     for token in block.tokens
                 )
             ):
+                cross_session_ast_available = bool(
+                    self.progressive_cross_session_pack_rows is not None
+                    and len(cohort) > 1
+                    and all(
+                        lane.uid in self._last_alternative_blocks
+                        for lane in cohort
+                    )
+                )
+                cross_session_ast_stop_guard = bool(
+                    cross_session_ast_available
+                    and any(
+                        int(token) in self.stops
+                        for lane in cohort
+                        for block in self._last_alternative_blocks[lane.uid]
+                        for token in block.tokens
+                    )
+                )
+                # The ordered live frontier needs 2-4 branches per session,
+                # each with a positive suffix past its shared prefix.  A
+                # processor-masked draft can end a branch at the prefix (a
+                # forbidden token left no finite candidate), so such a round
+                # keeps the exact primary progressive path instead.
+                cross_session_ast_geometry_guard = bool(
+                    cross_session_ast_available
+                    and not cross_session_ast_stop_guard
+                    and self.progressive_cross_session_pack_mode
+                    == "ordered_live_frontier"
+                    and any(
+                        not 2 <= len(self._last_alternative_blocks[lane.uid]) <= 4
+                        or any(
+                            len(block.tokens)
+                            - int(self._last_alternative_prefix_tokens.get(lane.uid, 0))
+                            < 1
+                            for block in self._last_alternative_blocks[lane.uid]
+                        )
+                        for lane in cohort
+                    )
+                )
+                if cross_session_ast_geometry_guard:
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_ast_geometry_guard_rounds",
+                        len(cohort),
+                    )
+                cross_session_ast_mode = (
+                    cross_session_ast_available
+                    and not cross_session_ast_stop_guard
+                    and not cross_session_ast_geometry_guard
+                )
+                if cross_session_ast_stop_guard:
+                    _bump(
+                        self.scheduler_stats,
+                        "external_progressive_alternative_stop_guard_rounds",
+                        len(cohort),
+                    )
+                    for lane in cohort:
+                        lane.progressive_alternative_stop_guard_rounds = (
+                            getattr(
+                                lane,
+                                "progressive_alternative_stop_guard_rounds",
+                                0,
+                            )
+                            + 1
+                        )
                 alternative_mode = (
-                    self.progressive_alternative_branches > 1
+                    not cross_session_ast_mode
+                    and len(cohort) == 1
+                    and self.progressive_alternative_branches > 1
                     and cohort[0].uid in self._last_alternative_blocks
                 )
                 verify_cohort = cohort
                 verify_blocks = blocks
-                if alternative_mode:
+                if cross_session_ast_mode:
+                    block_groups = [
+                        self._last_alternative_blocks[lane.uid] for lane in cohort
+                    ]
+                    prefix_counts = [
+                        self._last_alternative_prefix_tokens[lane.uid]
+                        for lane in cohort
+                    ]
+                    (
+                        decisions,
+                        features,
+                        committed_caches,
+                        committed_rngs,
+                        progressive_stats,
+                        physical_stats,
+                        cross_session_selections,
+                        selected_blocks,
+                    ) = self._progressive_verify_cross_session_ast(
+                        cohort,
+                        block_groups,
+                        prefix_counts,
+                        pack_rows=self.progressive_cross_session_pack_rows,
+                    )
+                    self._record_ast_topology_execution(cohort)
+                    blocks = selected_blocks
+                    topology_rows = []
+                    for lane, selection, lane_blocks, decision in zip(
+                        cohort,
+                        cross_session_selections,
+                        block_groups,
+                        decisions,
+                        strict=True,
+                    ):
+                        branch_accepts = selection["branch_accepts"]
+                        proposal_counts = selection["proposal_counts"]
+                        full = selection["full"]
+                        winner = selection["winner"]
+                        lane.progressive_alternative_rounds = (
+                            getattr(lane, "progressive_alternative_rounds", 0) + 1
+                        )
+                        lane.progressive_alternative_last_branch_accepts = list(
+                            branch_accepts
+                        )
+                        lane.progressive_alternative_last_active_branches = len(
+                            lane_blocks
+                        )
+                        lane.progressive_alternative_last_branch_proposal_counts = list(
+                            proposal_counts
+                        )
+                        lane.progressive_alternative_last_branch_outcomes = list(
+                            ordered_branch_outcomes(branch_accepts, proposal_counts)
+                        )
+                        lane.progressive_alternative_last_branch_hashes = [
+                            hashlib.sha256(
+                                json.dumps(
+                                    [int(token) for token in block.tokens],
+                                    separators=(",", ":"),
+                                ).encode()
+                            ).hexdigest()
+                            for block in lane_blocks
+                        ]
+                        lane.progressive_alternative_last_full_branches = [
+                            index + 1 for index in full
+                        ]
+                        lane.progressive_alternative_last_selected_branch = winner + 1
+                        lane.progressive_alternative_last_discarded_branches = [
+                            index + 1
+                            for index in range(len(lane_blocks))
+                            if index != winner
+                        ]
+                        lane.progressive_alternative_last_short_circuit = None
+                        lane.progressive_alternative_last_physical_width = (
+                            physical_stats["max_cohort_width"]
+                        )
+                        lane.progressive_alternative_last_strategy = (
+                            self.progressive_alternative_strategy
+                        )
+                        lane.progressive_alternative_last_shared_prefix_tokens = int(
+                            self._last_alternative_prefix_tokens[lane.uid]
+                        )
+                        lane.progressive_alternative_last_unique_target_rows = int(
+                            selection["unique_target_rows"]
+                        )
+                        lane.progressive_cross_session_ast_last_pack_rows = int(
+                            self.progressive_cross_session_pack_rows
+                        )
+                        lane.progressive_cross_session_ast_last_packs = list(
+                            physical_stats["cross_session_packs"]
+                        )
+                        lane.progressive_cross_session_ast_last_mode = physical_stats[
+                            "cross_session_ast_mode"
+                        ]
+                        lane.progressive_cross_session_ast_last_frontier = copy.deepcopy(
+                            physical_stats.get("live_frontier")
+                        )
+                        if self.progressive_topology_latch is not None:
+                            observation = {
+                                "branch_accepts": list(branch_accepts),
+                                "proposal_counts": list(proposal_counts),
+                                "selected_branch": winner + 1,
+                                "unique_target_rows": selection[
+                                    "unique_target_rows"
+                                ],
+                                **self._topology_observation_outcome(
+                                    lane,
+                                    decision,
+                                    branch_accepts,
+                                    proposal_counts,
+                                    winner + 1,
+                                ),
+                            }
+                            topology_rows.append(
+                                (int(lane.uid), copy.deepcopy(observation))
+                            )
+                    for uid, observation in topology_rows:
+                        # Sessions own their decision clocks; a session that
+                        # executed only its primary chain is recorded by the
+                        # primary-only path after commit.
+                        payload = self._last_alternative_latch[uid]
+                        if int(payload.get("active_branches", 0)) == 1:
+                            continue
+                        self._topology_observation_outbox.append(
+                            (int(payload["decision_token"]), [(uid, observation)])
+                        )
+                elif alternative_mode:
                     lane = cohort[0]
                     if float(lane.sampling.get("sampling_temp", 0)) != 0.0:
                         raise LaneFailure(
@@ -5829,7 +8385,9 @@ class ExternalDraftBatchGenerator:
                         verify_cohort = [
                             copy.copy(lane) for _ in range(len(verify_blocks))
                         ]
-                if (
+                if cross_session_ast_mode:
+                    pass
+                elif (
                     alternative_mode
                     and self.progressive_alternative_strategy
                     in {
@@ -5864,6 +8422,7 @@ class ExternalDraftBatchGenerator:
                         verify_cohort, verify_blocks
                     )
                 if alternative_mode:
+                    self._record_ast_topology_execution(cohort)
                     proposal_counts = tuple(
                         int(block.lengths[0]) for block in verify_blocks
                     )
@@ -5888,6 +8447,9 @@ class ExternalDraftBatchGenerator:
                     lane = cohort[0]
                     lane.progressive_alternative_rounds = (
                         getattr(lane, "progressive_alternative_rounds", 0) + 1
+                    )
+                    lane.progressive_alternative_last_active_branches = len(
+                        verify_blocks
                     )
                     lane.progressive_alternative_last_branch_accepts = branch_accepts
                     lane.progressive_alternative_last_branch_proposal_counts = list(
@@ -5925,25 +8487,29 @@ class ExternalDraftBatchGenerator:
                         )
                     )
                     if self.progressive_topology_latch is not None:
-                        self.progressive_topology_latch.observe(
-                            branch_accepts=branch_accepts,
-                            proposal_counts=proposal_counts,
-                            selected_branch=winner + 1,
-                            unique_target_rows=(
-                                lane.progressive_alternative_last_unique_target_rows
-                            ),
-                        )
-                        lane.progressive_topology_latch_last_observation = {
+                        observation = {
                             "branch_accepts": list(branch_accepts),
                             "proposal_counts": list(proposal_counts),
                             "selected_branch": winner + 1,
                             "unique_target_rows": (
                                 lane.progressive_alternative_last_unique_target_rows
                             ),
-                            "snapshot_after": (
-                                self.progressive_topology_latch.snapshot()
+                            **self._topology_observation_outcome(
+                                lane,
+                                decisions[winner],
+                                branch_accepts,
+                                proposal_counts,
+                                winner + 1,
                             ),
                         }
+                        self._topology_observation_outbox.append(
+                            (
+                                self._last_alternative_latch[lane.uid][
+                                    "decision_token"
+                                ],
+                                [(int(lane.uid), copy.deepcopy(observation))],
+                            )
+                        )
                     lane.progressive_alternative_b2_short_circuits = (
                         getattr(
                             lane,
@@ -6031,6 +8597,16 @@ class ExternalDraftBatchGenerator:
                     lane.progressive_verify_last_ragged_layout = physical_stats.get(
                         "last_ragged_layout"
                     )
+                    lane.progressive_target_row_executor = (
+                        _merge_target_executor_stats(
+                            getattr(
+                                lane,
+                                "progressive_target_row_executor",
+                                None,
+                            ),
+                            physical_stats.get("target_row_executor"),
+                        )
+                    )
                     if len(cohort) == 4 and physical_stats[
                         "first_tile_pairwise_disjoint"
                     ]:
@@ -6087,6 +8663,18 @@ class ExternalDraftBatchGenerator:
                     "external_progressive_verify_padding_rows",
                     physical_stats.get("padding_rows", 0),
                 )
+                executor_stats = physical_stats.get("target_row_executor", {})
+                for source, suffix in (
+                    ("adapter_owned_launches", "adapter_owned_launches"),
+                    ("legacy_launches", "legacy_launches"),
+                    ("row_exact_launches", "row_exact_launches"),
+                    ("nonexact_launches", "nonexact_launches"),
+                ):
+                    _bump(
+                        self.scheduler_stats,
+                        f"external_progressive_target_executor_{suffix}",
+                        executor_stats.get(source, 0),
+                    )
                 if len(cohort) > 1:
                     _bump(
                         self.scheduler_stats,
@@ -6097,6 +8685,83 @@ class ExternalDraftBatchGenerator:
                         "external_progressive_verify_batched_lanes",
                         len(cohort),
                     )
+                    if cross_session_ast_mode:
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_cross_session_ast_rounds",
+                        )
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_cross_session_ast_sessions",
+                            len(cohort),
+                        )
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_cross_session_ast_packs",
+                            len(physical_stats["cross_session_packs"]),
+                        )
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_cross_session_ast_b8_launches",
+                            physical_stats.get("b8_aligned_tile_launches", 0),
+                        )
+                        frontier = physical_stats.get("live_frontier")
+                        if frontier is not None:
+                            for suffix in (
+                                "rows_admitted",
+                                "sessions_retired",
+                                "branches_unvisited",
+                                "proposal_tokens_not_scheduled",
+                                "refills",
+                                "occupancy_numerator",
+                                "occupancy_denominator",
+                                "partial_packs",
+                                "full_packs",
+                            ):
+                                _bump(
+                                    self.scheduler_stats,
+                                    f"external_progressive_ast_frontier_{suffix}",
+                                    frontier[suffix],
+                                )
+                                self.scheduler_stats[
+                                    f"external_progressive_apt_frontier_{suffix}"
+                                ] = self.scheduler_stats[
+                                    f"external_progressive_ast_frontier_{suffix}"
+                                ]
+                            self.scheduler_stats[
+                                "external_progressive_ast_frontier_max_service_gap"
+                            ] = max(
+                                self.scheduler_stats[
+                                    "external_progressive_ast_frontier_max_service_gap"
+                                ],
+                                frontier["max_service_gap"],
+                            )
+                            self.scheduler_stats[
+                                "external_progressive_apt_frontier_max_service_gap"
+                            ] = self.scheduler_stats[
+                                "external_progressive_ast_frontier_max_service_gap"
+                            ]
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_alternative_rounds",
+                            len(cohort),
+                        )
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_alternative_branches",
+                            sum(
+                                len(group)
+                                for group in block_groups
+                            ),
+                        )
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_alternative_full_accepts",
+                            sum(
+                                len(selection["full"])
+                                for selection in cross_session_selections
+                            ),
+                        )
                     for width in range(1, 5):
                         _bump(
                             self.scheduler_stats,
@@ -6214,15 +8879,35 @@ class ExternalDraftBatchGenerator:
                     )
                 else:
                     owner = self._target_owner([l.cache for l in cohort])
-                    transaction = owner.begin(
-                        lengths=[count + 1 for count in proposal_counts]
-                    )
-                    logits, features = self.model.forward_with_taps(
-                        self.mx.array(inputs),
-                        transaction.caches,
-                        self.layers,
-                        **({"last_logits_only": True} if trusted_round else {}),
-                    )
+                    lengths = [count + 1 for count in proposal_counts]
+                    if all(count == 0 for count in proposal_counts) and hasattr(
+                        owner, "views"
+                    ):
+                        # Anchors only (a parked session, an ordinary probe, a
+                        # final-budget row): an ordinary decode step with no
+                        # rollback epoch, as the PLD executor runs it.
+                        _bump(self.scheduler_stats, "external_plain_single_token_rounds")
+                        transaction = owner.begin(lengths=lengths, plain_single_token=True)
+                    else:
+                        transaction = owner.begin(lengths=lengths)
+                    if trusted_round:
+                        logits, features = self.model.forward_with_taps(
+                            self.mx.array(inputs),
+                            transaction.caches,
+                            self.layers,
+                            last_logits_only=True,
+                        )
+                    else:
+                        logits, features = self._cohort_target_forward(
+                            self.mx.array(inputs),
+                            transaction,
+                            cohort,
+                            site=(
+                                "plain_single_token"
+                                if getattr(transaction, "plain", False)
+                                else "standard_verify"
+                            ),
+                        )
                 self.mx.eval(logits, features)
             finally:
                 if steer is not None:
@@ -6445,7 +9130,12 @@ class ExternalDraftBatchGenerator:
             if steer is not None:
                 taps.steer = steer
             try:
-                logits = self.model(inputs, cache=batched_cache)
+                if hybrid is not None:
+                    logits, _ = self._cohort_target_forward(
+                        inputs, hybrid, cohort, site="ordinary_round", taps=False
+                    )
+                else:
+                    logits = self.model(inputs, cache=batched_cache)
                 if hybrid is not None:
                     self.mx.eval(logits)
                     hybrid.commit([1] * len(cohort))
@@ -6567,6 +9257,8 @@ class ExternalDraftBatchGenerator:
         draft_per_token = 2*draft.num_key_value_heads*draft.head_dim*4
         required = 0
         extra_required = 0
+        ast_private_required = 0
+        ast_transient_per_lane = []
         reserve_draft = getattr(self.draft, "extra_memory_reservation", None)
         for lane in lanes:
             lane_append = (
@@ -6595,12 +9287,34 @@ class ExternalDraftBatchGenerator:
                 # priced a skewed B4 as tens of GiB and split it into B2 slabs.
                 required += lane_append*(target.intermediate_size+target.hidden_size)*16
             else:
-                required += lane_append*(target.num_hidden_layers*(target.intermediate_size+target.hidden_size)*16 + draft.num_hidden_layers*(draft.intermediate_size+draft.hidden_size)*16)
+                transient = lane_append*(target.num_hidden_layers*(target.intermediate_size+target.hidden_size)*16 + draft.num_hidden_layers*(draft.intermediate_size+draft.hidden_size)*16)
+                required += transient
+                ast_transient_per_lane.append(transient)
             if not prefill:
                 # Four coexisting float64 q/p originals+normalized copies,
                 # native logits/exp/output buffers, selector and safety slack.
                 required += append*target.vocab_size*128
-        if not prefill and self.continuation_policy is not None:
+            if not prefill and getattr(self, "continuation_pool_ast_bridge", False):
+                ast_private_required += (
+                    (self.progressive_alternative_branches - 1) * target_bytes
+                    + draft_bytes
+                )
+        if not prefill and getattr(self, "continuation_pool_ast_bridge", False):
+            geometry = self._continuation_ast_bridge_geometry(len(lanes))
+            concurrent_per_lane = max(
+                1,
+                (geometry["physical_path_rows"] + len(lanes) - 1)
+                // len(lanes),
+            )
+            ast_private_required += (concurrent_per_lane - 1) * sum(
+                ast_transient_per_lane
+            )
+            required += ast_private_required
+            self.scheduler_stats["continuation_ast_bridge_geometry"] = geometry
+            self.scheduler_stats["continuation_ast_bridge_private_bytes"] = (
+                ast_private_required
+            )
+        elif not prefill and self.continuation_policy is not None:
             # Conservative admission includes all private path branches and
             # provider recomputation; it must not reserve as though B15 were B1.
             required *= self.continuation_policy.limit
@@ -6672,7 +9386,7 @@ class ExternalDraftBatchGenerator:
         decode membership resumes and early completion may shrink width.
         """
         key = self._batch_cohort_key(lane)
-        if key is None:
+        if key is None or key in self._released_atomic_cohorts:
             return True
         members = [
             candidate
@@ -6739,6 +9453,11 @@ class ExternalDraftBatchGenerator:
         memory admission in the most recent poll.
         """
         waiting = set(self._atomic_prefill_waiting_uids)
+        # A lane omitted from a nonempty partial decode fit can run once the
+        # admitted siblings publish and release scratch.  Refresh it for this
+        # single scheduling turn; a wholly unfit group remains a real memory
+        # wait and is intentionally left to the bounded serving watchdog.
+        waiting.update(self._decode_fit_waiting_uids)
         waiting.update(
             lane.uid
             for lane in self.lanes.values()
@@ -6901,6 +9620,7 @@ class ExternalDraftBatchGenerator:
             self._memory_waiting_uids.clear()
         else:
             self._memory_waiting_uids.intersection_update(self.lanes)
+        self._decode_fit_waiting_uids.clear()
         self._atomic_prefill_waiting_uids.clear()
         self._reclaims_left = 2; self._allocator_reclaimed = False
         ordered = list(self.lanes.values())
@@ -6950,14 +9670,24 @@ class ExternalDraftBatchGenerator:
         for lane in ready:
             # Another lane's token budget must not change this lane's proposal
             # count and random draw schedule. Cohort only compatible counts.
-            count = 0 if lane.ordinary else min(depth,lane.maximum-lane.generated-1)
+            parked = _speculation_parked(lane)
+            count = 0 if lane.ordinary or parked else min(depth,lane.maximum-lane.generated-1)
             # Permanent ordinary lanes must not share a zero-depth round with
             # transient final-budget rows, whose draft context remains exact.
-            groups.setdefault((count, lane.ordinary),[]).append(lane)
+            # Parked sessions run their own target-only rounds (deferred draft
+            # append), so they group apart from both.
+            groups.setdefault((count, lane.ordinary, parked),[]).append(lane)
         decode_started = time.perf_counter()
-        for (count, _ordinary), candidates in groups.items():
+        for (count, _ordinary, _parked), candidates in groups.items():
+            candidates.sort(
+                key=lambda lane: getattr(lane, "decode_service_epoch", -1)
+            )
+            group_candidates = candidates
             if self.target_execution == "provider" and not concurrent:
-                candidates = candidates[: self.target_tree_cohort_limit]
+                candidates = group_candidates[: self.target_tree_cohort_limit]
+                self._decode_fit_waiting_uids.update(
+                    lane.uid for lane in group_candidates[len(candidates):]
+                )
             # Bound total target rows as lane pressure rises.  The adapter
             # declares the tree-node budget; admission prices that exact
             # verify shape rather than assuming 16 rows for every lane.
@@ -6970,6 +9700,9 @@ class ExternalDraftBatchGenerator:
             if not cohort:
                 self._memory_waiting_uids.update(lane.uid for lane in candidates)
                 continue
+            self._decode_fit_waiting_uids.update(
+                lane.uid for lane in group_candidates if lane not in cohort
+            )
             if self.draft_topology == "tree15" and self.target_execution != "provider":
                 pending = [[lane] for lane in reversed(cohort)]
             else:
@@ -6980,6 +9713,9 @@ class ExternalDraftBatchGenerator:
                     self._round_at_batch_route(
                         group, concurrent=concurrent, active_width=active_width
                     )
+                    self._decode_service_epoch += 1
+                    for lane in group:
+                        lane.decode_service_epoch = self._decode_service_epoch
                 except DraftUnavailable as error:
                     failed_uids = set(
                         getattr(error, "failed_uids", ())
@@ -7040,6 +9776,12 @@ class ExternalDraftBatchGenerator:
     def remove(self, uids, return_prompt_caches=False, *, cancelled=True, keep_boundary=False):
         if self._open: raise RuntimeError("Cannot remove during external transaction")
         requested_uids = {int(uid) for uid in uids}
+        inflight = getattr(self, "_parked_inflight", None)
+        if inflight is not None and any(
+            int(lane.uid) in requested_uids for lane in inflight.lanes
+        ):
+            # Unread, so the host never saw it: rewind exactly, then remove.
+            self._abort_parked_inflight()
         uids = set(requested_uids)
         # Before the first complete decode frontier, membership is owned by
         # the declaration rather than by individual lanes.  Removing one
@@ -7079,6 +9821,9 @@ class ExternalDraftBatchGenerator:
                 removed = True
                 if lane.cost_handoff_state is not None:
                     lane.cost_handoff_state.cancel()
+                latches = getattr(self, "progressive_topology_latch", None)
+                if latches is not None and hasattr(latches, "release"):
+                    latches.release(uid)
                 lane.cancelled = bool(cancelled); self.scheduler_stats["cancelled"] += int(cancelled)
                 if return_prompt_caches and uid in requested_uids:
                     result[uid] = self._freeze_cache(lane.cache)

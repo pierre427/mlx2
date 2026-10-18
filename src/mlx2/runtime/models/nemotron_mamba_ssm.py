@@ -15,7 +15,7 @@ from typing import Any
 import mlx.core as mx
 from mlx import nn
 
-from .served_exp import ServedExpGate
+from .served_exp import ServedExpGate, adapted_helper_header, kernel_dtype_refusal
 
 
 @dataclass(frozen=True)
@@ -177,7 +177,7 @@ def _kernel():
     global _KERNEL
     if _KERNEL is None:
         _KERNEL = mx.fast.metal_kernel(
-            name="mlx2_nemotron_mamba_ssm_short_dt",
+            name="mlx2_nemotron_mamba_ssm_short_dt" + _served_header()[1],
             input_names=[
                 "X",
                 "A_log",
@@ -190,7 +190,7 @@ def _kernel():
                 "gate",
             ],
             output_names=["out", "state_out"],
-            header=_HEADER,
+            header=_served_header()[0],
             source=_SOURCE,
             ensure_row_contiguous=True,
         )
@@ -240,7 +240,12 @@ _SILU_GATE = ServedExpGate(
 
 
 def fused_mamba_ssm_gate_refusal(dtype=mx.bfloat16) -> str | None:
-    return _SILU_GATE.refusal(dtype)
+    return kernel_dtype_refusal(_SILU_GATE, dtype)
+
+
+def _served_header() -> tuple[str, str]:
+    """Kernel header with the SiLU sigmoid spelled like the served op."""
+    return adapted_helper_header(_SILU_GATE, _HEADER, "mlx_sigmoid_fast")
 
 
 def fused_mamba_ssm_gate_short(

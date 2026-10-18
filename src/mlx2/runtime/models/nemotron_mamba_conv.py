@@ -13,7 +13,7 @@ from typing import Any
 import mlx.core as mx
 from mlx import nn
 
-from .served_exp import ServedExpGate
+from .served_exp import ServedExpGate, adapted_helper_header, kernel_dtype_refusal
 
 
 @dataclass(frozen=True)
@@ -125,17 +125,22 @@ _SILU_GATE = ServedExpGate(
 
 def fused_mamba_conv_refusal(dtype=mx.bfloat16) -> str | None:
     """Why this build cannot preserve the served SiLU spelling, or ``None``."""
-    return _SILU_GATE.refusal(dtype)
+    return kernel_dtype_refusal(_SILU_GATE, dtype)
+
+
+def _served_header() -> tuple[str, str]:
+    """Kernel header with the SiLU sigmoid spelled like the served op."""
+    return adapted_helper_header(_SILU_GATE, _HEADER, "mlx_sigmoid_fast")
 
 
 def _kernel():
     global _KERNEL
     if _KERNEL is None:
         _KERNEL = mx.fast.metal_kernel(
-            name="mlx2_nemotron_mamba_conv4_silu_b1",
+            name="mlx2_nemotron_mamba_conv4_silu_b1" + _served_header()[1],
             input_names=["input", "state", "weight", "bias"],
             output_names=["output", "history"],
-            header=_HEADER,
+            header=_served_header()[0],
             source=_SOURCE,
             ensure_row_contiguous=True,
         )
@@ -186,10 +191,10 @@ def _short_kernel():
     global _SHORT_KERNEL
     if _SHORT_KERNEL is None:
         _SHORT_KERNEL = mx.fast.metal_kernel(
-            name="mlx2_nemotron_mamba_conv4_silu_short",
+            name="mlx2_nemotron_mamba_conv4_silu_short" + _served_header()[1],
             input_names=["input", "state", "weight", "bias"],
             output_names=["output", "history"],
-            header=_HEADER,
+            header=_served_header()[0],
             source=_SHORT_SOURCE,
             ensure_row_contiguous=True,
         )

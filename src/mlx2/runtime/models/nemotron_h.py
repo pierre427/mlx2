@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: MIT
 # Adapted from mlx-lm-unified; see provenance/nemotron3-super-5bit.json.
 import copy
-from collections import defaultdict
+import threading
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import mlx.core as mx
 from mlx import nn
 
+from ..cache_operations import MAMBA_RECURRENT_OPERATIONS
 from ..prefill_checkpoint_rows import select_checkpoint_rows
-from ..progressive_external_verify import PROGRESSIVE_TARGET_PROTOCOL_VERSION
+from ..progressive_external_verify import (
+    PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    ProgressiveTargetRows,
+)
 from .activations import swiglu
 from .base import (
     BaseModelArgs,
@@ -17,9 +22,76 @@ from .base import (
     create_ssm_mask,
     scaled_dot_product_attention,
 )
-from .cache import ArraysCache, BatchKVCache, KVCache
+from .cache import ArraysCache, BatchKVCache, KVCache, decode_mask_mode
 from .ssm import ssm_update
+from . import moe_nax_gather as _moe_nax
 from .switch_layers import SwitchMLP
+
+NEMOTRON_ROUTED_EXACT_MAX_ROWS = 16
+NEMOTRON_ROUTED_LATTICE_MAX_ROWS = 8 * NEMOTRON_ROUTED_EXACT_MAX_ROWS
+
+
+def _serial_exact_ssm_update(x, A_log, B, C, D, dt, dt_bias, state, limit, mask):
+    """``ssm_update`` over a speculative strip with one-token decode arithmetic.
+
+    ``ssm_update`` runs 2..8 rows through its sequential kernel, which matches
+    serial one-token decode bit for bit, but 9..31 rows through the matrix
+    form (``ssm_attn``), which does not.  A verify strip that wide (a
+    copy-draft span of 8, or ``num_draft >= 8``) would then commit a recurrent
+    state that ordinary decode never produces, so the committed stream would
+    depend on how many tokens each verify window carried and on when a lane
+    left MTP for plain decode.  Split such a strip into sequential-kernel
+    pieces that carry the fp32 state.  Masked (padded) strips keep the stock
+    law: their rows are not one-token decode steps.
+    """
+    from .ssm import _SEQ_KERNEL_MAX_LEN
+
+    steps = int(x.shape[1])
+    if mask is not None or state is None or steps <= _SEQ_KERNEL_MAX_LEN:
+        return ssm_update(x, A_log, B, C, D, dt, dt_bias, state, limit, mask)
+    outputs = []
+    for start in range(0, steps, _SEQ_KERNEL_MAX_LEN):
+        stop = min(steps, start + _SEQ_KERNEL_MAX_LEN)
+        y, state = ssm_update(
+            x[:, start:stop],
+            A_log,
+            B[:, start:stop],
+            C[:, start:stop],
+            D,
+            dt[:, start:stop],
+            dt_bias,
+            state,
+            limit,
+            None,
+        )
+        outputs.append(y)
+    return mx.concatenate(outputs, axis=1), state
+
+
+def balanced_routed_exact_chunks(total_rows: int) -> tuple[int, ...]:
+    """Plan 2..16-row exact expert calls without a singleton tail."""
+
+    if type(total_rows) is not int or not 2 <= total_rows <= NEMOTRON_ROUTED_LATTICE_MAX_ROWS:
+        raise ValueError(
+            "Nemotron routed lattice total rows must be an integer in 2..128"
+        )
+    chunks = (total_rows + NEMOTRON_ROUTED_EXACT_MAX_ROWS - 1) // NEMOTRON_ROUTED_EXACT_MAX_ROWS
+    base, wider = divmod(total_rows, chunks)
+    plan = tuple(base + int(index < wider) for index in range(chunks))
+    if (
+        sum(plan) != total_rows
+        or min(plan) < 2
+        or max(plan) > NEMOTRON_ROUTED_EXACT_MAX_ROWS
+        or max(plan) - min(plan) > 1
+    ):
+        raise AssertionError("Nemotron routed lattice chunk planner violated its bounds")
+    return plan
+
+
+class NemotronMambaCache(ArraysCache):
+    """Adapter-owned identity for Nemotron Mamba recurrent state."""
+
+    cache_operations_contract = MAMBA_RECURRENT_OPERATIONS
 
 
 @dataclass()
@@ -461,7 +533,12 @@ class NemotronHMamba2Mixer(nn.Module):
                     self._ssm_refusal_reasons.get(reason, 0) + 1
                 )
                 self._ssm_counts["ordinary"] += 1
-                y, state = ssm_update(
+                update = (
+                    _serial_exact_ssm_update
+                    if cache is not None and cache.speculating
+                    else ssm_update
+                )
+                y, state = update(
                     hidden_states,
                     self.A_log,
                     B,
@@ -474,13 +551,22 @@ class NemotronHMamba2Mixer(nn.Module):
                     mask,
                 )
         else:
-            y, state = self._ssm_update_arrays(hidden_states, B, C, dt, state, mask)
+            y, state = self._ssm_update_arrays(
+                hidden_states,
+                B,
+                C,
+                dt,
+                state,
+                mask,
+                serial_exact=cache is not None and cache.speculating,
+            )
         if cache:
             cache[1] = state
 
         return y.reshape(batch_size, seq_len, self.intermediate_size), gate_fused
 
-    def _ssm_update_arrays(self, x, B, C, dt, state, mask):
+    def _ssm_update_arrays(self, x, B, C, dt, state, mask, *, serial_exact=False):
+        """One SSM update; ``serial_exact`` for speculative strips and replays."""
         D = self.D.astype(x.dtype)
         if self._ssm_policy in {"fused_short", "fused_short_gate"}:
             from .nemotron_mamba_ssm import (
@@ -523,7 +609,7 @@ class NemotronHMamba2Mixer(nn.Module):
                 self._ssm_refusal_reasons.get(admission.reason, 0) + 1
             )
         self._ssm_counts["ordinary"] += 1
-        return ssm_update(
+        return (_serial_exact_ssm_update if serial_exact else ssm_update)(
             x,
             self.A_log,
             B,
@@ -642,6 +728,7 @@ class NemotronHMamba2Mixer(nn.Module):
                     dt[:, :prefix],
                     state,
                     None if mask is None else mask[:, :prefix],
+                    serial_exact=True,
                 )
                 conv = (
                     padded[:, prefix]
@@ -743,6 +830,36 @@ class NemotronHMamba2Mixer(nn.Module):
         return residual + projected if residual is not None else projected
 
 
+_DECODE_MASK_MEMO = OrderedDict()  # (batch, keys) -> all-true decode mask
+# A verify strip is at most 17 rows (copy-draft window), and a
+# layer-by-layer walk revisits the same key counts in every layer.
+_DECODE_MASK_MEMO_ENTRIES = 18
+_DECODE_MASK_MEMO_LOCK = threading.Lock()
+
+
+def _all_true_decode_mask(batch: int, keys: int) -> mx.array:
+    """The ``(batch, 1, 1, keys)`` all-true decode mask, shared across layers.
+
+    Every attention layer of one step sees the same key count, and a verify
+    strip walks at most 17 consecutive counts per layer, so a small
+    shape-keyed memo builds each mask once per step instead of once per
+    layer (256 KiB per layer per token at 256K keys).  The value depends only
+    on the shape, so a hit can never change bits.
+    """
+    key = (batch, keys)
+    # Serving engines decode on their own threads; the lookup, refresh and
+    # eviction must be one step, or another thread can evict ``key`` between
+    # them.
+    with _DECODE_MASK_MEMO_LOCK:
+        mask = _DECODE_MASK_MEMO.pop(key, None)
+        if mask is None:
+            mask = mx.ones((batch, 1, 1, keys), dtype=mx.bool_)
+        _DECODE_MASK_MEMO[key] = mask
+        while len(_DECODE_MASK_MEMO) > _DECODE_MASK_MEMO_ENTRIES:
+            _DECODE_MASK_MEMO.popitem(last=False)
+    return mask
+
+
 class NemotronHAttention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -793,8 +910,32 @@ class NemotronHAttention(nn.Module):
             .transpose(0, 2, 1, 3)
         )
 
+        # A one-row call can arrive here without a mask (an MTP verify row,
+        # a lane's prompt-tail token, a draft-head step).  It must attend
+        # with exactly the mask ordinary single-token decode would use on
+        # this cache: MLX 0.32.4's one-query SDPA gives other bits for no
+        # mask than for an all-true boolean mask from 8192 keys on (M3 Pro
+        # and M5 Max, 2026-10-18), so MTP rows and plain decode would part
+        # from the ordinary reference, and from each other, there.  The law
+        # is established only for the two caches below; every other cache
+        # (view caches with their own ``bucketed_attention``, quantized and
+        # rotating caches, B>1 plain caches) keeps the mask it was given.
+        derive_mask = mask is None and L == 1 and cache is not None
+        if derive_mask and type(cache) is BatchKVCache:
+            # The ordinary backbone builds this before any layer's update;
+            # padded rows keep their false positions.
+            mask = cache.make_mask(1)
+            derive_mask = False
         if cache is not None:
             keys, values = cache.update_and_fetch(keys, values)
+        if (
+            derive_mask
+            and type(cache) is KVCache
+            and B == 1
+            and decode_mask_mode() == "array"
+        ):
+            # Unpadded B1: the BatchKVCache decode mask is all true.
+            mask = _all_true_decode_mask(B, int(keys.shape[2]))
 
         output = scaled_dot_product_attention(
             queries, keys, values, cache=cache, scale=self.scale, mask=mask
@@ -923,7 +1064,17 @@ class NemotronHMoE(nn.Module):
         )
         self._relu2_down_policy = "auto"
         self._relu2_down_counts = {"ordinary": 0, "fused_b1": 0, "refused": 0}
-        self._routed_batch_counts = {"ordinary": 0, "routed_batch_exact": 0, "refused": 0}
+        self._routed_batch_counts = {
+            "ordinary": 0,
+            "routed_batch_exact": 0,
+            "routed_lattice_exact": 0,
+            "lattice_chunked_calls": 0,
+            "lattice_physical_chunks": 0,
+            "lattice_sessions": 0,
+            "lattice_rows": 0,
+            "refused": 0,
+        }
+        self._last_routed_lattice = None
 
         self.gate = MoEGate(config)
         if config.n_shared_experts is not None:
@@ -956,7 +1107,7 @@ class NemotronHMoE(nn.Module):
     def _routed_batch_geometry_refusal(self, rows: int) -> str | None:
         if self.training:
             return "training"
-        if not 2 <= rows <= 16:
+        if not 2 <= rows <= NEMOTRON_ROUTED_EXACT_MAX_ROWS:
             return f"rows {rows}"
         geometry = (
             self.config.hidden_size,
@@ -982,13 +1133,76 @@ class NemotronHMoE(nn.Module):
         return self._routed_batch_geometry_refusal(int(x.shape[1]))
 
     def routed_batch_status(self) -> dict:
-        return {"counts": dict(self._routed_batch_counts)}
+        return {
+            "counts": dict(self._routed_batch_counts),
+            "last_lattice": (
+                None
+                if self._last_routed_lattice is None
+                else copy.deepcopy(self._last_routed_lattice)
+            ),
+        }
 
-    @staticmethod
-    def _rowwise(function, x):
-        return mx.concatenate(
-            [function(x[:, row : row + 1]) for row in range(x.shape[1])], axis=1
+    def _shared_rows_exact(self, x):
+        """The shared expert over a strip with each row's one-row arithmetic."""
+        from ..row_exact import ops
+
+        mlp = self.shared_experts
+        if type(mlp) is not NemotronHMLP:
+            return ops.per_row(mlp, x)
+        up = ops.linear(mlp.up_proj, x, stage="moe_shared_up")
+        hidden = ops.row_independent(
+            nn.relu2, up, stage="moe_shared_act", key=("relu2",)
         )
+        return ops.linear(mlp.down_proj, hidden, stage="moe_shared_down")
+
+    def _routed_rows_exact(self, x):
+        """One row strip (one session, or a session-major lattice) through the
+        latent MoE with each row's one-token arithmetic, from shared exact ops."""
+        from ..row_exact import ops
+
+        gate = self.gate
+        if type(gate) is MoEGate:
+            float_router = (
+                getattr(gate.config, "router_compute_dtype", "input") == "float32"
+            )
+            inds, scores = ops.router_select(
+                gate.weight,
+                x,
+                lambda logits: group_expert_select(
+                    logits,
+                    gate.e_score_correction_bias,
+                    gate.top_k,
+                    gate.n_group,
+                    gate.topk_group,
+                    gate.routed_scaling_factor,
+                    gate.norm_topk_prob,
+                ),
+                compute_dtype=mx.float32 if float_router else None,
+                key=(
+                    "nemotron_group_expert_select",
+                    gate.top_k,
+                    gate.n_group,
+                    gate.topk_group,
+                    float(gate.routed_scaling_factor),
+                    bool(gate.norm_topk_prob),
+                ),
+                stage="moe_router",
+            )
+        else:
+            selected = [gate(x[:, row : row + 1]) for row in range(x.shape[1])]
+            inds = mx.concatenate([item[0] for item in selected], axis=1)
+            scores = mx.concatenate([item[1] for item in selected], axis=1)
+        latent = ops.linear(self.fc1_latent_proj, x, stage="moe_latent_in")
+        routed = ops.routed_experts(
+            self.switch_mlp,
+            latent,
+            inds,
+            num_experts=int(self.config.n_routed_experts),
+            key=("nemotron_switch_mlp", type(self.switch_mlp).__name__),
+        )
+        y = ops.combine_experts(routed, scores)
+        y = ops.linear(self.fc2_latent_proj, y, stage="moe_latent_out")
+        return y + self._shared_rows_exact(x)
 
     def routed_batch_exact(self, x):
         """Batch only the routed expert core while preserving B1 boundaries."""
@@ -997,36 +1211,145 @@ class NemotronHMoE(nn.Module):
             self._routed_batch_counts["refused"] += 1
             raise ValueError(f"Nemotron routed expert batch refused: {refusal}")
 
-        residuals = x
-        selected = [self.gate(x[:, row : row + 1]) for row in range(x.shape[1])]
-        inds = mx.concatenate([item[0] for item in selected], axis=1)
-        scores = mx.concatenate([item[1] for item in selected], axis=1)
-        x = self._rowwise(self.fc1_latent_proj, x)
-
-        routed = self.switch_mlp(x, inds)
-        y = mx.concatenate(
-            [
-                (
-                    routed[:, row : row + 1]
-                    * scores[:, row : row + 1, :, None]
-                )
-                .sum(axis=-2)
-                .astype(routed.dtype)
-                for row in range(routed.shape[1])
-            ],
-            axis=1,
-        )
-        y = self._rowwise(self.fc2_latent_proj, y)
-        shared = self._rowwise(self.shared_experts, residuals)
-        y = mx.concatenate(
-            [
-                y[:, row : row + 1] + shared[:, row : row + 1]
-                for row in range(y.shape[1])
-            ],
-            axis=1,
-        )
+        y = self._routed_rows_exact(x)
         self._routed_batch_counts["routed_batch_exact"] += 1
         return y
+
+    def routed_lattice_refusal(self, session_rows) -> str | None:
+        """Return why a cross-session, ragged token-row lattice is unsafe.
+
+        Each item is one request-private ``[1, S, H]`` strip.  The lattice
+        deliberately has no padding contract: AST hands it only live rows,
+        which are flattened session-major, processed by an admitted balanced
+        expert-call plan, and scattered back to the original ragged strips.
+        """
+        if not isinstance(session_rows, (list, tuple)):
+            return "session rows are not a sequence"
+        if not 2 <= len(session_rows) <= 8:
+            return f"sessions {len(session_rows)}"
+        shapes = []
+        dtypes = []
+        for rows in session_rows:
+            shape_value = getattr(rows, "shape", None)
+            if shape_value is None:
+                return f"row type {type(rows).__module__}.{type(rows).__qualname__}"
+            shape = tuple(shape_value)
+            if getattr(rows, "ndim", None) != 3 or shape[0] != 1 or shape[1] < 1:
+                return f"shape {shape}"
+            if shape[1] > NEMOTRON_ROUTED_EXACT_MAX_ROWS:
+                return f"segment rows {shape[1]}"
+            if shape[2] != self.config.hidden_size:
+                return f"hidden size {shape[2]}"
+            shapes.append(shape)
+            dtypes.append(rows.dtype)
+        if any(dtype != dtypes[0] for dtype in dtypes[1:]):
+            return "mixed dtypes"
+        _plan, refusal = self.routed_lattice_plan(
+            tuple(shape[1] for shape in shapes)
+        )
+        return refusal
+
+    def routed_lattice_plan(self, lengths) -> tuple[tuple[int, ...] | None, str | None]:
+        """Admit one lattice and return its exact physical expert-call plan."""
+
+        if type(self.gate) is not MoEGate:
+            return (
+                None,
+                f"gate {type(self.gate).__module__}.{type(self.gate).__qualname__}",
+            )
+        if getattr(self.config, "router_compute_dtype", "input") not in {
+            "input",
+            "float32",
+        }:
+            return None, f"router compute dtype {self.config.router_compute_dtype}"
+        if not isinstance(lengths, (list, tuple)):
+            return None, "session lengths are not a sequence"
+        if not 2 <= len(lengths) <= 8:
+            return None, f"sessions {len(lengths)}"
+        if any(
+            type(length) is not int
+            or not 1 <= length <= NEMOTRON_ROUTED_EXACT_MAX_ROWS
+            for length in lengths
+        ):
+            return None, f"session lengths {tuple(lengths)}"
+        try:
+            plan = balanced_routed_exact_chunks(sum(lengths))
+        except ValueError as error:
+            return None, str(error)
+        for rows in plan:
+            refusal = self._routed_batch_geometry_refusal(rows)
+            if refusal is not None:
+                return None, refusal
+        # A non-floor global can pad a sorted gather onto a different QMM
+        # reduction.  That may be a valid performance policy elsewhere, but
+        # this route promises the established exact 2..16-row arithmetic.
+        from . import switch_layers
+
+        pad_policy = switch_layers.moe_pad_status()["policy"]
+        if pad_policy != "floor":
+            return None, f"moe rhs pad policy {pad_policy}"
+        return plan, None
+
+    def routed_lattice_exact(self, session_rows):
+        """Run exact balanced MoE chunks across ragged private strips.
+
+        Gate, latent projections, shared experts, residual addition, and the
+        final scatter retain the established exact row arithmetic.  Flattened
+        live rows are processed by the admitted balanced 2..16-row expert-call
+        plan; no singleton tail, cache, or request state crosses this boundary.
+        """
+        refusal = self.routed_lattice_refusal(session_rows)
+        if refusal is not None:
+            self._routed_batch_counts["refused"] += 1
+            raise ValueError(f"Nemotron routed expert lattice refused: {refusal}")
+        lengths = tuple(int(rows.shape[1]) for rows in session_rows)
+        plan, plan_refusal = self.routed_lattice_plan(lengths)
+        if plan_refusal is not None or plan is None:
+            raise AssertionError("admitted Nemotron routed lattice lost its plan")
+        flat = mx.concatenate(tuple(session_rows), axis=1)
+        routed_chunks = []
+        chunk_offset = 0
+        for chunk_rows in plan:
+            routed_chunks.append(
+                self._routed_rows_exact(
+                    flat[:, chunk_offset : chunk_offset + chunk_rows]
+                )
+            )
+            chunk_offset += chunk_rows
+        if chunk_offset != int(flat.shape[1]):
+            raise AssertionError("Nemotron routed lattice plan lost rows")
+        routed = (
+            routed_chunks[0]
+            if len(routed_chunks) == 1
+            else mx.concatenate(routed_chunks, axis=1)
+        )
+        scattered = []
+        offset = 0
+        for length in lengths:
+            scattered.append(routed[:, offset : offset + length])
+            offset += length
+        if offset != int(routed.shape[1]):
+            raise AssertionError("Nemotron routed lattice scatter lost rows")
+        self._routed_batch_counts["routed_lattice_exact"] += 1
+        self._routed_batch_counts["lattice_chunked_calls"] += int(
+            len(routed_chunks) > 1
+        )
+        self._routed_batch_counts["lattice_physical_chunks"] += len(routed_chunks)
+        self._routed_batch_counts["lattice_sessions"] += len(lengths)
+        self._routed_batch_counts["lattice_rows"] += offset
+        self._last_routed_lattice = {
+            "schema": "mlx2.nemotron-routed-lattice.v1",
+            "session_rows": list(lengths),
+            "total_rows": offset,
+            "physical_chunk_rows": [
+                int(chunk.shape[1]) for chunk in routed_chunks
+            ],
+            "max_physical_chunk_rows": NEMOTRON_ROUTED_EXACT_MAX_ROWS,
+            "flatten_order": "session_major_token_major",
+            "padding_rows": 0,
+            "exact": True,
+        }
+        return tuple(scattered)
 
     def __call__(self, x):
         residuals = x
@@ -1193,6 +1516,18 @@ class NemotronHModel(nn.Module):
         hidden_sink: list | None = None,
         inputs_embeds=None,
     ):
+        # The NAX sorted expert gather (policy moe_nax_gather=gather, default
+        # off) is prefill-only; the trunk forward decides the phase once.
+        # Decode, speculating caches and row-exact verify windows are not
+        # prefill.  A no-op while the mode is off.
+        with _moe_nax.forward_scope(inputs, cache):
+            return self._forward(
+                inputs, cache, ssm_sink, capture_layers, hidden_sink, inputs_embeds
+            )
+
+    def _forward(
+        self, inputs, cache, ssm_sink, capture_layers, hidden_sink, inputs_embeds
+    ):
         hidden_states = (
             self.embeddings(inputs) if inputs_embeds is None else inputs_embeds
         )
@@ -1277,6 +1612,10 @@ class Model(nn.Module):
         self._short_segment_counts = {
             "layerwise_short_exact": 0,
             "layerwise_short_exact_routed_batch": 0,
+            "multi_session_short_exact": 0,
+            "multi_session_sessions": 0,
+            "multi_session_rows": 0,
+            "multi_session_ragged": 0,
             "rows": 0,
             "refused": 0,
         }
@@ -1348,59 +1687,147 @@ class Model(nn.Module):
                 return f"mamba projection {mixer._projection_policy}"
         return None
 
+    def routed_expert_lattice_exact(self, layer_index: int, session_hidden):
+        """Execute one MoE residual layer over an AST ragged row lattice.
+
+        This model-owned seam lets a coordinator bring request-private hidden
+        strips to the same expert layer without teaching the generic scheduler
+        Nemotron topology.  It neither advances caches nor authorizes a route;
+        callers retain ownership of every session's surrounding layer walk.
+        """
+        if type(layer_index) is not int or not 0 <= layer_index < len(self.layers):
+            raise ValueError("Nemotron routed lattice layer index is invalid")
+        layer = self.layers[layer_index]
+        if layer.block_type != "E" or not isinstance(layer.mixer, NemotronHMoE):
+            raise ValueError("Nemotron routed lattice requires an MoE layer")
+        normalized = tuple(
+            mx.concatenate(
+                [
+                    layer.norm(rows[:, row : row + 1])
+                    for row in range(rows.shape[1])
+                ],
+                axis=1,
+            )
+            for rows in session_hidden
+        )
+        mixed = layer.mixer.routed_lattice_exact(normalized)
+        return tuple(
+            mx.concatenate(
+                [
+                    rows[:, row : row + 1] + update[:, row : row + 1]
+                    for row in range(rows.shape[1])
+                ],
+                axis=1,
+            )
+            for rows, update in zip(session_hidden, mixed, strict=True)
+        )
+
+    def _row_exact_recipe(self, layer):
+        """This model's declared exact-strip recipe for one block."""
+        from ..row_exact import recipes
+
+        if layer.block_type == "M":
+            # The Mamba mixer consumes a short segment with its row-exact
+            # projections, fused segment kernels and rollback tape.
+            return recipes.SEGMENT
+        if (
+            layer.block_type == "E"
+            and self._short_segment_policy == "layerwise_short_exact_routed_batch"
+        ):
+            recipe = self.__dict__.get("_mlx2_exact_moe_recipe")
+            if recipe is None:
+                norm = layer.norm
+                recipe = recipes.residual(
+                    (
+                        "nemotron_block_norm",
+                        type(norm).__name__,
+                        float(getattr(norm, "eps", 0.0)),
+                        tuple(norm.weight.shape),
+                    ),
+                    lambda block, normalized: block.mixer.routed_batch_exact(normalized),
+                    name="moe_exact",
+                )
+                self.__dict__["_mlx2_exact_moe_recipe"] = recipe
+            return recipe
+        return recipes.PER_ROW
+
+    def _row_exact_close(self, record) -> None:
+        stats = self.__dict__.setdefault(
+            "_mlx2_row_exact_stats",
+            {"windows": 0, "windows_exact": 0, "rows": 0, "stages": {}, "failures": {}},
+        )
+        stats["windows"] += 1
+        stats["windows_exact"] += int(record.exact)
+        stats["rows"] += record.rows
+        for stage, routes in record.stages.items():
+            target = stats["stages"].setdefault(stage, {})
+            for route, count in routes.items():
+                target[route] = target.get(route, 0) + count
+        for reason, count in record.failures.items():
+            stats["failures"][reason] = stats["failures"].get(reason, 0) + count
+
+    def row_exact_status(self) -> dict:
+        from .. import row_exact
+
+        stats = self.__dict__.get("_mlx2_row_exact_stats") or {}
+        return {
+            "schema": "mlx2.nemotron-row-exact.v1",
+            **{key: (dict(value) if isinstance(value, dict) else value) for key, value in stats.items()},
+            **row_exact.status(),
+        }
+
+    def _row_exact_head(self, hidden: mx.array) -> mx.array:
+        """Logits for a verify strip, each row bit-equal to its one-row head."""
+        from .. import row_exact_verify as REV
+        from ..row_exact import ops
+
+        if hidden.ndim != 3 or hidden.shape[0] != 1 or hidden.shape[1] <= 1:
+            return self.lm_head(hidden)
+        record = REV.Window(int(hidden.shape[1]))
+        with REV.window(record):
+            logits = ops.linear(self.lm_head, hidden, stage="lm_head")
+        self._row_exact_close(record)
+        return logits
+
     def _layerwise_short_hidden(self, inputs, cache, capture_layers):
         """Return exact short-segment hidden rows and requested layer taps.
 
-        Mamba owns the recurrent segment and its internal rollback tape.  Every
-        other block retains one-token decode arithmetic, including attention
-        cache updates and switched-expert gather decisions.  This is the
-        adapter-selected execution primitive consumed by the generic
-        speculative scheduler; no scheduler model-name branch is required.
+        Each block runs the strip with its declared recipe
+        (``_row_exact_recipe``) through the shared ``row_exact`` executor:
+        Mamba owns the recurrent segment and its rollback tape, the latent MoE
+        runs from canaried exact ops, and every other block keeps one-token
+        decode arithmetic.  No scheduler model-name branch is required.
         """
+        from .. import row_exact_verify as REV
+        from ..row_exact import ops, recipes
+
         hidden = self.backbone.embeddings(inputs)
-        taps = []
+        caches = []
         cache_index = 0
-        for layer_index, layer in enumerate(self.layers):
-            layer_cache = None
+        for layer in self.layers:
             if layer.block_type in {"M", "*"}:
-                layer_cache = cache[cache_index]
+                caches.append(cache[cache_index])
                 cache_index += 1
-            if layer.block_type == "M":
-                hidden = layer(hidden, mask=None, cache=layer_cache)
-            elif (
-                layer.block_type == "E"
-                and self._short_segment_policy
-                == "layerwise_short_exact_routed_batch"
-            ):
-                normalized = mx.concatenate(
-                    [
-                        layer.norm(hidden[:, row : row + 1])
-                        for row in range(hidden.shape[1])
-                    ],
-                    axis=1,
-                )
-                mixed = layer.mixer.routed_batch_exact(normalized)
-                hidden = mx.concatenate(
-                    [
-                        hidden[:, row : row + 1] + mixed[:, row : row + 1]
-                        for row in range(hidden.shape[1])
-                    ],
-                    axis=1,
-                )
             else:
-                rows = []
-                for row in range(hidden.shape[1]):
-                    rows.append(
-                        layer(
-                            hidden[:, row : row + 1],
-                            mask=None,
-                            cache=layer_cache,
-                        )
-                    )
-                hidden = mx.concatenate(rows, axis=1)
-            if layer_index in capture_layers:
-                taps.append(hidden)
-        hidden = self.backbone.norm_f(hidden)
+                caches.append(None)
+        record = REV.Window(int(inputs.shape[1]))
+        with REV.window(record):
+            hidden, taps = recipes.run_layerwise(
+                self.layers, self._row_exact_recipe, hidden, caches, capture_layers
+            )
+            norm = self.backbone.norm_f
+            hidden = ops.row_independent(
+                norm,
+                hidden,
+                stage="final_norm",
+                key=(
+                    "nemotron_final_norm",
+                    type(norm).__name__,
+                    float(getattr(norm, "eps", 0.0)),
+                    tuple(norm.weight.shape),
+                ),
+            )
+        self._row_exact_close(record)
         self._short_segment_counts[self._short_segment_policy] += 1
         self._short_segment_counts["rows"] += int(inputs.shape[1])
         return hidden, taps
@@ -1409,17 +1836,267 @@ class Model(nn.Module):
         self, inputs, cache, capture_layers, *, body_only: bool
     ):
         hidden, taps = self._layerwise_short_hidden(inputs, cache, capture_layers)
-        if body_only:
-            logits = None
-        else:
-            logits = mx.concatenate(
-                [
-                    self.lm_head(hidden[:, row : row + 1])
-                    for row in range(hidden.shape[1])
-                ],
-                axis=1,
-            )
+        logits = None if body_only else self._row_exact_head(hidden)
         return logits, mx.concatenate(taps, axis=-1)
+
+    @staticmethod
+    def _pad_short_row(value, width):
+        padding = int(width) - int(value.shape[1])
+        if padding < 0:
+            raise ValueError("Nemotron short row exceeds its launch width")
+        return value if padding == 0 else mx.pad(value, [(0, 0), (0, padding), (0, 0)])
+
+    def _multi_session_short_geometry(self, inputs, caches):
+        """Validate and unwrap a segmented AST target launch.
+
+        The generic transaction remains the owner of commit/abort.  This
+        capability seam only borrows each view's authoritative B1 rows for a
+        layerwise walk; it never joins recurrent or KV histories.
+        """
+
+        if self._short_segment_policy != "layerwise_short_exact_routed_batch":
+            raise ValueError(
+                "Nemotron multi-session short execution requires the selected "
+                "layerwise_short_exact_routed_batch policy"
+            )
+        if inputs.ndim != 2 or not 2 <= int(inputs.shape[0]) <= 8:
+            raise ValueError("Nemotron multi-session short execution requires B=2..8")
+        width = int(inputs.shape[1])
+        if not 1 <= width <= 16:
+            raise ValueError(
+                "Nemotron multi-session short execution requires token width 1..16"
+            )
+        expected = sum(layer.block_type in {"M", "*"} for layer in self.layers)
+        if caches is None or len(caches) != expected:
+            raise ValueError("Nemotron multi-session cache topology changed")
+
+        batch = int(inputs.shape[0])
+        row_caches = [[] for _ in range(batch)]
+        lengths = None
+        for cache in caches:
+            rows = getattr(cache, "rows", None)
+            if not isinstance(rows, list) or len(rows) != batch:
+                raise ValueError(
+                    "Nemotron multi-session execution requires segmented cache views"
+                )
+            if len({id(row) for row in rows}) != batch:
+                raise ValueError("Nemotron multi-session caches alias request rows")
+            for index, row in enumerate(rows):
+                row_caches[index].append(row)
+            candidate = getattr(cache, "_step_lengths", None)
+            if candidate is None and isinstance(cache, ArraysCache):
+                candidate = cache._length_vector()
+            if candidate is not None:
+                candidate = tuple(int(value) for value in candidate)
+                if lengths is None:
+                    lengths = candidate
+                elif candidate != lengths:
+                    raise ValueError(
+                        "Nemotron multi-session cache views disagree on row lengths"
+                    )
+        if lengths is None or len(lengths) != batch:
+            raise ValueError("Nemotron multi-session launch has no exact row lengths")
+        if any(not 1 <= length <= width for length in lengths):
+            raise ValueError(
+                "Nemotron multi-session short rows must each contain 1..width tokens"
+            )
+
+        total_rows = sum(lengths)
+        moe_chunk_plan = None
+        for layer in self.layers:
+            if layer.block_type == "E":
+                plan, refusal = layer.mixer.routed_lattice_plan(lengths)
+                if refusal is not None:
+                    raise ValueError(
+                        f"Nemotron multi-session routed lattice refused: {refusal}"
+                    )
+                if moe_chunk_plan is None:
+                    moe_chunk_plan = plan
+                elif plan != moe_chunk_plan:
+                    raise ValueError(
+                        "Nemotron multi-session MoE layers disagree on chunk plan"
+                    )
+            elif layer.block_type == "M":
+                mixer = layer.mixer
+                if mixer._conv_policy != "fused_short":
+                    raise ValueError(
+                        f"Nemotron multi-session mamba conv is {mixer._conv_policy}"
+                    )
+                if mixer._ssm_policy not in {"fused_short", "fused_short_gate"}:
+                    raise ValueError(
+                        f"Nemotron multi-session mamba ssm is {mixer._ssm_policy}"
+                    )
+                if mixer._projection_policy != "short_row_exact":
+                    raise ValueError(
+                        "Nemotron multi-session mamba projection is "
+                        f"{mixer._projection_policy}"
+                    )
+        return (
+            tuple(lengths),
+            tuple(tuple(row) for row in row_caches),
+            total_rows,
+            tuple(moe_chunk_plan or ()),
+        )
+
+    def _forward_multi_session_short_exact(
+        self, inputs, caches, capture_layers, lengths, row_caches
+    ):
+        """Run ragged AST rows with B1 state and a shared exact MoE lattice."""
+
+        hidden = [
+            self.backbone.embeddings(inputs[index : index + 1, :length])
+            for index, length in enumerate(lengths)
+        ]
+        taps = [[] for _ in lengths]
+        cache_index = 0
+        recurrent_metadata = []
+        try:
+            # Segmented transaction preparation annotates its authoritative
+            # B1 recurrent rows with batch lengths.  The selected short kernel
+            # consumes unpadded B1 geometry, so temporarily borrow those rows
+            # without the view-only metadata.  The transaction finalizer owns
+            # clearing it after this launch; restore it here for failure paths.
+            for row in row_caches:
+                for cache in row:
+                    if isinstance(cache, ArraysCache):
+                        recurrent_metadata.append(
+                            (cache, cache.lengths, cache.left_padding)
+                        )
+                        cache.lengths = None
+                        cache.left_padding = None
+            for layer_index, layer in enumerate(self.layers):
+                layer_caches = None
+                if layer.block_type in {"M", "*"}:
+                    layer_caches = [row[cache_index] for row in row_caches]
+                    cache_index += 1
+                if layer.block_type == "M":
+                    hidden = [
+                        layer(rows, mask=None, cache=cache)
+                        for rows, cache in zip(hidden, layer_caches, strict=True)
+                    ]
+                elif layer.block_type == "E":
+                    hidden = list(self.routed_expert_lattice_exact(layer_index, hidden))
+                else:
+                    next_hidden = []
+                    for rows, cache in zip(
+                        hidden,
+                        layer_caches or [None] * len(hidden),
+                        strict=True,
+                    ):
+                        # Attention and dense blocks retain ordinary tokenwise
+                        # arithmetic.  The weight-resident layer is shared by
+                        # the session loop; only request state stays private.
+                        next_hidden.append(
+                            mx.concatenate(
+                                [
+                                    layer(
+                                        rows[:, position : position + 1],
+                                        mask=None,
+                                        cache=cache,
+                                    )
+                                    for position in range(rows.shape[1])
+                                ],
+                                axis=1,
+                            )
+                        )
+                    hidden = next_hidden
+                if layer_index in capture_layers:
+                    for row_taps, rows in zip(taps, hidden, strict=True):
+                        row_taps.append(rows)
+            hidden = [self.backbone.norm_f(rows) for rows in hidden]
+            logits = [
+                mx.concatenate(
+                    [
+                        self.lm_head(rows[:, position : position + 1])
+                        for position in range(rows.shape[1])
+                    ],
+                    axis=1,
+                )
+                for rows in hidden
+            ]
+            features = [mx.concatenate(row_taps, axis=-1) for row_taps in taps]
+        finally:
+            for cache, lengths_value, left_padding in recurrent_metadata:
+                cache.lengths = lengths_value
+                cache.left_padding = left_padding
+
+        width = int(inputs.shape[1])
+        return (
+            mx.concatenate([self._pad_short_row(row, width) for row in logits]),
+            mx.concatenate([self._pad_short_row(row, width) for row in features]),
+        )
+
+    @property
+    def progressive_external_target_rows(self):
+        """Expose the specialized executor only while its policy is selected.
+
+        ``execute_progressive_target_rows`` uses ``getattr(..., None)`` as the
+        capability check.  Raising ``AttributeError`` here deliberately keeps
+        every unselected/unsupported configuration on the established legacy
+        target path instead of turning mere implementation into selection.
+        """
+
+        if self._short_segment_policy != "layerwise_short_exact_routed_batch":
+            raise AttributeError("Nemotron multi-session short executor is unselected")
+        return self._progressive_external_target_rows
+
+    def _progressive_external_target_rows(self, inputs, caches, capture_layers):
+        """Adapter-owned exact AST executor for B1 or B2..B8 hybrid rows."""
+
+        if inputs.ndim != 2:
+            raise ValueError("Nemotron progressive target tokens must be rank two")
+        batch = int(inputs.shape[0])
+        if batch == 1:
+            logits, features = self.forward_with_taps(inputs, caches, capture_layers)
+            return ProgressiveTargetRows(
+                logits,
+                features,
+                PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+                True,
+                {
+                    "route": "single_session_exact",
+                    "sessions": 1,
+                    "logical_rows": int(inputs.shape[1]),
+                    "ragged": False,
+                },
+            )
+        (
+            lengths,
+            row_caches,
+            total_rows,
+            moe_chunk_plan,
+        ) = self._multi_session_short_geometry(inputs, caches)
+        logits, features = self._forward_multi_session_short_exact(
+            inputs, caches, tuple(capture_layers), lengths, row_caches
+        )
+        self._short_segment_counts["multi_session_short_exact"] += 1
+        self._short_segment_counts[self._short_segment_policy] += 1
+        self._short_segment_counts["multi_session_sessions"] += batch
+        self._short_segment_counts["multi_session_rows"] += total_rows
+        self._short_segment_counts["rows"] += total_rows
+        ragged = len(set(lengths)) > 1
+        self._short_segment_counts["multi_session_ragged"] += int(ragged)
+        moe_lattice_layers = sum(
+            layer.block_type == "E" for layer in self.layers
+        )
+        return ProgressiveTargetRows(
+            logits,
+            features,
+            PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+            True,
+            {
+                "route": "multi_session_mamba_short_exact",
+                "sessions": batch,
+                "logical_rows": total_rows,
+                "physical_width": int(inputs.shape[1]),
+                "ragged": ragged,
+                "moe_lattice": moe_lattice_layers > 0,
+                "moe_lattice_layers": moe_lattice_layers,
+                "moe_chunks_per_layer": len(moe_chunk_plan),
+                "moe_chunk_plan": "+".join(map(str, moe_chunk_plan)),
+                "moe_chunk_row_cap": NEMOTRON_ROUTED_EXACT_MAX_ROWS,
+            },
+        )
 
     def __call__(
         self,
@@ -1549,7 +2226,7 @@ class Model(nn.Module):
         caches = []
         for layer_index, l in enumerate(self.layers):
             if l.block_type == "M":
-                cache = ArraysCache(size=2)
+                cache = NemotronMambaCache(size=2)
                 cache.apcv2_recurrent_kind = "mamba"
                 cache.apcv2_layer_index = layer_index
                 caches.append(cache)
@@ -1561,6 +2238,16 @@ class Model(nn.Module):
 
     def logits(self, hidden: mx.array) -> mx.array:
         return self.lm_head(hidden)
+
+    def mtp_verify_logits(self, hidden: mx.array) -> mx.array:
+        """Verify-row logits, each row bit-equal to its own one-row head call.
+
+        The stock batched head over a multi-row verify differs from ordinary
+        one-token decode in a few logits (GPU, mlx 0.32.4: 1-6 of 131,072 per
+        2-4 row verify), so exact verify rows could still authorize a
+        different argmax at a near tie.
+        """
+        return self._row_exact_head(hidden)
 
     def mtp_verify_backbone(self, tokens: mx.array, cache):
         """Verify B1 draft tokens with ordinary one-token state updates.
@@ -1617,7 +2304,7 @@ class Model(nn.Module):
         caches = []
         for layer_index, layer in enumerate(self.mtp.layers):
             if layer.block_type == "M":
-                cache = ArraysCache(size=2)
+                cache = NemotronMambaCache(size=2)
                 cache.apcv2_recurrent_kind = "mamba"
                 cache.apcv2_layer_index = layer_index
                 caches.append(cache)

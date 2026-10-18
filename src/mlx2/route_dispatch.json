@@ -2,17 +2,17 @@
   "schema": 1,
   "dispatchers": {
     "mlx2.adapters.registry": {
-      "sha256": "d0fade1d626a00c23ce67b95ff2a0a996127d70102313cb83c18d8243f090c0a",
+      "sha256": "218a4eb24f602fccbeb309f62f67e483e8b937d74c9a0ca6235518b6aeb15942",
       "targets": [],
       "reason": "selected-adapter dispatch"
     },
     "mlx2.runtime.models.cache": {
-      "sha256": "fb19232212c1cda48ccd82f4dfa93bb988f2a0f52b46e1988a3074acec35792c",
+      "sha256": "c20aefc9dd0dcc78a23ff263f74b22ca8775801fcaf10166a07b777f1f81e647",
       "targets": [],
       "reason": "revision-bound cache classes supplied by the selected adapter"
     },
     "mlx2.runtime.qwen38_tensorfold": {
-      "sha256": "847df7fef2ca9fae74f79fb6c2afa90911be118b73ef625d65827777286f9d40",
+      "sha256": "2b594f2379694dc42fd55f09444f48790bd45c361755e4926452663ea88cc81c",
       "targets": [
         "mlx2.runtime.tensorfold_qwen38.inputs",
         "mlx2.runtime.tensorfold_qwen38.lane_attention",

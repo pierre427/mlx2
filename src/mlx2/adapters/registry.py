@@ -132,7 +132,16 @@ class AdapterResolution:
         policy = declared.get(route) or {}
         if not isinstance(policy, dict):
             raise TypeError(f"{name} {route} default policy must be an object")
-        unknown = set(policy) - ADAPTER_DEFAULT_POLICY_KEYS
+        # An adapter may also default keys it owns and declares in its own
+        # class namespace (exact kernel and depth choices it parses itself),
+        # never inherited, for the same evidence reason as the policy above.
+        owned = vars(self.adapter_type).get("adapter_owned_default_policy_keys", frozenset())
+        if not isinstance(owned, frozenset) or owned & STATE_CHECKPOINT_POLICY_KEYS:
+            raise ValueError(
+                f"{name} adapter_owned_default_policy_keys must be a frozenset "
+                "of adapter-parsed keys"
+            )
+        unknown = set(policy) - ADAPTER_DEFAULT_POLICY_KEYS - owned
         if unknown:
             raise ValueError(
                 f"{name} declares non-default-able policy keys: {sorted(unknown)}"

@@ -29,6 +29,7 @@ from mlx2.runtime.proposal_composition import (
     PromptCopySourceRange,
     ProposalCompositionPolicy,
 )
+from mlx2.runtime.speculative_topology import OrderedLiveFrontierPlanner
 
 
 def test_progressive_external_policy_is_shared_and_identity_bound():
@@ -76,6 +77,91 @@ def test_external_adapter_mix_in_selects_and_reports_progressive_policy():
     assert settings["progressive_multilane_draft_cap"] == 3
     assert settings["progressive_alternative_branches"] == 4
     assert settings["progressive_alternative_strategy"] == "shared_prefix"
+
+
+def test_cross_session_ast_pack_policy_is_validated_and_identity_bound():
+    raw = {
+        "progressive_verification_tile": 4,
+        "progressive_alternative_branches": 4,
+        "progressive_alternative_strategy": "confidence_tree",
+        "progressive_alternative_depth_policy": "confidence_tail",
+        "progressive_cross_session_pack_rows": 8,
+    }
+    policy = normalize_progressive_external_policy(raw, num_draft=7)
+    assert policy["progressive_cross_session_pack_rows"] == 8
+    assert progressive_external_identity(policy) != progressive_external_identity(
+        {**policy, "progressive_cross_session_pack_rows": 4}
+    )
+
+
+def test_cross_session_ast_rejects_multilane_cap_at_verification_tile():
+    with pytest.raises(ValueError, match="multilane_draft_cap to exceed"):
+        normalize_progressive_external_policy(
+            {
+                "progressive_verification_tile": 3,
+                "progressive_multilane_draft_cap": 3,
+                "progressive_alternative_branches": 4,
+                "progressive_alternative_strategy": "confidence_tree",
+                "progressive_cross_session_pack_rows": 8,
+            },
+            num_draft=15,
+        )
+
+
+def test_ordered_live_frontier_policy_is_explicit_and_identity_bound():
+    base = {
+        "progressive_verification_tile": 4,
+        "progressive_alternative_branches": 4,
+        "progressive_alternative_strategy": "confidence_tree",
+        "progressive_cross_session_pack_rows": 8,
+    }
+    eager = normalize_progressive_external_policy(base, num_draft=7)
+    live = normalize_progressive_external_policy(
+        {**base, "progressive_cross_session_pack_mode": "ordered_live_frontier"},
+        num_draft=7,
+    )
+    assert eager.get("progressive_cross_session_pack_mode") is None
+    assert live["progressive_cross_session_pack_mode"] == "ordered_live_frontier"
+    assert progressive_external_identity(eager) != progressive_external_identity(live)
+
+
+def test_ordered_live_frontier_plans_b1_b2_and_no_full_without_eager_rows():
+    planner = OrderedLiveFrontierPlanner(((3, 4, 5), (3, 4), (3, 4)))
+    assert [(row.session_slot, row.branch_index) for row in planner.start()] == [
+        (0, 0),
+        (1, 0),
+        (2, 0),
+    ]
+    assert planner.complete(0, 0, full=True) is None
+    assert planner.complete(1, 0, full=False).branch_index == 1
+    assert planner.complete(2, 0, full=False).branch_index == 1
+    assert planner.complete(1, 1, full=True) is None
+    assert planner.complete(2, 1, full=False) is None
+    receipt = planner.snapshot()
+    assert receipt == {
+        "mode": "ordered_live_frontier",
+        "rows_admitted": 5,
+        "sessions_retired": 3,
+        "branches_unvisited": 2,
+        "proposal_tokens_not_scheduled": 9,
+        "refills": 2,
+        "winners": [1, 2, None],
+        "finished": True,
+    }
+
+
+@pytest.mark.parametrize("pack_rows", [1, 6, 16])
+def test_cross_session_ast_pack_policy_refuses_unbounded_widths(pack_rows):
+    with pytest.raises(ValueError, match="must be 4 or 8"):
+        normalize_progressive_external_policy(
+            {
+                "progressive_verification_tile": 4,
+                "progressive_alternative_branches": 4,
+                "progressive_alternative_strategy": "confidence_tree",
+                "progressive_cross_session_pack_rows": pack_rows,
+            },
+            num_draft=7,
+        )
 
 
 def test_shared_external_policy_rejects_unconsumed_fold_key():

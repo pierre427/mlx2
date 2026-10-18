@@ -360,7 +360,10 @@ def test_real_hybrid_branch_selection_commits_only_selected_recurrent_history(
     ).commit([4])[0]
     fresh = target.make_cache()
     mx.eval(target(mx.array([prompt + expected[:3]]), cache=fresh))
-    assert_state(selected, fresh)
+    # A committed branch replays its rows; a fresh prefill reduces the same
+    # tokens in one chunk.  GDN's recurrent fp32 state then rounds up to 2.5e-5
+    # apart on mlx 0.32.4 (a wrong branch is off by O(0.1)).
+    assert_state(selected, fresh, atol=5e-5 if kind == "gdn" else 2e-5)
     assert_state(cache, before)
     if kind == "qsa":
         from test_external_qsa_verify_rows_cpu import _assert_qsa

@@ -58,8 +58,11 @@ def tiny_model():
         rope_parameters=None,
         max_position_embeddings=256,
     )
+    from mlx2.seeded_fixtures import legacy_conv_init
+
     mx.random.seed(7)
-    model = TextModel(args)
+    with legacy_conv_init():
+        model = TextModel(args)
     model.eval()
     mx.eval(model.parameters())
     return model

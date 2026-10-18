@@ -5571,6 +5571,15 @@ def build_parser():
     )
     parser.add_argument("--execution-policy", type=Path, help="JSON file with adapter execution choices; included in qualification identity")
     parser.add_argument(
+        "--adaptive-profile-receipt",
+        type=Path,
+        help=(
+            "opt in to post-load reuse of a thermally controlled adaptive "
+            "profile; requires --qualification and an exact fingerprint/policy "
+            "match (never mutates a live route)"
+        ),
+    )
+    parser.add_argument(
         "--draft-model",
         action="append",
         default=[],
@@ -6506,6 +6515,7 @@ def serving_engine_kwargs(
         "qualification_mode": args.qualification_mode,
         "qualification": args.qualification,
         "execution_policy": policy,
+        "adaptive_profile_receipt": getattr(args, "adaptive_profile_receipt", None),
         "adaptive_mtp_depth": args.adaptive_mtp_depth,
         "mtp_acceptance_log": (
             None

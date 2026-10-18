@@ -914,19 +914,16 @@ def _dense_gate_ok(layer) -> bool:
 
 def _row_gate_logits(window, layer, flat):
     """``layer(row)`` for every row of ``flat`` with one-token arithmetic: the
-    row-exact qmv kernel for a quantized gate; for a dense gate (a bf16 gemv
-    whose multi-row matmul is not the one-row gemv) one one-token-shaped call
-    per row."""
+    row-exact qmv kernel for a quantized gate; for a dense gate (a bf16
+    ``[1, K]`` product whose one-row call no multi-row form reproduces) one
+    one-token-shaped call per row (``row_exact.ops.dense_linear``, route
+    ``per_row_single_output``).  Routes are noted on the open row-exact window
+    (``window``), if any."""
     if not _dense_gate_ok(layer):
         return _row_projections(window, (layer,), flat)[0]
-    hidden = flat.shape[-1]
-    out = mx.concatenate(
-        [layer(flat[r : r + 1].reshape(1, 1, hidden)).reshape(1, -1) for r in range(flat.shape[0])],
-        axis=0,
-    )
-    if window is not None:
-        window.note("projections", "dense_per_row", flat.shape[0])
-    return out
+    from ..row_exact import ops as _ops
+
+    return _ops.dense_linear(layer, flat[None], stage="projections")[0]
 
 
 def _shared_fold_ok(block, x) -> bool:
@@ -949,17 +946,19 @@ def _stock_routing(block, gates):
 
 
 def _row_projections(window, linears, x):
-    """Projections of ``x`` with one-row arithmetic per row (row-exact qmv)."""
-    from . import row_exact_qmv as _req
+    """Projections of ``x`` ([rows, K]) with one-row arithmetic per row: the
+    shared package's canary-gated row-exact qmv (grouped when several share a
+    quantization).  Routes are noted on the open row-exact window, if any."""
+    from ..row_exact import ops as _ops
 
+    # A lane-prepared layer runs its own lane law through the same canary
+    # gate as every other multi-row form (row_exact.ops), member by member.
+    strip = x[None]
     if len(linears) == 1:
-        (y, route) = _req.quantized_linear(linears[0], x)
-        outputs = (y,)
-    else:
-        (outputs, route) = _req.quantized_linears(linears, x)
-    if window is not None:
-        window.note("projections", route, 1 if route == "group_kernel" else len(linears))
-    return outputs
+        return (_ops.quantized_linear(linears[0], strip, stage="projections")[0],)
+    return tuple(
+        y[0] for y in _ops.quantized_linears(linears, strip, stage="projections")
+    )
 
 
 def _run_moe_window(block, x, rows, consumer):

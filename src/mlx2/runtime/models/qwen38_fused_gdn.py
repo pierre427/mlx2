@@ -199,11 +199,12 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             return self._fallback(f'prefill: {admission.reason}')
         if not prefill_kernels.runtime_supported():
             return self._fallback('prefill: Metal runtime unavailable')
-        refusal = kernels.served_silu_refusal()
-        if refusal is not None:
-            return self._fallback(f'prefill: {refusal}')
         numerics, gate = prefill_kernels.ARCHITECTURE_CONTRACTS[
             self.fused_gdn_architecture]
+        refusal = (kernels.served_silu_refusal()
+                   or prefill_kernels.prefill_refusal(numerics, gate))
+        if refusal is not None:
+            return self._fallback(f'prefill: {refusal}')
         steps = int(qkv.shape[1])
         norm_eager = False
         try:

@@ -306,7 +306,11 @@ APPROVED_QUALIFICATION_HARNESS = {
     # Re-pinned 2026-10-14: the batch check accepts a lane that ends its answer
     # with a natural stop before the 160-token budget (MiniCPM-o).
     # Receipts from 5b26cc60... must be regenerated.
-    "sha256": "18803913c4081995761a8d62680994a25ce3e9178432c3e60efb2a65d31f2493",
+    # Re-pinned 2026-10-17: preflight and delta lanes now fail closed to the
+    # CPU, suppress ambient pytest plugins/options, report slow-test and phase
+    # timings, and reuse each captured tree for its identity digest instead of
+    # hashing it twice. Existing receipts must be regenerated.
+    "sha256": "b7212bf33b2d06bc191cfc7e585ebdf208f33c0cba861b38aa3040b4ce6560a4",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
