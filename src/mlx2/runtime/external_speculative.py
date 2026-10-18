@@ -427,6 +427,9 @@ class Lane:
     ready: deque = field(default_factory=deque)
     cancelled: bool = False
     ordinary: bool = False
+    # Why this lane decodes on the ordinary target path (None: it does not,
+    # or the reason is a recoverable draft fallback counted elsewhere).
+    ordinary_reason: str | None = None
     external_rounds: int = 0
     proposed: int = 0
     accepted: int = 0
@@ -690,6 +693,7 @@ class ExternalDraftBatchGenerator:
                  progressive_protocol_binding=None,
                  decode_time_fairness=None, decode_first=None,
                  cost_per_commit_handoff=None,
+                 draft_tail_equalize=False,
                  **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
@@ -1116,6 +1120,15 @@ class ExternalDraftBatchGenerator:
         if ready_drain not in ("one", "all"):
             raise ValueError("ready_drain must be 'one' or 'all'")
         self.ready_drain = ready_drain
+        # A cohort's lanes carry different pending-context tails (each
+        # accepted a different number of tokens), and one drafter call needs
+        # one tail length.  With this set, the longer tails' leading part is
+        # committed to each lane's own draft plane first (the depth-zero
+        # append), so every lane enters one block call with the shortest
+        # tail.  Draft-plane only: target rows and verification are unchanged.
+        if type(draft_tail_equalize) is not bool:
+            raise ValueError("draft_tail_equalize must be a boolean")
+        self.draft_tail_equalize = draft_tail_equalize
         if any(len(t) != 1 for t in stop_tokens):
             raise ValueError("External executor currently requires single-token stops")
         self.stops = {int(t[0]) for t in stop_tokens}
@@ -1429,6 +1442,33 @@ class ExternalDraftBatchGenerator:
         _bump(self.scheduler_stats, "external_context_token_pairings", length)
         return self.draft.append_context(lane.tail, lane.draft_cache, context_tokens=[tokens])
 
+    def _equalize_draft_tails(self, cohort):
+        """Bring every lane's draft tail to the cohort's shortest length.
+
+        Commits the leading ``len(tail) - shortest`` features of each longer
+        tail to that lane's own draft plane, exactly as a depth-zero round
+        commits a whole tail, so one drafter call can cover the cohort.  A
+        pairing drafter's context tokens are per position of the whole tail,
+        so it keeps its per-length groups.
+        """
+        if self.pair_context_tokens:
+            return
+        dtypes = {str(lane.tail.dtype) for lane in cohort}
+        lengths = [int(lane.tail.shape[1]) for lane in cohort]
+        if len(dtypes) != 1 or len(set(lengths)) == 1:
+            return
+        shortest = min(lengths)
+        if shortest < 1:
+            return
+        for lane, length in zip(cohort, lengths, strict=True):
+            excess = length - shortest
+            if not excess:
+                continue
+            self.draft.append_context(lane.tail[:, :excess], lane.draft_cache)
+            lane.tail = lane.tail[:, excess:]
+            _bump(self.scheduler_stats, "external_draft_tail_equalized_lanes")
+            _bump(self.scheduler_stats, "external_draft_tail_equalized_positions", excess)
+
     def _verify_steer(self, cohort, inputs, proposal_counts):
         """Thinking-guard residual steering for one verify forward.
 
@@ -1547,6 +1587,15 @@ class ExternalDraftBatchGenerator:
                 # APC's hooked cache objects, which the lane must not adopt.
                 todo = prefix + todo; prefix = []; target = None
             lane = Lane(uid, prefix, deque(todo), list(target) if target is not None else self.model.make_cache(), draft_cache, tail, rng, int(max_tokens[i]), (logits_processors or [[]]*len(prompts))[i] or [], dict((sampling_configs or [{}]*len(prompts))[i]))
+            if self._sampled_lane_needs_ordinary(lane):
+                # Point-mass continuation laws can only be verified greedily
+                # (progressive add_state refuses them under sampling): serve
+                # this request on the exact ordinary target path, labelled in
+                # its receipt, instead of failing it mid-round.  Ordinary
+                # lanes cohort apart, so greedy lanes keep speculating.
+                lane.ordinary = True
+                lane.ordinary_reason = "sampled_request_on_greedy_only_point_mass_ast"
+                _bump(self.scheduler_stats, "external_sampled_point_mass_ordinary_lanes")
             lane.proposal_request_id = self._generator_revision + ":" + str(uid)
             lane.session_scope_hash = ((session_keys or [None] * len(prompts))[i]
                 or hashlib.sha256(json.dumps([self.binding, lane.proposal_request_id]).encode()).hexdigest())
@@ -1563,6 +1612,15 @@ class ExternalDraftBatchGenerator:
         self.next_uid += len(pending_lanes)
         self.scheduler_stats["paired_cache_resumes"] += resumed
         return [lane.uid for lane in pending_lanes]
+
+    def _sampled_lane_needs_ordinary(self, lane):
+        """A sampled lane on a progressive route whose proposals are point-mass
+        continuation laws (``continuation_pool``), which verify greedy-only."""
+        return (
+            float(lane.sampling.get("sampling_temp", 0)) != 0.0
+            and self.progressive_verification_tile is not None
+            and self.continuation_policy is not None
+        )
 
     def _sidecar(self, lane):
         draft_cache, tail = self._snapshot_draft_state(
@@ -2885,9 +2943,17 @@ class ExternalDraftBatchGenerator:
             for lane in cohort:
                 if lane.tail.shape[1]: self._append_context(lane, lane.anchor)
             return blocks
+        # Generators built without __init__ (tests, restored owners) predate
+        # the flag; it is opt-in, so a missing attribute means off.
+        if getattr(self, "draft_tail_equalize", False) and len(cohort) > 1:
+            self._equalize_draft_tails(cohort)
         groups = {}
         for row,lane in enumerate(cohort):
             groups.setdefault((int(lane.tail.shape[1]),str(lane.tail.dtype)),[]).append(row)
+        _bump(self.scheduler_stats, "external_draft_cohort_calls", len(groups))
+        if len(groups) > 1:
+            _bump(self.scheduler_stats, "external_draft_tail_split_rounds")
+            _bump(self.scheduler_stats, "external_draft_tail_split_extra_calls", len(groups) - 1)
         for indices in groups.values():
             session_alternative_branches = None
             lanes = [cohort[i] for i in indices]
@@ -7212,6 +7278,7 @@ class ExternalDraftBatchGenerator:
         """
         states = [lane.cost_handoff_state for lane in cohort]
         width = len(cohort)
+        _bump(self.scheduler_stats, f"external_round_cohort_width_{width}")
         from .cost_per_commit_handoff import cohort_needs_ordinary_probe
 
         parked_uids = {lane.uid for lane in cohort if _speculation_parked(lane)}
@@ -9210,6 +9277,8 @@ class ExternalDraftBatchGenerator:
                             "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target",
                             "current_execution":"ordinary_target",
                             "ordinary_fallback":True,
+                            **({"ordinary_fallback_reason": lane.ordinary_reason}
+                               if lane.ordinary_reason else {}),
                             "external_rounds":lane.external_rounds,
                             "accepted":lane.accepted,
                             "proposed":lane.proposed,
@@ -9654,6 +9723,18 @@ class ExternalDraftBatchGenerator:
             and not lane.cancelled
             and self._atomic_cohort_prefill_ready(lane)
         ][:self.capacity]
+        draining = sum(
+            1
+            for lane in ordered
+            if lane.uid in self.lanes
+            and lane.anchor is not None
+            and lane.ready
+            and not lane.cancelled
+        )
+        if draining:
+            # Lanes sitting out this decode phase while they emit queued
+            # tokens (ready_drain="one"): the cohort-split cause at B>1.
+            _bump(self.scheduler_stats, "external_decode_draining_lanes_skipped", draining)
         active_width = (
             sum(lane.anchor is not None and not lane.cancelled for lane in self.lanes.values())
             if self.dynamic_tree_max_width == 4 else len(self.lanes)
@@ -9677,6 +9758,13 @@ class ExternalDraftBatchGenerator:
             # Parked sessions run their own target-only rounds (deferred draft
             # append), so they group apart from both.
             groups.setdefault((count, lane.ordinary, parked),[]).append(lane)
+        if ready:
+            _bump(self.scheduler_stats, "external_decode_phases")
+            _bump(self.scheduler_stats, f"external_decode_phase_ready_width_{len(ready)}")
+            if len(groups) > 1:
+                _bump(self.scheduler_stats, "external_decode_group_split_phases")
+                if len({key[2] for key in groups}) > 1:
+                    _bump(self.scheduler_stats, "external_decode_parked_split_phases")
         decode_started = time.perf_counter()
         for (count, _ordinary, _parked), candidates in groups.items():
             candidates.sort(

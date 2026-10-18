@@ -1003,6 +1003,13 @@ class MuseGlimmerAdapter:
             cost_per_commit_handoff=self.external_policy.get(
                 "cost_per_commit_handoff"
             ),
+            # Keep B>1 lanes in lockstep: with one ready token per poll a lane
+            # that accepted a longer block sat out the others' next rounds
+            # (2026-10-18 M5: 8 of 369 verify launches covered all 4 lanes).
+            ready_drain="all",
+            # One drafter call per round across lanes whose pending tails
+            # differ (draft plane only; verification is unchanged).
+            draft_tail_equalize=True,
             **kwargs,
         )
 

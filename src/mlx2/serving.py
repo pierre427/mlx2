@@ -1512,6 +1512,13 @@ def row_exact_target_mutation_guard(adapter, *, lane_policy=None, lora=False):
     if not available():
         return  # This device's lane installer is an identity.
     exact = lane_policy.get("mode") == "exact"
+    # A model may name the projections its row-exact verify reaches through
+    # a law-following call: verify calls the module itself whenever the
+    # installed lane law covers its one-row call (min_rows 1), and otherwise
+    # the stock one-row arithmetic, so its verify rows take whichever law
+    # one-token decode takes.  Every other projection keeps the refusal.
+    followers = getattr(model, "row_exact_lane_followers", None)
+    followers = frozenset(followers()) if callable(followers) else frozenset()
     for name, module in model.named_modules():
         threshold = lane_policy.get("min_rows", {}).get(format_class(module))
         if threshold is None or skipped(lane_policy, name):
@@ -1526,6 +1533,8 @@ def row_exact_target_mutation_guard(adapter, *, lane_policy=None, lora=False):
             type(module) is nn.QuantizedLinear
             and (exact or threshold <= 1)
         ):
+            if name in followers:
+                continue
             raise ValueError(
                 "selected target_verify_row_exact cannot share native projections with lane matmul"
             )

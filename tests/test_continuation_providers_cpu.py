@@ -2195,3 +2195,74 @@ def test_scoped_continuation_receipt_hides_shared_critic_slate_numbers(monkeypat
             assert not {"score_sum", "score_observations"} & set(row)
         # Internal stats keep the score for ranking diagnostics.
         assert "score_sum" in next(iter(batch.lanes[uid].continuation_provider_stats.values()))
+
+
+def test_sampled_request_on_point_mass_ast_bridge_decodes_ordinary_with_receipt():
+    """Repro (qualify-ast3 2026-10-18): a ``temperature > 0`` request on the
+    Muse continuation-pool AST route failed mid-round ("continuation AST
+    point-mass verification is greedy-only", HTTP 500).  Point-mass laws
+    verify greedily only, so the sampled lane is admitted to the exact
+    ordinary target path instead, labelled in its receipt, and draws the same
+    tokens as an ordinary generator with the same seed; a greedy lane beside
+    it keeps the AST route."""
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+    )
+    from mlx2.runtime.sample_utils import LaneRNG
+
+    model, base = pair("xpress")
+    model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
+    wrapper = wrapped(model, base, {"sources": ["external"]})
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="continuation-ast-sampled",
+        completion_batch_size=1,
+        num_draft=2,
+        prefill_step_size=64,
+        ready_drain="all",
+        continuation_pool=wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=1,
+        progressive_alternative_branches=2,
+        progressive_alternative_strategy="distinct_root",
+    )
+    sampled = {"sampling_temp": 0.8}
+    prompt = [1, 2, 3]
+    sampled_uid, greedy_uid = batch.insert(
+        [prompt, [4, 5, 6]],
+        max_tokens=[6, 6],
+        lane_rngs=[LaneRNG(4242), LaneRNG(7)],
+        sampling_configs=[sampled, {"sampling_temp": 0}],
+    )
+    output, final = drain(batch)
+    # Before the fix the sampled lane was dropped as a LaneFailure here.
+    assert [str(f) for f in batch.take_lane_failures()] == []
+    receipt = final[sampled_uid].speculative_receipt
+    assert receipt["ordinary_fallback"] is True
+    assert receipt["current_execution"] == "ordinary_target"
+    assert receipt["ordinary_fallback_reason"] == (
+        "sampled_request_on_greedy_only_point_mass_ast"
+    )
+    assert batch.scheduler_stats["external_sampled_point_mass_ordinary_lanes"] == 1
+    greedy = final[greedy_uid].speculative_receipt
+    assert greedy["ordinary_fallback"] is False
+    assert greedy["external_rounds"] > 0
+    assert output[greedy_uid] == reference(model, [4, 5, 6], 6)
+
+    ordinary = ExternalDraftBatchGenerator(
+        model,
+        draft_model=base,
+        binding="continuation-ast-sampled-control",
+        completion_batch_size=1,
+        num_draft=2,
+        prefill_step_size=64,
+        ready_drain="all",
+    )
+    uid = ordinary.insert(
+        [prompt], max_tokens=[6], lane_rngs=[LaneRNG(4242)], sampling_configs=[sampled]
+    )[0]
+    ordinary.disable_speculation(uid)
+    ordinary_output, _ = drain(ordinary)
+    assert ordinary_output[uid] == output[sampled_uid]

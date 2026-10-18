@@ -447,7 +447,7 @@ def test_muse_progressive_receipt_reports_adapter_owned_exact_target_rows():
         assert executor["nonexact_launches"] == 0
         assert executor["last"]["execution"] == "adapter_owned"
         assert executor["last"]["adapter_detail"]["algorithm"] == (
-            "muse-q4-native-b1s1-causal-prefix-v1"
+            "muse-native-b1s1-causal-prefix-v2"
         )
     finally:
         batch.close()
@@ -3063,3 +3063,88 @@ def test_round_restore_with_an_empty_bfloat16_draft_kv_plane_is_exact():
     b._commit = real
     _, final = drain(b)
     assert final[0].finish_reason == 'length'
+
+
+def _b4_lockstep_run(ready_drain, equalize):
+    """Four greedy lanes on the progressive route with an oracle drafter
+    whose error position cycles, so lanes accept different block lengths."""
+    m, d = tiny()
+    m.configure_target_verify_row_exact(True)
+    batch = ExternalDraftBatchGenerator(
+        m, draft_model=d, binding="b4-lockstep", num_draft=3,
+        completion_batch_size=4, prefill_step_size=8,
+        progressive_verification_tile=1, ready_drain=ready_drain,
+        draft_tail_equalize=equalize,
+    )
+    prompts = [[1, 2, 3, 4], [5, 6, 7], [8, 9, 10, 11, 12], [13, 14]]
+
+    def greedy(prompt, count):
+        cache, tokens, out = m.make_cache(), list(prompt), []
+        for step in range(count):
+            logits = m(mx.array([tokens if step == 0 else [tokens[-1]]]), cache=cache)
+            out.append(int(mx.argmax(logits[0, -1]).item()))
+            tokens.append(out[-1])
+        return out
+
+    references = {uid: list(p) + greedy(p, 40) for uid, p in enumerate(prompts)}
+    real = d.draft_distributions
+    widths, rounds = [], {"n": 0}
+
+    def oracle(anchors, hidden, cache, count, rngs, temperatures, **kwargs):
+        widths.append(int(hidden.shape[0]))
+        # The real drafter still consumes context so its plane stays paired.
+        real(anchors, hidden, cache, count, rngs, temperatures, **kwargs)
+        tokens, laws = [], []
+        for anchor in anchors:
+            lane = next(l for l in batch.lanes.values() if l.anchor == int(anchor))
+            start = len(lane.history) + 1
+            proposal = list(references[lane.uid][start : start + count])
+            wrong = rounds["n"] % (count + 1)
+            rounds["n"] += 1
+            if wrong < count:
+                proposal[wrong] = (proposal[wrong] + 1) % 30
+            tokens.append(proposal)
+            laws.append([np.eye(32)[token] for token in proposal])
+        return tokens, laws
+
+    d.draft_distributions = oracle
+    uids = batch.insert(prompts, max_tokens=[24] * 4, sampling_configs=[{"sampling_temp": 0}] * 4)
+    output, _ = drain(batch)
+    for uid, prompt in zip(uids, prompts, strict=True):
+        assert output[uid] == references[uid][len(prompt) : len(prompt) + 24]
+    return batch.scheduler_stats, widths
+
+
+def test_b4_one_ready_token_per_poll_splits_cohorts_and_all_keeps_lockstep():
+    """Repro (Muse AST B4, 2026-10-18): with ready_drain="one" a lane holding
+    a longer accepted block sits out the others' rounds, so verify cohorts
+    split; "all" keeps every decoding lane in one round.  Exact either way."""
+    one, _ = _b4_lockstep_run("one", False)
+    full, _ = _b4_lockstep_run("all", False)
+    assert one["external_decode_draining_lanes_skipped"] > 0
+    assert one.get("external_round_cohort_width_4", 0) == 0
+    assert full.get("external_decode_draining_lanes_skipped", 0) == 0
+    assert full["external_round_cohort_width_4"] > 0
+    assert full["external_rounds"] < one["external_rounds"]
+
+
+def test_b4_draft_tail_equalization_makes_one_drafter_call_per_round():
+    """Lanes in one round carry different pending tails; without
+    equalization each tail length is its own drafter call.  Equalization
+    commits the longer tails' excess to each lane's draft plane first."""
+    split, split_widths = _b4_lockstep_run("all", False)
+    merged, merged_widths = _b4_lockstep_run("all", True)
+    assert split["external_draft_tail_split_extra_calls"] > 0
+    assert merged["external_draft_tail_equalized_lanes"] > 0
+    assert (
+        merged.get("external_draft_tail_split_extra_calls", 0)
+        < split["external_draft_tail_split_extra_calls"]
+    )
+    assert max(merged_widths) == 4 and max(split_widths) < 4
+    assert merged["external_draft_cohort_calls"] < split["external_draft_cohort_calls"]
+
+
+def test_draft_tail_equalize_must_be_boolean():
+    m, d = tiny()
+    with pytest.raises(ValueError, match="draft_tail_equalize"):
+        generator(m, d, draft_tail_equalize="yes")

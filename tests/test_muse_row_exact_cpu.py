@@ -151,7 +151,7 @@ def test_progressive_target_rows_are_adapter_owned_and_transaction_exact(width):
     assert detail["execution"] == "adapter_owned"
     assert detail["row_exact"] is True
     assert detail["adapter_detail"] == {
-        "algorithm": "muse-q4-native-b1s1-causal-prefix-v1",
+        "algorithm": "muse-native-b1s1-causal-prefix-v2",
         "physical_width": width,
         "token_width": 2,
     }
@@ -183,3 +183,153 @@ def test_progressive_target_rows_refuse_before_cache_mutation_when_deselected():
             mx.array([[7, 8]]), base, (0, 3)
         )
     assert_cache_equal(base, before)
+
+
+# v2 stacking: row-independent ops run as one launch over every verify row
+# when the parity canary agrees with the v1 per-row form.
+
+
+def _serial(model, base, tokens):
+    logits, taps = [], []
+    for lane in range(tokens.shape[0]):
+        cache = copy.deepcopy(base)
+        lane_logits, lane_taps = [], []
+        for token in tokens[lane].tolist():
+            row_logits, row_taps = model.forward_with_taps(
+                mx.array([[token]]), cache, (0, 3)
+            )
+            lane_logits.append(row_logits)
+            lane_taps.append(row_taps)
+        logits.append(mx.concatenate(lane_logits, axis=1))
+        taps.append(mx.concatenate(lane_taps, axis=1))
+    return mx.concatenate(logits), mx.concatenate(taps)
+
+
+def _verify(model, base, tokens):
+    width, length = tokens.shape
+    transaction = SegmentedKVRows([copy.deepcopy(base) for _ in range(width)]).begin(
+        [length] * width
+    )
+    model.configure_target_verify_row_exact(True)
+    try:
+        logits, taps = model.forward_with_taps(tokens, transaction.caches, (0, 3))
+        mx.eval(logits, taps)
+    finally:
+        transaction.abort()
+        model.configure_target_verify_row_exact(False)
+    return logits, taps
+
+
+@pytest.mark.parametrize("verdict", [False, None])
+@pytest.mark.parametrize("width,length", [(1, 4), (3, 3)])
+def test_stacked_rows_match_serial_under_any_canary_verdict(
+    monkeypatch, verdict, width, length
+):
+    """``None`` keeps this build's real canaries (CPU rms_norm is not
+    row-invariant at every row count, so both routes run); ``False`` forces
+    the v1 per-row form everywhere.  Either way every row is serial-exact."""
+    from mlx2.runtime.models import muse_glimmer as MG
+    from mlx2.runtime.row_exact.canary import CANARIES
+
+    model, base = model_and_cache()
+    if verdict is not None:
+        monkeypatch.setattr(CANARIES, "exact", lambda *a, **k: verdict)
+    MG.ROW_EXACT_ROUTES.clear()
+    tokens = mx.array([[21 + lane + 3 * i for i in range(length)] for lane in range(width)])
+    logits, taps = _verify(model, base, tokens)
+    want_logits, want_taps = _serial(model, base, tokens)
+    assert mx.array_equal(logits, want_logits)
+    assert mx.array_equal(taps, want_taps)
+    routes = dict(MG.ROW_EXACT_ROUTES)
+    if verdict is False:
+        assert not any(key.endswith(":batched") for key in routes)
+        assert routes.get("muse_centered_rms_norm:per_row_canary", 0) > 0
+    else:
+        assert any(key.endswith(":batched") for key in routes)
+
+
+def test_row_exact_rows_is_one_call_when_canary_passes(monkeypatch):
+    from mlx2.runtime.models import muse_glimmer as MG
+    from mlx2.runtime.row_exact.canary import CANARIES
+
+    calls = []
+
+    def op(value):
+        calls.append(tuple(value.shape))
+        return value * 2
+
+    value = mx.ones((2, 3, 4, 8))
+    MG.ROW_EXACT_ROUTES.clear()
+    monkeypatch.setattr(CANARIES, "exact", lambda *a, **k: True)
+    out = MG._row_exact_rows(op, value, ("t_op",))
+    assert calls == [(2, 3, 4, 8)] and out.shape == value.shape
+    calls.clear()
+    monkeypatch.setattr(CANARIES, "exact", lambda *a, **k: False)
+    MG._row_exact_rows(op, value, ("t_op",))
+    assert len(calls) == 24 and set(calls) == {(1, 1, 8)}
+    assert MG.ROW_EXACT_ROUTES["t_op:batched"] == 1
+    assert MG.ROW_EXACT_ROUTES["t_op:per_row_canary"] == 1
+
+
+@pytest.mark.parametrize("array_offsets", [False, True])
+def test_batched_rope_equals_v1_per_position_rope(array_offsets):
+    model, _ = model_and_cache()
+    attention = next(
+        layer.self_attn for layer in model.layers if layer.self_attn.use_rope
+    )
+    width = 3 if array_offsets else 1
+    offsets = [5, 9, 130][:width]
+    value = mx.random.normal((width, 2, 4, 8), key=mx.random.key(3))
+    batched = attention._rope_batched(value, offsets, array_offsets)
+    reference = attention._rope_per_position(value, offsets, array_offsets)
+    assert mx.array_equal(batched, reference)
+
+
+def test_receipt_reports_stage_routes():
+    from mlx2.runtime.models import muse_glimmer as MG
+
+    model, base = model_and_cache()
+    MG.ROW_EXACT_ROUTES.clear()
+    _verify(model, base, mx.array([[7, 8, 9]]))
+    model.configure_target_verify_row_exact(True)
+    routes = model.external_execution_receipt["target_verify_row_exact"]["routes"]
+    model.configure_target_verify_row_exact(False)
+    # CPU: the qmv kernel declines (device), so projections run per row.
+    assert routes["projection_group:per_row"] > 0
+    assert any(key.startswith("muse_qk_rms_norm:") for key in routes)
+    assert any(key.startswith("rope:") for key in routes)
+
+
+def test_lane_exact_projections_call_the_module_itself(monkeypatch):
+    """Under an exact-mode lane law (installed only on Metal), verify rows
+    take each projection's own call, the same lane launch one-token decode
+    makes; the row-exact qmv (stock law) is not used for those modules."""
+    from mlx2.runtime.models import muse_glimmer as MG
+    from mlx2.runtime.models import row_exact_qmv as REQ
+
+    model, base = model_and_cache()
+    monkeypatch.setattr(MG, "_lane_exact", lambda module, value: True)
+
+    def refuse(*_a, **_k):
+        raise AssertionError("row_exact_qmv ran under the lane law")
+
+    monkeypatch.setattr(REQ, "quantized_linear", refuse)
+    monkeypatch.setattr(REQ, "quantized_linears", refuse)
+    MG.ROW_EXACT_ROUTES.clear()
+    _verify(model, base, mx.array([[7, 8, 9]]))
+    routes = dict(MG.ROW_EXACT_ROUTES)
+    assert routes["projection_group:lane_module"] == 2 * len(model.layers)
+    assert routes["projection:lane_module"] == 2 * len(model.layers) + 1
+
+
+def test_lane_exact_detects_only_exact_mode_installs():
+    from types import SimpleNamespace
+
+    from mlx2.runtime.models import muse_glimmer as MG
+
+    model, _ = model_and_cache()
+    value = mx.zeros((1, 4, 16))
+    # Not lane-installed (CPU): the stock-law row-exact qmv applies.
+    assert MG._lane_exact(model.layers[0].mlp.down_proj, value) is False
+    fake = SimpleNamespace()
+    assert MG._lane_exact(fake, value) is False
