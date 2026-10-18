@@ -319,13 +319,20 @@ def _nemotron_h(path: Path, config: dict) -> AdapterResolution:
 
 
 def _nemotron_h_omni(path: Path, config: dict) -> AdapterResolution:
-    # The completed source-bound conversion is owned by the full adapter.  Its
-    # inspector validates the conversion receipt, complete tensor inventory,
-    # source revision, quantization plan, media geometry and MTP geometry.  Do
-    # not infer adapter ownership from one optional config field: that allowed
-    # a look-alike artifact to switch cache/router contracts.  The legacy
+    # A Puzzle-NAS declaration selects only the strict Bolt inspector; its
+    # pinned JSON and exact safetensors-header closure reject look-alikes before
+    # any executable capability is advertised.  The legacy
     # text-only loader remains available for explicit research construction,
     # but is not an automatic registry target for this model type.
+    llm_config = config.get("llm_config")
+    if isinstance(llm_config, dict) and llm_config.get("model_type") == "nemotron_h_puzzle":
+        module = importlib.import_module(".nemotron35_bolt", __package__)
+        artifact = module.inspect_artifact(path)
+        return AdapterResolution(
+            module.Nemotron35BoltAdapter,
+            module.DESCRIPTOR,
+            artifact,
+        )
     module = importlib.import_module(".nemotron35_super", __package__)
     artifact = module.inspect_artifact(path)
     return AdapterResolution(
