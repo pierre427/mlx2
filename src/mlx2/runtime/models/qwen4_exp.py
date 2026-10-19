@@ -7913,6 +7913,10 @@ class Model(nn.Module):
             "runtime_enabled": bool(self.mtp_draft_vocab_enabled),
             "reduced_head_calls": int(self.mtp_draft_vocab_calls),
             "full_vocab_bypasses": int(self.mtp_draft_vocab_full_bypasses),
+            "coverage_window": int(getattr(self, "mtp_draft_vocab_coverage_window", 0)),
+            "coverage_bypasses": int(
+                getattr(self, "mtp_draft_vocab_coverage_bypasses", 0)
+            ),
         }
 
     def sanitize(self, weights):

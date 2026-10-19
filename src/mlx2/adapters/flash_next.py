@@ -687,7 +687,9 @@ class FlashNextAdapter:
                 from ..runtime.mtp_draft_vocab import install_reduced_mtp_head
 
                 self.mtp_draft_vocab = install_reduced_mtp_head(
-                    self.model, *draft_vocab
+                    self.model,
+                    *draft_vocab,
+                    coverage_window=self.policy.mtp_draft_vocab_coverage_window,
                 )
                 mx.eval(self.model.mtp_draft_head.parameters())
             # MLX may lazily rewrite module dictionaries while speculative

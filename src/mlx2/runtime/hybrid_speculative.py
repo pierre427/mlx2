@@ -26,6 +26,7 @@ from .models.cache import (
     trim_ragged_prompt_cache,
 )
 from .processor_probe import VerifyWindow, copy_sharing, rollback_shared_memo
+from .mtp_draft_vocab import advance_coverage_run, coverage_admits
 from .prompt_lookup import HybridStats as _PromptLookupStatsBase
 from . import round_levers
 from . import mtp_state_trace
@@ -200,6 +201,19 @@ class SelfMTPLane:
     numerical_schedule_changed: bool = False
     numerical_initial_geometry: tuple[Any, ...] | None = None
     numerical_last_geometry: tuple[Any, ...] | None = None
+    # Reduced-vocabulary coverage gate (mtp_draft_vocab): the admitted-id mask
+    # (immutable, shared by snapshots), its window, and the trailing count of
+    # admitted committed tokens.  Host-only; window 0 means no gate.
+    coverage_member: Optional[bytes] = field(default=None, repr=False, compare=False)
+    coverage_window: int = 0
+    coverage_run: int = 0
+
+
+def _advance_lane_coverage(lane, tokens) -> None:
+    if lane.coverage_window:
+        lane.coverage_run = advance_coverage_run(
+            lane.coverage_run, lane.coverage_member, lane.coverage_window, tokens
+        )
 
 
 def record_self_mtp_verify_geometry(lane, *, compute_width, draft_depth, backend_mode):
@@ -381,10 +395,26 @@ def _mtp_backbone(model, tokens, cache):
 
 
 def _mtp_proposal_step(model, hidden, tokens, cache, lanes):
-    """Use a full proposal head whenever any batched lane is constrained."""
+    """Use a full proposal head whenever any batched lane is constrained.
+
+    With a reduced draft vocabulary installed, the batch also drafts through
+    the full head unless every lane's recent committed history lies inside the
+    admitted ids (the coverage gate).  Verification is full-width either way.
+    """
     if any(lane.logits_processors for lane in lanes):
         full_step = getattr(model, "mtp_step_full_vocab", None)
         if full_step is not None:
+            return full_step(hidden, tokens, cache)
+    if getattr(model, "mtp_draft_vocab_enabled", False) and not all(
+        coverage_admits(
+            lane.coverage_run, lane.coverage_member, lane.coverage_window, lane.cur
+        )
+        for lane in lanes
+        if getattr(lane, "coverage_window", 0)
+    ):
+        full_step = getattr(model, "mtp_step_full_vocab", None)
+        if full_step is not None:
+            model.mtp_draft_vocab_coverage_bypasses += 1
             return full_step(hidden, tokens, cache)
     return model.mtp_step(hidden, tokens, cache)
 
@@ -1163,6 +1193,22 @@ def prepare_self_mtp_lane(
             raise
     stats = HybridStats()
     stats.plain_tokens = 1
+    coverage_member = getattr(model, "mtp_draft_vocab_member", None)
+    coverage_window = (
+        int(getattr(model, "mtp_draft_vocab_coverage_window", 0))
+        if coverage_member is not None
+        else 0
+    )
+    coverage_run = 0
+    if coverage_window:
+        # Only the uncached prompt suffix is in hand; a suffix shorter than the
+        # window keeps the lane on the full head until enough tokens commit.
+        coverage_run = advance_coverage_run(
+            0,
+            coverage_member,
+            coverage_window,
+            processor_prompt[-coverage_window:].tolist(),
+        )
     from .speculative_sampling import FLyVerificationPolicy
 
     lane = SelfMTPLane(
@@ -1172,6 +1218,9 @@ def prepare_self_mtp_lane(
         pending_hs=None,
         pending_ts=[],
         token_prefix=processor_prompt,
+        coverage_member=coverage_member if coverage_window else None,
+        coverage_window=coverage_window,
+        coverage_run=coverage_run,
         rng=lane_rng,
         ntoks=1,
         max_tokens=int(max_tokens),
@@ -2474,6 +2523,7 @@ def advance_batched_self_mtp_zero(
             lane.token_prefix = mx.concatenate(
                 [lane.token_prefix, mx.array([old_curs[row]], mx.uint32)]
             )
+            _advance_lane_coverage(lane, (old_curs[row],))
             lane.ntoks += 1
             lane.stats.cycles += 1
             lane.stats.draft_cycles += 1
@@ -3547,6 +3597,7 @@ def commit_batched_self_mtp(
                             mx.array([old_cur] + drafts[: count - 1], mx.uint32),
                         ]
                     )
+                    _advance_lane_coverage(lane, [old_cur] + drafts[: count - 1])
             else:
                 new_hs = mx.concatenate([old_seed_h, hidden[:, :accepted, :]], axis=1)
                 new_ts = [old_cur] + drafts[:accepted]
@@ -3563,6 +3614,7 @@ def commit_batched_self_mtp(
                         mx.array([old_cur] + drafts[:accepted], mx.uint32),
                     ]
                 )
+                _advance_lane_coverage(lane, [old_cur] + drafts[:accepted])
             lane.ntoks += count
             lane.stats.cycles += 1
             copy_span = proposal.copy_spans[row] if proposal.copy_spans else 0

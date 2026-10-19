@@ -236,3 +236,150 @@ def test_policy_is_default_off_and_opt_in_is_receipted():
     selected = FlashNextPolicy(mtp_draft_vocab=True)
     assert selected.as_dict()["mtp_draft_vocab"] is True
     assert "mtp_draft_vocab" not in selected.batch_config(max_lanes=1, prefill_step=8)
+
+
+def test_coverage_run_counts_trailing_admitted_tokens_capped_at_window():
+    from mlx2.runtime.mtp_draft_vocab import (
+        advance_coverage_run,
+        coverage_admits,
+        membership_mask,
+    )
+
+    member = membership_mask((1, 2, 3), 8)
+    assert member == bytes([0, 1, 1, 1, 0, 0, 0, 0])
+    assert advance_coverage_run(0, member, 4, (1, 2, 3)) == 3
+    assert advance_coverage_run(0, member, 4, (1, 2, 3, 1, 2, 3)) == 4
+    assert advance_coverage_run(4, member, 4, (5,)) == 0
+    assert advance_coverage_run(0, member, 4, (1, 5, 2)) == 1
+    # An id outside the mask is never admitted.
+    assert advance_coverage_run(3, member, 4, (99,)) == 0
+    # The pending ``cur`` completes the window; window 0 never gates.
+    assert coverage_admits(3, member, 4, 2)
+    assert not coverage_admits(3, member, 4, 6)
+    assert not coverage_admits(2, member, 4, 2)
+    assert coverage_admits(0, member, 0, 6)
+
+
+def _gate_model(calls, enabled=True):
+    class Model:
+        mtp_draft_vocab_enabled = enabled
+        mtp_draft_vocab_coverage_bypasses = 0
+
+        def mtp_step(self, *_args):
+            calls.append("reduced")
+            return "reduced"
+
+        def mtp_step_full_vocab(self, *_args):
+            calls.append("full")
+            return "full"
+
+    return Model()
+
+
+def _lane(run, cur, window=4, processors=()):
+    from mlx2.runtime.mtp_draft_vocab import membership_mask
+
+    return SimpleNamespace(
+        logits_processors=list(processors),
+        coverage_member=membership_mask(range(4), 8),
+        coverage_window=window,
+        coverage_run=run,
+        cur=cur,
+    )
+
+
+def test_coverage_gate_is_batch_wide_and_counted():
+    from mlx2.runtime.hybrid_speculative import _mtp_proposal_step
+
+    calls = []
+    model = _gate_model(calls)
+    covered, uncovered = _lane(3, 1), _lane(3, 6)
+    assert _mtp_proposal_step(model, None, None, None, [covered]) == "reduced"
+    # One uncovered lane sends the whole batch through the full head.
+    assert _mtp_proposal_step(model, None, None, None, [covered, uncovered]) == "full"
+    assert model.mtp_draft_vocab_coverage_bypasses == 1
+    # Constrained lanes keep their own bypass and do not count as coverage.
+    constrained = _lane(3, 1, processors=[object()])
+    assert _mtp_proposal_step(model, None, None, None, [constrained]) == "full"
+    assert model.mtp_draft_vocab_coverage_bypasses == 1
+    # Gate off (window 0) or reduced head disabled: no coverage bypass.
+    assert _mtp_proposal_step(model, None, None, None, [_lane(0, 6, window=0)]) == "reduced"
+    disabled = _gate_model(calls, enabled=False)
+    assert _mtp_proposal_step(disabled, None, None, None, [uncovered]) == "reduced"
+    assert disabled.mtp_draft_vocab_coverage_bypasses == 0
+    assert calls == ["reduced", "full", "full", "reduced", "reduced"]
+
+
+def test_lane_coverage_survives_recovery_snapshot_without_copying_the_mask():
+    from mlx2.runtime.hybrid_speculative import (
+        _advance_lane_coverage,
+        _snapshot_segmented_recovery_row,
+    )
+
+    lane = _lane(1, 1)
+    _advance_lane_coverage(lane, [1, 2])
+    assert lane.coverage_run == 3
+    pair = SimpleNamespace(target=[], draft=[])
+    fields, *_ = _snapshot_segmented_recovery_row((lane, pair))
+    assert fields["coverage_run"] == 3
+    assert fields["coverage_member"] is lane.coverage_member
+    _advance_lane_coverage(lane, [7])
+    assert lane.coverage_run == 0 and fields["coverage_run"] == 3
+
+
+def test_install_receipts_the_coverage_window_and_rejects_bad_values():
+    import mlx.core as mx
+    from mlx import nn
+
+    from mlx2.runtime.mtp_draft_vocab import (
+        DraftVocabError,
+        DraftVocabManifest,
+        install_reduced_mtp_head,
+    )
+
+    mx.set_default_device(mx.cpu)
+
+    def model():
+        return SimpleNamespace(
+            mtp=object(),
+            language_model=SimpleNamespace(
+                args=SimpleNamespace(tie_word_embeddings=False),
+                lm_head=nn.Linear(4, 8, bias=False),
+            ),
+        )
+
+    manifest = DraftVocabManifest(
+        schema="mlx2.mtp-draft-vocab.v1", vocab_size=8, token_count=3,
+        ids_sha256="a", license_sha256="l", config_sha256="b", index_sha256="c",
+        tokenizer_sha256="d", source_repository="r", source_revision="v",
+        corpus_profile="t",
+    )
+    m = model()
+    receipt = install_reduced_mtp_head(m, manifest, (1, 3, 7))
+    assert receipt["coverage_window"] == 16
+    assert m.mtp_draft_vocab_member == bytes([0, 1, 0, 1, 0, 0, 0, 1])
+    assert m.mtp_draft_vocab_coverage_bypasses == 0
+    m = model()
+    assert install_reduced_mtp_head(m, manifest, (1, 3, 7), coverage_window=0)[
+        "coverage_window"
+    ] == 0
+    for bad in (-1, 1025, 8.0, True):
+        with pytest.raises(DraftVocabError, match="coverage window"):
+            install_reduced_mtp_head(model(), manifest, (1, 3, 7), coverage_window=bad)
+
+
+def test_policy_coverage_window_is_receipted_only_with_the_reduced_head():
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
+
+    assert "mtp_draft_vocab_coverage_window" not in FlashNextPolicy().as_dict()
+    assert FlashNextPolicy(mtp_draft_vocab=True).as_dict()[
+        "mtp_draft_vocab_coverage_window"
+    ] == 16
+    assert FlashNextPolicy(
+        mtp_draft_vocab=True, mtp_draft_vocab_coverage_window=0
+    ).as_dict()["mtp_draft_vocab_coverage_window"] == 0
+    with pytest.raises(ValueError, match="requires mtp_draft_vocab"):
+        FlashNextPolicy(mtp_draft_vocab_coverage_window=8)
+    for bad in (-1, 1025, "16", True):
+        with pytest.raises(ValueError, match="coverage_window"):
+            FlashNextPolicy(mtp_draft_vocab=True, mtp_draft_vocab_coverage_window=bad)

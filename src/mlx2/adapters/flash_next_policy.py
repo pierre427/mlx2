@@ -194,6 +194,10 @@ class FlashNextPolicy:
     # The target/verify head remains full width.  Constrained requests bypass
     # this head in hybrid_speculative rather than risking an empty legal set.
     mtp_draft_vocab: bool = False
+    # Coverage gate for that head: draft on it only while every batched lane's
+    # last N committed tokens are admitted ids; otherwise draft full-width.
+    # 0 disables the gate.  Enters receipts only with mtp_draft_vocab.
+    mtp_draft_vocab_coverage_window: int = 16
     # Candidate TensorFold Flash row matvec generalized for q4/group-64.
     tensorfold_qmv_rows: bool = False
     # Prefill-specific tiled projections and bounded core recurrence scans.
@@ -563,6 +567,11 @@ class FlashNextPolicy:
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        window = self.mtp_draft_vocab_coverage_window
+        if type(window) is not int or not 0 <= window <= 1024:
+            raise ValueError("mtp_draft_vocab_coverage_window must be an integer in [0, 1024]")
+        if window != 16 and not self.mtp_draft_vocab:
+            raise ValueError("mtp_draft_vocab_coverage_window requires mtp_draft_vocab")
         if self.prefill_depth_budget is not None and (
             type(self.prefill_depth_budget) is not int or self.prefill_depth_budget < 1
         ):
@@ -588,6 +597,7 @@ class FlashNextPolicy:
             del values["fp32_head_logits"]
         if not self.mtp_draft_vocab:
             del values["mtp_draft_vocab"]
+            del values["mtp_draft_vocab_coverage_window"]
         if not self.tensorfold_qmv_rows:
             del values["tensorfold_qmv_rows"]
         if not self.tensorfold_prefill:

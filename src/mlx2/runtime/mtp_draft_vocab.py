@@ -24,6 +24,13 @@ IDS_NAME = "mtp_draft_vocab.ids"
 LICENSE_NAME = "mtp_draft_vocab.ids.LICENSE"
 MIN_TOKEN_COUNT = 4096
 TOKEN_COUNT_ALIGNMENT = 64
+# A lane drafts on the reduced head only while its last ``window`` committed
+# tokens are all admitted ids (TensorFold #1011 coverage gate).  Text outside
+# the subset's profile (non-English scripts, for an English+code subset) would
+# otherwise stop every draft chain at the first token the subset cannot
+# propose.  0 disables the gate.
+DEFAULT_COVERAGE_WINDOW = 16
+MAX_COVERAGE_WINDOW = 1024
 
 
 class DraftVocabError(ValueError):
@@ -254,8 +261,42 @@ class RequestCompactGreedyHead:
         compact_ids = mx.argmax(logits, axis=-1)
         return mx.take(self.head.token_ids, compact_ids), logits
 
-def install_reduced_mtp_head(model, manifest, token_ids) -> dict:
+def validate_coverage_window(window) -> int:
+    if type(window) is not int or not 0 <= window <= MAX_COVERAGE_WINDOW:
+        raise DraftVocabError(
+            f"coverage window must be an integer in [0, {MAX_COVERAGE_WINDOW}]"
+        )
+    return window
+
+
+def membership_mask(token_ids: Iterable[int], vocab_size: int) -> bytes:
+    """Host-side admitted-id mask; immutable, so lane snapshots share it."""
+    mask = bytearray(int(vocab_size))
+    for token_id in token_ids:
+        mask[int(token_id)] = 1
+    return bytes(mask)
+
+
+def advance_coverage_run(run: int, member: bytes, window: int, tokens) -> int:
+    """Trailing count of admitted committed tokens, capped at ``window``."""
+    for token in tokens:
+        token = int(token)
+        run = min(run + 1, window) if 0 <= token < len(member) and member[token] else 0
+    return run
+
+
+def coverage_admits(run: int, member: bytes, window: int, cur: int) -> bool:
+    """Whether the committed history plus the pending ``cur`` fills the window."""
+    if window == 0:
+        return True
+    return advance_coverage_run(run, member, window, (cur,)) >= window
+
+
+def install_reduced_mtp_head(
+    model, manifest, token_ids, *, coverage_window: int = DEFAULT_COVERAGE_WINDOW
+) -> dict:
     """Install an adapter-requested proposal head, refusing tied/no-MTP models."""
+    coverage_window = validate_coverage_window(coverage_window)
     language_model = getattr(model, "language_model", None)
     if getattr(model, "mtp", None) is None:
         raise DraftVocabError("reduced MTP vocabulary requires an MTP sidecar")
@@ -270,5 +311,12 @@ def install_reduced_mtp_head(model, manifest, token_ids) -> dict:
     model.mtp_draft_vocab_calls = 0
     model.mtp_draft_vocab_full_bypasses = 0
     model.mtp_draft_vocab_enabled = True
-    receipt = {**manifest.receipt(), **reduced.receipt()}
+    model.mtp_draft_vocab_member = membership_mask(token_ids, manifest.vocab_size)
+    model.mtp_draft_vocab_coverage_window = coverage_window
+    model.mtp_draft_vocab_coverage_bypasses = 0
+    receipt = {
+        **manifest.receipt(),
+        **reduced.receipt(),
+        "coverage_window": coverage_window,
+    }
     return receipt

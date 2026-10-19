@@ -344,6 +344,8 @@ def test_serving_composes_both_keys_through_the_helpers():
     from mlx2 import serving
 
     source = inspect.getsource(serving)
+    # The persistent template's namespace is bound once and shared with the
+    # prefill-handoff execution digest; each key still composes it once.
     assert source.count("semantic_fingerprint=apc_semantic_namespace(") == 1
     assert source.count("persistent_semantic_namespace = apc_semantic_namespace(") == 1
     assert source.count("semantic_fingerprint=persistent_semantic_namespace") == 1
