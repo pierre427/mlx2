@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 CONTINUATION_VERIFICATION_ALGORITHM = "stable-truncated-prefix-dedup-v2"
 LONGEST_FIRST_EXACT_PREFIX = "longest-first-exact-prefix-v1"
@@ -72,8 +72,11 @@ class ContinuationPoolPolicy:
     mtp_max_history: int = 4096
     verification_algorithm: str = CONTINUATION_VERIFICATION_ALGORITHM
     admission: dict | None = None
+    ast_planner: bool = False
 
     def __post_init__(self):
+        if type(self.ast_planner) is not bool:
+            raise ValueError("continuation_pool ast_planner must be boolean")
         if (
             type(self.verification_algorithm) is not str
             or self.verification_algorithm not in CONTINUATION_VERIFICATION_ALGORITHMS
@@ -126,6 +129,10 @@ class ContinuationPoolPolicy:
         # revision-bound because it changes which providers may run.
         if result["admission"] is None:
             del result["admission"]
+        # The new planner is explicitly selected until its real-artifact
+        # performance/correctness gates justify promoting a default.
+        if not result["ast_planner"]:
+            del result["ast_planner"]
         return result
 
 
@@ -137,6 +144,8 @@ class ContinuationContext:
     draft_cache: object
     pending_features: object
     processors: tuple = ()
+    node_budget: int | None = None
+    draft_lattice: object = None
 
 
 class PromptLookupContinuationSource:
@@ -278,6 +287,7 @@ class ContinuationDraftModel:
         processor_histories=None,
         proposal_contexts=None,
         logits_processors=None,
+        ast_source_budgets=None,
         **kwargs,
     ):
         from .proposal_pool import PoolRound, ProposalPath
@@ -291,6 +301,12 @@ class ContinuationDraftModel:
             raise ValueError(
                 "continuation pool requires request-bound proposal contexts"
             )
+        if ast_source_budgets is not None and (
+            len(ast_source_budgets) != len(anchors)
+            or any(type(n) is not int or not 1 <= n <= self.policy.limit
+                   for n in ast_source_budgets)
+        ):
+            raise ValueError("AST source budgets must cover every request within the pool limit")
         self.last_continuation_selections = ()
         self.last_continuation_admissions = ()
         self.last_continuation_slates = ()
@@ -300,13 +316,19 @@ class ContinuationDraftModel:
         self.last_requested_proposal_length = int(proposal_length)
         # A batched cache exposes authoritative rows, while plain B1 cache does
         # not. Snapshot before the external context append changes its offset.
+        reusable = bool(getattr(self.backend, "supports_continuation_tree_reuse", False))
+        private_needed = [not (ast_source_budgets is not None and
+                              "external" in self.source_records and
+                              (ast_source_budgets[row] == 1 or
+                               reusable and ast_source_budgets[row] >= proposal_length))
+                          for row in range(len(anchors))]
         if all(hasattr(layer, "rows") for layer in cache):
             private_rows = [
-                copy.deepcopy([layer.rows[row] for layer in cache])
+                copy.deepcopy([layer.rows[row] for layer in cache]) if private_needed[row] else None
                 for row in range(len(anchors))
             ]
         elif len(anchors) == 1:
-            private_rows = [copy.deepcopy(cache)]
+            private_rows = [copy.deepcopy(cache) if private_needed[0] else None]
         else:
             raise ValueError(
                 "continuation pool requires individually owned draft cache rows"
@@ -361,17 +383,21 @@ class ContinuationDraftModel:
                 "big",
             )
             private_rngs.append(RequestRNG(seed))
-        backbone_tokens, _backbone_laws = self.backend.draft_distributions(
-            anchors,
-            hidden,
-            cache,
-            proposal_length,
-            private_rngs,
-            temperatures,
-            processor_histories=processor_histories,
-            logits_processors=logits_processors,
-            **kwargs,
-        )
+        capture_tree = bool(ast_source_budgets is not None and
+                            any(n > 1 for n in ast_source_budgets) and
+                            getattr(self.backend, "supports_continuation_tree_reuse", False))
+        try:
+            backbone_tokens, _backbone_laws = self.backend.draft_distributions(
+                anchors, hidden, cache, proposal_length, private_rngs, temperatures,
+                processor_histories=processor_histories,
+                logits_processors=logits_processors,
+                **({"capture_continuation_tree": True} if capture_tree else {}),
+                **kwargs,
+            )
+            lattice = getattr(self.backend, "last_continuation_lattice", None) if capture_tree else None
+        finally:
+            if capture_tree:
+                object.__setattr__(self.backend, "last_continuation_lattice", None)
         tokens = [None] * len(anchors)
         laws = [None] * len(anchors)
         self.draft_feedback_payloads = copy.deepcopy(
@@ -392,6 +418,15 @@ class ContinuationDraftModel:
                 confidence_provenance.append(None)
                 source_diagnostic_rows.append({})
                 continue
+            source_budget = self.policy.limit if ast_source_budgets is None else ast_source_budgets[row]
+            context = replace(context, node_budget=None if ast_source_budgets is None else source_budget)
+            if lattice is not None and source_budget >= proposal_length:
+                if lattice["anchors"] != tuple(int(a) for a in anchors) or lattice["depth"] != proposal_length:
+                    raise ValueError("DFlash continuation lattice does not belong to this proposal call")
+                context = replace(context, draft_lattice={
+                    "anchors": [int(anchors[row])], "depth": proposal_length,
+                    "pending": tuple(value[row:row + 1] for value in lattice["pending"]),
+                })
             round = PoolRound(
                 self.session.session_revision,
                 identity["context_revision"],
@@ -430,13 +465,34 @@ class ContinuationDraftModel:
 
             def invoke(source_id):
                 provider = self.providers[source_id]
-                candidates = tuple(provider(context, self.policy.limit))
+                candidates = tuple(provider(context, source_budget))
+                admission.setdefault("observed_invoked_sources", []).append(source_id)
                 diagnostics = getattr(provider, "last_diagnostics", None)
                 if diagnostics is not None:
                     row_source_diagnostics[source_id] = copy.deepcopy(diagnostics)
                 return candidates
 
-            for source_id in admission["admitted"]:
+            use_backbone = (ast_source_budgets is not None and source_budget == 1
+                            and "external" in self.source_records)
+            if use_backbone:
+                admission["ast_source_budget"] = source_budget
+                admission["observed_invoked_sources"] = []
+                admission["observed_backbone_source"] = "external"
+                record = self.source_records["external"]
+                paths.append(ProposalPath(
+                    candidate_id=f"external:{row}:planned-primary",
+                    source_id=record.source_id, source_revision=record.revision,
+                    session_revision=self.session.session_revision,
+                    context_revision=round.context_revision,
+                    tokens=tuple(int(t) for t in backbone_tokens[row]),
+                    confidence_features=tuple(None for _ in backbone_tokens[row]),
+                    ranking_score=0.0, ranking_convention="ast_planned_backbone_primary",
+                ))
+                row_source_diagnostics["external"] = {
+                    "mechanism": "planned_backbone_primary", "node_budget": 1,
+                    "private_head_calls": 0, "backbone_reused": True,
+                }
+            for source_id in () if use_backbone else admission["admitted"]:
                 record = self.source_records[source_id]
                 for ordinal, candidate in enumerate(invoke(source_id)):
                     paths.append(
@@ -696,6 +752,7 @@ class ContinuationDraftModel:
         strategy,
         shared_prefix_tokens,
         allow_adaptive_prefix_search=False,
+        row_indices=None,
     ):
         """Project the ranked complete-path slate into an AST branch layout.
 
@@ -722,9 +779,20 @@ class ContinuationDraftModel:
                 "continuation alternatives require one through four branches"
             )
         validate_ordered_alternative_strategy(strategy, branch_count)
+        selections = self.last_continuation_selections
+        if row_indices is not None:
+            row_indices = tuple(row_indices)
+            if (
+                len(row_indices) != len(primary_tokens)
+                or len(set(row_indices)) != len(row_indices)
+                or any(type(index) is not int or not 0 <= index < len(selections)
+                       for index in row_indices)
+            ):
+                raise ValueError("continuation alternative row selection is invalid")
+            selections = tuple(selections[index] for index in row_indices)
         if (
             not isinstance(primary_tokens, (list, tuple))
-            or len(primary_tokens) != len(self.last_continuation_selections)
+            or len(primary_tokens) != len(selections)
         ):
             raise ValueError("continuation alternative rows mismatch")
         if isinstance(shared_prefix_tokens, (list, tuple)) and len(
@@ -763,7 +831,7 @@ class ContinuationDraftModel:
         search_diagnostics = []
         adaptive_search_failed = False
         for row, (primary, selection) in enumerate(
-            zip(primary_tokens, self.last_continuation_selections, strict=True)
+            zip(primary_tokens, selections, strict=True)
         ):
             primary = tuple(primary)
             if not primary:

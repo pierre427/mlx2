@@ -7,7 +7,10 @@ from .installer import (
     apply_policy,
     install,
     installed,
+    installed_lane,
     law_id,
+    module_row_capacity,
+    module_weight_passes,
     set_enabled,
     stats,
     uninstall,
@@ -25,6 +28,7 @@ from .matmul import (
     lane_matmul,
     prepare,
     split_k,
+    weight_passes,
 )
 
 __all__ = [
@@ -43,11 +47,15 @@ __all__ = [
     "force_backend",
     "install",
     "installed",
+    "installed_lane",
     "lane_matmul",
     "law_id",
+    "module_row_capacity",
+    "module_weight_passes",
     "prepare",
     "set_enabled",
     "split_k",
     "stats",
     "uninstall",
+    "weight_passes",
 ]

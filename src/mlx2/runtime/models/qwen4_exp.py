@@ -7551,6 +7551,15 @@ class Model(nn.Module):
     def speculative_args(self):
         return self.language_model.args
 
+    @property
+    def progressive_external_attention_geometry(self):
+        """KV geometry from the declared layer types; GDN layers carry none."""
+        from ..attention_geometry import geometry_from_layer_types
+
+        args = self.language_model.args
+        return geometry_from_layer_types(args.layer_types, kv_heads=int(args.num_key_value_heads),
+                                         head_dim=int(args.head_dim))
+
     # External-draft feature source, selected by the adapter. ``None`` keeps
     # the post-layer HC-mixer taps; ``"mtp_seed"`` returns the scheme-A HC
     # hidden the native MTP head consumes; ``"completed_layer_hc_mean"`` is
@@ -7561,6 +7570,15 @@ class Model(nn.Module):
     # (qwen4_row_exact records them not exact): lane-exact cohort forwards
     # need at least two rows per lane.
     progressive_external_lane_exact_min_width = 2
+
+    @property
+    def progressive_external_compact_exact_rows(self):
+        return self._progressive_row_exact
+
+    @property
+    def progressive_external_target_modules(self):
+        return tuple(module for module in (self.language_model.model,
+                     getattr(self.language_model, "lm_head", None)) if module is not None)
 
     @property
     def progressive_external_exact_tile_widths(self):

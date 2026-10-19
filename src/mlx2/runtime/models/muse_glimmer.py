@@ -54,6 +54,11 @@ def _lane_exact(module, value) -> bool:
 def _row_exact_project(module, value, *, call=None):
     """Project every logical row with ordinary one-row reduction order."""
     from .row_exact_qmv import quantized_linear
+    from ..row_exact_verify import compact_rows
+
+    compacted = compact_rows(value, stage="projections")
+    if compacted is not None:
+        return compacted.restore(_row_exact_project(module, compacted.values, call=call))
 
     if call is None and _lane_exact(module, value):
         ROW_EXACT_ROUTES["projection:lane_module"] += 1
@@ -74,6 +79,11 @@ def _row_exact_rows(call, value, key):
     """
     from ..row_exact.canary import CANARIES, probe_input
     from .row_exact_qmv import per_row
+    from ..row_exact_verify import compact_rows
+
+    compacted = compact_rows(value, stage="norms")
+    if compacted is not None:
+        return compacted.restore(_row_exact_rows(call, compacted.values, key))
 
     width = int(value.shape[-1])
     rows = 1
@@ -99,6 +109,11 @@ def _row_exact_rows(call, value, key):
 def _row_exact_group(modules, value):
     """Same-input projections with one-row bits, grouped when Metal admits it."""
     from .row_exact_qmv import quantized_linears
+    from ..row_exact_verify import compact_rows
+
+    compacted = compact_rows(value, stage="projections")
+    if compacted is not None:
+        return tuple(compacted.restore(y) for y in _row_exact_group(modules, compacted.values))
 
     lane = [_lane_exact(module, value) for module in modules]
     if any(lane):
@@ -621,9 +636,11 @@ class Model(nn.Module):
             ProgressiveTargetRows,
         )
 
-        logits, features = self.forward_with_taps(
-            inputs, cache, capture_layers
-        )
+        from .. import row_exact_verify as rev
+
+        record = rev.Window(int(inputs.size))
+        with rev.window(record):
+            logits, features = self.forward_with_taps(inputs, cache, capture_layers)
         return ProgressiveTargetRows(
             logits=logits,
             features=features,
@@ -633,8 +650,38 @@ class Model(nn.Module):
                 "algorithm": TARGET_VERIFY_ROW_EXACT_VERSION,
                 "physical_width": int(inputs.shape[0]),
                 "token_width": int(inputs.shape[1]),
+                "padding_stage_rows_skipped": sum(
+                    count for key, count in record.stages.get("valid_row_compaction", {}).items()
+                    if key.endswith("_padding_skipped")),
             },
         )
+
+    # Executor safety bounds, not performance qualification. Auto planning
+    # uses this contract instead of a model-name table in the scheduler.
+    progressive_external_exact_tile_widths = tuple(range(1, 16))
+    progressive_external_exact_terminal_input_widths = tuple(range(2, 17))
+    progressive_external_exact_max_lanes = 8
+
+    @property
+    def progressive_external_attention_geometry(self):
+        """KV geometry per declared layer type; sliding layers under their window."""
+        from ..attention_geometry import geometry_from_layer_types
+
+        return geometry_from_layer_types(self.args.layer_types, kv_heads=int(self.args.num_key_value_heads),
+                                         head_dim=int(self.args.head_dim),
+                                         sliding_window=int(self.args.sliding_window))
+
+    @property
+    def progressive_external_compact_exact_rows(self):
+        return self._target_verify_row_exact
+
+    @property
+    def progressive_external_compact_projection_names(self):
+        return self.row_exact_lane_followers()
+
+    @property
+    def progressive_external_target_modules(self):
+        return tuple(module for module in (self.model, getattr(self, "lm_head", None)) if module is not None)
 
     @property
     def external_execution_receipt(self):

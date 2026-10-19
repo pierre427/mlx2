@@ -44,22 +44,24 @@ class LiveFrontierAdmission:
 class OrderedLiveFrontierPlanner:
     """Pure ordered admission state for cross-session AST packing.
 
-    A session has at most one live branch.  Branch ``n + 1`` becomes eligible
-    only after branch ``n`` completed conclusively non-full.  The first full
-    branch therefore wins without scheduling any higher rank; exhausting all
-    branches leaves B1 as the caller's exact fallback.
+    A session has at most one live branch. By default the first full branch
+    retires that session. Complete-path callers may maximize committed prefix:
+    a full branch then retires only when no remaining branch is deeper. The
+    caller selects the exact winner from all visited branches. A parked
+    session may participate with just its primary branch.
     """
 
-    def __init__(self, proposal_counts):
+    def __init__(self, proposal_counts, *, maximize_committed_prefix=False):
         counts = tuple(tuple(int(value) for value in row) for row in proposal_counts)
         if not 1 <= len(counts) <= 4:
             raise ValueError("live frontier requires one to four sessions")
         if any(
-            not 2 <= len(row) <= 4 or any(value < 1 for value in row)
+            not 1 <= len(row) <= 4 or any(value < 1 for value in row)
             for row in counts
         ):
-            raise ValueError("live frontier requires two to four positive branch depths")
+            raise ValueError("live frontier requires one to four positive branch depths")
         self.proposal_counts = counts
+        self.maximize_committed_prefix = bool(maximize_committed_prefix)
         self._started = False
         self._active = {}
         self._visited = [set() for _row in counts]
@@ -113,7 +115,13 @@ class OrderedLiveFrontierPlanner:
         if self._active.get(session_slot) != branch_index:
             raise ValueError("live frontier completion does not match the active branch")
         del self._active[session_slot]
-        if bool(full):
+        # Complete-path AST may have ragged depths. A full short branch is
+        # not an upper bound on a later, longer branch's exact commit utility.
+        dominated_suffix = all(
+            count <= self.proposal_counts[session_slot][branch_index]
+            for count in self.proposal_counts[session_slot][branch_index + 1 :]
+        )
+        if bool(full) and (not self.maximize_committed_prefix or dominated_suffix):
             self._winner[session_slot] = branch_index
             self._retired.add(session_slot)
             return None
@@ -192,6 +200,7 @@ class AdaptiveSpeculationTopology:
         self.censored_sessions = 0
         self.primary_only_samples = 0
         self.primary_only_sessions = 0
+        self.unavailable_samples = 0
         self.downshifts = 0
         self.periodic_reprobes = 0
         self.accepted_token_uplift = 0
@@ -402,7 +411,7 @@ class AdaptiveSpeculationTopology:
                     self.park_length = min(2 * self.park_length, self.max_park_rounds)
         return True
 
-    def observe_primary_only(self, *, decision_token, session_count):
+    def observe_primary_only(self, *, decision_token, session_count, unavailable=False):
         """Advance a parked decision after its exact primary rows commit.
 
         No alternative was executed, so this advances only the sparse-audit
@@ -420,7 +429,7 @@ class AdaptiveSpeculationTopology:
         if token != self.decisions + 1:
             raise ValueError("AST primary-only observation token is stale or out of order")
         reprobe = token % self.reprobe_interval == 0
-        if reprobe:
+        if reprobe and not unavailable:
             raise ValueError("AST periodic reprobe cannot be recorded as primary-only")
         self._tick_park(token)
         self.decisions = token
@@ -429,6 +438,7 @@ class AdaptiveSpeculationTopology:
         self.completed_sessions += session_count
         self.primary_only_samples += 1
         self.primary_only_sessions += session_count
+        self.unavailable_samples += int(unavailable)
         return True
 
     def _tick_park(self, token):
@@ -450,6 +460,7 @@ class AdaptiveSpeculationTopology:
             "censored_sessions": self.censored_sessions,
             "primary_only_samples": self.primary_only_samples,
             "primary_only_sessions": self.primary_only_sessions,
+            "unavailable_samples": self.unavailable_samples,
             "window_samples": len(rows),
             "alternative_selections": sum(
                 row["selected_branch"] > 1 for row in rows
@@ -562,12 +573,12 @@ class PerSessionSpeculationTopology:
             )
         return applied
 
-    def observe_primary_only(self, *, session_uids, decision_tokens):
+    def observe_primary_only(self, *, session_uids, decision_tokens, unavailable=False):
         applied = False
         for uid, token in zip(session_uids, decision_tokens, strict=True):
             applied = (
                 self.session(uid).observe_primary_only(
-                    decision_token=token, session_count=1
+                    decision_token=token, session_count=1, unavailable=unavailable
                 )
                 or applied
             )

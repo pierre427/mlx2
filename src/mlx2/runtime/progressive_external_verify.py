@@ -8,6 +8,7 @@ can stage every tile on request-private state before atomically promoting it.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
@@ -45,6 +46,18 @@ _ALGORITHM_SOURCE_PATHS = (
     "src/mlx2/runtime/progressive_external_verify.py",
     "src/mlx2/runtime/external_speculative.py",
     "src/mlx2/adapters/external_draft_policy.py",
+    "src/mlx2/runtime/ast_planner.py",
+    "src/mlx2/adapters/ast_execution_profile.py",
+    "src/mlx2/runtime/proposal_providers.py",
+    "src/mlx2/adapters/proposal_path_sources.py",
+    "src/mlx2/runtime/drafters/dflash2.py",
+    "src/mlx2/runtime/row_exact_verify.py",
+    "src/mlx2/runtime/models/row_exact_components.py",
+    "src/mlx2/runtime/models/qwen_hybrid_row_exact.py",
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "src/mlx2/runtime/models/muse_glimmer.py",
+    "src/mlx2/runtime/drafters/native_mtp.py",
+    "src/mlx2/adapters/muse_glimmer.py",
 )
 
 
@@ -174,6 +187,7 @@ def execute_progressive_target_rows(
     *,
     protocol,
     fidelity,
+    input_lengths=None,
 ):
     """Run an optional model-owned target-row executor, with a safe fallback.
 
@@ -187,6 +201,11 @@ def execute_progressive_target_rows(
         raise ValueError("unsupported progressive verification fidelity")
     if not isinstance(protocol, str) or not protocol:
         raise ValueError("progressive target-row executor requires a protocol")
+    if input_lengths is not None and (
+        len(input_lengths) != int(tokens.shape[0])
+        or any(type(n) is not int or not 1 <= n <= int(tokens.shape[1]) for n in input_lengths)
+    ):
+        raise ValueError("progressive target lengths disagree with the physical slab")
     executor = getattr(model, "progressive_external_target_rows", None)
     if executor is None:
         logits, features = model.forward_with_taps(tokens, caches, capture_layers)
@@ -200,7 +219,12 @@ def execute_progressive_target_rows(
         }
     if not callable(executor):
         raise TypeError("progressive target-row executor must be callable")
-    result = executor(tokens, caches, capture_layers)
+    from .row_exact_verify import valid_rows
+    compact = (input_lengths is not None and fidelity == PROGRESSIVE_FIDELITY_EXACT
+               and getattr(model, "progressive_external_compact_exact_rows", False))
+    scope = valid_rows(input_lengths, int(tokens.shape[1])) if compact else nullcontext()
+    with scope:
+        result = executor(tokens, caches, capture_layers)
     if not isinstance(result, ProgressiveTargetRows):
         raise TypeError(
             "progressive target-row executor must return ProgressiveTargetRows"

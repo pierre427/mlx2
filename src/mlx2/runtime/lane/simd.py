@@ -841,6 +841,25 @@ def _affine_launch(rows: int) -> tuple[int, int]:
     return 2, (1 if rows == 1 else 2 if rows == 2 else 4 if rows <= 4 else 8)
 
 
+def weight_passes(bits: int, group_size: int, n: int, k: int, scales_dtype, biases_dtype,
+                  rows: int) -> int:
+    """Full reads of the weight that one ``rows``-row ``qmm`` launch performs.
+
+    This is the kernel's own row geometry, published for cost planning: each
+    threadgroup along the grid's row axis streams the whole weight once, so
+    the count is the row-axis grid size of the launch ``qmm`` would make.
+    The scalar and MMA kinds share one row tiling (``_launch``); the affine
+    family tiles rows by ``_affine_launch``.  Planners consume this instead
+    of re-deriving the tiling from the launch helpers.
+    """
+    if not 1 <= rows <= MAX_ROWS:
+        raise SimdUnsupported(f"simd matmul takes 1-{MAX_ROWS} rows, got {rows}")
+    if path(bits, group_size, n, k, scales_dtype, biases_dtype) == "affine":
+        return -(-rows // _affine_launch(rows)[1])
+    rt = min(RT_MAX, (rows + 7) // 8)
+    return -(-rows // (8 * rt))
+
+
 def _padded(a: mx.array) -> mx.array:
     # Inputs under 8 elements are padded so the argument buffer's address
     # space stays stable across calls (TensorFold kernels/inputs.padded).

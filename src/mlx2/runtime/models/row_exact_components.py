@@ -66,6 +66,9 @@ def grouped_quantized_linears(window, linears, inputs):
     notes on ``row_exact_verify.current()``, which must be it).
     """
 
+    compacted = REV.compact_rows(inputs, stage=STAGE)
+    if compacted is not None:
+        inputs = compacted.values
     rows = row_count(inputs)
     strip = _strip(inputs, rows)
     outputs = [None] * len(linears)
@@ -89,13 +92,18 @@ def grouped_quantized_linears(window, linears, inputs):
             # An undeclared projection stays exact by construction.
             window.note(STAGE, "per_row_unsupported")
             outputs[index] = ops.per_row(module, strip)
-    return tuple(_unstrip(y, inputs) for y in outputs)
+    outputs = tuple(_unstrip(y, inputs) for y in outputs)
+    return tuple(compacted.restore(y) for y in outputs) if compacted is not None else outputs
 
 
 class RowExactQuantizedLinearMixin:
     """Route multi-row quantized projections through their one-row law."""
+    _mlx2_compacts_valid_rows = True
 
     def __call__(self, x):
+        compacted = REV.compact_rows(x, stage=STAGE)
+        if compacted is not None:
+            return compacted.restore(self(compacted.values))
         window = REV.current()
         lane = REQ.lane_preparation(self)
         if lane is not None and window is None:
@@ -121,8 +129,12 @@ class RowExactLinearMixin:
     holds on this build; otherwise, and for a biased layer (``nn.Linear``
     fuses the bias through ``addmm``), one one-row call per row.
     """
+    _mlx2_compacts_valid_rows = True
 
     def __call__(self, x):
+        compacted = REV.compact_rows(x, stage=STAGE)
+        if compacted is not None:
+            return compacted.restore(self(compacted.values))
         window = REV.current()
         rows = row_count(x)
         if window is None or rows <= 1:
@@ -132,8 +144,12 @@ class RowExactLinearMixin:
 
 class RowExactMoEMixin:
     """Keep routing batched while routed experts retain one-row arithmetic."""
+    _mlx2_compacts_valid_rows = True
 
     def __call__(self, x):
+        compacted = REV.compact_rows(x, stage="moe")
+        if compacted is not None:
+            return compacted.restore(self(compacted.values))
         window = REV.current()
         rows = row_count(x)
         if window is None or rows <= 1:

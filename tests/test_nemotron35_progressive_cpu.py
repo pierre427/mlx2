@@ -514,6 +514,19 @@ def test_ast_zero_uplift_alternative_selection_does_not_reset_parking():
     assert snapshot["park_remaining"] == 2
 
 
+def test_ast_unavailable_reprobe_advances_clock_without_training():
+    latch = AdaptiveTopologyLatch(2, reprobe_interval=1)
+    decision = latch.choose(1, 3, 2)
+    assert decision.reprobe
+    latch.observe_primary_only(
+        decision_token=decision.decision_token, session_count=1, unavailable=True
+    )
+    assert latch.choose(1, 3, 2).decision_token == 2
+    assert not latch.window
+    assert latch.no_alternative_win == 0
+    assert latch.snapshot()["unavailable_samples"] == 1
+
+
 def test_ast_no_uplift_without_incremental_cost_does_not_downshift():
     latch = AdaptiveTopologyLatch(4, shrink_after=1)
     decision = latch.choose(2, 7, 4)
@@ -596,6 +609,15 @@ def test_ast_branch_safe_minimum_processor_is_not_censored():
         )
         assert outcome["outcome"] == "committed_conclusive"
         assert "processor_limited" not in outcome["censor_reasons"]
+
+        previous_maximum = lane.maximum
+        lane.maximum = lane.generated + len(decision.emitted)
+        terminal = batch._topology_observation_outcome(
+            lane, decision, [2, 1, 0, 0], [7, 7, 3, 3], 1
+        )
+        assert terminal["outcome"] == "committed_censored"
+        assert terminal["budget_limited"]
+        lane.maximum = previous_maximum
 
         lane.processors = [lambda _tokens, logits: logits]
         outcome = batch._topology_observation_outcome(
@@ -1467,10 +1489,11 @@ def test_nemotron_mamba_apcv2_segments_include_internal_checkpoint():
         frozen.close()
 
 
-def test_cross_session_ast_latch_is_per_session_with_mixed_widths():
+@pytest.mark.parametrize("pack_mode", [None, "ordered_live_frontier"])
+def test_cross_session_ast_latch_is_per_session_with_mixed_widths(pack_mode):
     """One session's latch never narrows (or widens) its packed peers."""
     baseline_batch, baseline = run_cross_session_ast()
-    batch, lanes = run_cross_session_ast(4, execute=False)
+    batch, lanes = run_cross_session_ast(4, execute=False, pack_mode=pack_mode)
     latches = batch.progressive_topology_latch
     # Session 1 has parked itself on its primary chain; session 2 runs the
     # economical two-way check; sessions 0 and 3 keep all four branches.

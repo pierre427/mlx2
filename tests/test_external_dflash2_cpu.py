@@ -93,6 +93,48 @@ def _write_safetensors_headers(path, tensors, *, dtype="BF16"):
     return header
 
 
+@pytest.mark.parametrize("lanes", [1, 3])
+def test_dflash_ast_reuses_exact_lattice_without_second_head_or_cache_append(lanes, monkeypatch):
+    model, draft = tiny()
+    histories = [[1, 2]] * lanes
+    anchors = [3 + i for i in range(lanes)]
+    hidden = model.prefill_body(mx.array(histories), model.make_cache(), draft.config.target_layer_ids)
+    calls = []
+    original = draft._hidden
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(draft, "_hidden", counted)
+    cache = draft.batch_caches([draft.make_cache() for _ in anchors])
+    tokens, laws = draft.draft_distributions(
+        anchors, hidden, cache, 3, [RequestRNG(7) for _ in anchors], [0] * lanes,
+        capture_continuation_tree=True,
+    )
+    lattice = draft.last_continuation_lattice
+    pred, succ, _ = draft.tree_codebooks()
+    reused = draft.finish_tree({**lattice, "max_nodes": 15, "codebooks": (pred, succ)})
+    assert len(calls) == 1
+    for row, anchor in enumerate(anchors):
+        reference = draft.propose_tree([anchor], hidden[row:row+1], draft.make_cache(), 15,
+                                       lattice_positions=4, codebooks=(pred, succ))[0]
+        assert reused[row] == reference
+    plain_cache = draft.batch_caches([draft.make_cache() for _ in anchors])
+    plain_tokens, plain_laws = draft.draft_distributions(
+        anchors, hidden, plain_cache, 3, [RequestRNG(7) for _ in anchors], [0] * lanes,
+    )
+    assert draft.last_continuation_lattice is None
+    assert tokens == plain_tokens
+    for a, b in zip(laws, plain_laws):
+        np.testing.assert_array_equal(a, b)
+    for captured, plain in zip(cache, plain_cache):
+        for a, b in zip(captured.rows, plain.rows):
+            assert a.offset == b.offset == len(histories[0])
+            for x, y in zip(a.state, b.state):
+                np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
 def _write_safetensors_header_records(path, header):
     raw = json.dumps(header, separators=(",", ":")).encode()
     size = max((record["data_offsets"][1] for record in header.values()), default=0)
@@ -387,9 +429,7 @@ def _run_forced_progressive_round(
             laws.append(law)
     model.configure_target_verify_row_exact(True)
     if tile_policy == "auto":
-        model.progressive_external_exact_terminal_input_widths = tuple(
-            range(2, 17)
-        )
+        assert model.progressive_external_exact_terminal_input_widths == tuple(range(2, 17))
     batch = ExternalDraftBatchGenerator(
         model,
         draft_model=draft,
@@ -613,7 +653,7 @@ def test_auto_terminal_k_wide_correction_stop_matches_fixed_state_and_rng():
 def test_auto_terminal_k_wide_generator_refuses_unsafe_shapes():
     model, draft = tiny()
     model.configure_target_verify_row_exact(True)
-    model.progressive_external_exact_terminal_input_widths = (2, 3, 4)
+    object.__setattr__(model, "progressive_external_exact_terminal_input_widths", (2, 3, 4))
     common = dict(
         draft_model=draft,
         binding="progressive-test",
@@ -629,12 +669,12 @@ def test_auto_terminal_k_wide_generator_refuses_unsafe_shapes():
         ExternalDraftBatchGenerator(
             model, **common, progressive_terminal_input_widths=(2, 3)
         )
-    model.progressive_external_exact_terminal_input_widths = (2, 3)
+    object.__setattr__(model, "progressive_external_exact_terminal_input_widths", (2, 3))
     with pytest.raises(ValueError, match="not declared exact"):
         ExternalDraftBatchGenerator(
             model, **common, progressive_terminal_input_widths=(2, 3, 4)
         )
-    model.progressive_external_exact_terminal_input_widths = (2, 3, 4)
+    object.__setattr__(model, "progressive_external_exact_terminal_input_widths", (2, 3, 4))
     with pytest.raises(ValueError, match="simple primary chain"):
         ExternalDraftBatchGenerator(
             model,

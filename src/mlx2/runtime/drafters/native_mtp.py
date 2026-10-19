@@ -93,6 +93,13 @@ def require_native_mtp_target(target):
 
 class NativeMTPDraftModel:
     """External-draft backend over the target's resident MTP head."""
+    continuation_source_reuses_backbone = True
+    ast_sequential_draft = True
+
+    @property
+    def ast_execution_modules(self):
+        language = getattr(self.target, "language_model", self.target)
+        return tuple(module for module in (self.target.mtp, getattr(language, "lm_head", None)) if module is not None)
 
     requires_context_tokens = True
     supports_logits_processors = True

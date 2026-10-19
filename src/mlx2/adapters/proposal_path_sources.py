@@ -121,19 +121,33 @@ class ExternalContinuationSource:
                 if isinstance(candidate, SourceContinuation)
                 and 1 <= len(candidate.tokens) <= context.depth
             ]
-        cache = copy.deepcopy(context.draft_cache)
+        cache = (None if getattr(context, "draft_lattice", None) is not None
+                 else copy.deepcopy(context.draft_cache))
         pending = context.pending_features
         if self.mechanism in {"dflash2", "dflash2_fold"}:
             from ..runtime.drafters.dflash_tree import tree_paths
 
-            nodes = 15
-            tokens, parents = draft.propose_tree(
-                [context.anchor],
-                pending,
-                cache,
-                nodes,
-                lattice_positions=context.depth + 1,
-            )[0]
+            nodes = getattr(context, "node_budget", None) or 15
+            options = {}
+            codebook_cache_hit = None
+            cached_codebooks = getattr(draft, "tree_codebooks", None)
+            if callable(cached_codebooks):
+                predecessor, successor, codebook_cache_hit = cached_codebooks()
+                options["codebooks"] = (predecessor, successor)
+            lattice = getattr(context, "draft_lattice", None)
+            if lattice is not None:
+                if "codebooks" not in options:
+                    raise ValueError("reused DFlash lattice requires weight-bound codebooks")
+                if lattice["anchors"] != [context.anchor] or lattice["depth"] != context.depth:
+                    raise ValueError("continuation lattice anchor/depth mismatch")
+                tokens, parents = draft.finish_tree({
+                    **lattice, "max_nodes": nodes, "codebooks": options.get("codebooks"),
+                })[0]
+            else:
+                tokens, parents = draft.propose_tree(
+                    [context.anchor], pending, cache, nodes,
+                    lattice_positions=context.depth + 1, **options,
+                )[0]
             row_paths = tree_paths(parents)
             depth_hist = {}
             leaf_depth_hist = {}
@@ -160,6 +174,10 @@ class ExternalContinuationSource:
                     for row, path_rows in enumerate(row_paths)
                 ),
             }
+            if codebook_cache_hit is not None:
+                self.last_diagnostics["codebook_cache_hit"] = bool(codebook_cache_hit)
+            if lattice is not None:
+                self.last_diagnostics.update(backbone_reused=True, private_head_calls=0)
             result = []
             seen = set()
             for ordinal, rows in enumerate(row_paths):

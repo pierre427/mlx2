@@ -154,6 +154,7 @@ def test_progressive_target_rows_are_adapter_owned_and_transaction_exact(width):
         "algorithm": "muse-native-b1s1-causal-prefix-v2",
         "physical_width": width,
         "token_width": 2,
+        "padding_stage_rows_skipped": 0,
     }
     for lane in range(width):
         reference = copy.deepcopy(base)
@@ -173,6 +174,36 @@ def test_progressive_target_rows_are_adapter_owned_and_transaction_exact(width):
         committed_reference = copy.deepcopy(base)
         mx.eval(model(mx.array([[tokens[lane, 0].item()]]), cache=committed_reference))
         assert_cache_equal(committed[lane], committed_reference)
+
+
+@pytest.mark.parametrize("lengths", [(1, 3), (3, 1, 2)])
+def test_compacted_valid_rows_keep_exact_logits_taps_and_partial_cache(lengths):
+    model, base = model_and_cache()
+    model.configure_target_verify_row_exact(True)
+    tokens = mx.array([[7 + lane, 11 + lane, 17 + lane] for lane in range(len(lengths))])
+    transaction = SegmentedKVRows([copy.deepcopy(base) for _ in lengths]).begin(lengths)
+    logits, taps, detail = execute_progressive_target_rows(
+        model, tokens, transaction.caches, (0, 3),
+        protocol=PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+        fidelity=PROGRESSIVE_FIDELITY_EXACT, input_lengths=lengths,
+    )
+    mx.eval(logits, taps)
+    accepted = [max(0, length - 1) for length in lengths]
+    committed = transaction.commit(accepted)
+    assert detail["adapter_detail"]["padding_stage_rows_skipped"] > 0
+    for lane, length in enumerate(lengths):
+        reference = copy.deepcopy(base)
+        expected_logits, expected_taps = [], []
+        for token in tokens[lane, :length].tolist():
+            out, features = model.forward_with_taps(mx.array([[token]]), reference, (0, 3))
+            expected_logits.append(out)
+            expected_taps.append(features)
+        assert mx.array_equal(logits[lane:lane + 1, :length], mx.concatenate(expected_logits, axis=1))
+        assert mx.array_equal(taps[lane:lane + 1, :length], mx.concatenate(expected_taps, axis=1))
+        cache = copy.deepcopy(base)
+        for token in tokens[lane, :accepted[lane]].tolist():
+            mx.eval(model(mx.array([[token]]), cache=cache))
+        assert_cache_equal(committed[lane], cache)
 
 
 def test_progressive_target_rows_refuse_before_cache_mutation_when_deselected():

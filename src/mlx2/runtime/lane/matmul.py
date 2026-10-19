@@ -420,6 +420,31 @@ def _mdims(m: int, mp: int):
     return _MDIMS[key]
 
 
+def _row_tiling(m: int) -> tuple[int, int]:
+    """(padded rows, rows a threadgroup) of one ``m``-row tensor-unit launch."""
+    mp = 16 * ((m + 15) // 16)
+    return mp, min(mp, ROW_BLOCK)
+
+
+def weight_passes(lw: LaneWeights, rows: int) -> int:
+    """Full reads of ``lw``'s weight that one ``rows``-row ``lane_matmul`` performs.
+
+    Published kernel geometry for cost planning, not a timing: every
+    threadgroup along the launch's row axis streams the whole (split-K
+    sliced) weight once, so this is that axis's grid size.  A simd lane
+    answers with its own tiling (``simd.weight_passes``).
+    """
+    if not 1 <= rows <= MAX_ROWS:
+        raise LaneUnsupported(f"lane matmul takes 1-{MAX_ROWS} rows, got {rows}")
+    if lw.backend == "simd":
+        if lw.scales is None or lw.biases is None:
+            raise LaneUnsupported("simd lane requires affine scales and biases")
+        return simd.weight_passes(lw.bits, lw.group_size, lw.n, lw.k,
+                                  lw.scales.dtype, lw.biases.dtype, rows)
+    mp, block = _row_tiling(rows)
+    return -(-mp // block)
+
+
 def lane_matmul(x, lw: LaneWeights):
     """``x @ W.T`` (+ bias) for ``x`` of shape (..., K) with at most MAX_ROWS rows."""
     xt = _TYPES.get(x.dtype)
@@ -440,8 +465,7 @@ def lane_matmul(x, lw: LaneWeights):
             raise LaneUnsupported(str(exc)) from None
         y = y.reshape(*lead, lw.n)
         return y + lw.bias if lw.bias is not None else y
-    mp = 16 * ((m + 15) // 16)
-    block = min(mp, ROW_BLOCK)
+    mp, block = _row_tiling(m)
     mdims = _mdims(m, mp)
     if lw.bits == UNQUANTIZED_BITS:
         wt = _TYPES[lw.weight.dtype]

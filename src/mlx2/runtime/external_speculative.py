@@ -1220,6 +1220,23 @@ class ExternalDraftBatchGenerator:
             and progressive_alternative_branches > 1
             else None
         )
+        self.ast_execution_planner = None
+        if self.continuation_pool_ast_bridge and self.continuation_policy.ast_planner:
+            from ..adapters.ast_execution_profile import build_execution_profile
+            from .ast_planner import ASTExecutionPlanner
+
+            profile = build_execution_profile(
+                model, draft_model, binding=str(binding),
+                tile_cap=progressive_verification_tile,
+                max_lanes=progressive_cross_session_pack_rows or 4,
+                num_draft=self.num_draft,
+            )
+            self.ast_execution_planner = ASTExecutionPlanner(
+                profile, tile_cap=progressive_verification_tile,
+                fixed_tile=progressive_verification_tile_policy != "auto",
+                source_limit=self.continuation_policy.limit,
+                minimum_depth=self.minimum_draft_proposals,
+            )
         if multilane_draft_cap is not None and (
             type(multilane_draft_cap) is not int
             or not self.minimum_draft_proposals
@@ -1521,6 +1538,7 @@ class ExternalDraftBatchGenerator:
                 self.layers,
                 protocol=self.progressive_target_protocol,
                 fidelity=PROGRESSIVE_FIDELITY_EXACT,
+                input_lengths=transaction.lengths,
             )
             path = "lane_exact"
             if detail["row_exact"] is not True:
@@ -2109,6 +2127,13 @@ class ExternalDraftBatchGenerator:
             "relaxed_accepts": lane.relaxed_accepts,
             **hists,
         }
+        ast_planner = getattr(self, "ast_execution_planner", None)
+        if ast_planner is not None:
+            result["ast_execution_plan"] = {
+                **ast_planner.receipt(),
+                "source_budget": getattr(lane, "ast_source_budget", None),
+                "last_launch": getattr(lane, "ast_last_launch", None),
+            }
         if self.progressive_verification_tile is not None:
             approximate = (
                 self.progressive_verification_fidelity
@@ -2229,7 +2254,7 @@ class ExternalDraftBatchGenerator:
                         self.progressive_alternative_depth_policy
                     ),
                     "winner_contract": (
-                        "exact_max_committed_prefix_then_rank"
+                        "exact_max_visited_committed_prefix_then_full_rank"
                         if getattr(self, "continuation_pool_ast_bridge", False)
                         else "first_nonlosing_full_branch_else_b1"
                     ),
@@ -2355,6 +2380,10 @@ class ExternalDraftBatchGenerator:
                         0,
                     ),
                     "geometry_totals": {
+                        "schema": "mlx2.ast-geometry.v2",
+                        "scope": "request_session_all_progressive_ast_modes",
+                        "provider_rank_basis": "pool_selection_rank",
+                        "counterfactual_scope": "verified_partial_branches_only",
                         "verified_branches": getattr(
                             lane, "progressive_ast_verified_branches_total", 0
                         ),
@@ -2444,10 +2473,20 @@ class ExternalDraftBatchGenerator:
                         0,
                     ),
                     "winner_selection": (
-                        "first_full_branch_with_at_least_b1_committed_tokens"
+                        "exact_max_visited_committed_prefix_then_full_rank"
+                        if getattr(self, "continuation_pool_ast_bridge", False)
+                        else "first_full_branch_with_at_least_b1_committed_tokens"
                     ),
-                    "fallback_when_none_full": "commit_b1_exact_result",
-                    "fallback_when_no_useful_full": "commit_b1_exact_result",
+                    "fallback_when_none_full": (
+                        "commit_best_exact_visited_prefix"
+                        if getattr(self, "continuation_pool_ast_bridge", False)
+                        else "commit_b1_exact_result"
+                    ),
+                    "fallback_when_no_useful_full": (
+                        "commit_best_exact_visited_prefix"
+                        if getattr(self, "continuation_pool_ast_bridge", False)
+                        else "commit_b1_exact_result"
+                    ),
                     "next_round_base": "selected_branch_committed_state",
                     "committed_physical_width": getattr(
                         lane,
@@ -3091,6 +3130,82 @@ class ExternalDraftBatchGenerator:
 
         return processors_branch_safe(lane.processors)
 
+    def _continuation_ast_layout(self, lanes, tokens, prefixes, widths, fallback):
+        """Admit each session's feasible slate without narrowing its peers.
+
+        This is a host-only projection of already produced paths. No target
+        state or proposal pool selection is replaced by the row-local search.
+        """
+        rows, actual_prefixes, provenance, search_diagnostics = [], [], [], []
+        refused_sessions = 0
+        for row, lane in enumerate(lanes):
+            requested = int(widths[lane.uid])
+            suggested = int(prefixes[row])
+            chosen = None
+            refused = False
+            diagnostics = None
+            for width in range(requested, 1, -1):
+                try:
+                    candidate = self.draft.ordered_alternative_proposals(
+                        [tokens[row]], branch_count=width,
+                        strategy="confidence_tree", shared_prefix_tokens=[suggested],
+                        allow_adaptive_prefix_search=True, row_indices=[row],
+                    )[0]
+                except InsufficientContinuationAlternatives:
+                    candidate = None
+                details = self.draft.last_ordered_alternative_search_diagnostics
+                if details:
+                    diagnostics = copy.deepcopy(details[0])
+                if candidate is None:
+                    continue
+                prefix = int(self.draft.last_ordered_alternative_prefix_tokens[0])
+                if prefix == 0 and not self.progressive_ast_rootless_fallback:
+                    refused = True
+                    continue
+                chosen = candidate
+                branch_provenance = self.draft.last_ordered_alternative_provenance[0]
+                break
+            if diagnostics is not None:
+                self._last_alternative_prefix_diagnostics[lane.uid] = diagnostics
+            search_diagnostics.append(diagnostics)
+            if refused:
+                lane.progressive_ast_rootless_refusal_rounds = (
+                    getattr(lane, "progressive_ast_rootless_refusal_rounds", 0) + 1
+                )
+                refused_sessions += 1
+            if chosen is None:
+                rows.append([list(tokens[row])])
+                actual_prefixes.append(0)
+                provenance.append(())
+                fallback([lane], "adaptive_utility_latch" if requested == 1
+                         else "rootless_refused" if refused else "insufficient_branches")
+                continue
+            rows.append(chosen)
+            actual_prefixes.append(prefix)
+            provenance.append(branch_provenance)
+            topology = (
+                "rootless_sibling_fanout" if prefix == 0 else
+                "adaptive_shared_trunk" if prefix != suggested else "shared_trunk"
+            )
+            self._last_alternative_topology[lane.uid] = topology
+            if prefix != suggested:
+                self._last_alternative_prefix_search[lane.uid] = {
+                    "suggested": suggested, "active": prefix,
+                }
+            if len(chosen) < requested:
+                self._last_alternative_downshift[lane.uid] = {
+                    "configured": requested, "active": len(chosen),
+                    "reason": "insufficient_root_sibling_branches" if prefix == 0
+                    else "insufficient_shared_prefix_branches",
+                }
+        self.draft.last_ordered_alternative_provenance = tuple(provenance)
+        self.draft.last_ordered_alternative_prefix_tokens = tuple(actual_prefixes)
+        self.draft.last_ordered_alternative_search_diagnostics = tuple(search_diagnostics)
+        if refused_sessions:
+            _bump(self.scheduler_stats, "external_progressive_ast_rootless_refusal_rounds")
+            _bump(self.scheduler_stats, "external_progressive_ast_rootless_refusal_sessions", refused_sessions)
+        return rows, tuple(actual_prefixes)
+
     def _propose(self, cohort, *, adaptive_depth=None, force_zero=False):
         """Draft phase: one proposal block per cohort row, ``None`` for no draft.
 
@@ -3107,7 +3222,8 @@ class ExternalDraftBatchGenerator:
         self._last_alternative_downshift = {}
         self._last_alternative_prefix_search = {}
         self._last_alternative_prefix_diagnostics = {}
-        ast_fallback_uids = set()
+        ast_planner = getattr(self, "ast_execution_planner", None)
+        source_plans = {}
 
         def record_ast_primary_fallback(lanes, reason):
             _bump(
@@ -3121,7 +3237,6 @@ class ExternalDraftBatchGenerator:
                 len(lanes),
             )
             for lane in lanes:
-                ast_fallback_uids.add(lane.uid)
                 # This round executed only the exact primary chain.  Keep
                 # cumulative AST history, but do not expose a proposal-only
                 # branch width as the last observed execution shape.
@@ -3162,7 +3277,7 @@ class ExternalDraftBatchGenerator:
             tree_budget if tree_budget is not None
             else self.num_draft if chain_cap is None
             else min(self.num_draft, chain_cap),
-            min(l.maximum-l.generated-1 for l in cohort),
+            (max if ast_planner is not None else min)(l.maximum-l.generated-1 for l in cohort),
         )
         multilane_draft_cap = getattr(self, "multilane_draft_cap", None)
         active_width = 1
@@ -3198,7 +3313,7 @@ class ExternalDraftBatchGenerator:
         elif adaptive_depth is not None:
             adaptive_count = min(requested_count, int(adaptive_depth))
             requested_count = self._proposal_depth(adaptive_count, requested_count)
-        if any(l.ordinary or _speculation_parked(l) for l in cohort):
+        if (all if ast_planner is not None else any)(l.ordinary or _speculation_parked(l) for l in cohort):
             requested_count = 0
         alternative_round = branches > 1 and not (
             (
@@ -3262,6 +3377,7 @@ class ExternalDraftBatchGenerator:
             self._last_alternative_prefix_tokens.pop(lane.uid, None)
         if (
             getattr(self, "continuation_pool_ast_bridge", False)
+            and ast_planner is None
             and active_width > 1
             and self.progressive_cross_session_pack_rows is not None
             and requested_count
@@ -3284,16 +3400,56 @@ class ExternalDraftBatchGenerator:
         # the flag; it is opt-in, so a missing attribute means off.
         if getattr(self, "draft_tail_equalize", False) and len(cohort) > 1:
             self._equalize_draft_tails(cohort)
+        if ast_planner is not None:
+            from .ast_planner import RequestWork
+
+            work = []
+            for lane in cohort:
+                depth = max(0, min(requested_count, lane.maximum - lane.generated - 1))
+                if lane.ordinary or _speculation_parked(lane):
+                    depth = 0
+                choice = (self.progressive_topology_latch.session(lane.uid).choose(
+                    0, max(1, depth), self.progressive_verification_tile)
+                    if self.progressive_topology_latch is not None else None)
+                # Preview before source work; commit alone advances the latch.
+                if choice is not None:
+                    self._last_alternative_latch[lane.uid] = dict(choice.__dict__)
+                # The planner owns branch width from its learned uplift; the
+                # latch contributes only its reprobe clock and trunk hint.
+                work.append(RequestWork(
+                    int(lane.uid), depth, len(lane.history),
+                    branches if alternative_round else 1,
+                    ast_planner.acceptance(int(lane.uid)), choice.reprobe if choice is not None else False,
+                    trunk=int(choice.trunk_tokens) if choice is not None else 1,
+                ))
+            source_plans = {plan.uid: plan for plan in ast_planner.source_budgets(work)}
+            for lane in cohort:
+                lane.ast_source_budget = source_plans[int(lane.uid)].receipt()
+                if lane.uid in self._last_alternative_latch:
+                    self._last_alternative_latch[lane.uid]["planner_branches"] = source_plans[int(lane.uid)].branches
         groups = {}
         for row,lane in enumerate(cohort):
-            groups.setdefault((int(lane.tail.shape[1]),str(lane.tail.dtype)),[]).append(row)
+            depth = source_plans[int(lane.uid)].depth if ast_planner is not None else requested_count
+            groups.setdefault((int(lane.tail.shape[1]),str(lane.tail.dtype),depth),[]).append(row)
         _bump(self.scheduler_stats, "external_draft_cohort_calls", len(groups))
         if len(groups) > 1:
             _bump(self.scheduler_stats, "external_draft_tail_split_rounds")
             _bump(self.scheduler_stats, "external_draft_tail_split_extra_calls", len(groups) - 1)
-        for indices in groups.values():
+        cohort_alternative_round = alternative_round
+        for (_tail, _dtype, group_depth), indices in groups.items():
+            # A previous tail/dtype group's parked latch is not this group's
+            # admission decision.
+            alternative_round = cohort_alternative_round
             session_alternative_branches = None
             lanes = [cohort[i] for i in indices]
+            requested_count = group_depth
+            if self.progressive_alternative_strategy == "confidence_tree" and requested_count < 2:
+                alternative_round = False
+            if not requested_count:
+                for lane in lanes:
+                    if lane.tail.shape[1]:
+                        self._append_context(lane, lane.anchor)
+                continue
             processors = [lane.processors for lane in lanes]
             arguments = (
                 [l.anchor for l in lanes],
@@ -3315,6 +3471,11 @@ class ExternalDraftBatchGenerator:
                 )
             try:
                 extra = {"context_tokens": pairing} if self.pair_context_tokens else {}
+                if ast_planner is not None:
+                    extra["ast_source_budgets"] = [
+                        1 if source_plans[int(lane.uid)].branches == 1
+                        else source_plans[int(lane.uid)].node_budget for lane in lanes
+                    ]
                 if getattr(self.draft, "requires_proposal_contexts", False):
                     from .proposal_providers import continuation_context_revision
                     extra["proposal_contexts"] = [{
@@ -3530,6 +3691,10 @@ class ExternalDraftBatchGenerator:
             alternatives = None
             alternative_prefixes = None
             active_alternative_branches = getattr(self, "progressive_alternative_branches", 1)
+            if ast_planner is not None and self.progressive_alternative_strategy != "confidence_tree":
+                active_alternative_branches = min(
+                    source_plans[int(lane.uid)].branches for lane in lanes)
+                alternative_round = alternative_round and active_alternative_branches > 1
             latch_decisions = None
             if alternative_round:
                 if self.progressive_alternative_strategy == "confidence_tree":
@@ -3537,25 +3702,34 @@ class ExternalDraftBatchGenerator:
                         raise ValueError(
                             "confidence tree requires per-token confidence features"
                         )
+                    # This is each source plan's trunk limit, not the
+                    # server-wide maximum tile. A one-column physical tile
+                    # may still execute a one-token shared trunk separately;
+                    # the confidence helper's two-input minimum encodes that
+                    # anchor-plus-child semantic contract, not a launch size.
+                    alternative_tiles = tuple(
+                        max(2, source_plans[int(lane.uid)].tile)
+                        if ast_planner is not None else int(self.progressive_verification_tile or 0)
+                        for lane in lanes)
                     alternative_prefixes = tuple(
                         confidence_tree_trunk_length(
                             confidence[row],
                             len(tokens[row]),
-                            int(self.progressive_verification_tile or 0),
+                            alternative_tiles[row],
                         )
                         for row in range(len(lanes))
                     )
-                    latch_decisions = self.progressive_topology_latch.choose_many(
-                        alternative_prefixes,
-                        [len(row) for row in tokens],
-                        int(self.progressive_verification_tile or 0),
-                        session_uids=[lane.uid for lane in lanes],
-                    )
-                    # Each session owns its width.  Proposals are drafted at
-                    # the widest session's width and trimmed per session
-                    # before any target row is verified.
+                    latch_decisions = tuple(
+                        self.progressive_topology_latch.session(lane.uid).choose(
+                            prefix, len(row), tile)
+                        for lane, prefix, row, tile in zip(
+                            lanes, alternative_prefixes, tokens, alternative_tiles, strict=True))
+                    # Each session owns its width. Complete-path slates are
+                    # projected row-locally; the generic logits provider uses
+                    # the widest slate and trims before target verification.
                     session_alternative_branches = {
-                        int(lane.uid): int(decision.active_branches)
+                        int(lane.uid): source_plans[int(lane.uid)].branches
+                        if ast_planner is not None else int(decision.active_branches)
                         for lane, decision in zip(lanes, latch_decisions, strict=True)
                     }
                     active_alternative_branches = max(
@@ -3572,12 +3746,9 @@ class ExternalDraftBatchGenerator:
                         # the first suffix launch is 4+4 rather than a five-row
                         # terminal slab when three confidence features are
                         # strong.
-                        maximum_tail_trunk = max(
-                            1, int(self.progressive_verification_tile or 0) - 2
-                        )
                         alternative_prefixes = tuple(
-                            min(value, maximum_tail_trunk)
-                            for value in suggested_alternative_prefixes
+                            min(value, max(1, tile - 2))
+                            for value, tile in zip(suggested_alternative_prefixes, alternative_tiles, strict=True)
                         )
                     else:
                         alternative_prefixes = suggested_alternative_prefixes
@@ -3590,6 +3761,8 @@ class ExternalDraftBatchGenerator:
                         strict=True,
                     ):
                         payload = dict(decision.__dict__)
+                        if ast_planner is not None:
+                            payload["planner_branches"] = source_plans[int(lane.uid)].branches
                         payload["suggested_trunk_tokens"] = int(suggested)
                         payload["trunk_tokens"] = int(actual)
                         payload["snapshot_before"] = (
@@ -3623,196 +3796,37 @@ class ExternalDraftBatchGenerator:
                             "external_progressive_ast_mixed_width_rounds",
                         )
                 if alternative_round:
-                    requested_branches = active_alternative_branches
-                    requested_prefixes = tuple(alternative_prefixes or ())
-                    branch_attempts = tuple(
-                        range(requested_branches, 1, -1)
-                        if getattr(self, "continuation_pool_ast_bridge", False)
-                        and self.progressive_alternative_strategy
-                        == "confidence_tree"
-                        else (requested_branches,)
-                    )
-                    selected_topologies = ("shared_trunk",) * len(lanes)
-                    rootless_refused = False
-                    rootless_refused_uids = set()
-                    rootless_refusal_diagnostics = {}
-                    for candidate_branches in branch_attempts:
-                        adaptive_prefix_search = (
-                            getattr(self, "continuation_pool_ast_bridge", False)
-                            and self.progressive_alternative_strategy
-                            == "confidence_tree"
+                    if (
+                        getattr(self, "continuation_pool_ast_bridge", False)
+                        and self.progressive_alternative_strategy == "confidence_tree"
+                    ):
+                        alternatives, alternative_prefixes = self._continuation_ast_layout(
+                            lanes, tokens, alternative_prefixes,
+                            session_alternative_branches, record_ast_primary_fallback,
                         )
+                    else:
                         try:
                             alternatives = ordered_alternative_proposals(
-                                self.draft,
-                                tokens,
-                                branch_count=candidate_branches,
+                                self.draft, tokens,
+                                branch_count=active_alternative_branches,
                                 strategy=self.progressive_alternative_strategy,
                                 shared_prefix_tokens=(
-                                    alternative_prefixes
-                                    if alternative_prefixes is not None
+                                    alternative_prefixes if alternative_prefixes is not None
                                     else self.progressive_verification_tile
                                     if self.progressive_alternative_strategy
-                                    in {"shared_prefix", "paired_continuations"}
-                                    else None
+                                    in {"shared_prefix", "paired_continuations"} else None
                                 ),
-                                allow_adaptive_prefix_search=adaptive_prefix_search,
                             )
                         except InsufficientContinuationAlternatives:
-                            alternatives = None
-                            failed_diagnostics = getattr(
-                                self.draft,
-                                "last_ordered_alternative_search_diagnostics",
-                                (),
-                            )
-                            if len(failed_diagnostics) == len(lanes):
-                                for lane, diagnostics in zip(
-                                    lanes, failed_diagnostics, strict=True
-                                ):
-                                    self._last_alternative_prefix_diagnostics[
-                                        lane.uid
-                                    ] = copy.deepcopy(diagnostics)
-                            continue
-                        actual_prefixes = getattr(
-                            self.draft,
-                            "last_ordered_alternative_prefix_tokens",
-                            (),
-                        )
-                        candidate_prefixes = None
-                        if actual_prefixes:
-                            if len(actual_prefixes) != len(lanes):
-                                raise ValueError(
-                                    "AST bridge prefix provenance rows mismatch"
-                                )
-                            candidate_prefixes = tuple(
-                                int(value) for value in actual_prefixes
-                            )
-                        elif adaptive_prefix_search:
-                            candidate_prefixes = tuple(alternative_prefixes or ())
-                        if (
-                            adaptive_prefix_search
-                            and not self.progressive_ast_rootless_fallback
-                            and any(prefix == 0 for prefix in (candidate_prefixes or ()))
-                        ):
-                            rootless_refused = True
-                            rootless_refused_uids.update(
-                                lane.uid
-                                for lane, prefix in zip(
-                                    lanes, candidate_prefixes, strict=True
-                                )
-                                if prefix == 0
-                            )
-                            failed_diagnostics = getattr(
-                                self.draft,
-                                "last_ordered_alternative_search_diagnostics",
-                                (),
-                            )
-                            if len(failed_diagnostics) == len(lanes):
-                                for lane, diagnostics in zip(
-                                    lanes, failed_diagnostics, strict=True
-                                ):
-                                    rootless_refusal_diagnostics[lane.uid] = (
-                                        copy.deepcopy(diagnostics)
-                                    )
-                            alternatives = None
-                            alternative_prefixes = requested_prefixes
-                            continue
-                        if candidate_prefixes is not None:
-                            alternative_prefixes = candidate_prefixes
-                        active_alternative_branches = candidate_branches
-                        if adaptive_prefix_search:
-                            selected_topologies = tuple(
-                                "rootless_sibling_fanout"
-                                if prefix == 0
-                                else "adaptive_shared_trunk"
-                                if prefix != requested_prefixes[index]
-                                else "shared_trunk"
-                                for index, prefix in enumerate(alternative_prefixes)
-                            )
-                        break
-                    if rootless_refused:
-                        self._last_alternative_prefix_diagnostics.update(
-                            rootless_refusal_diagnostics
-                        )
-                        _bump(
-                            self.scheduler_stats,
-                            "external_progressive_ast_rootless_refusal_rounds",
-                        )
-                        _bump(
-                            self.scheduler_stats,
-                            "external_progressive_ast_rootless_refusal_sessions",
-                            len(rootless_refused_uids),
-                        )
-                        for lane in lanes:
-                            if lane.uid not in rootless_refused_uids:
-                                continue
-                            lane.progressive_ast_rootless_refusal_rounds = (
-                                getattr(
-                                    lane,
-                                    "progressive_ast_rootless_refusal_rounds",
-                                    0,
-                                )
-                                + 1
-                            )
-                    if alternatives is not None:
-                        prefix_diagnostics = getattr(
-                            self.draft,
-                            "last_ordered_alternative_search_diagnostics",
-                            (),
-                        )
-                        if prefix_diagnostics:
-                            if len(prefix_diagnostics) != len(lanes):
-                                raise ValueError(
-                                    "AST bridge prefix diagnostics rows mismatch"
-                                )
-                            for lane, diagnostics in zip(
-                                lanes, prefix_diagnostics, strict=True
-                            ):
-                                self._last_alternative_prefix_diagnostics[
-                                    lane.uid
-                                ] = copy.deepcopy(diagnostics)
-                        for lane, selected_topology in zip(
-                            lanes, selected_topologies, strict=True
-                        ):
-                            self._last_alternative_topology[lane.uid] = (
-                                selected_topology
-                            )
-                        for index, lane in enumerate(lanes):
-                            if (
-                                alternative_prefixes is not None
-                                and requested_prefixes
-                                and alternative_prefixes[index]
-                                != requested_prefixes[index]
-                            ):
-                                self._last_alternative_prefix_search[lane.uid] = {
-                                    "suggested": requested_prefixes[index],
-                                    "active": alternative_prefixes[index],
-                                }
-                        if active_alternative_branches < requested_branches:
-                            for lane, selected_topology in zip(
-                                lanes, selected_topologies, strict=True
-                            ):
-                                self._last_alternative_downshift[lane.uid] = {
-                                    "configured": requested_branches,
-                                    "active": active_alternative_branches,
-                                    "reason": (
-                                        "insufficient_root_sibling_branches"
-                                        if selected_topology
-                                        == "rootless_sibling_fanout"
-                                        else "insufficient_shared_prefix_branches"
-                                    ),
-                                }
-                    if alternatives is None:
-                        alternatives = None
-                        alternative_round = False
-                        record_ast_primary_fallback(
-                            lanes,
-                            (
-                                "rootless_refused"
-                                if rootless_refused
-                                else "insufficient_branches"
-                            ),
-                        )
+                            if not getattr(self, "continuation_pool_ast_bridge", False):
+                                raise
+                            alternative_round = False
+                            record_ast_primary_fallback(lanes, "insufficient_branches")
+                        else:
+                            if getattr(self, "continuation_pool_ast_bridge", False):
+                                alternative_prefixes = self.draft.last_ordered_alternative_prefix_tokens
+                            for lane in lanes:
+                                self._last_alternative_topology[lane.uid] = "shared_trunk"
             for j,row in enumerate(indices):
                 feature_row = None
                 if deterministic_admission:
@@ -3851,7 +3865,11 @@ class ExternalDraftBatchGenerator:
                     q[j] if isinstance(q[j], (CompactDraftRow, TreeDraftRow))
                     else HostDraftRow(tokens[j], q[j], len(lanes), feature_row)
                 )
-                if alternative_round:
+                if alternative_round and (
+                    not getattr(self, "continuation_pool_ast_bridge", False)
+                    or len(alternatives[j]) > 1
+                ):
+                    active_alternative_branches = len(alternatives[j])
                     provenance_rows = getattr(
                         self.draft,
                         "last_ordered_alternative_provenance",
@@ -4014,29 +4032,64 @@ class ExternalDraftBatchGenerator:
                     blocks[row].continuation_slate = slates[j]
                 if payloads is not None and isinstance(blocks[row], HostDraftRow):
                     blocks[row].feedback_payload = payloads[j]
-        if getattr(self, "continuation_pool_ast_bridge", False) and branches > 1:
-            feasible = [
-                lane for lane in cohort if lane.uid in self._last_alternative_blocks
-            ]
-            if len(feasible) != len(cohort) and feasible:
-                # Cross-session AST is an all-lanes transaction.  Do not let
-                # proposal-only topology telemetry claim execution when one
-                # draft group could not form even B2.
-                missing_receipt = [
-                    lane for lane in feasible if lane.uid not in ast_fallback_uids
-                ]
-                if missing_receipt:
-                    record_ast_primary_fallback(
-                        missing_receipt, "cohort_incomplete"
-                    )
-                self._last_alternative_blocks.clear()
-                self._last_alternative_prefix_tokens.clear()
-                self._last_alternative_latch.clear()
-                self._last_alternative_topology.clear()
-                self._last_alternative_downshift.clear()
-                self._last_alternative_prefix_search.clear()
-                self._last_alternative_prefix_diagnostics.clear()
+        if getattr(self, "continuation_pool_ast_bridge", False) and self._last_alternative_blocks:
+            # Feasibility is request-local. A peer without alternatives joins
+            # the physical frontier as its exact primary chain, not as a
+            # reason to discard another session's useful branches.
+            for lane, block in zip(cohort, blocks, strict=True):
+                if lane.uid not in self._last_alternative_blocks and block is not None:
+                    self._last_alternative_blocks[lane.uid] = [block]
+                    self._last_alternative_prefix_tokens[lane.uid] = 0
         return blocks
+
+    def _record_ast_geometry(self, lane, blocks, accepts, counts, committed, winner, geometry):
+        """One request-local accounting law for B1 and cross-session AST."""
+        def add(name, value):
+            key = "progressive_ast_" + name
+            setattr(lane, key, getattr(lane, key, 0) + int(value))
+
+        def histogram(name, bucket, value=1):
+            key = "progressive_ast_" + name
+            values = getattr(lane, key, {})
+            bucket = str(bucket)
+            values[bucket] = values.get(bucket, 0) + int(value)
+            setattr(lane, key, values)
+
+        rows = int(geometry.get("unique_target_rows", geometry["physical_target_rows"]))
+        shared = int(geometry.get("shared_prefix_target_rows", 0))
+        add("verified_branches_total", sum(value >= 0 for value in accepts))
+        add("unique_target_rows_total", rows)
+        add("shared_prefix_target_rows_total", shared)
+        add("branch_suffix_target_rows_total", geometry.get("branch_suffix_target_rows", rows - shared))
+        add("selected_committed_inputs_total", committed[winner])
+        add("selected_token_uplift_total", max(0, committed[winner] - committed[0]))
+        partial = [index for index, (accepted, count) in enumerate(zip(accepts, counts, strict=True))
+                   if 0 <= accepted < count]
+        best = max(partial, key=lambda index: (committed[index], -index), default=0)
+        uplift = max(0, committed[best] - committed[0]) if partial else 0
+        add("counterfactual_partial_uplift_rounds", uplift > 0)
+        add("counterfactual_partial_uplift_tokens", uplift)
+        if uplift:
+            histogram("counterfactual_best_branch_hist", best + 1)
+        for index, (block, accepted, count, commit) in enumerate(zip(blocks, accepts, counts, committed, strict=True)):
+            if accepted < 0:
+                continue
+            if getattr(self, "continuation_pool_ast_bridge", False):
+                provenance = getattr(block, "continuation_ast_provenance", None)
+                rank = provenance.get("rank") if provenance else (0 if len(blocks) == 1 else None)
+                if type(rank) is not int or rank < 0:
+                    raise RuntimeError("AST bridge verification lacks provider rank provenance")
+                histogram("provider_rank_verified_hist", rank)
+                histogram("provider_rank_committed_inputs", rank, commit)
+                histogram("provider_rank_full_accept_hist", rank, accepted == count)
+            if index:
+                primary = blocks[0].tokens
+                divergence = next((position for position, (a, b) in enumerate(zip(primary, block.tokens))
+                                   if a != b), min(len(primary), len(block.tokens)))
+                histogram("alternative_divergence_position_hist", divergence)
+        add("prefix_rejected_rounds", bool(geometry.get("prefix_rejected", False)))
+        histogram("active_branch_hist", len(blocks))
+        histogram("shared_prefix_token_hist", geometry.get("shared_prefix_tokens", 0))
 
     def _record_ast_topology_execution(self, lanes):
         """Publish content topology only after its target rows executed."""
@@ -4282,18 +4335,37 @@ class ExternalDraftBatchGenerator:
         )
         ready = deque(range(len(states)))
         launch_schedule = []
+        packed_min_width = max(
+            1, int(getattr(self.model, "progressive_external_lane_exact_min_width", 1))
+        )
+        ast_planner = getattr(self, "ast_execution_planner", None)
         while ready:
-            active = [
-                ready.popleft()
-                for _ in range(min(max_physical_rows, len(ready)))
-            ]
+            launch_plan = None
+            tile_width = self.progressive_verification_tile
+            if ast_planner is not None:
+                from .ast_planner import ReadyRow
+
+                launch_plan = ast_planner.plan_launch([
+                    ReadyRow(i, int(states[i]["lane"].uid),
+                             len(states[i]["drafts"]) - states[i]["offset"],
+                             len(states[i]["local_history"]),
+                             ast_planner.acceptance(int(states[i]["lane"].uid),
+                                 getattr(states[i]["lane"], "ast_source_budget", {}).get("depth")))
+                    for i in ready
+                ], terminal=terminal, max_lanes=max_physical_rows)
+                active = list(launch_plan.indices)
+                tile_width = launch_plan.tile
+                selected_indices = set(active)
+                ready = deque(i for i in ready if i not in selected_indices)
+            else:
+                active = [ready.popleft() for _ in range(min(max_physical_rows, len(ready)))]
             inputs = []
             stage = []
             for index in active:
                 state = states[index]
                 remaining = len(state["drafts"]) - state["offset"]
-                final = terminal and remaining <= self.progressive_verification_tile
-                count = min(remaining, self.progressive_verification_tile)
+                final = terminal and remaining <= tile_width
+                count = min(remaining, tile_width)
                 stage_tokens = state["drafts"][
                     state["offset"] : state["offset"] + count
                 ]
@@ -4308,6 +4380,18 @@ class ExternalDraftBatchGenerator:
                 state["rollback_base_tile"] = state["full_tiles"]
                 inputs.append(row_inputs)
                 stage.append((index, final, count, stage_tokens, stage_laws))
+            # A legal configured tile can still produce a shorter shared
+            # trunk or final remainder. Honor the adapter's *actual launch*
+            # boundary, not merely the load-time tile bound. Narrow trunks
+            # retain exact B1 execution; wider suffixes remain packable.
+            packing_split = bool(
+                self.progressive_verification_fidelity == PROGRESSIVE_FIDELITY_EXACT
+                and len(active) > 1
+                and max(map(len, inputs)) < packed_min_width
+            )
+            if packing_split:
+                ready.extendleft(reversed(active[1:]))
+                active, inputs, stage = active[:1], inputs[:1], stage[:1]
             request_lane_uids = [states[index]["lane"].uid for index in active]
             layout_lane_uids = (
                 request_lane_uids
@@ -4324,6 +4408,14 @@ class ExternalDraftBatchGenerator:
             last_layout_receipt = layout.receipt(plan)
             last_layout_receipt["request_lane_uids"] = request_lane_uids
             last_layout_receipt["physical_lane_uids"] = layout_lane_uids
+            last_layout_receipt["packed_min_query_len"] = packed_min_width
+            last_layout_receipt["split_for_packed_min_query_len"] = packing_split
+            if launch_plan is not None:
+                if tuple(map(len, inputs)) != launch_plan.input_lengths or packing_split:
+                    raise RuntimeError("AST physical launch disagrees with its exact plan")
+                last_layout_receipt["ast_plan"] = launch_plan.receipt()
+                for index in active:
+                    states[index]["lane"].ast_last_launch = launch_plan.receipt()
             input_lengths = list(layout.query_lengths)
             launch_width = layout.max_query_len
             launch_padding = plan.padding_rows
@@ -4370,6 +4462,7 @@ class ExternalDraftBatchGenerator:
             transaction = owner.begin(lengths=input_lengths)
             results = []
             try:
+                planning_started = time.perf_counter() if launch_plan is not None else None
                 (
                     logits,
                     features,
@@ -4381,6 +4474,7 @@ class ExternalDraftBatchGenerator:
                     self.layers,
                     protocol=self.progressive_target_protocol,
                     fidelity=self.progressive_verification_fidelity,
+                    input_lengths=input_lengths,
                 )
                 _observe_target_executor(
                     target_executor, _target_executor_detail
@@ -4426,6 +4520,8 @@ class ExternalDraftBatchGenerator:
                     greedy_normalizers = normalizers.tolist()
                 else:
                     self.mx.eval(logits, features)
+                if launch_plan is not None:
+                    ast_planner.observe_launch(launch_plan, time.perf_counter() - planning_started)
                 for physical_row, (
                     index,
                     final,
@@ -4671,6 +4767,7 @@ class ExternalDraftBatchGenerator:
                     "tile_input_rows": state["tile_input_rows"],
                     "rollback_base_tile": state["rollback_base_tile"],
                     "cohort_width": len(cohort),
+                    "ast_last_launch": getattr(state["lane"], "ast_last_launch", None),
                 }
             )
         width = max(int(row.shape[1]) for row in feature_rows)
@@ -5327,7 +5424,10 @@ class ExternalDraftBatchGenerator:
                     for blocks, prefix_count in zip(
                         block_groups, prefix_counts, strict=True
                     )
-                ]
+                ],
+                maximize_committed_prefix=bool(
+                    getattr(self, "continuation_pool_ast_bridge", False)
+                ),
             )
             eligible = [
                 session_index
@@ -5612,6 +5712,15 @@ class ExternalDraftBatchGenerator:
             selected_rngs.append(selected_rng)
             selected_stats.append(stats)
             selected_blocks.append(blocks[winner])
+            self._record_ast_geometry(
+                lane, blocks, branch_accepts, proposal_counts, committed_tokens, winner,
+                {
+                    "physical_target_rows": unique_target_rows,
+                    "shared_prefix_target_rows": prefix_stats[session_index]["target_rows"],
+                    "shared_prefix_tokens": prefix_count,
+                    "prefix_rejected": int(prefix.accepted) != prefix_count,
+                },
+            )
             selections.append(
                 {
                     "session_uid": int(lane.uid),
@@ -7567,7 +7676,8 @@ class ExternalDraftBatchGenerator:
             reasons.append("unvisited_alternative")
         if any(int(token) in self.stops for token in decision.emitted):
             reasons.append("target_stop")
-        if int(lane.generated) >= int(lane.maximum):
+        # Observations are assembled before _commit updates lane.generated.
+        if int(lane.generated) + len(decision.emitted) >= int(lane.maximum):
             reasons.append("length_boundary")
         if lane.processors and not self._progressive_processors_supported(lane):
             reasons.append("processor_limited")
@@ -7632,7 +7742,7 @@ class ExternalDraftBatchGenerator:
                 if (
                     uid not in observed_topology_uids
                     and payload is not None
-                    and int(payload.get("active_branches", 0)) == 1
+                    and len(lane.ready) > ready_starts[uid]
                 ):
                     primary_only.setdefault(
                         int(payload["decision_token"]), []
@@ -7646,6 +7756,8 @@ class ExternalDraftBatchGenerator:
                     self.progressive_topology_latch.observe_primary_only(
                         session_uids=[lane.uid],
                         decision_tokens=[token],
+                        unavailable=(int(latch_payloads[lane.uid]["active_branches"]) > 1
+                                     and int(latch_payloads[lane.uid].get("planner_branches", 4)) > 1),
                     )
                     snapshot = self.progressive_topology_latch.snapshot(lane.uid)
                     _bump(
@@ -7761,6 +7873,11 @@ class ExternalDraftBatchGenerator:
                                     "last_observation"
                                 ] = copy.deepcopy(degraded)
             manager = getattr(self.draft, "feedback_manager", None)
+            primary_outcomes = {
+                int(uid): observation
+                for _token, rows in self._topology_observation_outbox
+                for uid, observation in rows
+            }
             for lane, block, decision, round_id in self._feedback_outbox:
                 selection = block.continuation_selection
                 try:
@@ -7775,6 +7892,36 @@ class ExternalDraftBatchGenerator:
                     observed_proposed = min(
                         len(block.tokens), len(decision.emitted)
                     )
+                    ast_planner = getattr(self, "ast_execution_planner", None)
+                    if ast_planner is not None and observed_proposed:
+                        primary = primary_outcomes.get(int(lane.uid))
+                        tested = observed_proposed
+                        primary_accepted = accepted
+                        if primary is not None:
+                            # Do not teach the primary-chain prior the best
+                            # of several branches: that would make wider
+                            # searches manufacture their own confidence.
+                            tested = min(tested, int(primary["proposal_counts"][0]))
+                            primary_accepted = int(primary["branch_accepts"][0])
+                        if primary_accepted >= 0:
+                            ast_planner.observe_commit(
+                                int(lane.uid), min(primary_accepted, tested), tested,
+                                censored=primary_accepted >= tested,
+                                source_depth=getattr(lane, "ast_source_budget", {}).get("depth"),
+                            )
+                        if primary is not None and len(primary["branch_accepts"]) > 1:
+                            # What the extra branch rows bought this round:
+                            # committed tokens beyond the primary chain, per
+                            # target row beyond the primary's own rows.
+                            accepts = [int(a) for a in primary["branch_accepts"]]
+                            committed = [max(1, a + 1) if a >= 0 else 0 for a in accepts]
+                            winner = int(primary["selected_branch"]) - 1
+                            primary_rows = int(primary["proposal_counts"][0]) + 1
+                            ast_planner.observe_branches(
+                                int(lane.uid),
+                                max(0, int(primary["unique_target_rows"]) - primary_rows),
+                                max(0, committed[winner] - committed[0]),
+                            )
                     if (
                         callable(observer)
                         and block.proposal_score_key is not None
@@ -8818,6 +8965,7 @@ class ExternalDraftBatchGenerator:
                 and all(block is not None for block in blocks)
                 and (
                     progressive_proposal_span > self.progressive_verification_tile
+                    or getattr(self, "ast_execution_planner", None) is not None
                     or self.progressive_verification_tile_policy == "auto"
                     and self.progressive_verification_tile == self.num_draft
                     and progressive_proposal_span
@@ -8840,6 +8988,10 @@ class ExternalDraftBatchGenerator:
                         lane.uid in self._last_alternative_blocks
                         for lane in cohort
                     )
+                    and any(
+                        len(self._last_alternative_blocks[lane.uid]) > 1
+                        for lane in cohort
+                    )
                 )
                 cross_session_ast_stop_guard = bool(
                     cross_session_ast_available
@@ -8850,7 +9002,7 @@ class ExternalDraftBatchGenerator:
                         for token in block.tokens
                     )
                 )
-                # The ordered live frontier needs 2-4 branches per session,
+                # The ordered live frontier accepts 1-4 branches per session,
                 # each with a positive suffix past its shared prefix.  A
                 # processor-masked draft can end a branch at the prefix (a
                 # forbidden token left no finite candidate), so such a round
@@ -8861,7 +9013,7 @@ class ExternalDraftBatchGenerator:
                     and self.progressive_cross_session_pack_mode
                     == "ordered_live_frontier"
                     and any(
-                        not 2 <= len(self._last_alternative_blocks[lane.uid]) <= 4
+                        not 1 <= len(self._last_alternative_blocks[lane.uid]) <= 4
                         or any(
                             len(block.tokens)
                             - int(self._last_alternative_prefix_tokens.get(lane.uid, 0))
@@ -9029,8 +9181,8 @@ class ExternalDraftBatchGenerator:
                         # Sessions own their decision clocks; a session that
                         # executed only its primary chain is recorded by the
                         # primary-only path after commit.
-                        payload = self._last_alternative_latch[uid]
-                        if int(payload.get("active_branches", 0)) == 1:
+                        payload = self._last_alternative_latch.get(uid)
+                        if payload is None or len(observation["branch_accepts"]) == 1:
                             continue
                         self._topology_observation_outbox.append(
                             (int(payload["decision_token"]), [(uid, observation)])
@@ -9189,171 +9341,10 @@ class ExternalDraftBatchGenerator:
                             physical_stats["physical_target_rows"],
                         )
                     )
-                    lane.progressive_ast_verified_branches_total = (
-                        getattr(lane, "progressive_ast_verified_branches_total", 0)
-                        + len(verify_blocks)
+                    self._record_ast_geometry(
+                        lane, verify_blocks, branch_accepts, proposal_counts,
+                        committed_tokens, winner, physical_stats,
                     )
-                    lane.progressive_ast_unique_target_rows_total = (
-                        getattr(lane, "progressive_ast_unique_target_rows_total", 0)
-                        + lane.progressive_alternative_last_unique_target_rows
-                    )
-                    lane.progressive_ast_shared_prefix_target_rows_total = (
-                        getattr(
-                            lane,
-                            "progressive_ast_shared_prefix_target_rows_total",
-                            0,
-                        )
-                        + int(physical_stats.get("shared_prefix_target_rows", 0))
-                    )
-                    lane.progressive_ast_branch_suffix_target_rows_total = (
-                        getattr(
-                            lane,
-                            "progressive_ast_branch_suffix_target_rows_total",
-                            0,
-                        )
-                        + int(
-                            physical_stats.get(
-                                "branch_suffix_target_rows",
-                                physical_stats["physical_target_rows"],
-                            )
-                        )
-                    )
-                    lane.progressive_ast_selected_committed_inputs_total = (
-                        getattr(
-                            lane,
-                            "progressive_ast_selected_committed_inputs_total",
-                            0,
-                        )
-                        + int(decisions[winner].commit_count)
-                    )
-                    lane.progressive_ast_selected_token_uplift_total = (
-                        getattr(
-                            lane,
-                            "progressive_ast_selected_token_uplift_total",
-                            0,
-                        )
-                        + lane.progressive_alternative_last_selected_token_uplift
-                    )
-                    counterfactual_best = max(
-                        range(len(committed_tokens)),
-                        key=lambda index: (int(committed_tokens[index]), -index),
-                    )
-                    counterfactual_uplift = max(
-                        0,
-                        int(committed_tokens[counterfactual_best])
-                        - int(committed_tokens[0]),
-                    )
-                    lane.progressive_ast_counterfactual_partial_uplift_rounds = (
-                        getattr(
-                            lane,
-                            "progressive_ast_counterfactual_partial_uplift_rounds",
-                            0,
-                        )
-                        + int(counterfactual_uplift > 0)
-                    )
-                    lane.progressive_ast_counterfactual_partial_uplift_tokens = (
-                        getattr(
-                            lane,
-                            "progressive_ast_counterfactual_partial_uplift_tokens",
-                            0,
-                        )
-                        + counterfactual_uplift
-                    )
-                    if counterfactual_uplift:
-                        counterfactual_hist = getattr(
-                            lane,
-                            "progressive_ast_counterfactual_best_branch_hist",
-                            {},
-                        )
-                        counterfactual_key = str(counterfactual_best + 1)
-                        counterfactual_hist[counterfactual_key] = (
-                            counterfactual_hist.get(counterfactual_key, 0) + 1
-                        )
-                        lane.progressive_ast_counterfactual_best_branch_hist = (
-                            counterfactual_hist
-                        )
-                    provider_ranks = []
-                    if getattr(self, "continuation_pool_ast_bridge", False):
-                        for block in verify_blocks:
-                            provenance = getattr(
-                                block, "continuation_ast_provenance", None
-                            )
-                            rank = provenance.get("rank") if provenance else None
-                            if type(rank) is not int or rank < 0:
-                                raise RuntimeError(
-                                    "AST bridge verification lacks provider rank provenance"
-                                )
-                            provider_ranks.append(rank)
-                    rank_verified = getattr(
-                        lane, "progressive_ast_provider_rank_verified_hist", {}
-                    )
-                    rank_committed = getattr(
-                        lane, "progressive_ast_provider_rank_committed_inputs", {}
-                    )
-                    rank_full = getattr(
-                        lane, "progressive_ast_provider_rank_full_accept_hist", {}
-                    )
-                    for rank, decision, proposal_count in zip(
-                        provider_ranks,
-                        decisions,
-                        proposal_counts,
-                        strict=bool(provider_ranks),
-                    ):
-                        rank_key = str(rank)
-                        rank_verified[rank_key] = rank_verified.get(rank_key, 0) + 1
-                        rank_committed[rank_key] = (
-                            rank_committed.get(rank_key, 0)
-                            + int(decision.commit_count)
-                        )
-                        rank_full[rank_key] = rank_full.get(rank_key, 0) + int(
-                            int(decision.accepted) == int(proposal_count)
-                        )
-                    lane.progressive_ast_provider_rank_verified_hist = rank_verified
-                    lane.progressive_ast_provider_rank_committed_inputs = rank_committed
-                    lane.progressive_ast_provider_rank_full_accept_hist = rank_full
-                    divergence_hist = getattr(
-                        lane,
-                        "progressive_ast_alternative_divergence_position_hist",
-                        {},
-                    )
-                    primary_tokens = tuple(verify_blocks[0].tokens)
-                    for block in verify_blocks[1:]:
-                        alternative_tokens = tuple(block.tokens)
-                        divergence = next(
-                            (
-                                index
-                                for index, (primary, alternative) in enumerate(
-                                    zip(primary_tokens, alternative_tokens, strict=False)
-                                )
-                                if primary != alternative
-                            ),
-                            min(len(primary_tokens), len(alternative_tokens)),
-                        )
-                        divergence_key = str(divergence)
-                        divergence_hist[divergence_key] = (
-                            divergence_hist.get(divergence_key, 0) + 1
-                        )
-                    lane.progressive_ast_alternative_divergence_position_hist = (
-                        divergence_hist
-                    )
-                    lane.progressive_ast_prefix_rejected_rounds = (
-                        getattr(lane, "progressive_ast_prefix_rejected_rounds", 0)
-                        + int(bool(physical_stats.get("prefix_rejected", False)))
-                    )
-                    branch_hist = getattr(
-                        lane, "progressive_ast_active_branch_hist", {}
-                    )
-                    branch_key = str(len(verify_blocks))
-                    branch_hist[branch_key] = branch_hist.get(branch_key, 0) + 1
-                    lane.progressive_ast_active_branch_hist = branch_hist
-                    prefix_hist = getattr(
-                        lane, "progressive_ast_shared_prefix_token_hist", {}
-                    )
-                    prefix_key = str(
-                        int(physical_stats.get("shared_prefix_tokens", 0))
-                    )
-                    prefix_hist[prefix_key] = prefix_hist.get(prefix_key, 0) + 1
-                    lane.progressive_ast_shared_prefix_token_hist = prefix_hist
                     if self.progressive_topology_latch is not None:
                         observation = {
                             "branch_accepts": list(branch_accepts),
@@ -9465,6 +9456,8 @@ class ExternalDraftBatchGenerator:
                     lane.progressive_verify_last_ragged_layout = physical_stats.get(
                         "last_ragged_layout"
                     )
+                    if lane_stats.get("ast_last_launch") is not None:
+                        lane.ast_last_launch = lane_stats["ast_last_launch"]
                     lane.progressive_target_row_executor = (
                         _merge_target_executor_stats(
                             getattr(
@@ -10957,6 +10950,9 @@ class ExternalDraftBatchGenerator:
                 latches = getattr(self, "progressive_topology_latch", None)
                 if latches is not None and hasattr(latches, "release"):
                     latches.release(uid)
+                ast_planner = getattr(self, "ast_execution_planner", None)
+                if ast_planner is not None:
+                    ast_planner.release(uid)
                 lane.cancelled = bool(cancelled); self.scheduler_stats["cancelled"] += int(cancelled)
                 if return_prompt_caches and uid in requested_uids:
                     result[uid] = self._freeze_cache(lane.cache)

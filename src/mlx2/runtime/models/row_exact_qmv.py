@@ -451,6 +451,32 @@ def _row_groups(bits: int, fast: bool, n: int, rows: int, k: int = 0) -> int:
     return chosen
 
 
+def weight_passes(linear, rows: int) -> int:
+    """Full weight reads of a ``rows``-row row-exact call of ``linear``.
+
+    Published kernel geometry for cost planning.  It follows
+    ``quantized_linear``'s own dispatch: a row-exact lane answers with the
+    lane's tiling over ``lane_rows``' chunks; the guarded kernel reads the
+    weight once per threadgroup of ``_row_groups`` rows; a layout it does not
+    cover (``layout_decline_reason``), a call past ``MAX_ROWS`` or a one-row
+    call runs one stock one-row call per row, which reads the weight per row.
+    """
+    if rows < 0:
+        raise ValueError("row count must be nonnegative")
+    lane = lane_preparation(linear)
+    if lane is not None and rows:
+        from ..lane import MAX_ROWS as LANE_ROWS, weight_passes as lane_passes
+
+        return sum(lane_passes(lane, min(LANE_ROWS, rows - start))
+                   for start in range(0, rows, LANE_ROWS))
+    if rows <= 1 or rows > MAX_ROWS or layout_decline_reason(linear) is not None:
+        return rows
+    n = int(linear.weight.shape[0])
+    bits = int(linear.bits)
+    k = int(linear.scales.shape[-1]) * int(linear.group_size)
+    return -(-rows // _row_groups(bits, qmv_fast_layout(k, n, bits), n, rows, k))
+
+
 class _Plan:
     """Static launch parameters of one (linear, row count, dtype) shape."""
 

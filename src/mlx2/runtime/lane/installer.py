@@ -36,6 +36,7 @@ from .matmul import (
     backend,
     lane_matmul,
     prepare,
+    weight_passes,
     split_k,
 )
 
@@ -52,6 +53,41 @@ LAW_IDS = {"mpp": LAW_ID, "simd": "lane-simd-v2"}
 # old model's stacked weights (and kept them alive).
 def _prepared(module):
     return module.__dict__.get("_lane_prepared")
+
+
+def installed_lane(module):
+    """The lane preparation installed on ``module`` (``LaneWeights``), or None."""
+    return _prepared(module)
+
+
+def module_row_capacity(module) -> int | None:
+    """Rows one call of ``module``'s installed lane serves without chunking,
+    or None when it is not installed or chunks longer calls itself.  Beyond
+    this, an unchunked lane takes the stock kernel (another numerical law),
+    so a planner must not count on the lane past it."""
+    if _prepared(module) is None or bool(getattr(module, "_lane_chunk_above_max", False)):
+        return None
+    return int(getattr(module, "_lane_max_rows", MAX_ROWS))
+
+
+def module_weight_passes(module, rows: int) -> int | None:
+    """Full weight reads of a ``rows``-row call served by ``module``'s lane.
+
+    Mirrors ``_LaneMixin.__call__``'s own dispatch: None when that call takes
+    the stock kernel (nothing installed, lanes disabled or unavailable, rows
+    below the module's crossover, or rows past its window without chunking).
+    A chunked call sums its ``_lane_max_rows``-row launches.  Stacked groups
+    read every member's weight once per launch, the same count per member.
+    """
+    lw = _prepared(module)
+    if lw is None or not ENABLED[0] or not available() or rows < 1:
+        return None
+    if rows < int(getattr(module, "_lane_min_rows", 1)):
+        return None
+    limit = int(getattr(module, "_lane_max_rows", MAX_ROWS))
+    if rows > limit and not bool(getattr(module, "_lane_chunk_above_max", False)):
+        return None
+    return sum(weight_passes(lw, min(limit, rows - start)) for start in range(0, rows, limit))
 
 
 def _group(module):

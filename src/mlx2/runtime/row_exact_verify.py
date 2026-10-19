@@ -17,11 +17,69 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 _WINDOW: ContextVar[Optional["Window"]] = ContextVar(
     "mlx2_row_exact_verify_window", default=None
 )
+_VALID_ROWS = ContextVar("mlx2_exact_valid_rows", default=None)
+
+
+@contextmanager
+def valid_rows(lengths, width):
+    """Adapter-opted exact row compaction, scoped to one physical forward.
+
+    Only row-independent stage mixins consume this scope. Attention/GDN/cache
+    retain the rectangular ABI and authoritative per-request lengths.
+    """
+    lengths = tuple(lengths)
+    if not lengths or any(type(n) is not int or not 1 <= n <= width for n in lengths):
+        raise ValueError("exact valid-row scope has invalid lengths")
+    value = None
+    if any(n != width for n in lengths):
+        import mlx.core as mx
+        indices = [lane * width + position for lane, n in enumerate(lengths) for position in range(n)]
+        value = (len(lengths), width, len(indices), mx.array(indices, mx.int32))
+    token = _VALID_ROWS.set(value)
+    try:
+        yield
+    finally:
+        _VALID_ROWS.reset(token)
+
+
+@dataclass(frozen=True)
+class CompactedExactRows:
+    values: object
+    geometry: tuple
+
+    def restore(self, output):
+        import mlx.core as mx
+        batch, width, live, indices = self.geometry
+        if output.shape[:2] != (1, live):
+            raise ValueError("exact compacted stage changed its token-row geometry")
+        result = mx.zeros((batch * width, *output.shape[2:]), dtype=output.dtype)
+        result[indices] = output.reshape(live, *output.shape[2:])
+        return result.reshape(batch, width, *output.shape[2:])
+
+
+def compacts_valid_rows(module) -> bool:
+    """Whether ``module`` is a stage that consumes the valid-row scope
+    (declared by the row-independent mixins, never inferred from shape)."""
+    return bool(getattr(module, "_mlx2_compacts_valid_rows", False))
+
+
+def compact_rows(value, *, stage):
+    scope = _VALID_ROWS.get()
+    record = current()
+    if scope is None or record is None or value.ndim < 3 or tuple(value.shape[:2]) != scope[:2]:
+        return None
+    import mlx.core as mx
+    batch, width, live, indices = scope
+    values = mx.take(value.reshape(batch * width, *value.shape[2:]), indices, axis=0)
+    record.note("valid_row_compaction", stage + "_executed", live)
+    record.note("valid_row_compaction", stage + "_padding_skipped", batch * width - live)
+    return CompactedExactRows(values[None], scope)
 
 
 class Window:

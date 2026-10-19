@@ -95,12 +95,23 @@ def _next_logits(model, cache):
     return np.asarray(value)
 
 
-def _launch(model, bases, lengths):
+def _launch(model, bases, lengths, *, compact=False):
     owner = HybridVerifyRows([copy.deepcopy(base) for base in bases])
     transaction = owner.begin(lengths)
-    result = model.progressive_external_target_rows(
-        mx.array(_tokens(lengths)), transaction.caches, LAYERS
-    )
+    if compact:
+        from mlx2.runtime.progressive_external_verify import ProgressiveTargetRows
+
+        logits, features, receipt = execute_progressive_target_rows(
+            model, mx.array(_tokens(lengths)), transaction.caches, LAYERS,
+            protocol=PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+            fidelity=PROGRESSIVE_FIDELITY_EXACT, input_lengths=lengths,
+        )
+        result = ProgressiveTargetRows(logits, features, receipt["protocol"],
+                                      receipt["row_exact"], receipt["adapter_detail"])
+    else:
+        result = model.progressive_external_target_rows(
+            mx.array(_tokens(lengths)), transaction.caches, LAYERS
+        )
     mx.eval(result.logits, result.features)
     return owner, transaction, result
 
@@ -136,13 +147,14 @@ def test_qwen36_rejected_moe_window_retains_the_exact_per_row_route(monkeypatch)
 
 @pytest.mark.parametrize("factory", FACTORIES)
 @pytest.mark.parametrize("lengths", LENGTHS, ids=lambda v: "x".join(map(str, v)))
-def test_rows_taps_commit_and_abort_match_serial_ordinary_decode(factory, lengths):
+@pytest.mark.parametrize("compact", [False, True], ids=["rectangular", "valid-rows"])
+def test_rows_taps_commit_and_abort_match_serial_ordinary_decode(factory, lengths, compact):
     model = factory()
     model.configure_target_verify_row_exact(True)
     bases = _bases(model, len(lengths))
     tokens = _tokens(lengths)
 
-    owner, transaction, result = _launch(model, bases, lengths)
+    owner, transaction, result = _launch(model, bases, lengths, compact=compact)
     assert result.protocol == PROGRESSIVE_TARGET_PROTOCOL_VERSION
     assert result.row_exact is True, result.detail
     assert result.detail["gdn_route"] == "serial_one_token"
@@ -169,7 +181,7 @@ def test_rows_taps_commit_and_abort_match_serial_ordinary_decode(factory, length
                 assert not cache.speculating and not cache._rollbacks
 
     # Abort restores every lane exactly.
-    owner, transaction, result = _launch(model, bases, lengths)
+    owner, transaction, result = _launch(model, bases, lengths, compact=compact)
     assert result.row_exact is True
     transaction.abort()
     for lane, row in enumerate(owner.rows):
@@ -670,7 +682,7 @@ def test_gdn_fused_verify_runs_only_under_a_passing_canary(
 
 
 # -- end to end: AST on the external DFlash2 engine ---------------------------
-def _ast_batch(target, *, lanes, monkeypatch, oracle=True):
+def _ast_batch(target, *, lanes, monkeypatch, oracle=True, planner=False, auto=False):
     from mlx2.adapters.proposal_path_sources import (
         SourceContinuation,
         build_continuation_drafter,
@@ -685,7 +697,7 @@ def _ast_batch(target, *, lanes, monkeypatch, oracle=True):
     wrapper = build_continuation_drafter(
         target,
         draft,
-        {"sources": ["external"], "limit": 15},
+        {"sources": ["external"], "limit": 15, "ast_planner": planner},
         target_revision="a" * 64,
         draft_revision="b" * 64,
         tokenizer_revision="a" * 64,
@@ -739,13 +751,64 @@ def _ast_batch(target, *, lanes, monkeypatch, oracle=True):
         ready_drain="all",
         continuation_pool=wrapper.policy,
         continuation_pool_ast_bridge=True,
-        progressive_verification_tile=3,
+        progressive_verification_tile=6 if auto else 3,
+        **({"progressive_verification_tile_policy": "auto",
+            "progressive_terminal_input_widths": target.progressive_external_exact_terminal_input_widths}
+           if auto else {}),
         multilane_draft_cap=4,
         progressive_alternative_branches=4,
         progressive_alternative_strategy="confidence_tree",
         progressive_alternative_depth_policy="confidence_tail",
         **packing,
     )
+
+
+@pytest.mark.parametrize("factory", FACTORIES)
+@pytest.mark.parametrize("auto", [False, True])
+def test_adaptive_ast_mixed_budgets_retire_and_preserve_ordinary_output(factory, monkeypatch, auto):
+    target = factory()
+    batch = _ast_batch(target, lanes=3, monkeypatch=monkeypatch, oracle=False, planner=True, auto=auto)
+    limits = [1, 7, 23]
+    uids = batch.insert(PROMPTS[:3], max_tokens=limits,
+                        sampling_configs=[{"sampling_temp": 0}] * 3)
+    plans = []
+    original = batch.ast_execution_planner.source_budgets
+
+    def observe(work):
+        result = original(work)
+        plans.append(result)
+        return result
+
+    monkeypatch.setattr(batch.ast_execution_planner, "source_budgets", observe)
+    got, final = drain(batch)
+    target.configure_target_verify_row_exact(False)
+    for uid, prompt, limit in zip(uids, PROMPTS, limits):
+        assert got[uid] == ordinary_greedy(target, prompt, limit)
+        receipt = final[uid].speculative_receipt["ast_execution_plan"]
+        assert receipt["qualified"] is False
+        assert receipt["binding"]
+    assert plans
+    assert any(len(p) == 1 and p[0].uid == uids[-1] for p in plans)
+    if auto:
+        assert max(batch.ast_execution_planner.tiles) == 6
+        assert all(p.depth <= 4 for group in plans if len(group) > 1 for p in group)
+        assert "depth_not_above_tile" not in final[uids[-1]].speculative_receipt["progressive_verification"].get(
+            "ordered_alternatives", {}).get("primary_fallback_reasons", {})
+    assert final[uids[-1]].speculative_receipt["ast_execution_plan"]["cost_samples"] > 0
+
+
+def test_compaction_scope_skips_padding_without_escaping_its_forward():
+    from mlx2.runtime import row_exact_verify as rev
+    target = tiny_qwen36()
+    target.configure_target_verify_row_exact(True)
+    bases = _bases(target, 4)
+    _, tx, _ = _launch(target, bases, [3, 3, 3, 4], compact=True)
+    routes = target.external_execution_receipt["target_verify_row_exact"]["routes"]
+    counts = routes["valid_row_compaction"]
+    assert counts["projections_padding_skipped"] > 0
+    assert counts["moe_padding_skipped"] > 0
+    assert rev._VALID_ROWS.get() is None
+    tx.abort()
 
 
 @pytest.mark.parametrize("factory", FACTORIES)

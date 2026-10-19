@@ -354,11 +354,11 @@ def _ast_generator(
     )
 
 
-def _wrapper(model, draft):
+def _wrapper(model, draft, *, planner=False):
     return build_continuation_drafter(
         model,
         draft,
-        {"sources": ["external"], "limit": 15},
+        {"sources": ["external"], "limit": 15, "ast_planner": planner},
         target_revision=PIN,
         draft_revision="b" * 64,
         tokenizer_revision=PIN,
@@ -385,7 +385,7 @@ def test_ast_over_native_mtp_matches_ordinary_greedy_b1():
     assert sum(executor["adapter_route_hist"].values()) == executor["launches"]
     geometry = progressive["ordered_alternatives"]["geometry_totals"]
     assert progressive["ordered_alternatives"]["winner_contract"] == (
-        "exact_max_committed_prefix_then_rank"
+        "exact_max_visited_committed_prefix_then_full_rank"
     )
     assert geometry["verified_branches"] > 0
     assert geometry["unique_target_rows"] > 0

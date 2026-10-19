@@ -294,6 +294,7 @@ def _draft_distributions(
     *,
     logits_processors=None,
     processor_histories=None,
+    capture_continuation_tree=False,
 ):
     """Return tokens and the exact selector laws that produced them.
 
@@ -303,6 +304,7 @@ def _draft_distributions(
     position ``j`` depends on tokens selected at positions ``< j``.  Apply the
     processors and sample sequentially while retaining the one-pass features.
     """
+    object.__setattr__(self, "last_continuation_lattice", None)
     import numpy as np
     from ..processor_probe import probe_logits_processors
     from ..speculative_sampling import softmax
@@ -320,6 +322,12 @@ def _draft_distributions(
     count = min(selector.top_k, logits.shape[-1])
     candidates = mx.argpartition(logits, -count, axis=-1)[..., -count:]
     unary = mx.take_along_axis(logits, candidates, axis=-1)
+    if capture_continuation_tree and proposal_length:
+        object.__setattr__(self, "last_continuation_lattice", {
+            "anchors": tuple(anchor_values), "depth": proposal_length,
+            "pending": (candidates, unary.astype(mx.float32),
+                        selector.hidden_projection(features).astype(mx.float32)),
+        })
     if not any(logits_processors):
         # Keep the request-bound wrapper path numerically coupled to the
         # compact pairwise path.  Computing q again through NumPy's float64
@@ -458,6 +466,7 @@ def _append_context(self, hidden, cache):
             entry._idx = entry.max_size
 
 DFlash2DraftModel.draft_distributions = _draft_distributions
+DFlash2DraftModel.supports_continuation_tree_reuse = True
 DFlash2DraftModel.append_context = _append_context
 
 

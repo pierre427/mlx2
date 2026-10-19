@@ -319,6 +319,19 @@ def test_ordered_live_frontier_policy_is_explicit_and_identity_bound():
     assert progressive_external_identity(eager) != progressive_external_identity(live)
 
 
+def test_ordered_live_frontier_supports_parked_session_and_ragged_utility():
+    planner = OrderedLiveFrontierPlanner(
+        ((3,), (1, 3, 2)), maximize_committed_prefix=True
+    )
+    assert len(planner.start()) == 2
+    assert planner.complete(0, 0, full=False) is None
+    # A full short path must not hide a deeper exact partial-prefix gain.
+    assert planner.complete(1, 0, full=True).branch_index == 1
+    assert planner.complete(1, 1, full=True) is None
+    assert planner.finished
+    assert planner.snapshot()["branches_unvisited"] == 1
+
+
 def test_ordered_live_frontier_plans_b1_b2_and_no_full_without_eager_rows():
     planner = OrderedLiveFrontierPlanner(((3, 4, 5), (3, 4), (3, 4)))
     assert [(row.session_slot, row.branch_index) for row in planner.start()] == [

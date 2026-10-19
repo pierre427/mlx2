@@ -36,6 +36,56 @@ from mlx2.runtime.proposal_providers import (
 PIN = "a" * 64
 
 
+@pytest.mark.parametrize("minimum_width,expected_launches", [(1, 1), (2, 3)])
+def test_progressive_short_trunk_honors_target_packed_minimum_width(
+    monkeypatch, minimum_width, expected_launches,
+):
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator, HostDraftRow
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION, ProgressiveTargetRows,
+    )
+
+    model, draft = pair("xpress")
+    model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
+    model.progressive_external_lane_exact_min_width = minimum_width
+    launches = []
+
+    def execute(tokens, caches, layers):
+        shape = tuple(tokens.shape)
+        assert shape[0] == 1 or shape[1] >= minimum_width
+        launches.append(shape)
+        logits, features = model.forward_with_taps(tokens, caches, layers)
+        return ProgressiveTargetRows(logits, features, PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+                                     True, {"algorithm": "cpu-test-executor"})
+
+    monkeypatch.setattr(model, "progressive_external_target_rows", execute, raising=False)
+    batch = ExternalDraftBatchGenerator(
+        model, draft_model=draft, binding="short-trunk-capability-regression",
+        completion_batch_size=4, num_draft=3, prefill_step_size=64,
+        ready_drain="all", progressive_verification_tile=2,
+    )
+    prompts = [[1, 2, 3], [1, 2, 4], [1, 2, 5]]
+    uids = batch.insert(prompts, max_tokens=[8] * 3,
+                        sampling_configs=[{"sampling_temp": 0}] * 3)
+    lanes = [batch.lanes[uid] for uid in uids]
+    for lane in lanes:
+        while lane.anchor is None:
+            batch._prefill(lane)
+    paths = [reference(model, prompt, 2) for prompt in prompts]
+    blocks = [HostDraftRow(path[:1], [PointMassLaw(path[0])], 1) for path in paths]
+    result = batch._progressive_verify_many(lanes, blocks, terminal=False)
+    assert launches == ([(3, 1)] if minimum_width == 1 else [(1, 1)] * 3)
+    assert result[5]["physical_launches"] == expected_launches
+    assert result[5]["physical_target_rows"] == 3
+    assert [list(decision.emitted) for decision in result[0]] == [path[:1] for path in paths]
+    # The narrow shared trunk does not disable packing for legal suffix shapes.
+    launches.clear()
+    wider = [HostDraftRow(path, [PointMassLaw(t) for t in path], 1) for path in paths]
+    wide_result = batch._progressive_verify_many(lanes, wider)
+    assert launches == [(3, 3)]
+    assert wide_result[5]["physical_launches"] == 1
+
+
 class _Selection:
     def __init__(self, paths):
         self.paths = tuple(paths)
@@ -118,6 +168,22 @@ def test_dflash_tree_source_reports_token_redacted_path_geometry():
         "full_depth_nodes": 2,
         "full_depth_leaves": 2,
     }
+
+
+def test_dflash_continuation_uses_weight_bound_codebook_cache():
+    from test_external_dflash2_cpu import tiny
+
+    model, draft = tiny()
+    ctx = context(model, draft)
+    source = ExternalContinuationSource(draft)
+    first = source(ctx, 15)
+    assert source.last_diagnostics["codebook_cache_hit"] is False
+    assert source(ctx, 15) == first
+    assert source.last_diagnostics["codebook_cache_hit"] is True
+    selector = draft.candidate_selector
+    selector.predecessor_codebook.weight = selector.predecessor_codebook.weight + 0
+    assert source(ctx, 15) == first
+    assert source.last_diagnostics["codebook_cache_hit"] is False
 
 
 @pytest.mark.parametrize("kind", ["xpress", "lilicorr"])
@@ -460,7 +526,8 @@ def wrapped(model, draft, policy=None):
     return build_continuation_drafter(
         model,
         draft,
-        policy or {},
+        # These fixtures exercise fixed topology, not the cost planner.
+        {"ast_planner": False, **(policy or {})},
         target_revision=PIN,
         draft_revision="b" * 64,
         tokenizer_revision=PIN,
@@ -1423,6 +1490,10 @@ def test_continuation_ast_rootless_dflash_shape_cross_session_packs(monkeypatch)
         alternatives = lane.ready[-1].speculative_receipt[
             "progressive_verification"
         ]["ordered_alternatives"]
+        assert alternatives["winner_selection"] == (
+            "exact_max_visited_committed_prefix_then_full_rank"
+        )
+        assert alternatives["fallback_when_none_full"] == "commit_best_exact_visited_prefix"
         expected_rootless = prompt[-1] == 3
         expected_prefix = {3: 0, 4: 1, 5: 2}[prompt[-1]]
         assert alternatives["last_shared_prefix_tokens"] == (
@@ -1455,6 +1526,12 @@ def test_continuation_ast_rootless_dflash_shape_cross_session_packs(monkeypatch)
             assert (2, 4) in diagnostics["feasible_width_by_prefix"]
         assert alternatives["last_active_branches"] == 4
         assert alternatives["cross_session_ast_packing"]["observed_used"]
+        geometry = alternatives["geometry_totals"]
+        assert geometry["unique_target_rows"] > 0
+        assert geometry["unique_target_rows"] == (
+            geometry["shared_prefix_target_rows"] + geometry["branch_suffix_target_rows"]
+        )
+        assert geometry["selected_committed_inputs"] == len(lane.ready)
         pool = lane.ready[-1].speculative_receipt["continuation_pool"]
         assert pool["ast_observed_used"]
         assert pool["selected_path"] == 1
@@ -1603,12 +1680,15 @@ def test_continuation_ast_rootless_dflash_shape_cross_session_packs(monkeypatch)
             )
 
 
-def test_continuation_ast_partial_group_feasibility_falls_back_exactly(monkeypatch):
+@pytest.mark.parametrize("split_groups", [False, True])
+@pytest.mark.parametrize("sparse_first", [False, True])
+def test_continuation_ast_partial_group_feasibility_is_session_local(
+    monkeypatch, split_groups, sparse_first
+):
     from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
     from mlx2.runtime.progressive_external_verify import (
         PROGRESSIVE_TARGET_PROTOCOL_VERSION,
     )
-    from scripts.paired_direct_ab import state_digest
 
     def build(*, partial):
         model, base = pair("xpress")
@@ -1660,6 +1740,8 @@ def test_continuation_ast_partial_group_feasibility_falls_back_exactly(monkeypat
             **kwargs,
         )
         prompts = [[1, 2, 3], [1, 2, 3], [1, 2, 4], [1, 2, 4]]
+        if sparse_first:
+            prompts.reverse()
         uids = batch.insert(
             prompts,
             max_tokens=[4] * 4,
@@ -1671,8 +1753,9 @@ def test_continuation_ast_partial_group_feasibility_falls_back_exactly(monkeypat
                 batch._prefill(lane)
         # Exercise the production grouping boundary: one draft group can form
         # rootless B4 while the other cannot form even B2.
-        for lane in lanes[2:]:
-            lane.tail = lane.tail.astype(mx.float16)
+        if split_groups:
+            for lane in lanes[2:]:
+                lane.tail = lane.tail.astype(mx.float16)
         before_rng = {lane.uid: lane.rng.snapshot() for lane in lanes}
         batch._round(lanes)
         return batch, wrapper, prompts, lanes, before_rng
@@ -1687,39 +1770,35 @@ def test_continuation_ast_partial_group_feasibility_falls_back_exactly(monkeypat
     ):
         expected = reference(ast.model, prompt, len(ast_lane.ready))
         assert [item.token for item in ast_lane.ready] == expected
-        assert [item.token for item in control_lane.ready] == expected
+        assert [item.token for item in control_lane.ready] == expected[:len(control_lane.ready)]
         receipt = ast_lane.ready[-1].speculative_receipt
-        assert not receipt["continuation_pool"]["ast_observed_used"]
+        branching = prompt[-1] == 3
+        assert receipt["continuation_pool"]["ast_observed_used"] is branching
         alternatives = receipt["progressive_verification"]["ordered_alternatives"]
-        assert alternatives["rounds"] == 0
-        assert alternatives["last_active_branches"] == 1
-        expected_reason = (
-            "cohort_incomplete" if prompt[-1] == 3 else "insufficient_branches"
-        )
-        assert alternatives["last_primary_fallback_reason"] == expected_reason
-        proposed = alternatives["last_proposed_prefix_diagnostics"]
-        assert proposed is not None
-        assert proposed["attempted_prefixes"]
-        assert proposed["feasible_width_by_prefix"]
-        assert not any(
-            key in proposed for key in ("tokens", "paths", "path_ids")
-        )
-        assert alternatives["last_prefix_diagnostics"] is None
+        assert alternatives["last_active_branches"] == (4 if branching else 1)
+        assert alternatives["cross_session_ast_packing"]["observed_used"]
+        if branching:
+            assert alternatives["last_topology"] == "rootless_sibling_fanout"
+            assert alternatives["last_selected_branch"] == 2
+        else:
+            assert alternatives["last_primary_fallback_reason"] == "insufficient_branches"
+            assert ast_lane.history == control_lane.history
+            # This tiny generic target declares the protocol but does not
+            # implement a row-exact executor. Different CPU slab widths differ
+            # by <= 2.4e-7 here; test owned prefix/state plumbing, not Metal bits.
+            for actual, expected_cache in zip(ast_lane.cache, control_lane.cache, strict=True):
+                assert actual.offset == expected_cache.offset
+                for name in ("keys", "values"):
+                    np.testing.assert_allclose(
+                        np.asarray(getattr(actual, name))[..., :actual.offset, :],
+                        np.asarray(getattr(expected_cache, name))[..., :expected_cache.offset, :],
+                        rtol=0, atol=2e-6,
+                    )
+            np.testing.assert_allclose(np.asarray(ast_lane.tail), np.asarray(control_lane.tail), rtol=0, atol=2e-6)
         assert ast_lane.rng.snapshot() == ast_rng_before[ast_lane.uid]
         assert control_lane.rng.snapshot() == control_rng_before[control_lane.uid]
-        assert ast_lane.rng.snapshot() == control_lane.rng.snapshot()
-        assert state_digest(ast._freeze_cache(ast_lane.cache)) == state_digest(
-            control._freeze_cache(control_lane.cache)
-        )
-        assert state_digest(ast._sidecar(ast_lane)) == state_digest(
-            control._sidecar(control_lane)
-        )
-    assert ast.scheduler_stats["external_progressive_ast_rootless_rounds"] == 0
-    assert ast.scheduler_stats["external_progressive_ast_rootless_lanes"] == 0
-    assert ast.scheduler_stats["external_progressive_ast_branch_downshift_rounds"] == 0
-    assert ast.scheduler_stats["external_progressive_ast_branch_downshift_lanes"] == 0
-    assert ast.scheduler_stats["external_progressive_ast_adaptive_prefix_rounds"] == 0
-    assert ast.scheduler_stats["external_progressive_ast_adaptive_prefix_lanes"] == 0
+    assert ast.scheduler_stats["external_progressive_ast_rootless_rounds"] == 1
+    assert ast.scheduler_stats["external_progressive_ast_rootless_lanes"] == 2
     assert not ast_wrapper.proposal_pool._pending
     assert not control_wrapper.proposal_pool._pending
 
@@ -1810,7 +1889,8 @@ def test_continuation_ast_sparse_slate_falls_back_to_exact_primary(monkeypatch):
     assert not wrapper.proposal_pool._pending
 
 
-def test_continuation_ast_fault_discards_ticket_and_retry_is_stable(monkeypatch):
+@pytest.mark.parametrize("planner", [False, True])
+def test_continuation_ast_fault_discards_ticket_and_retry_is_stable(monkeypatch, planner):
     from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
     from mlx2.runtime.progressive_external_verify import (
         PROGRESSIVE_TARGET_PROTOCOL_VERSION,
@@ -1819,7 +1899,7 @@ def test_continuation_ast_fault_discards_ticket_and_retry_is_stable(monkeypatch)
 
     model, base = pair("xpress")
     model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
-    wrapper = wrapped(model, base, {"sources": ["external"]})
+    wrapper = wrapped(model, base, {"sources": ["external"], "ast_planner": planner})
     batch = ExternalDraftBatchGenerator(
         model,
         draft_model=wrapper,
@@ -1864,12 +1944,14 @@ def test_continuation_ast_fault_discards_ticket_and_retry_is_stable(monkeypatch)
     assert not lane.ready
     assert not wrapper.proposal_pool._pending
     assert not getattr(lane, "continuation_ast_committed_rounds", 0)
+    if planner:
+        assert not batch.ast_execution_planner._survival
+        assert not hasattr(lane, "ast_source_budget")
     monkeypatch.setattr(batch, "_progressive_verify_many", verify)
     output, final = drain(batch)
     assert output[uid] == reference(model, prompt, 6)
-    assert final[uid].speculative_receipt["continuation_pool"][
-        "ast_observed_used"
-    ]
+    if not planner:
+        assert final[uid].speculative_receipt["continuation_pool"]["ast_observed_used"]
     assert not wrapper.proposal_pool._pending
 
 

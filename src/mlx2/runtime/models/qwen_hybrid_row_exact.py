@@ -144,8 +144,12 @@ def _strip(x):
 # -- norms ----------------------------------------------------------------------
 class RowExactRMSNormMixin:
     """Decoder RMSNorm over a window's rows through the row-independent canary."""
+    _mlx2_compacts_valid_rows = True
 
     def __call__(self, x):
+        compacted = REV.compact_rows(x, stage="norms")
+        if compacted is not None:
+            return compacted.restore(self(compacted.values))
         if REV.current() is None or row_count(x) <= 1:
             return super().__call__(x)
         call = super().__call__
@@ -562,8 +566,12 @@ class RowExactQwenSparseMoEMixin:
     arithmetic) run instead, and the launch is credited only when the
     window actually engaged.
     """
+    _mlx2_compacts_valid_rows = True
 
     def __call__(self, x):
+        compacted = REV.compact_rows(x, stage="moe")
+        if compacted is not None:
+            return compacted.restore(self(compacted.values))
         window = REV.current()
         rows = row_count(x)
         if window is None or rows <= 1:
@@ -672,12 +680,18 @@ class QwenHybridRowExactRoute:
                 "progressive_external_exact_tile_widths",
                 "progressive_external_exact_terminal_input_widths",
                 "progressive_external_exact_max_lanes",
+                "progressive_external_compact_exact_rows",
+                "progressive_external_target_modules",
                 "forward_with_taps",
             )
         }
         from ..progressive_external_verify import PROGRESSIVE_TARGET_PROTOCOL_VERSION
 
         object.__setattr__(model, "progressive_external_target_rows", self.execute)
+        object.__setattr__(model, "progressive_external_compact_exact_rows", True)
+        language = getattr(model, "language_model", model)
+        object.__setattr__(model, "progressive_external_target_modules", tuple(
+            module for module in (language.model, getattr(language, "lm_head", None)) if module is not None))
         # Safety/admission capabilities of this executor, not qualification or
         # a performance claim.  ``execute`` refuses shapes outside these same
         # constants before it can attest a launch as row-exact.

@@ -731,6 +731,17 @@ class Model(nn.Module):
     supports_trusted_pld = True
 
     @property
+    def progressive_external_attention_geometry(self):
+        """KV geometry of the full-attention layers; linear layers carry none."""
+        from ..attention_geometry import declared_attention_geometry
+
+        args = self.language_model.args
+        interval = int(args.full_attention_interval)
+        full = sum((index + 1) % interval == 0 for index in range(int(args.num_hidden_layers)))
+        return declared_attention_geometry(full_layers=full, kv_heads=int(args.num_key_value_heads),
+                                           head_dim=int(args.head_dim))
+
+    @property
     def state_plane_operations(self):
         from .qwen38_state_plane import QWEN38_STATE_PLANE_OPERATIONS
 

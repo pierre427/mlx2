@@ -1,7 +1,11 @@
 """Host-only guards for the bounded AST diagnostic harness."""
 
 import importlib.util
+import io
+import json
 from pathlib import Path
+
+import pytest
 
 
 PATH = Path(__file__).resolve().parents[1] / (
@@ -26,3 +30,27 @@ def test_b4_plan_names_both_real_batch_phases():
     assert phases["b4_cold"] is True
     assert phases["b4_warm"] is True
     assert phases["sampled"] is True
+
+
+@pytest.mark.parametrize("done", [False, True])
+def test_stream_records_done_independently_of_eof(monkeypatch, done):
+    event = {"choices": [{"delta": {"content": "ok"}}],
+             "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+             "mlx2": {"route": "ordinary", "token_trace": {"token_ids": [42]}}}
+    response = io.BytesIO(("data: " + json.dumps(event) + "\n\n" +
+                           ("data: [DONE]\n\n" if done else "")).encode())
+    response.status = 200
+    class Connection:
+        closed = False
+        def request(self, *args, **kwargs):
+            pass
+        def getresponse(self):
+            return response
+        def close(self):
+            self.closed = True
+    connection = Connection()
+    monkeypatch.setattr(AST_SMOKE.http.client, "HTTPConnection", lambda *a, **k: connection)
+    row = AST_SMOKE.stream(1, "model", "prompt", 1)
+    assert row["done"] is done
+    assert row["token_ids"] == [42]
+    assert connection.closed

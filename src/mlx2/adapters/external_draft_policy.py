@@ -277,7 +277,12 @@ def resolve_progressive_external_tile(policy, *, num_draft, target, max_lanes):
     ):
         ceiling = int(num_draft)
     cap = policy.get("progressive_multilane_draft_cap")
-    if max_lanes > 1 and cap is not None:
+    pool = policy.get("continuation_pool")
+    planned_cohort = isinstance(pool, dict) and pool.get("ast_planner") is True
+    # The planner prices actual ready rows. A future multi-request depth cap
+    # must not shrink its singleton capability ceiling at server startup.
+    # _propose still enforces the explicit cap when multiple requests live.
+    if max_lanes > 1 and cap is not None and not planned_cohort:
         ceiling = min(ceiling, int(cap))
         if policy.get("progressive_cross_session_pack_rows") is not None:
             ceiling = min(ceiling, int(cap) - 1)

@@ -150,6 +150,21 @@ def _plain_class(module) -> type:
     return cls.__dict__.get("_mlx2_row_exact_base", cls)
 
 
+def row_exact_base(module) -> type:
+    """Public name of ``_plain_class``: the class whose one-row call a
+    row-exact module reproduces (the module's own class when none was
+    installed)."""
+    return _plain_class(module)
+
+
+def installed_row_exact_base(module) -> type | None:
+    """The base class a row-exact route swapped this module's class for, or
+    None when the module still runs its stock class.  Cost planning credits
+    the guarded row-exact kernels only to swapped modules; a stock module
+    takes the stock kernel, whatever its layout."""
+    return type(module).__dict__.get("_mlx2_row_exact_base")
+
+
 def dense_linear(linear: nn.Linear, x: mx.array, *, stage: str = "dense") -> mx.array:
     """An unquantized ``nn.Linear`` over a strip with one-row arithmetic per row."""
     rows = strip_rows(x)

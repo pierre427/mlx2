@@ -406,10 +406,10 @@ def normalize_external_policy(value):
     if not row_exact:
         policy.pop("target_verify_row_exact", None)
     progressive_tile = policy.get("progressive_verification_tile")
-    if progressive_tile is not None and (
+    if progressive_tile is not None and progressive_tile != "auto" and (
         type(progressive_tile) is not int or progressive_tile < 1
     ):
-        raise ValueError("progressive_verification_tile must be a positive integer")
+        raise ValueError("progressive_verification_tile must be 'auto' or a positive integer")
     pairwise = policy.get("pairwise_selection", "host")
     if pairwise not in ("host", "batched"):
         raise ValueError("pairwise_selection must be 'host' or 'batched'")
@@ -442,7 +442,7 @@ def normalize_external_policy(value):
         # Mirror ExternalDraftBatchGenerator's bounds so a profile it would
         # refuse fails here, before the target and drafter weights load.
         num_draft = policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT)
-        if type(num_draft) is not int or not progressive_tile < num_draft:
+        if type(num_draft) is not int or (progressive_tile != "auto" and not progressive_tile < num_draft):
             raise ValueError(
                 "progressive_verification_tile must be below num_draft"
             )
@@ -959,6 +959,14 @@ class MuseGlimmerAdapter:
         if self.draft_model is None:
             raise ValueError("No external draft model bound")
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
+        from .external_draft_policy import (
+            progressive_external_terminal_input_widths,
+            resolve_progressive_external_tile,
+        )
+        count = self.external_policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT)
+        lanes = kwargs.get("completion_batch_size", 1)
+        tile = resolve_progressive_external_tile(
+            self.external_policy, num_draft=count, target=self.model, max_lanes=lanes)
         return ExternalDraftBatchGenerator(
             self.model,
             draft_model=self.draft_model,
@@ -969,8 +977,12 @@ class MuseGlimmerAdapter:
             pairwise_selection=self.external_policy.get(
                 "pairwise_selection", "host"
             ),
-            progressive_verification_tile=self.external_policy.get(
-                "progressive_verification_tile"
+            progressive_verification_tile=tile,
+            progressive_verification_tile_policy=(
+                "auto" if self.external_policy.get("progressive_verification_tile") == "auto" else None),
+            progressive_terminal_input_widths=(
+                progressive_external_terminal_input_widths(self.model, max_lanes=lanes, num_draft=count)
+                if self.external_policy.get("progressive_verification_tile") == "auto" else None
             ),
             multilane_draft_cap=self.external_policy.get(
                 "progressive_multilane_draft_cap"
