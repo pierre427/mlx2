@@ -16,7 +16,16 @@ import json
 from ..runtime.ast_planner import ExecutionProfile
 
 
-def build_execution_profile(model, draft, *, binding, tile_cap, max_lanes, num_draft):
+def build_execution_profile(
+    model,
+    draft,
+    *,
+    binding,
+    tile_cap,
+    max_lanes,
+    num_draft,
+    alternative_provider=None,
+):
     import mlx.core as mx
     from mlx import nn
 
@@ -193,7 +202,7 @@ def build_execution_profile(model, draft, *, binding, tile_cap, max_lanes, num_d
          getattr(draft, "policy", None)],
         sort_keys=True, default=str,
     ).encode()).hexdigest()
-    return ExecutionProfile(
+    profile = ExecutionProfile(
         binding=identity, device=device, build=build, max_lanes=maximum,
         tile_widths=tiles, terminal_widths=terminal,
         packed_min_width=max(1, int(getattr(model, "progressive_external_lane_exact_min_width", 1))),
@@ -212,4 +221,23 @@ def build_execution_profile(model, draft, *, binding, tile_cap, max_lanes, num_d
         max_position_rows=row_capacity,
         context_windows=tuple((window, cost / total_bytes) for window, cost in sorted(windows.items())),
         sequential_draft=bool(getattr(backend, "ast_sequential_draft", False)),
+    )
+    if alternative_provider is None:
+        return profile
+    from ..runtime.target_tree_executor import ASTTargetTreeExecutorProvider
+
+    if not isinstance(alternative_provider, ASTTargetTreeExecutorProvider):
+        raise TypeError("AST target-tree backend requires a complete adapter provider")
+    alternative_provider.validate_revision()
+    candidate = alternative_provider.ast_execution_backend(profile)
+    if candidate is None:
+        raise ValueError(
+            "AST target-tree backend lacks a passing device/build/source-bound "
+            "numerical oracle"
+        )
+    return ExecutionProfile(
+        **{
+            **profile.__dict__,
+            "alternative_backends": (candidate,),
+        }
     )

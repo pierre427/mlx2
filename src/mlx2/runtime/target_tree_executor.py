@@ -61,3 +61,16 @@ class TargetTreeExecutorProvider(Protocol):
     def validate_revision(self) -> None: ...
 
     def receipt(self) -> dict: ...
+
+
+@runtime_checkable
+class ASTTargetTreeExecutorProvider(TargetTreeExecutorProvider, Protocol):
+    """Provider that may publish a numerically admitted AST backend.
+
+    ``ast_execution_backend`` receives the already source/device/build-bound
+    primary profile. Returning ``None`` is a refusal. A returned backend must
+    carry a matching affirmative numerical oracle; ``ExecutionProfile``
+    validates that binding before the planner can see it.
+    """
+
+    def ast_execution_backend(self, profile: Any) -> Any: ...

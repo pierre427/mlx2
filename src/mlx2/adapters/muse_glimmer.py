@@ -387,6 +387,7 @@ def normalize_external_policy(value):
         "proposal_composition",
         "continuation_pool",
         "target_verify_row_exact",
+        "attention_window_row_exact",
         "progressive_verification_tile",
         "progressive_multilane_draft_cap",
         "progressive_alternative_branches",
@@ -405,6 +406,15 @@ def normalize_external_policy(value):
         raise ValueError("target_verify_row_exact must be a boolean")
     if not row_exact:
         policy.pop("target_verify_row_exact", None)
+    attention_window = policy.get("attention_window_row_exact", False)
+    if type(attention_window) is not bool:
+        raise ValueError("attention_window_row_exact must be a boolean")
+    if attention_window and not row_exact:
+        raise ValueError(
+            "attention_window_row_exact requires target_verify_row_exact"
+        )
+    if not attention_window:
+        policy.pop("attention_window_row_exact", None)
     progressive_tile = policy.get("progressive_verification_tile")
     if progressive_tile is not None and progressive_tile != "auto" and (
         type(progressive_tile) is not int or progressive_tile < 1
@@ -765,11 +775,19 @@ class MuseGlimmerAdapter:
             )
 
             self.model.configure_target_verify_row_exact(True)
+            self.model.configure_attention_window_row_exact(
+                self.external_policy.get("attention_window_row_exact", False)
+            )
             digest = hashlib.sha256(
                 (
                     self.identity["fingerprint"]
                     + json.dumps(
-                        {"algorithm": TARGET_VERIFY_ROW_EXACT_VERSION},
+                        {
+                            "algorithm": TARGET_VERIFY_ROW_EXACT_VERSION,
+                            "attention_window_row_exact": self.external_policy.get(
+                                "attention_window_row_exact", False
+                            ),
+                        },
                         sort_keys=True,
                     )
                 ).encode()
@@ -900,6 +918,9 @@ class MuseGlimmerAdapter:
                     "qualified": False,
                     "selected": True,
                     "performance_claim": False,
+                    "attention_window_row_exact": self.external_policy.get(
+                        "attention_window_row_exact", False
+                    ),
                 }
             if progressive_tile is not None:
                 from ..runtime.progressive_external_verify import (

@@ -443,6 +443,7 @@ def test_external_execution_config_normalizes_pairwise_and_adaptive_policy():
     assert "adaptive_verification" not in baseline
     assert "external_varlen_prefill" not in baseline
     assert "ingress_cohort" not in baseline
+    assert "ast_collision_probability" not in baseline
 
     adapter.external_policy = {
         "num_draft": 2,
@@ -482,6 +483,20 @@ def test_external_execution_config_normalizes_pairwise_and_adaptive_policy():
         "policy": adaptive,
     }
 
+    adapter.external_policy["ast_collision_probability"] = True
+    selected = adapter.execution_config(max_lanes=4, prefill_step=16)
+    assert selected["ast_collision_probability"] == {
+        "enabled": True,
+        "feature": "sum_q_squared_per_position_v1",
+        "phase": "prior_completed_round_before_current_draw",
+    }
+    assert adapter._external_execution_numerics()[
+        "external_ast_collision_probability"
+    ] == {
+        "algorithm": "lagged-pre-sample-collision-survival-v1",
+        "feature": "sum_q_squared_per_position_v1",
+    }
+
 
 def test_qwen38_external_batch_forwards_adaptive_proposal_topology(monkeypatch):
     from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
@@ -500,6 +515,7 @@ def test_qwen38_external_batch_forwards_adaptive_proposal_topology(monkeypatch):
         "progressive_alternative_depth_policy": "confidence_tail",
         "progressive_cross_session_pack_rows": 8,
         "progressive_cross_session_pack_mode": "ordered_live_frontier",
+        "ast_collision_probability": True,
     }
     adapter._progressive_external_binding = {
         "target_protocol": "test-target-protocol",
@@ -518,12 +534,14 @@ def test_qwen38_external_batch_forwards_adaptive_proposal_topology(monkeypatch):
     assert calls[-1]["progressive_alternative_depth_policy"] == "confidence_tail"
     assert calls[-1]["progressive_cross_session_pack_rows"] == 8
     assert calls[-1]["progressive_cross_session_pack_mode"] == "ordered_live_frontier"
+    assert calls[-1]["ast_collision_probability"] is True
     config = adapter.execution_config(max_lanes=4, prefill_step=16)
     assert config["progressive_alternative_branches"] == 4
     assert config["progressive_alternative_strategy"] == "confidence_tree"
     assert config["progressive_alternative_depth_policy"] == "confidence_tail"
     assert config["progressive_cross_session_pack_rows"] == 8
     assert config["progressive_cross_session_pack_mode"] == "ordered_live_frontier"
+    assert config["ast_collision_probability"]["enabled"] is True
 
 
 def test_qwen_external_policy_allowlists_adaptive_proposal_topology():

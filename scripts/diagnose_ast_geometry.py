@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, is_dataclass
 import functools
+import hashlib
 import importlib.machinery
 import json
 from pathlib import Path
@@ -23,6 +24,19 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
+
+
+def load_execution_policy(default_path, override_path=None, required_enabled=()):
+    """Load one explicit policy and fail closed on required feature gates."""
+    path = Path(default_path if override_path is None else override_path).resolve()
+    policy = json.loads(path.read_text())
+    if not isinstance(policy, dict):
+        raise ValueError("execution policy must be a JSON object")
+    for key in required_enabled:
+        if policy.get(key) is not True:
+            raise ValueError(f"execution policy must explicitly enable {key}")
+    encoded = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+    return policy, path, hashlib.sha256(encoded).hexdigest()
 
 
 def capture_options(content, prompt, position, options):
@@ -320,6 +334,18 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=96)
     ap.add_argument("--ast-planner", action="store_true")
     ap.add_argument("--auto-tile", action="store_true")
+    ap.add_argument(
+        "--policy-path",
+        type=Path,
+        help="explicit execution policy; defaults to the historical config policy",
+    )
+    ap.add_argument(
+        "--require-policy-enabled",
+        action="append",
+        default=[],
+        metavar="KEY",
+        help="fail unless the resolved policy explicitly sets KEY to true",
+    )
     ap.add_argument("--capture-position", type=int, help="one-based, already localized divergence position")
     ap.add_argument("--capture-prompt", default="code_edit", choices=("short_math", "short_explain", "code_edit"))
     ap.add_argument("--capture-at", action="append", default=[], metavar="PROMPT=POSITION",
@@ -343,7 +369,9 @@ def main():
     if foreign := guards.foreign_model_processes():
         raise RuntimeError(f"foreign model processes: {foreign}")
     name, policy_path, lane, lane_policy = bench.CONFIGS[args.config]
-    policy = json.loads(policy_path.read_text())
+    policy, resolved_policy_path, policy_sha256 = load_execution_policy(
+        policy_path, args.policy_path, args.require_policy_enabled
+    )
     if args.ast_planner:
         policy["continuation_pool"]["ast_planner"] = True
     if args.auto_tile:
@@ -354,6 +382,8 @@ def main():
     identities = bench.inventory()
     meta = {"schema": "mlx2.ast-geometry-probe.v1", "config": args.config,
             "source_revision": source, "ownership": owned, "policy": policy,
+            "policy_source": str(resolved_policy_path),
+            "policy_sha256": policy_sha256,
             "checkpoint": identities["targets"][name]["checkpoint"], "inventory": identities,
             "performance_evidence": False, "qualification": False,
             "bounded_logprob_capture": {label: {"position_one_based": position, "top_logprobs": 20}

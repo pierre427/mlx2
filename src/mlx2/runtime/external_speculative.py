@@ -642,6 +642,30 @@ def _block_row(block, vocab):
     return tokens, (None if vocab is None else block.dense_laws(vocab)[0])
 
 
+def _proposal_collision_probabilities(laws):
+    """Distribution-only AST features; this API cannot inspect draft tokens."""
+    from .acceptance_estimator import proposal_law_features
+
+    if isinstance(laws, CompactDraftRow):
+        rows = laws.candidate_probs
+    elif isinstance(laws, TreeDraftRow):
+        raise TypeError(
+            "AST collision probability requires proposal distributions"
+        )
+    else:
+        rows = laws
+    result = []
+    for law in rows:
+        result.append(
+            1.0
+            if isinstance(law, PointMassLaw)
+            else proposal_law_features(law).collision_probability
+        )
+    if not result:
+        raise ValueError("AST collision probability requires a nonempty law row")
+    return tuple(result)
+
+
 class _ReferenceTreeTransaction:
     """Commit a serial-tree accepted path through the ordinary target forward."""
 
@@ -684,6 +708,7 @@ class ExternalDraftBatchGenerator:
     progressive_cross_session_pack_rows = None
     progressive_cross_session_pack_mode = None
     adaptive_policy = None
+    ast_collision_probability = False
     multilane_draft_cap = None
 
     def __init__(self, model, *, draft_model, binding, completion_batch_size=4,
@@ -699,6 +724,7 @@ class ExternalDraftBatchGenerator:
                  tree_node_budget_by_lanes=None,
                  tensorfold_cohort_limit=None,
                  target_tree_executor_provider=None,
+                 ast_target_tree_executor_provider=None,
                  minimum_draft_proposals=None,
                  external_prefill_coalesce_ms=0,
                  external_prefill_coalesce_min_tokens=1,
@@ -716,6 +742,7 @@ class ExternalDraftBatchGenerator:
                  progressive_verification_fidelity=None,
                  progressive_target_protocol=None,
                  progressive_protocol_binding=None,
+                 ast_collision_probability=False,
                  decode_time_fairness=None, decode_first=None,
                  cost_per_commit_handoff=None,
                  draft_tail_equalize=False,
@@ -1230,6 +1257,7 @@ class ExternalDraftBatchGenerator:
                 tile_cap=progressive_verification_tile,
                 max_lanes=progressive_cross_session_pack_rows or 4,
                 num_draft=self.num_draft,
+                alternative_provider=ast_target_tree_executor_provider,
             )
             self.ast_execution_planner = ASTExecutionPlanner(
                 profile, tile_cap=progressive_verification_tile,
@@ -1237,6 +1265,18 @@ class ExternalDraftBatchGenerator:
                 source_limit=self.continuation_policy.limit,
                 minimum_depth=self.minimum_draft_proposals,
             )
+        elif ast_target_tree_executor_provider is not None:
+            raise ValueError(
+                "AST target-tree backend requires an adapter-bound AST planner"
+            )
+        self.ast_target_tree_executor_provider = ast_target_tree_executor_provider
+        if type(ast_collision_probability) is not bool:
+            raise ValueError("ast_collision_probability must be boolean")
+        if ast_collision_probability and self.ast_execution_planner is None:
+            raise ValueError(
+                "ast_collision_probability requires an adapter-bound AST planner"
+            )
+        self.ast_collision_probability = ast_collision_probability
         if multilane_draft_cap is not None and (
             type(multilane_draft_cap) is not int
             or not self.minimum_draft_proposals
@@ -2861,8 +2901,17 @@ class ExternalDraftBatchGenerator:
                 lane.target_tree_width_trace_overflow = overflow
             raise
 
-    def _finish_target_tree_dispatch(self, cohort, result, *, cached):
+    def _finish_target_tree_dispatch(
+        self,
+        cohort,
+        result,
+        *,
+        cached,
+        provider=None,
+        publish_tree_metrics=True,
+    ):
         """Publish metrics or abort the still-open target transaction."""
+        provider = self.target_tree_executor_provider if provider is None else provider
         if not isinstance(result, tuple) or len(result) != 3:
             raise TypeError("target-tree executor must return logits, features, transaction")
         transaction = result[2]
@@ -2899,9 +2948,9 @@ class ExternalDraftBatchGenerator:
             raise TypeError("target-tree transaction has no commit operation")
         if (
             transaction.provider_protocol
-            != self.target_tree_executor_provider.protocol
+            != provider.protocol
             or transaction.provider_revision_token
-            != self.target_tree_executor_provider.source_revision_token
+            != provider.source_revision_token
         ):
             try:
                 transaction.abort()
@@ -2909,10 +2958,10 @@ class ExternalDraftBatchGenerator:
                 pass
             raise RuntimeError("target-tree transaction provider binding mismatch")
         try:
-            event = self.target_tree_executor_provider.dispatch_metrics(
+            event = provider.dispatch_metrics(
                 len(cohort), transaction, cached=cached
             )
-            if event.provider_protocol != self.target_tree_executor_provider.protocol:
+            if event.provider_protocol != provider.protocol:
                 raise RuntimeError("target-tree dispatch provider identity mismatch")
             if type(event.cached) is not bool or event.cached is not cached:
                 raise RuntimeError("target-tree dispatch cache selection mismatch")
@@ -2922,7 +2971,23 @@ class ExternalDraftBatchGenerator:
                 raise RuntimeError("uncached target-tree dispatch reported a cache hit")
             if type(event.physical_packed) is not bool:
                 raise TypeError("target-tree packed-dispatch metric must be boolean")
-            self._apply_target_tree_dispatch_metrics(cohort, event)
+            if publish_tree_metrics:
+                self._apply_target_tree_dispatch_metrics(cohort, event)
+            else:
+                from .target_tree_executor import TargetTreeDispatchMetrics
+
+                if not isinstance(event, TargetTreeDispatchMetrics):
+                    raise TypeError(
+                        "target-tree provider returned invalid dispatch metrics"
+                    )
+                if type(event.width) is not int or event.width != 1:
+                    raise ValueError(
+                        "AST target-tree dispatch must remain single-session"
+                    )
+                _bump(
+                    self.scheduler_stats,
+                    "external_ast_target_tree_provider_launches",
+                )
         except BaseException:
             # Provider callbacks are untrusted and may corrupt `closed` before
             # failing. Only exact True is sufficient evidence that abort is no
@@ -4456,29 +4521,60 @@ class ExternalDraftBatchGenerator:
                 if all(states[index]["offset"] > 0 for index in active):
                     aligned_continued_launches[active_width] += 1
 
-            owner = self._target_owner(
-                [states[index]["private_cache"] for index in active]
+            provider_backend = bool(
+                launch_plan is not None
+                and launch_plan.backend != ast_planner.profile.backend
             )
-            transaction = owner.begin(lengths=input_lengths)
+            if provider_backend and len(active) != 1:
+                raise RuntimeError(
+                    "AST target-tree backend is single-session only"
+                )
+            transaction = None
             results = []
             try:
                 planning_started = time.perf_counter() if launch_plan is not None else None
-                (
-                    logits,
-                    features,
-                    _target_executor_detail,
-                ) = execute_progressive_target_rows(
-                    self.model,
-                    self.mx.array(padded_inputs),
-                    transaction.caches,
-                    self.layers,
-                    protocol=self.progressive_target_protocol,
-                    fidelity=self.progressive_verification_fidelity,
-                    input_lengths=input_lengths,
-                )
-                _observe_target_executor(
-                    target_executor, _target_executor_detail
-                )
+                if provider_backend:
+                    logits, features, transaction = self._ast_target_tree_forward(
+                        states[active[0]]["lane"],
+                        states[active[0]]["private_cache"],
+                        padded_inputs[0],
+                    )
+                    _observe_target_executor(
+                        target_executor,
+                        {
+                            "execution": "adapter_owned",
+                            "row_exact": True,
+                            "physical_width": 1,
+                            "token_width": len(padded_inputs[0]),
+                            "adapter_detail": {
+                                "route": launch_plan.backend,
+                                "provider_protocol": (
+                                    self.ast_target_tree_executor_provider.protocol
+                                ),
+                            },
+                        },
+                    )
+                else:
+                    owner = self._target_owner(
+                        [states[index]["private_cache"] for index in active]
+                    )
+                    transaction = owner.begin(lengths=input_lengths)
+                    (
+                        logits,
+                        features,
+                        _target_executor_detail,
+                    ) = execute_progressive_target_rows(
+                        self.model,
+                        self.mx.array(padded_inputs),
+                        transaction.caches,
+                        self.layers,
+                        protocol=self.progressive_target_protocol,
+                        fidelity=self.progressive_verification_fidelity,
+                        input_lengths=input_lengths,
+                    )
+                    _observe_target_executor(
+                        target_executor, _target_executor_detail
+                    )
                 # Greedy, processor-free rows need only the target argmax and
                 # (when requested) the ordinary float32 log-softmax row.  Keep
                 # the whole physical slab on device and cross the host/device
@@ -4658,7 +4754,7 @@ class ExternalDraftBatchGenerator:
                     accepted_lengths=[result[6] for result in results]
                 )
             except BaseException:
-                if not transaction.closed:
+                if transaction is not None and not transaction.closed:
                     transaction.abort()
                 raise
 
@@ -6058,6 +6154,35 @@ class ExternalDraftBatchGenerator:
             configured_limit=self.target_tree_cohort_limit,
         )
         return self._finish_target_tree_dispatch(cohort, result, cached=cached)
+
+    def _ast_target_tree_forward(self, lane, cache, inputs):
+        """One exact linear chain through the admitted AST provider.
+
+        This deliberately accepts one lane and one private cache only. There
+        is no sibling cache copy/share operation in the phase-1 contract.
+        """
+
+        provider = self.ast_target_tree_executor_provider
+        if provider is None:
+            raise RuntimeError("AST target-tree backend has no adapter provider")
+        provider.validate_cohort(1, 1)
+        parents = list(range(-1, len(inputs) - 1))
+        cached = self.tree_gates["cache_executor"]
+        result = provider.forward(
+            self.model,
+            inputs,
+            parents,
+            cache,
+            self.layers,
+            cached=cached,
+        )
+        return self._finish_target_tree_dispatch(
+            [lane],
+            result,
+            cached=cached,
+            provider=provider,
+            publish_tree_metrics=False,
+        )
 
     @staticmethod
     def _tree_forbidden(lane):
@@ -7894,6 +8019,18 @@ class ExternalDraftBatchGenerator:
                     )
                     ast_planner = getattr(self, "ast_execution_planner", None)
                     if ast_planner is not None and observed_proposed:
+                        if self.ast_collision_probability:
+                            _tokens, proposal_laws = _block_row(
+                                block, self._target_args.vocab_size
+                            )
+                            ast_planner.observe_collision_probabilities(
+                                int(lane.uid),
+                                _proposal_collision_probabilities(proposal_laws),
+                            )
+                            _bump(
+                                self.scheduler_stats,
+                                "external_ast_collision_feature_rows",
+                            )
                         primary = primary_outcomes.get(int(lane.uid))
                         tested = observed_proposed
                         primary_accepted = accepted

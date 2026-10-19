@@ -27,6 +27,112 @@ LAUNCH_FIT_WINDOW = 256
 
 
 @dataclass(frozen=True)
+class NumericalEquivalenceOracle:
+    """An exact backend verdict bound to every mutable execution identity.
+
+    The planner never runs an oracle and never treats a source hash as a
+    numerical verdict.  An adapter may publish a backend only after its own
+    oracle has produced this complete, affirmative binding.
+    """
+
+    profile_binding: str
+    device: str
+    build: str
+    source_revision_token: str
+    evidence: str
+    equivalent: bool
+
+    def __post_init__(self):
+        if type(self.equivalent) is not bool or self.equivalent is not True:
+            raise ValueError("AST alternative backend requires a passing numerical oracle")
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                self.profile_binding,
+                self.device,
+                self.build,
+                self.source_revision_token,
+                self.evidence,
+            )
+        ):
+            raise ValueError("AST numerical oracle binding is incomplete")
+
+
+@dataclass(frozen=True)
+class AlternativeExecutionBackend:
+    """Adapter-owned, exact, single-session target backend and cost law."""
+
+    backend: str
+    profile_binding: str
+    device: str
+    build: str
+    source_revision_token: str
+    input_widths: tuple[int, ...]
+    row_costs: tuple[float, ...]
+    launch_cost: float = 0.0
+    context_row_cost: float = 0.0
+    context_windows: tuple[tuple[int, float], ...] = ()
+    cost_authority: str = "adapter_declared_weight_passes"
+    maximum_sessions: int = 1
+    oracle: NumericalEquivalenceOracle | None = None
+
+    def __post_init__(self):
+        if not self.backend or self.backend == "padded_row_exact":
+            raise ValueError("AST alternative backend identity is invalid")
+        if self.maximum_sessions != 1:
+            raise ValueError("AST alternative backend is single-session only")
+        if not self.input_widths or any(
+            type(width) is not int or width < 1 for width in self.input_widths
+        ):
+            raise ValueError("AST alternative backend requires exact input widths")
+        if len(self.row_costs) < max(self.input_widths) or any(
+            not math.isfinite(cost) or cost <= 0 for cost in self.row_costs
+        ):
+            raise ValueError("AST alternative backend cost law is incomplete")
+        if any(
+            not math.isfinite(cost) or cost < 0
+            for cost in (self.launch_cost, self.context_row_cost)
+        ):
+            raise ValueError("AST alternative backend costs must be nonnegative")
+        if any(
+            type(window) is not int
+            or window < 1
+            or not math.isfinite(cost)
+            or cost < 0
+            for window, cost in self.context_windows
+        ):
+            raise ValueError(
+                "AST alternative attention windows require finite valid geometry"
+            )
+        oracle = self.oracle
+        if oracle is None or (
+            oracle.profile_binding != self.profile_binding
+            or oracle.device != self.device
+            or oracle.build != self.build
+            or oracle.source_revision_token != self.source_revision_token
+        ):
+            raise ValueError(
+                "AST alternative backend numerical oracle does not match its binding"
+            )
+
+    def cost(self, length, context=0):
+        if type(length) is not int or length < 1 or context < 0:
+            raise ValueError("AST alternative backend geometry is invalid")
+        if length not in self.input_widths:
+            return math.inf
+        window_work = sum(
+            cost * length * min(context, window)
+            for window, cost in self.context_windows
+        )
+        return (
+            self.launch_cost
+            + self.row_costs[length - 1]
+            + self.context_row_cost * length * context
+            + window_work
+        )
+
+
+@dataclass(frozen=True)
 class ExecutionProfile:
     binding: str
     device: str
@@ -49,6 +155,7 @@ class ExecutionProfile:
     max_position_rows: int | None = None
     context_windows: tuple[tuple[int, float], ...] = ()
     sequential_draft: bool = False
+    alternative_backends: tuple[AlternativeExecutionBackend, ...] = ()
 
     def __post_init__(self):
         if not self.binding or not self.device or not self.build:
@@ -78,6 +185,18 @@ class ExecutionProfile:
         if any(type(w) is not int or w < 1 or not math.isfinite(c) or c < 0
                for w, c in self.context_windows):
             raise ValueError("AST attention windows must have finite valid geometry")
+        names = [backend.backend for backend in self.alternative_backends]
+        if len(names) != len(set(names)) or self.backend in names:
+            raise ValueError("AST execution backend identities must be distinct")
+        for backend in self.alternative_backends:
+            if (
+                backend.profile_binding != self.binding
+                or backend.device != self.device
+                or backend.build != self.build
+            ):
+                raise ValueError(
+                    "AST alternative backend does not match the execution profile"
+                )
 
     def cost(self, lengths, contexts=()):
         lengths = tuple(lengths)
@@ -105,6 +224,13 @@ class ExecutionProfile:
                           for window, cost in self.context_windows)
         return self.launch_cost + work + self.context_row_cost * context + window_work
 
+    def alternative(self, backend):
+        return next(
+            (candidate for candidate in self.alternative_backends
+             if candidate.backend == backend),
+            None,
+        )
+
 
 @dataclass(frozen=True)
 class RequestWork:
@@ -118,6 +244,11 @@ class RequestWork:
     # (branches one and two keep full chains, later branches keep the trunk
     # plus one token: ``confidence_tree_branch_depths``).
     trunk: int = 1
+    # Optional adapter-owned, per-position distribution features.  Every
+    # value is sum(q_i^2) for the whole proposal law at that position, never
+    # q_i(sampled).  The external route publishes only lagged completed-round
+    # features, so this round's depth is fixed before its proposal draw.
+    collision_probabilities: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -130,6 +261,8 @@ class SourceBudget:
     predicted_utility: float
     predicted_cost: float
     reason: str
+    survival_priors: tuple[float, ...] = ()
+    survival_authority: str = "lagged_acceptance"
 
     def receipt(self):
         return asdict(self)
@@ -200,11 +333,17 @@ This bounds starvation while allowing live-frontier refill and retirement.
         # Observed committed-token uplift per extra verified row from
         # multi-branch rounds, per request: (uplift sum, extra-row sum, n).
         self._branch_uplift = {}
+        # Adapter-opted distribution-only proposal features from the most
+        # recent completed proposal round, keyed by request.  These are a
+        # causal prior for the next round, never current sampled-token data.
+        self._collision_probabilities = {}
+        self._collision_feature_observations = 0
         # (physical rows, geometry prior, seconds) of timed launches, and the
         # robust per-row-count seconds curve over prior cost when justified:
         # a tuple of (prior, seconds, rows, samples) points, nondecreasing.
         self._launch_samples = deque(maxlen=LAUNCH_FIT_WINDOW)
         self._launch_curve = None
+        self._backend_launches = {}
 
     def acceptance(self, uid, depth=None):
         accepted, tested = (self._survival.get(uid, (0, 0)) if depth is None
@@ -252,21 +391,45 @@ This bounds starvation while allowing live-frontier refill and retirement.
         total, rows, count = self._branch_uplift.get(uid, (0.0, 0.0, 0))
         return (None if not rows else total / rows), count
 
+    def observe_collision_probabilities(self, uid, probabilities):
+        """Publish one law-only feature row for a later source decision."""
+        values = tuple(float(value) for value in probabilities)
+        if (
+            not values
+            or len(values) > 15
+            or any(not math.isfinite(value) or not 0 < value <= 1 for value in values)
+        ):
+            raise ValueError("AST collision probabilities must be finite in (0, 1]")
+        self._collision_probabilities[uid] = values
+        self._collision_feature_observations += 1
+
     def release(self, uid):
         self._survival.pop(uid, None)
         self._branch_uplift.pop(uid, None)
+        self._collision_probabilities.pop(uid, None)
         self._depth_survival = {key: value for key, value in self._depth_survival.items() if key[0] != uid}
 
     def observe_launch(self, plan, seconds):
         # The caller times an existing synchronization, never adds an eval.
+        self._backend_launches[plan.backend] = (
+            self._backend_launches.get(plan.backend, 0) + 1
+        )
+        if plan.backend != self.profile.backend:
+            # Alternative priors are intentionally not mixed into the
+            # primary backend's learned launch curve.
+            return
         if not math.isfinite(seconds) or seconds <= 0 or plan.predicted_cost <= 0:
             return
-        prior = self.profile.cost(plan.input_lengths, plan.context_lengths)
+        prior = self.declared_backend_cost(
+            plan.backend, plan.input_lengths, plan.context_lengths
+        )
         scale = seconds / prior
         self.observed_scale = scale if not self.cost_samples else (
             0.875 * self.observed_scale + 0.125 * scale)
         self.cost_samples += 1
-        key = self._shape_key(plan.input_lengths, plan.context_lengths)
+        key = self._shape_key(
+            plan.input_lengths, plan.context_lengths, plan.backend
+        )
         previous, count = self._shape_costs.get(key, (scale, 0))
         self._shape_costs[key] = (previous * 0.875 + scale * 0.125, count + 1)
         # Per-executor, source-bound and bounded; no cross-artifact cache.
@@ -352,8 +515,11 @@ This bounds starvation while allowing live-frontier refill and retirement.
                 "launch_estimator": "per_row_count_median_isotonic_v1"}
 
     @staticmethod
-    def _shape_key(lengths, contexts):
-        return tuple(sorted(zip(lengths, (int(c).bit_length() for c in contexts))))
+    def _shape_key(lengths, contexts, backend="padded_row_exact"):
+        return (
+            backend,
+            tuple(sorted(zip(lengths, (int(c).bit_length() for c in contexts)))),
+        )
 
     def cost(self, lengths, contexts):
         prior = self.profile.cost(lengths, contexts)
@@ -364,7 +530,9 @@ This bounds starvation while allowing live-frontier refill and retirement.
         # a shape never launched, the geometry prior when no curve exists.
         baseline = (prior if self._launch_curve is None
                     else self._curve_seconds(prior) / self.observed_scale)
-        observed = self._shape_costs.get(self._shape_key(lengths, contexts))
+        observed = self._shape_costs.get(
+            self._shape_key(lengths, contexts, self.profile.backend)
+        )
         if observed is None:
             return baseline
         scale, count = observed
@@ -373,6 +541,49 @@ This bounds starvation while allowing live-frontier refill and retirement.
         weight = count / (count + 4)
         ratio = min(4.0, max(0.25, scale / self.observed_scale))
         return baseline + weight * (prior * ratio - baseline)
+
+    def backend_cost(self, backend, lengths, contexts):
+        """Cost one exact physical launch through a named backend.
+
+        Learned launch curves belong only to the primary backend until an
+        alternative has its own timing contract. Alternative costs remain
+        adapter-declared priors and are never silently calibrated from the
+        primary executor.
+        """
+
+        if backend == self.profile.backend:
+            return self.cost(lengths, contexts)
+        candidate = self.profile.alternative(backend)
+        if candidate is None or len(lengths) != 1:
+            return math.inf
+        if contexts and len(contexts) != 1:
+            raise ValueError("AST alternative backend requires one context")
+        return candidate.cost(lengths[0], contexts[0] if contexts else 0)
+
+    def declared_backend_cost(self, backend, lengths, contexts):
+        """Uncalibrated adapter cost used to fit backend-local timings."""
+
+        if backend == self.profile.backend:
+            return self.profile.cost(lengths, contexts)
+        candidate = self.profile.alternative(backend)
+        if candidate is None or len(lengths) != 1:
+            return math.inf
+        return candidate.cost(lengths[0], contexts[0] if contexts else 0)
+
+    def _best_launch_cost(self, lengths, contexts):
+        primary = self.cost(lengths, contexts)
+        best = (primary, self.profile.backend)
+        if len(lengths) == 1:
+            for backend in self.profile.alternative_backends:
+                value = backend.cost(
+                    lengths[0], contexts[0] if contexts else 0
+                )
+                # Strictly cheaper: an equality keeps the ordinary/reference
+                # executor selected. Cost priors never break a tie toward a
+                # specialized backend.
+                if value < best[0]:
+                    best = (value, backend.backend)
+        return best
 
     @staticmethod
     def _branch_rows(branches, trunk, start, end):
@@ -391,18 +602,36 @@ This bounds starvation while allowing live-frontier refill and retirement.
                 rows.extend([1] * (branches - 2))
         return rows
 
+    @staticmethod
+    def _prefix_survival(priors, position):
+        return math.prod(priors[:position])
+
     def _round_cost(self, depth, branches, tile, context, survival, trunk=1):
         # Later tiles execute only after a surviving prefix. Price each
         # branch's conditional work, not every full path unconditionally,
         # and never charge the shared trunk once per branch.
         trunk = max(1, min(int(trunk), depth - 1)) if branches > 1 else depth
         total = 0.0
+        priors = (
+            tuple(float(value) for value in survival[:depth])
+            if isinstance(survival, (tuple, list))
+            else (float(survival),) * depth
+        )
+        if len(priors) < depth or any(
+            not math.isfinite(value) or not 0 <= value <= 1 for value in priors
+        ):
+            raise ValueError("AST per-position survival prior is invalid")
         for start in range(0, depth, tile):
             end = min(depth, start + tile)
             rows = self._branch_rows(branches, trunk, start, end)
             terminal = int(end == depth)
-            total += self.cost([n + terminal for n in rows], [context + start] * len(rows)) * (
-                1 - (1 - survival ** start) ** branches)
+            prefix_survival = self._prefix_survival(priors, start)
+            target, _backend = self._best_launch_cost(
+                [n + terminal for n in rows],
+                [context + start] * len(rows),
+            )
+            total += target * (
+                1 - (1 - prefix_survival) ** branches)
         return total
 
     def source_budgets(self, requests):
@@ -421,6 +650,20 @@ This bounds starvation while allowing live-frontier refill and retirement.
             p = request.acceptance
             if not math.isfinite(p) or not 0 <= p <= 1:
                 raise ValueError("AST acceptance prior must be a probability")
+            collision = (
+                tuple(request.collision_probabilities)
+                or self._collision_probabilities.get(request.uid, ())
+            )
+            if collision and (
+                len(collision) > 15
+                or any(
+                    not math.isfinite(value) or not 0 < value <= 1
+                    for value in collision
+                )
+            ):
+                raise ValueError(
+                    "AST collision prior must be a bounded probability row"
+                )
             if request.maximum_depth == 0:
                 result.append(SourceBudget(request.uid, 0, 1, 0, self.tiles[0], 1, 0,
                                            "terminal_primary"))
@@ -439,6 +682,12 @@ This bounds starvation while allowing live-frontier refill and retirement.
                 # DFlash block length changes its denoising distribution.
                 # Do not pool a short block's observations into a longer one.
                 depth_p = self.acceptance(request.uid, depth) if (request.uid, depth) in self._depth_survival else p
+                priors = (
+                    tuple(collision[:depth])
+                    + (depth_p,) * max(0, depth - len(collision))
+                    if collision
+                    else (depth_p,) * depth
+                )
                 for branches in range(1, limit + 1):
                     if branches > 1 and depth < 2:
                         continue
@@ -449,8 +698,14 @@ This bounds starvation while allowing live-frontier refill and retirement.
                     # A branch budget is bounded work, not fabricated token
                     # confidence. The union prior stands in until exact
                     # multi-branch commits report what extra rows bought.
-                    primary = 1 + sum(depth_p ** d for d in range(1, depth + 1))
-                    union = 1 + sum(1 - (1 - depth_p ** d) ** branches for d in range(1, depth + 1))
+                    prefix_survival = [
+                        self._prefix_survival(priors, position)
+                        for position in range(1, depth + 1)
+                    ]
+                    primary = 1 + sum(prefix_survival)
+                    union = 1 + sum(
+                        1 - (1 - value) ** branches for value in prefix_survival
+                    )
                     trunk = max(1, min(int(request.trunk), depth - 1)) if branches > 1 else depth
                     extra_rows = (depth - trunk) + max(0, branches - 2) if branches > 1 else 0
                     rate, samples = self.branch_uplift(request.uid)
@@ -460,20 +715,25 @@ This bounds starvation while allowing live-frontier refill and retirement.
                     utility = primary + prior_uplift + weight * (learned - prior_uplift)
                     nodes = min(self.source_limit, depth * branches)
                     for tile in self.tiles:
-                        target = self._round_cost(depth, branches, tile, request.context_length, depth_p, trunk)
+                        target = self._round_cost(
+                            depth, branches, tile, request.context_length, priors, trunk
+                        )
                         passes = 1 + (branches > 1 and not self.profile.reusable_draft_lattice)
                         cost = target + self.profile.draft_cost * passes * (depth if self.profile.sequential_draft else 1)
                         if math.isfinite(cost) and cost > 0:
                             candidates.append((utility / cost, -cost, -nodes, depth,
-                                               branches, tile, utility, cost))
+                                               branches, tile, utility, cost, priors))
             if not candidates:
                 raise ValueError("AST request has no feasible exact source plan")
-            _, _, _, depth, branches, tile, utility, cost = max(candidates)
+            _, _, _, depth, branches, tile, utility, cost, priors = max(candidates)
             result.append(SourceBudget(request.uid, depth, branches,
                                        min(self.source_limit, depth * branches), tile,
                                        utility, cost, "bounded_reprobe" if request.reprobe
                                        else "learned_branch_uplift" if self.branch_uplift(request.uid)[1]
-                                       else "hardware_cohort_cost_prior"))
+                                       else "hardware_cohort_cost_prior",
+                                       tuple(priors),
+                                       "proposal_collision_probability_lagged_v1"
+                                       if collision else "lagged_acceptance"))
         return tuple(result)
 
     def plan_launch(self, ready, *, terminal, max_lanes):
@@ -494,8 +754,10 @@ This bounds starvation while allowing live-frontier refill and retirement.
             rows = sorted(ready, key=lambda r: (lengths[r.index], r.context_length, r.index))
 
             def cost(group, lengths=lengths):
-                return self.cost([lengths[r.index] for r in group],
-                                 [r.context_length for r in group])
+                return self._best_launch_cost(
+                    [lengths[r.index] for r in group],
+                    [r.context_length for r in group],
+                )[0]
 
             @lru_cache(None)
             def partition(start, rows=tuple(rows), cost=cost):
@@ -552,10 +814,14 @@ This bounds starvation while allowing live-frontier refill and retirement.
                               for row in group if lengths[row.index] > position)
                 for group in by_request.values()
                 for position in range(max(lengths[row.index] for row in group)))
+            group_cost, backend = self._best_launch_cost(
+                [lengths[r.index] for r in group],
+                [r.context_length for r in group],
+            )
             plans.append((total / useful, maximum, -tile, LaunchPlan(
                 tuple(r.index for r in group), tile,
-                tuple(lengths[r.index] for r in group), cost(group), total,
-                maximum, len(groups), self.profile.backend,
+                tuple(lengths[r.index] for r in group), group_cost, total,
+                maximum, len(groups), backend,
                 tuple(r.context_length for r in group), tuple(len(g) for g in groups),
                 useful, tuple(r.acceptance for r in group))))
         if not plans:
@@ -579,4 +845,28 @@ This bounds starvation while allowing live-frontier refill and retirement.
                 **self.launch_curve_receipt(),
                 "branch_authority": "planner_learned_uplift_v1",
                 "branch_feedback_requests": len(self._branch_uplift),
+                "collision_feature": "sum_q_squared_per_position_v1",
+                "collision_feature_requests": len(self._collision_probabilities),
+                "collision_feature_observations": self._collision_feature_observations,
+                "collision_feature_phase": "prior_completed_round_before_current_draw",
+                "alternative_backends": [
+                    {
+                        "backend": backend.backend,
+                        "maximum_sessions": backend.maximum_sessions,
+                        "input_widths": backend.input_widths,
+                        "cost_authority": backend.cost_authority,
+                        "source_revision_token": backend.source_revision_token,
+                        "numerical_oracle": backend.oracle.evidence,
+                        "qualified": False,
+                        "selected": True,
+                        "observed_used": self._backend_launches.get(
+                            backend.backend, 0
+                        )
+                        > 0,
+                        "launches": self._backend_launches.get(
+                            backend.backend, 0
+                        ),
+                    }
+                    for backend in self.profile.alternative_backends
+                ],
                 "qualified": False}

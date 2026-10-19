@@ -400,7 +400,18 @@ class SegmentedKVView:
         self.offset = mx.array([row.offset for row in self.rows])
         return None, None
 
-    def row_exact_attention(self, queries, keys, values, *, scale, window_size):
+    def row_exact_attention(
+        self,
+        queries,
+        keys,
+        values,
+        *,
+        scale,
+        window_size,
+        window_attention=None,
+        serial_transform=None,
+        route_note=None,
+    ):
         """Append and attend with each lane's ordinary one-token arithmetic.
 
         A speculative verify window normally appends all rows at once. That
@@ -425,6 +436,8 @@ class SegmentedKVView:
         ):
             raise ValueError("row-exact segmented attention geometry mismatch")
         outputs = []
+        window_rows = 0
+        serial_rows = 0
         try:
             for index, (row, count) in enumerate(zip(self.rows, self.lengths)):
                 if not count:
@@ -440,6 +453,33 @@ class SegmentedKVView:
                     mx.array(values[index : index + 1, :, :count]),
                 )
                 self._appends[index] = pair
+                candidate = (
+                    None
+                    if window_attention is None
+                    else window_attention(
+                        index,
+                        row,
+                        queries[index : index + 1, :, :count],
+                        pair[0],
+                        pair[1],
+                        count,
+                    )
+                )
+                if candidate is not None:
+                    result, fetched, reason = candidate
+                    if result is not None:
+                        self._fetched[index] = fetched
+                        if count < self.width:
+                            result = mx.pad(
+                                result,
+                                [(0, 0), (0, 0), (0, self.width - count), (0, 0)],
+                            )
+                        outputs.append(result)
+                        self.transaction._expected[index][self.layer] = _stamp(row)
+                        window_rows += count
+                        continue
+                    if route_note is not None:
+                        route_note("attention_window_fallback", reason)
                 lane_outputs = []
                 fetched = None
                 for position in range(count):
@@ -462,6 +502,8 @@ class SegmentedKVView:
                     )
                 self._fetched[index] = fetched
                 result = mx.concatenate(lane_outputs, axis=2)
+                if serial_transform is not None:
+                    result = serial_transform(index, result, count)
                 if count < self.width:
                     result = mx.pad(
                         result,
@@ -469,6 +511,7 @@ class SegmentedKVView:
                     )
                 outputs.append(result)
                 self.transaction._expected[index][self.layer] = _stamp(row)
+                serial_rows += count
         except BaseException:
             for index in range(len(self.rows)):
                 self.transaction._restore(index, self.layer)
@@ -481,6 +524,19 @@ class SegmentedKVView:
         self.offset = mx.array([row.offset for row in self.rows])
         if self.transaction.owner.note is not None:
             self.transaction.owner.note("independent_attention_rows", len(self.rows))
+        if route_note is not None:
+            if window_rows:
+                route_note("attention", "window_b1s1", window_rows)
+            if serial_rows:
+                route_note("attention", "serial_b1s1", serial_rows)
+            route_note(
+                "attention_layers",
+                (
+                    "mixed_window_serial_b1s1"
+                    if window_rows and serial_rows
+                    else ("window_b1s1" if window_rows else "serial_b1s1")
+                ),
+            )
         return mx.concatenate(outputs, axis=0)
 
     @property

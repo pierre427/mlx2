@@ -3,6 +3,7 @@ import copy
 import json
 import struct
 from pathlib import Path
+from types import MethodType, SimpleNamespace
 from typing import ClassVar
 
 import mlx.core as mx
@@ -11,11 +12,14 @@ import pytest
 
 mx.set_default_device(mx.cpu)
 from mlx2.adapters.muse_glimmer_config import ModelArgs
+from mlx2.runtime.ast_planner import ASTExecutionPlanner, ExecutionProfile, RequestWork
 from mlx2.runtime.drafters.dflash2 import DFlash2DraftModel
 from mlx2.runtime.drafters.dflash2_config import DFlash2Config
 from mlx2.runtime.external_speculative import (
     ExternalDraftBatchGenerator,
     ExternalDraftState,
+    HostDraftRow,
+    RoundDecision,
     _first_tiles_pairwise_disjoint,
 )
 from mlx2.runtime.models.muse_glimmer import Model
@@ -25,6 +29,78 @@ from mlx2.runtime.progressive_external_verify import (
 )
 from mlx2.runtime.sample_utils import LaneRNG
 from mlx2.runtime.speculative_sampling import RequestRNG, verify_proposals
+
+
+def test_external_ast_collision_feature_is_published_only_for_next_round():
+    profile = ExecutionProfile(
+        binding="test-external-ast-collision",
+        device="cpu",
+        build="test",
+        max_lanes=1,
+        tile_widths=(1,),
+        terminal_widths=(1, 2),
+        packed_min_width=1,
+        row_costs=(1.0, 2.0, 3.0),
+        launch_cost=0.1,
+        context_row_cost=0.0,
+        draft_cost=0.0,
+    )
+    planner = ASTExecutionPlanner(profile, tile_cap=1, source_limit=2)
+    work = RequestWork(
+        uid=7,
+        maximum_depth=2,
+        context_length=0,
+        branch_limit=1,
+        acceptance=0.2,
+    )
+    lane = SimpleNamespace(
+        uid=work.uid,
+        ready=[],
+        ast_source_budget={"depth": 2},
+        proposal_score_counts={},
+        proposal_trust_states={},
+    )
+    generator = object.__new__(ExternalDraftBatchGenerator)
+    generator.draft = SimpleNamespace(admission_planner=None, feedback_manager=None)
+    generator.continuation_policy = None
+    generator.ast_execution_planner = planner
+    generator.ast_collision_probability = True
+    generator.scheduler_stats = {}
+    generator.model = SimpleNamespace(args=SimpleNamespace(vocab_size=2))
+    generator._last_alternative_latch = {}
+    generator._attach_postcommit_proposal_receipts = lambda *_args, **_kwargs: None
+    observed = {}
+
+    def committed_round(owner, cohort):
+        # Source depth is irrevocably chosen before this round samples token 1.
+        observed["current"] = planner.source_budgets([work])[0]
+        assert observed["current"].depth == 2
+        assert observed["current"].survival_authority == "lagged_acceptance"
+        assert owner.scheduler_stats.get("external_ast_collision_feature_rows", 0) == 0
+
+        block = HostDraftRow(
+            tokens=[1, 1],
+            laws=[[0.9, 0.1], [0.6, 0.4]],
+        )
+        decision = RoundDecision(accepted=2, emitted=[1, 1], target_laws=None)
+        cohort[0].ready.append(SimpleNamespace(speculative_receipt={}))
+        owner._feedback_outbox.append((cohort[0], block, decision, 0))
+
+        # Staging feedback cannot publish it while the transaction is open.
+        assert owner.scheduler_stats.get("external_ast_collision_feature_rows", 0) == 0
+        assert planner.source_budgets([work])[0] == observed["current"]
+
+    generator._run_round = MethodType(committed_round, generator)
+    generator._round([lane])
+
+    assert len(lane.ready) == 1
+    assert generator.scheduler_stats["external_ast_collision_feature_rows"] == 1
+    assert planner.receipt()["collision_feature_observations"] == 1
+    next_budget = planner.source_budgets([work])[0]
+    assert next_budget.depth == 1
+    assert next_budget.survival_authority == "proposal_collision_probability_lagged_v1"
+    assert next_budget.survival_priors == pytest.approx((0.9**2 + 0.1**2,))
+    assert next_budget.survival_priors != pytest.approx((0.1,))
 
 
 def test_dflash_continuation_wrapper_is_private_point_mass_and_retry_stable():
@@ -767,7 +843,7 @@ def test_muse_progressive_receipt_reports_adapter_owned_exact_target_rows():
         assert executor["nonexact_launches"] == 0
         assert executor["last"]["execution"] == "adapter_owned"
         assert executor["last"]["adapter_detail"]["algorithm"] == (
-            "muse-native-b1s1-causal-prefix-v2"
+            "muse-native-b1s1-causal-prefix-v4"
         )
     finally:
         batch.close()

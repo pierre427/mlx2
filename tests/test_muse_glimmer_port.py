@@ -143,6 +143,37 @@ def test_row_exact_external_policy_is_explicit_and_boolean():
     assert selected["target_verify_row_exact"] is True
     with pytest.raises(ValueError, match="must be a boolean"):
         normalize_external_policy({**base, "target_verify_row_exact": 1})
+    window = normalize_external_policy(
+        {
+            **base,
+            "target_verify_row_exact": True,
+            "attention_window_row_exact": True,
+        }
+    )
+    assert window["attention_window_row_exact"] is True
+    with pytest.raises(ValueError, match="must be a boolean"):
+        normalize_external_policy(
+            {
+                **base,
+                "target_verify_row_exact": True,
+                "attention_window_row_exact": 1,
+            }
+        )
+    with pytest.raises(ValueError, match="requires target_verify_row_exact"):
+        normalize_external_policy(
+            {**base, "attention_window_row_exact": True}
+        )
+
+
+def test_ast_campaign_deselects_rejected_muse_attention_window():
+    path = Path(__file__).resolve().parents[1] / (
+        "qualification/runs/ast-cost-contract-20261019/policies/"
+        "muse-ast-planner-auto.json"
+    )
+    policy = json.loads(path.read_text())
+    assert policy["target_verify_row_exact"] is True
+    assert policy["attention_window_row_exact"] is False
+    assert policy["continuation_pool"]["ast_planner"] is True
 
 
 def test_progressive_external_policy_requires_row_exact_host_chain():

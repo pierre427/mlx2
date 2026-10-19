@@ -365,6 +365,7 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "progressive_cross_session_pack_rows",
         "progressive_cross_session_pack_mode",
         "progressive_verification_fidelity",
+        "ast_collision_probability",
         "target_verify_row_exact",
         "cost_per_commit_handoff",
         "fold",
@@ -474,6 +475,18 @@ def validate_target_verify_row_exact(policy: dict) -> bool:
     return True
 
 
+def pop_attention_window_row_exact(policy: dict) -> bool:
+    """Consume the Qwen3.8 target-owned attention-window selection."""
+    selected = policy.pop("attention_window_row_exact", False)
+    if type(selected) is not bool:
+        raise ValueError("attention_window_row_exact must be a boolean")
+    if selected and policy.get("target_verify_row_exact") is not True:
+        raise ValueError(
+            "attention_window_row_exact requires target_verify_row_exact"
+        )
+    return selected
+
+
 def target_verify_row_exact_metadata():
     from ..runtime.models.qwen_hybrid_row_exact import ALGORITHM, GPU_EVIDENCE
 
@@ -544,6 +557,8 @@ def inspect_external_policy(
             raise ValueError(f"Qwen3.8 27B external draft policy must pin {key}")
     if policy.get("pairwise_selection", "host") not in ("host", "batched"):
         raise ValueError("pairwise_selection must be 'host' or 'batched'")
+    if type(policy.get("ast_collision_probability", False)) is not bool:
+        raise ValueError("ast_collision_probability must be boolean")
     from ..runtime.drafters.fold_reference import FOLDPolicy
 
     FOLDPolicy.from_value(policy.get("fold"))
@@ -1077,6 +1092,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
+        self._kernels = {
+            "attention_window_row_exact": pop_attention_window_row_exact(policy)
+        }
         self.fused_gdn = fused_gdn_policy(
             policy, vars(type(self)).get("default_fused_gdn", False)
         )
@@ -1498,6 +1516,17 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
 
         self._initialize_external_feedback()
         self._external_execution_started = True
+        collision_feature = self.external_policy.get(
+            "ast_collision_probability", False
+        )
+        if (
+            "ast_collision_probability" in kwargs
+            and kwargs["ast_collision_probability"] is not collision_feature
+        ):
+            raise ValueError(
+                "ast_collision_probability cannot override the adapter policy"
+            )
+        kwargs["ast_collision_probability"] = collision_feature
         if hasattr(self.draft_model, "last_continuation_selections"):
             kwargs.setdefault("continuation_pool", self.draft_model.policy)
             strategy = getattr(self, "continuation_verification_strategy", None)
@@ -1721,6 +1750,12 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 config["pairwise_selection"] = "batched"
             if self.external_policy.get("target_verify_row_exact"):
                 config["target_verify_row_exact"] = True
+            if self.external_policy.get("ast_collision_probability"):
+                config["ast_collision_probability"] = {
+                    "enabled": True,
+                    "feature": "sum_q_squared_per_position_v1",
+                    "phase": "prior_completed_round_before_current_draw",
+                }
             if (
                 "continuation_pool" in self.external_policy
                 and self.external_policy.get("progressive_verification_tile")
@@ -1824,6 +1859,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             contract["external_adaptive_verification"] = {
                 "algorithm": "exact-chain-adaptive-target-verify-width-v1",
                 "policy": adaptive,
+            }
+        if self.external_policy.get("ast_collision_probability"):
+            contract["external_ast_collision_probability"] = {
+                "algorithm": "lagged-pre-sample-collision-survival-v1",
+                "feature": "sum_q_squared_per_position_v1",
             }
         if self.external_policy.get("exact_verification", "token") == "block":
             # Same target law, another RNG schedule: seeded outputs differ.

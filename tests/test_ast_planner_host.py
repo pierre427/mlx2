@@ -5,11 +5,13 @@ from dataclasses import replace
 import pytest
 
 from mlx2.runtime.ast_planner import (
+    AlternativeExecutionBackend,
     LAUNCH_BUCKET_MIN_SAMPLES,
     LAUNCH_FIT_MIN_SAMPLES,
     ASTExecutionPlanner,
     ExecutionProfile,
     LaunchPlan,
+    NumericalEquivalenceOracle,
     ReadyRow,
     RequestWork,
 )
@@ -26,6 +28,76 @@ def profile(**kwargs):
 
 def planner(p=None, **kwargs):
     return ASTExecutionPlanner(p or profile(), tile_cap=3, **kwargs)
+
+
+def alternative(primary, *, costs=(0.5, 0.5, 0.5, 0.5)):
+    oracle = NumericalEquivalenceOracle(
+        profile_binding=primary.binding,
+        device=primary.device,
+        build=primary.build,
+        source_revision_token="provider-source",
+        evidence="qualification/example/exact-oracle.json",
+        equivalent=True,
+    )
+    return AlternativeExecutionBackend(
+        backend="target_tree_single_session",
+        profile_binding=primary.binding,
+        device=primary.device,
+        build=primary.build,
+        source_revision_token="provider-source",
+        input_widths=(2, 3, 4),
+        row_costs=costs,
+        oracle=oracle,
+    )
+
+
+def test_single_session_alternative_requires_exact_oracle_and_strictly_lower_cost():
+    primary = profile(row_costs=(2.0,) * 32, launch_cost=0)
+    with pytest.raises(ValueError, match="numerical oracle"):
+        AlternativeExecutionBackend(
+            backend="target_tree_single_session",
+            profile_binding=primary.binding,
+            device=primary.device,
+            build=primary.build,
+            source_revision_token="provider-source",
+            input_widths=(2,),
+            row_costs=(1.0, 1.0),
+        )
+    admitted = replace(primary, alternative_backends=(alternative(primary),))
+    selected = planner(admitted).plan_launch(
+        [ReadyRow(0, 7, 2, 0)], terminal=True, max_lanes=1
+    )
+    assert selected.backend == "target_tree_single_session"
+    tied = replace(
+        primary,
+        alternative_backends=(alternative(primary, costs=(2.0,) * 4),),
+    )
+    assert planner(tied).plan_launch(
+        [ReadyRow(0, 7, 2, 0)], terminal=True, max_lanes=1
+    ).backend == primary.backend
+
+
+def test_target_tree_alternative_never_cohorts_sessions_and_reports_actual_use():
+    primary = profile(row_costs=(2.0,) * 32, launch_cost=0)
+    p = planner(replace(primary, alternative_backends=(alternative(primary),)))
+    single = p.plan_launch(
+        [ReadyRow(0, 7, 2, 0)], terminal=True, max_lanes=4
+    )
+    p.observe_launch(single, 0.001)
+    two = p.plan_launch(
+        [ReadyRow(0, 7, 2, 0), ReadyRow(1, 8, 2, 0)],
+        terminal=True,
+        max_lanes=4,
+    )
+    assert single.backend == "target_tree_single_session"
+    assert two.backend == "target_tree_single_session"
+    assert len(two.indices) == 1
+    assert two.batch_count == 2
+    receipt = p.receipt()["alternative_backends"][0]
+    assert receipt["selected"] is True
+    assert receipt["observed_used"] is True
+    assert receipt["launches"] == 1
+    assert receipt["qualified"] is False
 
 
 def test_geometry_prior_changes_cold_source_plan_and_explicit_tile_is_pinned():
@@ -299,3 +371,44 @@ def test_shared_trunk_is_priced_once_and_learned_uplift_owns_branch_width():
     assert p.receipt()["branch_authority"] == "planner_learned_uplift_v1"
     with pytest.raises(ValueError):
         p.observe_branches(7, extra_rows=-1, uplift=0)
+
+
+def test_collision_survival_is_per_position_lagged_and_request_owned():
+    p = planner(profile(row_costs=(1.0,) * 32))
+    work = RequestWork(7, 4, 0, 1, acceptance=.2)
+    ordinary = p.source_budgets([work])[0]
+    assert ordinary.survival_authority == "lagged_acceptance"
+    assert ordinary.survival_priors == (.2,) * ordinary.depth
+
+    explicit = planner(profile(row_costs=(1.0,) * 32)).source_budgets([
+        replace(work, collision_probabilities=(.6, .5, .4, .3))
+    ])[0]
+    assert explicit.survival_priors == (.6, .5, .4, .3)[:explicit.depth]
+
+    p.observe_collision_probabilities(7, (.9, .8, .7))
+    refined = p.source_budgets([work])[0]
+    assert refined.survival_authority == (
+        "proposal_collision_probability_lagged_v1"
+    )
+    # The previous round only reached three positions. The unobserved suffix
+    # keeps the ordinary lagged acceptance prior instead of being fabricated.
+    assert refined.survival_priors[:3] == (.9, .8, .7)
+    if refined.depth > 3:
+        assert refined.survival_priors[3:] == (.2,) * (refined.depth - 3)
+    receipt = p.receipt()
+    assert receipt["collision_feature"] == "sum_q_squared_per_position_v1"
+    assert receipt["collision_feature_observations"] == 1
+    assert receipt["collision_feature_phase"] == (
+        "prior_completed_round_before_current_draw"
+    )
+    p.release(7)
+    assert p.receipt()["collision_feature_requests"] == 0
+    with pytest.raises(ValueError, match="collision probabilities"):
+        p.observe_collision_probabilities(7, (.8, 0))
+
+
+def test_collision_history_can_outlive_a_short_terminal_budget():
+    p = planner()
+    p.observe_collision_probabilities(9, (.9, .8, .7, .6))
+    terminal = p.source_budgets([RequestWork(9, 0, 0, 1)])[0]
+    assert terminal.depth == 0 and terminal.survival_priors == ()

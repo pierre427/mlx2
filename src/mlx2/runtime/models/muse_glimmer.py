@@ -2,7 +2,9 @@
 # Adapted from mlx-lm-unified; see provenance/muse-glimmer.json and .NOTICE.
 """Muse Glimmer text tower using mlx2 attention and cache contracts."""
 
+import copy
 from collections import Counter
+from numbers import Integral
 
 import mlx.core as mx
 from mlx import nn
@@ -16,7 +18,8 @@ from .cache import KVCache, RotatingKVCache
 # row once this build's parity canary shows that launch equals the v1 per-row
 # form; v1 ran them per row (and the QK norms per head row), which made the
 # verify forward host-dispatch bound: about 38 norm launches per row per layer.
-TARGET_VERIFY_ROW_EXACT_VERSION = "muse-native-b1s1-causal-prefix-v2"
+TARGET_VERIFY_ROW_EXACT_VERSION = "muse-native-b1s1-causal-prefix-v4"
+MAX_ATTENTION_WINDOW_ROWS = 16
 
 # What each row-exact stage ran, for the model receipt (one scheduler thread
 # drives the target, so a plain Counter is enough).
@@ -53,8 +56,8 @@ def _lane_exact(module, value) -> bool:
 
 def _row_exact_project(module, value, *, call=None):
     """Project every logical row with ordinary one-row reduction order."""
-    from .row_exact_qmv import quantized_linear
     from ..row_exact_verify import compact_rows
+    from .row_exact_qmv import quantized_linear
 
     compacted = compact_rows(value, stage="projections")
     if compacted is not None:
@@ -78,8 +81,8 @@ def _row_exact_rows(call, value, key):
     every row's bits.  ``key`` names the op and its configuration.
     """
     from ..row_exact.canary import CANARIES, probe_input
-    from .row_exact_qmv import per_row
     from ..row_exact_verify import compact_rows
+    from .row_exact_qmv import per_row
 
     compacted = compact_rows(value, stage="norms")
     if compacted is not None:
@@ -108,8 +111,8 @@ def _row_exact_rows(call, value, key):
 
 def _row_exact_group(modules, value):
     """Same-input projections with one-row bits, grouped when Metal admits it."""
-    from .row_exact_qmv import quantized_linears
     from ..row_exact_verify import compact_rows
+    from .row_exact_qmv import quantized_linears
 
     compacted = compact_rows(value, stage="projections")
     if compacted is not None:
@@ -163,6 +166,9 @@ class Attention(nn.Module):
         self.is_sliding = self.layer_type == "sliding_attention"
         self.window = args.sliding_window
         self.use_rope = bool(args.layer_rope_theta[layer_idx])
+        # Adapter-owned, explicit-only selection.  The ordinary path and the
+        # existing serial B1/S1 row-exact path remain the default.
+        self.attention_window_row_exact = False
 
         self.q_proj = nn.Linear(dim, self.n_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
@@ -252,18 +258,280 @@ class Attention(nn.Module):
             self._rope_rows(k, offsets, array_offsets),
         )
 
+    def _window_masks(self, cache, valid, n_first):
+        """Validate every one-token mask before mutating the live cache."""
+        geometry = copy.copy(cache)
+        masks = []
+        for position in range(valid):
+            mask = geometry.make_mask(
+                1,
+                window_size=self.window if self.is_sliding else None,
+                return_array=True,
+            )
+            flat = None
+            if mask is None:
+                flat = mx.ones((n_first + position,), dtype=mx.bool_)
+            elif (
+                isinstance(mask, mx.array)
+                and mask.dtype == mx.bool_
+                and mask.size == n_first + position
+            ):
+                flat = mask.reshape(-1)
+            if flat is None:
+                return None, "mask_layout"
+            masks.append(None if mask is None else flat)
+            geometry.offset += 1
+            if type(geometry) is RotatingKVCache:
+                geometry._idx += 1
+        if not any(mask is not None for mask in masks):
+            return None, None
+        return mx.concatenate(
+            [
+                mask
+                if mask is not None
+                else mx.ones((n_first + position,), dtype=mx.bool_)
+                for position, mask in enumerate(masks)
+            ]
+        ), None
+
+    def _attention_window_canary(
+        self, *, rows, n_first, dtype, masks, layout
+    ) -> bool:
+        """Window kernel versus Muse's served serial attention.
+
+        ``ParityCanaries`` contributes MLX-build, device and generation to
+        the key.  The explicit Metal-source digest below closes the other
+        half of the specialization contract.
+        """
+        from ..row_exact.canary import CANARIES
+        from . import muse_attn_window as MW
+
+        plans = MW.plan_signature(
+            n_first,
+            rows,
+            self.n_heads,
+            self.n_kv_heads,
+        )
+        key = (
+            "muse_attention_only_window_vs_serial",
+            MW.source_identity(),
+            self.n_heads,
+            self.n_kv_heads,
+            self.head_dim,
+            str(dtype),
+            plans,
+            masks is not None,
+            self.window if self.is_sliding else None,
+            int(n_first),
+            tuple(layout),
+        )
+
+        def probe(count):
+            total = n_first + count - 1
+            queries = (
+                mx.random.normal(
+                    (1, self.n_heads, count, self.head_dim),
+                    key=mx.random.key(7131 + count),
+                )
+                * 0.25
+            ).astype(dtype)
+            # Match the final cache view: it is a logical ``total`` slice of
+            # a step-sized backing allocation, not a standalone contiguous
+            # tensor.  The custom source reads MLX-provided strides directly.
+            capacity = int(layout[1])
+            keys_storage = (
+                mx.random.normal(
+                    (1, self.n_kv_heads, capacity, self.head_dim),
+                    key=mx.random.key(7151 + count),
+                )
+                * 0.25
+            ).astype(dtype)
+            values_storage = (
+                mx.random.normal(
+                    (1, self.n_kv_heads, capacity, self.head_dim),
+                    key=mx.random.key(7171 + count),
+                )
+                * 0.25
+            ).astype(dtype)
+            keys = keys_storage[..., :total, :]
+            values = values_storage[..., :total, :]
+            actual = MW.window_sdpa(
+                queries,
+                keys,
+                values,
+                self.scale,
+                n_first=n_first,
+                masks=masks,
+            )
+            reference = []
+            base = 0
+            for position in range(count):
+                width = n_first + position
+                mask = None
+                if masks is not None:
+                    mask = masks[base : base + width]
+                    base += width
+                row = scaled_dot_product_attention(
+                    queries[..., position : position + 1, :],
+                    keys[..., :width, :],
+                    values[..., :width, :],
+                    cache=KVCache(),
+                    scale=self.scale,
+                    mask=mask,
+                )
+                row = row.transpose(0, 2, 1, 3).reshape(1, 1, -1)
+                reference.append(row)
+            return actual, mx.concatenate(reference, axis=1)
+
+        return CANARIES.exact(key, probe, rows=rows)
+
+    def _row_exact_attention_window(self, q, k, v, cache, valid):
+        """Try one lane's attention-only window before cache mutation."""
+        if (
+            not self.attention_window_row_exact
+            or valid < 2
+            or valid > MAX_ATTENTION_WINDOW_ROWS
+        ):
+            return None
+        from . import muse_attn_window as MW
+
+        reason = None
+        if type(cache) not in (KVCache, RotatingKVCache):
+            reason = "cache_type"
+        elif not isinstance(cache.offset, Integral) or cache.offset < 0:
+            reason = "offset"
+        elif type(cache) is RotatingKVCache and cache.offset + valid > cache.max_size:
+            # Once the ring wraps, earlier rows and the final row do not share
+            # one monotonic cache view.  Keep their serial one-token path.
+            reason = "rotating_wrap"
+        elif (
+            q.ndim != 4
+            or k.ndim != 4
+            or v.ndim != 4
+            or q.shape != (1, self.n_heads, valid, self.head_dim)
+            or k.shape != (1, self.n_kv_heads, valid, self.head_dim)
+            or v.shape != k.shape
+            or k.dtype != q.dtype
+            or v.dtype != q.dtype
+        ):
+            reason = "projected_geometry"
+        elif cache.keys is not None and (
+            cache.values is None
+            or cache.keys.shape[:2] != (1, self.n_kv_heads)
+            or cache.values.shape[:2] != (1, self.n_kv_heads)
+            or cache.keys.shape[-1] != self.head_dim
+            or cache.values.shape[-1] != self.head_dim
+            or cache.keys.dtype != q.dtype
+            or cache.values.dtype != q.dtype
+        ):
+            reason = "cache_geometry"
+        if reason is not None:
+            return None, None, reason
+
+        base = int(cache.offset)
+        n_first = base + 1
+        final = base + valid
+        capacity = int(cache.keys.shape[2]) if cache.keys is not None else 0
+        limit = cache.max_size if type(cache) is RotatingKVCache else None
+        while capacity < final:
+            growth = int(cache.step)
+            if limit is not None:
+                growth = min(growth, int(limit) - capacity)
+            if growth <= 0:  # guarded by rotating_wrap; fail closed if drifted
+                return None, None, "cache_capacity"
+            capacity += growth
+        layout = (type(cache).__name__, capacity, self.head_dim)
+        after_k = MW.ShapeOnly(
+            (1, self.n_kv_heads, final, self.head_dim), q.dtype
+        )
+        reason = MW.window_supported(q, after_k, after_k, n_first)
+        masks = None
+        if reason is None:
+            masks, reason = self._window_masks(cache, valid, n_first)
+        if reason is None and not self._attention_window_canary(
+            rows=valid,
+            n_first=n_first,
+            dtype=q.dtype,
+            masks=masks,
+            layout=layout,
+        ):
+            reason = "numerical_canary"
+        if reason is not None:
+            return None, None, reason
+
+        fetched = None
+        for position in range(valid):
+            fetched = cache.update_and_fetch(
+                k[..., position : position + 1, :],
+                v[..., position : position + 1, :],
+            )
+        if fetched is None:  # pragma: no cover - valid >= 2 above
+            raise RuntimeError("Muse attention window appended no cache rows")
+        output = MW.window_sdpa(
+            q,
+            fetched[0],
+            fetched[1],
+            self.scale,
+            n_first=n_first,
+            masks=masks,
+        )
+        return (
+            output.reshape(1, valid, self.n_heads, self.head_dim).transpose(
+                0, 2, 1, 3
+            ),
+            fetched,
+            None,
+        )
+
+    def _route_note(self, window, stage, route, count=1):
+        if window is not None:
+            window.note(stage, route, count)
+        ROW_EXACT_ROUTES[f"{stage}:{route}"] += count
+
     def _row_exact_attention(self, q, k, v, cache):
+        from .. import row_exact_verify as REV
+
+        window = REV.current()
         segmented = getattr(cache, "row_exact_attention", None)
         if callable(segmented):
-            return segmented(
+            selected = self.attention_window_row_exact
+
+            def window_attention(lane, row, queries, keys, values, valid):
+                return self._row_exact_attention_window(
+                    queries,
+                    keys,
+                    values,
+                    row,
+                    valid,
+                )
+
+            output = segmented(
                 q,
                 k,
                 v,
                 scale=self.scale,
                 window_size=self.window if self.is_sliding else None,
+                window_attention=window_attention if selected else None,
+                route_note=lambda stage, route, count=1: self._route_note(
+                    window, stage, route, count
+                ),
             )
+            # Keep the ordinary graph boundary: attention-only lane results
+            # are concatenated first, then one full BxL gate multiply runs in
+            # ``__call__`` before the row-exact output projection.
+            return output, False
         if q.shape[0] != 1:
             raise ValueError("Muse row-exact attention requires independent B1 caches")
+        candidate = self._row_exact_attention_window(
+            q, k, v, cache, int(q.shape[2])
+        )
+        if candidate is not None:
+            output, _fetched, reason = candidate
+            if output is not None:
+                self._route_note(window, "attention", "window_b1s1", q.shape[2])
+                self._route_note(window, "attention_layers", "window_b1s1")
+                return output, False
+            self._route_note(window, "attention_window_fallback", reason)
         outputs = []
         for position in range(q.shape[2]):
             row_mask = cache.make_mask(
@@ -285,7 +553,9 @@ class Attention(nn.Module):
                     mask=row_mask,
                 )
             )
-        return mx.concatenate(outputs, axis=2)
+        self._route_note(window, "attention", "serial_b1s1", q.shape[2])
+        self._route_note(window, "attention_layers", "serial_b1s1")
+        return mx.concatenate(outputs, axis=2), False
 
     def __call__(
         self, x: mx.array, mask=None, cache=None, *, row_exact=False
@@ -329,8 +599,9 @@ class Attention(nn.Module):
             q = self.rope(q, offset=offset)
             k = self.rope(k, offset=offset)
 
+        gated = False
         if row_exact:
-            out = self._row_exact_attention(q, k, v, cache)
+            out, gated = self._row_exact_attention(q, k, v, cache)
         else:
             if cache is not None:
                 k, v = cache.update_and_fetch(k, v)
@@ -341,7 +612,8 @@ class Attention(nn.Module):
         out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
 
         # Glimmer's output gate.
-        out = out * mx.sigmoid(gate)
+        if not gated:
+            out = out * mx.sigmoid(gate)
         return _row_exact_project(self.o_proj, out) if row_exact else self.o_proj(out)
 
 
@@ -506,6 +778,7 @@ class Model(nn.Module):
         self.model_type = args.model_type
         self.model = MuseGlimmerModel(args)
         self._target_verify_row_exact = False
+        self._attention_window_row_exact = False
         self._row_exact_forwards = 0
         self._row_exact_query_rows = 0
         self.tie_word_embeddings = args.tie_word_embeddings
@@ -581,6 +854,18 @@ class Model(nn.Module):
             raise ValueError("target_verify_row_exact must be a boolean")
         self._target_verify_row_exact = enabled
 
+    def configure_attention_window_row_exact(self, enabled):
+        """Select the adapter-owned, default-off Muse attention window."""
+        if type(enabled) is not bool:
+            raise ValueError("attention_window_row_exact must be a boolean")
+        if enabled and not self._target_verify_row_exact:
+            raise ValueError(
+                "attention_window_row_exact requires target_verify_row_exact"
+            )
+        self._attention_window_row_exact = enabled
+        for layer in self.layers:
+            layer.self_attn.attention_window_row_exact = enabled
+
     def row_exact_lane_followers(self):
         """Module names whose row-exact verify follows the installed law.
 
@@ -631,12 +916,11 @@ class Model(nn.Module):
         """
         if not self._target_verify_row_exact:
             raise RuntimeError("Muse progressive row-exact target is not selected")
+        from .. import row_exact_verify as rev
         from ..progressive_external_verify import (
             PROGRESSIVE_TARGET_PROTOCOL_VERSION,
             ProgressiveTargetRows,
         )
-
-        from .. import row_exact_verify as rev
 
         record = rev.Window(int(inputs.size))
         with rev.window(record):
@@ -693,6 +977,7 @@ class Model(nn.Module):
                 "implemented": True,
                 "qualified": False,
                 "selected": True,
+                "attention_window_row_exact": self._attention_window_row_exact,
                 "performance_claim": False,
                 "observed_used": self._row_exact_forwards > 0,
                 "executed_forwards": self._row_exact_forwards,

@@ -25,6 +25,25 @@ def test_capture_is_localized_to_one_prompt_and_position():
         PROBE.capture_options("code", "code", 0, options)
 
 
+def test_explicit_policy_override_is_bound_and_required_features_fail_closed(tmp_path):
+    default = tmp_path / "default.json"
+    selected = tmp_path / "selected.json"
+    default.write_text(json.dumps({"attention_window_row_exact": False}))
+    selected.write_text(json.dumps({"attention_window_row_exact": True, "z": 1}))
+
+    policy, source, digest = PROBE.load_execution_policy(
+        default, selected, ("attention_window_row_exact",)
+    )
+    assert policy == {"attention_window_row_exact": True, "z": 1}
+    assert source == selected.resolve()
+    assert len(digest) == 64
+
+    with pytest.raises(ValueError, match="explicitly enable attention_window_row_exact"):
+        PROBE.load_execution_policy(
+            default, default, ("attention_window_row_exact",)
+        )
+
+
 def test_lazy_install_does_not_import_model_runtime(tmp_path):
     code = (
         "import runpy, sys; "

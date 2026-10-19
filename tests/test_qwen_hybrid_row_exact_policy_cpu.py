@@ -25,6 +25,7 @@ from mlx2.adapters.qwen38_27b import EXTERNAL_POLICY_KEYS as QWEN38_KEYS
 from mlx2.adapters.qwen38_27b import (
     Qwen3827BAdapter,
     descriptor_for,
+    pop_attention_window_row_exact,
     validate_target_verify_row_exact,
 )
 from mlx2.runtime.models import qwen_hybrid_row_exact as QHR
@@ -99,6 +100,38 @@ def test_qwen36_attention_window_is_target_owned_and_requires_row_exact():
     assert target == {"attention_window_row_exact": True}
     environment = configure_environment(target, "off")
     assert environment["MLX_QWEN36_ATTN_WINDOW_ROW_EXACT"] == "1"
+
+
+def test_qwen38_attention_window_is_target_owned_and_requires_row_exact():
+    with pytest.raises(ValueError, match="requires target_verify_row_exact"):
+        pop_attention_window_row_exact({"attention_window_row_exact": True})
+    with pytest.raises(ValueError, match="must be a boolean"):
+        pop_attention_window_row_exact(
+            {
+                "target_verify_row_exact": True,
+                "attention_window_row_exact": "yes",
+            }
+        )
+    policy = {**AST, "attention_window_row_exact": True}
+    assert pop_attention_window_row_exact(policy) is True
+    assert "attention_window_row_exact" not in policy
+
+
+def test_ast_cost_attention_window_policies_are_explicit_candidates():
+    policies = Path(__file__).resolve().parents[1] / (
+        "qualification/runs/ast-cost-contract-20261019/policies"
+    )
+    qwen38 = json.loads(
+        (policies / "qwen38-27b-ast-planner-auto.json").read_text()
+    )
+    qwen36 = json.loads(
+        (policies / "qwen36-35b-ast-planner-auto.json").read_text()
+    )
+    assert qwen38["target_verify_row_exact"] is True
+    assert qwen38["attention_window_row_exact"] is True
+    assert qwen36["target_verify_row_exact"] is True
+    assert qwen36["attention_window_row_exact"] is True
+    assert qwen36["continuation_pool"]["ast_planner"] is True
 
 
 @pytest.mark.parametrize(

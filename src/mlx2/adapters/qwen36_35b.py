@@ -483,6 +483,7 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "progressive_ast_rootless_fallback",
         "progressive_cross_session_pack_rows",
         "progressive_cross_session_pack_mode",
+        "ast_collision_probability",
         *EXTERNAL_TARGET_KERNEL_KEYS,
     }
 )

@@ -13,8 +13,22 @@ from dataclasses import dataclass
 import numpy as np
 
 
-def proposal_feature(law):
-    """Logit(max q) of the actual normalized proposal law, never q(sampled)."""
+@dataclass(frozen=True)
+class ProposalLawFeatures:
+    """Distribution-only proposal features fixed before a token is drawn."""
+
+    peak_logit: float
+    collision_probability: float
+
+
+def proposal_law_features(law):
+    """Return max(q) and sum(q^2), never a feature of the sampled token.
+
+    ``collision_probability`` is the probability that two independent draws
+    from the normalized proposal law agree.  It may therefore gate work that
+    will inspect a future proposal without conditioning that gate on the
+    proposal token itself.
+    """
     values = np.asarray(law, dtype=np.float64)
     if (
         values.ndim != 1
@@ -27,9 +41,21 @@ def proposal_feature(law):
             "adaptive verification requires a finite normalized proposal law"
         )
     peak = float(values.max())
-    if peak >= 1.0:
-        return 40.0
-    return max(-40.0, min(40.0, math.log(peak) - math.log1p(-peak)))
+    peak_logit = (
+        40.0
+        if peak >= 1.0
+        else max(-40.0, min(40.0, math.log(peak) - math.log1p(-peak)))
+    )
+    normalized = values / values.sum()
+    collision = float(np.dot(normalized, normalized))
+    if not math.isfinite(collision) or not 0 < collision <= 1.0 + 1e-12:
+        raise ValueError("invalid proposal collision probability")
+    return ProposalLawFeatures(peak_logit, min(1.0, collision))
+
+
+def proposal_feature(law):
+    """Logit(max q) of the actual normalized proposal law, never q(sampled)."""
+    return proposal_law_features(law).peak_logit
 
 
 def _sigmoid(value):

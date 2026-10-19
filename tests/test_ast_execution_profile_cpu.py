@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 from mlx import nn
+import pytest
 
 from mlx2.adapters.ast_execution_profile import build_execution_profile
 from mlx2.runtime.models.row_exact_components import (
@@ -44,6 +45,47 @@ def test_profile_uses_installed_kernel_geometry_and_binds_draft_source(monkeypat
     draft.revision = "draft-b"
     b = build_execution_profile(target, draft, binding="target-a", tile_cap=3, max_lanes=8, num_draft=7)
     assert a.binding != b.binding
+
+
+def test_profile_refuses_provider_without_bound_numerical_oracle():
+    class RefusingProvider:
+        source_identity = (("revision", "source"),)
+        source_revision_token = "source-token"
+        protocol = "fixture-provider"
+        maximum_cohort_width = 1
+
+        def validate_cohort(self, width, configured_limit):
+            return None
+
+        def forward(self, *args, **kwargs):
+            raise AssertionError("profile admission must not execute tensors")
+
+        def forward_many(self, *args, **kwargs):
+            raise AssertionError("profile admission must not execute tensors")
+
+        def dispatch_metrics(self, *args, **kwargs):
+            raise AssertionError("profile admission must not dispatch")
+
+        def validate_revision(self):
+            return None
+
+        def receipt(self):
+            return {"provider": self.protocol}
+
+        def ast_execution_backend(self, profile):
+            return None
+
+    target = SimpleNamespace(named_modules=lambda: [])
+    with pytest.raises(ValueError, match="device/build/source-bound numerical oracle"):
+        build_execution_profile(
+            target,
+            SimpleNamespace(),
+            binding="target",
+            tile_cap=2,
+            max_lanes=1,
+            num_draft=3,
+            alternative_provider=RefusingProvider(),
+        )
 
 
 def test_muse_auto_resolves_before_generator_construction():

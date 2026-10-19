@@ -5,6 +5,7 @@ from mlx2.runtime.acceptance_estimator import (
     AdaptiveVerificationPolicy,
     OnlineAcceptanceEstimator,
     proposal_feature,
+    proposal_law_features,
 )
 
 
@@ -15,6 +16,40 @@ def test_feature_scores_law_not_sampled_token_and_clamps_one_hot():
     for bad in ([np.nan, 1], [np.inf, 0], [-0.1, 1.1], [0.1, 0.2], []):
         with pytest.raises(ValueError):
             proposal_feature(bad)
+
+
+def test_collision_feature_is_distribution_only_and_post_sample_depth_is_biased():
+    """A depth gate may inspect q, but not the q-drawn token it is gating."""
+    proposal = np.array([0.9, 0.1])
+    target = np.array([0.5, 0.5])
+    features = proposal_law_features(proposal)
+    assert features.collision_probability == pytest.approx(0.82)
+    assert proposal_law_features(proposal[::-1]) == features
+
+    def emitted_law(verify):
+        result = np.zeros(2)
+        residual = np.maximum(target - proposal, 0)
+        residual /= residual.sum()
+        for sampled, q_sampled in enumerate(proposal):
+            if not verify(sampled):
+                result += q_sampled * target
+                continue
+            accepted = min(1.0, target[sampled] / q_sampled)
+            result[sampled] += q_sampled * accepted
+            result += q_sampled * (1 - accepted) * residual
+        return result
+
+    # The law-only decision is fixed for both possible proposal draws. Exact
+    # speculative verification therefore preserves the target distribution.
+    pre_sample = emitted_law(
+        lambda _sampled: features.collision_probability >= 0.3
+    )
+    np.testing.assert_allclose(pre_sample, target, atol=1e-12)
+    # Conditioning the same decision on q(sampled) verifies the likely draw
+    # and replaces the unlikely draw with an ordinary target sample: 55/45.
+    post_sample = emitted_law(lambda sampled: proposal[sampled] >= 0.3)
+    np.testing.assert_allclose(post_sample, [0.55, 0.45], atol=1e-12)
+    assert not np.allclose(post_sample, target)
 
 
 def test_censored_positions_never_receive_rejection_labels():

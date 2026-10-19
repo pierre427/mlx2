@@ -17,6 +17,7 @@ class Qwen38TargetTreeExecutor:
     source_revision_token: str
     protocol: str = "qwen38_tensorfold_v1"
     maximum_cohort_width: int = 4
+    ast_numerical_oracle: object = None
 
     @classmethod
     def create(cls):
@@ -96,6 +97,44 @@ class Qwen38TargetTreeExecutor:
             provider_protocol=self.protocol,
         )
 
+    def ast_execution_backend(self, profile):
+        """Publish the phase-1 chain backend only after an exact oracle.
+
+        The current adapter carries no pre-approved AST oracle, so normal
+        construction returns a refusal. Qualification code may construct a
+        provider with an explicit ``NumericalEquivalenceOracle``; its complete
+        profile/device/build/source binding is rechecked by the generic
+        execution profile before planning.
+        """
+
+        oracle = self.ast_numerical_oracle
+        if oracle is None:
+            return None
+        from ..runtime.ast_planner import AlternativeExecutionBackend
+
+        widths = tuple(
+            width
+            for width in profile.terminal_widths
+            if width <= len(profile.row_costs)
+        )
+        return AlternativeExecutionBackend(
+            backend="target_tree_single_session",
+            profile_binding=profile.binding,
+            device=profile.device,
+            build=profile.build,
+            source_revision_token=self.source_revision_token,
+            input_widths=widths,
+            # TensorFold's chain launch reads target weights once. Context
+            # traffic remains the profile's declared exact attention cost.
+            row_costs=tuple(1.0 for _ in profile.row_costs),
+            launch_cost=0.0,
+            context_row_cost=profile.context_row_cost,
+            context_windows=profile.context_windows,
+            cost_authority="tensorfold_single_launch_weight_pass_v1",
+            maximum_sessions=1,
+            oracle=oracle,
+        )
+
     def receipt(self) -> dict:
         from ..runtime.qwen38_tensorfold import gdn_backend_stats, glue_backend_stats
 
@@ -103,6 +142,18 @@ class Qwen38TargetTreeExecutor:
             "provider": self.protocol,
             "source_identity": dict(self.source_identity),
             "source_revision_token": self.source_revision_token,
+            "ast_target_tree": {
+                "implemented": True,
+                "qualified": False,
+                "selected": self.ast_numerical_oracle is not None,
+                "maximum_sessions": 1,
+                "sibling_cache_sharing": False,
+                "numerical_oracle": (
+                    None
+                    if self.ast_numerical_oracle is None
+                    else self.ast_numerical_oracle.evidence
+                ),
+            },
             "gdn_backend": gdn_backend_stats(),
             "glue_backend": glue_backend_stats(),
         }
