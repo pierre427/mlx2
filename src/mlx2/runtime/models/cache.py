@@ -1978,7 +1978,21 @@ class RotatingKVCache(_BaseCache):
             window_size = window_size or self.max_size
             offset = min(self.max_size - 1, self.offset)
             if offset + N > window_size or return_array:
-                return create_causal_mask(N, offset, window_size=window_size)
+                # A different attention window must not force the retained
+                # prefix visible: it describes the model's attention policy,
+                # rather than this cache's sink-plus-window layout.
+                if self.keep == 0 or window_size != self.max_size:
+                    return create_causal_mask(N, offset, window_size=window_size)
+                # ``keep`` columns hold the retained prefix; the remaining
+                # columns hold the newest ``max_size - keep`` tokens.  Apply
+                # causality to both regions and keep exactly ``max_size``
+                # visible positions once the window is full.
+                rinds = mx.arange(offset + N)[None]
+                linds = mx.arange(offset, offset + N)[:, None]
+                return (linds >= rinds) & (
+                    (rinds < self.keep)
+                    | (linds < rinds + window_size - self.keep)
+                )
             else:
                 return "causal"
         else:
